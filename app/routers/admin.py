@@ -75,3 +75,17 @@ def refresh(_: None = Depends(require_admin_key)) -> dict[str, Any]:
 def refresh_status(_: None = Depends(require_admin_key)) -> dict[str, Any]:
     return {"data": {"running": recompute_lock.locked(), "last": _last},
             "meta": {"disclaimer": "Research, not advice."}}
+
+
+@router.post(
+    "/send-sms",
+    summary="Send the daily SMS digest now (X-API-Key required)",
+    description=("Builds the tiny LLM report from the latest snapshot and sends it via "
+                 "sipgate. Bypasses the SMS_ENABLED schedule gate but still requires "
+                 "sipgate credentials + a recipient."),
+)
+def send_sms_now(_: None = Depends(require_admin_key)) -> dict[str, Any]:
+    from app.services.digest import send_daily_digest
+
+    result = send_daily_digest(force=True)
+    return {"data": result, "meta": {"disclaimer": "Research, not advice."}}

@@ -41,32 +41,18 @@ class JudgmentCall:
     error_class: str | None = None  # exception class name of the last failure, if any
 
 
-def generate(median: float, iqr: tuple[float, float], band: str,
-             s_scores: dict[str, float], d_scores: dict[str, float], v: float,
-             red_flag_detail: dict[str, bool], override: bool,
-             spy_state: str, qqq_state: str, fast_alarm: dict[str, object],
-             last_successful: str | None = None) -> JudgmentCall:
-    """Call the Messages API; degrade to the last successful text on failure."""
-    settings = get_settings()
-    prompt = PROMPT_TEMPLATE.format(
-        median=round(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]), band=band,
-        s_scores=s_scores, d_scores=d_scores, v=v,
-        red_flag_detail=red_flag_detail, override=override,
-        spy_state=spy_state, qqq_state=qqq_state, fast_alarm=fast_alarm,
-    )
-    try:
-        import anthropic
-    except Exception as exc:  # SDK absent
-        log.warning("judgment_call_degraded", error_class=type(exc).__name__, error=repr(exc)[:200])
-        if last_successful:
-            return JudgmentCall(text=last_successful, stale=True, error_class=type(exc).__name__)
-        return JudgmentCall(text=None, stale=True, error_class=type(exc).__name__)
+def run_completion(prompt: str) -> str:
+    """Run the Anthropic model-fallback chain; return raw text or RAISE.
 
+    Chain (spec 5): primary -> sonnet-5 -> sonnet-4-6, all with adaptive
+    thinking + effort=max; then one plain retry with neither. The minimal
+    request NEVER sends budget_tokens or temperature (both HTTP 400 with
+    adaptive thinking / this effort config). Shared by the judgment call and
+    the daily SMS digest."""
+    import anthropic  # raises ImportError if the SDK is absent
+
+    settings = get_settings()
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    # Model fallback chain (spec 5): primary -> sonnet-5 -> sonnet-4-6, all
-    # with adaptive thinking + effort=max; then one plain retry with neither.
-    # The minimal request NEVER sends budget_tokens or temperature (both HTTP
-    # 400 with adaptive thinking / this effort config).
     models = [settings.anthropic_model, "claude-sonnet-5", "claude-sonnet-4-6"]
     last_exc: Exception | None = None
 
@@ -96,24 +82,40 @@ def generate(median: float, iqr: tuple[float, float], band: str,
     for model in models:
         try:
             text = _call(model, thinking=True)
-            log.info("judgment_call_ok", model=model, shape="adaptive+effort")
-            return JudgmentCall(text=text[:300], stale=False)
+            log.info("completion_ok", model=model, shape="adaptive+effort")
+            return text
         except Exception as exc:
             last_exc = exc
-            log.warning("judgment_model_failed", model=model, error_class=type(exc).__name__,
+            log.warning("completion_model_failed", model=model, error_class=type(exc).__name__,
                         error=repr(exc)[:300])
 
     # Tertiary: plain request, no thinking/output_config, on the primary model.
+    # Any exception from this final attempt propagates to the caller (which
+    # applies its own degradation), carrying the accumulated failure context.
+    del last_exc
+    text = _call(settings.anthropic_model, thinking=False)
+    log.info("completion_ok", model=settings.anthropic_model, shape="plain")
+    return text
+
+
+def generate(median: float, iqr: tuple[float, float], band: str,
+             s_scores: dict[str, float], d_scores: dict[str, float], v: float,
+             red_flag_detail: dict[str, bool], override: bool,
+             spy_state: str, qqq_state: str, fast_alarm: dict[str, object],
+             last_successful: str | None = None) -> JudgmentCall:
+    """Call the Messages API; degrade to the last successful text on failure."""
+    prompt = PROMPT_TEMPLATE.format(
+        median=round(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]), band=band,
+        s_scores=s_scores, d_scores=d_scores, v=v,
+        red_flag_detail=red_flag_detail, override=override,
+        spy_state=spy_state, qqq_state=qqq_state, fast_alarm=fast_alarm,
+    )
     try:
-        text = _call(settings.anthropic_model, thinking=False)
-        log.info("judgment_call_ok", model=settings.anthropic_model, shape="plain")
+        text = run_completion(prompt)
         return JudgmentCall(text=text[:300], stale=False)
     except Exception as exc:
-        last_exc = exc
         log.warning("judgment_call_degraded", error_class=type(exc).__name__, error=repr(exc)[:300])
-
-    err_class = type(last_exc).__name__ if last_exc else "Unknown"
-    if last_successful:
-        return JudgmentCall(text=last_successful, stale=True, error_class=err_class)
-    # No prior judgment: text is null (machine-detectable), not a placeholder.
-    return JudgmentCall(text=None, stale=True, error_class=err_class)
+        if last_successful:
+            return JudgmentCall(text=last_successful, stale=True, error_class=type(exc).__name__)
+        # No prior judgment: text is null (machine-detectable), not a placeholder.
+        return JudgmentCall(text=None, stale=True, error_class=type(exc).__name__)

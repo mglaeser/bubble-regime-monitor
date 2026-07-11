@@ -118,6 +118,24 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /healthz` · `GET /readyz` | Liveness; per-source health matrix |
 | `POST /api/v1/admin/refresh` | Start a recompute in the background — returns 202 immediately; single-flight (X-API-Key) |
 | `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
+| `POST /api/v1/admin/send-sms` | Send the daily SMS digest now — test path (X-API-Key) |
+
+## Daily SMS digest (optional)
+
+The service recomputes the score **twice daily (06:00 / 18:00 UTC)** and can additionally **text a once-a-day digest** — the headline score, action band, and a tiny LLM-written report — as a single SMS via the [sipgate REST API v2](https://api.sipgate.com/v2/doc). The report body is produced by the same Anthropic model-fallback chain as the judgment call and hard-capped to one GSM-7 SMS (160 chars, ASCII-coerced so a stray Unicode character cannot halve the limit); if the LLM is unavailable it degrades to a deterministic template built from the snapshot, so the digest always sends. It is disabled by default.
+
+To enable: create a sipgate **Personal Access Token** with the `sessions:sms:write` scope, then set in `.env`:
+
+```dotenv
+SMS_ENABLED=true
+SIPGATE_TOKEN_ID=token-XXXX        # PAT id (Basic-auth username)
+SIPGATE_TOKEN=...                  # PAT secret (Basic-auth password)
+SIPGATE_SMS_ID=s0                  # your Web SMS extension
+SIPGATE_RECIPIENT=+49151...        # E.164
+SMS_DAILY_HOUR=8                   # UTC hour (default 08:00)
+```
+
+Test it immediately without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms`. Example body: `bubblegauge 41/100 hold. IQR 34-47. SPY IN, QQQ IN. Flags 0/4. Research, not advice.`
 
 ## Falsification criteria
 

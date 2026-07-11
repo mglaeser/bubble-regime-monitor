@@ -42,6 +42,19 @@ class Settings(BaseSettings):
     def effective_sec_ua(self) -> str:
         return self.sec_edgar_ua or self.sec_user_agent
 
+    # Daily SMS digest via the sipgate REST API v2 (POST /sessions/sms).
+    # Auth is a Personal Access Token (token ID + token, scope
+    # sessions:sms:write). Sent once a day at SMS_DAILY_HOUR:SMS_DAILY_MINUTE
+    # UTC; disabled unless SMS_ENABLED=true and credentials are present.
+    sms_enabled: bool = False
+    sipgate_token_id: str = ""       # Personal Access Token ID (Basic-auth username)
+    sipgate_token: str = ""          # Personal Access Token (Basic-auth password)
+    sipgate_sms_id: str = "s0"       # Web SMS extension: 's' + number
+    sipgate_recipient: str = ""      # recipient in E.164 format, e.g. +49151...
+    sms_daily_hour: int = 8          # UTC hour for the daily digest
+    sms_daily_minute: int = 0
+    sms_max_len: int = 160           # single-SMS GSM-7 ceiling (hard cap)
+
     # Runtime
     tz: str = "UTC"
     mc_samples: int = 100_000
@@ -53,6 +66,11 @@ class Settings(BaseSettings):
     gsadf_timeout_s: int = 1800
 
     service_version: str = "3.1.0"
+
+    @property
+    def sms_configured(self) -> bool:
+        return bool(self.sms_enabled and self.sipgate_token_id
+                    and self.sipgate_token and self.sipgate_recipient)
 
 
 @lru_cache
