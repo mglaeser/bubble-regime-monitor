@@ -78,7 +78,7 @@ log = get_logger(__name__)
 # served with stale=true. Keys are indicator ids; "v" covers the multiplier.
 FRESHNESS_SLA_DAYS: dict[str, int] = {
     "s1": 35, "s2": 3, "s3": 3, "s4": 35, "s5": 3,
-    "d1": 3, "d2": 45, "d3": 100, "d4": 3, "v": 2,
+    "d1": 3, "d2": 75, "d3": 100, "d4": 3, "v": 2,
 }
 
 
@@ -89,6 +89,35 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return max(0, (datetime.now(UTC).date() - date.fromisoformat(as_of_iso[:10])).days)
     except ValueError:
         return None
+
+
+COVERAGE_DROP_THRESHOLD = 1.0 / 3.0  # >1/3 nominal weight lost -> block degraded
+
+
+def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
+    """Per-block coverage: fraction of nominal weight actually obtained.
+
+    A dropped OR stale indicator counts as lost weight; a proxy substitution
+    does not. If >1/3 of a block's nominal weight is lost the block is
+    degraded (its action band is suppressed)."""
+    blocks: dict[str, Any] = {}
+    degraded_any = False
+    for block_id, prefix in (("S", "s"), ("D", "d")):
+        total = 0.0
+        obtained = 0.0
+        for ind in indicators.values():
+            if not ind.id.startswith(prefix):
+                continue
+            w = REGISTRY[ind.id].weight
+            total += w
+            if not ind.dropped and not ind.stale:
+                obtained += w
+        frac = obtained / total if total else 0.0
+        degraded = frac < (1.0 - COVERAGE_DROP_THRESHOLD)
+        degraded_any = degraded_any or degraded
+        blocks[block_id] = {"coverage": round(frac, 4), "degraded": degraded}
+    blocks["degraded"] = degraded_any
+    return blocks
 
 
 @dataclass
@@ -233,6 +262,7 @@ class SnapshotData:
     trend_states: dict[str, dict[str, str]]
     fast_alarm: dict[str, Any]
     freshness: dict[str, str]
+    coverage: dict[str, Any]
 
 
 def _track(raw: RawInputs, source: str, fn: Any) -> Any:
@@ -294,8 +324,16 @@ def gather_inputs() -> RawInputs:
         raw.top10_pct, raw.top10_source, raw.top10_fallback = r.value, r.provenance.source, r.provenance.fallback_used
         raw.top10_as_of = r.provenance.as_of or today  # holdings file is daily
 
-    # SMH/SPY 2-yr run-up (SOXX as SMH substitute).
-    spy = _track(raw, "stooq_spy", lambda: stooq_src.daily_closes("spy.us"))
+    # Prices via the v3.1 provider chain (Tiingo -> Twelve Data -> Alpha
+    # Vantage -> yfinance -> cache). Index levels use ETF proxies on free
+    # tiers (NDX->QQQ, SPX->SPY); proxy substitutions are flagged in the note.
+    from app.sources import prices as price_src
+
+    def _closes(canonical: str):
+        return price_src.get_daily_closes(canonical)
+
+    # SPY (also the ATH gate) and QQQ.
+    spy = _track(raw, "price_SPY", lambda: _closes("SPY"))
     if spy:
         raw.spy_daily = spy.value
         raw.spy_daily_closes = [c for _, c in spy.value]
@@ -305,34 +343,39 @@ def gather_inputs() -> RawInputs:
             pass
         closes = raw.spy_daily_closes
         raw.index_within_2pct_of_ath = closes[-1] >= 0.98 * max(closes)
-    semis = _track(raw, "stooq_smh", lambda: stooq_src.daily_closes("smh.us"))
+    qqq = _track(raw, "price_QQQ", lambda: _closes("QQQ"))
+    if qqq:
+        raw.qqq_daily = qqq.value
+        raw.qqq_daily_closes = [c for _, c in qqq.value]
+
+    # SMH/SPY 2-yr run-up (SOXX as SMH substitute).
+    semis = _track(raw, "price_SMH", lambda: _closes("SMH"))
     if semis is None:
-        semis = _track(raw, "stooq_soxx", lambda: stooq_src.daily_closes("soxx.us"))
-        raw.semis_symbol = "soxx.us"
+        semis = _track(raw, "price_SOXX", lambda: _closes("SOXX"))
+        raw.semis_symbol = "soxx"
     if semis:
         try:
             raw.smh_2yr_return_pct = stooq_src.total_return_pct(semis.value, 504)
             raw.semis_as_of = semis.provenance.as_of
         except Exception:
             pass
-    qqq = _track(raw, "stooq_qqq", lambda: stooq_src.daily_closes("qqq.us"))
-    if qqq:
-        raw.qqq_daily = qqq.value
-        raw.qqq_daily_closes = [c for _, c in qqq.value]
 
-    # GSADF on Nasdaq-100 monthly log prices (R subprocess; degrade to note).
-    ndx = _track(raw, "stooq_ndx", lambda: stooq_src.daily_closes("^ndx"))
+    # GSADF on Nasdaq-100 monthly log prices via the QQQ proxy (no free raw
+    # index source); R subprocess degrades to the contested/stale 0.25 floor.
+    ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
     if ndx:
         import math
 
         monthly = legs.monthly_closes(ndx.value)
-        out = run_gsadf([math.log(v) for v in monthly[-360:]])
+        out = run_gsadf([math.log(v) for v in monthly[-360:]],
+                        timeout_s=get_settings().gsadf_timeout_s)
         if out:
             raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
+            raw.gsadf_note = "Nasdaq-100 via QQQ proxy"
         else:
-            raw.gsadf_note = "R/exuber unavailable or failed; sub-score floor 0.05"
+            raw.gsadf_note = "GSADF not computable (R/exuber unavailable or failed)"
     else:
-        raw.gsadf_note = "no Nasdaq-100 series; sub-score floor 0.05"
+        raw.gsadf_note = "GSADF not computable (no Nasdaq-100/QQQ series this run)"
 
     # HY OAS: FRED latest + own persisted history (FRED 3-yr truncation).
     r = _track(raw, "fred_BAMLH0A0HYM2", lambda: fred_src.observations("BAMLH0A0HYM2"))
@@ -525,8 +568,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = d1_breadth.compute(raw.breadth_pct)
         sub_d["d1"] = sub
         mc_in.breadth_pct = raw.breadth_pct
+        path_note = "path=B_constituent_compute"
+        d1_note = f"{raw.breadth_note}; {path_note}" if raw.breadth_note else path_note
         indicators["d1"] = IndicatorOutput("d1", raw.breadth_pct, sub, False,
-                                           raw.breadth_source, False, note=raw.breadth_note,
+                                           raw.breadth_source, False, note=d1_note,
                                            as_of=raw.breadth_as_of)
     else:
         indicators["d1"] = IndicatorOutput("d1", None, None, True, raw.breadth_source, False,
@@ -534,8 +579,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
 
     # ---- D2 margin ----
     margin_age = _age_days(raw.margin_as_of)
+    # FINRA SLA: 75 days tolerates one skipped monthly publication (series
+    # posts ~3 weeks after month-end). Beyond that, never compute a YoY.
     if raw.margin_balances and len(raw.margin_balances) >= 13 \
-            and (margin_age is None or margin_age <= 90):
+            and (margin_age is None or margin_age <= 75):
         yoy = d2_margin.yoy_pct(raw.margin_balances)
         # Guard (b): the rollover multiplier (x1.0) may only be asserted from
         # data <= 60 days old; stale data always uses x0.6 + "rollover: unknown".
@@ -558,8 +605,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = float(raw.margin_cached["sub_score"])
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
-        reason = (f"reference month {raw.margin_as_of} older than 90d"
-                  if margin_age is not None and margin_age > 90 else "margin statistics unavailable")
+        reason = (f"reference month {raw.margin_as_of} older than 75d SLA"
+                  if margin_age is not None and margin_age > 75 else "margin statistics unavailable")
         indicators["d2"] = IndicatorOutput(
             "d2", raw.margin_cached.get("value"), sub, False, "finra_xlsx (cached)", True,
             note=f"{reason}; serving cached reading from {raw.margin_cached['timestamp']}; "
@@ -624,6 +671,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     mc = monte_carlo(mc_in, n=n, seed=seed)
     band = action_band_with_override(mc.median, red_flags)
 
+    # Coverage gate (spec 5): if >1/3 of a block's nominal weight is dropped
+    # or stale, the block is degraded and its action band is suppressed.
+    coverage = _coverage_gate(indicators)
+    if coverage["degraded"]:
+        band = "suppressed (block degraded)"
+
     # ---- legs ----
     trend_states: dict[str, dict[str, str]] = {}
     for name, daily, closes in (("SPY", raw.spy_daily, raw.spy_daily_closes),
@@ -671,6 +724,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         trend_states=trend_states,
         fast_alarm=alarm.as_dict(),
         freshness=freshness,
+        coverage=coverage,
     )
 
 
@@ -729,7 +783,7 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             judgment_call=call.text,
             judgment_stale=call.stale,
             judgment_error=call.error_class,
-            data_freshness=data.freshness,
+            data_freshness={**data.freshness, "_coverage": data.coverage},
         )
         session.add(snap)
         session.flush()

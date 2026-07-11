@@ -1,22 +1,23 @@
-"""Breadth computed from constituents (D1 raw input), with a per-symbol cache.
+"""Breadth from constituents (D1 raw input) — v3.1 Path B, PRIMARY.
 
-StockCharts $SPXA200R / Barchart $MMTH are JS/login-gated for programmatic
-use as of July 2026, so constituent computation is the effective primary:
-Wikipedia S&P 500 constituent list + Stooq daily closes per symbol ->
-pct = 100 * #{close > SMA200} / N.
+All keyless published %>200DMA sources (Barchart $S5TH, IndexIndicators,
+StockCharts $SPXA200R) are JS-gated or image-only, so Path A cannot be
+relied on unattended. Path B computes breadth directly = share of S&P 500
+constituents whose adjClose exceeds their own trailing 200-day SMA.
 
-The sweep must not hammer Stooq in one burst: each symbol's last close and
-SMA200 are persisted in SQLite (breadth_symbol_cache) and only entries older
-than the freshness SLA are re-fetched, at the polite per-request pacing set
-in the stooq module. Partial coverage never drops the indicator — the pct is
-computed from the constituents that did resolve and the provenance note says
-how many ("breadth computed from N/503 constituents").
+Constituent list from Wikipedia; closes from the v3.1 price layer's Twelve
+Data path (800 credits/day, throttled to 8/min, governed on remaining
+credits). Each symbol's last close + SMA200 is persisted in SQLite
+(breadth_symbol_cache) so only stale/missing symbols refetch — a full sweep
+happens once, later runs touch the day's new closes. Partial coverage never
+drops the indicator: pct is computed from the constituents that resolved and
+the provenance note states how many ("breadth computed from N/503").
 """
 
 from __future__ import annotations
 
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -25,13 +26,19 @@ from app.http_client import fetch
 from app.logging_conf import get_logger
 from app.models import BreadthSymbolCache
 from app.sources import Provenance, SourceError, SourceResult
-from app.sources.stooq import StooqLimitError, daily_closes, sla_cutoff_date
+from app.sources.prices import RateLimited, constituent_closes, twelvedata_credits_left
 
 log = get_logger(__name__)
 
 WIKIPEDIA_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-EARLY_ABORT_AFTER = 25  # all-failures prefix with an empty cache => Stooq blocked; stop early
+EARLY_ABORT_AFTER = 25  # all-failures prefix with an empty cache => provider blocked; stop early
 MIN_RESOLVED = 25       # below this, the pct is too noisy to publish
+CACHE_SLA_DAYS = 3
+CREDIT_RESERVE = 50     # keep this many Twelve Data credits for other work
+
+
+def sla_cutoff_date() -> str:
+    return (datetime.now(UTC).date() - timedelta(days=CACHE_SLA_DAYS)).isoformat()
 
 
 def sp500_symbols() -> list[str]:
@@ -81,18 +88,21 @@ def _store(symbol: str, as_of: str, last_close: float, sma200: float) -> None:
 def pct_above_200dma() -> SourceResult:
     """Percent of S&P 500 members with close > their own 200-day SMA.
 
-    Fresh cache entries are used as-is; stale/missing ones are re-fetched at
-    polite pacing (no 60 s retry inside the sweep). Fetch failures fall back
-    to the stale cached entry when one exists."""
+    v3.1 Path B (PRIMARY): constituent closes come from Twelve Data (800
+    credits/day), throttled to 8/min inside the price layer and governed on
+    remaining credits. Fresh SQLite cache entries skip the network; only
+    stale/missing symbols are fetched. Partial coverage is PUBLISHED with a
+    provenance note (breadth computed from N/503) rather than dropped."""
     symbols = sp500_symbols()
     cache = _load_cache()
     cutoff = sla_cutoff_date()
+    credits = twelvedata_credits_left()  # None => unknown; proceed and rely on 429 handling
 
     above = 0
     counted = 0
     fetched = 0
-    fetch_failures = 0
     served_stale = 0
+    budget_stopped = False
 
     for sym in symbols:
         entry = cache.get(sym)
@@ -101,23 +111,34 @@ def pct_above_200dma() -> SourceResult:
             above += entry.last_close > entry.sma200
             continue
 
+        if credits is not None and credits - fetched <= CREDIT_RESERVE:
+            budget_stopped = True  # protect the daily credit reserve
+            if entry is not None:
+                counted += 1
+                served_stale += 1
+                above += entry.last_close > entry.sma200
+            continue
+
         fetched += 1
         try:
-            result = daily_closes(f"{sym.lower()}.us", retry_on_unavailable=False, use_cache=False)
-            closes = [c for _, c in result.value]
+            closes = [c for _, c in constituent_closes(sym, outputsize=260)]
             if len(closes) < 200:
                 raise SourceError(f"{sym}: fewer than 200 closes")
             last_close = closes[-1]
             sma200 = sum(closes[-200:]) / 200.0
-            as_of = result.value[-1][0]
+            as_of = datetime.now(UTC).date().isoformat()
             _store(sym, as_of, last_close, sma200)
             counted += 1
             above += last_close > sma200
-        except StooqLimitError as exc:
-            log.warning("breadth_sweep_limit_hit", detail=str(exc), resolved=counted)
-            break  # daily limit: keep what we have, stop fetching
+        except RateLimited as exc:
+            log.warning("breadth_sweep_rate_limited", detail=str(exc), resolved=counted)
+            budget_stopped = True
+            if entry is not None:
+                counted += 1
+                served_stale += 1
+                above += entry.last_close > entry.sma200
+            break  # daily credits exhausted: keep what we have
         except Exception:
-            fetch_failures += 1
             if entry is not None:  # over-SLA cache beats nothing
                 counted += 1
                 served_stale += 1
@@ -125,7 +146,7 @@ def pct_above_200dma() -> SourceResult:
             if fetched == EARLY_ABORT_AFTER and counted == 0:
                 raise SourceError(
                     f"breadth: first {EARLY_ABORT_AFTER} symbols all unusable and no cache — "
-                    "Stooq blocked/limited; aborting sweep early"
+                    "provider blocked/limited; aborting sweep early"
                 ) from None
 
     if counted < MIN_RESOLVED:
@@ -134,6 +155,8 @@ def pct_above_200dma() -> SourceResult:
     pct = 100.0 * above / counted
     note = f"breadth computed from {counted}/{len(symbols)} constituents"
     if served_stale:
-        note += f"; {served_stale} served from stale cache"
-    return SourceResult(pct, Provenance(source="constituents+stooq", note=note,
+        note += f"; {served_stale} from stale cache"
+    if budget_stopped:
+        note += "; sweep stopped at Twelve Data daily-credit reserve"
+    return SourceResult(pct, Provenance(source="constituents+twelvedata", note=note,
                                         as_of=datetime.now(UTC).date().isoformat()))

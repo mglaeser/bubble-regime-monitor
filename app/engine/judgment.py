@@ -56,37 +56,64 @@ def generate(median: float, iqr: tuple[float, float], band: str,
     )
     try:
         import anthropic
+    except Exception as exc:  # SDK absent
+        log.warning("judgment_call_degraded", error_class=type(exc).__name__, error=repr(exc)[:200])
+        if last_successful:
+            return JudgmentCall(text=last_successful, stale=True, error_class=type(exc).__name__)
+        return JudgmentCall(text=None, stale=True, error_class=type(exc).__name__)
 
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        request: dict[str, object] = {
-            "model": settings.anthropic_model,  # alias 'opus'
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    # Model fallback chain (spec 5): primary -> sonnet-5 -> sonnet-4-6, all
+    # with adaptive thinking + effort=max; then one plain retry with neither.
+    # The minimal request NEVER sends budget_tokens or temperature (both HTTP
+    # 400 with adaptive thinking / this effort config).
+    models = [settings.anthropic_model, "claude-sonnet-5", "claude-sonnet-4-6"]
+    last_exc: Exception | None = None
+
+    def _call(model: str, thinking: bool) -> str:
+        base: dict[str, object] = {
+            "model": model,
             "max_tokens": settings.anthropic_max_tokens,
             "messages": [{"role": "user", "content": prompt}],
-            # NOTE: do NOT set budget_tokens or temperature — both return
-            # HTTP 400 on Opus 4.7+
         }
-        try:
-            resp = client.messages.create(
-                **request,
-                thinking={"type": "adaptive"},  # adaptive thinking (July 2026)
-                output_config={"effort": settings.anthropic_effort},
-            )
-        except TypeError:
-            # SDK predates adaptive-thinking kwargs: pass them straight
-            # through to the API instead.
-            resp = client.messages.create(
-                **request,
-                extra_body={"thinking": {"type": "adaptive"},
-                            "output_config": {"effort": settings.anthropic_effort}},
-            )
+        if thinking:
+            try:
+                resp = client.messages.create(
+                    **base, thinking={"type": "adaptive"},
+                    output_config={"effort": settings.anthropic_effort})
+            except TypeError:
+                # SDK predates the kwargs: pass them straight through.
+                resp = client.messages.create(
+                    **base, extra_body={"thinking": {"type": "adaptive"},
+                                        "output_config": {"effort": settings.anthropic_effort}})
+        else:
+            resp = client.messages.create(**base)
         text = "".join(b.text for b in resp.content if b.type == "text").strip()
         if not text:
             raise ValueError("empty completion")
+        return text
+
+    for model in models:
+        try:
+            text = _call(model, thinking=True)
+            log.info("judgment_call_ok", model=model, shape="adaptive+effort")
+            return JudgmentCall(text=text[:300], stale=False)
+        except Exception as exc:
+            last_exc = exc
+            log.warning("judgment_model_failed", model=model, error_class=type(exc).__name__,
+                        error=repr(exc)[:300])
+
+    # Tertiary: plain request, no thinking/output_config, on the primary model.
+    try:
+        text = _call(settings.anthropic_model, thinking=False)
+        log.info("judgment_call_ok", model=settings.anthropic_model, shape="plain")
         return JudgmentCall(text=text[:300], stale=False)
     except Exception as exc:
-        log.warning("judgment_call_degraded", error_class=type(exc).__name__, error=repr(exc)[:500])
-        if last_successful:
-            return JudgmentCall(text=last_successful, stale=True, error_class=type(exc).__name__)
-        # No prior judgment: text is null, not a placeholder string, so the
-        # failure is machine-detectable downstream.
-        return JudgmentCall(text=None, stale=True, error_class=type(exc).__name__)
+        last_exc = exc
+        log.warning("judgment_call_degraded", error_class=type(exc).__name__, error=repr(exc)[:300])
+
+    err_class = type(last_exc).__name__ if last_exc else "Unknown"
+    if last_successful:
+        return JudgmentCall(text=last_successful, stale=True, error_class=err_class)
+    # No prior judgment: text is null (machine-detectable), not a placeholder.
+    return JudgmentCall(text=None, stale=True, error_class=err_class)

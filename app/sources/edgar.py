@@ -66,7 +66,7 @@ def _companyfacts(cik: str) -> dict[str, Any]:
     if wait > 0:
         time.sleep(wait)
     settings = get_settings()
-    resp = fetch("sec_edgar", BASE.format(cik=cik), headers={"User-Agent": settings.sec_user_agent})
+    resp = fetch("sec_edgar", BASE.format(cik=cik), headers={"User-Agent": settings.effective_sec_ua})
     _last_request[0] = time.monotonic()
     return resp.json()
 

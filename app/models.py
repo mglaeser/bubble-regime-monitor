@@ -89,17 +89,32 @@ class HyOasHistory(Base):
     oas_bps: Mapped[float] = mapped_column(Float)
 
 
-class StooqSeriesCache(Base):
-    """Cached daily close series for the index/ETF symbols (spy, qqq, smh, ^ndx).
+class PriceSeriesCache(Base):
+    """TERMINAL price cache: last good daily close series per CANONICAL symbol.
 
-    Stooq enforces a per-IP daily download limit and throttles bursts, so
-    series are reused up to the freshness SLA before re-fetching."""
+    Every successful provider fetch lands here; on total provider failure the
+    last cached series is served with stale flags (never a 500)."""
 
-    __tablename__ = "stooq_series_cache"
+    __tablename__ = "price_series_cache"
 
-    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)  # canonical (SPY, NDX, ...)
     as_of: Mapped[date] = mapped_column(Date)
-    closes: Mapped[list] = mapped_column(JSON)  # [[date_iso, close], ...] chronological
+    source: Mapped[str] = mapped_column(String(32))  # provider:vendor_symbol that filled it
+    closes: Mapped[list] = mapped_column(JSON)  # [[date_iso, adjclose], ...] chronological
+
+
+class ProviderHealth(Base):
+    """Consecutive-failure scoring per price provider, persisted across runs.
+
+    A provider is skipped after 3 consecutive failures and only re-tried
+    after a 6-hour cooldown."""
+
+    __tablename__ = "provider_health"
+
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class BreadthSymbolCache(Base):

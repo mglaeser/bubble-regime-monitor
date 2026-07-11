@@ -81,7 +81,9 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         "judgment_call": {"text": snap.judgment_call, "stale": snap.judgment_stale,
                           "error_class": snap.judgment_error},
     }
-    return {"data": data, "meta": _meta(snap)}
+    meta = _meta(snap)
+    meta["coverage"] = (snap.data_freshness or {}).get("_coverage", {})
+    return {"data": data, "meta": meta}
 
 
 @router.get(

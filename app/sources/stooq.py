@@ -1,51 +1,53 @@
-"""Stooq daily CSV price loader with an SQLite series cache.
+"""Stooq daily CSV loader — DEMOTED to optional experimental provider (v3.1).
 
-URL: https://stooq.com/q/d/l/?s=<sym>&i=d
-Symbols: spy.us, qqq.us, smh.us, soxx.us, ^ndx, ^spx. Close is adjusted.
-(httpx URL-encodes `^ndx` as `%5Endx` in the query string — verified in live
-request logs.)
+FINDING (operator-verified on the live server, July 11 2026): Stooq's CSV
+endpoint (https://stooq.com/q/d/l/?s=spy.us&i=d) returns HTTP 200 with a
+~796-byte HTML body containing a JavaScript SHA-256 proof-of-work (PoW)
+anti-bot challenge (Anubis-style). The page embeds a challenge string `c` and
+difficulty `d=4`; the browser brute-forces a nonce `n` such that
+SHA-256(c + n) in hex starts with d zeros, POSTs (c, n) to /__verify with
+same-origin credentials, receives a session cookie, and reloads — only then
+is CSV served. A JS-less HTTP client can never satisfy this, so it always
+receives the challenge instead of data. This was the root cause of the
+persistent N=0 from Stooq.
 
-Stooq has no formal API, enforces a per-IP daily download limit, and answers
-throttled or unwelcome clients with HTTP 200 carrying "No data" plain text or
-an HTML/CAPTCHA page instead of CSV. Countermeasures, in order:
+Stooq is therefore OFF the automatic chain: STOOQ_ENABLED=false by default.
 
-- typed errors: StooqLimitError (daily limit — retrying is pointless today)
-  and SourceUnavailable (empty/CAPTCHA/notice body) instead of silently
-  yielding an empty frame;
-- an SQLite cache per symbol, reused up to `CACHE_SLA_DAYS` before
-  re-fetching (and served stale, flagged, when Stooq is down);
-- >= 2 s between requests, a browser-like User-Agent, and one retry after
-  60 s on an unavailable response (index/ETF symbols only — the breadth
-  sweep must not multiply that wait by 500).
+ToS caveat (verbatim per spec): Solving the PoW is technically feasible and
+the challenge is explicitly designed to be solvable by a browser; however,
+automated circumvention of an anti-bot gate may violate Stooq's Terms of
+Service. This path is the operator's choice and is disabled by default
+(STOOQ_ENABLED=false). No headless browser is used — too heavyweight for a
+slim container; dropping Stooq entirely is fully supported and is the
+recommended default.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
+import json
+import re
 import time
-from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
-from app.http_client import fetch
+import httpx
+
 from app.logging_conf import get_logger
-from app.sources import Provenance, SourceError, SourceResult
+from app.sources import SourceError
 
 log = get_logger(__name__)
 
 BASE = "https://stooq.com/q/d/l/"
 POLITE_DELAY_S = 2.0
-UNAVAILABLE_RETRY_DELAY_S = 60.0
-CACHE_SLA_DAYS = 3
-CACHE_MAX_ROWS = 900  # ~3.5 trading years; covers the 2-3 yr windows + SMA200
+POW_NONCE_CEILING = 5_000_000  # safety ceiling; abort runaway search
+POW_MAX_CYCLES = 3             # give up after 3 challenge cycles
+COOKIE_TTL_S = 24 * 3600       # reuse the /__verify session cookie for 24 h
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0 Safari/537.36",
-    "Accept": "text/csv,text/plain,*/*",
-    "Referer": "https://stooq.com/",
-}
+HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                         "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
 
-# Known Stooq notice fragments (English + Polish) worth naming in errors.
 LIMIT_MARKERS = ("exceeded the daily hits limit", "przekroczono dzienny limit")
 NO_DATA_MARKERS = ("no data", "brak danych")
 
@@ -57,19 +59,29 @@ class StooqLimitError(SourceError):
 
 
 class SourceUnavailable(SourceError):
-    """Stooq answered with a notice/CAPTCHA/empty body instead of CSV."""
+    """Stooq answered with a notice/empty body instead of CSV."""
+
+
+class StooqPoWChallenge(SourceUnavailable):
+    """Stooq served its JavaScript proof-of-work anti-bot challenge page.
+
+    Detection spec: body starts with '<!DOCTYPE html' OR contains '__verify'.
+    Never parse such a body as CSV; count Stooq as provider-down."""
+
+
+def detect_pow(body: str) -> bool:
+    return body.lstrip()[:14].lower().startswith("<!doctype html") or "__verify" in body
 
 
 def _parse_csv(text: str, symbol: str) -> list[tuple[str, float]]:
+    if detect_pow(text):
+        raise StooqPoWChallenge(
+            f"stooq {symbol}: JS proof-of-work challenge page served instead of CSV")
     head = text[:200].strip()
     lowered = head.lower()
     if any(m in lowered for m in LIMIT_MARKERS):
         raise StooqLimitError(f"stooq {symbol}: daily hits limit exceeded")
-    if lowered.startswith("<") or "captcha" in lowered:
-        raise SourceUnavailable(f"stooq {symbol}: HTML/CAPTCHA page instead of CSV; "
-                                f"body starts: {head[:80]!r}")
     reader = csv.DictReader(io.StringIO(text))
-    # case-insensitive header lookup (BOM already stripped by utf-8-sig decode)
     field_map = {name.strip().lower(): name for name in (reader.fieldnames or [])}
     date_key, close_key = field_map.get("date"), field_map.get("close")
     rows: list[tuple[str, float]] = []
@@ -87,99 +99,85 @@ def _parse_csv(text: str, symbol: str) -> list[tuple[str, float]]:
     return rows
 
 
-def _fetch_series(symbol: str, retry_on_unavailable: bool) -> list[tuple[str, float]]:
-    """One (optionally twice-attempted) live fetch, politely paced."""
-    attempts = 2 if retry_on_unavailable else 1
-    for attempt in range(1, attempts + 1):
-        wait = POLITE_DELAY_S - (time.monotonic() - _last_request[0])
-        if wait > 0:
-            time.sleep(wait)
-        resp = fetch(f"stooq:{symbol}", BASE, params={"s": symbol, "i": "d"}, headers=HEADERS)
-        _last_request[0] = time.monotonic()
-        text = resp.content.decode("utf-8-sig", errors="replace")
-        try:
-            return _parse_csv(text, symbol)
-        except StooqLimitError:
-            raise
-        except SourceUnavailable:
-            log.warning("stooq_unavailable", symbol=symbol, status=resp.status_code,
-                        body_head=text[:200])
-            if attempt >= attempts:
-                raise
-            time.sleep(UNAVAILABLE_RETRY_DELAY_S)
-    raise SourceUnavailable(f"stooq {symbol}: unreachable")  # pragma: no cover
+# ---------------------------------------------------------------------------
+# Optional polite PoW solver (STOOQ_ENABLED=true only; see ToS caveat above)
+# ---------------------------------------------------------------------------
+
+def solve_pow(challenge: str, difficulty: int = 4) -> int | None:
+    """Brute-force the hashcash nonce: SHA-256(c + n) hex starts with d zeros."""
+    target = "0" * difficulty
+    n = 0
+    while n <= POW_NONCE_CEILING:
+        if hashlib.sha256((challenge + str(n)).encode()).hexdigest().startswith(target):
+            return n
+        n += 1
+    return None
 
 
-def _cache_get(symbol: str) -> tuple[list[tuple[str, float]], str] | None:
-    from sqlalchemy import select
+def _cookie_path() -> Path:
+    from app.config import get_settings
 
-    from app.db import session_scope
-    from app.models import StooqSeriesCache
+    db_url = get_settings().db_url
+    base = Path(db_url.replace("sqlite:///", "/", 1)).parent if db_url.startswith("sqlite:///") \
+        else Path("/tmp")
+    return base / "stooq_cookies.json"
 
+
+def _load_cookies(client: httpx.Client) -> None:
     try:
-        with session_scope() as session:
-            row = session.execute(
-                select(StooqSeriesCache).where(StooqSeriesCache.symbol == symbol)
-            ).scalars().first()
-        if row is None:
-            return None
-        return [(d, float(c)) for d, c in row.closes], row.as_of.isoformat()
+        path = _cookie_path()
+        if not path.exists() or time.time() - path.stat().st_mtime > COOKIE_TTL_S:
+            return
+        for name, value in json.loads(path.read_text()).items():
+            client.cookies.set(name, value, domain="stooq.com")
     except Exception:
-        return None  # cache is an optimization, never a failure source
+        pass
 
 
-def _cache_put(symbol: str, rows: list[tuple[str, float]]) -> None:
-    from datetime import date as _date
-
-    from app.db import session_scope
-    from app.models import StooqSeriesCache
-
+def _save_cookies(client: httpx.Client) -> None:
     try:
-        with session_scope() as session:
-            session.merge(StooqSeriesCache(
-                symbol=symbol,
-                as_of=_date.fromisoformat(rows[-1][0]),
-                closes=[[d, c] for d, c in rows[-CACHE_MAX_ROWS:]],
-            ))
-    except Exception as exc:  # pragma: no cover
-        log.warning("stooq_cache_write_failed", symbol=symbol, error=str(exc))
+        _cookie_path().write_text(json.dumps(dict(client.cookies)))
+    except Exception:
+        pass
 
 
-def daily_closes(symbol: str, *, retry_on_unavailable: bool = True,
-                 use_cache: bool = True) -> SourceResult:
-    """Chronological (date_iso, adjusted_close) list, cache-first.
+def fetch_with_pow(symbol: str) -> list[tuple[str, float]]:
+    """Fetch CSV, solving the PoW challenge if presented (max 3 cycles).
 
-    Cache within CACHE_SLA_DAYS is served without a network hit. On a live
-    fetch failure, an over-SLA cached series is still served with a stale
-    note — better a dated close than a dropped indicator."""
-    cached = _cache_get(symbol) if use_cache else None
-    if cached:
-        rows, as_of = cached
-        age = (datetime.now(UTC).date() - datetime.fromisoformat(as_of).date()).days
-        if age <= CACHE_SLA_DAYS:
-            return SourceResult(rows, Provenance(source=f"stooq:{symbol}", as_of=as_of,
-                                                 note=f"cache ({age}d old)"))
-    try:
-        rows = _fetch_series(symbol, retry_on_unavailable)
-    except SourceError:
-        if cached:
-            rows, as_of = cached
-            return SourceResult(rows, Provenance(
-                source=f"stooq:{symbol}", as_of=as_of, fallback_used=True,
-                note="stooq unavailable; serving stale cache"))
-        raise
-    _cache_put(symbol, rows)
-    return SourceResult(rows, Provenance(source=f"stooq:{symbol}", as_of=rows[-1][0]))
+    Reuses the /__verify session cookie from disk for 24 h so at most one
+    solve per day happens, not one per request (politeness)."""
+    wait = POLITE_DELAY_S - (time.monotonic() - _last_request[0])
+    if wait > 0:
+        time.sleep(wait)
+    with httpx.Client(headers=HEADERS, timeout=20, follow_redirects=True) as client:
+        _load_cookies(client)
+        for _cycle in range(POW_MAX_CYCLES):
+            resp = client.get(BASE, params={"s": symbol, "i": "d"})
+            _last_request[0] = time.monotonic()
+            body = resp.content.decode("utf-8-sig", errors="replace")
+            if not detect_pow(body):
+                return _parse_csv(body, symbol)
+            m = re.search(r'const c="([^"]+)"', body)
+            d = re.search(r"\bd=(\d+)", body)
+            if not m:
+                raise StooqPoWChallenge(f"stooq {symbol}: challenge page without parseable c=")
+            nonce = solve_pow(m.group(1), int(d.group(1)) if d else 4)
+            if nonce is None:
+                raise StooqPoWChallenge(f"stooq {symbol}: PoW nonce search hit safety ceiling")
+            verify = client.post(
+                "https://stooq.com/__verify",
+                data={"c": m.group(1), "n": nonce},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            if not verify.is_success:
+                raise StooqPoWChallenge(f"stooq {symbol}: /__verify rejected the solved nonce")
+            _save_cookies(client)  # session cookie persists 24 h
+    raise StooqPoWChallenge(f"stooq {symbol}: still challenged after {POW_MAX_CYCLES} cycles")
 
 
 def total_return_pct(closes: list[tuple[str, float]], trading_days: int) -> float:
-    """Total return over the trailing `trading_days`, in percent (adjusted closes)."""
+    """Total return over the trailing `trading_days`, in percent."""
     if len(closes) <= trading_days:
         raise SourceError("not enough history for total return window")
     start, end = closes[-trading_days - 1][1], closes[-1][1]
     return (end / start - 1.0) * 100.0
-
-
-def sla_cutoff_date() -> str:
-    """ISO date before which a cached entry counts as stale (shared with breadth)."""
-    return (datetime.now(UTC).date() - timedelta(days=CACHE_SLA_DAYS)).isoformat()
