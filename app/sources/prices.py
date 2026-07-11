@@ -18,8 +18,10 @@ Chain (spec v3.1 section 2):
 - TERTIARY  Alpha Vantage (ALPHAVANTAGE_API_KEY, 25 req/day): CORE tickers
   ONLY (SPY/QQQ/SMH/SOXX); never for the constituent sweep. Free tier is
   UNADJUSTED daily — acceptable for short-window ETF math, flagged.
-- QUATERNARY yfinance (documented-unreliable, ToS-gray): last automated
-  attempt; every call short-timeout try/except.
+- QUATERNARY yfinance (documented-unreliable, ToS-gray): OPTIONAL dependency
+  (install the `.[yfinance]` extra to activate). When absent the tier is
+  skipped as ProviderNotConfigured (no health penalty). Last automated
+  attempt; short timeout. The one free place raw indices may appear.
 - TERMINAL  SQLite cache: last good series per canonical symbol served with
   stale flags on total provider failure. Never a 500.
 
@@ -64,6 +66,14 @@ TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 class ProviderError(SourceError):
     """A price provider failed (bad token, cap hit, error body, HTTP error)."""
+
+
+class ProviderNotConfigured(ProviderError):
+    """The provider is not usable by configuration, not by ill-health: no API
+    key, disabled by flag, or the symbol is outside the provider's budget.
+
+    These must NOT count against provider health — checked with isinstance
+    rather than by sniffing the error message (which was fragile)."""
 
 
 class NotOnPlan(ProviderError):
@@ -244,7 +254,7 @@ def _td_throttle() -> None:
 def fetch_tiingo(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
     settings = get_settings()
     if not settings.tiingo_api_key:
-        raise ProviderError("tiingo: no TIINGO_API_KEY configured")
+        raise ProviderNotConfigured("tiingo: no TIINGO_API_KEY configured")
     vendor, proxy = resolve_symbol(canonical, "tiingo")
     start = (datetime.now(UTC).date() - timedelta(days=HISTORY_DAYS)).isoformat()
     with httpx.Client(timeout=TIMEOUT) as client:
@@ -270,7 +280,7 @@ def fetch_tiingo(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
 def fetch_twelvedata(canonical: str, outputsize: int = 800) -> tuple[list[tuple[str, float]], str, bool]:
     settings = get_settings()
     if not settings.twelve_data_api_key:
-        raise ProviderError("twelvedata: no TWELVE_DATA_API_KEY configured")
+        raise ProviderNotConfigured("twelvedata: no TWELVE_DATA_API_KEY configured")
     vendor, proxy = resolve_symbol(canonical, "twelvedata")
     _td_throttle()
     with httpx.Client(timeout=TIMEOUT) as client:
@@ -324,11 +334,11 @@ def twelvedata_credits_left() -> int | None:
 def fetch_alphavantage(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
     settings = get_settings()
     if not settings.alphavantage_api_key:
-        raise ProviderError("alphavantage: no ALPHAVANTAGE_API_KEY configured")
+        raise ProviderNotConfigured("alphavantage: no ALPHAVANTAGE_API_KEY configured")
     vendor, proxy = resolve_symbol(canonical, "alphavantage")
     if vendor not in CORE_TICKERS:
         # 25 req/day budget: strictly core symbols, never the breadth sweep
-        raise ProviderError(f"alphavantage: {vendor} outside CORE ticker budget")
+        raise ProviderNotConfigured(f"alphavantage: {vendor} outside CORE ticker budget")
     with httpx.Client(timeout=TIMEOUT) as client:
         resp = client.get(
             "https://www.alphavantage.co/query",
@@ -341,41 +351,48 @@ def fetch_alphavantage(canonical: str) -> tuple[list[tuple[str, float]], str, bo
 
 def fetch_yfinance(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
     """yfinance: documented-unreliable (scrapes unofficial Yahoo endpoints,
-    ToS-gray, breaks often). Last automated attempt only; short timeout."""
-    vendor, proxy = resolve_symbol(canonical, "yfinance")
+    ToS-gray, breaks often). Optional dependency — install the `.[yfinance]`
+    extra to activate this tier; when absent it is skipped (not a failure).
+    Last automated attempt only; short timeout. It is the one free place raw
+    index levels (^GSPC/^NDX) may appear."""
     try:
         import yfinance as yf
+    except ImportError as exc:
+        # Not installed -> a configuration state, not provider ill-health.
+        raise ProviderNotConfigured(
+            "yfinance: not installed (pip install '.[yfinance]' to enable)") from exc
 
-        df = yf.Ticker(vendor).history(period="4y", interval="1d",
-                                       auto_adjust=True, timeout=20)
-        rows = [(idx.date().isoformat(), float(close))
-                for idx, close in df["Close"].items()]
+    vendor, proxy = resolve_symbol(canonical, "yfinance")
+
+    def _history(sym: str) -> list[tuple[str, float]]:
+        df = yf.Ticker(sym).history(period="4y", interval="1d",
+                                    auto_adjust=True, timeout=20)
+        return sorted((idx.date().isoformat(), float(close))
+                      for idx, close in df["Close"].items())
+
+    try:
+        rows = _history(vendor)
     except Exception as exc:
         # raw index failed: one shot at the ETF proxy before giving up
         if not proxy and canonical in INDEX_PROXIES:
             try:
-                import yfinance as yf
-
-                vendor = INDEX_PROXIES[canonical]
-                df = yf.Ticker(vendor).history(period="4y", interval="1d",
-                                               auto_adjust=True, timeout=20)
-                rows = [(idx.date().isoformat(), float(close))
-                        for idx, close in df["Close"].items()]
+                proxy_vendor = INDEX_PROXIES[canonical]
+                rows = _history(proxy_vendor)
                 if len(rows) >= 50:
-                    return sorted(rows), vendor, True
+                    return rows, proxy_vendor, True
             except Exception:
                 pass
         raise ProviderError(f"yfinance {vendor}: {exc}") from exc
     if len(rows) < 50:
         raise ProviderError(f"yfinance {vendor}: only {len(rows)} rows")
-    return sorted(rows), vendor, proxy
+    return rows, vendor, proxy
 
 
 def fetch_stooq(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
     """Optional experimental Stooq path (STOOQ_ENABLED=true only)."""
     settings = get_settings()
     if not settings.stooq_enabled:
-        raise ProviderError("stooq: disabled (STOOQ_ENABLED=false)")
+        raise ProviderNotConfigured("stooq: disabled (STOOQ_ENABLED=false)")
     from app.sources import stooq
 
     vendor = {"NDX": "^ndx", "SPX": "^spx"}.get(canonical, f"{canonical.lower()}.us")
@@ -454,13 +471,13 @@ def get_daily_closes(canonical: str) -> SourceResult:
             continue
         try:
             rows, vendor, proxy = fetcher(canonical)
+        except ProviderNotConfigured as exc:
+            # Not a provider failure — a configuration state (no key, disabled,
+            # out-of-budget). Never counts against provider health.
+            errors.append(str(exc)[:160])
+            continue
         except ProviderError as exc:
-            # A missing key / out-of-budget symbol is a configuration state,
-            # not provider ill-health; only real failures feed the scorer.
-            configured = "no " not in str(exc) and "disabled" not in str(exc) \
-                and "outside CORE" not in str(exc)
-            if configured:
-                _record_health(name, ok=False)
+            _record_health(name, ok=False)
             errors.append(str(exc)[:160])
             continue
         except Exception as exc:

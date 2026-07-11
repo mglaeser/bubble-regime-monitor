@@ -41,6 +41,13 @@ dependencies = [
 parquet = [
     "pyarrow>=16.0",
 ]
+# yfinance is the QUATERNARY price provider (documented-unreliable, ToS-gray),
+# and the one free source of raw index levels. Not installed by default;
+# install .[yfinance] to activate that tier. When absent the price chain
+# simply skips it (ProviderNotConfigured, no health penalty).
+yfinance = [
+    "yfinance>=0.2.40",
+]
 dev = [
     "pytest>=8.2",
     "ruff>=0.4",

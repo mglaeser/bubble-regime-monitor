@@ -133,13 +133,78 @@ class TestProviderChainNever500:
         from app.config import get_settings
 
         get_settings.cache_clear()
-        # No cache, no keys, yfinance import will fail -> SourceError (caught
-        # by the compute layer's _track, never a 500).
+        # No cache, no keys, yfinance absent -> SourceError (caught by the
+        # compute layer's _track, never a 500).
         from app.sources import SourceError
 
         with pytest.raises(SourceError):
             prices.get_daily_closes("SPY")
         get_settings.cache_clear()
+
+
+class TestProviderHealthScoring:
+    def test_not_configured_does_not_penalize_health(self, isolated_db, monkeypatch):
+        # All providers unconfigured -> ProviderNotConfigured -> no provider
+        # should be put on cooldown (it's a config state, not ill-health).
+        for var in ("TIINGO_API_KEY", "TWELVE_DATA_API_KEY", "ALPHAVANTAGE_API_KEY"):
+            monkeypatch.setenv(var, "")
+        monkeypatch.setenv("STOOQ_ENABLED", "false")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import ProviderHealth
+        from app.sources import SourceError
+
+        for _ in range(4):  # more than FAIL_THRESHOLD
+            with pytest.raises(SourceError):
+                prices.get_daily_closes("SPY")
+        with session_scope() as session:
+            rows = session.execute(select(ProviderHealth)).scalars().all()
+        # No health rows written at all (nothing counted as a failure).
+        assert all(r.cooldown_until is None for r in rows)
+        get_settings.cache_clear()
+
+    def test_real_failure_records_and_cools_down(self, isolated_db, monkeypatch):
+        # A genuine ProviderError (bad body) after 3 tries -> 6h cooldown.
+        monkeypatch.setenv("TIINGO_API_KEY", "tok")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        monkeypatch.setattr(prices, "fetch_tiingo",
+                            lambda c: (_ for _ in ()).throw(prices.ProviderError("tiingo: boom")))
+        # keep the rest unconfigured so the chain exhausts
+        for var in ("TWELVE_DATA_API_KEY", "ALPHAVANTAGE_API_KEY"):
+            monkeypatch.setenv(var, "")
+        monkeypatch.setenv("STOOQ_ENABLED", "false")
+        get_settings.cache_clear()
+
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import ProviderHealth
+        from app.sources import SourceError
+
+        for _ in range(3):
+            with pytest.raises(SourceError):
+                prices.get_daily_closes("SPY")
+        with session_scope() as session:
+            row = session.execute(
+                select(ProviderHealth).where(ProviderHealth.provider == "tiingo")
+            ).scalars().first()
+        assert row is not None and row.consecutive_failures >= 3
+        assert row.cooldown_until is not None  # on cooldown after 3 real failures
+        get_settings.cache_clear()
+
+    def test_yfinance_absent_is_not_configured(self, monkeypatch):
+        # yfinance isn't installed in the test venv -> ProviderNotConfigured,
+        # not a ProviderError (so it never dings health).
+        from app.sources.prices import ProviderNotConfigured, fetch_yfinance
+
+        with pytest.raises(ProviderNotConfigured):
+            fetch_yfinance("SPY")
 
 
 class TestCoverageGate:
