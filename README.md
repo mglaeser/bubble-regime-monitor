@@ -132,7 +132,13 @@ Outcomes are stored in the DB and exposed via `/api/v1/meta/methodology`.
 
 ## Old-CPU deployments (pre-SSE4.2, e.g. Atom N2800)
 
-Modern numpy/scipy/pyarrow wheels are built for a raised x86-64 baseline and die with **SIGILL (Illegal instruction)** at import time on CPUs without SSE4.2 — including VMs with generic CPU models (`qemu64`/`kvm64`; fix those with host CPU passthrough). The service is hardened for this: numpy/pandas are pinned to old-baseline wheel lines, the LPPLS fit runs in an isolated subprocess (a native crash there degrades to drop-and-renormalize, bounded by `LPPLS_TIMEOUT_S`, default 1800 s), and Parquet export probes pyarrow in a subprocess before ever importing it in-process, disabling itself with a log note if the probe dies. Expect long recomputes on weak hardware: the GSADF critical-value simulation (R, 2000 reps) and LPPLS fits dominate.
+Modern numpy/scipy/pyarrow wheels are built for a raised x86-64 baseline and die with **SIGILL (Illegal instruction)** at import time on CPUs without SSE4.2 — including VMs with generic CPU models (`qemu64`/`kvm64`; fix those with host CPU passthrough). The service is hardened for this:
+
+- numpy/pandas are pinned to old-baseline wheel lines (numpy < 2.3, pandas < 3.0).
+- **pyarrow is an optional extra** (`pip install .[parquet]`): pandas imports pyarrow *eagerly* when it is installed (`pandas/compat/pyarrow.py`), and pyarrow's Arrow C++ wheels require SSE4.2, so merely having it installed crashes service boot on old CPUs. The Containerfile probes at build time and removes pyarrow if `import pandas` dies; the Parquet export then disables itself via its own runtime subprocess probe (SQLite persistence is unaffected).
+- The LPPLS fit runs in an isolated subprocess (a native crash in its scipy/scikit-learn/numba stack degrades to drop-and-renormalize, bounded by `LPPLS_TIMEOUT_S`, default 1800 s).
+
+Expect long recomputes on weak hardware: the GSADF critical-value simulation (R, 2000 reps) and LPPLS fits dominate.
 
 ## Development
 
