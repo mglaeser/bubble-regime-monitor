@@ -36,6 +36,7 @@ persisted in SQLite across runs.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
@@ -440,13 +441,16 @@ def _cache_put(canonical: str, rows: list[tuple[str, float]], source: str) -> No
 # the chain
 # ---------------------------------------------------------------------------
 
-PROVIDER_CHAIN = [
-    ("tiingo", fetch_tiingo),
-    ("twelvedata", fetch_twelvedata),
-    ("alphavantage", fetch_alphavantage),
-    ("yfinance", fetch_yfinance),
-    ("stooq", fetch_stooq),
-]
+# Provider precedence. Fetchers are resolved by name at call time (see
+# _fetcher) rather than frozen into this list as function objects, so that
+# monkeypatching `prices.fetch_<name>` in tests — and any runtime swap of a
+# provider — actually takes effect.
+PROVIDER_ORDER = ["tiingo", "twelvedata", "alphavantage", "yfinance", "stooq"]
+
+
+def _fetcher(name: str) -> Callable[[str], tuple[list[tuple[str, float]], str, bool]]:
+    """Resolve the current module-level fetch_<name> binding (late-binding)."""
+    return globals()[f"fetch_{name}"]
 
 
 def get_daily_closes(canonical: str) -> SourceResult:
@@ -465,12 +469,12 @@ def get_daily_closes(canonical: str) -> SourceResult:
                                                  note=f"cache ({age}d old)"))
 
     errors: list[str] = []
-    for name, fetcher in PROVIDER_CHAIN:
+    for name in PROVIDER_ORDER:
         if not _health_ok(name):
             errors.append(f"{name}: cooldown")
             continue
         try:
-            rows, vendor, proxy = fetcher(canonical)
+            rows, vendor, proxy = _fetcher(name)(canonical)
         except ProviderNotConfigured as exc:
             # Not a provider failure — a configuration state (no key, disabled,
             # out-of-budget). Never counts against provider health.
