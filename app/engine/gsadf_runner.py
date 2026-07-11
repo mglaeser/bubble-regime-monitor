@@ -21,7 +21,6 @@ from app.logging_conf import get_logger
 log = get_logger(__name__)
 
 R_SCRIPT = Path(__file__).resolve().parents[2] / "r" / "gsadf.R"
-TIMEOUT_S = 600
 
 
 @dataclass
@@ -31,15 +30,19 @@ class GsadfOutput:
     cv95: float
 
 
-def run(monthly_log_prices: list[float]) -> GsadfOutput | None:
+def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfOutput | None:
     if shutil.which("Rscript") is None:
         log.warning("gsadf_rscript_unavailable")
         return None
+    if timeout_s is None:
+        from app.config import get_settings
+
+        timeout_s = get_settings().gsadf_timeout_s
     try:
         proc = subprocess.run(
             ["Rscript", str(R_SCRIPT)],
             input=json.dumps({"series": monthly_log_prices}),
-            capture_output=True, text=True, timeout=TIMEOUT_S, check=True,
+            capture_output=True, text=True, timeout=timeout_s, check=True,
         )
         out = json.loads(proc.stdout.strip())
         return GsadfOutput(gsadf=float(out["gsadf"]), cv90=float(out["cv90"]),

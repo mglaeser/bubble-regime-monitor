@@ -46,7 +46,11 @@ def monthly_closes(daily: list[tuple[str, float]]) -> list[float]:
 
 
 def faber_state(monthly: list[float]) -> str:
-    """IN if last monthly close > 10-month SMA of monthly closes, else OUT."""
+    """IN if last monthly close > 10-month SMA of monthly closes, else OUT.
+
+    The in-progress month's latest close stands in for its month-end close
+    (the common practical reading of Faber's month-end rule between month
+    ends)."""
     if len(monthly) < 10:
         raise ValueError("need >= 10 monthly closes for the Faber rule")
     sma10 = sum(monthly[-10:]) / 10.0

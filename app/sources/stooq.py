@@ -72,7 +72,7 @@ def daily_closes(symbol: str) -> SourceResult:
     _last_request[0] = time.monotonic()
     text = resp.content.decode("utf-8-sig", errors="replace")
     rows = _parse_csv(text, symbol)
-    return SourceResult(rows, Provenance(source=f"stooq:{symbol}"))
+    return SourceResult(rows, Provenance(source=f"stooq:{symbol}", as_of=rows[-1][0]))
 
 
 def total_return_pct(closes: list[tuple[str, float]], trading_days: int) -> float:

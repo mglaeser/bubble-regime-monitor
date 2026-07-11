@@ -82,11 +82,23 @@ def monthly_cape_history() -> SourceResult:
     except Exception as e:
         errors.append(f"shillerdata: {e}")
     try:
+        from bs4 import BeautifulSoup
+
         html = fetch("multpl", MULTPL_TABLE_URL).text
-        values = [float(v) for v in re.findall(r"<td class=\"right\">([\d.]+)</td>", html)]
+        soup = BeautifulSoup(html, "lxml")
+        values: list[float] = []
+        for row in soup.select("table tr"):
+            cells = row.find_all("td")
+            if len(cells) >= 2:
+                try:
+                    v = float(cells[-1].get_text(strip=True).replace(",", ""))
+                except ValueError:
+                    continue
+                if 3.0 < v < 100.0:  # plausible CAPE range
+                    values.append(v)
         values.reverse()  # table is newest-first
         if len(values) < 240:
-            raise SourceError("multpl table: too little history")
+            raise SourceError(f"multpl table: too little history ({len(values)} rows)")
         return SourceResult(values, Provenance(source="multpl_table", fallback_used=True))
     except Exception as e:
         errors.append(f"multpl_table: {e}")

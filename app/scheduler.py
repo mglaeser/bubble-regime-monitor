@@ -29,7 +29,8 @@ def start() -> BackgroundScheduler:
     if _scheduler is None:
         _scheduler = BackgroundScheduler(timezone="UTC")
         _scheduler.add_job(_job, CronTrigger(hour="6,18", minute=0, timezone="UTC"),
-                           id="recompute", replace_existing=True)
+                           id="recompute", replace_existing=True,
+                           coalesce=True, misfire_grace_time=3600, max_instances=1)
         _scheduler.start()
         log.info("scheduler_started", schedule="06:00/18:00 UTC")
     return _scheduler

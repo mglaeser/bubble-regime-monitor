@@ -25,18 +25,28 @@ async def lifespan(app: FastAPI):
 
     Base.metadata.create_all(get_engine())  # Alembic owns migrations; create_all covers first boot
 
-    try:
-        from app.services.backfill import seed_hy_oas_history
+    def _seed() -> None:
+        try:
+            from app.services.backfill import seed_hy_oas_history
 
-        seed_hy_oas_history()
-    except Exception as exc:
-        log.warning("hy_oas_seed_skipped", error=str(exc))
+            seed_hy_oas_history()
+        except Exception as exc:
+            log.warning("hy_oas_seed_skipped", error=str(exc))
+
+    # First-boot HY OAS seeding does a live FRED fetch — run it off the boot
+    # path so a slow/unreachable FRED can never delay readiness.
+    import threading
+
+    threading.Thread(target=_seed, name="hy-oas-seed", daemon=True).start()
 
     from app import scheduler
 
     scheduler.start()
     yield
     scheduler.shutdown()
+    from app.http_client import close_client
+
+    close_client()
 
 
 def create_app() -> FastAPI:

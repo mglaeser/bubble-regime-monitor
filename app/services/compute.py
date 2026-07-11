@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -74,25 +74,48 @@ from app.references import REGISTRY
 
 log = get_logger(__name__)
 
+# Freshness SLAs in days (spec section 3): a reading older than its SLA is
+# served with stale=true. Keys are indicator ids; "v" covers the multiplier.
+FRESHNESS_SLA_DAYS: dict[str, int] = {
+    "s1": 35, "s2": 3, "s3": 3, "s4": 35, "s5": 3,
+    "d1": 3, "d2": 45, "d3": 100, "d4": 3, "v": 2,
+}
+
+
+def _age_days(as_of_iso: str | None) -> int | None:
+    if not as_of_iso:
+        return None
+    try:
+        return max(0, (datetime.now(UTC).date() - date.fromisoformat(as_of_iso[:10])).days)
+    except ValueError:
+        return None
+
 
 @dataclass
 class RawInputs:
-    """Everything gathered from upstream, all optional; provenance per field."""
+    """Everything gathered from upstream, all optional; provenance per field.
+
+    *_as_of fields carry the ISO date of the underlying reading (not the
+    fetch time) and drive the staleness SLA."""
 
     cape: float | None = None
     cape_source: str = "multpl"
     cape_fallback: bool = False
+    cape_as_of: str | None = None
     cape_history: list[float] | None = None
 
     real10y_decimal: float | None = None
+    real10y_as_of: str | None = None
 
     top10_pct: float | None = None
     top10_source: str = "ssga_spy_xlsx"
     top10_fallback: bool = False
+    top10_as_of: str | None = None
 
     smh_2yr_return_pct: float | None = None
     spy_2yr_return_pct: float | None = None
     semis_symbol: str = "smh.us"
+    semis_as_of: str | None = None
 
     gsadf_stat: float | None = None
     gsadf_cv90: float | None = None
@@ -102,23 +125,29 @@ class RawInputs:
     hy_oas_bps: float | None = None
     hy_oas_history_bps: list[float] | None = None
     hy_oas_note: str | None = None
+    hy_oas_as_of: str | None = None
 
     breadth_pct: float | None = None
     breadth_source: str = "constituents+stooq"
     breadth_note: str | None = None
+    breadth_as_of: str | None = None
 
     margin_balances: list[float] | None = None
     margin_note: str | None = None
+    margin_as_of: str | None = None
 
     hyperscalers: list[d3_hyperscaler_fcf.HyperscalerReading] | None = None
     hyperscaler_note: str | None = None
+    hyperscaler_as_of: str | None = None
 
     lppls_confidence: float | None = None
     lppls_note: str | None = None
+    lppls_as_of: str | None = None
 
     vix_ratio: float | None = None
     vix_ratio_source: str = "vixcentral"
     vix_ratio_fallback: bool = False
+    vix_as_of: str | None = None
     vix_level: float | None = None
     skew: float | None = None
 
@@ -130,7 +159,6 @@ class RawInputs:
     index_within_2pct_of_ath: bool = False
 
     source_health: list[dict[str, Any]] = field(default_factory=list)
-    freshness: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -142,6 +170,20 @@ class IndicatorOutput:
     data_source: str
     fallback_used: bool
     note: str | None = None
+    as_of: str | None = None
+
+    @property
+    def age_days(self) -> int | None:
+        return _age_days(self.as_of)
+
+    @property
+    def stale(self) -> bool | None:
+        """True past the indicator's freshness SLA; None when age is unknown."""
+        age = self.age_days
+        sla = FRESHNESS_SLA_DAYS.get(self.id)
+        if age is None or sla is None:
+            return None
+        return age > sla
 
     def payload(self) -> dict[str, Any]:
         meta = REGISTRY[self.id]
@@ -155,6 +197,9 @@ class IndicatorOutput:
             "data_source": self.data_source,
             "fallback_used": self.fallback_used,
             "dropped": self.dropped,
+            "as_of": self.as_of,
+            "age_days": self.age_days,
+            "stale": self.stale,
             "timestamp": datetime.now(UTC).isoformat(),
         }
         if self.note:
@@ -185,7 +230,7 @@ class SnapshotData:
     freshness: dict[str, str]
 
 
-def _track(raw: RawInputs, source: str, fn: Any, note_attr: str | None = None) -> Any:
+def _track(raw: RawInputs, source: str, fn: Any) -> Any:
     """Run one gather step, recording source_health; return None on failure."""
     start = time.monotonic()
     try:
@@ -223,10 +268,12 @@ def gather_inputs() -> RawInputs:
 
     raw = RawInputs()
 
+    today = datetime.now(UTC).date().isoformat()
+
     r = _track(raw, "cape", cape_src.current_cape)
     if r:
         raw.cape, raw.cape_source, raw.cape_fallback = r.value, r.provenance.source, r.provenance.fallback_used
-        raw.freshness["cape"] = "0d"
+        raw.cape_as_of = r.provenance.as_of or today  # multpl updates each market close
     hist = _track(raw, "cape_history", cape_src.monthly_cape_history)
     if hist:
         raw.cape_history = hist.value
@@ -234,10 +281,12 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "fred_DFII10", lambda: fred_src.latest("DFII10"))
     if r:
         raw.real10y_decimal = r.value / 100.0
+        raw.real10y_as_of = r.provenance.as_of
 
     r = _track(raw, "ssga_spy_xlsx", ssga_src.top10_concentration)
     if r:
         raw.top10_pct, raw.top10_source, raw.top10_fallback = r.value, r.provenance.source, r.provenance.fallback_used
+        raw.top10_as_of = r.provenance.as_of or today  # holdings file is daily
 
     # SMH/SPY 2-yr run-up (SOXX as SMH substitute).
     spy = _track(raw, "stooq_spy", lambda: stooq_src.daily_closes("spy.us"))
@@ -257,6 +306,7 @@ def gather_inputs() -> RawInputs:
     if semis:
         try:
             raw.smh_2yr_return_pct = stooq_src.total_return_pct(semis.value, 504)
+            raw.semis_as_of = semis.provenance.as_of
         except Exception:
             pass
     qqq = _track(raw, "stooq_qqq", lambda: stooq_src.daily_closes("qqq.us"))
@@ -282,8 +332,14 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "fred_BAMLH0A0HYM2", lambda: fred_src.observations("BAMLH0A0HYM2"))
     with session_scope() as session:
         if r:
+            latest_stored = session.execute(
+                select(HyOasHistory.date).order_by(HyOasHistory.date.desc()).limit(1)
+            ).scalar_one_or_none()
+            cutoff = latest_stored - timedelta(days=7) if latest_stored else None
             for d, v in r:
-                session.merge(HyOasHistory(date=date.fromisoformat(d), oas_bps=v * 100.0))
+                day = date.fromisoformat(d)
+                if cutoff is None or day >= cutoff:  # 7-day overlap absorbs FRED revisions
+                    session.merge(HyOasHistory(date=day, oas_bps=v * 100.0))
             session.flush()
         rows = session.execute(
             select(HyOasHistory).order_by(HyOasHistory.date)
@@ -291,6 +347,7 @@ def gather_inputs() -> RawInputs:
         if rows:
             raw.hy_oas_history_bps = [row.oas_bps for row in rows]
             raw.hy_oas_bps = rows[-1].oas_bps
+            raw.hy_oas_as_of = rows[-1].date.isoformat()
             raw.hy_oas_note = "own history table; FRED 3yr truncation"
             if not r:
                 raw.hy_oas_note += "; FRED unavailable, serving persisted history (stale)"
@@ -298,14 +355,17 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "breadth", breadth_src.pct_above_200dma)
     if r:
         raw.breadth_pct, raw.breadth_note = r.value, r.provenance.note
+        raw.breadth_as_of = today  # computed live from constituent closes
 
     r = _track(raw, "finra_xlsx", finra_src.debit_balances)
     if r:
         raw.margin_balances = r.value
+        raw.margin_as_of = r.provenance.as_of
 
     r = _track(raw, "sec_edgar", edgar_src.hyperscaler_readings)
     if r:
         raw.hyperscalers, raw.hyperscaler_note = r.value, r.provenance.note
+        raw.hyperscaler_as_of = r.provenance.as_of
 
     # LPPLS confidence (subprocess-isolated; drop-and-renormalize on failure,
     # including native crashes on CPUs below the scipy/sklearn wheel baseline).
@@ -321,6 +381,7 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "lppls", _lppls)
     if r is not None:
         raw.lppls_confidence = r
+        raw.lppls_as_of = ndx.provenance.as_of if ndx else today
     else:
         raw.lppls_note = "LPPLS fit failed; indicator dropped, Block D renormalized"
 
@@ -329,6 +390,7 @@ def gather_inputs() -> RawInputs:
         raw.vix_ratio = r.value
         raw.vix_ratio_source = r.provenance.source
         raw.vix_ratio_fallback = r.provenance.fallback_used
+        raw.vix_as_of = r.provenance.as_of or today
     r = _track(raw, "vix_level", vix_src.vix_level)
     if r:
         raw.vix_level = r.value
@@ -364,7 +426,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         }
         mc_in.s1_sub = res.sub_score
         indicators["s1"] = IndicatorOutput("s1", raw.cape, res.sub_score, False,
-                                           raw.cape_source, raw.cape_fallback)
+                                           raw.cape_source, raw.cape_fallback,
+                                           as_of=raw.cape_as_of)
     elif raw.cape is not None and raw.real10y_decimal is not None:
         # No percentile history: ECY-only degraded blend, pct pinned to 0.99
         # only if CAPE > 35 (documented conservative shim), else 0.5.
@@ -375,7 +438,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_s["s1"] = sub
         mc_in.s1_sub = sub
         indicators["s1"] = IndicatorOutput("s1", raw.cape, sub, False, raw.cape_source,
-                                           raw.cape_fallback, note="no CAPE history; percentile shimmed")
+                                           raw.cape_fallback, as_of=raw.cape_as_of,
+                                           note="no CAPE history; percentile shimmed")
     else:
         indicators["s1"] = IndicatorOutput("s1", None, None, True, raw.cape_source, False,
                                            note="CAPE/real-yield unavailable; dropped, Block S renormalized")
@@ -386,7 +450,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_s["s2"] = sub
         mc_in.top10_pct = raw.top10_pct
         indicators["s2"] = IndicatorOutput("s2", raw.top10_pct, sub, False,
-                                           raw.top10_source, raw.top10_fallback)
+                                           raw.top10_source, raw.top10_fallback,
+                                           as_of=raw.top10_as_of)
     else:
         indicators["s2"] = IndicatorOutput("s2", None, None, True, raw.top10_source, False,
                                            note="concentration unavailable; dropped, Block S renormalized")
@@ -400,7 +465,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         mc_in.runup_pp = runup
         indicators["s3"] = IndicatorOutput("s3", runup, sub, False,
                                            f"stooq:{raw.semis_symbol}",
-                                           raw.semis_symbol != "smh.us")
+                                           raw.semis_symbol != "smh.us",
+                                           as_of=raw.semis_as_of)
     else:
         indicators["s3"] = IndicatorOutput("s3", None, None, True, "stooq", False,
                                            note="run-up unavailable; dropped, Block S renormalized")
@@ -410,7 +476,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     sub_s["s4"] = s4_sub
     mc_in.s4_sub = s4_sub
     s4_note = raw.gsadf_note or (f"GSADF_CONTESTED={str(contested).lower()}")
-    indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False, note=s4_note)
+    indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False,
+                                       note=s4_note, as_of=raw.semis_as_of)
 
     # ---- S5 credit ----
     if raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
@@ -418,7 +485,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_s["s5"] = sub
         mc_in.s5_sub = sub
         indicators["s5"] = IndicatorOutput("s5", raw.hy_oas_bps, sub, False,
-                                           "fred_BAMLH0A0HYM2", False, note=raw.hy_oas_note)
+                                           "fred_BAMLH0A0HYM2", False, note=raw.hy_oas_note,
+                                           as_of=raw.hy_oas_as_of)
     else:
         indicators["s5"] = IndicatorOutput("s5", None, None, True, "fred_BAMLH0A0HYM2", False,
                                            note="HY OAS unavailable and no persisted history; dropped")
@@ -429,7 +497,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_d["d1"] = sub
         mc_in.breadth_pct = raw.breadth_pct
         indicators["d1"] = IndicatorOutput("d1", raw.breadth_pct, sub, False,
-                                           raw.breadth_source, False, note=raw.breadth_note)
+                                           raw.breadth_source, False, note=raw.breadth_note,
+                                           as_of=raw.breadth_as_of)
     else:
         indicators["d1"] = IndicatorOutput("d1", None, None, True, raw.breadth_source, False,
                                            note="breadth unavailable; dropped, Block D renormalized")
@@ -442,7 +511,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
         indicators["d2"] = IndicatorOutput("d2", yoy, sub, False, "finra_xlsx", False,
-                                           note=raw.margin_note or ("rollover confirmed" if rolled else None))
+                                           note=raw.margin_note or ("rollover confirmed" if rolled else None),
+                                           as_of=raw.margin_as_of)
     else:
         indicators["d2"] = IndicatorOutput("d2", None, None, True, "finra_xlsx", False,
                                            note="margin statistics unavailable; dropped (no true fallback)")
@@ -457,7 +527,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         note = raw.hyperscaler_note
         gate_note = "gate fired" if gate else "gate not fired; capped at 0.30"
         indicators["d3"] = IndicatorOutput("d3", round(ratio, 4), sub, False, "sec_edgar", False,
-                                           note=f"{gate_note}" + (f"; {note}" if note else ""))
+                                           note=f"{gate_note}" + (f"; {note}" if note else ""),
+                                           as_of=raw.hyperscaler_as_of)
     else:
         indicators["d3"] = IndicatorOutput("d3", None, None, True, "sec_edgar", False,
                                            note="EDGAR unavailable; dropped, Block D renormalized")
@@ -467,7 +538,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = d4_lppls.sub_score(raw.lppls_confidence)
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
-        indicators["d4"] = IndicatorOutput("d4", raw.lppls_confidence, sub, False, "lppls==0.6.24", False)
+        indicators["d4"] = IndicatorOutput("d4", raw.lppls_confidence, sub, False,
+                                           "lppls==0.6.24", False, as_of=raw.lppls_as_of)
     else:
         indicators["d4"] = IndicatorOutput("d4", None, None, True, "lppls==0.6.24", False,
                                            note=raw.lppls_note or "LPPLS dropped; Block D renormalized")
@@ -519,6 +591,15 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     ts_state = v_vix.state(raw.vix_ratio) if raw.vix_ratio is not None else "unknown"
     alarm = legs.fast_alarm(ts_state, raw.vix_level, raw.spy_daily_closes, raw.skew)
 
+    freshness: dict[str, str] = {}
+    for ind in indicators.values():
+        age = ind.age_days
+        if age is not None:
+            freshness[ind.id] = f"{age}d"
+    v_age = _age_days(raw.vix_as_of)
+    if v_age is not None:
+        freshness["v"] = f"{v_age}d"
+
     return SnapshotData(
         median=mc.median,
         iqr=mc.iqr,
@@ -536,7 +617,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators=indicators,
         trend_states=trend_states,
         fast_alarm=alarm.as_dict(),
-        freshness=raw.freshness,
+        freshness=freshness,
     )
 
 

@@ -20,7 +20,11 @@ XLSX_URL = "https://www.finra.org/sites/default/files/2021-03/margin-statistics.
 
 
 def debit_balances() -> SourceResult:
-    """Chronological list of monthly debit balances (millions USD)."""
+    """Chronological list of monthly debit balances (millions USD).
+
+    Provenance.as_of carries the last reference month when a date-like
+    column can be parsed (drives the 45-day staleness SLA; the series is
+    published ~3-4 weeks after the reference month)."""
     resp = fetch("finra_xlsx", XLSX_URL)
     raw = pd.read_excel(io.BytesIO(resp.content), header=None)
     debit_col = None
@@ -35,8 +39,16 @@ def debit_balances() -> SourceResult:
             break
     if debit_col is None or header_row is None:
         raise SourceError("FINRA XLSX: no debit-balance column found")
-    series = pd.to_numeric(raw.iloc[header_row + 1:, debit_col], errors="coerce").dropna()
-    values = [float(v) for v in series.tolist()]
+    body = raw.iloc[header_row + 1:]
+    series = pd.to_numeric(body.iloc[:, debit_col], errors="coerce")
+    values = [float(v) for v in series.dropna().tolist()]
     if len(values) < 13:
         raise SourceError("FINRA XLSX: fewer than 13 monthly observations")
-    return SourceResult(values, Provenance(source="finra_xlsx"))
+    as_of: str | None = None
+    for j in range(min(debit_col, raw.shape[1])):
+        dates = pd.to_datetime(body.iloc[:, j], errors="coerce")
+        valid = dates[series.notna() & dates.notna()]
+        if len(valid) >= 13:
+            as_of = valid.iloc[-1].date().isoformat()
+            break
+    return SourceResult(values, Provenance(source="finra_xlsx", as_of=as_of))

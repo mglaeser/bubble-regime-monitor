@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -85,21 +86,19 @@ def get_history(
     to: str | None = Query(None, description="ISO date upper bound (inclusive)"),
     granularity: str = Query("raw", pattern="^(raw|daily|monthly)$",
                              description="raw = every snapshot; daily/monthly = last snapshot per period"),
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum rows returned (most recent kept)"),
     _: None = Depends(require_read_access),
 ) -> dict[str, Any]:
     with session_scope() as session:
-        q = select(Snapshot).order_by(Snapshot.computed_at)
-        rows = session.execute(q).scalars().all()
+        q = select(Snapshot)
+        if from_:
+            q = q.where(Snapshot.computed_at >= datetime.fromisoformat(from_))
+        if to:
+            q = q.where(Snapshot.computed_at < datetime.fromisoformat(to) + timedelta(days=1))
+        # filter + newest-first limit in SQL, then restore chronological order
+        q = q.order_by(Snapshot.computed_at.desc()).limit(limit)
+        rows = list(reversed(session.execute(q).scalars().all()))
 
-    def _in_range(s: Snapshot) -> bool:
-        d = s.computed_at.date().isoformat()
-        if from_ and d < from_:
-            return False
-        if to and d > to:
-            return False
-        return True
-
-    rows = [s for s in rows if _in_range(s)]
     if granularity != "raw":
         keyfn = (lambda s: s.computed_at.date().isoformat()) if granularity == "daily" \
             else (lambda s: s.computed_at.strftime("%Y-%m"))

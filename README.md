@@ -104,7 +104,7 @@ The upstream spec's §5.3 lists the split exponent as `α ~ U(0.40, 0.60)`, but 
 
 ## API
 
-Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`. Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
+Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`. Each per-indicator object carries `as_of`, `age_days`, and `stale` (true past the source's freshness SLA), plus provenance (`data_source`, `fallback_used`, `dropped`, `note`). Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -114,7 +114,8 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/legs/trend` · `GET /api/v1/legs/fast-alarm` | Faber states; VIX curve/VRP/SKEW |
 | `GET /api/v1/meta/methodology` | Framework, references, falsification criteria, changelog |
 | `GET /healthz` · `GET /readyz` | Liveness; per-source health matrix |
-| `POST /api/v1/admin/refresh` | Manual recompute (X-API-Key) |
+| `POST /api/v1/admin/refresh` | Start a recompute in the background — returns 202 immediately; single-flight (X-API-Key) |
+| `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
 
 ## Falsification criteria
 

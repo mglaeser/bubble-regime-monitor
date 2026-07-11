@@ -22,10 +22,29 @@ MIN_COVERAGE = 0.6  # require quotes for >= 60% of constituents
 
 
 def sp500_symbols() -> list[str]:
+    """Constituent tickers from Wikipedia (Stooq spelling: dots -> dashes)."""
     html = fetch("wikipedia_sp500", WIKIPEDIA_URL).text
-    symbols = re.findall(r"https://www\.nyse\.com/quote/XNYS:([A-Z.\-]+)", html)
-    symbols += re.findall(r"https://www\.nasdaq\.com/market-activity/stocks/([a-z.\-]+)", html)
-    unique = sorted({s.upper().replace(".", "-") for s in symbols})
+    symbols: set[str] = set()
+    try:
+        import io as _io
+
+        import pandas as pd
+
+        for table in pd.read_html(_io.StringIO(html)):
+            cols = {str(c).strip().lower(): c for c in table.columns}
+            if "symbol" in cols:
+                symbols = {str(v).strip().upper().replace(".", "-")
+                           for v in table[cols["symbol"]].dropna().tolist()}
+                symbols = {s for s in symbols if re.fullmatch(r"[A-Z][A-Z0-9\-]{0,6}", s)}
+                if len(symbols) >= 400:
+                    break
+    except Exception:
+        symbols = set()
+    if len(symbols) < 400:  # fallback: exchange quote links in the page
+        links = re.findall(r"https://www\.nyse\.com/quote/XNYS:([A-Z.\-]+)", html)
+        links += re.findall(r"https://www\.nasdaq\.com/market-activity/stocks/([a-z.\-]+)", html)
+        symbols = {s.upper().replace(".", "-") for s in links}
+    unique = sorted(symbols)
     if len(unique) < 400:
         raise SourceError(f"wikipedia: only {len(unique)} constituents parsed")
     return unique
