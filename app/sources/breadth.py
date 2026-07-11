@@ -31,16 +31,30 @@ def sp500_symbols() -> list[str]:
     return unique
 
 
+EARLY_ABORT_AFTER = 25  # all-failures prefix => Stooq blocked/limited; stop wasting the sweep
+
+
 def pct_above_200dma() -> SourceResult:
     """Percent of S&P 500 members with close > their own 200-day SMA."""
+    from app.sources.stooq import StooqLimitError
+
     symbols = sp500_symbols()
     above = 0
     counted = 0
+    attempted = 0
     for sym in symbols:
+        attempted += 1
         try:
             closes = [c for _, c in daily_closes(f"{sym.lower()}.us").value]
+        except StooqLimitError as exc:
+            raise SourceError(f"breadth: aborted, {exc}") from exc
         except Exception:
-            continue
+            closes = []
+        if attempted == EARLY_ABORT_AFTER and counted == 0:
+            raise SourceError(
+                f"breadth: first {EARLY_ABORT_AFTER} symbols all unusable — "
+                "Stooq blocked/limited; aborting sweep early"
+            )
         if len(closes) < 200:
             continue
         counted += 1

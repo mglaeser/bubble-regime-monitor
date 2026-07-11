@@ -26,6 +26,7 @@ dependencies = [
     "numpy>=1.26,<2.3",
     "pandas>=2.2,<3.0",
     "openpyxl>=3.1",
+    "xlrd>=2.0.1",  # legacy .xls support (shillerdata ie_data.xls CAPE fallback)
     "beautifulsoup4>=4.12",
     "lxml>=5.2",
     "anthropic>=0.30",

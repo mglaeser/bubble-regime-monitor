@@ -14,10 +14,12 @@ _scheduler: BackgroundScheduler | None = None
 
 
 def _job() -> None:
-    from app.services.compute import run_recompute
+    # Shares the admin router's single-flight lock so a scheduled run never
+    # stacks on top of a manual refresh (and vice versa).
+    from app.routers.admin import run_recompute_guarded
 
     try:
-        run_recompute()
+        run_recompute_guarded()
     except Exception as exc:  # the run must always complete or log — never crash the scheduler
         log.error("scheduled_recompute_failed", error=str(exc))
 

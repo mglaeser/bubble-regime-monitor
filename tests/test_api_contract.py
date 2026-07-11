@@ -107,6 +107,16 @@ def test_health_endpoints(client):
 def test_admin_requires_key(client):
     assert client.post("/api/v1/admin/refresh").status_code == 401
     assert client.post("/api/v1/admin/refresh", headers={"X-API-Key": "wrong"}).status_code == 401
+    assert client.get("/api/v1/admin/refresh/status").status_code == 401
+
+
+def test_admin_refresh_status_shape(client):
+    resp = client.get("/api/v1/admin/refresh/status",
+                      headers={"X-API-Key": "change-me-to-a-long-random-string"})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert set(data) == {"running", "last"}
+    assert isinstance(data["running"], bool)
 
 
 def test_score_history(client_with_snapshot):
