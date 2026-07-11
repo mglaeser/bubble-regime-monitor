@@ -58,16 +58,18 @@ def compute_confidence(daily_closes: list[float]) -> float:
     Raises on any failure so the caller DROPS the indicator and renormalizes
     Block D (never a neutral placeholder). Requires the pinned lppls==0.6.24.
     """
+    import os
+
     import numpy as np
     from lppls import lppls as lppls_mod
 
-    if len(daily_closes) < 300:
-        raise ValueError("need >= 300 daily closes for LPPLS")
+    if len(daily_closes) < 500:
+        raise ValueError(f"insufficient price history (N={len(daily_closes)}; need >= 500)")
     time_idx = np.arange(len(daily_closes), dtype=float)
     price = np.log(np.asarray(daily_closes, dtype=float))
     model = lppls_mod.LPPLS(observations=np.array([time_idx, price]))
     res = model.mp_compute_nested_fits(
-        workers=2,
+        workers=max(1, min(4, os.cpu_count() or 1)),  # respect container CPUs
         window_size=min(len(daily_closes), 504),
         smallest_window_size=120,
         outer_increment=21,

@@ -158,7 +158,12 @@ class RawInputs:
 
     index_within_2pct_of_ath: bool = False
 
+    # last good (non-dropped) D2 reading from a prior snapshot, for the
+    # margin >90d staleness guard: {"value", "sub_score", "timestamp"}
+    margin_cached: dict[str, Any] | None = None
+
     source_health: list[dict[str, Any]] = field(default_factory=list)
+    gather_errors: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -247,6 +252,7 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
             "latency_ms": (time.monotonic() - start) * 1000.0,
             "http_status": None, "note": str(exc)[:400],
         })
+        raw.gather_errors[source] = str(exc)[:300]
         log.warning("gather_failed", source=source, error=str(exc))
         return None
 
@@ -361,6 +367,19 @@ def gather_inputs() -> RawInputs:
     if r:
         raw.margin_balances = r.value
         raw.margin_as_of = r.provenance.as_of
+    from app.models import IndicatorReading
+
+    with session_scope() as session:
+        cached_d2 = session.execute(
+            select(IndicatorReading)
+            .where(IndicatorReading.indicator_id == "d2",
+                   IndicatorReading.dropped.is_(False),
+                   IndicatorReading.sub_score.is_not(None))
+            .order_by(IndicatorReading.timestamp.desc()).limit(1)
+        ).scalars().first()
+        if cached_d2:
+            raw.margin_cached = {"value": cached_d2.value, "sub_score": cached_d2.sub_score,
+                                 "timestamp": cached_d2.timestamp.isoformat()}
 
     r = _track(raw, "sec_edgar", edgar_src.hyperscaler_readings)
     if r:
@@ -370,20 +389,20 @@ def gather_inputs() -> RawInputs:
     # LPPLS confidence (subprocess-isolated; drop-and-renormalize on failure,
     # including native crashes on CPUs below the scipy/sklearn wheel baseline).
     def _lppls() -> float:
-        closes = ndx.value if ndx else None
-        if not closes:
-            raise RuntimeError("no index series for LPPLS")
+        closes = [c for _, c in ndx.value][-756:] if ndx else []
+        if len(closes) < 500:
+            raise RuntimeError(f"insufficient price history (N={len(closes)})")
         settings = get_settings()
-        return d4_lppls.compute_confidence_isolated(
-            [c for _, c in closes][-756:], timeout_s=settings.lppls_timeout_s
-        )
+        log.info("lppls_fit_start", n=len(closes), timeout_s=settings.lppls_timeout_s)
+        return d4_lppls.compute_confidence_isolated(closes, timeout_s=settings.lppls_timeout_s)
 
     r = _track(raw, "lppls", _lppls)
     if r is not None:
         raw.lppls_confidence = r
         raw.lppls_as_of = ndx.provenance.as_of if ndx else today
     else:
-        raw.lppls_note = "LPPLS fit failed; indicator dropped, Block D renormalized"
+        cause = raw.gather_errors.get("lppls", "unknown cause")
+        raw.lppls_note = f"LPPLS dropped ({cause}); Block D renormalized"
 
     r = _track(raw, "vix_term_structure", vix_src.term_structure_ratio)
     if r:
@@ -472,10 +491,17 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            note="run-up unavailable; dropped, Block S renormalized")
 
     # ---- S4 GSADF ----
+    # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
+    # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
     s4_sub = s4_gsadf.sub_score(raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95, contested)
     sub_s["s4"] = s4_sub
     mc_in.s4_sub = s4_sub
-    s4_note = raw.gsadf_note or (f"GSADF_CONTESTED={str(contested).lower()}")
+    if raw.gsadf_stat is None or raw.gsadf_cv95 is None:
+        s4_note = "GSADF not computable this run; contested/stale floor applied"
+        if raw.gsadf_note:
+            s4_note += f" ({raw.gsadf_note})"
+    else:
+        s4_note = raw.gsadf_note or f"GSADF_CONTESTED={str(contested).lower()}"
     indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False,
                                        note=s4_note, as_of=raw.semis_as_of)
 
@@ -484,8 +510,11 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = s5_credit.sub_score(raw.hy_oas_bps, raw.hy_oas_history_bps)
         sub_s["s5"] = sub
         mc_in.s5_sub = sub
+        depth_note = (f"percentile computed on {len(raw.hy_oas_history_bps)} days of accrued "
+                      "history (min 3y seed); deepens over time")
+        s5_note = f"{raw.hy_oas_note}; {depth_note}" if raw.hy_oas_note else depth_note
         indicators["s5"] = IndicatorOutput("s5", raw.hy_oas_bps, sub, False,
-                                           "fred_BAMLH0A0HYM2", False, note=raw.hy_oas_note,
+                                           "fred_BAMLH0A0HYM2", False, note=s5_note,
                                            as_of=raw.hy_oas_as_of)
     else:
         indicators["s5"] = IndicatorOutput("s5", None, None, True, "fred_BAMLH0A0HYM2", False,
@@ -504,18 +533,42 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            note="breadth unavailable; dropped, Block D renormalized")
 
     # ---- D2 margin ----
-    if raw.margin_balances and len(raw.margin_balances) >= 13:
+    margin_age = _age_days(raw.margin_as_of)
+    if raw.margin_balances and len(raw.margin_balances) >= 13 \
+            and (margin_age is None or margin_age <= 90):
         yoy = d2_margin.yoy_pct(raw.margin_balances)
-        rolled = d2_margin.rollover_confirmed(raw.margin_balances)
+        # Guard (b): the rollover multiplier (x1.0) may only be asserted from
+        # data <= 60 days old; stale data always uses x0.6 + "rollover: unknown".
+        rollover_assertable = margin_age is not None and margin_age <= 60
+        rolled = d2_margin.rollover_confirmed(raw.margin_balances) if rollover_assertable else False
         sub = d2_margin.sub_score(yoy, rolled)
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
+        if not rollover_assertable:
+            note = "rollover: unknown (data age not confirmably <=60d); mult=0.6"
+        else:
+            note = "rollover confirmed" if rolled else "no rollover; mult=0.6"
+        if raw.margin_note:
+            note = f"{raw.margin_note}; {note}"
         indicators["d2"] = IndicatorOutput("d2", yoy, sub, False, "finra_xlsx", False,
-                                           note=raw.margin_note or ("rollover confirmed" if rolled else None),
-                                           as_of=raw.margin_as_of)
+                                           note=note, as_of=raw.margin_as_of)
+    elif raw.margin_cached is not None:
+        # Guard (a): data older than 90 days (or missing) never feeds a YoY
+        # across a broken window — serve the last good cached reading.
+        sub = float(raw.margin_cached["sub_score"])
+        sub_d["d2"] = sub
+        mc_in.d2_sub = sub
+        reason = (f"reference month {raw.margin_as_of} older than 90d"
+                  if margin_age is not None and margin_age > 90 else "margin statistics unavailable")
+        indicators["d2"] = IndicatorOutput(
+            "d2", raw.margin_cached.get("value"), sub, False, "finra_xlsx (cached)", True,
+            note=f"{reason}; serving cached reading from {raw.margin_cached['timestamp']}; "
+                 "rollover: unknown",
+            as_of=raw.margin_as_of)
     else:
         indicators["d2"] = IndicatorOutput("d2", None, None, True, "finra_xlsx", False,
-                                           note="margin statistics unavailable; dropped (no true fallback)")
+                                           note="margin statistics unavailable, no cached reading; "
+                                                "dropped (no true fallback)")
 
     # ---- D3 hyperscaler FCF ----
     if raw.hyperscalers:
@@ -675,6 +728,7 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             fast_alarm=data.fast_alarm,
             judgment_call=call.text,
             judgment_stale=call.stale,
+            judgment_error=call.error_class,
             data_freshness=data.freshness,
         )
         session.add(snap)

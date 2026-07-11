@@ -218,7 +218,8 @@ REGISTRY: dict[str, Methodology] = {
             "1.49 — that is a SADF critical value, not GSADF; the simulated GSADF 95% CV is "
             "~1.9-2.1 depending on T. Called from Python via Rscript r/gsadf.R with JSON "
             "stdin/stdout. Sub-score mapping: gsadf_stat > cv95 AND non-contested -> 1.0; "
-            "> cv90 -> 0.5; contested-or-stale -> 0.25; else 0.05."
+            "> cv90 -> 0.5; contested-or-stale-or-data-missing -> 0.25; "
+            "tested-and-not-explosive -> 0.05."
         ),
         why=(
             "The GSADF test recursively runs right-tailed ADF regressions over expanding and rolling "
@@ -528,6 +529,22 @@ CHANGELOG: list[dict[str, str]] = [
         "notes": "two-block geometric aggregation + non-compensatory override + Monte Carlo "
         "median. The v2->v3 rise is the aggregation fix (partial compensability now punishes "
         "imbalance), NOT market deterioration.",
+    },
+    {
+        "version": "v3.0.1",
+        "score": "unchanged methodology",
+        "notes": "first-live-run bugfixes: (1) Stooq pipeline hardened — typed "
+        "unavailable/CAPTCHA/limit errors, SQLite series + breadth caches with SLA reuse, "
+        ">=2s pacing, retry-once-after-60s, partial breadth coverage published with note "
+        "instead of dropping; (2) FINRA parser sorts by date (file is newest-first; a naive "
+        "read produced a -22% YoY across the 1997 series start) + >90d cached-reading guard "
+        "and 60d rollover-assertability guard; (3) GSADF data-missing now floors at the "
+        "contested/stale 0.25, not the tested-not-explosive 0.05; R/exuber self-check "
+        "surfaced in /readyz; (4) judgment call failures are machine-detectable "
+        "(text null + error_class) with SDK param fallback; (5) LPPLS requires >=500 closes, "
+        "bounded workers, 10-min hard timeout, and drop notes carry the concrete cause; "
+        "(6) timezone-aware computed_at, S5 history-depth note, SKEW raw-value logging, "
+        "renormalization regression test.",
     },
 ]
 

@@ -17,10 +17,19 @@ from app.security import READ_RATE_LIMIT, limiter, require_read_access
 router = APIRouter(prefix="/api/v1/score", tags=["score"])
 
 
+def _iso_utc(dt: datetime) -> str:
+    """Timezone-aware UTC ISO-8601 (SQLite returns naive datetimes)."""
+    from datetime import UTC
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.isoformat()
+
+
 def _meta(snap: Snapshot | None) -> dict[str, Any]:
     settings = get_settings()
     return {
-        "computed_at": snap.computed_at.isoformat() if snap else None,
+        "computed_at": _iso_utc(snap.computed_at) if snap else None,
         "service_version": settings.service_version,
         "data_freshness": snap.data_freshness if snap else {},
         "disclaimer": "Research, not advice.",
@@ -69,7 +78,8 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         },
         "trend_states": snap.trend_states,
         "fast_alarm": snap.fast_alarm,
-        "judgment_call": {"text": snap.judgment_call, "stale": snap.judgment_stale},
+        "judgment_call": {"text": snap.judgment_call, "stale": snap.judgment_stale,
+                          "error_class": snap.judgment_error},
     }
     return {"data": data, "meta": _meta(snap)}
 
@@ -109,7 +119,7 @@ def get_history(
 
     data = [
         {
-            "computed_at": s.computed_at.isoformat(),
+            "computed_at": _iso_utc(s.computed_at),
             "median": round(s.median, 2),
             "iqr": [round(s.iqr_lo, 2), round(s.iqr_hi, 2)],
             "band_5_95": [round(s.band5, 2), round(s.band95, 2)],

@@ -33,10 +33,10 @@ class Settings(BaseSettings):
     db_url: str = "sqlite:////data/bubble.db"
     log_level: str = "INFO"
     gsadf_contested: bool = True
-    lppls_timeout_s: int = 1800
+    lppls_timeout_s: int = 600
     gsadf_timeout_s: int = 1800
 
-    service_version: str = "3.0.0"
+    service_version: str = "3.0.1"
 
 
 @lru_cache

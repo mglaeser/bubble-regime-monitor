@@ -95,7 +95,7 @@ def test_methodology_endpoint(client):
     assert resp.status_code == 200
     d = resp.json()["data"]
     assert len(d["falsification_criteria"]) == 3
-    assert [c["version"] for c in d["changelog"]] == ["v1", "v2", "v3"]
+    assert [c["version"] for c in d["changelog"]] == ["v1", "v2", "v3", "v3.0.1"]
     assert d["unverified_citations"]
 
 

@@ -38,6 +38,7 @@ class Snapshot(Base):
     fast_alarm: Mapped[dict] = mapped_column(JSON, default=dict)
     judgment_call: Mapped[str | None] = mapped_column(Text, nullable=True)
     judgment_stale: Mapped[bool] = mapped_column(Boolean, default=False)
+    judgment_error: Mapped[str | None] = mapped_column(String(128), nullable=True)
     data_freshness: Mapped[dict] = mapped_column(JSON, default=dict)
 
     readings: Mapped[list[IndicatorReading]] = relationship(back_populates="snapshot")
@@ -86,6 +87,33 @@ class HyOasHistory(Base):
 
     date: Mapped[date] = mapped_column(Date, primary_key=True)
     oas_bps: Mapped[float] = mapped_column(Float)
+
+
+class StooqSeriesCache(Base):
+    """Cached daily close series for the index/ETF symbols (spy, qqq, smh, ^ndx).
+
+    Stooq enforces a per-IP daily download limit and throttles bursts, so
+    series are reused up to the freshness SLA before re-fetching."""
+
+    __tablename__ = "stooq_series_cache"
+
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    as_of: Mapped[date] = mapped_column(Date)
+    closes: Mapped[list] = mapped_column(JSON)  # [[date_iso, close], ...] chronological
+
+
+class BreadthSymbolCache(Base):
+    """Per-constituent last close + SMA200 for the D1 breadth computation.
+
+    Only symbols older than the SLA are re-fetched each run, so a full
+    ~500-symbol sweep happens once and later runs touch only stale entries."""
+
+    __tablename__ = "breadth_symbol_cache"
+
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    as_of: Mapped[date] = mapped_column(Date)
+    last_close: Mapped[float] = mapped_column(Float)
+    sma200: Mapped[float] = mapped_column(Float)
 
 
 class FalsificationOutcome(Base):

@@ -29,8 +29,14 @@ def _ratio_from_vixcentral(html: str) -> float:
 
 
 def _cboe_last(url: str, source: str) -> float:
+    from app.logging_conf import get_logger
+
     data = fetch(source, url).json()
-    price = data.get("data", {}).get("current_price") or data.get("data", {}).get("last")
+    inner = data.get("data", {})
+    price = inner.get("current_price") or inner.get("last")
+    get_logger(__name__).info("cboe_quote_raw", source=source,
+                              current_price=inner.get("current_price"),
+                              last=inner.get("last"), symbol=inner.get("symbol"))
     if not price:
         raise SourceError(f"{source}: no price in payload")
     return float(price)

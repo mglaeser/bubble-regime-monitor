@@ -36,8 +36,9 @@ Trend states (Faber): SPY {spy_state}, QQQ {qqq_state}. Fast alarm: {fast_alarm}
 
 @dataclass
 class JudgmentCall:
-    text: str
+    text: str | None       # None when no judgment was ever generated (machine-detectable)
     stale: bool
+    error_class: str | None = None  # exception class name of the last failure, if any
 
 
 def generate(median: float, iqr: tuple[float, float], band: str,
@@ -57,21 +58,35 @@ def generate(median: float, iqr: tuple[float, float], band: str,
         import anthropic
 
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        resp = client.messages.create(
-            model=settings.anthropic_model,  # alias 'opus'
-            max_tokens=settings.anthropic_max_tokens,
-            thinking={"type": "adaptive"},  # adaptive thinking (July 2026)
-            output_config={"effort": settings.anthropic_effort},
+        request: dict[str, object] = {
+            "model": settings.anthropic_model,  # alias 'opus'
+            "max_tokens": settings.anthropic_max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
             # NOTE: do NOT set budget_tokens or temperature — both return
             # HTTP 400 on Opus 4.7+
-            messages=[{"role": "user", "content": prompt}],
-        )
+        }
+        try:
+            resp = client.messages.create(
+                **request,
+                thinking={"type": "adaptive"},  # adaptive thinking (July 2026)
+                output_config={"effort": settings.anthropic_effort},
+            )
+        except TypeError:
+            # SDK predates adaptive-thinking kwargs: pass them straight
+            # through to the API instead.
+            resp = client.messages.create(
+                **request,
+                extra_body={"thinking": {"type": "adaptive"},
+                            "output_config": {"effort": settings.anthropic_effort}},
+            )
         text = "".join(b.text for b in resp.content if b.type == "text").strip()
         if not text:
             raise ValueError("empty completion")
         return JudgmentCall(text=text[:300], stale=False)
     except Exception as exc:
-        log.warning("judgment_call_degraded", error=str(exc))
+        log.warning("judgment_call_degraded", error_class=type(exc).__name__, error=repr(exc)[:500])
         if last_successful:
-            return JudgmentCall(text=last_successful, stale=True)
-        return JudgmentCall(text="(judgment call unavailable)", stale=True)
+            return JudgmentCall(text=last_successful, stale=True, error_class=type(exc).__name__)
+        # No prior judgment: text is null, not a placeholder string, so the
+        # failure is machine-detectable downstream.
+        return JudgmentCall(text=None, stale=True, error_class=type(exc).__name__)

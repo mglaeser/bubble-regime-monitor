@@ -32,6 +32,12 @@ async def lifespan(app: FastAPI):
             seed_hy_oas_history()
         except Exception as exc:
             log.warning("hy_oas_seed_skipped", error=str(exc))
+        try:
+            from app.engine.gsadf_runner import r_selfcheck
+
+            r_selfcheck()
+        except Exception as exc:
+            log.warning("gsadf_selfcheck_skipped", error=str(exc))
 
     # First-boot HY OAS seeding does a live FRED fetch — run it off the boot
     # path so a slow/unreachable FRED can never delay readiness.

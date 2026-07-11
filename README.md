@@ -130,6 +130,7 @@ Outcomes are stored in the DB and exposed via `/api/v1/meta/methodology`.
 - **v1 (score 33):** linear-additive aggregation (fully compensatory); stale concentration 40.8%; HY-OAS sign inverted; LPPLS neutral placeholder.
 - **v2 (score 28):** data fixes (concentration, HY-OAS sign, LPPLS); still fully compensatory.
 - **v3 (score ≈ 40, IQR 34–47):** two-block geometric aggregation + non-compensatory override + Monte Carlo median. **The v2→v3 rise is the aggregation fix (partial compensability now punishes imbalance), NOT market deterioration.**
+- **v3.0.1 (methodology unchanged):** first-live-run bugfixes — Stooq pipeline hardened (typed unavailable/CAPTCHA/limit errors, SQLite series + breadth caches with SLA reuse, ≥2 s pacing, retry-once-after-60 s, partial breadth coverage published with a note); FINRA parser sorts by date (the file is newest-first — a naive read produced −22% "YoY" across the 1997 series start) plus >90-day cached-reading and 60-day rollover-assertability guards; GSADF data-missing floors at the contested/stale 0.25 (0.05 is only for a successfully executed non-explosive test) with an R/exuber self-check in `/readyz`; judgment-call failures are machine-detectable (`text: null` + `error_class`); LPPLS requires ≥500 closes with bounded workers and a 10-minute hard timeout; timezone-aware `computed_at`; S5 history-depth note; renormalization regression tests.
 
 ## Old-CPU deployments (pre-SSE4.2, e.g. Atom N2800)
 

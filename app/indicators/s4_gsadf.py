@@ -9,8 +9,10 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
     `Rscript r/gsadf.R` with JSON stdin/stdout.
 
     Mapping: stat > cv95 AND non-contested -> 1.0; > cv90 -> 0.5;
-    contested-or-stale -> 0.25; else 0.05.
-    If R/Rscript unavailable -> sub-score 0.05 with provenance note (never crash).
+    contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
+    The 0.05 floor is ONLY for a successfully executed test that finds no
+    explosiveness; if R/Rscript is unavailable or the series is missing, the
+    contested/stale floor 0.25 applies with a provenance note (never crash).
 
 CAVEAT (verbatim): The CONTESTED flag is currently permanent because of
 Chen-Chen-Huang (2026): under hump-shaped GPT fundamentals the test
@@ -53,9 +55,11 @@ def sub_score(gsadf_stat: float | None, cv90: float | None, cv95: float | None,
     """Map the GSADF statistic against simulated finite-sample CVs.
 
     contested-or-stale caps the sub-score at 0.25 regardless of the statistic
-    (controlled by the manual GSADF_CONTESTED config flag)."""
+    (controlled by the manual GSADF_CONTESTED config flag). Data-missing also
+    floors at 0.25: the 0.05 floor is reserved for a successfully executed
+    test that finds no explosiveness."""
     if gsadf_stat is None or cv95 is None or cv90 is None:
-        return SUB_NULL
+        return SUB_CONTESTED_OR_STALE
     if contested or stale:
         return SUB_CONTESTED_OR_STALE
     if gsadf_stat > cv95:

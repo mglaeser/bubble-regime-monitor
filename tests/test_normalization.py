@@ -71,8 +71,11 @@ class TestS4:
         assert s4_gsadf.sub_score(2.0, 1.9, 2.1, contested=False) == 0.5
         assert s4_gsadf.sub_score(1.0, 1.9, 2.1, contested=False) == 0.05
 
-    def test_missing_stat_floors(self):
-        assert s4_gsadf.sub_score(None, None, None, contested=False) == 0.05
+    def test_missing_data_floors_at_contested_level(self):
+        # data-missing -> 0.25 (contested/stale floor); 0.05 is ONLY for a
+        # successfully executed test that finds no explosiveness
+        assert s4_gsadf.sub_score(None, None, None, contested=False) == 0.25
+        assert s4_gsadf.sub_score(None, None, None, contested=True) == 0.25
 
 
 class TestS5:

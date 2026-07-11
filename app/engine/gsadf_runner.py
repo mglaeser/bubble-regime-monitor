@@ -47,6 +47,38 @@ def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfO
         out = json.loads(proc.stdout.strip())
         return GsadfOutput(gsadf=float(out["gsadf"]), cv90=float(out["cv90"]),
                            cv95=float(out["cv95"]))
+    except subprocess.CalledProcessError as exc:
+        log.warning("gsadf_run_failed", returncode=exc.returncode,
+                    stdout=(exc.stdout or "")[-400:], stderr=(exc.stderr or "")[-400:])
+        return None
     except Exception as exc:
         log.warning("gsadf_run_failed", error=str(exc))
         return None
+
+
+_r_check: dict[str, object] | None = None
+
+
+def r_selfcheck(force: bool = False) -> dict[str, object]:
+    """Cached check that Rscript exists and `library(exuber)` loads.
+
+    Surfaced in /readyz so a missing R runtime is visible as a clear message
+    instead of a mysterious S4 floor."""
+    global _r_check
+    if _r_check is not None and not force:
+        return _r_check
+    if shutil.which("Rscript") is None:
+        _r_check = {"ok": False, "note": "Rscript not on PATH — GSADF floors at 0.25"}
+        return _r_check
+    try:
+        proc = subprocess.run(["Rscript", "-e", "library(exuber)"],
+                              capture_output=True, text=True, timeout=180)
+        if proc.returncode == 0:
+            _r_check = {"ok": True, "note": "Rscript + exuber available"}
+        else:
+            _r_check = {"ok": False,
+                        "note": f"library(exuber) failed: {(proc.stderr or '')[-200:]}"}
+    except Exception as exc:
+        _r_check = {"ok": False, "note": f"Rscript self-check error: {exc}"}
+    log.info("gsadf_r_selfcheck", **_r_check)
+    return _r_check
