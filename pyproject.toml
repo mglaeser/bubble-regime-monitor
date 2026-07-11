@@ -19,8 +19,12 @@ dependencies = [
     "APScheduler>=3.10,<4",
     "structlog>=24.1",
     "slowapi>=0.1.9",
-    "numpy>=1.26",
-    "pandas>=2.2",
+    # <2.3 / <3.0: newer numpy wheels raise the x86-64 CPU baseline and die
+    # with SIGILL (Illegal instruction) on older CPUs and on VMs with generic
+    # CPU models (qemu64/kvm64). Relax only if all deploy targets expose
+    # x86-64-v2+ (or the VM uses host CPU passthrough).
+    "numpy>=1.26,<2.3",
+    "pandas>=2.2,<3.0",
     "openpyxl>=3.1",
     "beautifulsoup4>=4.12",
     "lxml>=5.2",
