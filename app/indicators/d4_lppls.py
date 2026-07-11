@@ -87,3 +87,36 @@ def compute_confidence(daily_closes: list[float]) -> float:
     if not flags:
         raise ValueError("LPPLS produced no fit windows")
     return confidence_from_fits(flags)
+
+
+def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800) -> float:
+    """Run the LPPLS fit in a SUBPROCESS and return the confidence.
+
+    Isolation exists because the lppls dependency stack (scipy, scikit-learn,
+    numba) ships native wheels that can die with SIGILL on CPUs below their
+    build baseline (e.g. pre-SSE4.2 Atoms) — an uncatchable in-process crash.
+    In a subprocess, any crash/timeout surfaces as an exception here, and the
+    caller drops D4 and renormalizes Block D (epistemic guardrail #5).
+    """
+    import json
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "app.indicators.d4_lppls"],
+        input=json.dumps({"closes": daily_closes}),
+        capture_output=True, text=True, timeout=timeout_s,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"LPPLS subprocess failed rc={proc.returncode}: {proc.stderr.strip()[-300:]}"
+        )
+    return float(json.loads(proc.stdout.strip())["confidence"])
+
+
+if __name__ == "__main__":
+    import json as _json
+    import sys as _sys
+
+    _payload = _json.loads(_sys.stdin.read())
+    print(_json.dumps({"confidence": compute_confidence(_payload["closes"])}))

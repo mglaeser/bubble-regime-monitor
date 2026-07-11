@@ -307,12 +307,16 @@ def gather_inputs() -> RawInputs:
     if r:
         raw.hyperscalers, raw.hyperscaler_note = r.value, r.provenance.note
 
-    # LPPLS confidence (drop-and-renormalize on failure).
+    # LPPLS confidence (subprocess-isolated; drop-and-renormalize on failure,
+    # including native crashes on CPUs below the scipy/sklearn wheel baseline).
     def _lppls() -> float:
         closes = ndx.value if ndx else None
         if not closes:
             raise RuntimeError("no index series for LPPLS")
-        return d4_lppls.compute_confidence([c for _, c in closes][-756:])
+        settings = get_settings()
+        return d4_lppls.compute_confidence_isolated(
+            [c for _, c in closes][-756:], timeout_s=settings.lppls_timeout_s
+        )
 
     r = _track(raw, "lppls", _lppls)
     if r is not None:

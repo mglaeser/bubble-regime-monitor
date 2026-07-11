@@ -119,3 +119,14 @@ def test_entire_block_down_raises_cleanly(isolated_db):
     raw.lppls_confidence = None
     with pytest.raises(RuntimeError):
         _compute(raw)  # admin router converts this to a degraded 200, never 500
+
+
+def test_lppls_subprocess_failure_raises_cleanly():
+    """The isolated LPPLS runner must convert any subprocess death (missing
+    package, SIGILL on old CPUs, timeout) into a plain exception the compute
+    layer catches -> drop + renormalize. This venv has no lppls installed, so
+    the subprocess genuinely fails."""
+    from app.indicators.d4_lppls import compute_confidence_isolated
+
+    with pytest.raises(RuntimeError):
+        compute_confidence_isolated([100.0 + i for i in range(400)], timeout_s=120)
