@@ -594,3 +594,141 @@ LEG_CAVEATS: dict[str, str] = {
         "costs."
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# DATA-SOURCE REGISTRY — the authority/basis behind every external pull, so
+# the status UI can show "where each number comes from" and join it to the
+# live source_health matrix. health_keys are the source_health row names
+# written by services.compute.gather_inputs.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SourceSpec:
+    key: str                       # stable id
+    name: str                      # human label
+    feeds: str                     # which indicator(s)
+    basis: str                     # authority / scientific or official basis
+    sla_days: int                  # freshness SLA
+    url: str = ""
+    caveats: str = ""
+    health_keys: tuple[str, ...] = ()  # matching source_health row names
+
+
+SOURCE_REGISTRY: list[SourceSpec] = [
+    SourceSpec("cape", "Shiller CAPE (multpl / GuruFocus / shillerdata)", "S1 valuation",
+               "Robert Shiller's cyclically-adjusted P/E series (Campbell & Shiller 1988); "
+               "multpl and GuruFocus republish it, shillerdata is Shiller's own spreadsheet.",
+               35, "https://www.multpl.com/shiller-pe",
+               "Scraped from HTML/spreadsheet, not an API; post-1990 GAAP changes bias CAPE "
+               "upward (Siegel 2016).", ("cape", "cape_history")),
+    SourceSpec("fred_real10y", "FRED DFII10 (10-yr TIPS real yield)", "S1 ECY",
+               "Federal Reserve Bank of St. Louis (FRED), official series.", 3,
+               "https://fred.stlouisfed.org/series/DFII10", "", ("fred_DFII10",)),
+    SourceSpec("ssga", "SSGA SPY holdings XLSX", "S2 concentration",
+               "State Street (SPY issuer) official daily holdings file.", 3,
+               "https://www.ssga.com", "Top-10 is the sum of individual HOLDING weights, not a "
+               "sector-table figure.", ("ssga_spy_xlsx",)),
+    SourceSpec("prices", "Price layer (Tiingo->TwelveData->AlphaVantage->yfinance->cache)",
+               "S3, D4, GSADF, trend, VRP",
+               "Commercial market-data vendors; adjusted close. No free tier serves raw index "
+               "levels, so NDX/SPX use QQQ/SPY ETF proxies.", 3,
+               "https://www.tiingo.com",
+               "Stooq (former keyless primary) now behind a JS proof-of-work gate; index proxies "
+               "in use; Alpha Vantage free tier is unadjusted.",
+               ("price_SPY", "price_QQQ", "price_SMH", "price_SOXX", "price_NDX")),
+    SourceSpec("fred_hyoas", "FRED BAMLH0A0HYM2 (ICE BofA US HY OAS)", "S5 credit",
+               "ICE BofA index via FRED (official).", 3,
+               "https://fred.stlouisfed.org/series/BAMLH0A0HYM2",
+               "FRED truncated this series to a rolling 3-year window (Apr 2026); the S5 "
+               "percentile is only as deep as our own accrued history table.",
+               ("fred_BAMLH0A0HYM2",)),
+    SourceSpec("breadth", "S&P 500 constituents (Wikipedia) + Twelve Data closes", "D1 breadth",
+               "Constituent-level computation of % > 200-day SMA; no published keyless "
+               "%>200DMA source is machine-readable.", 3, "",
+               "Partial coverage is published (N/503) rather than dropped; keyless scrape "
+               "sources are JS-gated/image-only.", ("breadth",)),
+    SourceSpec("finra", "FINRA margin-statistics XLSX", "D2 margin",
+               "FINRA official monthly customer margin-debt statistics (Rule 4521).", 75,
+               "https://www.finra.org", "Published ~3 weeks after month-end; no true fallback "
+               "(cache & tolerate staleness).", ("finra_xlsx",)),
+    SourceSpec("edgar", "SEC EDGAR companyfacts", "D3 hyperscaler FCF",
+               "SEC XBRL company facts (official regulatory filings).", 100,
+               "https://data.sec.gov", "Cloud-segment revenue is best-effort; total-revenue "
+               "proxy is conservative when segments are unavailable.", ("sec_edgar",)),
+    SourceSpec("lppls", "LPPLS fit (lppls==0.6.24 on QQQ proxy)", "D4 LPPLS",
+               "Johansen-Ledoit-Sornette log-periodic power-law singularity confidence.", 3, "",
+               "Package maintenance-inactive; ~29% precision (fires in ordinary bull markets); "
+               "runs on the QQQ index proxy.", ("lppls",)),
+    SourceSpec("vix", "VIX term structure + level + SKEW (vixcentral/CBOE/FRED)",
+               "V multiplier, fast alarm",
+               "CBOE VIX/VIX3M methodology; vixcentral republishes the futures curve.", 2, "",
+               "SKEW is COINCIDENT CONTEXT ONLY (no forward skill).",
+               ("vix_term_structure", "vix_level", "cboe_skew")),
+]
+
+
+# ---------------------------------------------------------------------------
+# KNOWN ISSUES — the scientific-correctness catalogue. Everything currently
+# known to be UNVERIFIED, CONTESTED, PROXIED, JUDGMENTAL, or a documented
+# DEVIATION is enumerated here so the status/API surface can flag it. This is
+# the "flag whatever is unclear, incomplete, or wrong" requirement made
+# concrete and always-visible (severity: error > warn > info).
+# ---------------------------------------------------------------------------
+
+KNOWN_ISSUES: list[dict[str, str]] = [
+    {"id": "citation-chen", "severity": "warn", "category": "citation-unverified",
+     "title": "Framework citation could not be independently verified",
+     "detail": "Chen, Chen & Huang (2026, arXiv:2604.25826) — the basis for the GSADF "
+     "CONTESTED flag — could not be confirmed via search; embedded as given, verify before "
+     "publishing.", "ref": "references.UNVERIFIED_CITATIONS"},
+    {"id": "citation-basele", "severity": "warn", "category": "citation-unverified",
+     "title": "Framework citation could not be independently verified",
+     "detail": "Basele, Phillips & Shi (2025, Cowles d2430) could not be confirmed via search.",
+     "ref": "references.UNVERIFIED_CITATIONS"},
+    {"id": "citation-bis", "severity": "warn", "category": "citation-unverified",
+     "title": "Framework citation could not be independently verified",
+     "detail": "BIS (2026) Annual Economic Report (D3 buildout context) could not be confirmed.",
+     "ref": "references.UNVERIFIED_CITATIONS"},
+    {"id": "gsadf-contested", "severity": "warn", "category": "contested-method",
+     "title": "GSADF is permanently CONTESTED",
+     "detail": "Chen-Chen-Huang (2026) show GSADF-type tests spuriously reject the no-bubble "
+     "null 93-100% of the time under hump-shaped GPT fundamentals; S4 is capped at 0.25 and "
+     "carries a low weight.", "ref": "indicator s4"},
+    {"id": "index-proxy", "severity": "info", "category": "data-substitution",
+     "title": "Stock indices served via ETF proxies",
+     "detail": "No free data tier serves raw index levels, so Nasdaq-100 uses QQQ and S&P 500 "
+     "uses SPY. GSADF and LPPLS therefore run on the QQQ proxy. Enable TWELVE_DATA_INDICES on "
+     "the Grow plan for raw GSPC/NDX.", "ref": "sources.prices"},
+    {"id": "alpha-range-deviation", "severity": "info", "category": "documented-deviation",
+     "title": "Monte Carlo alpha range deviates from the written spec",
+     "detail": "Spec 5.3 states alpha ~ U(0.40,0.60), but that cannot reproduce the spec 5.5 "
+     "golden IQR (34,47); the implementation uses U(0.25,0.75), which reproduces ALL published "
+     "fixture outputs. Documented at ALPHA_RANGE in engine/montecarlo.py.",
+     "ref": "engine.montecarlo.ALPHA_RANGE"},
+    {"id": "fred-truncation", "severity": "info", "category": "data-limitation",
+     "title": "HY-OAS history is only as deep as accrued locally",
+     "detail": "FRED truncated BAMLH0A0HYM2 to a rolling 3-year window (Apr 2026); the S5 "
+     "percentile deepens over time as the service persists its own daily history.",
+     "ref": "indicator s5"},
+    {"id": "stooq-pow", "severity": "info", "category": "source-degraded",
+     "title": "Stooq disabled (JS proof-of-work anti-bot gate)",
+     "detail": "Stooq's CSV endpoint now serves a SHA-256 proof-of-work challenge; it is off by "
+     "default and the price layer requires Tiingo/Twelve Data keys.", "ref": "sources.stooq"},
+    {"id": "n4-calibration", "severity": "info", "category": "epistemic",
+     "title": "Uncalibratable by construction (n ~= 4)",
+     "detail": "The reference class of comparable US equity manias is ~4 events "
+     "{1929,2000,2007,2021}; the headline is structured expert judgment, NOT a probability.",
+     "ref": "epistemic caveat 2"},
+    {"id": "judgmental-anchors", "severity": "info", "category": "judgmental-parameter",
+     "title": "Several anchors/weights are expert-judgmental, not estimated",
+     "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, and the alpha split have no "
+     "labeled-crash-dataset calibration; see the annual PSS sensitivity script.",
+     "ref": "indicators s2,d1"},
+    {"id": "alphavantage-unadjusted", "severity": "info", "category": "data-quality",
+     "title": "Alpha Vantage tier serves UNADJUSTED prices",
+     "detail": "If the price chain falls through to Alpha Vantage, closes are split/dividend "
+     "unadjusted (acceptable for short-window ETF math; flagged in provenance).",
+     "ref": "sources.prices"},
+]

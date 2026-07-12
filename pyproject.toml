@@ -57,6 +57,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+"app.routers" = ["*.html"]
+
 [tool.ruff]
 line-length = 110
 target-version = "py311"

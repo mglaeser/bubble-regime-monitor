@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bubblegauge — status &amp; spec</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --border:#2a3240;
+    --fg:#e6edf3; --muted:#9aa7b4; --accent:#58a6ff;
+    --ok:#2ea043; --warn:#d29922; --err:#f85149; --info:#58a6ff; --unknown:#6e7681;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:light){
+    :root{ --bg:#f6f8fa; --panel:#fff; --panel2:#f0f3f6; --border:#d0d7de;
+           --fg:#1f2328; --muted:#57606a; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  header{padding:20px 22px;border-bottom:1px solid var(--border);
+    display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}
+  header h1{font-size:20px;margin:0;font-weight:650;letter-spacing:.2px}
+  .ver{color:var(--muted);font:12px var(--mono)}
+  .disclaimer{width:100%;color:var(--muted);font-size:12.5px;margin-top:4px}
+  main{max-width:1100px;margin:0 auto;padding:20px 22px 60px}
+  section{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+    padding:16px 18px;margin:16px 0}
+  section>h2{margin:0 0 12px;font-size:15px;font-weight:650;
+    display:flex;align-items:center;gap:8px}
+  .muted{color:var(--muted)} .mono{font-family:var(--mono)}
+  .row{display:flex;flex-wrap:wrap;gap:14px}
+  .headline{display:flex;align-items:center;gap:22px;flex-wrap:wrap}
+  .score{font-size:52px;font-weight:700;line-height:1}
+  .band{font-size:13px;padding:3px 10px;border-radius:20px;border:1px solid var(--border);text-transform:uppercase;letter-spacing:.5px}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-size:13px}
+  .kv b{color:var(--muted);font-weight:500}
+  .badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;
+    text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
+  .b-ok{background:rgba(46,160,67,.18);color:var(--ok)}
+  .b-failed,.b-error{background:rgba(248,81,73,.18);color:var(--err)}
+  .b-partial,.b-warn,.b-cooldown{background:rgba(210,153,34,.18);color:var(--warn)}
+  .b-info{background:rgba(88,166,255,.16);color:var(--info)}
+  .b-unknown{background:rgba(110,118,129,.18);color:var(--unknown)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:500;font-size:11.5px;text-transform:uppercase;letter-spacing:.4px}
+  tr:last-child td{border-bottom:none}
+  .flag{border:1px solid var(--border);border-left-width:4px;border-radius:7px;padding:9px 12px;margin:8px 0;background:var(--panel2)}
+  .flag.error{border-left-color:var(--err)} .flag.warn{border-left-color:var(--warn)} .flag.info{border-left-color:var(--info)}
+  .flag .t{font-weight:600;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .flag .d{color:var(--muted);margin-top:3px;font-size:12.5px}
+  .flag .cat{font:11px var(--mono);color:var(--muted)}
+  details{border:1px solid var(--border);border-radius:8px;margin:8px 0;background:var(--panel2)}
+  details>summary{cursor:pointer;padding:10px 12px;font-weight:600;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  details>summary::-webkit-details-marker{display:none}
+  details .body{padding:0 14px 14px}
+  .ind-meta{font-size:12.5px;color:var(--muted);margin:6px 0}
+  .refs{list-style:none;padding:0;margin:6px 0 0}
+  .refs li{font:12px var(--mono);color:var(--fg);padding:4px 0;border-top:1px dashed var(--border)}
+  .weight{font:12px var(--mono);color:var(--muted)}
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+  .tab{cursor:pointer;padding:4px 12px;border:1px solid var(--border);border-radius:16px;font-size:12.5px;color:var(--muted)}
+  .tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+  pre{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:12px;overflow:auto;font:12px var(--mono);max-height:360px}
+  .counts{display:flex;gap:8px}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px}
+  .foot{color:var(--muted);font-size:12px;margin-top:20px;border-top:1px solid var(--border);padding-top:14px}
+  .refresh{margin-left:auto;font-size:12px}
+  button{font:inherit;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:7px;padding:5px 12px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  .overflow{overflow-x:auto}
+  code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:5px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>bubblegauge</h1>
+  <span class="ver" id="ver"></span>
+  <span class="refresh"><span class="muted" id="ts"></span> <button id="refresh">Refresh</button></span>
+  <div class="disclaimer" id="disclaimer"></div>
+</header>
+<main>
+  <section id="sec-headline"><h2>Headline</h2><div id="headline" class="headline"></div></section>
+
+  <section id="sec-audit">
+    <h2>Science audit <span class="counts" id="audit-counts"></span></h2>
+    <p class="muted" style="margin-top:0">Everything currently unclear, incomplete, contested,
+      proxied, judgmental, or deviating from the written spec — flagged and made visible.
+      Scientific correctness is the leading design aspect.</p>
+    <div class="tabs" id="audit-tabs"></div>
+    <div id="audit"></div>
+  </section>
+
+  <section id="sec-sources">
+    <h2>Data source pulls</h2>
+    <p class="muted" style="margin-top:0">Live success/failure of each external fetch from the
+      most recent recompute, with the scientific/official basis of each source.</p>
+    <div id="sources"></div>
+  </section>
+
+  <section id="sec-providers"><h2>Price providers</h2><div id="providers"></div></section>
+
+  <section id="sec-indicators">
+    <h2>Indicators — methodology &amp; scientific sources</h2>
+    <div id="indicators"></div>
+  </section>
+
+  <section id="sec-api">
+    <h2>API reference</h2>
+    <p class="muted" style="margin-top:0">Interactive, machine-readable spec with schemas and
+      try-it-out:</p>
+    <div class="row" style="margin-bottom:12px">
+      <a href="/docs">Swagger UI →</a>
+      <a href="/redoc">ReDoc →</a>
+      <a href="/openapi.json">openapi.json →</a>
+      <a href="/api/v1/status">this status as JSON →</a>
+      <a href="/api/v1/meta/methodology">methodology JSON →</a>
+    </div>
+    <div id="endpoints"></div>
+    <h2 style="margin-top:18px">Example — <code>GET /api/v1/score</code></h2>
+    <pre id="example"></pre>
+  </section>
+
+  <section id="sec-meta">
+    <h2>Falsification criteria</h2><ul id="falsification" class="muted"></ul>
+    <h2>Epistemic guardrails</h2><ul id="caveats" class="muted"></ul>
+    <h2>Changelog</h2><div id="changelog"></div>
+  </section>
+
+  <div class="foot" id="foot"></div>
+</main>
+
+<script>
+// -- safe DOM helpers: all dynamic/external text via textContent, never innerHTML --
+function h(tag, cls, text){ const e=document.createElement(tag); if(cls) e.className=cls;
+  if(text!=null) e.textContent=String(text); return e; }
+function badge(status){ const b=h('span','badge b-'+status, status); return b; }
+function safeHref(u){ return (typeof u==='string' && /^https?:\/\//i.test(u)) ? u : null; }
+function clear(el){ while(el.firstChild) el.removeChild(el.firstChild); }
+function kv(pairs){ const d=h('div','kv'); pairs.forEach(([k,v])=>{ d.appendChild(h('b',null,k));
+  d.appendChild(h('span',null, v==null?'—':v)); }); return d; }
+
+const EXAMPLE = {
+  data:{ headline_median:40, iqr:[34,47], band_5_95:[28,55], action_band:"hold",
+    override_fired:false, red_flag_count:0,
+    block_S:{value:0.711}, block_D:{value:0.229}, V:{state:"contango",multiplier:1.0},
+    trend_states:{SPY:{faber_10mo:"IN"},QQQ:{faber_10mo:"IN"}},
+    judgment_call:{text:"Rich valuation (CAPE ~42) dominant; broad breadth the counter-signal.",stale:false}},
+  meta:{ service_version:"3.1.0", disclaimer:"Research, not advice.",
+    coverage:{S:{coverage:1.0,degraded:false},D:{coverage:1.0,degraded:false}} }
+};
+
+const ENDPOINTS = [
+  ["GET","/api/v1/score","Headline median, IQR, band, both blocks, red flags, legs, judgment"],
+  ["GET","/api/v1/score/history","Historical snapshots (raw/daily/monthly)"],
+  ["GET","/api/v1/indicators/{id}","Full WHAT/HOW/WHY methodology + references"],
+  ["GET","/api/v1/legs/trend","Faber trend states (SPY, QQQ)"],
+  ["GET","/api/v1/legs/fast-alarm","VIX term structure, VRP, SKEW"],
+  ["GET","/api/v1/meta/methodology","Framework, references, falsification, changelog"],
+  ["GET","/api/v1/status","This status document"],
+  ["GET","/readyz","Per-source health matrix + GSADF R self-check"],
+  ["POST","/api/v1/admin/refresh","Trigger a recompute (X-API-Key)"],
+];
+
+function renderHeadline(s){
+  const el=document.getElementById('headline'); clear(el);
+  const snap=s.snapshot;
+  if(!snap){ el.appendChild(h('div','muted','No snapshot computed yet — trigger a recompute or wait for the 06:00/18:00 UTC schedule.')); return; }
+  el.appendChild(h('div','score', snap.headline_median));
+  const right=h('div');
+  right.appendChild(badge(snap.action_band||'—'));
+  right.appendChild(kv([
+    ['IQR', (snap.iqr||[]).join(' – ')],
+    ['5–95 band', (snap.band_5_95||[]).join(' – ')],
+    ['Red flags', snap.red_flag_count + (snap.override_fired?' (OVERRIDE FIRED)':'')],
+    ['Computed', snap.computed_at],
+  ]));
+  el.appendChild(right);
+  if(snap.judgment_call){ const j=h('div','ind-meta'); j.style.flexBasis='100%';
+    j.textContent='Judgment: '+snap.judgment_call+(snap.judgment_stale?' (stale)':''); el.appendChild(j); }
+}
+
+let AUDIT=[], AUDIT_FILTER='all';
+function renderAudit(s){
+  AUDIT = (s.science_audit&&s.science_audit.flags)||[];
+  const counts=(s.science_audit&&s.science_audit.counts)||{};
+  const cel=document.getElementById('audit-counts'); clear(cel);
+  ['error','warn','info'].forEach(sv=>{ if(counts[sv]){ const b=badge(sv==='error'?'error':(sv==='warn'?'warn':'info'));
+    b.textContent=counts[sv]+' '+sv; cel.appendChild(b); }});
+  const tabs=document.getElementById('audit-tabs'); clear(tabs);
+  ['all','error','warn','info'].forEach(f=>{ const t=h('span','tab'+(f===AUDIT_FILTER?' active':''),f);
+    t.onclick=()=>{AUDIT_FILTER=f; drawAudit();}; tabs.appendChild(t); });
+  drawAudit();
+}
+function drawAudit(){
+  document.querySelectorAll('#audit-tabs .tab').forEach(t=>t.classList.toggle('active',t.textContent===AUDIT_FILTER));
+  const el=document.getElementById('audit'); clear(el);
+  const list=AUDIT.filter(f=>AUDIT_FILTER==='all'||f.severity===AUDIT_FILTER);
+  if(!list.length){ el.appendChild(h('div','muted','Nothing flagged at this level.')); return; }
+  list.forEach(f=>{
+    const d=h('div','flag '+f.severity);
+    const t=h('div','t'); t.appendChild(badge(f.severity==='error'?'error':(f.severity==='warn'?'warn':'info')));
+    t.appendChild(h('span',null,f.title||''));
+    const c=h('span','cat','['+(f.category||'')+']'); t.appendChild(c);
+    d.appendChild(t);
+    if(f.detail) d.appendChild(h('div','d',f.detail));
+    if(f.ref) d.appendChild(h('div','cat','ref: '+f.ref));
+    el.appendChild(d);
+  });
+}
+
+function renderSources(s){
+  const el=document.getElementById('sources'); clear(el);
+  const grid=h('div','grid2');
+  (s.sources||[]).forEach(src=>{
+    const det=h('details'); const sum=h('summary');
+    sum.appendChild(badge(src.status)); sum.appendChild(h('span',null,src.name));
+    det.appendChild(sum);
+    const body=h('div','body');
+    body.appendChild(h('div','ind-meta','Feeds: '+src.feeds+' · SLA '+src.sla_days+'d'));
+    body.appendChild(h('div','ind-meta','Basis: '+src.basis));
+    if(src.caveats) body.appendChild(h('div','ind-meta','Caveat: '+src.caveats));
+    if(safeHref(src.url)){ const a=h('a',null,src.url); a.href=safeHref(src.url); a.target='_blank'; a.rel='noopener'; body.appendChild(a); }
+    if(src.pulls&&src.pulls.length){
+      const wrap=h('div','overflow'); const tb=h('table');
+      const thead=h('thead'); const htr=h('tr'); ['pull','ok','http','ms','checked','note'].forEach(x=>htr.appendChild(h('th',null,x)));
+      thead.appendChild(htr); tb.appendChild(thead);
+      const tbody=h('tbody');
+      src.pulls.forEach(p=>{ const tr=h('tr');
+        tr.appendChild(h('td','mono',p.source));
+        const okc=h('td'); okc.appendChild(badge(p.ok?'ok':'failed')); tr.appendChild(okc);
+        tr.appendChild(h('td','mono',p.http_status==null?'—':p.http_status));
+        tr.appendChild(h('td','mono',p.latency_ms==null?'—':p.latency_ms));
+        tr.appendChild(h('td','mono',(p.checked_at||'—')));
+        tr.appendChild(h('td','muted',p.note||''));
+        tbody.appendChild(tr); });
+      tb.appendChild(tbody); wrap.appendChild(tb); body.appendChild(wrap);
+    }
+    det.appendChild(body); grid.appendChild(det);
+  });
+  el.appendChild(grid);
+}
+
+function renderProviders(s){
+  const el=document.getElementById('providers'); clear(el);
+  const list=s.providers||[];
+  if(!list.length){ el.appendChild(h('div','muted','No price-provider health recorded yet (first recompute pending).')); return; }
+  const wrap=h('div','overflow'); const tb=h('table');
+  const thead=h('thead'); const htr=h('tr'); ['provider','status','consecutive failures','cooldown until','updated'].forEach(x=>htr.appendChild(h('th',null,x)));
+  thead.appendChild(htr); tb.appendChild(thead); const tbody=h('tbody');
+  list.forEach(p=>{ const tr=h('tr'); tr.appendChild(h('td','mono',p.provider));
+    const sc=h('td'); sc.appendChild(badge(p.status)); tr.appendChild(sc);
+    tr.appendChild(h('td','mono',p.consecutive_failures));
+    tr.appendChild(h('td','mono',p.cooldown_until||'—'));
+    tr.appendChild(h('td','mono',p.updated_at||'—')); tbody.appendChild(tr); });
+  tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
+}
+
+const GROUND_BADGE={'literature-grounded':'ok','literature-adjacent':'info','judgmental':'warn','contested':'error','lagging-confirmation':'info'};
+function renderIndicators(s){
+  const el=document.getElementById('indicators'); clear(el);
+  (s.indicators||[]).forEach(ind=>{
+    const det=h('details'); const sum=h('summary');
+    const gb=badge(GROUND_BADGE[ind.grounding]||'unknown'); gb.textContent=ind.grounding; sum.appendChild(gb);
+    sum.appendChild(h('span',null,ind.id.toUpperCase()+' · '+ind.name));
+    sum.appendChild(h('span','weight','w='+ind.weight+' · block '+ind.block));
+    const lv=ind.live;
+    if(lv){ let tag='ok', txt='sub '+(lv.sub_score==null?'NA':lv.sub_score);
+      if(lv.dropped){tag='failed';txt='dropped';} else if(lv.stale){tag='warn';txt='stale';}
+      const lb=badge(tag); lb.textContent=txt; sum.appendChild(lb); }
+    det.appendChild(sum);
+    const body=h('div','body');
+    body.appendChild(h('div','ind-meta',ind.what));
+    if(lv){ body.appendChild(kv([
+      ['value', lv.value], ['sub_score', lv.sub_score], ['as_of', lv.as_of],
+      ['age_days', lv.age_days], ['stale', String(lv.stale)], ['dropped', String(lv.dropped)],
+      ['note', lv.note],
+    ])); }
+    if(ind.references&&ind.references.length){
+      body.appendChild(h('div','ind-meta','Scientific sources:'));
+      const ul=h('ul','refs'); ind.references.forEach(r=>ul.appendChild(h('li',null,r))); body.appendChild(ul); }
+    if(ind.caveats&&ind.caveats.length){
+      const ul=h('ul','refs'); ind.caveats.forEach(c=>{const li=h('li',null,'⚠ '+c);li.style.color='var(--warn)';ul.appendChild(li);}); body.appendChild(ul); }
+    det.appendChild(body); el.appendChild(det);
+  });
+}
+
+function renderMeta(s){
+  const f=document.getElementById('falsification'); clear(f);
+  (s.falsification_criteria||[]).forEach(x=>f.appendChild(h('li',null,x)));
+  const c=document.getElementById('caveats'); clear(c);
+  (s.epistemic_caveats||[]).forEach(x=>c.appendChild(h('li',null,x)));
+  const cl=document.getElementById('changelog'); clear(cl);
+  (s.changelog||[]).forEach(e=>{ const d=h('div','ind-meta'); d.appendChild(h('b',null,(e.version||'')+' ')); d.appendChild(document.createTextNode((e.score?'('+e.score+') ':'')+(e.notes||''))); cl.appendChild(d); });
+}
+
+function renderEndpoints(){
+  const el=document.getElementById('endpoints'); clear(el);
+  const wrap=h('div','overflow'); const tb=h('table');
+  const thead=h('thead'); const htr=h('tr'); ['method','path','purpose'].forEach(x=>htr.appendChild(h('th',null,x)));
+  thead.appendChild(htr); tb.appendChild(thead); const tbody=h('tbody');
+  ENDPOINTS.forEach(([m,p,d])=>{ const tr=h('tr'); tr.appendChild(h('td','mono',m));
+    const pc=h('td'); const a=h('a',null,p); a.href=p.indexOf('{')<0?p:'#'; pc.appendChild(a); tr.appendChild(pc);
+    tr.appendChild(h('td','muted',d)); tbody.appendChild(tr); });
+  tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
+  document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
+}
+
+async function load(){
+  renderEndpoints();
+  try{
+    const r = await fetch('/api/v1/status', {headers:{'Accept':'application/json'}});
+    const s = await r.json();
+    document.getElementById('ver').textContent = 'v'+((s.service&&s.service.version)||'?');
+    document.getElementById('disclaimer').textContent = (s.disclaimer||'').replace(/\*\*/g,'');
+    document.getElementById('ts').textContent = 'as of '+((s.service&&s.service.now)||'');
+    renderHeadline(s); renderAudit(s); renderSources(s); renderProviders(s);
+    renderIndicators(s); renderMeta(s);
+    document.getElementById('foot').textContent =
+      'bubblegauge '+((s.service&&s.service.version)||'')+' · recompute '+((s.service&&s.service.recompute_schedule)||'')+
+      ' · Research, not advice.';
+  }catch(e){
+    document.getElementById('headline').textContent = 'Failed to load status: '+e;
+  }
+}
+document.getElementById('refresh').onclick=load;
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>

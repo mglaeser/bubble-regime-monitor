@@ -120,6 +120,12 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
 | `POST /api/v1/admin/send-sms` | Send the daily SMS digest now — test path (X-API-Key) |
 
+## Status & spec UI
+
+A self-contained status dashboard is served at **`/`** (and `/status`) on the same port as the API. It reflects the live service and — because scientific correctness is the leading design goal — foregrounds a **science audit**: a severity-ranked list of everything currently unclear, incomplete, contested, proxied, judgmental, or deviating from the written spec (unverified citations, the contested GSADF, ETF index proxies, the documented Monte-Carlo alpha-range deviation, FRED truncation, stale/dropped indicators, coverage degradation, price-provider cooldowns, and **live success/failure of every external source pull**). It also shows each indicator's methodology and scientific sources, links to the interactive API docs (Swagger `/docs`, ReDoc `/redoc`, `/openapi.json`), and shows a worked example.
+
+The same data is available as JSON at **`GET /api/v1/status`**. The page is fully self-contained (no external assets, CSP-friendly) and renders all dynamic/external strings via `textContent` so upstream error messages and source notes cannot inject markup.
+
 ## Daily SMS digest (optional)
 
 The service recomputes the score **twice daily (06:00 / 18:00 UTC)** and can additionally **text a once-a-day digest** — the headline score, action band, and a tiny LLM-written report — as a single SMS via the [sipgate REST API v2](https://api.sipgate.com/v2/doc). The report body is produced by the same Anthropic model-fallback chain as the judgment call and hard-capped to one GSM-7 SMS (160 chars, ASCII-coerced so a stray Unicode character cannot halve the limit); if the LLM is unavailable it degrades to a deterministic template built from the snapshot, so the digest always sends. It is disabled by default.
