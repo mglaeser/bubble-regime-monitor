@@ -143,7 +143,9 @@ class RawInputs:
 
     smh_2yr_return_pct: float | None = None
     spy_2yr_return_pct: float | None = None
-    semis_symbol: str = "smh.us"
+    semis_symbol: str = "SMH"
+    semis_source: str | None = None   # real price-chain provenance, e.g. "tiingo:SMH"
+    semis_fallback: bool = False      # True when SOXX substituted for SMH
     semis_as_of: str | None = None
 
     gsadf_stat: float | None = None
@@ -157,7 +159,7 @@ class RawInputs:
     hy_oas_as_of: str | None = None
 
     breadth_pct: float | None = None
-    breadth_source: str = "constituents+stooq"
+    breadth_source: str = "constituents+twelvedata"
     breadth_note: str | None = None
     breadth_as_of: str | None = None
 
@@ -299,7 +301,6 @@ def gather_inputs() -> RawInputs:
     from app.sources import finra as finra_src
     from app.sources import fred as fred_src
     from app.sources import ssga as ssga_src
-    from app.sources import stooq as stooq_src
     from app.sources import vix as vix_src
 
     raw = RawInputs()
@@ -338,7 +339,7 @@ def gather_inputs() -> RawInputs:
         raw.spy_daily = spy.value
         raw.spy_daily_closes = [c for _, c in spy.value]
         try:
-            raw.spy_2yr_return_pct = stooq_src.total_return_pct(spy.value, 504)
+            raw.spy_2yr_return_pct = price_src.total_return_pct(spy.value, 504)
         except Exception:
             pass
         closes = raw.spy_daily_closes
@@ -348,14 +349,16 @@ def gather_inputs() -> RawInputs:
         raw.qqq_daily = qqq.value
         raw.qqq_daily_closes = [c for _, c in qqq.value]
 
-    # SMH/SPY 2-yr run-up (SOXX as SMH substitute).
+    # SMH/SPY 2-yr run-up via the price chain (SOXX as SMH substitute).
     semis = _track(raw, "price_SMH", lambda: _closes("SMH"))
     if semis is None:
         semis = _track(raw, "price_SOXX", lambda: _closes("SOXX"))
-        raw.semis_symbol = "soxx"
+        raw.semis_symbol = "SOXX"
+        raw.semis_fallback = True
     if semis:
+        raw.semis_source = semis.provenance.source  # real provenance, e.g. "tiingo:SMH"
         try:
-            raw.smh_2yr_return_pct = stooq_src.total_return_pct(semis.value, 504)
+            raw.smh_2yr_return_pct = price_src.total_return_pct(semis.value, 504)
             raw.semis_as_of = semis.provenance.as_of
         except Exception:
             pass
@@ -526,11 +529,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_s["s3"] = sub
         mc_in.runup_pp = runup
         indicators["s3"] = IndicatorOutput("s3", runup, sub, False,
-                                           f"stooq:{raw.semis_symbol}",
-                                           raw.semis_symbol != "smh.us",
+                                           raw.semis_source or f"price:{raw.semis_symbol}",
+                                           raw.semis_fallback,
                                            as_of=raw.semis_as_of)
     else:
-        indicators["s3"] = IndicatorOutput("s3", None, None, True, "stooq", False,
+        indicators["s3"] = IndicatorOutput("s3", None, None, True,
+                                           raw.semis_source or "price_chain", False,
                                            note="run-up unavailable; dropped, Block S renormalized")
 
     # ---- S4 GSADF ----
@@ -584,17 +588,17 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     if raw.margin_balances and len(raw.margin_balances) >= 13 \
             and (margin_age is None or margin_age <= 75):
         yoy = d2_margin.yoy_pct(raw.margin_balances)
-        # Guard (b): the rollover multiplier (x1.0) may only be asserted from
-        # data <= 60 days old; stale data always uses x0.6 + "rollover: unknown".
-        rollover_assertable = margin_age is not None and margin_age <= 60
-        rolled = d2_margin.rollover_confirmed(raw.margin_balances) if rollover_assertable else False
+        # Within the FINRA SLA (75 days) the rollover confirmation is asserted
+        # normally. FINRA posts monthly ~3 weeks after month-end, so the FRESHEST
+        # possible reading is routinely ~45-75 days old — a ~71-day age is as
+        # current as the series ever gets, NOT stale. (Data older than the SLA
+        # never reaches here; it takes the cached branch below, which reports
+        # rollover as unknown.)
+        rolled = d2_margin.rollover_confirmed(raw.margin_balances)
         sub = d2_margin.sub_score(yoy, rolled)
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
-        if not rollover_assertable:
-            note = "rollover: unknown (data age not confirmably <=60d); mult=0.6"
-        else:
-            note = "rollover confirmed" if rolled else "no rollover; mult=0.6"
+        note = "rollover confirmed" if rolled else "no rollover; mult=0.6"
         if raw.margin_note:
             note = f"{raw.margin_note}; {note}"
         indicators["d2"] = IndicatorOutput("d2", yoy, sub, False, "finra_xlsx", False,

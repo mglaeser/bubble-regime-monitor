@@ -2,11 +2,20 @@
 
 WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["d4"]; summary:
 
-    lppls PyPI 0.6.24 (PINNED), mp_compute_nested_fits on ^ndx & smh.us daily
-    closes over a 2-3 yr window; filters m in (0,1), w in [4,25];
-    confidence = fraction of fitting windows passing; sub_score = confidence.
+    lppls PyPI 0.6.24 (PINNED), mp_compute_nested_fits on the NDX/QQQ-proxy
+    daily closes over a 2-3 yr window; filters m in (0,1), w in [4,25];
+    confidence = positive-bubble confidence (pos_conf) from compute_indicators,
+    averaged over the most recent windows; sub_score = confidence.
     On computation failure -> DROP the indicator and renormalize Block D
     (NEVER a neutral placeholder — that was a v1 error).
+
+    lppls 0.6.24 API NOTE: filter_conditions_config is a FLAT dict[str, float]
+    (keys: m_min/m_max/w_min/w_max/O_min/D_min/tc_min_days/tc_max_days/
+    tc_min_frac/tc_max_frac) — passing the older list-of-{"condition_1": {...}}
+    form raises "filter_conditions_config must be a dict[str, float] or None".
+    mp_compute_nested_fits returns RAW fits; qualification (is_qualified ->
+    pos_conf/neg_conf) is produced by compute_indicators, which must be called
+    separately. Getting either wrong is what silently broke D4.
 
 CAVEAT (verbatim): LPPLS has documented false-alarm / too-early behavior; one
 published evaluation reports ~90% recall but ~29% precision (it fires often
@@ -37,19 +46,48 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
-FILTER_CONDITIONS = {"m_min": 0.0, "m_max": 1.0, "w_min": 4.0, "w_max": 25.0}
+# lppls 0.6.24 filter thresholds — a FLAT dict[str, float] (NOT the older
+# list-of-{"condition_1": {...}} form). Only m/w bounds are overridden; O_min,
+# D_min and the tc-window fractions keep the library's DS-LPPLS defaults
+# (O_min=2.5, D_min=0.5, tc_min_days=60, tc_max_days=252, tc_*_frac=0.5).
+FILTER_CONDITIONS: dict[str, float] = {
+    "m_min": 0.0, "m_max": 1.0, "w_min": 4.0, "w_max": 25.0,
+}
 
-
-def confidence_from_fits(pass_flags: list[bool]) -> float:
-    """confidence = fraction of fitting windows whose calibrated parameters
-    satisfy the bubble-consistency filters."""
-    if not pass_flags:
-        raise ValueError("no LPPLS fitting windows")
-    return sum(pass_flags) / len(pass_flags)
+# Nested-fit parameters. Sized for the target host (Intel Atom N2800, 1.86 GHz,
+# workers pinned to 1) to finish inside the LPPLS subprocess timeout
+# (lppls_timeout_s, default 600 s). Measured ~2.6 ms/fit on a modern core here;
+# the Atom is several times slower, so outer_increment is 8 (not the
+# lppls-README's 1, which is ~11k sub-window fits single-worker and blows the
+# budget). 8 yields ~80 windows over ~750 closes — ample for a stable
+# current-confidence read while leaving comfortable margin under 600 s. If D4
+# still times out on a given host it simply drops and Block D renormalizes.
+LPPLS_WORKERS = 1
+LPPLS_WINDOW_SIZE = 120
+LPPLS_SMALLEST_WINDOW = 30
+LPPLS_OUTER_INCREMENT = 8
+LPPLS_INNER_INCREMENT = 5
+LPPLS_MAX_SEARCHES = 25
+# Average pos_conf over this many most-recent windows for the "current" reading.
+LPPLS_RECENT_WINDOWS = 6
+MIN_CLOSES = 500
+# Frames the confidence result on the subprocess stdout (lppls prints fit
+# exceptions to stdout, so the result line must be unambiguously identifiable).
+_RESULT_SENTINEL = "LPPLSCONF:"
 
 
 def sub_score(confidence: float) -> float:
     return max(0.0, min(1.0, confidence))
+
+
+def _confidence_from_indicators(pos_conf: list[float]) -> float:
+    """Current positive-bubble confidence = mean pos_conf over the most recent
+    LPPLS_RECENT_WINDOWS windows (smooths single-window noise). pos_conf is
+    already in [0, 1]; an all-zero tail is a legitimate 0.0 reading, not a drop."""
+    if not pos_conf:
+        raise ValueError("LPPLS produced no fit windows")
+    tail = pos_conf[-min(len(pos_conf), LPPLS_RECENT_WINDOWS):]
+    return max(0.0, min(1.0, sum(tail) / len(tail)))
 
 
 def compute_confidence(daily_closes: list[float]) -> float:
@@ -58,37 +96,38 @@ def compute_confidence(daily_closes: list[float]) -> float:
     Raises on any failure so the caller DROPS the indicator and renormalizes
     Block D (never a neutral placeholder). Requires the pinned lppls==0.6.24.
     """
-    import os
-
     import numpy as np
     from lppls import lppls as lppls_mod
 
-    if len(daily_closes) < 500:
-        raise ValueError(f"insufficient price history (N={len(daily_closes)}; need >= 500)")
-    time_idx = np.arange(len(daily_closes), dtype=float)
+    from app.logging_conf import get_logger
+
+    log = get_logger(__name__)
+    n = len(daily_closes)
+    if n < MIN_CLOSES:  # log N explicitly so a data shortfall is never again
+        # mistaken for a code fault (that confusion is exactly what happened).
+        raise ValueError(f"insufficient price history (N={n}; need >= {MIN_CLOSES})")
+    log.info("lppls_fit", n=n, workers=LPPLS_WORKERS, window_size=LPPLS_WINDOW_SIZE,
+             outer_increment=LPPLS_OUTER_INCREMENT)
+
+    time_idx = np.arange(n, dtype=float)
     price = np.log(np.asarray(daily_closes, dtype=float))
     model = lppls_mod.LPPLS(observations=np.array([time_idx, price]))
+
+    # Step 1: raw nested fits. filter_conditions_config is stored on the model
+    # here but qualification happens in compute_indicators (0.6.24 contract).
     res = model.mp_compute_nested_fits(
-        workers=max(1, min(4, os.cpu_count() or 1)),  # respect container CPUs
-        window_size=min(len(daily_closes), 504),
-        smallest_window_size=120,
-        outer_increment=21,
-        inner_increment=5,
-        max_searches=25,
-        filter_conditions_config=[{"condition_1": {
-            "tc_range": [0.0, 0.2], "m_range": [FILTER_CONDITIONS["m_min"], FILTER_CONDITIONS["m_max"]],
-            "w_range": [FILTER_CONDITIONS["w_min"], FILTER_CONDITIONS["w_max"]],
-            "O_min": 2.5, "D_min": 0.5,
-        }}],
+        workers=LPPLS_WORKERS,
+        window_size=min(n, LPPLS_WINDOW_SIZE),
+        smallest_window_size=LPPLS_SMALLEST_WINDOW,
+        outer_increment=LPPLS_OUTER_INCREMENT,
+        inner_increment=LPPLS_INNER_INCREMENT,
+        max_searches=LPPLS_MAX_SEARCHES,
+        filter_conditions_config=FILTER_CONDITIONS,
     )
-    flags: list[bool] = []
-    for window in res:
-        qualified = window.get("res", []) if isinstance(window, dict) else []
-        for fit in qualified:
-            flags.append(bool(fit.get("qualified", {}).get("condition_1", False)))
-    if not flags:
-        raise ValueError("LPPLS produced no fit windows")
-    return confidence_from_fits(flags)
+    # Step 2: qualify fits -> per-window positive/negative-bubble confidence.
+    indicators = model.compute_indicators(res, filter_conditions_config=FILTER_CONDITIONS)
+    pos_conf = [float(v) for v in indicators["pos_conf"].tolist()]
+    return _confidence_from_indicators(pos_conf)
 
 
 def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800) -> float:
@@ -113,7 +152,13 @@ def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800
         raise RuntimeError(
             f"LPPLS subprocess failed rc={proc.returncode}: {proc.stderr.strip()[-300:]}"
         )
-    return float(json.loads(proc.stdout.strip())["confidence"])
+    # lppls prints fit exceptions to stdout (lppls.py:960) from forked workers,
+    # so stdout is NOT pure JSON. The result is framed with a sentinel and is
+    # the last line the parent writes (after the Pool joins) — parse that line.
+    for line in reversed(proc.stdout.splitlines()):
+        if line.startswith(_RESULT_SENTINEL):
+            return float(json.loads(line[len(_RESULT_SENTINEL):])["confidence"])
+    raise RuntimeError(f"LPPLS subprocess produced no result line: {proc.stdout.strip()[-300:]}")
 
 
 if __name__ == "__main__":
@@ -121,4 +166,13 @@ if __name__ == "__main__":
     import sys as _sys
 
     _payload = _json.loads(_sys.stdin.read())
-    print(_json.dumps({"confidence": compute_confidence(_payload["closes"])}))
+    # Route all fit-time output (tqdm, lppls' print(e) in parent AND forked
+    # workers) to stderr so stdout carries only the framed result line.
+    _real_stdout = _sys.stdout
+    _sys.stdout = _sys.stderr
+    try:
+        _conf = compute_confidence(_payload["closes"])
+    finally:
+        _sys.stdout = _real_stdout
+    _sys.stdout.write(f"{_RESULT_SENTINEL}{_json.dumps({'confidence': _conf})}\n")
+    _sys.stdout.flush()

@@ -44,6 +44,50 @@ def _top10_from_xlsx(content: bytes) -> float:
     return top10
 
 
+def _constituents_from_xlsx(content: bytes) -> list[str]:
+    """S&P 500 tickers from the SPY holdings XLSX (Ticker column).
+
+    Same file S2 already fetches successfully — one download yields both the
+    top-10 weights AND the constituent list, so breadth no longer depends on
+    scraping Wikipedia. Class-share dots become dashes (BRK.B -> BRK-B) for the
+    Twelve Data symbol convention; cash/FX/placeholder rows are dropped.
+    """
+    import re
+
+    raw = pd.read_excel(io.BytesIO(content), header=None)
+    header_row = ticker_col = None
+    for i in range(min(len(raw), 20)):
+        cells = [str(c).strip().lower() for c in raw.iloc[i].tolist()]
+        if "ticker" in cells:
+            header_row, ticker_col = i, cells.index("ticker")
+            break
+    if header_row is None or ticker_col is None:
+        raise SourceError("SSGA XLSX: no Ticker column found")
+    non_equity = {"USD", "CASH", "USDCASH", "MMFUND", "SPAXX"}  # cash/FX holding rows
+    seen: set[str] = set()
+    out: list[str] = []
+    for v in raw.iloc[header_row + 1:, ticker_col].tolist():
+        sym = str(v).strip().upper().replace(".", "-")
+        if not re.fullmatch(r"[A-Z][A-Z0-9-]{0,6}", sym):
+            continue  # drops "-", NaN, footer/disclaimer rows
+        if sym in non_equity:
+            continue  # cash/FX line matches the ticker pattern but is not a member
+        if sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+    if len(out) < 400:
+        raise SourceError(f"SSGA XLSX: only {len(out)} constituents parsed")
+    return out
+
+
+def sp500_constituents() -> SourceResult:
+    """Constituent tickers (list[str]) from the SSGA SPY holdings XLSX."""
+    resp = fetch("ssga_spy_xlsx", XLSX_URL)
+    tickers = _constituents_from_xlsx(resp.content)
+    return SourceResult(tickers, Provenance(source="ssga_spy_xlsx",
+                                            note=f"{len(tickers)} constituents"))
+
+
 def _top10_from_slickcharts(html: str) -> float:
     pcts = [float(m) for m in re.findall(r"(\d{1,2}\.\d{2})%", html)]
     if len(pcts) < 10:

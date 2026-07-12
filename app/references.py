@@ -546,6 +546,24 @@ CHANGELOG: list[dict[str, str]] = [
         "(6) timezone-aware computed_at, S5 history-depth note, SKEW raw-value logging, "
         "renormalization regression test.",
     },
+    {
+        "version": "v3.2.0",
+        "score": "unchanged methodology",
+        "notes": "July 2026 outage remediation. ROOT CAUSE was broken in-container DNS "
+        "(every outbound host failed name resolution, so no price provider was ever "
+        "contacted and the chain short-circuited to UNKNOWN) — NOT provider, key, plan, or "
+        "CPU/SIGILL issues. Fixes: (1) pinned DNS nameservers (1.1.1.1/8.8.8.8) in "
+        "compose.yml + curl in the image; (2) LPPLS repaired to the real lppls==0.6.24 API "
+        "— flat filter_conditions_config dict + compute_indicators pos_conf (the prior "
+        "list-of-{condition_1} form raised 'must be a dict[str, float]'); Atom-bounded fit "
+        "params, explicit N logging; (3) S3 repointed off the disabled Stooq label onto the "
+        "PriceProvider chain's real provenance (data was already Tiingo; the source string "
+        "was mislabelled stooq:*), total_return_pct moved out of the stooq module; "
+        "(4) breadth re-architected onto SSGA constituents (Wikipedia removed) with the "
+        "Twelve Data sweep moved to a credit-governed background job and a cache-only "
+        "recompute path; (5) D2 rollover guard aligned to the 75-day FINRA SLA "
+        "(a ~71-day freshest-possible reading is no longer flagged stale).",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {

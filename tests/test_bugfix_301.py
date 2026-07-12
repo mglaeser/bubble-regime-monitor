@@ -83,16 +83,18 @@ class TestD2Guards:
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
         assert data.indicators["d2"].dropped
 
-    def test_rollover_never_asserted_beyond_60d(self, isolated_db):
+    def test_rollover_asserted_within_75d_sla(self, isolated_db):
         from app.services.compute import compute_snapshot
 
         raw = make_golden_raw_inputs()
         # descending recent months => rollover pattern present in the data...
         raw.margin_balances = [900_000 + i * 40_000 for i in range(11)] + [1_400_000, 1_390_000, 1_380_000]
-        raw.margin_as_of = (datetime.now(UTC) - timedelta(days=70)).date().isoformat()
+        # ...and a ~71-day age is the FRESHEST possible FINRA reading (monthly,
+        # ~3-week lag), so within the 75d SLA it must NOT be flagged stale.
+        raw.margin_as_of = (datetime.now(UTC) - timedelta(days=71)).date().isoformat()
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
-        # ...but 70d-old data may not assert it: mult stays 0.6, note says unknown
-        assert "rollover: unknown" in (data.indicators["d2"].note or "")
+        assert not data.indicators["d2"].dropped
+        assert "rollover: unknown" not in (data.indicators["d2"].note or "")
 
     def test_fresh_data_may_assert_rollover(self, isolated_db):
         from app.services.compute import compute_snapshot

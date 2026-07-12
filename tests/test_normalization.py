@@ -143,8 +143,10 @@ class TestD3:
 
 
 class TestD4:
-    def test_confidence_fraction(self):
-        assert d4_lppls.confidence_from_fits([True, False, False, False]) == 0.25
+    def test_confidence_from_indicators_recent_mean(self):
+        # confidence = mean pos_conf over the most-recent windows (<= 8).
+        assert d4_lppls._confidence_from_indicators([1.0, 0.0, 0.0, 0.0]) == 0.25
+        assert d4_lppls._confidence_from_indicators([0.5]) == 0.5
 
     def test_bounds(self):
         assert d4_lppls.sub_score(1.5) == 1.0

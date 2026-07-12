@@ -506,6 +506,18 @@ def get_daily_closes(canonical: str) -> SourceResult:
     raise SourceError(f"price chain exhausted for {canonical}: " + "; ".join(errors))
 
 
+def total_return_pct(closes: list[tuple[str, float]], trading_days: int) -> float:
+    """Total return over the trailing `trading_days`, in percent.
+
+    Pure math on an already-fetched (date, close) series — provider-agnostic
+    (lives here, not in the disabled `stooq` module, so price indicators never
+    import Stooq). Uses adjusted closes when the caller passed them."""
+    if len(closes) <= trading_days:
+        raise SourceError("not enough history for total return window")
+    start, end = closes[-trading_days - 1][1], closes[-1][1]
+    return (end / start - 1.0) * 100.0
+
+
 def constituent_closes(ticker: str, outputsize: int = 260) -> list[tuple[str, float]]:
     """Constituent closes for the breadth sweep: Twelve Data ONLY.
 

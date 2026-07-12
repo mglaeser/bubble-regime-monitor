@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     lppls_timeout_s: int = 600
     gsadf_timeout_s: int = 1800
 
-    service_version: str = "3.1.0"
+    service_version: str = "3.2.0"
 
     @property
     def sms_configured(self) -> bool:

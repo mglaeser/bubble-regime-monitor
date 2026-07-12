@@ -7,6 +7,7 @@ FROM docker.io/library/python:3.12-slim
 # - r-cran-jsonlite: needed by r/gsadf.R itself (not an exuber dependency)
 # - stopifnot: install.packages does NOT error on failure; fail the build instead
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
         r-base r-base-dev build-essential gfortran \
         r-cran-jsonlite r-cran-rcpp r-cran-rcpparmadillo r-cran-ggplot2 \
         r-cran-dplyr r-cran-tidyr r-cran-purrr r-cran-lubridate \

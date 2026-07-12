@@ -38,11 +38,26 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             log.warning("gsadf_selfcheck_skipped", error=str(exc))
 
-    # First-boot HY OAS seeding does a live FRED fetch — run it off the boot
-    # path so a slow/unreachable FRED can never delay readiness.
+    def _breadth_backfill() -> None:
+        # Cold-start breadth backfill: warms breadth_symbol_cache so D1 comes
+        # alive without waiting for the first scheduled 01:00/13:00 sweep. It
+        # is self-limiting — a warm cache leaves few stale/missing symbols, so
+        # this returns quickly on restarts.
+        try:
+            from app.sources.breadth import refresh_breadth_cache
+
+            refresh_breadth_cache()
+        except Exception as exc:
+            log.warning("breadth_backfill_skipped", error=str(exc))
+
+    # First-boot seeding does live network fetches — run off the boot path so a
+    # slow/unreachable upstream can never delay readiness. Breadth backfill gets
+    # its own thread (it can take ~1h fully cold) so it never serializes the
+    # quick HY-OAS seed / GSADF self-check behind it.
     import threading
 
     threading.Thread(target=_seed, name="hy-oas-seed", daemon=True).start()
+    threading.Thread(target=_breadth_backfill, name="breadth-backfill", daemon=True).start()
 
     from app import scheduler
 

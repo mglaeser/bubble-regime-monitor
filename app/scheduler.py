@@ -35,6 +35,18 @@ def _sms_job() -> None:
         log.error("scheduled_digest_failed", error=str(exc))
 
 
+def _breadth_job() -> None:
+    # Incremental breadth-cache refresh (Twelve Data, ~8/min, credit-governed).
+    # Runs off the recompute path so the twice-daily recompute stays fast and
+    # spends no Twelve Data credits; the universe rolls over within the SLA.
+    from app.sources.breadth import DEFAULT_INCREMENTAL, refresh_breadth_cache
+
+    try:
+        refresh_breadth_cache(max_symbols=DEFAULT_INCREMENTAL)
+    except Exception as exc:  # a failed sweep must never crash the scheduler
+        log.error("scheduled_breadth_refresh_failed", error=str(exc))
+
+
 def start() -> BackgroundScheduler:
     global _scheduler
     if _scheduler is None:
@@ -42,6 +54,12 @@ def start() -> BackgroundScheduler:
         _scheduler = BackgroundScheduler(timezone="UTC")
         _scheduler.add_job(_job, CronTrigger(hour="6,18", minute=0, timezone="UTC"),
                            id="recompute", replace_existing=True,
+                           coalesce=True, misfire_grace_time=3600, max_instances=1)
+        # Breadth cache refresh twice daily, off the recompute hours so the two
+        # never contend. 2x150 symbols/day rolls the ~503 universe over inside
+        # the 3-day cache SLA well within Twelve Data's 800 credits/day.
+        _scheduler.add_job(_breadth_job, CronTrigger(hour="1,13", minute=0, timezone="UTC"),
+                           id="breadth_refresh", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
         sms_schedule = "disabled"
         if settings.sms_enabled:
@@ -53,7 +71,8 @@ def start() -> BackgroundScheduler:
                 coalesce=True, misfire_grace_time=3600, max_instances=1)
             sms_schedule = f"{settings.sms_daily_hour:02d}:{settings.sms_daily_minute:02d} UTC"
         _scheduler.start()
-        log.info("scheduler_started", recompute="06:00/18:00 UTC", daily_sms=sms_schedule)
+        log.info("scheduler_started", recompute="06:00/18:00 UTC",
+                 breadth_refresh="01:00/13:00 UTC", daily_sms=sms_schedule)
     return _scheduler
 
 
