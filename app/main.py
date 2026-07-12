@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
@@ -89,6 +90,24 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.add_middleware(SlowAPIMiddleware)
+
+    # CORS so a browser dashboard on another origin (crash.klee.me) can call the
+    # public read API. Reads are public (READ_ENDPOINTS_PUBLIC=true) so no
+    # credentials/X-API-Key are sent — keep allow_credentials=False. GET-only
+    # (read-only API). Added at app level, so it covers every route
+    # (/api/v1/*, /api/v1/status, /healthz, /readyz, /).
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "https://crash.klee.me",
+            # add local dev origins only if a dashboard dev server calls the API, e.g.:
+            # "http://localhost:8000",
+        ],
+        allow_credentials=False,   # public read-only data, no cookies — keep False
+        allow_methods=["GET"],     # read-only API
+        allow_headers=["*"],
+        max_age=86400,
+    )
 
     app.include_router(score.router)
     app.include_router(indicators.router)
