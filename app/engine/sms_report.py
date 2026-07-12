@@ -32,16 +32,21 @@ _ASCII_MAP = {
     "≤": "<=", "≥": ">=", "≈": "~", "×": "x",
 }
 
-SMS_PROMPT = """You are writing a DAILY TEXT-MESSAGE digest for a research bubble-regime monitor.
-Write ONE line, at most {limit} characters, plain ASCII only (no emoji, no
-dashes other than '-', no special symbols). Name the headline score and action
-band, then the single dominant driver in a few words. NO probability language,
-NO investment advice, NO price targets. Do NOT add quotes. Do NOT append any
+SMS_PROMPT = """You are writing a DAILY TEXT-MESSAGE digest for a research bubble-regime monitor,
+for an interested NON-PROFESSIONAL (a retail investor who follows markets
+casually) — accessible, but not baby-talk. Ordinary market words are fine
+("valuation", "trend", "market breadth", "credit"), but AVOID technical acronyms
+and quant jargon (no CAPE, GSADF, LPPLS, VRP, IQR). Write ONE line, at most
+{limit} characters, plain ASCII only (no emoji, no dashes other than '-', no
+special symbols). Lead with the headline score out of 100 and the action band,
+then the single biggest driver in a few plain words. NO probability language, NO
+investment advice, NO price targets. Do NOT add quotes. Do NOT append any
 disclaimer (one is added automatically).
 
-Readings: score {median}/100, band {band}, IQR {iqr_lo}-{iqr_hi}, red flags
-{flags}/4{override}. Trend: SPY {spy}, QQQ {qqq}. Block sub-scores S={s}, D={d}.
-Judgment note: {judgment}
+Readings: score {median}/100, band {band}, rough range {iqr_lo}-{iqr_hi}, warning
+flags {flags}/4{override}. Long-term trend: SPY {spy}, QQQ {qqq}. Fragility gauges
+S={s}, timing gauges D={d}.
+Plain-language note you may draw on: {judgment}
 """
 
 
@@ -68,7 +73,7 @@ def deterministic_report(snap: Snapshot, limit: int) -> str:
     qqq = trend.get("QQQ", {}).get("faber_10mo", "?")
     override = " OVERRIDE" if snap.override_fired else ""
     core = (f"bubblegauge {round(snap.median)}/100 {snap.action_band}{override}. "
-            f"IQR {round(snap.iqr_lo)}-{round(snap.iqr_hi)}. "
+            f"range {round(snap.iqr_lo)}-{round(snap.iqr_hi)}. "
             f"SPY {spy}, QQQ {qqq}. Flags {snap.red_flag_count}/4.")
     body = f"{core} {_TAG}"
     if len(_asciify(body)) <= limit:
