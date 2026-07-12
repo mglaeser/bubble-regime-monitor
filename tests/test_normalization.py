@@ -91,11 +91,13 @@ class TestS5:
 
 class TestD1:
     def test_fixture_value(self):
-        # (75 - 56) / (75 - 40) = 19/35 = 0.5428...
-        assert d1_breadth.compute(56.0) == pytest.approx(0.543, abs=1e-3)
+        # v3.3.0 anchors: (90 - 56) / (90 - 35) = 34/55 = 0.6182
+        assert d1_breadth.compute(56.0) == pytest.approx(0.618, abs=1e-3)
 
     def test_clipping(self):
-        assert d1_breadth.compute(90.0) == 0.0
+        # breadth >= hi (90) clips to the 0.05 soft floor (never annihilates the block)
+        assert d1_breadth.compute(90.0) == 0.05
+        assert d1_breadth.compute(95.0) == 0.05
         assert d1_breadth.compute(10.0) == 1.0
 
     def test_red_flag(self):

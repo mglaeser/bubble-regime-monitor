@@ -35,7 +35,8 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 GOLDEN_SUB_S = {"s1": 0.92, "s2": 0.80, "s3": 0.525, "s4": 0.25, "s5": 0.80}
-GOLDEN_SUB_D = {"d1": 0.543, "d2": 0.49, "d3": 0.30, "d4": 0.005}
+# d1 = (90-56)/(90-35) = 0.618 under the v3.3.0 breadth anchors (hi=90, lo=35).
+GOLDEN_SUB_D = {"d1": 0.618, "d2": 0.49, "d3": 0.30, "d4": 0.005}
 
 
 @pytest.fixture()

@@ -121,7 +121,9 @@ class TestRenormalizationRegression:
                                   BASE_WEIGHTS_S, BASE_WEIGHTS_D)
         assert res.weights_d["d2"] == pytest.approx(0.13 / 0.45)
         assert res.weights_d["d3"] == pytest.approx(0.32 / 0.45)
-        expected_d = (0.49 + 0.02) ** (0.13 / 0.45) * (0.30 + 0.02) ** (0.32 / 0.45) - 0.02
+        # v3.3.0 rescale-then-aggregate: prod(rescale(s)^w), rescale(s)=0.10+0.90*s
+        from app.engine.aggregate import rescale
+        expected_d = rescale(0.49) ** (0.13 / 0.45) * rescale(0.30) ** (0.32 / 0.45)
         assert res.d_block == pytest.approx(expected_d, abs=1e-9)
 
     def test_dropped_payload_has_null_subscore(self, isolated_db):

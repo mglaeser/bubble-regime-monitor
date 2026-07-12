@@ -43,7 +43,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-EPSILON = 0.02
+# Rescale-then-aggregate floor (UNDP HDI / OECD-JRC style strictly-positive
+# geometric mean). Every sub-score in [0,1] is first mapped to [RESCALE_FLOOR, 1]
+# before the weighted geometric mean, so a single 0-valued indicator can no
+# longer annihilate its block. Replaces the old additive-epsilon (prod(s+eps)-eps)
+# hack, which let one floored indicator silence ~75% of a block. L=0.10 keeps a
+# genuinely low reading meaningfully punitive (a floored indicator still cuts its
+# block to L^w of the otherwise value) while preventing block collapse.
+RESCALE_FLOOR = 0.10
 
 RED_FLAG_KEYS = [
     "gsadf_explosive_noncontested",
@@ -66,19 +73,26 @@ def renormalize(weights: dict[str, float], present: set[str]) -> dict[str, float
     return {k: w / total for k, w in kept.items()}
 
 
-def geometric_block(sub_scores: dict[str, float], weights: dict[str, float]) -> float:
-    """Weighted geometric mean of one block: prod (s_i + eps)^w_i - eps.
+def rescale(s: float) -> float:
+    """Map a sub-score in [0,1] to [RESCALE_FLOOR, 1] before geometric aggregation."""
+    return RESCALE_FLOOR + (1.0 - RESCALE_FLOOR) * s
 
-    `weights` must already be renormalized to sum to 1 over the keys present
-    in `sub_scores`.
+
+def geometric_block(sub_scores: dict[str, float], weights: dict[str, float]) -> float:
+    """Weighted geometric mean of one block over rescaled sub-scores:
+    prod( rescale(s_i) )^w_i, with rescale(s) = L + (1-L)*s (L = RESCALE_FLOOR).
+
+    Output lies in [RESCALE_FLOOR, 1]; a single 0-valued indicator pulls the
+    block toward L^{w_i} of its otherwise value, never to 0. `weights` must
+    already be renormalized to sum to 1 over the keys present in `sub_scores`.
     """
     log_sum = 0.0
     for key, w in weights.items():
         s = sub_scores[key]
         if not 0.0 <= s <= 1.0:
             raise ValueError(f"sub-score {key}={s} outside [0,1]")
-        log_sum += w * math.log(s + EPSILON)
-    return math.exp(log_sum) - EPSILON
+        log_sum += w * math.log(rescale(s))
+    return math.exp(log_sum)
 
 
 def apply_vix_multiplier(d_raw: float, v_multiplier: float) -> float:

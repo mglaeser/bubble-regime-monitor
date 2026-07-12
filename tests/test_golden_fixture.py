@@ -1,10 +1,14 @@
-"""THE golden-file test (spec section 5.5).
+"""THE golden-file test (spec section 5.5), regenerated for v3.3.0.
 
-Feeds the resolved July-2026 fixture and asserts:
-- deterministic point score ~= 40.35 (S = 0.711368, D = 0.228877)
-- MC median = 40 +/- 1
-- IQR endpoints within +/- 2 of (34, 47)
-- red_flag_count = 0, override False, action band 'hold'
+Regenerated under the rescale-then-aggregate scheme (RESCALE_FLOOR=0.10, no
+additive-epsilon), the v3.3.0 breadth anchors (hi=90, lo=35 -> d1=0.618 at
+breadth 56%), and the spec ALPHA_RANGE=(0.40,0.60). Asserts:
+- deterministic point score ~= 52.43 (S = 0.745081, D = 0.368915)
+- MC median ~= 52.6 +/- 1
+- IQR endpoints within +/- 2 of (50.0, 55.0)
+- red_flag_count = 0, override False, action band 'trim'
+  (moved up from the pre-v3.3.0 'hold'/40.35: a single low/zero indicator no
+  longer collapses a block, so the headline reflects the real regime.)
 """
 
 from __future__ import annotations
@@ -20,18 +24,18 @@ MC_SEED = 20260711
 def test_deterministic_point_score(golden_subscores):
     sub_s, sub_d = golden_subscores
     res = deterministic_score(sub_s, sub_d, 1.0, RedFlags(), BASE_WEIGHTS_S, BASE_WEIGHTS_D)
-    assert res.s_block == pytest.approx(0.711368, abs=1e-4)
-    assert res.d_raw == pytest.approx(0.228877, abs=1e-4)
-    assert res.d_block == pytest.approx(0.228877, abs=1e-4)
-    assert res.score == pytest.approx(40.35, abs=0.05)
-    assert res.band == "hold"
+    assert res.s_block == pytest.approx(0.745081, abs=1e-4)
+    assert res.d_raw == pytest.approx(0.368915, abs=1e-4)
+    assert res.d_block == pytest.approx(0.368915, abs=1e-4)
+    assert res.score == pytest.approx(52.43, abs=0.05)
+    assert res.band == "trim"
 
 
 def test_monte_carlo_median_and_iqr(golden_mc_inputs):
     result = monte_carlo(golden_mc_inputs, n=100_000, seed=MC_SEED)
-    assert result.median == pytest.approx(40.0, abs=1.0)
-    assert result.iqr[0] == pytest.approx(34.0, abs=2.0)
-    assert result.iqr[1] == pytest.approx(47.0, abs=2.0)
+    assert result.median == pytest.approx(52.6, abs=1.0)
+    assert result.iqr[0] == pytest.approx(50.0, abs=2.0)
+    assert result.iqr[1] == pytest.approx(55.0, abs=2.0)
 
 
 def test_red_flags_none_fired():
@@ -69,8 +73,8 @@ def test_full_pipeline_on_golden_raw_inputs(isolated_db):
                             gsadf_contested=True)
     assert data.red_flags.count == 0
     assert not data.override_fired
-    assert data.action_band == "hold"
-    assert 35.0 <= data.median <= 45.0
+    assert data.action_band == "trim"
+    assert 48.0 <= data.median <= 57.0
     # s4 contested cap, d3 gate-off cap
     assert data.indicators["s4"].sub_score == 0.25 or data.indicators["s4"].sub_score == 0.05
     assert data.indicators["d3"].sub_score == pytest.approx(0.30)
