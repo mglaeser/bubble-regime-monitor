@@ -1,9 +1,10 @@
 """Judgment-call generator: Anthropic Messages API with graceful degradation.
 
-After each recompute, produce a <=300-character plain-English "judgment call"
-naming the single dominant driver and the single biggest counter-signal.
-Constraints in the prompt: NO probability language, NO investment advice, NO
-price targets — presented as observation, not recommendation.
+After each recompute, produce a <=300-character "judgment call" written for a
+COMPLETE NON-EXPERT (no finance background): plain everyday language, no jargon,
+naming in plain words the single biggest thing making it look more bubble-like
+and the single biggest calming factor. Constraints in the prompt: NO probability
+language, NO investment advice, NO price targets — an observation, not advice.
 
 API notes (verified July 2026): model claude-opus-4-8 (released 28 May 2026);
 thinking={"type": "adaptive"} + output_config={"effort": "max"};
@@ -22,15 +23,30 @@ from app.logging_conf import get_logger
 
 log = get_logger(__name__)
 
-PROMPT_TEMPLATE = """You are annotating a research bubble-regime monitor. Given the readings below,
-write ONE sentence (<=300 characters) that names the single dominant driver and
-the single biggest counter-signal. Constraints: NO probability language, NO
-investment advice, NO price targets. Present as observation, not recommendation.
+PROMPT_TEMPLATE = """You are writing a one-line note for a research bubble-regime monitor, for a
+COMPLETE NON-EXPERT with no finance background — write it so a smart 15-year-old
+could follow it.
 
-Headline median: {median} (IQR {iqr_lo}-{iqr_hi}); action band: {band}.
-Block S sub-scores: {s_scores}. Block D sub-scores: {d_scores}. V multiplier: {v}.
-Red flags fired: {red_flag_detail}. Override fired: {override}.
-Trend states (Faber): SPY {spy_state}, QQQ {qqq_state}. Fast alarm: {fast_alarm}.
+Rules:
+- Plain, everyday language. NO jargon. If a technical measure matters, say it in
+  plain words instead of its name — e.g. "how pricey shares are compared with
+  their own history" not "CAPE"; "how many companies are climbing together, not
+  just a few" not "breadth"; "people borrowing money to buy shares" not "margin
+  debt"; "the market's fear gauge" not "VIX".
+- Say, in plain terms, the ONE biggest thing making it look MORE bubble-like and
+  the ONE biggest thing keeping it calmer.
+- One or two short sentences, at most ~280 characters total.
+- Avoid raw numbers/percentiles; if one is truly needed, explain it plainly.
+- NO probability wording, NO investment advice, NO price targets, NO buy/sell.
+  It is a neutral observation, never a recommendation.
+
+Readings (context for you — do NOT quote these codes or labels back to the reader):
+Headline: {median} out of 100 (rough range {iqr_lo}-{iqr_hi}); status: {band}.
+"How deep a fall could be" gauges: {s_scores}.
+"Is a turn near" gauges: {d_scores}. Fear-gauge multiplier: {v}.
+Warning flags tripped: {red_flag_detail}. Emergency override tripped: {override}.
+Long-term trend (still in the market?): SPY {spy_state}, QQQ {qqq_state}.
+Fast fear signals: {fast_alarm}.
 """
 
 

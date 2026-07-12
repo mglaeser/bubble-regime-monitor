@@ -774,8 +774,9 @@ SCORE_EXAMPLE: dict = {
                          "QQQ": {"faber_10mo": "IN", "sma200": "IN"}},
         "fast_alarm": {"term_structure": "contango", "vrp": 12.4, "vrp_flag": False,
                        "skew": 128, "skew_label": "coincident context only"},
-        "judgment_call": {"text": "Rich valuation (CAPE ~42) is the dominant driver; broad "
-                          "breadth near 56% above the 200-day is the biggest counter-signal.",
+        "judgment_call": {"text": "The biggest thing lifting the reading is that shares look "
+                          "very expensive compared with their own past; the main calming factor "
+                          "is that lots of companies are still climbing together, not just a handful.",
                           "stale": False, "error_class": None},
     },
     "meta": {
