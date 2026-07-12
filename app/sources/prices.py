@@ -312,8 +312,36 @@ def fetch_twelvedata(canonical: str, outputsize: int = 800) -> tuple[list[tuple[
     return rows, vendor, proxy
 
 
+def _daily_credits_left(body: dict) -> int | None:
+    """DAILY credits remaining from a Twelve Data /api_usage body, or None when
+    the daily budget can't be confidently identified.
+
+    IMPORTANT: this deliberately does NOT use the `api-credits-left` response
+    header. That header is the PER-MINUTE rate-limit window (<= 8 on the free
+    Basic plan), not the daily budget — reading it as the daily estimate made
+    the breadth governor trip on the very first symbol (<= 8 < CREDIT_RESERVE),
+    so the sweep fetched nothing and breadth_symbol_cache stayed empty forever.
+    """
+    limit = body.get("plan_daily_limit", body.get("plan_limit"))
+    used = body.get("daily_usage", body.get("current_usage"))
+    if limit is None or used is None:
+        return None
+    try:
+        limit_i, used_i = int(limit), int(used)
+    except (TypeError, ValueError):
+        return None
+    if limit_i < 100:
+        # Looks like a per-minute limit, not the daily budget -> treat as
+        # unknown so the caller proceeds and relies on 429 handling + pacing.
+        return None
+    return max(0, limit_i - used_i)
+
+
 def twelvedata_credits_left() -> int | None:
-    """Best-effort probe of remaining daily credits (governor for breadth)."""
+    """Best-effort probe of remaining DAILY credits (governor for breadth).
+
+    Returns None (unknown -> caller proceeds, relying on the 429 RateLimited
+    handling and the 8/min pacing) when the daily budget can't be read."""
     settings = get_settings()
     if not settings.twelve_data_api_key:
         return None
@@ -321,15 +349,9 @@ def twelvedata_credits_left() -> int | None:
         with httpx.Client(timeout=TIMEOUT) as client:
             resp = client.get("https://api.twelvedata.com/api_usage",
                               params={"apikey": settings.twelve_data_api_key})
-        left = resp.headers.get("api-credits-left")
-        if left is not None:
-            return int(left)
-        data = resp.json()
-        if "daily_usage" in data and "plan_daily_limit" in data:
-            return int(data["plan_daily_limit"]) - int(data["daily_usage"])
+        return _daily_credits_left(resp.json())
     except Exception:
         return None
-    return None
 
 
 def fetch_alphavantage(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:

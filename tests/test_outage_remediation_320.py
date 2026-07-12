@@ -124,6 +124,17 @@ class TestBreadthOnSSGA:
         assert "USD" not in tickers        # cash/FX line dropped (denylist)
         assert len(tickers) >= 400
 
+    def test_twelvedata_credit_governor_ignores_per_minute_header(self):
+        # The breadth sweep must not trip on Twelve Data's per-minute counter.
+        from app.sources.prices import _daily_credits_left
+
+        # per-minute-looking body -> unknown (None) so the sweep proceeds
+        assert _daily_credits_left({"plan_limit": 8, "current_usage": 3}) is None
+        # real daily budget -> remaining
+        assert _daily_credits_left({"plan_daily_limit": 800, "daily_usage": 120}) == 680
+        assert _daily_credits_left({"plan_limit": 800, "current_usage": 750}) == 50
+        assert _daily_credits_left({}) is None
+
     def test_pct_above_200dma_reads_cache_only(self, isolated_db):
         # Recompute path must not hit the network; an empty cache raises (D1
         # then drops until the background sweep populates it) rather than
