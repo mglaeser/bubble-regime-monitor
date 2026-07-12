@@ -107,6 +107,13 @@
     <div id="indicators"></div>
   </section>
 
+  <section id="sec-legs">
+    <h2>Legs 2–3 &amp; action bands — scientific sources</h2>
+    <p class="muted" style="margin-top:0">The trend trigger, fast alarm, and action-band
+      thresholds that gate the headline, with their literature basis and caveats.</p>
+    <div id="legs"></div>
+  </section>
+
   <section id="sec-api">
     <h2>API reference</h2>
     <p class="muted" style="margin-top:0">Interactive, machine-readable spec with schemas and
@@ -142,15 +149,9 @@ function clear(el){ while(el.firstChild) el.removeChild(el.firstChild); }
 function kv(pairs){ const d=h('div','kv'); pairs.forEach(([k,v])=>{ d.appendChild(h('b',null,k));
   d.appendChild(h('span',null, v==null?'—':v)); }); return d; }
 
-const EXAMPLE = {
-  data:{ headline_median:40, iqr:[34,47], band_5_95:[28,55], action_band:"hold",
-    override_fired:false, red_flag_count:0,
-    block_S:{value:0.711}, block_D:{value:0.229}, V:{state:"contango",multiplier:1.0},
-    trend_states:{SPY:{faber_10mo:"IN"},QQQ:{faber_10mo:"IN"}},
-    judgment_call:{text:"Rich valuation (CAPE ~42) dominant; broad breadth the counter-signal.",stale:false}},
-  meta:{ service_version:"3.1.0", disclaimer:"Research, not advice.",
-    coverage:{S:{coverage:1.0,degraded:false},D:{coverage:1.0,degraded:false}} }
-};
+// The worked example is served from the status document (single source of
+// truth shared with the OpenAPI /score example) — set at load time.
+let EXAMPLE = {};
 
 const ENDPOINTS = [
   ["GET","/api/v1/score","Headline median, IQR, band, both blocks, red flags, legs, judgment"],
@@ -287,6 +288,19 @@ function renderIndicators(s){
   });
 }
 
+function renderLegs(s){
+  const el=document.getElementById('legs'); clear(el);
+  (s.legs_science||[]).forEach(leg=>{
+    const det=h('details'); const sum=h('summary'); sum.appendChild(h('span',null,leg.name)); det.appendChild(sum);
+    const body=h('div','body');
+    if(leg.caveat){ const c=h('div','ind-meta','⚠ '+leg.caveat); c.style.color='var(--warn)'; body.appendChild(c); }
+    if(leg.references&&leg.references.length){
+      body.appendChild(h('div','ind-meta','Scientific sources:'));
+      const ul=h('ul','refs'); leg.references.forEach(r=>ul.appendChild(h('li',null,r))); body.appendChild(ul); }
+    det.appendChild(body); el.appendChild(det);
+  });
+}
+
 function renderMeta(s){
   const f=document.getElementById('falsification'); clear(f);
   (s.falsification_criteria||[]).forEach(x=>f.appendChild(h('li',null,x)));
@@ -316,8 +330,10 @@ async function load(){
     document.getElementById('ver').textContent = 'v'+((s.service&&s.service.version)||'?');
     document.getElementById('disclaimer').textContent = (s.disclaimer||'').replace(/\*\*/g,'');
     document.getElementById('ts').textContent = 'as of '+((s.service&&s.service.now)||'');
+    EXAMPLE = s.example || {};
+    document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
     renderHeadline(s); renderAudit(s); renderSources(s); renderProviders(s);
-    renderIndicators(s); renderMeta(s);
+    renderIndicators(s); renderLegs(s); renderMeta(s);
     document.getElementById('foot').textContent =
       'bubblegauge '+((s.service&&s.service.version)||'')+' · recompute '+((s.service&&s.service.recompute_schedule)||'')+
       ' · Research, not advice.';

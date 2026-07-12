@@ -135,3 +135,48 @@ class TestOpenApiExample:
         assert ex["data"]["headline_median"] == 40
         # root HTML page is hidden from the machine schema
         assert "/" not in oa["paths"]
+
+
+class TestCompletenessFixes:
+    def test_leg_science_surfaced(self, client):
+        body = client.get("/api/v1/status").json()
+        legs = {leg["id"]: leg for leg in body["legs_science"]}
+        assert set(legs) == {"trend", "fast_alarm", "action_bands"}
+        # Faber (trend), Bollerslev (fast alarm), Alessi-Detken (action bands)
+        assert any("Faber" in r for r in legs["trend"]["references"])
+        assert any("Bollerslev" in r for r in legs["fast_alarm"]["references"])
+        assert any("Alessi" in r for r in legs["action_bands"]["references"])
+        assert legs["trend"]["caveat"]
+
+    def test_example_shared_and_consistent(self, client):
+        # Single source of truth: score.py and status.py both import the same
+        # references.SCORE_EXAMPLE, so page and OpenAPI examples cannot drift.
+        import app.routers.score as score_router
+        from app.references import SCORE_EXAMPLE
+
+        assert score_router._SCORE_EXAMPLE is SCORE_EXAMPLE
+        body = client.get("/api/v1/status").json()
+        assert body["example"] == SCORE_EXAMPLE  # status doc serves the canonical example
+        oa = client.get("/openapi.json").json()
+        oa_ex = oa["paths"]["/api/v1/score"]["get"]["responses"]["200"]["content"]["application/json"]["example"]
+        assert oa_ex["data"]["headline_median"] == SCORE_EXAMPLE["data"]["headline_median"]
+
+    def test_stale_judgment_is_flagged(self, client, isolated_db):
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=1)
+        persist_snapshot(data, raw)
+        # mark the persisted snapshot's judgment stale (non-erroring)
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import Snapshot
+
+        with session_scope() as session:
+            snap = session.execute(select(Snapshot).order_by(Snapshot.id.desc()).limit(1)).scalars().first()
+            snap.judgment_stale = True
+            snap.judgment_error = None
+        body = client.get("/api/v1/status").json()
+        assert any(f["id"] == "judgment-stale" for f in body["science_audit"]["flags"])

@@ -27,7 +27,9 @@ from app.references import (
     EPISTEMIC_CAVEATS,
     FALSIFICATION_CRITERIA,
     KNOWN_ISSUES,
+    LEGS_SCIENCE,
     REGISTRY,
+    SCORE_EXAMPLE,
     SOURCE_REGISTRY,
 )
 
@@ -210,6 +212,12 @@ def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
                           "title": "Judgment call degraded",
                           "detail": f"Anthropic call failed ({snap.judgment_error}); the stored "
                                     "text may be stale or absent.", "ref": "engine.judgment"})
+        elif snap.judgment_stale:
+            flags.append({"id": "judgment-stale", "severity": "info", "category": "llm-degraded",
+                          "title": "Judgment call is stale",
+                          "detail": "The latest recompute reused a previous judgment call; the "
+                                    "annotation may be outdated for the current readings.",
+                          "ref": "engine.judgment"})
 
     flags.sort(key=lambda f: (SEVERITY_RANK.get(f["severity"], 3), f["category"]))
     counts = {"error": 0, "warn": 0, "info": 0}
@@ -264,7 +272,9 @@ def build_status() -> dict[str, Any]:
         "sources": sources,
         "providers": providers,
         "indicators": _indicators_block(live),
+        "legs_science": LEGS_SCIENCE,
         "science_audit": audit,
+        "example": SCORE_EXAMPLE,
         "falsification_criteria": FALSIFICATION_CRITERIA,
         "changelog": CHANGELOG,
         "epistemic_caveats": EPISTEMIC_CAVEATS,

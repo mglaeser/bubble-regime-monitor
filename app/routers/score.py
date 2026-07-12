@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.db import session_scope
 from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS
+from app.references import SCORE_EXAMPLE as _SCORE_EXAMPLE
 from app.security import READ_RATE_LIMIT, limiter, require_read_access
 
 router = APIRouter(prefix="/api/v1/score", tags=["score"])
@@ -43,35 +44,6 @@ def _latest_snapshot() -> Snapshot | None:
             select(Snapshot).order_by(Snapshot.computed_at.desc()).limit(1)
         ).scalars().first()
 
-
-_SCORE_EXAMPLE = {
-    "data": {
-        "headline_median": 40, "iqr": [34, 47], "band_5_95": [28, 55], "point_score": 40.35,
-        "action_band": "hold", "override_fired": False, "red_flag_count": 0,
-        "red_flag_detail": {"gsadf_explosive_noncontested": False, "semi_runup_ge_150pp": False,
-                            "hy_oas_widen_gt_100bps": False, "breadth_lt_50_near_ath": False},
-        "block_S": {"value": 0.711, "indicators": {"s1": {"value": 41.6, "sub_score": 0.92,
-                    "weight": 0.33, "grounding": "literature-grounded", "stale": False}}},
-        "block_D": {"value": 0.229, "indicators": {"d1": {"value": 56.0, "sub_score": 0.543,
-                    "weight": 0.35, "grounding": "judgmental", "note": "path=B_constituent_compute"}}},
-        "V": {"state": "contango", "multiplier": 1.0, "label": "lagging confirmation"},
-        "trend_states": {"SPY": {"faber_10mo": "IN", "sma200": "IN"},
-                         "QQQ": {"faber_10mo": "IN", "sma200": "IN"}},
-        "fast_alarm": {"term_structure": "contango", "vrp": 12.4, "vrp_flag": False,
-                       "skew": 128, "skew_label": "coincident context only"},
-        "judgment_call": {"text": "Rich valuation (CAPE ~42) is the dominant driver; broad "
-                          "breadth near 56% above the 200-day is the biggest counter-signal.",
-                          "stale": False, "error_class": None},
-    },
-    "meta": {
-        "computed_at": "2026-07-11T06:00:03+00:00", "service_version": "3.1.0",
-        "coverage": {"S": {"coverage": 1.0, "degraded": False},
-                     "D": {"coverage": 1.0, "degraded": False}, "degraded": False},
-        "disclaimer": "Research, not advice.",
-        "epistemic_caveats": ["NOT-A-PROBABILITY: 0-100 regime heuristic = structured expert "
-                              "judgment; uncalibrated.", "... (5 verbatim guardrails)"],
-    },
-}
 
 
 @router.get(
