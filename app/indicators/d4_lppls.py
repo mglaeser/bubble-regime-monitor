@@ -55,21 +55,22 @@ FILTER_CONDITIONS: dict[str, float] = {
 }
 
 # Nested-fit parameters. Sized for the target host (Intel Atom N2800, 1.86 GHz,
-# workers pinned to 1) to finish inside the LPPLS subprocess timeout
-# (lppls_timeout_s, default 600 s). Measured ~2.6 ms/fit on a modern core here;
-# the Atom is several times slower, so outer_increment is 8 (not the
-# lppls-README's 1, which is ~11k sub-window fits single-worker and blows the
-# budget). 8 yields ~80 windows over ~750 closes — ample for a stable
-# current-confidence read while leaving comfortable margin under 600 s. If D4
-# still times out on a given host it simply drops and Block D renormalizes.
+# workers pinned to 1). EMPIRICAL: outer_increment=8 measured ~87 s on a modern
+# core here but TIMED OUT past 600 s on the N2800 (the Atom is ~7-10x slower).
+# These lighter values measure ~64 s here -> ~500-640 s projected on the Atom.
+# LPPLS has a per-window overhead floor, so cutting fit-units has diminishing
+# returns; the real safety margin comes from the raised lppls_timeout_s (1500 s).
+# D4 is a weight-0.20 "noisy corroborator", so a coarser-but-completing fit is
+# strictly better than a perpetual timeout-drop. If it still times out on some
+# host it simply drops and Block D renormalizes.
 LPPLS_WORKERS = 1
 LPPLS_WINDOW_SIZE = 120
 LPPLS_SMALLEST_WINDOW = 30
-LPPLS_OUTER_INCREMENT = 8
-LPPLS_INNER_INCREMENT = 5
-LPPLS_MAX_SEARCHES = 25
+LPPLS_OUTER_INCREMENT = 16
+LPPLS_INNER_INCREMENT = 6
+LPPLS_MAX_SEARCHES = 15
 # Average pos_conf over this many most-recent windows for the "current" reading.
-LPPLS_RECENT_WINDOWS = 6
+LPPLS_RECENT_WINDOWS = 5
 MIN_CLOSES = 500
 # Frames the confidence result on the subprocess stdout (lppls prints fit
 # exceptions to stdout, so the result line must be unambiguously identifiable).

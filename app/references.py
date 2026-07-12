@@ -313,8 +313,9 @@ REGISTRY: dict[str, Methodology] = {
         how=(
             "Primary: StockCharts $SPXA200R or Barchart $MMTH only if anonymously accessible "
             "(verify each run; both are JS/login-gated as of July 2026, so mark best-effort). "
-            "Fallback (effectively primary): fetch the S&P 500 constituent list (Wikipedia), pull "
-            "each symbol's Stooq daily closes, compute pct = 100*#{close > SMA200}/N. "
+            "Fallback (effectively primary): fetch the S&P 500 constituent list from the SSGA "
+            "SPY holdings XLSX, pull each symbol's Twelve Data daily closes, compute "
+            "pct = 100*#{close > SMA200}/N. "
             "sub_score = clip((hi - pct)/(hi - lo), 0, 1), with MC anchors lo ~ U(35,45), "
             "hi ~ U(70,80); baseline lo = 40, hi = 75 (lower breadth => higher sub-score)."
         ),
@@ -662,7 +663,7 @@ SOURCE_REGISTRY: list[SourceSpec] = [
                "FRED truncated this series to a rolling 3-year window (Apr 2026); the S5 "
                "percentile is only as deep as our own accrued history table.",
                ("fred_BAMLH0A0HYM2",)),
-    SourceSpec("breadth", "S&P 500 constituents (Wikipedia) + Twelve Data closes", "D1 breadth",
+    SourceSpec("breadth", "S&P 500 constituents (SSGA holdings) + Twelve Data closes", "D1 breadth",
                "Constituent-level computation of % > 200-day SMA; no published keyless "
                "%>200DMA source is machine-readable.", 3, "",
                "Partial coverage is published (N/503) rather than dropped; keyless scrape "
