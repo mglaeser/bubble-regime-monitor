@@ -1,4 +1,4 @@
-.PHONY: install dev lint type test run build up sensitivity
+.PHONY: install dev lint type test run build up deploy migrate sensitivity
 
 install:
 	pip install .
@@ -23,6 +23,14 @@ build:
 
 up:
 	podman-compose up -d
+
+# One-command update & deploy: pull -> build -> migrate -> recreate -> health-check.
+deploy:
+	./deploy.sh
+
+# Apply DB migrations to head against the local DB_URL (no container).
+migrate:
+	alembic upgrade head
 
 sensitivity:
 	python scripts/sensitivity.py

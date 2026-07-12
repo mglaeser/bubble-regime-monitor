@@ -120,6 +120,26 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
 | `POST /api/v1/admin/send-sms` | Send the daily SMS digest now — test path (X-API-Key) |
 
+## Deployment & updates
+
+Updating a running server is a single command:
+
+```bash
+./deploy.sh        # or: make deploy
+```
+
+It performs, in order (each step announced with a `==>` banner):
+
+1. **Pull** — `git fetch` + fast-forward the deployment branch (refuses to run on a diverged/dirty tree rather than discard local work).
+2. **Build** — a container image tagged with the short commit (and `:latest`).
+3. **Migrate** — `alembic upgrade head` in a throwaway container against the same `./data` volume. Migrations run **before** the new container starts, so a bad migration aborts the deploy instead of taking the service down. Alembic is the single source of truth for the schema; a legacy database created by the old `create_all` path is detected and stamped automatically, so **you no longer need to `rm data/bubble.db` on schema changes**.
+4. **Recreate** — replaces the container with one built from the new image.
+5. **Health-check + auto-rollback** — polls `/healthz`; if the new container does not become healthy it prints the logs and rolls back to the previously running image.
+
+Configuration is via environment variables (all optional, sensible defaults): `BRANCH`, `IMAGE`, `CONTAINER`, `DATA_DIR`, `PORT`, `ENV_FILE`, `ENGINE` (podman/docker), `HEALTH_TIMEOUT`, `KEEP_IMAGES`, plus `SKIP_PULL=1` / `SKIP_BUILD=1`. Example: `PORT=8080 BRANCH=main ./deploy.sh`.
+
+The app also **self-migrates at boot** (`app.db_migrate.ensure_schema` runs `alembic upgrade head` with a `create_all` fallback), so a plain `podman-compose up -d --build` stays valid too — `deploy.sh` just makes the pull/build/migrate/health-check flow explicit and safe. To apply migrations locally without a container: `make migrate`.
+
 ## Status & spec UI
 
 A self-contained status dashboard is served at **`/`** (and `/status`) on the same port as the API. It reflects the live service and — because scientific correctness is the leading design goal — foregrounds a **science audit**: a severity-ranked list of everything currently unclear, incomplete, contested, proxied, judgmental, or deviating from the written spec (unverified citations, the contested GSADF, ETF index proxies, the documented Monte-Carlo alpha-range deviation, FRED truncation, stale/dropped indicators, coverage degradation, price-provider cooldowns, and **live success/failure of every external source pull**). It also shows each indicator's methodology and scientific sources, links to the interactive API docs (Swagger `/docs`, ReDoc `/redoc`, `/openapi.json`), and shows a worked example.
