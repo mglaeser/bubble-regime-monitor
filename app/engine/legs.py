@@ -82,6 +82,13 @@ def variance_risk_premium(vix_level: float, daily_spy_closes: list[float]) -> fl
     return (iv - rv) * 1e4
 
 
+# VRP is annualized VIX^2 - realized variance, expressed in variance points
+# (pct^2); empirical readings run roughly single digits to low tens. Values
+# outside this band signal a units/data error rather than a real regime.
+VRP_UNITS = "annualized_variance_pts_pct2"
+VRP_SANE_LO, VRP_SANE_HI = -50.0, 150.0
+
+
 @dataclass
 class FastAlarm:
     term_structure: str
@@ -94,7 +101,9 @@ class FastAlarm:
         return {
             "term_structure": self.term_structure,
             "vrp": self.vrp,
+            "vrp_units": VRP_UNITS,
             "vrp_flag": self.vrp_flag,
+            "vrp_sane": self.vrp is None or VRP_SANE_LO <= self.vrp <= VRP_SANE_HI,
             "skew": self.skew,
             "skew_label": self.skew_label,
         }

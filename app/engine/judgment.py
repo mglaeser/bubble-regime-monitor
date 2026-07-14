@@ -57,6 +57,22 @@ class JudgmentCall:
     error_class: str | None = None  # exception class name of the last failure, if any
 
 
+def _clean_completion(text: str, limit: int = 300) -> str:
+    """Trim to <= limit chars on a SENTENCE boundary and guarantee terminal
+    punctuation, so the stored judgment never ends mid-word (the old text[:300]
+    hard cut produced fragments like '...leaving the band at')."""
+    text = " ".join(text.split()).strip()
+    if len(text) <= limit and text[-1:] in ".!?":
+        return text
+    clipped = text[:limit]
+    for end in (". ", "! ", "? ", ".", "!", "?"):
+        idx = clipped.rfind(end)
+        if idx >= 40:  # keep a meaningful sentence, not a stub
+            return clipped[: idx + 1].strip()
+    cut = clipped.rsplit(" ", 1)[0].rstrip(",;:- ")  # no boundary: last whole word + period
+    return (cut + ".") if cut else clipped
+
+
 def run_completion(prompt: str) -> str:
     """Run the Anthropic model-fallback chain; return raw text or RAISE.
 
@@ -128,7 +144,7 @@ def generate(median: float, iqr: tuple[float, float], band: str,
     )
     try:
         text = run_completion(prompt)
-        return JudgmentCall(text=text[:300], stale=False)
+        return JudgmentCall(text=_clean_completion(text, 300), stale=False)
     except Exception as exc:
         log.warning("judgment_call_degraded", error_class=type(exc).__name__, error=repr(exc)[:300])
         if last_successful:
