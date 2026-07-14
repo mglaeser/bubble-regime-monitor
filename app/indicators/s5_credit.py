@@ -36,17 +36,40 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
+LAG_OBS_2YR = 504  # ~2 years of business-daily HY OAS observations (LSSZ t-2 horizon)
+
 
 def inverted_percentile(oas_bps: float, history_bps: list[float]) -> float:
-    """1 - percentile of the current OAS within persisted history."""
+    """1 - percentile of the given OAS within persisted history."""
     if not history_bps:
         raise ValueError("empty HY OAS history")
     below = sum(1 for v in history_bps if v <= oas_bps)
     return 1.0 - below / len(history_bps)
 
 
+def t_minus_2_value(history_bps: list[float], lag_obs: int = LAG_OBS_2YR) -> float:
+    """The HY OAS value ~2 years ago (the LSSZ 2017 t-2 credit-sentiment
+    horizon). Falls back to the OLDEST available observation when the accrued
+    history is shorter than the 2-year lag — the best available t-2 proxy."""
+    if not history_bps:
+        raise ValueError("empty HY OAS history")
+    if len(history_bps) > lag_obs:
+        return history_bps[-lag_obs - 1]
+    return history_bps[0]
+
+
 def sub_score(oas_bps: float, history_bps: list[float]) -> float:
+    """Inverted percentile of a given OAS within history (tighter => higher)."""
     return max(0.0, min(1.0, inverted_percentile(oas_bps, history_bps)))
+
+
+def sub_score_t2(history_bps: list[float], lag_obs: int = LAG_OBS_2YR) -> float:
+    """S5 = inverted percentile of the HY OAS AS OF t-2yr within the full
+    history. López-Salido, Stein & Zakrajšek (2017): elevated credit-market
+    sentiment (tight spreads) at t-2 predicts a decline in activity at t/t+1 —
+    a PREDICTIVE, lagged relationship, so the current fragility reflects the
+    t-2 spread, NOT the contemporaneous one (which the code previously used)."""
+    return sub_score(t_minus_2_value(history_bps, lag_obs), history_bps)
 
 
 def widened_gt_100bps_above_3yr_tights(oas_bps: float, history_bps_3yr: list[float]) -> bool:

@@ -576,13 +576,18 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
 
     # ---- S5 credit ----
     if raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
-        sub = s5_credit.sub_score(raw.hy_oas_bps, raw.hy_oas_history_bps)
+        # LSSZ t-2 horizon: score the spread AS OF ~2 years ago, not today.
+        oas_t2 = s5_credit.t_minus_2_value(raw.hy_oas_history_bps)
+        sub = s5_credit.sub_score_t2(raw.hy_oas_history_bps)
         sub_s["s5"] = sub
         mc_in.s5_sub = sub
-        depth_note = (f"percentile computed on {len(raw.hy_oas_history_bps)} days of accrued "
-                      "history (min 3y seed); deepens over time")
+        yrs = len(raw.hy_oas_history_bps) / 252.0
+        depth_note = (f"t-2yr credit-sentiment horizon (LSSZ 2017): inverted percentile of the "
+                      f"t-2 spread (~{round(oas_t2)}bps) over {len(raw.hy_oas_history_bps)} days "
+                      f"(~{yrs:.1f}y) of accrued history; regime-limited until a longer history "
+                      "(or a Baa-spread proxy) accrues")
         s5_note = f"{raw.hy_oas_note}; {depth_note}" if raw.hy_oas_note else depth_note
-        indicators["s5"] = IndicatorOutput("s5", raw.hy_oas_bps, sub, False,
+        indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
                                            "fred_BAMLH0A0HYM2", False, note=s5_note,
                                            as_of=raw.hy_oas_as_of)
     else:

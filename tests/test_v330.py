@@ -132,6 +132,27 @@ class TestQualityWeightedCoverage:
         assert d["degraded"] is True
 
 
+class TestS5TMinus2Lag:
+    def test_t_minus_2_picks_lagged_or_oldest(self):
+        from app.indicators import s5_credit
+
+        # short history (< 2yr) -> fall back to the oldest observation
+        assert s5_credit.t_minus_2_value([250.0, 260.0, 270.0]) == 250.0
+        # long history -> the value ~2yr (504 obs) back
+        series = [float(i) for i in range(600)]
+        assert s5_credit.t_minus_2_value(series) == series[-505]
+
+    def test_sub_score_t2_uses_lagged_not_contemporaneous(self):
+        from app.indicators import s5_credit
+
+        # today tight (250) but 2yr ago loose (600): fragility must reflect the
+        # LOOSE t-2 spread (low), not today's tight spread (which reads high).
+        hist = [600.0] + [500.0] * 10 + [250.0]
+        t2 = s5_credit.sub_score_t2(hist)
+        contemporaneous = s5_credit.sub_score(250.0, hist)
+        assert t2 < contemporaneous
+
+
 class TestVrpUnits:
     def test_fast_alarm_exposes_units_and_sanity(self):
         from app.engine.legs import fast_alarm

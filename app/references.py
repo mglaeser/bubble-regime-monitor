@@ -565,6 +565,26 @@ CHANGELOG: list[dict[str, str]] = [
         "recompute path; (5) D2 rollover guard aligned to the 75-day FINRA SLA "
         "(a ~71-day freshest-possible reading is no longer flagged stale).",
     },
+    {
+        "version": "v3.3.0",
+        "score": "METHODOLOGY CHANGE — headline ~40 -> ~52 on the golden fixture",
+        "notes": "Scientific-review remediation. The rise is an AGGREGATION FIX, not market "
+        "deterioration: (1) rescale-then-aggregate — each sub-score is mapped to [0.10,1] "
+        "before the weighted geometric mean (UNDP-HDI style), replacing the additive-epsilon "
+        "form under which a single 0-valued indicator entered as 0.02^w and silenced ~75% of "
+        "its block (a false-negative headline); (2) d1 breadth anchors hi 75->90 + a 0.05 soft "
+        "floor (bull-market breadth routinely hits the high 80s-90s, so hi=75 clipped normal "
+        "readings to 0); ALPHA_RANGE restored to the spec (0.40,0.60); golden fixture "
+        "regenerated. (3) full-universe breadth via the Polygon/Massive grouped-daily endpoint "
+        "(1 call/day, daily_close cache) with Twelve Data fallback + a binomial CI; "
+        "(4) LPPLS tri-state contract (VALID/VALID_ZERO/FIT_FAILED/INSUFFICIENT_DATA + window "
+        "counts) so a genuine 0 is auditable; (5) quality-weighted coverage gate (a partial "
+        "breadth universe + failed LPPLS now correctly flag Block D degraded); (6) S5 scored on "
+        "the LSSZ t-2yr spread rather than the contemporaneous value; (7) governance: judgment "
+        "completion guard, VRP units annotation, GSADF small-sample calibration flag. Still "
+        "open (host-verified follow-up): GSADF extended history + wild-bootstrap CVs, and an "
+        "S5 long-history Baa-spread proxy percentile.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
@@ -750,6 +770,15 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "detail": "If the price chain falls through to Alpha Vantage, closes are split/dividend "
      "unadjusted (acceptable for short-window ETF math; flagged in provenance).",
      "ref": "sources.prices"},
+    {"id": "gsadf-small-sample", "severity": "warn", "category": "calibration",
+     "title": "GSADF runs on a short monthly sample (T may be < 100)",
+     "detail": "PSY finite-sample critical values are tabulated from T=100; on the ~monthly "
+     "QQQ-proxy series T can be well below that, so the raw GSADF statistic is not reliably "
+     "calibrated. s4 is capped at the contested 0.25 regardless, so this does NOT move the "
+     "headline. Recommended (host-verified) upgrade: fetch extended Tiingo history (QQQ from "
+     "1999 -> T>=300) and use wild-bootstrap critical values (exuber radf_wb_cv, Harvey et al. "
+     "2016) instead of radf_mc_cv.",
+     "ref": "indicator s4"},
 ]
 
 
