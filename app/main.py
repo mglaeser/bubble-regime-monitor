@@ -45,9 +45,9 @@ async def lifespan(app: FastAPI):
         # is self-limiting — a warm cache leaves few stale/missing symbols, so
         # this returns quickly on restarts.
         try:
-            from app.sources.breadth import refresh_breadth_cache
+            from app.sources.breadth import DEFAULT_BACKFILL, refresh_breadth
 
-            refresh_breadth_cache()
+            refresh_breadth(max_symbols=DEFAULT_BACKFILL)  # Polygon cold-start when keyed, else TD
         except Exception as exc:
             log.warning("breadth_backfill_skipped", error=str(exc))
 

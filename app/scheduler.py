@@ -39,10 +39,10 @@ def _breadth_job() -> None:
     # Incremental breadth-cache refresh (Twelve Data, ~8/min, credit-governed).
     # Runs off the recompute path so the twice-daily recompute stays fast and
     # spends no Twelve Data credits; the universe rolls over within the SLA.
-    from app.sources.breadth import DEFAULT_INCREMENTAL, refresh_breadth_cache
+    from app.sources.breadth import DEFAULT_INCREMENTAL, refresh_breadth
 
     try:
-        refresh_breadth_cache(max_symbols=DEFAULT_INCREMENTAL)
+        refresh_breadth(max_symbols=DEFAULT_INCREMENTAL)  # Polygon 1-call/day when keyed, else TD sweep
     except Exception as exc:  # a failed sweep must never crash the scheduler
         log.error("scheduled_breadth_refresh_failed", error=str(exc))
 

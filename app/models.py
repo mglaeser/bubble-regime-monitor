@@ -131,6 +131,22 @@ class BreadthSymbolCache(Base):
     sma200: Mapped[float] = mapped_column(Float)
 
 
+class DailyClose(Base):
+    """Per-symbol daily close for the D1 breadth 200-DMA, populated from the
+    Polygon/Massive grouped-daily endpoint (one call = the whole US market for
+    one day). Keyed (symbol, date); the 200-day SMA is computed on read from the
+    most recent 200 rows per symbol. Complements breadth_symbol_cache, which
+    stores a pre-computed SMA from the per-symbol Twelve Data fallback path."""
+
+    __tablename__ = "daily_close"
+
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    close: Mapped[float] = mapped_column(Float)
+    provider: Mapped[str] = mapped_column(String(24), default="polygon")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class FalsificationOutcome(Base):
     """Outcomes of the falsification registry criteria (spec section 15)."""
 

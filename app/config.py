@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     tiingo_api_key: str = ""        # PRIMARY  (50 req/hr, 1000/day, 500 symbols/mo)
     twelve_data_api_key: str = ""   # SECONDARY (8 req/min, 800 credits/day)
     alphavantage_api_key: str = ""  # TERTIARY, CORE tickers only (25 req/day)
+    polygon_api_key: str = ""       # PRIMARY breadth (grouped-daily: 1 call/day, whole US market)
     stooq_enabled: bool = False     # experimental PoW-solver path; see ToS caveat
     twelve_data_indices: bool = False  # true ONLY on Twelve Data Grow ($29/mo)
     fmp_api_key: str = ""           # optional SEC fundamentals fallback

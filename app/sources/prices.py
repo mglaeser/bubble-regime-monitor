@@ -528,6 +528,48 @@ def get_daily_closes(canonical: str) -> SourceResult:
     raise SourceError(f"price chain exhausted for {canonical}: " + "; ".join(errors))
 
 
+def parse_polygon_grouped(payload: dict) -> dict[str, float]:
+    """Polygon/Massive grouped-daily JSON -> {TICKER: close}.
+
+    results = [{"T": ticker, "c": close, "o","h","l","v", ...}, ...]. An error
+    envelope (NOT_AUTHORIZED / error) has no `results`; a market-closed day
+    returns status OK with resultsCount 0 (empty dict, not an error). Tickers
+    are upppercased and dots -> dashes (BRK.B -> BRK-B) to match the SSGA list."""
+    status = str(payload.get("status", ""))
+    if "results" not in payload:
+        if status in ("NOT_AUTHORIZED", "ERROR"):
+            raise NotOnPlan(f"polygon grouped: {status}: {str(payload.get('error'))[:160]}")
+        raise ProviderError(f"polygon grouped: no results ({status})")
+    out: dict[str, float] = {}
+    for row in payload.get("results") or []:
+        try:
+            out[str(row["T"]).upper().replace(".", "-")] = float(row["c"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def fetch_polygon_grouped(date_iso: str) -> dict[str, float]:
+    """Every US stock's close for one date via Polygon/Massive grouped-daily.
+
+    Free tier: 5 req/min, EOD, ~2 yr history — one call covers the whole S&P 500
+    for a day. Raises ProviderNotConfigured when no key is set (breadth then
+    falls back to the Twelve Data per-symbol path)."""
+    settings = get_settings()
+    if not settings.polygon_api_key:
+        raise ProviderNotConfigured("polygon: no POLYGON_API_KEY configured")
+    with httpx.Client(timeout=TIMEOUT) as client:
+        resp = client.get(
+            f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{date_iso}",
+            params={"adjusted": "true", "apiKey": settings.polygon_api_key})
+    if resp.status_code == 429:
+        raise RateLimited("polygon grouped: HTTP 429 (5 req/min free tier)")
+    if resp.status_code in (401, 403):
+        raise NotOnPlan(f"polygon grouped: HTTP {resp.status_code} (plan/key)")
+    resp.raise_for_status()
+    return parse_polygon_grouped(resp.json())
+
+
 def total_return_pct(closes: list[tuple[str, float]], trading_days: int) -> float:
     """Total return over the trailing `trading_days`, in percent.
 
