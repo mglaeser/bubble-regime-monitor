@@ -2,7 +2,7 @@
 
 Each repair executed test-first: a test derived from the frozen spec/invariants (not from the code under test), run **red before**, **green after**. Full suite kept green. Clone sweep per fix. Independent adversarial verification (partial S2 — same-vendor, disclosed) in §Independent verifier.
 
-**Suite baseline → after:** `1 failed / 161 passed` (the failure an env-missing-`lppls` hard error) → **`171 passed`** with `lppls` and `Rscript` both absent (the suite is now hermetic). `ruff check app tests scripts` (now incl. `S` rules): **clean**. `pip-audit`: **clean** after the `setuptools>=83` bump (was 1 vuln, PYSEC-2026-3447).
+**Suite baseline → after:** `1 failed / 161 passed` (the failure an env-missing-`lppls` hard error) → **`176 passed`** with `lppls` and `Rscript` both absent (the suite is now hermetic) — including 5 regression tests added in response to the adversarial verifier (§Independent verifier). `ruff check app tests scripts` (now incl. `S` rules): **clean**. `pip-audit`: **clean** after the `setuptools>=83` bump (was 1 vuln, PYSEC-2026-3447).
 
 ## Fixes with red→green evidence
 
@@ -54,4 +54,8 @@ Not yet run — `mutmut` is not wired. The mutation score of the suite is theref
 
 ## Independent verifier (partial S2)
 
-An independent adversarial agent was tasked to **break** the five code fixes (not bless them). Same-vendor limitation disclosed (A-39 residual). Result: see `audit/evidence/independent-verifier.md`.
+An independent adversarial agent was tasked to **break** the five code fixes (not bless them). It found **four surviving issues**: the `/history` fix was **bypassable** (`?to=9999-12-31` → 500 via a `timedelta` overflow), the admin fix had a **clone** I missed (`require_read_access`) plus a non-ASCII-key 500, the numbers-only invariant **did not cover the SMS prompt** (false assurance), and the CI **secret-scan step did not actually block** (`detect-secrets scan --baseline` exits 0 on new secrets). **All four were reproduced, fixed, and regression-tested** (suite `171 → 176`); full detail and the closed loop in `audit/evidence/independent-verifier.md`. Same-vendor limitation disclosed — this does not discharge A-39 (a genuinely different-vendor pass remains an open residual).
+
+## A correction, recorded honestly (CI cannot run in this environment)
+
+An initial reconstruction blamed the red CI on the install list omitting `lppls`. **Job-timing evidence refutes that:** every CI job — pre-audit and audit alike — "completes" in ~3 seconds with no downloadable logs, i.e. **no runner executes it** (the git remote here is a local proxy; Actions execution is not wired up). See `audit/evidence/ci-runs.md`. Consequence: the rebuilt gate is verified **GREEN LOCALLY ONLY** (all four gate commands pass here); it **cannot be confirmed green on a runner** in this environment. A functioning CI executor (or a pre-push executor on the deploy host) is therefore a prerequisite carried in `audit/06`.

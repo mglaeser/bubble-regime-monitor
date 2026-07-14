@@ -14,7 +14,7 @@ Until items 1 and 2 are done, **treat this system as not independently verified.
 
 ## What this engagement actually changed (with evidence)
 
-Test-first, small, atomic, each red→green (`audit/05`). Suite `161 passed / 1 errored` → **`171 passed`** (now hermetic); ruff (with security rules) clean; `pip-audit` clean.
+Test-first, small, atomic, each red→green (`audit/05`). Suite `161 passed / 1 errored` → **`176 passed`** (now hermetic); ruff (with security rules) clean; `pip-audit` clean. An independent adversarial pass then **broke four of the fixes** (a bypassable 500, a missed clone, a false-assurance test, a non-blocking secret-scan) — all four were reproduced, re-fixed and regression-tested. Two honesty corrections were folded in: the red CI is **infrastructural** (Actions never executes here — jobs die in 3s with no logs), so the rebuilt gate is verified **green locally only**; and the citations flagged "unverifiable" turned out **real**.
 
 - **Fixed a public 500** — `/score/history?from=<garbage>` returned HTTP 500; now validated to 422 (A-25).
 - **Closed the admin door** — the guessable placeholder admin key used to authenticate; it now fails closed (B-06/C-01).

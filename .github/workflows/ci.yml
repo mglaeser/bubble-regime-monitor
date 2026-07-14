@@ -47,10 +47,12 @@ jobs:
         continue-on-error: true
       - name: Security — dependency audit (BLOCKING)
         run: pip-audit --progress-spinner off
-      - name: Security — secret scan over the working tree (BLOCKING)
-        run: |
-          detect-secrets scan --baseline .secrets.baseline \
-            --exclude-files '\.venv/|__pycache__/|\.git/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|audit/|\.secrets\.baseline'
+      - name: Security — secret scan over tracked files (BLOCKING)
+        # NB: `detect-secrets scan --baseline` exits 0 even on NEW secrets (it just
+        # re-emits an updated baseline) — it does NOT gate. `detect-secrets-hook`
+        # exits 1 when a tracked file contains a secret absent from the baseline.
+        # (This distinction was caught by adversarial verification.)
+        run: git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
       - name: Tests (BLOCKING)
         run: pytest -q
 

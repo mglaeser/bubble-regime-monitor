@@ -129,7 +129,14 @@ def get_history(
         if from_dt is not None:
             q = q.where(Snapshot.computed_at >= from_dt)
         if to_dt is not None:
-            q = q.where(Snapshot.computed_at < to_dt + timedelta(days=1))
+            # 'to' is inclusive of the whole day; guard the +1-day arithmetic
+            # against OverflowError near datetime.max (e.g. ?to=9999-12-31),
+            # which otherwise surfaced as a 500 (found by adversarial verification).
+            try:
+                upper = to_dt + timedelta(days=1)
+            except OverflowError:
+                upper = datetime.max
+            q = q.where(Snapshot.computed_at < upper)
         # filter + newest-first limit in SQL, then restore chronological order
         q = q.order_by(Snapshot.computed_at.desc()).limit(limit)
         rows = list(reversed(session.execute(q).scalars().all()))
