@@ -608,15 +608,29 @@ def fetch_polygon_grouped(date_iso: str) -> dict[str, float]:
     return parse_polygon_grouped(resp.json())
 
 
-def total_return_pct(closes: list[tuple[str, float]], trading_days: int) -> float:
+def total_return_pct(closes: list[tuple[str, float]], trading_days: int, smooth: int = 1) -> float:
     """Total return over the trailing `trading_days`, in percent.
 
     Pure math on an already-fetched (date, close) series — provider-agnostic
     (lives here, not in the disabled `stooq` module, so price indicators never
-    import Stooq). Uses adjusted closes when the caller passed them."""
+    import Stooq). Uses adjusted closes when the caller passed them.
+
+    `smooth` (S4/S5 audit, D5): average the two endpoints over `smooth` trading
+    days instead of using single closes. A 2-year structural run-up must not
+    jump when a single high/low base day rolls into the lookback start; a 5-day
+    mean removes that base-date-roll artifact. smooth=1 preserves prior behavior.
+    """
     if len(closes) <= trading_days:
         raise SourceError("not enough history for total return window")
-    start, end = closes[-trading_days - 1][1], closes[-1][1]
+    if smooth <= 1:
+        start, end = closes[-trading_days - 1][1], closes[-1][1]
+    else:
+        vals = [c for _, c in closes]
+        base_idx = len(vals) - trading_days - 1
+        lo = max(0, base_idx - smooth // 2)
+        hi = min(len(vals), base_idx + smooth - smooth // 2)
+        start = sum(vals[lo:hi]) / (hi - lo)
+        end = sum(vals[-smooth:]) / smooth
     return (end / start - 1.0) * 100.0
 
 

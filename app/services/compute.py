@@ -353,7 +353,9 @@ def gather_inputs() -> RawInputs:
         raw.spy_daily = spy.value
         raw.spy_daily_closes = [c for _, c in spy.value]
         try:
-            raw.spy_2yr_return_pct = price_src.total_return_pct(spy.value, 504)
+            # smooth=5: 5-day endpoint averaging removes the 2yr base-date-roll
+            # artifact in the S3 run-up (D5). SPY and SMH must use the same window.
+            raw.spy_2yr_return_pct = price_src.total_return_pct(spy.value, 504, smooth=5)
         except Exception:  # noqa: S110 -- optional 2yr-return enrichment; a short series legitimately has none (A-26)
             pass
         closes = raw.spy_daily_closes
@@ -372,7 +374,7 @@ def gather_inputs() -> RawInputs:
     if semis:
         raw.semis_source = semis.provenance.source  # real provenance, e.g. "tiingo:SMH"
         try:
-            raw.smh_2yr_return_pct = price_src.total_return_pct(semis.value, 504)
+            raw.smh_2yr_return_pct = price_src.total_return_pct(semis.value, 504, smooth=5)
             raw.semis_as_of = semis.provenance.as_of
         except Exception:  # noqa: S110 -- optional 2yr-return enrichment; a short series legitimately has none (A-26)
             pass
@@ -397,11 +399,13 @@ def gather_inputs() -> RawInputs:
                         timeout_s=get_settings().gsadf_timeout_s)
         if out:
             raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
-            raw.gsadf_note = f"{gsadf_src_note} (wild-bootstrap CVs)"
+            raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
         else:
-            raw.gsadf_note = "GSADF not computable (R/exuber unavailable or failed)"
+            # Reason only — the "GSADF not computable this run" prefix is added
+            # once by the s4 note builder; do not repeat it here (was double-nested).
+            raw.gsadf_note = "R/exuber unavailable or the fit failed"
     else:
-        raw.gsadf_note = "GSADF not computable (no Nasdaq-100/QQQ series this run)"
+        raw.gsadf_note = "no Nasdaq-100/QQQ series this run"
 
     # HY OAS: FRED latest + own persisted history (FRED 3-yr truncation).
     r = _track(raw, "fred_BAMLH0A0HYM2", lambda: fred_src.observations("BAMLH0A0HYM2"))
