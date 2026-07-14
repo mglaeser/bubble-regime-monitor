@@ -26,6 +26,15 @@ SMS_URL = "https://api.sipgate.com/v2/sessions/sms"
 TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
 
+def _mask_recipient(number: str) -> str:
+    """C-23: keep a personal phone number out of cleartext logs. Retain only the
+    last 3 digits for support triage (e.g. '+49…254')."""
+    if not number:
+        return "(none)"
+    tail = number[-3:]
+    return f"…{tail}"
+
+
 @dataclass
 class SmsResult:
     ok: bool
@@ -60,7 +69,8 @@ def send_sms(message: str, *, recipient: str | None = None) -> SmsResult:
     # The endpoint returns 204 No Content on success; accept any 2xx.
     ok = 200 <= resp.status_code < 300
     if ok:
-        log.info("sipgate_sms_sent", status=resp.status_code, chars=len(message), recipient=to)
+        log.info("sipgate_sms_sent", status=resp.status_code, chars=len(message),
+                 recipient=_mask_recipient(to))
         return SmsResult(ok=True, status_code=resp.status_code)
     log.warning("sipgate_sms_rejected", status=resp.status_code, body=resp.text[:200])
     return SmsResult(ok=False, status_code=resp.status_code, error=resp.text[:200])

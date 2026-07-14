@@ -199,4 +199,4 @@ make type       # mypy strict
 make sensitivity  # annual PSS main-effects report (governance)
 ```
 
-Three framework citations could not be independently verified as of July 2026 and are embedded with build-time-verification flags (see `app/references.py`): Chen, Chen & Huang (2026, arXiv 2604.25826); Basele–Phillips–Shi (Cowles d2430, 2025); BIS 2026 *Annual Economic Report*.
+Three framework citations were flagged for build-time verification and were **independently confirmed during the 2026-07 due-diligence audit** (see `app/references.py` `VERIFIED_CITATIONS`): Chen, Chen & Huang (2026, [arXiv:2604.25826](https://arxiv.org/abs/2604.25826), posted 2026-04-28); Basele–Phillips–Shi (Cowles [CFDP 2430](https://cowles.yale.edu/research/cfdp-2430-speculative-bubbles-recent-ai-boom-nasdaq-and-magnificent-seven), 2025); BIS 2026 *[Annual Economic Report](https://www.bis.org/publ/arpdf/ar2026e.htm)* (released 2026-06-28). All three resolve to real sources.

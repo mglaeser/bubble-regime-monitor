@@ -30,6 +30,11 @@ RUN pip install --no-cache-dir ".[parquet]" && \
       pip uninstall -y pyarrow)) && \
     python -c "import numpy, pandas; print('core numeric stack OK:', numpy.__version__, pandas.__version__)"
 COPY . .
+# B-12: run as a non-root user (defence in depth on top of rootless Podman).
+# /data is the SQLite volume mount-point; make it writable by the app user.
+RUN useradd --system --uid 10001 --home-dir /app --no-create-home appuser \
+    && mkdir -p /data && chown -R appuser:appuser /app /data
+USER appuser
 ENV TZ=UTC PYTHONUNBUFFERED=1
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -109,17 +109,20 @@ def compute_confidence(daily_closes: list[float]) -> dict:
     triple the compute and blow the Atom N2800 subprocess timeout.
     Requires the pinned lppls==0.6.24.
     """
-    import numpy as np
-    from lppls import lppls as lppls_mod
-
     from app.logging_conf import get_logger
 
     log = get_logger(__name__)
     n = len(daily_closes)
     if n < MIN_CLOSES:  # log N explicitly so a data shortfall is never again
         # mistaken for a code fault (that confusion is exactly what happened).
+        # A-02: this contract must hold WITHOUT the optional lppls engine, so the
+        # length guard precedes the import (the INSUFFICIENT_DATA path fits nothing).
         return {"state": "INSUFFICIENT_DATA", "value": None,
                 "n_windows_evaluated": 0, "n_windows_qualifying": 0, "n_closes": n}
+
+    import numpy as np
+    from lppls import lppls as lppls_mod
+
     log.info("lppls_fit", n=n, workers=LPPLS_WORKERS, window_size=LPPLS_WINDOW_SIZE,
              outer_increment=LPPLS_OUTER_INCREMENT)
 

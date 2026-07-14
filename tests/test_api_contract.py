@@ -96,7 +96,9 @@ def test_methodology_endpoint(client):
     d = resp.json()["data"]
     assert len(d["falsification_criteria"]) == 3
     assert [c["version"] for c in d["changelog"]] == ["v1", "v2", "v3", "v3.0.1", "v3.2.0", "v3.3.0"]
-    assert d["unverified_citations"]
+    # all framework citations verified in the 2026-07 audit: none unverified, three verified
+    assert d["unverified_citations"] == []
+    assert len(d["verified_citations"]) == 3
 
 
 def test_health_endpoints(client):
@@ -111,8 +113,10 @@ def test_admin_requires_key(client):
 
 
 def test_admin_refresh_status_shape(client):
+    from tests.conftest import TEST_ADMIN_KEY
+
     resp = client.get("/api/v1/admin/refresh/status",
-                      headers={"X-API-Key": "change-me-to-a-long-random-string"})
+                      headers={"X-API-Key": TEST_ADMIN_KEY})
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert set(data) == {"running", "last"}

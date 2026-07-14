@@ -41,12 +41,15 @@ class TestStatusJson:
         audit = client.get("/api/v1/status").json()["science_audit"]
         cats = {f["category"] for f in audit["flags"]}
         # the scientific-correctness catalogue is always present
-        assert "citation-unverified" in cats
+        # citations were verified during the 2026-07 audit → now surfaced as
+        # "citation-verified" info flags (previously "citation-unverified" warns).
+        assert "citation-verified" in cats
+        assert "citation-unverified" not in cats
         assert "contested-method" in cats
         assert "documented-deviation" in cats  # the alpha-range deviation
         assert "data-substitution" in cats     # ETF index proxies
-        # unverified citations surface as individual flags
-        assert sum(1 for f in audit["flags"] if f["category"] == "citation-unverified") == 3
+        # all three framework citations resolve to real sources
+        assert sum(1 for f in audit["flags"] if f["category"] == "citation-verified") == 3
         # flags are severity-ordered (error, then warn, then info)
         ranks = {"error": 0, "warn": 1, "info": 2}
         seq = [ranks[f["severity"]] for f in audit["flags"]]

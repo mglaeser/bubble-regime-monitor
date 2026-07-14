@@ -27,6 +27,23 @@ def _iso_utc(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _parse_date_bound(value: str | None, field: str) -> datetime | None:
+    """Parse an ISO date/datetime query bound, or 422 on malformed input.
+
+    A-25: `datetime.fromisoformat` raises ValueError on garbage; unguarded it
+    surfaced as an HTTP 500 on a public endpoint. Validation belongs at the
+    boundary, and a bad client value is a 422, never a server error."""
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field} must be an ISO-8601 date (e.g. 2026-01-31); got {value!r}",
+        ) from exc
+
+
 def _meta(snap: Snapshot | None) -> dict[str, Any]:
     settings = get_settings()
     return {
@@ -105,12 +122,14 @@ def get_history(
     limit: int = Query(1000, ge=1, le=10000, description="Maximum rows returned (most recent kept)"),
     _: None = Depends(require_read_access),
 ) -> dict[str, Any]:
+    from_dt = _parse_date_bound(from_, "from")
+    to_dt = _parse_date_bound(to, "to")
     with session_scope() as session:
         q = select(Snapshot)
-        if from_:
-            q = q.where(Snapshot.computed_at >= datetime.fromisoformat(from_))
-        if to:
-            q = q.where(Snapshot.computed_at < datetime.fromisoformat(to) + timedelta(days=1))
+        if from_dt is not None:
+            q = q.where(Snapshot.computed_at >= from_dt)
+        if to_dt is not None:
+            q = q.where(Snapshot.computed_at < to_dt + timedelta(days=1))
         # filter + newest-first limit in SQL, then restore chronological order
         q = q.order_by(Snapshot.computed_at.desc()).limit(limit)
         rows = list(reversed(session.execute(q).scalars().all()))

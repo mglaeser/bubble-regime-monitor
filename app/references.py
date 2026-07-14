@@ -67,15 +67,20 @@ class Methodology:
     block: str = ""  # "S", "D", or "V"
 
 
-# TODO: verify at build time — the following three citations could not be
-# independently confirmed via search as of July 2026; embedded as given:
-#   * Chen, Chen & Huang (2026), arXiv:2604.25826
-#   * Basele, Phillips & Shi (2025), Cowles Foundation Discussion Paper d2430
-#   * BIS (2026), Annual Economic Report
-UNVERIFIED_CITATIONS: list[str] = [
-    "Chen, Chen & Huang (2026). arXiv:2604.25826 (verify at build time)",
-    "Basele, Phillips & Shi (2025). Cowles Foundation Discussion Paper d2430 (verify at build time)",
-    "Bank for International Settlements (2026). Annual Economic Report (verify at build time)",
+# RESOLVED (due-diligence audit, 2026-07-14): all three framework citations were
+# independently confirmed via search and now resolve to real sources. The earlier
+# "could not be confirmed as of July 2026" flag was over-cautious and is cleared.
+#   * Chen, Chen & Huang (2026), arXiv:2604.25826 — "General-Purpose Technology and
+#     Speculative Bubble Detection" (arxiv.org/abs/2604.25826, posted 2026-04-28)
+#   * Basele, Phillips & Shi (2025), Cowles Foundation Discussion Paper d2430 —
+#     "Speculative Bubbles in the Recent AI Boom" (cowles.yale.edu, CFDP 2430)
+#   * BIS (2026), Annual Economic Report (bis.org/publ/arpdf/ar2026e, released 2026-06-28)
+UNVERIFIED_CITATIONS: list[str] = []  # none remain unverified (audit 2026-07-14)
+
+VERIFIED_CITATIONS: list[str] = [
+    "Chen, Chen & Huang (2026). arXiv:2604.25826 — verified 2026-07-14 (arxiv.org/abs/2604.25826)",
+    "Basele, Phillips & Shi (2025). Cowles Foundation Discussion Paper d2430 — verified 2026-07-14",
+    "Bank for International Settlements (2026). Annual Economic Report — verified 2026-07-14 (bis.org)",
 ]
 
 REGISTRY: dict[str, Methodology] = {
@@ -717,19 +722,22 @@ SOURCE_REGISTRY: list[SourceSpec] = [
 # ---------------------------------------------------------------------------
 
 KNOWN_ISSUES: list[dict[str, str]] = [
-    {"id": "citation-chen", "severity": "warn", "category": "citation-unverified",
-     "title": "Framework citation could not be independently verified",
+    {"id": "citation-chen", "severity": "info", "category": "citation-verified",
+     "title": "Framework citation verified (due-diligence audit 2026-07-14)",
      "detail": "Chen, Chen & Huang (2026, arXiv:2604.25826) — the basis for the GSADF "
-     "CONTESTED flag — could not be confirmed via search; embedded as given, verify before "
-     "publishing.", "ref": "references.UNVERIFIED_CITATIONS"},
-    {"id": "citation-basele", "severity": "warn", "category": "citation-unverified",
-     "title": "Framework citation could not be independently verified",
-     "detail": "Basele, Phillips & Shi (2025, Cowles d2430) could not be confirmed via search.",
-     "ref": "references.UNVERIFIED_CITATIONS"},
-    {"id": "citation-bis", "severity": "warn", "category": "citation-unverified",
-     "title": "Framework citation could not be independently verified",
-     "detail": "BIS (2026) Annual Economic Report (D3 buildout context) could not be confirmed.",
-     "ref": "references.UNVERIFIED_CITATIONS"},
+     "CONTESTED flag — resolves to 'General-Purpose Technology and Speculative Bubble "
+     "Detection' (arxiv.org/abs/2604.25826, posted 2026-04-28).",
+     "ref": "references.VERIFIED_CITATIONS"},
+    {"id": "citation-basele", "severity": "info", "category": "citation-verified",
+     "title": "Framework citation verified (due-diligence audit 2026-07-14)",
+     "detail": "Basele, Phillips & Shi (2025, Cowles d2430) resolves to 'Speculative Bubbles "
+     "in the Recent AI Boom' (cowles.yale.edu, CFDP 2430).",
+     "ref": "references.VERIFIED_CITATIONS"},
+    {"id": "citation-bis", "severity": "info", "category": "citation-verified",
+     "title": "Framework citation verified (due-diligence audit 2026-07-14)",
+     "detail": "BIS (2026) Annual Economic Report resolves to the report released 2026-06-28 "
+     "(bis.org/publ/arpdf/ar2026e), which discusses AI-boom / capex-bust risk.",
+     "ref": "references.VERIFIED_CITATIONS"},
     {"id": "gsadf-contested", "severity": "warn", "category": "contested-method",
      "title": "GSADF is permanently CONTESTED",
      "detail": "Chen-Chen-Huang (2026) show GSADF-type tests spuriously reject the no-bubble "

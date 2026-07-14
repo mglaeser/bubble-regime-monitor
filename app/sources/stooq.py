@@ -119,7 +119,7 @@ def _cookie_path() -> Path:
 
     db_url = get_settings().db_url
     base = Path(db_url.replace("sqlite:///", "/", 1)).parent if db_url.startswith("sqlite:///") \
-        else Path("/tmp")
+        else Path("/tmp")  # noqa: S108 -- non-sqlite dev fallback only; stooq is disabled by default (A-26)
     return base / "stooq_cookies.json"
 
 
@@ -130,14 +130,14 @@ def _load_cookies(client: httpx.Client) -> None:
             return
         for name, value in json.loads(path.read_text()).items():
             client.cookies.set(name, value, domain="stooq.com")
-    except Exception:
+    except Exception:  # noqa: S110 -- best-effort cookie cache read; a miss just re-solves the PoW (A-26)
         pass
 
 
 def _save_cookies(client: httpx.Client) -> None:
     try:
         _cookie_path().write_text(json.dumps(dict(client.cookies)))
-    except Exception:
+    except Exception:  # noqa: S110 -- best-effort cookie cache write; failure is non-fatal (A-26)
         pass
 
 

@@ -354,7 +354,7 @@ def gather_inputs() -> RawInputs:
         raw.spy_daily_closes = [c for _, c in spy.value]
         try:
             raw.spy_2yr_return_pct = price_src.total_return_pct(spy.value, 504)
-        except Exception:
+        except Exception:  # noqa: S110 -- optional 2yr-return enrichment; a short series legitimately has none (A-26)
             pass
         closes = raw.spy_daily_closes
         raw.index_within_2pct_of_ath = closes[-1] >= 0.98 * max(closes)
@@ -374,7 +374,7 @@ def gather_inputs() -> RawInputs:
         try:
             raw.smh_2yr_return_pct = price_src.total_return_pct(semis.value, 504)
             raw.semis_as_of = semis.provenance.as_of
-        except Exception:
+        except Exception:  # noqa: S110 -- optional 2yr-return enrichment; a short series legitimately has none (A-26)
             pass
 
     # GSADF on Nasdaq-100 monthly log prices via the QQQ proxy (no free raw

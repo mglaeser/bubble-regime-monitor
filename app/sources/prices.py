@@ -403,7 +403,7 @@ def fetch_yfinance(canonical: str) -> tuple[list[tuple[str, float]], str, bool]:
                 rows = _history(proxy_vendor)
                 if len(rows) >= 50:
                     return rows, proxy_vendor, True
-            except Exception:
+            except Exception:  # noqa: S110 -- proxy fallback is best-effort; the original error is re-raised below (A-26)
                 pass
         raise ProviderError(f"yfinance {vendor}: {exc}") from exc
     if len(rows) < 50:

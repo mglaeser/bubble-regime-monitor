@@ -137,7 +137,7 @@ def hyperscaler_readings() -> SourceResult:
     for ticker, cik in CIKS.items():
         try:
             facts = _companyfacts(cik)
-        except Exception:
+        except Exception:  # noqa: S112 -- one unreachable issuer must not sink the whole hyperscaler FCF pull; provenance note covers it (A-26)
             continue
         ocf = ttm(duration_facts(facts, OCF_TAGS))
         capex = ttm(duration_facts(facts, CAPEX_TAGS))
