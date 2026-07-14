@@ -33,6 +33,7 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -95,11 +96,14 @@ COVERAGE_DROP_THRESHOLD = 1.0 / 3.0  # >1/3 nominal weight lost -> block degrade
 
 
 def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
-    """Per-block coverage: fraction of nominal weight actually obtained.
+    """Per-block QUALITY-WEIGHTED coverage: fraction of nominal weight actually
+    obtained, each live indicator scaled by its quality in [0,1].
 
-    A dropped OR stale indicator counts as lost weight; a proxy substitution
-    does not. If >1/3 of a block's nominal weight is lost the block is
-    degraded (its action band is suppressed)."""
+    A dropped OR stale indicator counts as fully lost weight; a low-quality one
+    (e.g. d1 measured from a partial constituent universe, quality=n/503) counts
+    as w*quality. A proxy substitution does not reduce quality. If >1/3 of a
+    block's nominal weight is lost the block is degraded (band suppressed) — so a
+    breadth reading from only a handful of names now correctly degrades Block D."""
     blocks: dict[str, Any] = {}
     degraded_any = False
     for block_id, prefix in (("S", "s"), ("D", "d")):
@@ -111,7 +115,7 @@ def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
             w = REGISTRY[ind.id].weight
             total += w
             if not ind.dropped and not ind.stale:
-                obtained += w
+                obtained += w * max(0.0, min(1.0, ind.quality))
         frac = obtained / total if total else 0.0
         degraded = frac < (1.0 - COVERAGE_DROP_THRESHOLD)
         degraded_any = degraded_any or degraded
@@ -159,6 +163,7 @@ class RawInputs:
     hy_oas_as_of: str | None = None
 
     breadth_pct: float | None = None
+    breadth_n: int | None = None   # constituents resolved (for d1 quality = n/503)
     breadth_source: str = "constituents+twelvedata"
     breadth_note: str | None = None
     breadth_as_of: str | None = None
@@ -208,6 +213,8 @@ class IndicatorOutput:
     fallback_used: bool
     note: str | None = None
     as_of: str | None = None
+    quality: float = 1.0   # in [0,1]; < 1 discounts this indicator's live weight
+                           # in the coverage gate (e.g. d1 from a partial universe)
 
     @property
     def age_days(self) -> int | None:
@@ -237,6 +244,7 @@ class IndicatorOutput:
             "as_of": self.as_of,
             "age_days": self.age_days,
             "stale": self.stale,
+            "quality": round(self.quality, 4),
             "timestamp": datetime.now(UTC).isoformat(),
         }
         if self.note:
@@ -409,6 +417,9 @@ def gather_inputs() -> RawInputs:
     if r:
         raw.breadth_pct, raw.breadth_note = r.value, r.provenance.note
         raw.breadth_as_of = today  # computed live from constituent closes
+        raw.breadth_source = r.provenance.source
+        m = re.search(r"breadth from (\d+)", raw.breadth_note or "")  # "breadth from N/503 ..."
+        raw.breadth_n = int(m.group(1)) if m else None
 
     r = _track(raw, "finra_xlsx", finra_src.debit_balances)
     if r:
@@ -585,9 +596,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         mc_in.breadth_pct = raw.breadth_pct
         path_note = "path=B_constituent_compute"
         d1_note = f"{raw.breadth_note}; {path_note}" if raw.breadth_note else path_note
+        # d1 quality = resolved constituents / 503: a breadth reading from a
+        # partial universe discounts d1's live weight in the coverage gate (6b).
+        d1_quality = min(1.0, raw.breadth_n / 503.0) if raw.breadth_n else 1.0
         indicators["d1"] = IndicatorOutput("d1", raw.breadth_pct, sub, False,
                                            raw.breadth_source, False, note=d1_note,
-                                           as_of=raw.breadth_as_of)
+                                           as_of=raw.breadth_as_of, quality=d1_quality)
     else:
         indicators["d1"] = IndicatorOutput("d1", None, None, True, raw.breadth_source, False,
                                            note="breadth unavailable; dropped, Block D renormalized")

@@ -101,6 +101,37 @@ class TestPolygonBreadth:
         assert _binomial_ci_pp(0.6, 503) == 0.0  # full universe -> no sampling error
 
 
+class TestQualityWeightedCoverage:
+    @staticmethod
+    def _block_d(d1_quality, d4_dropped=False):
+        from app.services.compute import IndicatorOutput, _coverage_gate
+
+        inds = {
+            "d1": IndicatorOutput("d1", 56.0, 0.6, False, "x", False, quality=d1_quality),
+            "d2": IndicatorOutput("d2", 40.0, 0.5, False, "x", False),
+            "d3": IndicatorOutput("d3", 1.0, 0.3, False, "x", False),
+            "d4": IndicatorOutput("d4", None, None, True, "x", False) if d4_dropped
+            else IndicatorOutput("d4", 0.1, 0.1, False, "x", False),
+        }
+        return _coverage_gate(inds)["D"]
+
+    def test_full_universe_not_degraded(self):
+        assert self._block_d(1.0)["degraded"] is False
+
+    def test_partial_breadth_alone_barely_passes(self):
+        # d1 from ~33/503 names alone: coverage ~= 0.35*0.066 + 0.65 = 0.673 (per
+        # the review) — barely above the 2/3 gate.
+        d = self._block_d(33 / 503)
+        assert d["coverage"] == pytest.approx(0.673, abs=0.01)
+        assert d["degraded"] is False
+
+    def test_partial_breadth_plus_failed_lppls_degrades(self):
+        # ...but with d4 also FIT_FAILED (dropped) it falls below 2/3 -> degraded.
+        d = self._block_d(33 / 503, d4_dropped=True)
+        assert d["coverage"] < 0.667
+        assert d["degraded"] is True
+
+
 class TestVrpUnits:
     def test_fast_alarm_exposes_units_and_sanity(self):
         from app.engine.legs import fast_alarm
