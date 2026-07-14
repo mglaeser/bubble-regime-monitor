@@ -69,7 +69,9 @@ class TestPolygonBreadth:
     def test_market_closed_day_is_empty_not_error(self):
         from app.sources.prices import parse_polygon_grouped
 
+        # both shapes a closed day can take: empty results, and no results key
         assert parse_polygon_grouped({"status": "OK", "resultsCount": 0, "results": []}) == {}
+        assert parse_polygon_grouped({"status": "OK", "resultsCount": 0}) == {}
 
     def test_breadth_from_daily_close_full_universe(self, isolated_db):
         from datetime import UTC, date, datetime, timedelta

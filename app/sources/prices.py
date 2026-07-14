@@ -570,9 +570,13 @@ def parse_polygon_grouped(payload: dict) -> dict[str, float]:
     returns status OK with resultsCount 0 (empty dict, not an error). Tickers
     are upppercased and dots -> dashes (BRK.B -> BRK-B) to match the SSGA list."""
     status = str(payload.get("status", ""))
-    if "results" not in payload:
-        if status in ("NOT_AUTHORIZED", "ERROR"):
-            raise NotOnPlan(f"polygon grouped: {status}: {str(payload.get('error'))[:160]}")
+    if status in ("NOT_AUTHORIZED", "ERROR"):
+        raise NotOnPlan(f"polygon grouped: {status}: {str(payload.get('error'))[:160]}")
+    if payload.get("results") is None:
+        # A market-closed day returns status OK with resultsCount 0 and no
+        # `results` key — that is an empty (non-trading) day, NOT an error.
+        if int(payload.get("resultsCount", 0) or 0) == 0:
+            return {}
         raise ProviderError(f"polygon grouped: no results ({status})")
     out: dict[str, float] = {}
     for row in payload.get("results") or []:

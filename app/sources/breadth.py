@@ -193,7 +193,11 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
     span = 0
     while len(have) < target_days and span < POLYGON_MAX_CALENDAR_DAYS:
         span += 1
-        if day in have:
+        # Skip weekends (and already-cached days) WITHOUT an API call — the
+        # grouped endpoint returns empty on non-trading days, so calling it for
+        # Sat/Sun just burns rate-limit budget and time. Holidays still cost one
+        # (empty) call since there is no local holiday calendar.
+        if day in have or day.weekday() >= 5:
             day -= timedelta(days=1)
             continue
         iso = day.isoformat()
