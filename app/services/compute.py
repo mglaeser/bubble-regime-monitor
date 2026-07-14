@@ -162,6 +162,11 @@ class RawInputs:
     hy_oas_note: str | None = None
     hy_oas_as_of: str | None = None
 
+    # Long BAA-DGS10 credit-spread proxy (bps, monthly) for the S5 long-history
+    # percentile — HY OAS is FRED-truncated to 3yr, BAA/DGS10 go back to 1997.
+    baa_spread_history_bps: list[float] | None = None
+    baa_spread_as_of: str | None = None
+
     breadth_pct: float | None = None
     breadth_n: int | None = None   # constituents resolved (for d1 quality = n/503)
     breadth_source: str = "constituents+twelvedata"
@@ -378,12 +383,21 @@ def gather_inputs() -> RawInputs:
     if ndx:
         import math
 
-        monthly = legs.monthly_closes(ndx.value)
-        out = run_gsadf([math.log(v) for v in monthly[-360:]],
+        # GSADF needs a long monthly history to calibrate (PSY tables start at
+        # T=100); fetch QQQ monthly from 1999 (T~329), falling back to the
+        # shorter recompute series if the long fetch is unavailable.
+        try:
+            gsadf_monthly = [c for _, c in price_src.fetch_tiingo_monthly("NDX")]
+            gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
+        except Exception as exc:
+            gsadf_monthly = legs.monthly_closes(ndx.value)
+            gsadf_src_note = (f"Nasdaq-100 via QQQ proxy (short series T={len(gsadf_monthly)}; "
+                              f"long history unavailable: {str(exc)[:80]})")
+        out = run_gsadf([math.log(v) for v in gsadf_monthly[-360:]],
                         timeout_s=get_settings().gsadf_timeout_s)
         if out:
             raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
-            raw.gsadf_note = "Nasdaq-100 via QQQ proxy"
+            raw.gsadf_note = f"{gsadf_src_note} (wild-bootstrap CVs)"
         else:
             raw.gsadf_note = "GSADF not computable (R/exuber unavailable or failed)"
     else:
@@ -412,6 +426,21 @@ def gather_inputs() -> RawInputs:
             raw.hy_oas_note = "own history table; FRED 3yr truncation"
             if not r:
                 raw.hy_oas_note += "; FRED unavailable, serving persisted history (stale)"
+
+    # Long BAA-DGS10 credit-spread proxy (monthly, 1997+) for the S5 long-history
+    # percentile — both FRED series are decades-deep and NOT ICE-truncated.
+    def _baa_spread() -> list[float]:
+        baa = dict(fred_src.observations("BAA"))
+        dgs = dict(fred_src.observations("DGS10"))
+        common = sorted(set(baa) & set(dgs))
+        if len(common) < 24:
+            raise RuntimeError(f"baa spread: only {len(common)} aligned months")
+        raw.baa_spread_as_of = common[-1]
+        return [(baa[d] - dgs[d]) * 100.0 for d in common]  # % -> bps
+
+    sp = _track(raw, "fred_baa_dgs10", _baa_spread)
+    if sp:
+        raw.baa_spread_history_bps = sp
 
     r = _track(raw, "breadth", breadth_src.pct_above_200dma)
     if r:
@@ -575,8 +604,24 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                        note=s4_note, as_of=raw.semis_as_of)
 
     # ---- S5 credit ----
-    if raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
-        # LSSZ t-2 horizon: score the spread AS OF ~2 years ago, not today.
+    if raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
+        # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
+        # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
+        # own percentile is regime-limited; the Baa spread goes back to 1997.
+        spread_t2 = s5_credit.t_minus_2_value(raw.baa_spread_history_bps, lag_obs=24)
+        sub = s5_credit.sub_score_t2(raw.baa_spread_history_bps, lag_obs=24)
+        sub_s["s5"] = sub
+        mc_in.s5_sub = sub
+        yrs = len(raw.baa_spread_history_bps) / 12.0
+        s5_note = (f"t-2yr credit-sentiment horizon (LSSZ 2017) on the BAA-DGS10 long proxy: "
+                   f"inverted percentile of the t-2 spread (~{round(spread_t2)}bps) over "
+                   f"{len(raw.baa_spread_history_bps)} months (~{yrs:.0f}y); HY OAS is "
+                   "FRED-truncated to 3yr, so the long proxy is used for the percentile")
+        indicators["s5"] = IndicatorOutput("s5", spread_t2, sub, False,
+                                           "fred_BAA_DGS10", True, note=s5_note,
+                                           as_of=raw.baa_spread_as_of)
+    elif raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
+        # FALLBACK: HY-OAS t-2 over the (regime-limited) accrued 3yr history.
         oas_t2 = s5_credit.t_minus_2_value(raw.hy_oas_history_bps)
         sub = s5_credit.sub_score_t2(raw.hy_oas_history_bps)
         sub_s["s5"] = sub
@@ -584,8 +629,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         yrs = len(raw.hy_oas_history_bps) / 252.0
         depth_note = (f"t-2yr credit-sentiment horizon (LSSZ 2017): inverted percentile of the "
                       f"t-2 spread (~{round(oas_t2)}bps) over {len(raw.hy_oas_history_bps)} days "
-                      f"(~{yrs:.1f}y) of accrued history; regime-limited until a longer history "
-                      "(or a Baa-spread proxy) accrues")
+                      f"(~{yrs:.1f}y) of accrued history; regime-limited (Baa proxy unavailable)")
         s5_note = f"{raw.hy_oas_note}; {depth_note}" if raw.hy_oas_note else depth_note
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
                                            "fred_BAMLH0A0HYM2", False, note=s5_note,

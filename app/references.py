@@ -770,14 +770,14 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "detail": "If the price chain falls through to Alpha Vantage, closes are split/dividend "
      "unadjusted (acceptable for short-window ETF math; flagged in provenance).",
      "ref": "sources.prices"},
-    {"id": "gsadf-small-sample", "severity": "warn", "category": "calibration",
-     "title": "GSADF runs on a short monthly sample (T may be < 100)",
-     "detail": "PSY finite-sample critical values are tabulated from T=100; on the ~monthly "
-     "QQQ-proxy series T can be well below that, so the raw GSADF statistic is not reliably "
-     "calibrated. s4 is capped at the contested 0.25 regardless, so this does NOT move the "
-     "headline. Recommended (host-verified) upgrade: fetch extended Tiingo history (QQQ from "
-     "1999 -> T>=300) and use wild-bootstrap critical values (exuber radf_wb_cv, Harvey et al. "
-     "2016) instead of radf_mc_cv.",
+    {"id": "gsadf-wb-cv", "severity": "info", "category": "calibration",
+     "title": "GSADF now uses extended history + wild-bootstrap CVs (verify on host)",
+     "detail": "v3.3.0 feeds an extended Tiingo monthly history (QQQ from 1999, T~329, past the "
+     "PSY T=100 tabulation floor) and switched exuber to wild-bootstrap critical values "
+     "(radf_wb_cv, Harvey et al. 2016; robust to the serial-correlation oversizing of "
+     "Pedersen-Schutte 2020). s4 is still capped at the contested 0.25, so this does not move "
+     "the headline — it only makes the displayed statistic honest. The R path degrades to the "
+     "0.25 floor if exuber errors; smoke-test on the host after deploy.",
      "ref": "indicator s4"},
 ]
 

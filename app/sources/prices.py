@@ -528,6 +528,40 @@ def get_daily_closes(canonical: str) -> SourceResult:
     raise SourceError(f"price chain exhausted for {canonical}: " + "; ".join(errors))
 
 
+def fetch_tiingo_monthly(canonical: str, start_date: str = "1999-01-01") -> list[tuple[str, float]]:
+    """Long MONTHLY adjusted-close history for one symbol via Tiingo.
+
+    Feeds the S4 GSADF calibration, which needs T >= 100 (PSY finite-sample
+    critical-value tables start at T=100). QQQ goes back to 1999-03 (T ~ 329).
+    Raises ProviderNotConfigured when no Tiingo key is set (GSADF then runs on
+    the recompute's shorter series)."""
+    settings = get_settings()
+    if not settings.tiingo_api_key:
+        raise ProviderNotConfigured("tiingo: no TIINGO_API_KEY configured")
+    vendor, _ = resolve_symbol(canonical, "tiingo")
+    with httpx.Client(timeout=TIMEOUT) as client:
+        resp = client.get(
+            f"https://api.tiingo.com/tiingo/daily/{vendor}/prices",
+            params={"startDate": start_date, "resampleFreq": "monthly",
+                    "token": settings.tiingo_api_key})
+    if resp.status_code == 429:
+        raise RateLimited(f"tiingo monthly {vendor}: HTTP 429")
+    resp.raise_for_status()
+    payload = resp.json()
+    if not isinstance(payload, list):
+        raise ProviderError(f"tiingo monthly {vendor}: non-list body")
+    rows: list[tuple[str, float]] = []
+    for item in payload:
+        try:
+            rows.append((str(item["date"])[:10], float(item["adjClose"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(rows) < 100:
+        raise ProviderError(f"tiingo monthly {vendor}: only {len(rows)} rows")
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
 def parse_polygon_grouped(payload: dict) -> dict[str, float]:
     """Polygon/Massive grouped-daily JSON -> {TICKER: close}.
 

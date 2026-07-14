@@ -153,6 +153,23 @@ class TestS5TMinus2Lag:
         assert t2 < contemporaneous
 
 
+class TestS5BaaProxy:
+    def test_baa_proxy_preferred_and_t_minus_2(self, isolated_db):
+        from app.indicators import s5_credit
+        from app.services.compute import compute_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        raw.baa_spread_history_bps = [float(150 + (i % 100)) for i in range(300)]  # 25y monthly
+        raw.baa_spread_as_of = "2026-06-01"
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711)
+        s5 = data.indicators["s5"]
+        assert s5.data_source == "fred_BAA_DGS10"   # long proxy preferred over HY-OAS
+        assert not s5.dropped
+        # value shown = the 24-month-lagged spread
+        assert s5.value == s5_credit.t_minus_2_value(raw.baa_spread_history_bps, lag_obs=24)
+
+
 class TestVrpUnits:
     def test_fast_alarm_exposes_units_and_sanity(self):
         from app.engine.legs import fast_alarm
