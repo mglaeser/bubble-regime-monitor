@@ -172,6 +172,7 @@ class RawInputs:
     hyperscaler_as_of: str | None = None
 
     lppls_confidence: float | None = None
+    lppls_result: dict | None = None   # tri-state {state, value, n_windows_*, n_closes}
     lppls_note: str | None = None
     lppls_as_of: str | None = None
 
@@ -434,17 +435,27 @@ def gather_inputs() -> RawInputs:
 
     # LPPLS confidence (subprocess-isolated; drop-and-renormalize on failure,
     # including native crashes on CPUs below the scipy/sklearn wheel baseline).
-    def _lppls() -> float:
+    def _lppls() -> dict:
         closes = [c for _, c in ndx.value][-756:] if ndx else []
         if len(closes) < 500:
             raise RuntimeError(f"insufficient price history (N={len(closes)})")
         settings = get_settings()
         log.info("lppls_fit_start", n=len(closes), timeout_s=settings.lppls_timeout_s)
-        return d4_lppls.compute_confidence_isolated(closes, timeout_s=settings.lppls_timeout_s)
+        result = d4_lppls.compute_confidence_isolated(closes, timeout_s=settings.lppls_timeout_s)
+        # Tri-state: a FIT_FAILED / INSUFFICIENT_DATA result raises here so the
+        # "lppls" source is recorded unhealthy AND d4 drops. VALID / VALID_ZERO
+        # keep d4 alive (an auditable zero, never a silent one).
+        if result["state"] in ("FIT_FAILED", "INSUFFICIENT_DATA"):
+            raise RuntimeError(
+                f"LPPLS {result['state']}: {result.get('reason', '')} "
+                f"({result['n_windows_qualifying']}/{result['n_windows_evaluated']} "
+                f"windows, N={result['n_closes']})".strip())
+        return result
 
     r = _track(raw, "lppls", _lppls)
     if r is not None:
-        raw.lppls_confidence = r
+        raw.lppls_result = r
+        raw.lppls_confidence = r["value"]
         raw.lppls_as_of = ndx.provenance.as_of if ndx else today
     else:
         cause = raw.gather_errors.get("lppls", "unknown cause")
@@ -642,8 +653,15 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = d4_lppls.sub_score(raw.lppls_confidence)
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
+        res = raw.lppls_result or {}
+        # Surface the tri-state + window counts so a genuine zero is auditable
+        # (state=VALID_ZERO with >0 windows) rather than an ambiguous 0.0.
+        d4_note = (f"LPPLS {res.get('state', 'VALID')}: "
+                   f"{res.get('n_windows_qualifying', '?')}/{res.get('n_windows_evaluated', '?')} "
+                   f"windows qualifying, N={res.get('n_closes', '?')}")
         indicators["d4"] = IndicatorOutput("d4", raw.lppls_confidence, sub, False,
-                                           "lppls==0.6.24", False, as_of=raw.lppls_as_of)
+                                           "lppls==0.6.24", False, note=d4_note,
+                                           as_of=raw.lppls_as_of)
     else:
         indicators["d4"] = IndicatorOutput("d4", None, None, True, "lppls==0.6.24", False,
                                            note=raw.lppls_note or "LPPLS dropped; Block D renormalized")

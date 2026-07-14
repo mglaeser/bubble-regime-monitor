@@ -43,11 +43,13 @@ class TestLPPLSApi:
         # the broken list-of-condition_1 form must not reappear
         assert "condition_1" not in src
 
-    def test_requires_500_closes_and_logs_n(self):
+    def test_requires_500_closes_returns_insufficient_data(self):
         from app.indicators import d4_lppls
 
-        with pytest.raises(ValueError, match="insufficient price history"):
-            d4_lppls.compute_confidence([100.0] * 499)
+        result = d4_lppls.compute_confidence([100.0] * 499)
+        assert result["state"] == "INSUFFICIENT_DATA"
+        assert result["value"] is None
+        assert result["n_closes"] == 499
 
     def test_confidence_aggregator(self):
         from app.indicators import d4_lppls

@@ -91,11 +91,23 @@ def _confidence_from_indicators(pos_conf: list[float]) -> float:
     return max(0.0, min(1.0, sum(tail) / len(tail)))
 
 
-def compute_confidence(daily_closes: list[float]) -> float:
-    """Fit LPPLS nested windows on 2-3 yr of daily closes; return confidence.
+def compute_confidence(daily_closes: list[float]) -> dict:
+    """Fit LPPLS nested windows and return a TRI-STATE result (Defect 3):
 
-    Raises on any failure so the caller DROPS the indicator and renormalizes
-    Block D (never a neutral placeholder). Requires the pinned lppls==0.6.24.
+        {state, value, n_windows_evaluated, n_windows_qualifying, n_closes}
+
+    state is one of:
+      - "VALID"            confidence > 0, computed cleanly (n_windows_evaluated>0)
+      - "VALID_ZERO"       confidence == 0 but genuinely evaluated (>0 windows) —
+                           an AUDITABLE zero, NOT a silent failure
+      - "INSUFFICIENT_DATA" fewer than MIN_CLOSES closes (no fit attempted)
+      - "FIT_FAILED"       fit produced no windows / an empty result
+
+    This makes a legitimate zero distinguishable from a broken pipeline (the old
+    contract returned a bare 0.0 that was indistinguishable from failure).
+    Single-scale only: the multi-scale (120/30 + 250/60 + 500/120) design would
+    triple the compute and blow the Atom N2800 subprocess timeout.
+    Requires the pinned lppls==0.6.24.
     """
     import numpy as np
     from lppls import lppls as lppls_mod
@@ -106,7 +118,8 @@ def compute_confidence(daily_closes: list[float]) -> float:
     n = len(daily_closes)
     if n < MIN_CLOSES:  # log N explicitly so a data shortfall is never again
         # mistaken for a code fault (that confusion is exactly what happened).
-        raise ValueError(f"insufficient price history (N={n}; need >= {MIN_CLOSES})")
+        return {"state": "INSUFFICIENT_DATA", "value": None,
+                "n_windows_evaluated": 0, "n_windows_qualifying": 0, "n_closes": n}
     log.info("lppls_fit", n=n, workers=LPPLS_WORKERS, window_size=LPPLS_WINDOW_SIZE,
              outer_increment=LPPLS_OUTER_INCREMENT)
 
@@ -128,38 +141,51 @@ def compute_confidence(daily_closes: list[float]) -> float:
     # Step 2: qualify fits -> per-window positive/negative-bubble confidence.
     indicators = model.compute_indicators(res, filter_conditions_config=FILTER_CONDITIONS)
     pos_conf = [float(v) for v in indicators["pos_conf"].tolist()]
-    return _confidence_from_indicators(pos_conf)
+    n_eval = len(pos_conf)
+    if n_eval == 0:
+        return {"state": "FIT_FAILED", "value": None,
+                "n_windows_evaluated": 0, "n_windows_qualifying": 0, "n_closes": n}
+    n_qual = sum(1 for c in pos_conf if c > 0.0)
+    value = _confidence_from_indicators(pos_conf)
+    return {"state": "VALID_ZERO" if value == 0.0 else "VALID", "value": value,
+            "n_windows_evaluated": n_eval, "n_windows_qualifying": n_qual, "n_closes": n}
 
 
-def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800) -> float:
-    """Run the LPPLS fit in a SUBPROCESS and return the confidence.
+def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800) -> dict:
+    """Run the LPPLS fit in a SUBPROCESS and return the TRI-STATE result dict.
 
     Isolation exists because the lppls dependency stack (scipy, scikit-learn,
     numba) ships native wheels that can die with SIGILL on CPUs below their
     build baseline (e.g. pre-SSE4.2 Atoms) — an uncatchable in-process crash.
-    In a subprocess, any crash/timeout surfaces as an exception here, and the
-    caller drops D4 and renormalizes Block D (epistemic guardrail #5).
+    A crash or timeout is mapped to a {state: "FIT_FAILED"} result here, so the
+    caller can treat it uniformly with an empty-window fit (drop D4 and
+    renormalize Block D — epistemic guardrail #5).
     """
     import json
     import subprocess
     import sys
 
-    proc = subprocess.run(
-        [sys.executable, "-m", "app.indicators.d4_lppls"],
-        input=json.dumps({"closes": daily_closes}),
-        capture_output=True, text=True, timeout=timeout_s,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"LPPLS subprocess failed rc={proc.returncode}: {proc.stderr.strip()[-300:]}"
+    def _failed(reason: str) -> dict:
+        return {"state": "FIT_FAILED", "value": None, "n_windows_evaluated": 0,
+                "n_windows_qualifying": 0, "n_closes": len(daily_closes), "reason": reason[-200:]}
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "app.indicators.d4_lppls"],
+            input=json.dumps({"closes": daily_closes}),
+            capture_output=True, text=True, timeout=timeout_s,
         )
+    except subprocess.TimeoutExpired:
+        return _failed(f"subprocess timed out after {timeout_s}s")
+    if proc.returncode != 0:
+        return _failed(f"subprocess rc={proc.returncode}: {proc.stderr.strip()[-200:]}")
     # lppls prints fit exceptions to stdout (lppls.py:960) from forked workers,
     # so stdout is NOT pure JSON. The result is framed with a sentinel and is
     # the last line the parent writes (after the Pool joins) — parse that line.
     for line in reversed(proc.stdout.splitlines()):
         if line.startswith(_RESULT_SENTINEL):
-            return float(json.loads(line[len(_RESULT_SENTINEL):])["confidence"])
-    raise RuntimeError(f"LPPLS subprocess produced no result line: {proc.stdout.strip()[-300:]}")
+            return json.loads(line[len(_RESULT_SENTINEL):])
+    return _failed(f"no result line: {proc.stdout.strip()[-200:]}")
 
 
 if __name__ == "__main__":
@@ -172,8 +198,12 @@ if __name__ == "__main__":
     _real_stdout = _sys.stdout
     _sys.stdout = _sys.stderr
     try:
-        _conf = compute_confidence(_payload["closes"])
+        _result = compute_confidence(_payload["closes"])
+    except Exception as _exc:  # any in-process fit exception -> auditable FIT_FAILED
+        _result = {"state": "FIT_FAILED", "value": None, "n_windows_evaluated": 0,
+                   "n_windows_qualifying": 0, "n_closes": len(_payload["closes"]),
+                   "reason": repr(_exc)[-200:]}
     finally:
         _sys.stdout = _real_stdout
-    _sys.stdout.write(f"{_RESULT_SENTINEL}{_json.dumps({'confidence': _conf})}\n")
+    _sys.stdout.write(f"{_RESULT_SENTINEL}{_json.dumps(_result)}\n")
     _sys.stdout.flush()
