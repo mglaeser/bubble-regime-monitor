@@ -635,6 +635,20 @@ CHANGELOG: list[dict[str, str]] = [
         "proxy 0.5 / HY-OAS-3yr 0.3; d4 1.0 full scan, 0.5 partial (<100 windows), 0.0 FLOOR; d1 "
         "stays n/503. (4) machine-readable `state` field added to the indicator payload.",
     },
+    {
+        "version": "v3.4.0",
+        "score": "Dashboard feed added — METHODOLOGY UNCHANGED",
+        "notes": "New read-only GET /api/v1/dashboard/feed for the companion Crisis-Winners "
+        "dashboard (DASHBOARD_FEED_SPEC.md): 12 monthly series (61 points each, t-60..t0, "
+        "explicit nulls, honest `kind` labels — QQQ/GLD/SLV/IEF/BIL ETF proxies stated, Fed "
+        "Broad Dollar Index explicitly NOT ICE DXY) + 34 scalar metrics with per-item "
+        "value/unit/as_of/source/available/stale. Built once per recompute AFTER the score "
+        "persists (a feed failure never touches scoring); per-item degradation to "
+        "available:false, 503 only before the first payload, Cache-Control max-age=900. "
+        "New sources are non-scoring additions on already-keyed providers (Tiingo GLD/SLV/"
+        "IEF/BIL, Twelve Data BTC/XAU/XAG/FX scalars, FRED FX/rates/MMF). Score computation, "
+        "weights, and all indicator methodology are untouched.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
@@ -862,7 +876,7 @@ SCORE_EXAMPLE: dict = {
                           "stale": False, "error_class": None},
     },
     "meta": {
-        "computed_at": "2026-07-11T06:00:03+00:00", "service_version": "3.3.2",
+        "computed_at": "2026-07-11T06:00:03+00:00", "service_version": "3.4.0",
         "coverage": {"S": {"coverage": 1.0, "degraded": False},
                      "D": {"coverage": 1.0, "degraded": False}, "degraded": False},
         "disclaimer": "Research, not advice.",

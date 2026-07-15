@@ -989,5 +989,13 @@ def run_recompute() -> int | None:
         export_parquet(snap_id)
     except Exception as exc:
         log.warning("parquet_export_failed", error=str(exc))
+    # Dashboard feed (v3.4.0): built strictly AFTER the score persists — a feed
+    # failure can never affect scoring; the endpoint then serves the prior payload.
+    try:
+        from app.services.dashboard_feed import build_and_persist_feed
+
+        build_and_persist_feed(raw, data)
+    except Exception as exc:
+        log.warning("dashboard_feed_failed", error=str(exc)[:300])
     log.info("recompute_done", snapshot_id=snap_id, median=data.median, band=data.action_band)
     return snap_id
