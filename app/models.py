@@ -156,3 +156,16 @@ class FalsificationOutcome(Base):
     criterion: Mapped[str] = mapped_column(Text)
     tripped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DashboardFeed(Base):
+    """Cached dashboard-feed payload (v3.4.0, DASHBOARD_FEED_SPEC.md): the full
+    series+metrics JSON assembled once per recompute (AFTER the score persists)
+    and served verbatim by GET /api/v1/dashboard/feed — endpoints never pull
+    upstream on request. Only the newest ~14 rows are retained."""
+
+    __tablename__ = "dashboard_feed"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[str] = mapped_column(Text)  # JSON: {anchor_month, anchor_partial, series, metrics}

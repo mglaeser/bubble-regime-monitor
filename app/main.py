@@ -84,7 +84,7 @@ def create_app() -> FastAPI:
 
     from slowapi import _rate_limit_exceeded_handler
 
-    from app.routers import admin, health, indicators, legs, meta, score, status
+    from app.routers import admin, dashboard, health, indicators, legs, meta, score, status
     from app.security import limiter
 
     app.state.limiter = limiter
@@ -116,6 +116,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(admin.router)
     app.include_router(status.router)
+    app.include_router(dashboard.router)
     return app
 
 

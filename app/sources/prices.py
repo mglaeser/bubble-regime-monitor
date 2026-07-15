@@ -186,8 +186,12 @@ def parse_tiingo(payload: object, symbol: str) -> list[tuple[str, float]]:
     return rows
 
 
-def parse_twelvedata(payload: dict, symbol: str) -> list[tuple[str, float]]:
-    """Twelve Data JSON -> [(date_iso, close)].
+def parse_twelvedata(payload: dict, symbol: str, min_rows: int = 50) -> list[tuple[str, float]]:
+    """Twelve Data JSON -> [(date_iso, close)], oldest first.
+
+    min_rows guards equity daily pulls against a silently-truncated response
+    (default 50); dashboard-feed scalar reads legitimately fetch outputsize=1
+    and pass min_rows=1.
 
     Error envelope: {"code":..., "message":..., "status":"error"} —
     429 = credits exhausted (minute or day), 403 = symbol not on plan
@@ -207,7 +211,7 @@ def parse_twelvedata(payload: dict, symbol: str) -> list[tuple[str, float]]:
             rows.append((str(item["datetime"])[:10], float(item["close"])))
         except (KeyError, TypeError, ValueError):
             continue
-    if len(rows) < 50:
+    if len(rows) < min_rows:
         raise ProviderError(f"twelvedata {symbol}: only {len(rows)} usable rows")
     rows.sort(key=lambda r: r[0])
     return rows
@@ -310,6 +314,27 @@ def fetch_twelvedata(canonical: str, outputsize: int = 800) -> tuple[list[tuple[
             return parse_twelvedata(resp.json(), vendor), vendor, True
         raise
     return rows, vendor, proxy
+
+
+def fetch_twelvedata_series(symbol: str, interval: str = "1day",
+                            outputsize: int = 61) -> list[tuple[str, float]]:
+    """Twelve Data time_series for an EXACT vendor symbol (no canonical/proxy
+    resolution) — supports forex pairs ("USD/JPY"), metals ("XAU/USD") and
+    crypto ("BTC/USD"), which the equity-oriented fetch_twelvedata path never
+    needs. Used by the dashboard feed (v3.4.0): BTC monthly series + fresh FX/
+    metal scalars. Same throttle and parser as the main adapter; raises the
+    usual ProviderNotConfigured / RateLimited / NotOnPlan / ProviderError."""
+    settings = get_settings()
+    if not settings.twelve_data_api_key:
+        raise ProviderNotConfigured("twelvedata: no TWELVE_DATA_API_KEY configured")
+    _td_throttle()
+    with httpx.Client(timeout=TIMEOUT) as client:
+        resp = client.get(
+            "https://api.twelvedata.com/time_series",
+            params={"symbol": symbol, "interval": interval, "outputsize": str(outputsize),
+                    "apikey": settings.twelve_data_api_key},
+        )
+    return parse_twelvedata(resp.json(), symbol, min_rows=1)
 
 
 def _daily_credits_left(body: dict) -> int | None:
