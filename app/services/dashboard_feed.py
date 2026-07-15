@@ -39,7 +39,10 @@ MONTHS = 61  # t-60 .. t0
 def _tiingo_monthly(canonical: str, start_date: str) -> list[tuple[str, float]]:
     from app.sources import prices as price_src
 
-    return price_src.fetch_tiingo_monthly(canonical, start_date=start_date)
+    # min_rows=24: the fetcher's default >=100-row guard is a GSADF-calibration
+    # requirement; a 61-month feed window legitimately returns ~61 rows (the
+    # 2026-07-15 live capture failed all six series on the default guard).
+    return price_src.fetch_tiingo_monthly(canonical, start_date=start_date, min_rows=24)
 
 
 def _fred_series(series_id: str) -> list[tuple[str, float]]:
@@ -106,6 +109,9 @@ def _stale(as_of: str | None, sla_days: int, today: date) -> bool | None:
 
 SLA_DAILY = 7       # daily market series
 SLA_FRED_FX = 10    # FRED H.10 posts weekly
+SLA_MONTHLY_BAR = 35  # TD 1month bars are DATED AT MONTH START (live capture:
+                      # the current partial bar reads "2026-07-01" mid-July),
+                      # so a 7d SLA would flag the freshest bar stale
 SLA_CAPE = 45
 SLA_FINRA = 75
 SLA_QUARTERLY = 120  # Z.1 MMF assets
@@ -166,17 +172,17 @@ def _unavailable(unit: str, source: str, note: str) -> dict[str, Any]:
 _TIINGO_SERIES = [
     # key, canonical, name, kind, unit, note
     ("qqq", "NDX", "NASDAQ-100 (QQQ ETF proxy, dividend-adjusted)", "total_return", "USD",
-     "QQQ ETF proxy — free tiers serve no raw index; dividend-adjusted close"),
+     "QQQ ETF proxy - free tiers serve no raw index; dividend-adjusted close"),
     ("spy", "SPY", "S&P 500 (SPY ETF proxy, dividend-adjusted)", "total_return", "USD",
      "dividend-adjusted close"),
     ("gold", "GLD", "Gold (GLD ETF proxy)", "price", "USD",
-     "GLD ETF proxy for spot gold (~0.40%/yr expense drag) — not spot"),
+     "GLD ETF proxy for spot gold (~0.40%/yr expense drag) - not spot"),
     ("silver", "SLV", "Silver (SLV ETF proxy)", "price", "USD",
-     "SLV ETF proxy for spot silver — not spot"),
+     "SLV ETF proxy for spot silver - not spot"),
     ("ust10y_tr", "IEF", "10Y US Treasuries TR (IEF ETF proxy, dividend-adjusted)",
-     "total_return", "USD", "IEF (7-10y Treasury ETF) dividend-adjusted close — TR proxy"),
+     "total_return", "USD", "IEF (7-10y Treasury ETF) dividend-adjusted close - TR proxy"),
     ("tbill3m_tr", "BIL", "3M T-bills / cash TR (BIL ETF proxy, dividend-adjusted)",
-     "total_return", "USD", "BIL (1-3mo T-bill ETF) dividend-adjusted close — TR proxy"),
+     "total_return", "USD", "BIL (1-3mo T-bill ETF) dividend-adjusted close - TR proxy"),
 ]
 _FRED_SERIES = [
     ("usdjpy", "DEXJPUS", "USD/JPY (Fed H.10)", "price", "JPY-per-USD",
@@ -184,7 +190,7 @@ _FRED_SERIES = [
     ("usdchf", "DEXSZUS", "USD/CHF (Fed H.10)", "price", "CHF-per-USD",
      "FRED H.10 posts weekly; as_of may lag a few business days", SLA_FRED_FX),
     ("usd_broad_index", "DTWEXBGS", "US dollar (Fed Broad Dollar Index)", "index", "index",
-     "Fed Broad Dollar Index (DTWEXBGS) — NOT ICE DXY (licensed, unavailable free)",
+     "Fed Broad Dollar Index (DTWEXBGS) - NOT ICE DXY (licensed, unavailable free)",
      SLA_FRED_FX),
     ("ust10y_yield", "DGS10", "10Y US Treasury yield", "yield", "pct", None, SLA_DAILY),
     ("tbill3m_yield", "DTB3", "3M T-bill yield", "yield", "pct", None, SLA_DAILY),
@@ -248,8 +254,9 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
 
     series["btc"] = _series_item(
         "btc", "Bitcoin (BTC/USD)", "price", "USD", "twelvedata:BTC/USD", months,
-        _fetch_btc, note="monthly closes; provider history is shorter than some "
-        "BTC price records — see btc_ath basis")
+        _fetch_btc, sla_days=SLA_MONTHLY_BAR,
+        note="monthly closes (bars dated at month start); provider history is "
+             "shorter than some BTC price records - see btc_ath basis")
 
     fred_cache: dict[str, list[tuple[str, float]] | None] = {}
     for key, sid, name, kind, unit, note, sla in _FRED_SERIES:
@@ -352,7 +359,7 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                 return _unavailable("USD", s["source"], f"spot failed ({err}); no ETF fallback")
             return _scalar(pts[-1]["value"], "USD", s["as_of"], s["source"],
                            sla_days=SLA_DAILY,
-                           note=f"{label} ETF close proxy — NOT spot (spot source failed)")
+                           note=f"{label} ETF close proxy - NOT spot (spot source failed)")
         return _fb
 
     def _fred_fx_fallback(sid: str, unit: str):
@@ -368,8 +375,16 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
 
     gs, ss = m["gold_spot"], m["silver_spot"]
     if gs["available"] and ss["available"] and ss["value"]:
-        spot_basis = "spot" if gs["source"].startswith("twelvedata") \
-            and ss["source"].startswith("twelvedata") else "ETF-close proxy"
+        gold_is_spot = gs["source"].startswith("twelvedata")
+        silver_is_spot = ss["source"].startswith("twelvedata")
+        if gold_is_spot and silver_is_spot:
+            spot_basis = "spot"
+        elif gold_is_spot or silver_is_spot:
+            # live reality on the free tier: XAU/USD is included, XAG/USD needs
+            # a paid TD plan -> gold=spot / silver=SLV close (see source field)
+            spot_basis = "mixed - one leg spot, one leg ETF close (see source)"
+        else:
+            spot_basis = "ETF-close proxy"
         m["gold_silver_ratio"] = _scalar(round(gs["value"] / ss["value"], 2), "ratio",
                                          min(gs["as_of"] or "", ss["as_of"] or "") or None,
                                          f"{gs['source']}/{ss['source']}", sla_days=SLA_DAILY,
@@ -393,7 +408,7 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
         m["btc_ath"] = _scalar(round(ath, 2), "USD", m["btc_spot"]["as_of"],
                                "twelvedata:BTC/USD", sla_days=SLA_DAILY,
                                note=f"max of provider MONTHLY closes since {btc_monthly[0][0][:7]} "
-                                    "and current spot — not a curated all-time record",
+                                    "and current spot - not a curated all-time record",
                                detail={"basis": "monthly_closes+spot",
                                        "coverage_start": btc_monthly[0][0][:7]})
         m["btc_drawdown_pct"] = _scalar(round((m["btc_spot"]["value"] / ath - 1.0) * 100.0, 2),
@@ -408,7 +423,7 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     usd_pairs = fred_cache.get("DTWEXBGS")
     m["usd_broad_index_level"] = _fred_scalar_from(
         usd_pairs, "index", "DTWEXBGS", SLA_FRED_FX,
-        note="Fed Broad Dollar Index — NOT ICE DXY")
+        note="Fed Broad Dollar Index - NOT ICE DXY")
     ytd = None
     if usd_pairs:
         last_d, last_v = usd_pairs[-1]
@@ -427,7 +442,7 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
         mmf = _fred_series("MMMFFAQ027S")
         m["mmf_total_assets_usd"] = _fred_scalar_from(
             mmf, "USD_mn", "MMMFFAQ027S", SLA_QUARTERLY,
-            note="Money market funds total financial assets, quarterly Z.1 — "
+            note="Money market funds total financial assets, quarterly Z.1 - "
                  "publication lags ~1 quarter")
     except Exception as exc:
         m["mmf_total_assets_usd"] = _unavailable("USD_mn", "fred:MMMFFAQ027S",
