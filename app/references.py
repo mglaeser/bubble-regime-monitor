@@ -590,6 +590,27 @@ CHANGELOG: list[dict[str, str]] = [
         "open (host-verified follow-up): GSADF extended history + wild-bootstrap CVs, and an "
         "S5 long-history Baa-spread proxy percentile.",
     },
+    {
+        "version": "v3.3.1",
+        "score": "Scientific-correctness remediation (no methodology change to the aggregation)",
+        "notes": "(1) S5 credit: PREFERRED input is now the Gilchrist-Zakrajsek Excess Bond "
+        "Premium (Fed FEDS Note, monthly 1973+) — the construct LSSZ (2017) actually build on; "
+        "the BAA-DGS10 proxy (which was not signal-equivalent to HY-OAS: ~220bps BAA sits near "
+        "its median while ~269bps HY-OAS sits near record tights) is demoted to fallback. "
+        "(2) S4 GSADF: cached Monte-Carlo critical values (radf_mc_cv, a function of n only) "
+        "replace the v3.3.0 per-call wild bootstrap that timed out on the Atom N2800 and "
+        "regressed s4 to NULL; s4 remains CONTESTED and capped at 0.25, so this is a "
+        "reliability fix, not a score change. R stderr now captured on timeout; the doubled "
+        "'GSADF not computable' note fixed. (3) S3: 5-day endpoint averaging on the 2yr run-up "
+        "removes a base-date-roll artifact (s3 moved ~12pp in 48h on an unchanged market). "
+        "(4) D4 LPPLS: note rewritten to state the value is the present-time confidence "
+        "(fraction of START-TIME windows qualifying at the recent endpoints, Sornette/Demos) "
+        "and that the n_qual/n_eval ENDPOINT counts are a separate diagnostic — so a 0 value "
+        "beside '6/40' is not a contradiction. The confidence DEFINITION is unchanged: an "
+        "external review proposed value = n_qual/n_eval, but that divides over endpoints, not "
+        "start-times, and is not the LPPLS-confidence definition. (5) verified the Monte Carlo "
+        "sampler remains live (non-degenerate, seed-sensitive).",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
@@ -817,7 +838,7 @@ SCORE_EXAMPLE: dict = {
                           "stale": False, "error_class": None},
     },
     "meta": {
-        "computed_at": "2026-07-11T06:00:03+00:00", "service_version": "3.3.0",
+        "computed_at": "2026-07-11T06:00:03+00:00", "service_version": "3.3.1",
         "coverage": {"S": {"coverage": 1.0, "degraded": False},
                      "D": {"coverage": 1.0, "degraded": False}, "degraded": False},
         "disclaimer": "Research, not advice.",

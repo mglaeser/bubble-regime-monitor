@@ -50,6 +50,53 @@ class TestGsadfNoteNotDoubled:
         assert "computable (GSADF not computable" not in note  # the old double-nest
 
 
+class TestFedEbpParser:
+    CSV = ("date,gz_spread,ebp\n"
+           "1973-01,1.20,0.30\n"
+           "1973-02,1.10,0.10\n"
+           "2008-10,5.90,3.41\n"
+           "2026-05,1.05,-0.39\n"
+           "2026-06,1.02,NA\n")  # trailing NA row must be skipped
+
+    def test_parses_date_ebp_pairs(self):
+        from app.sources.fed_ebp import _parse_ebp_csv
+
+        # 24-row minimum guard: pad with synthetic months, then check the real rows
+        pad = "".join(f"19{80+i:02d}-01,1.0,0.0\n" for i in range(24))
+        pairs = _parse_ebp_csv(self.CSV + pad)
+        d = dict(pairs)
+        assert d["2026-05"] == pytest.approx(-0.39)   # negative EBP preserved
+        assert "2026-06" not in d                      # NA skipped
+        assert pairs == sorted(pairs, key=lambda p: p[0])  # oldest first
+
+    def test_low_ebp_scores_high_fragility(self):
+        from app.indicators import s5_credit
+
+        # a long series mostly loose (~-0.4) with a couple of tight-credit spikes:
+        # the current low EBP should read as HIGH fragility (inverted percentile).
+        hist = [(-0.4 + (i % 5) * 0.05) for i in range(300)]
+        hist[-25] = -1.0  # t-2 (24 back) is very loose credit -> high fragility
+        assert s5_credit.sub_score_t2(hist, lag_obs=24) >= 0.8
+
+
+class TestS5PrefersEbp:
+    def test_ebp_history_is_preferred_over_baa(self, isolated_db):
+        from app.services.compute import compute_snapshot
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        # supply BOTH: EBP must win. EBP loose now (t-2 negative) -> high fragility.
+        raw.ebp_history = [(-0.3 + (i % 7) * 0.03) for i in range(360)]
+        raw.ebp_history[-25] = -1.05
+        raw.ebp_as_of = "2026-05"
+        raw.baa_spread_history_bps = [float(150 + (i % 100)) for i in range(300)]
+        raw.baa_spread_as_of = "2026-06-01"
+        data = compute_snapshot(raw, mc_samples=2000, mc_seed=20260711)
+        s5 = data.indicators["s5"]
+        assert s5.data_source == "fed_ebp"
+        assert not s5.dropped
+
+
 class TestMonteCarloIsLive:
     def test_distribution_is_non_degenerate(self, golden_mc_inputs):
         from app.engine.montecarlo import monte_carlo

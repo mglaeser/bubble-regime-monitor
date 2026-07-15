@@ -167,6 +167,11 @@ class RawInputs:
     baa_spread_history_bps: list[float] | None = None
     baa_spread_as_of: str | None = None
 
+    # Gilchrist-Zakrajsek Excess Bond Premium (pp, monthly, 1973+) — the credit-
+    # sentiment construct LSSZ (2017) actually build on; PREFERRED S5 input (v3.3.1).
+    ebp_history: list[float] | None = None
+    ebp_as_of: str | None = None
+
     breadth_pct: float | None = None
     breadth_n: int | None = None   # constituents resolved (for d1 quality = n/503)
     breadth_source: str = "constituents+twelvedata"
@@ -312,6 +317,7 @@ def gather_inputs() -> RawInputs:
     from app.sources import breadth as breadth_src
     from app.sources import cape as cape_src
     from app.sources import edgar as edgar_src
+    from app.sources import fed_ebp as fed_ebp_src
     from app.sources import finra as finra_src
     from app.sources import fred as fred_src
     from app.sources import ssga as ssga_src
@@ -445,6 +451,13 @@ def gather_inputs() -> RawInputs:
     sp = _track(raw, "fred_baa_dgs10", _baa_spread)
     if sp:
         raw.baa_spread_history_bps = sp
+
+    # Gilchrist-Zakrajsek Excess Bond Premium (monthly, 1973+) — PREFERRED S5
+    # input (v3.3.1). Free Fed CSV, no key; degrades to the BAA proxy on failure.
+    ebp = _track(raw, "fed_ebp", fed_ebp_src.fetch_ebp)
+    if ebp:
+        raw.ebp_history = [v for _, v in ebp]
+        raw.ebp_as_of = ebp[-1][0]
 
     r = _track(raw, "breadth", breadth_src.pct_above_200dma)
     if r:
@@ -608,7 +621,24 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                        note=s4_note, as_of=raw.semis_as_of)
 
     # ---- S5 credit ----
-    if raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
+    if raw.ebp_history and len(raw.ebp_history) >= 24:
+        # PREFERRED (v3.3.1): Gilchrist-Zakrajsek Excess Bond Premium — the exact
+        # credit-sentiment construct LSSZ (2017) build on. Monthly, 1973+, so the
+        # LSSZ t-2yr lag is 24 observations. inverted_percentile is sign-agnostic:
+        # a LOW/negative EBP (loose credit, high risk appetite) -> HIGH fragility.
+        ebp_t2 = s5_credit.t_minus_2_value(raw.ebp_history, lag_obs=24)
+        sub = s5_credit.sub_score_t2(raw.ebp_history, lag_obs=24)
+        sub_s["s5"] = sub
+        mc_in.s5_sub = sub
+        yrs = len(raw.ebp_history) / 12.0
+        s5_note = (f"t-2yr credit-sentiment horizon (LSSZ 2017) on the Gilchrist-Zakrajsek "
+                   f"Excess Bond Premium (Fed, 1973+): inverted percentile of the t-2 EBP "
+                   f"(~{ebp_t2:+.2f}pp) over {len(raw.ebp_history)} months (~{yrs:.0f}y). "
+                   "A low/negative EBP is loose credit / elevated sentiment = high fragility.")
+        indicators["s5"] = IndicatorOutput("s5", round(ebp_t2, 4), sub, False,
+                                           "fed_ebp", False, note=s5_note,
+                                           as_of=raw.ebp_as_of)
+    elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
         # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
         # own percentile is regime-limited; the Baa spread goes back to 1997.
@@ -721,11 +751,19 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
         res = raw.lppls_result or {}
-        # Surface the tri-state + window counts so a genuine zero is auditable
-        # (state=VALID_ZERO with >0 windows) rather than an ambiguous 0.0.
-        d4_note = (f"LPPLS {res.get('state', 'VALID')}: "
-                   f"{res.get('n_windows_qualifying', '?')}/{res.get('n_windows_evaluated', '?')} "
-                   f"windows qualifying, N={res.get('n_closes', '?')}")
+        # v3.3.1 note clarity: the VALUE is the present-time LPPLS confidence =
+        # the fraction of START-TIME windows qualifying at the most-recent
+        # endpoints (Sornette/Demos), smoothed over the last few fitting
+        # endpoints. The n_qual/n_eval counts are a SEPARATE diagnostic — how
+        # many of the evaluated ENDPOINTS showed any positive-bubble signal — so
+        # a value of 0 alongside "6/40" is NOT a contradiction: older endpoints
+        # qualified, the present ones do not, and confidence is a present reading.
+        d4_note = (
+            f"LPPLS {res.get('state', 'VALID')}: present-time confidence="
+            f"{(raw.lppls_confidence or 0.0):.3f} (fraction of start-time windows "
+            f"qualifying at the recent endpoints); {res.get('n_windows_qualifying', '?')}"
+            f"/{res.get('n_windows_evaluated', '?')} evaluated endpoints showed any "
+            f"positive-bubble signal, N={res.get('n_closes', '?')} closes")
         indicators["d4"] = IndicatorOutput("d4", raw.lppls_confidence, sub, False,
                                            "lppls==0.6.24", False, note=d4_note,
                                            as_of=raw.lppls_as_of)

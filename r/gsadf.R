@@ -1,17 +1,37 @@
 # GSADF via exuber (JSS 103(10), doi:10.18637/jss.v103.i10); exuber >= 1.1.0.
 # Contract: JSON {"series": [...]} on stdin -> {"gsadf", "cv90", "cv95"} on stdout.
 # NEVER hard-code the blog value 1.49 — that is a SADF critical value, not GSADF.
-# v3.3.0: WILD-BOOTSTRAP critical values (radf_wb_cv, Harvey et al. 2016) instead
-# of Monte-Carlo CVs — robust to serial correlation / non-stationary volatility,
-# which severely oversize PWY/PSY (Pedersen & Schutte 2020). CVs are computed on
-# the actual series, and the caller now feeds an extended monthly history (QQQ
-# from 1999, T ~ 329) so the statistic is calibrated (PSY tables start at T=100).
+#
+# v3.3.1: CACHED MONTE-CARLO critical values (radf_mc_cv) instead of the v3.3.0
+# per-call wild bootstrap (radf_wb_cv). radf_mc_cv depends ONLY on (n, minw) —
+# NOT on the observed data — so it is computed once and cached to disk; the wild
+# bootstrap re-ran a full recursive right-tailed regression set every call and
+# timed out on the Intel Atom N2800 at T~329 (s4 regressed to NULL). s4 is
+# CONTESTED and capped at 0.25 regardless, so this is a reliability fix, not a
+# score change. The statistic itself (rob$gsadf) is unchanged.
 library(exuber); library(jsonlite)
 
 inp <- fromJSON(file("stdin"))
 y   <- inp$series                      # numeric vector, monthly log prices
 r   <- radf(y, lag = 0)                # minw defaults to 0.01 + 1.8/sqrt(T)
-cv  <- radf_wb_cv(y, nboot = 999)      # wild-bootstrap, data-dependent CVs
+
+# Monte-Carlo CVs are data-independent (function of n + the default minw for that
+# n), so cache them by n. A cache miss computes once (~seconds) and persists.
+n         <- length(y)
+cache_dir <- Sys.getenv("GSADF_CV_CACHE", "/data/cv_cache")
+cv_path   <- file.path(cache_dir, sprintf("mc_cv_n%d.rds", n))
+cv <- NULL
+if (file.exists(cv_path)) {
+  cv <- tryCatch(readRDS(cv_path), error = function(e) NULL)
+}
+if (is.null(cv)) {
+  set.seed(20260711)
+  cv <- radf_mc_cv(n = n, nrep = 2000)
+  tryCatch({
+    dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+    saveRDS(cv, cv_path)
+  }, error = function(e) invisible(NULL))   # cache-write failure must not break the run
+}
 
 # Extract the GSADF statistic and simulated CVs across exuber API variants.
 extract_stat <- function(obj) {

@@ -51,6 +51,12 @@ def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfO
         log.warning("gsadf_run_failed", returncode=exc.returncode,
                     stdout=(exc.stdout or "")[-400:], stderr=(exc.stderr or "")[-400:])
         return None
+    except subprocess.TimeoutExpired as exc:
+        # Surface R's own stderr on a timeout too (was swallowed): distinguishes a
+        # genuinely slow fit from e.g. a package-load hang. (v3.3.1)
+        err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        log.warning("gsadf_run_timeout", timeout_s=timeout_s, stderr=err[-400:])
+        return None
     except Exception as exc:
         log.warning("gsadf_run_failed", error=str(exc))
         return None
