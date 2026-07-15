@@ -145,14 +145,20 @@ class TestD3:
 
 
 class TestD4:
-    def test_confidence_from_indicators_recent_mean(self):
-        # confidence = mean pos_conf over the most-recent windows (<= 8).
-        assert d4_lppls._confidence_from_indicators([1.0, 0.0, 0.0, 0.0]) == 0.25
-        assert d4_lppls._confidence_from_indicators([0.5]) == 0.5
-
     def test_bounds(self):
         assert d4_lppls.sub_score(1.5) == 1.0
         assert d4_lppls.sub_score(-0.1) == 0.0
+
+    def test_band_edges_cover_the_scan_range(self):
+        # v3.3.2: bands must tile [smallest_window, window_max] with no gap, so
+        # every fitted start-time window belongs to exactly one scale band.
+        lo = d4_lppls.LPPLS_BANDS[0][1]
+        hi = d4_lppls.LPPLS_BANDS[-1][2]
+        assert lo == d4_lppls.LPPLS_SMALLEST_WINDOW
+        assert hi == d4_lppls.LPPLS_WINDOW_MAX
+        for (_, _, a_hi), (_, b_lo, _) in zip(d4_lppls.LPPLS_BANDS,
+                                              d4_lppls.LPPLS_BANDS[1:], strict=False):
+            assert a_hi == b_lo  # contiguous
 
 
 class TestV:

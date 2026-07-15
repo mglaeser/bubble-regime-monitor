@@ -224,7 +224,14 @@ class IndicatorOutput:
     note: str | None = None
     as_of: str | None = None
     quality: float = 1.0   # in [0,1]; < 1 discounts this indicator's live weight
-                           # in the coverage gate (e.g. d1 from a partial universe)
+                           # in the coverage gate. v3.3.2 FIDELITY RULE: quality
+                           # measures fidelity to the indicator's construct, not
+                           # position in a fallback chain (a superior substitute
+                           # is not penalized for being a "fallback"); 0.0 means
+                           # nothing was measured (FLOOR / not computable).
+    state: str | None = None  # machine-readable indicator state where defined
+                              # (d4: VALID/VALID_ZERO/FLOOR/INSUFFICIENT_DATA;
+                              # s4: COMPUTED/FLOOR); None elsewhere
 
     @property
     def age_days(self) -> int | None:
@@ -255,6 +262,7 @@ class IndicatorOutput:
             "age_days": self.age_days,
             "stale": self.stale,
             "quality": round(self.quality, 4),
+            "state": self.state,
             "timestamp": datetime.now(UTC).isoformat(),
         }
         if self.note:
@@ -490,33 +498,37 @@ def gather_inputs() -> RawInputs:
         raw.hyperscalers, raw.hyperscaler_note = r.value, r.provenance.note
         raw.hyperscaler_as_of = r.provenance.as_of
 
-    # LPPLS confidence (subprocess-isolated; drop-and-renormalize on failure,
-    # including native crashes on CPUs below the scipy/sklearn wheel baseline).
+    # LPPLS confidence (subprocess-isolated). v3.3.2 FLOOR semantics: on
+    # timeout/crash/no-windows the result row STAYS in the payload (state=FLOOR,
+    # quality=0.0) but the value is excluded from the aggregation and Block D
+    # renormalizes — an uncomputed indicator never masquerades as a zero.
     def _lppls() -> dict:
-        closes = [c for _, c in ndx.value][-756:] if ndx else []
-        if len(closes) < 500:
+        closes = [c for _, c in ndx.value][-d4_lppls.LPPLS_WINDOW_MAX:] if ndx else []
+        if len(closes) < d4_lppls.MIN_CLOSES:
+            raw.lppls_result = {"state": "INSUFFICIENT_DATA", "value": None, "quality": 0.0,
+                                "n_windows_evaluated": 0, "n_windows_qualifying": 0,
+                                "n_closes": len(closes), "window": None, "bands": None}
             raise RuntimeError(f"insufficient price history (N={len(closes)})")
         settings = get_settings()
         log.info("lppls_fit_start", n=len(closes), timeout_s=settings.lppls_timeout_s)
         result = d4_lppls.compute_confidence_isolated(closes, timeout_s=settings.lppls_timeout_s)
-        # Tri-state: a FIT_FAILED / INSUFFICIENT_DATA result raises here so the
-        # "lppls" source is recorded unhealthy AND d4 drops. VALID / VALID_ZERO
-        # keep d4 alive (an auditable zero, never a silent one).
-        if result["state"] in ("FIT_FAILED", "INSUFFICIENT_DATA"):
+        raw.lppls_result = result  # kept even on failure — the FLOOR row needs it
+        # FLOOR / INSUFFICIENT_DATA raise so the "lppls" source is recorded
+        # unhealthy on the status page; VALID / VALID_ZERO keep d4 alive (an
+        # auditable zero, never a silent one).
+        if result["state"] in ("FLOOR", "INSUFFICIENT_DATA"):
             raise RuntimeError(
                 f"LPPLS {result['state']}: {result.get('reason', '')} "
-                f"({result['n_windows_qualifying']}/{result['n_windows_evaluated']} "
-                f"windows, N={result['n_closes']})".strip())
+                f"(N={result['n_closes']})".strip())
         return result
 
     r = _track(raw, "lppls", _lppls)
     if r is not None:
-        raw.lppls_result = r
         raw.lppls_confidence = r["value"]
         raw.lppls_as_of = ndx.provenance.as_of if ndx else today
     else:
         cause = raw.gather_errors.get("lppls", "unknown cause")
-        raw.lppls_note = f"LPPLS dropped ({cause}); Block D renormalized"
+        raw.lppls_note = f"LPPLS floored ({cause}); excluded from Block D, which renormalizes"
 
     r = _track(raw, "vix_term_structure", vix_src.term_structure_ratio)
     if r:
@@ -612,13 +624,22 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     sub_s["s4"] = s4_sub
     mc_in.s4_sub = s4_sub
     if raw.gsadf_stat is None or raw.gsadf_cv95 is None:
+        # v3.3.2 FLOOR semantics: the 0.25 stays in the aggregation (that is the
+        # documented contested/stale policy constant, unchanged), but quality=0.0
+        # tells the coverage gate — and the reader — that NOTHING was measured
+        # this run. A floored s4 must not report itself as a full-quality reading.
+        s4_state, s4_quality = "FLOOR", 0.0
         s4_note = "GSADF not computable this run; contested/stale floor applied"
         if raw.gsadf_note:
             s4_note += f" ({raw.gsadf_note})"
     else:
+        # Computed successfully. The contested CAP is epistemic policy, not a
+        # data-quality problem — a capped-but-measured s4 is a full-quality read.
+        s4_state, s4_quality = "COMPUTED", 1.0
         s4_note = raw.gsadf_note or f"GSADF_CONTESTED={str(contested).lower()}"
     indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False,
-                                       note=s4_note, as_of=raw.semis_as_of)
+                                       note=s4_note, as_of=raw.semis_as_of,
+                                       quality=s4_quality, state=s4_state)
 
     # ---- S5 credit ----
     if raw.ebp_history and len(raw.ebp_history) >= 24:
@@ -635,9 +656,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                    f"Excess Bond Premium (Fed, 1973+): inverted percentile of the t-2 EBP "
                    f"(~{ebp_t2:+.2f}pp) over {len(raw.ebp_history)} months (~{yrs:.0f}y). "
                    "A low/negative EBP is loose credit / elevated sentiment = high fragility.")
+        # FIDELITY quality (v3.3.2): EBP IS the LSSZ credit-sentiment construct.
         indicators["s5"] = IndicatorOutput("s5", round(ebp_t2, 4), sub, False,
                                            "fed_ebp", False, note=s5_note,
-                                           as_of=raw.ebp_as_of)
+                                           as_of=raw.ebp_as_of, quality=1.0)
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
         # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
@@ -651,9 +673,13 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                    f"inverted percentile of the t-2 spread (~{round(spread_t2)}bps) over "
                    f"{len(raw.baa_spread_history_bps)} months (~{yrs:.0f}y); HY OAS is "
                    "FRED-truncated to 3yr, so the long proxy is used for the percentile")
+        # FIDELITY quality 0.5 (v3.3.2): the BAA-DGS10 proxy is demonstrably NOT
+        # signal-equivalent to the credit-sentiment construct (a ~220bps BAA
+        # spread sits near its own median while ~269bps HY-OAS sits near record
+        # tights) — a usable but low-fidelity substitute.
         indicators["s5"] = IndicatorOutput("s5", spread_t2, sub, False,
                                            "fred_BAA_DGS10", True, note=s5_note,
-                                           as_of=raw.baa_spread_as_of)
+                                           as_of=raw.baa_spread_as_of, quality=0.5)
     elif raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
         # FALLBACK: HY-OAS t-2 over the (regime-limited) accrued 3yr history.
         oas_t2 = s5_credit.t_minus_2_value(raw.hy_oas_history_bps)
@@ -665,9 +691,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                       f"t-2 spread (~{round(oas_t2)}bps) over {len(raw.hy_oas_history_bps)} days "
                       f"(~{yrs:.1f}y) of accrued history; regime-limited (Baa proxy unavailable)")
         s5_note = f"{raw.hy_oas_note}; {depth_note}" if raw.hy_oas_note else depth_note
+        # FIDELITY quality 0.3 (v3.3.2): right construct family (a market credit
+        # spread) but the FRED-truncated 3yr window makes its percentile
+        # regime-limited — the weakest usable tier of the s5 chain.
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
                                            "fred_BAMLH0A0HYM2", False, note=s5_note,
-                                           as_of=raw.hy_oas_as_of)
+                                           as_of=raw.hy_oas_as_of, quality=0.3)
     else:
         indicators["s5"] = IndicatorOutput("s5", None, None, True, "fred_BAMLH0A0HYM2", False,
                                            note="HY OAS unavailable and no persisted history; dropped")
@@ -745,31 +774,42 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators["d3"] = IndicatorOutput("d3", None, None, True, "sec_edgar", False,
                                            note="EDGAR unavailable; dropped, Block D renormalized")
 
-    # ---- D4 LPPLS (drop-and-renormalize on failure; NEVER a placeholder) ----
+    # ---- D4 LPPLS (v3.3.2 single-endpoint dense scan; FLOOR on failure) ----
+    res = raw.lppls_result or {}
     if raw.lppls_confidence is not None:
         sub = d4_lppls.sub_score(raw.lppls_confidence)
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
-        res = raw.lppls_result or {}
-        # v3.3.1 note clarity: the VALUE is the present-time LPPLS confidence =
-        # the fraction of START-TIME windows qualifying at the most-recent
-        # endpoints (Sornette/Demos), smoothed over the last few fitting
-        # endpoints. The n_qual/n_eval counts are a SEPARATE diagnostic — how
-        # many of the evaluated ENDPOINTS showed any positive-bubble signal — so
-        # a value of 0 alongside "6/40" is NOT a contradiction: older endpoints
-        # qualified, the present ones do not, and confidence is a present reading.
+        # value = LPPLS confidence at t2=today: the fraction of START-TIME
+        # windows (dt 30..750d) qualifying at the single scanned endpoint
+        # (Sornette et al. 2015 / Demirer et al. 2019). With one endpoint,
+        # value == n_qualifying / n_evaluated by construction.
+        bands = res.get("bands") or {}
+        band_txt = ", ".join(
+            f"{k}={v['conf']:.2f}(n={v['n']})" if v and v.get("conf") is not None
+            else f"{k}=n/a" for k, v in bands.items()) if bands else "unavailable"
         d4_note = (
-            f"LPPLS {res.get('state', 'VALID')}: present-time confidence="
-            f"{(raw.lppls_confidence or 0.0):.3f} (fraction of start-time windows "
-            f"qualifying at the recent endpoints); {res.get('n_windows_qualifying', '?')}"
-            f"/{res.get('n_windows_evaluated', '?')} evaluated endpoints showed any "
-            f"positive-bubble signal, N={res.get('n_closes', '?')} closes")
+            f"LPPLS {res.get('state', 'VALID')}: confidence at t2=today = "
+            f"{res.get('n_windows_qualifying', '?')}/{res.get('n_windows_positive', '?')} "
+            f"positive-bubble start-time windows qualifying "
+            f"({res.get('n_windows_evaluated', '?')} fitted, dt 30-750d, single endpoint); "
+            f"scale bands [{band_txt}]; N={res.get('n_closes', '?')} closes")
         indicators["d4"] = IndicatorOutput("d4", raw.lppls_confidence, sub, False,
                                            "lppls==0.6.24", False, note=d4_note,
-                                           as_of=raw.lppls_as_of)
+                                           as_of=raw.lppls_as_of,
+                                           quality=float(res.get("quality", 1.0)),
+                                           state=res.get("state", "VALID"))
     else:
-        indicators["d4"] = IndicatorOutput("d4", None, None, True, "lppls==0.6.24", False,
-                                           note=raw.lppls_note or "LPPLS dropped; Block D renormalized")
+        # FLOOR / INSUFFICIENT_DATA: the row stays visible (state + reason +
+        # quality=0.0 for the coverage gate) but d4 is EXCLUDED from the
+        # geometric mean and Block D renormalizes — never a fabricated zero.
+        state = res.get("state") or "FLOOR"
+        reason = res.get("reason") or raw.gather_errors.get("lppls", "unknown cause")
+        indicators["d4"] = IndicatorOutput(
+            "d4", None, None, True, "lppls==0.6.24", False,
+            note=(f"LPPLS {state}: not computed this run ({reason}); row retained for "
+                  "audit, value excluded from aggregation, Block D renormalized"),
+            quality=0.0, state=state)
 
     # ---- V multiplier ----
     if raw.vix_ratio is not None:

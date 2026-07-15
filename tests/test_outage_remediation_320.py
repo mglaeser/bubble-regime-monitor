@@ -51,13 +51,29 @@ class TestLPPLSApi:
         assert result["value"] is None
         assert result["n_closes"] == 499
 
-    def test_confidence_aggregator(self):
+    def test_quality_rule_and_bands(self):
+        # v3.3.2 single-endpoint contract: quality from evaluated window count,
+        # bands partitioned from the library's own per-fit is_qualified flags.
         from app.indicators import d4_lppls
 
-        assert d4_lppls._confidence_from_indicators([1.0, 0.0, 0.0, 0.0]) == 0.25
-        assert d4_lppls._confidence_from_indicators([0.5]) == 0.5
-        with pytest.raises(ValueError):
-            d4_lppls._confidence_from_indicators([])
+        assert d4_lppls._quality(144) == 1.0
+        assert d4_lppls._quality(99) == 0.5
+        assert d4_lppls._quality(0) == 0.0
+
+        # bands normalize over POSITIVE-bubble windows (b < 0), like pos_conf:
+        # a b>0 window is excluded from the denominator; b<0 windows count.
+        fits = ([{"t1": 0.0, "t2": 40.0, "is_qualified": True, "b": -1.0}] +    # short: 1/1
+                [{"t1": 0.0, "t2": 100.0, "is_qualified": False, "b": -1.0}] * 3 +  # medium: 0/3
+                [{"t1": 0.0, "t2": 100.0, "is_qualified": True, "b": 1.0}] +    # medium neg-bubble: excluded
+                [{"t1": 0.0, "t2": 500.0, "is_qualified": True, "b": -1.0}] * 2)  # long: 2/2
+        bands = d4_lppls.band_fractions(fits)
+        assert bands["short"] == {"conf": 1.0, "n": 1}
+        assert bands["medium"] == {"conf": 0.0, "n": 3}   # the b>0 window not counted
+        assert bands["long"] == {"conf": 1.0, "n": 2}
+        # value == n_qual/n_positive by construction (same normalization)
+        assert d4_lppls._positive_qualified(fits) == (3, 6)
+        # schema surprise (no is_qualified/b) -> None, never a crash
+        assert d4_lppls.band_fractions([{"t1": 0.0, "t2": 40.0}]) is None
 
 
 class TestS3NoStooq:

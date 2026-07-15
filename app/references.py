@@ -425,20 +425,24 @@ REGISTRY: dict[str, Methodology] = {
         grounding="literature-grounded",
         block="D",
         what=(
-            "The Log-Periodic Power Law Singularity (LPPLS) confidence indicator on Nasdaq-100 and "
-            "SMH: the fraction of fitting windows whose calibrated parameters satisfy "
-            "bubble-consistency filters."
+            "The Log-Periodic Power Law Singularity (LPPLS) confidence indicator on the Nasdaq-100 "
+            "(QQQ proxy): the fraction of start-time fitting windows, at the present endpoint, whose "
+            "calibrated parameters satisfy bubble-consistency filters."
         ),
         how=(
-            "Use lppls PyPI 0.6.24 (PINNED). For each index, take daily closes over a 2-3-year "
-            "window and fit ln p(t) = A + B*(t_c - t)^m + C*(t_c - t)^m * cos(w*ln(t_c - t) - phi) "
-            "where t_c = critical (singularity) time, m = power-law exponent, w = log-periodic "
-            "angular frequency, A,B,C,phi = linear/phase parameters. Filter conditions: m in (0,1), "
-            "w in [4,25] (via mp_compute_nested_fits(..., filter_conditions_config={'m_min':0.0,"
-            "'m_max':1.0,'w_min':4.0,'w_max':25.0, ...})). confidence = fraction of fitting windows "
-            "passing the filters, scaled to [0,1]; sub_score = confidence. On computation failure "
-            "-> DROP the indicator and renormalize Block D weights (NEVER a neutral placeholder — "
-            "that was a v1 error)."
+            "Use lppls PyPI 0.6.24 (PINNED). v3.3.2 SINGLE-ENDPOINT DENSE SCAN: one fitting endpoint "
+            "t2 = the latest close; start times t1 shrink the window from 750 down to 30 trading "
+            "days in 5-day steps (~144 windows). Fit ln p(t) = A + B*(t_c - t)^m + C*(t_c - t)^m * "
+            "cos(w*ln(t_c - t) - phi); filter conditions m in (0,1), w in [4,25] (flat "
+            "filter_conditions_config dict; qualification via compute_indicators). confidence = "
+            "fraction of start-time windows passing the filters AT t2 (the library's per-endpoint "
+            "pos_conf; == n_qualifying/n_evaluated with a single endpoint); sub_score = confidence. "
+            "Three dt-band fractions (short 30-63d, medium 63-252d, long 252-750d) are partitioned "
+            "from the SAME fits as multi-scale diagnostics (payload only, never headline inputs). "
+            "States: VALID / VALID_ZERO (a computed zero ENTERS the aggregation) / "
+            "INSUFFICIENT_DATA / FLOOR (timeout/crash: row retained with quality=0.0, value "
+            "EXCLUDED from the aggregation and Block D renormalized — an uncomputed indicator "
+            "never masquerades as a zero, and NEVER a neutral placeholder — that was a v1 error)."
         ),
         why=(
             "The Johansen-Ledoit-Sornette LPPLS model formalizes a bubble as faster-than-exponential "
@@ -610,6 +614,26 @@ CHANGELOG: list[dict[str, str]] = [
         "external review proposed value = n_qual/n_eval, but that divides over endpoints, not "
         "start-times, and is not the LPPLS-confidence definition. (5) verified the Monte Carlo "
         "sampler remains live (non-degenerate, seed-sensitive).",
+    },
+    {
+        "version": "v3.3.2",
+        "score": "D4 METHOD CHANGE — values not comparable across the v3.3.0->v3.3.2 boundary",
+        "notes": "(1) D4 LPPLS redesigned to a SINGLE-ENDPOINT DENSE SCAN: one endpoint t2=today, "
+        "start-time windows dt 30-750 trading days in 5-day steps (~144 windows); confidence = "
+        "fraction qualifying at t2 (Sornette 2015 / Demirer 2019 definition — with one endpoint "
+        "this equals n_qualifying/n_evaluated, dissolving the earlier reviewer dispute). Replaces "
+        "the ~40-endpoint x <=120-day grid with a recent-endpoint mean: cheaper (~144 fits vs "
+        "~600) and examines 6x the scale range, so readings are NOT comparable to v3.3.0/1. "
+        "Three dt-band diagnostics (short/medium/long) partitioned from the same fits at zero "
+        "extra cost. (2) FLOOR semantics: on timeout/crash the d4 row STAYS in the payload "
+        "(state=FLOOR, quality=0.0) but is excluded from the aggregation (Block D renormalizes) — "
+        "an uncomputed indicator never masquerades as a confident zero; VALID_ZERO (a genuinely "
+        "computed zero) still enters the aggregation at full quality. s4 gains the same "
+        "state/quality treatment (FLOOR quality=0.0 when not computable; the 0.25 policy constant "
+        "in the aggregation is unchanged). (3) FIDELITY-BASED quality across indicators: quality "
+        "measures fidelity to the construct, not fallback-chain position — s5 EBP 1.0 / BAA-DGS10 "
+        "proxy 0.5 / HY-OAS-3yr 0.3; d4 1.0 full scan, 0.5 partial (<100 windows), 0.0 FLOOR; d1 "
+        "stays n/503. (4) machine-readable `state` field added to the indicator payload.",
     },
 ]
 
@@ -838,7 +862,7 @@ SCORE_EXAMPLE: dict = {
                           "stale": False, "error_class": None},
     },
     "meta": {
-        "computed_at": "2026-07-11T06:00:03+00:00", "service_version": "3.3.1",
+        "computed_at": "2026-07-11T06:00:03+00:00", "service_version": "3.3.2",
         "coverage": {"S": {"coverage": 1.0, "degraded": False},
                      "D": {"coverage": 1.0, "degraded": False}, "degraded": False},
         "disclaimer": "Research, not advice.",

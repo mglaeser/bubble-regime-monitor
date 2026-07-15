@@ -2,20 +2,41 @@
 
 WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["d4"]; summary:
 
-    lppls PyPI 0.6.24 (PINNED), mp_compute_nested_fits on the NDX/QQQ-proxy
-    daily closes over a 2-3 yr window; filters m in (0,1), w in [4,25];
-    confidence = positive-bubble confidence (pos_conf) from compute_indicators,
-    averaged over the most recent windows; sub_score = confidence.
-    On computation failure -> DROP the indicator and renormalize Block D
-    (NEVER a neutral placeholder — that was a v1 error).
+    lppls PyPI 0.6.24 (PINNED). v3.3.2 SINGLE-ENDPOINT DENSE SCAN: one fitting
+    endpoint t2 = today, start times t1 shrinking from dt=750 down to dt=30
+    trading days in steps of 5 (~144 windows); filters m in (0,1), w in [4,25].
+    confidence = fraction of start-time windows whose calibration passes the
+    filters AT THIS ENDPOINT (Sornette et al. 2015; Demirer et al. 2019) —
+    the library's per-endpoint pos_conf, reported as the scalar directly.
+    Three dt-band fractions (short 30-63 / medium 63-252 / long 252-750) are
+    partitioned from the SAME fits (Demirer 2019 multi-scale structure at zero
+    extra cost) and surfaced as payload diagnostics — never headline inputs.
 
-    lppls 0.6.24 API NOTE: filter_conditions_config is a FLAT dict[str, float]
-    (keys: m_min/m_max/w_min/w_max/O_min/D_min/tc_min_days/tc_max_days/
-    tc_min_frac/tc_max_frac) — passing the older list-of-{"condition_1": {...}}
-    form raises "filter_conditions_config must be a dict[str, float] or None".
+    Design note (v3.3.2): the previous grid slid ~40 endpoints of <=120-day
+    windows and averaged pos_conf over the most recent 5. A "now" gauge needs
+    the present endpoint only; sampling ONE endpoint densely is both cheaper
+    (~144 fits vs ~600) and examines 6x the scale range (dt up to 750 vs 120).
+    Values are therefore NOT comparable across the v3.3.0->v3.3.2 boundary.
+
+    lppls 0.6.24 API NOTE: filter_conditions_config is a FLAT dict[str, float];
     mp_compute_nested_fits returns RAW fits; qualification (is_qualified ->
-    pos_conf/neg_conf) is produced by compute_indicators, which must be called
-    separately. Getting either wrong is what silently broke D4.
+    pos_conf) is produced by compute_indicators, whose DataFrame also carries
+    the per-fit `_fits` dicts this module partitions into bands.
+
+    STATE CONTRACT (v3.3.2, supersedes the v3.3.0 tri-state):
+      VALID             computed, confidence > 0            quality 1.0 / 0.5
+      VALID_ZERO        computed, genuinely zero — a real   quality 1.0 / 0.5
+                        reading that ENTERS the aggregation
+      INSUFFICIENT_DATA < MIN_CLOSES closes, nothing fitted  quality 0.0
+      FLOOR             timeout / crash / no fit windows —   quality 0.0
+                        the row stays in the payload but the
+                        value is EXCLUDED from the geometric
+                        mean and Block D renormalizes; an
+                        uncomputed indicator must never
+                        masquerade as a confident zero
+    quality: 1.0 when >= LPPLS_MIN_WINDOWS_FULL_QUALITY start-time windows
+    were evaluated, 0.5 below that (partial history), 0.0 when nothing was
+    computed. quality feeds the coverage gate, never the score itself.
 
 CAVEAT (verbatim): LPPLS has documented false-alarm / too-early behavior; one
 published evaluation reports ~90% recall but ~29% precision (it fires often
@@ -54,24 +75,26 @@ FILTER_CONDITIONS: dict[str, float] = {
     "m_min": 0.0, "m_max": 1.0, "w_min": 4.0, "w_max": 25.0,
 }
 
-# Nested-fit parameters. Sized for the target host (Intel Atom N2800, 1.86 GHz,
-# workers pinned to 1). EMPIRICAL: outer_increment=8 measured ~87 s on a modern
-# core here but TIMED OUT past 600 s on the N2800 (the Atom is ~7-10x slower).
-# These lighter values measure ~64 s here -> ~500-640 s projected on the Atom.
-# LPPLS has a per-window overhead floor, so cutting fit-units has diminishing
-# returns; the real safety margin comes from the raised lppls_timeout_s (1500 s).
-# D4 is a weight-0.20 "noisy corroborator", so a coarser-but-completing fit is
-# strictly better than a perpetual timeout-drop. If it still times out on some
-# host it simply drops and Block D renormalizes.
+# Single-endpoint dense-scan parameters (v3.3.2). t2 = the latest close; start
+# times shrink the window from LPPLS_WINDOW_MAX down to LPPLS_SMALLEST_WINDOW
+# in LPPLS_INNER_INCREMENT-day steps -> ~144 start-time windows at ONE endpoint
+# (the library grid yields dt in {34, 39, ..., 749} for a 750-close window).
+# Atom N2800 budget: ~144 fits x max_searches=15 projects ~650-850 s (measured
+# against the v3.2 calibration of 675k point-searches ~ 64 s on a dev core,
+# Atom ~8x slower) — inside the 1500 s subprocess timeout with margin. Raise
+# max_searches only after a timed host run.
 LPPLS_WORKERS = 1
-LPPLS_WINDOW_SIZE = 120
-LPPLS_SMALLEST_WINDOW = 30
-LPPLS_OUTER_INCREMENT = 16
-LPPLS_INNER_INCREMENT = 6
+LPPLS_WINDOW_MAX = 750          # longest lookback fitted (trading days)
+LPPLS_SMALLEST_WINDOW = 30      # shortest stable window for a 7-parameter fit
+LPPLS_INNER_INCREMENT = 5       # dt grid step
 LPPLS_MAX_SEARCHES = 15
-# Average pos_conf over this many most-recent windows for the "current" reading.
-LPPLS_RECENT_WINDOWS = 5
+LPPLS_MIN_WINDOWS_FULL_QUALITY = 100  # fewer evaluated windows -> quality 0.5
 MIN_CLOSES = 500
+# dt bands (trading days) for the multi-scale diagnostics; long extends to the
+# scan maximum so every fitted window belongs to exactly one band.
+LPPLS_BANDS: tuple[tuple[str, int, int], ...] = (
+    ("short", 30, 63), ("medium", 63, 252), ("long", 252, 750),
+)
 # Frames the confidence result on the subprocess stdout (lppls prints fit
 # exceptions to stdout, so the result line must be unambiguously identifiable).
 _RESULT_SENTINEL = "LPPLSCONF:"
@@ -81,33 +104,67 @@ def sub_score(confidence: float) -> float:
     return max(0.0, min(1.0, confidence))
 
 
-def _confidence_from_indicators(pos_conf: list[float]) -> float:
-    """Current positive-bubble confidence = mean pos_conf over the most recent
-    LPPLS_RECENT_WINDOWS windows (smooths single-window noise). pos_conf is
-    already in [0, 1]; an all-zero tail is a legitimate 0.0 reading, not a drop."""
-    if not pos_conf:
-        raise ValueError("LPPLS produced no fit windows")
-    tail = pos_conf[-min(len(pos_conf), LPPLS_RECENT_WINDOWS):]
-    return max(0.0, min(1.0, sum(tail) / len(tail)))
+def _quality(n_windows_evaluated: int) -> float:
+    """Coverage-gate quality from the evaluated start-time window count:
+    full history -> 1.0; a shortened scan (< ~100 windows, i.e. < ~530 closes)
+    -> 0.5; nothing computed -> 0.0 (callers use the FLOOR/INSUFFICIENT paths)."""
+    if n_windows_evaluated <= 0:
+        return 0.0
+    return 1.0 if n_windows_evaluated >= LPPLS_MIN_WINDOWS_FULL_QUALITY else 0.5
+
+
+def _positive_qualified(fits: list[dict]) -> tuple[int, int] | None:
+    """(qualifying, positive) window counts using the SAME normalization as the
+    library's pos_conf: a window is 'positive-bubble' when b < 0, and confidence
+    = (qualified positive windows) / (positive windows). Returns None on a
+    schema surprise so the scalar path never depends on this."""
+    try:
+        pos = [bool(f["is_qualified"]) for f in fits if float(f["b"]) < 0.0]
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (sum(pos), len(pos))
+
+
+def band_fractions(fits: list[dict]) -> dict[str, dict[str, float | int]] | None:
+    """Partition confidence by window length dt = t2 - t1 into the LPPLS_BANDS
+    scales, using the SAME positive-bubble normalization as the headline
+    pos_conf (qualified-positive / positive within each band). Returns
+    {band: {"conf": frac|None, "n": positive-window count}}; None on a schema
+    surprise (the scalar path must never depend on this)."""
+    try:
+        rows = [(float(f["t2"]) - float(f["t1"]), bool(f["is_qualified"]), float(f["b"]))
+                for f in fits]
+    except (KeyError, TypeError, ValueError):
+        return None
+    out: dict[str, dict[str, float | int]] = {}
+    last = LPPLS_BANDS[-1][0]
+    for name, lo, hi in LPPLS_BANDS:
+        # positive-bubble windows in this dt band; top band inclusive of the max
+        pos = [q for dt, q, b in rows
+               if b < 0.0 and (lo <= dt <= hi if name == last else lo <= dt < hi)]
+        out[name] = {"conf": (sum(pos) / len(pos)) if pos else None, "n": len(pos)}
+    return out
+
+
+def _floor(n_closes: int, reason: str) -> dict:
+    return {"state": "FLOOR", "value": None, "quality": 0.0,
+            "n_windows_evaluated": 0, "n_windows_positive": 0, "n_windows_qualifying": 0,
+            "n_closes": n_closes, "window": None, "bands": None,
+            "reason": reason[-200:]}
 
 
 def compute_confidence(daily_closes: list[float]) -> dict:
-    """Fit LPPLS nested windows and return a TRI-STATE result (Defect 3):
+    """Fit ONE dense-scanned endpoint (t2 = the latest close) and return:
 
-        {state, value, n_windows_evaluated, n_windows_qualifying, n_closes}
+        {state, value, quality, n_windows_evaluated, n_windows_qualifying,
+         n_closes, window, bands[, reason]}
 
-    state is one of:
-      - "VALID"            confidence > 0, computed cleanly (n_windows_evaluated>0)
-      - "VALID_ZERO"       confidence == 0 but genuinely evaluated (>0 windows) —
-                           an AUDITABLE zero, NOT a silent failure
-      - "INSUFFICIENT_DATA" fewer than MIN_CLOSES closes (no fit attempted)
-      - "FIT_FAILED"       fit produced no windows / an empty result
-
-    This makes a legitimate zero distinguishable from a broken pipeline (the old
-    contract returned a bare 0.0 that was indistinguishable from failure).
-    Single-scale only: the multi-scale (120/30 + 250/60 + 500/120) design would
-    triple the compute and blow the Atom N2800 subprocess timeout.
-    Requires the pinned lppls==0.6.24.
+    value = the LPPLS confidence at t2: the fraction of start-time windows
+    (dt from LPPLS_SMALLEST_WINDOW to LPPLS_WINDOW_MAX) whose calibrated
+    parameters pass the DS-LPPLS filters — per Sornette et al. (2015) /
+    Demirer et al. (2019). With a single endpoint, value ==
+    n_windows_qualifying / n_windows_evaluated by construction.
+    States/quality per the module-header contract. Requires lppls==0.6.24.
     """
     from app.logging_conf import get_logger
 
@@ -117,60 +174,77 @@ def compute_confidence(daily_closes: list[float]) -> dict:
         # mistaken for a code fault (that confusion is exactly what happened).
         # A-02: this contract must hold WITHOUT the optional lppls engine, so the
         # length guard precedes the import (the INSUFFICIENT_DATA path fits nothing).
-        return {"state": "INSUFFICIENT_DATA", "value": None,
-                "n_windows_evaluated": 0, "n_windows_qualifying": 0, "n_closes": n}
+        return {"state": "INSUFFICIENT_DATA", "value": None, "quality": 0.0,
+                "n_windows_evaluated": 0, "n_windows_positive": 0, "n_windows_qualifying": 0,
+                "n_closes": n, "window": None, "bands": None}
 
     import numpy as np
     from lppls import lppls as lppls_mod
 
-    log.info("lppls_fit", n=n, workers=LPPLS_WORKERS, window_size=LPPLS_WINDOW_SIZE,
-             outer_increment=LPPLS_OUTER_INCREMENT)
+    window = min(n, LPPLS_WINDOW_MAX)
+    log.info("lppls_fit", n=n, window=window, workers=LPPLS_WORKERS,
+             inner_increment=LPPLS_INNER_INCREMENT, max_searches=LPPLS_MAX_SEARCHES)
 
-    time_idx = np.arange(n, dtype=float)
-    price = np.log(np.asarray(daily_closes, dtype=float))
+    # Feed EXACTLY `window` closes: the outer loop then has a single position,
+    # i.e. one endpoint t2 = today (probed against lppls 0.6.24: len(res) == 1).
+    tail = daily_closes[-window:]
+    time_idx = np.arange(window, dtype=float)
+    price = np.log(np.asarray(tail, dtype=float))
     model = lppls_mod.LPPLS(observations=np.array([time_idx, price]))
 
-    # Step 1: raw nested fits. filter_conditions_config is stored on the model
-    # here but qualification happens in compute_indicators (0.6.24 contract).
+    # Step 1: raw nested fits (start times shrink toward t2). filter config is
+    # stored on the model here but qualification happens in compute_indicators.
     res = model.mp_compute_nested_fits(
         workers=LPPLS_WORKERS,
-        window_size=min(n, LPPLS_WINDOW_SIZE),
+        window_size=window,
         smallest_window_size=LPPLS_SMALLEST_WINDOW,
-        outer_increment=LPPLS_OUTER_INCREMENT,
+        outer_increment=1,                       # single outer position anyway
         inner_increment=LPPLS_INNER_INCREMENT,
         max_searches=LPPLS_MAX_SEARCHES,
         filter_conditions_config=FILTER_CONDITIONS,
     )
-    # Step 2: qualify fits -> per-window positive/negative-bubble confidence.
+    # Step 2: qualification -> per-endpoint pos_conf; the `_fits` column carries
+    # the per-window is_qualified flags this module partitions into dt bands.
     indicators = model.compute_indicators(res, filter_conditions_config=FILTER_CONDITIONS)
-    pos_conf = [float(v) for v in indicators["pos_conf"].tolist()]
-    n_eval = len(pos_conf)
+    if len(indicators) == 0:
+        return _floor(n, "compute_indicators returned no rows")
+    row = indicators.iloc[-1]
+    fits = list(row["_fits"]) if "_fits" in indicators.columns else \
+        list((res[0] or {}).get("res") or [])
+    n_eval = len(fits)                       # total fit windows -> drives quality
     if n_eval == 0:
-        return {"state": "FIT_FAILED", "value": None,
-                "n_windows_evaluated": 0, "n_windows_qualifying": 0, "n_closes": n}
-    n_qual = sum(1 for c in pos_conf if c > 0.0)
-    value = _confidence_from_indicators(pos_conf)
-    return {"state": "VALID_ZERO" if value == 0.0 else "VALID", "value": value,
-            "n_windows_evaluated": n_eval, "n_windows_qualifying": n_qual, "n_closes": n}
+        return _floor(n, "no fit windows produced")
+    value = max(0.0, min(1.0, float(row["pos_conf"])))
+    bands = band_fractions(fits)
+    # Report the counts on the SAME denominator as `value` (positive-bubble
+    # windows, b < 0), so value == n_windows_qualifying / n_windows_positive
+    # exactly — no repeat of the "6/40 beside 0.0" inconsistency.
+    pq = _positive_qualified(fits)
+    if pq is not None:
+        n_qual, n_pos = pq
+    else:  # schema surprise: recover a consistent (qual, pos) from the ratio
+        n_pos, n_qual = n_eval, round(value * n_eval)
+    return {"state": "VALID_ZERO" if value == 0.0 else "VALID",
+            "value": value, "quality": _quality(n_eval),
+            "n_windows_evaluated": n_eval, "n_windows_positive": n_pos,
+            "n_windows_qualifying": n_qual, "n_closes": n,
+            "window": window, "bands": bands}
 
 
 def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800) -> dict:
-    """Run the LPPLS fit in a SUBPROCESS and return the TRI-STATE result dict.
+    """Run the LPPLS fit in a SUBPROCESS and return the state-dict result.
 
     Isolation exists because the lppls dependency stack (scipy, scikit-learn,
     numba) ships native wheels that can die with SIGILL on CPUs below their
     build baseline (e.g. pre-SSE4.2 Atoms) — an uncatchable in-process crash.
-    A crash or timeout is mapped to a {state: "FIT_FAILED"} result here, so the
-    caller can treat it uniformly with an empty-window fit (drop D4 and
-    renormalize Block D — epistemic guardrail #5).
+    A crash or timeout maps to state="FLOOR" (quality 0.0): the caller keeps
+    the payload row visible but EXCLUDES d4 from the aggregation and
+    renormalizes Block D — an uncomputed indicator must never masquerade as a
+    confident zero (v3.3.2 floor semantics; epistemic guardrail #5).
     """
     import json
     import subprocess
     import sys
-
-    def _failed(reason: str) -> dict:
-        return {"state": "FIT_FAILED", "value": None, "n_windows_evaluated": 0,
-                "n_windows_qualifying": 0, "n_closes": len(daily_closes), "reason": reason[-200:]}
 
     try:
         proc = subprocess.run(
@@ -179,16 +253,17 @@ def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800
             capture_output=True, text=True, timeout=timeout_s,
         )
     except subprocess.TimeoutExpired:
-        return _failed(f"subprocess timed out after {timeout_s}s")
+        return _floor(len(daily_closes), f"subprocess timed out after {timeout_s}s")
     if proc.returncode != 0:
-        return _failed(f"subprocess rc={proc.returncode}: {proc.stderr.strip()[-200:]}")
+        return _floor(len(daily_closes),
+                      f"subprocess rc={proc.returncode}: {proc.stderr.strip()[-200:]}")
     # lppls prints fit exceptions to stdout (lppls.py:960) from forked workers,
     # so stdout is NOT pure JSON. The result is framed with a sentinel and is
     # the last line the parent writes (after the Pool joins) — parse that line.
     for line in reversed(proc.stdout.splitlines()):
         if line.startswith(_RESULT_SENTINEL):
             return json.loads(line[len(_RESULT_SENTINEL):])
-    return _failed(f"no result line: {proc.stdout.strip()[-200:]}")
+    return _floor(len(daily_closes), f"no result line: {proc.stdout.strip()[-200:]}")
 
 
 if __name__ == "__main__":
@@ -202,10 +277,8 @@ if __name__ == "__main__":
     _sys.stdout = _sys.stderr
     try:
         _result = compute_confidence(_payload["closes"])
-    except Exception as _exc:  # any in-process fit exception -> auditable FIT_FAILED
-        _result = {"state": "FIT_FAILED", "value": None, "n_windows_evaluated": 0,
-                   "n_windows_qualifying": 0, "n_closes": len(_payload["closes"]),
-                   "reason": repr(_exc)[-200:]}
+    except Exception as _exc:  # any in-process fit exception -> auditable FLOOR
+        _result = _floor(len(_payload["closes"]), repr(_exc))
     finally:
         _sys.stdout = _real_stdout
     _sys.stdout.write(f"{_RESULT_SENTINEL}{_json.dumps(_result)}\n")

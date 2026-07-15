@@ -123,11 +123,13 @@ def test_entire_block_down_raises_cleanly(isolated_db):
 
 def test_lppls_subprocess_returns_failed_state_cleanly():
     """The isolated LPPLS runner converts any subprocess death (missing package,
-    SIGILL on old CPUs, timeout) or a short input into an AUDITABLE tri-state
-    dict — never an uncaught crash. The compute layer then raises on
-    FIT_FAILED / INSUFFICIENT_DATA -> drop + renormalize."""
+    SIGILL on old CPUs, timeout) or a short input into an AUDITABLE state dict —
+    never an uncaught crash. v3.3.2: failures map to FLOOR (quality 0.0) /
+    INSUFFICIENT_DATA; the compute layer keeps the payload row visible but
+    excludes d4 from the aggregation and renormalizes Block D."""
     from app.indicators.d4_lppls import compute_confidence_isolated
 
     result = compute_confidence_isolated([100.0 + i for i in range(400)], timeout_s=120)
-    assert result["state"] in ("FIT_FAILED", "INSUFFICIENT_DATA")
+    assert result["state"] in ("FLOOR", "INSUFFICIENT_DATA")
     assert result["value"] is None
+    assert result["quality"] == 0.0
