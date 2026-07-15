@@ -104,8 +104,14 @@ $ENGINE run --rm --env-file "$ENV_FILE" \
 # ---- 4. (re)create the container ----------------------------------------
 banner "(Re)creating container $CONTAINER"
 $ENGINE rm -f "$CONTAINER" >/dev/null 2>&1 || true
+# Hardening (audit B-12): drop ALL capabilities + forbid privilege escalation.
+# The app needs no capabilities (unprivileged port, plain file/network I/O).
+# NOTE: the image deliberately runs as container-root — under rootless Podman
+# that maps to the unprivileged invoking user, which is what keeps the /data
+# bind mount writable (an in-image USER broke it; see Containerfile note).
 $ENGINE run -d --name "$CONTAINER" \
   --env-file "$ENV_FILE" \
+  --cap-drop=ALL --security-opt no-new-privileges \
   -v "$(realpath "$DATA_DIR")":/data"$VOL_SUFFIX" \
   -p "$PORT":8000 \
   --restart unless-stopped \
@@ -144,6 +150,7 @@ if [[ -n "$PREV_IMAGE_ID" ]]; then
   $ENGINE rm -f "$CONTAINER" >/dev/null 2>&1 || true
   $ENGINE run -d --name "$CONTAINER" \
     --env-file "$ENV_FILE" \
+    --cap-drop=ALL --security-opt no-new-privileges \
     -v "$(realpath "$DATA_DIR")":/data"$VOL_SUFFIX" \
     -p "$PORT":8000 --restart unless-stopped \
     "$PREV_IMAGE_ID" >/dev/null && echo "    rolled back."

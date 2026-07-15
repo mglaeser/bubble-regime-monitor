@@ -30,11 +30,16 @@ RUN pip install --no-cache-dir ".[parquet]" && \
       pip uninstall -y pyarrow)) && \
     python -c "import numpy, pandas; print('core numeric stack OK:', numpy.__version__, pandas.__version__)"
 COPY . .
-# B-12: run as a non-root user (defence in depth on top of rootless Podman).
-# /data is the SQLite volume mount-point; make it writable by the app user.
-RUN useradd --system --uid 10001 --home-dir /app --no-create-home appuser \
-    && mkdir -p /data && chown -R appuser:appuser /app /data
-USER appuser
+RUN mkdir -p /data
+# B-12 hardening note (audit): an in-image `USER appuser` (uid 10001) was tried
+# and REVERTED — under rootless Podman the /data bind mount is owned by the
+# invoking host user, and container-uid 10001 maps to a subordinate uid with no
+# write access ("attempt to write a readonly database" on the WAL pragma; the
+# 2026-07-15 deploy failed on it and auto-rolled back). Container-root under
+# rootless Podman already maps to the UNPRIVILEGED host user, so the escape
+# blast radius is unchanged; the defence-in-depth is provided instead by
+# --cap-drop=ALL --security-opt no-new-privileges at run time (deploy.sh /
+# compose.yml), which does not fight the bind-mount ownership.
 ENV TZ=UTC PYTHONUNBUFFERED=1
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

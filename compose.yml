@@ -16,4 +16,10 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
+    # Hardening (audit B-12): no capabilities, no privilege escalation. The
+    # container deliberately runs as container-root — under rootless Podman that
+    # maps to the unprivileged invoking user, keeping the ./data bind mount
+    # writable (an in-image USER broke the WAL pragma; see Containerfile note).
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges"]
     restart: unless-stopped

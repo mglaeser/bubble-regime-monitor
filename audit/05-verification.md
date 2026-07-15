@@ -40,8 +40,9 @@ Each repair executed test-first: a test derived from the frozen spec/invariants 
 - **Fix:** `references.py` — `UNVERIFIED_CITATIONS = []`, new `VERIFIED_CITATIONS`; the three science-audit flags flip `warn/citation-unverified → info/citation-verified` with the resolved sources; `meta.py` and README updated.
 - **Test:** the coupled contract tests (`test_status.py` expecting 3 `citation-unverified`; `test_api_contract.py` expecting non-empty `unverified_citations`) were updated red→green to assert 3 `citation-verified` and empty `unverified_citations`. **Green.**
 
-### B-12 — container ran as root → non-root user
-- **Change:** `Containerfile` adds a `useradd` system user (uid 10001), `chown`s `/app` and `/data`, and `USER appuser`. (Validated by build in the CI `image` job.)
+### B-12 — container ran as root → non-root user → **CORRECTED after a failed deploy**
+- **Change (original):** `Containerfile` added `USER appuser` (uid 10001).
+- **Correction (2026-07-15):** the 2026-07-15 host deploy **failed on this change** — under rootless Podman the `/data` bind mount is owned by the invoking host user, and container-uid 10001 maps to a subordinate uid with no write access (`sqlite3.OperationalError: attempt to write a readonly database` on the WAL pragma). The deploy-time health-check **auto-rollback fired as designed** and prod stayed on the prior image. `USER` was reverted with a written rationale (container-root under rootless Podman maps to the *unprivileged* host user, so the escape blast radius is unchanged); the defence-in-depth is now `--cap-drop=ALL --security-opt no-new-privileges` at run time (deploy.sh + compose.yml), which does not conflict with bind-mount ownership. Honest verdict: the first fix was verified by *build*, not by *deploy* — the gap between those two is exactly what the health-check caught.
 
 ### A-01 / A-08 / A-13 / B-01 / B-35 — the gate rebuild
 - **Change:** `.github/workflows/ci.yml` rewritten: blocking `ruff` (incl. `S`), blocking `pip-audit`, blocking `detect-secrets` (baseline `.secrets.baseline`), blocking `pytest`; deps aligned to `pyproject` (+`anthropic`,`xlrd`); `lppls` best-effort (suite self-skips); `setuptools>=83` upgrade; the deceptive `mypy … || true` replaced with an **honestly-labelled advisory** `continue-on-error` step (43 tracked type errors, A-13).
