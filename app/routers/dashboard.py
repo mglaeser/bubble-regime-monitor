@@ -54,7 +54,14 @@ def get_feed(request: Request, response: Response,
                                 detail="no dashboard feed computed yet; retry after the "
                                        "first snapshot recompute")
         payload: dict[str, Any] = json.loads(row.payload)
-        computed_at = row.computed_at.isoformat()
+        # SQLite drops tzinfo on read; re-stamp UTC so computed_at is always
+        # timezone-aware ISO-8601 (the live capture showed a naive timestamp).
+        ca = row.computed_at
+        if ca.tzinfo is None:
+            from datetime import UTC
+
+            ca = ca.replace(tzinfo=UTC)
+        computed_at = ca.isoformat()
 
     # ?sections= filter (unknown section names are ignored, never a 4xx)
     if sections is not None:

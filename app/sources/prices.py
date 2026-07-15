@@ -553,13 +553,17 @@ def get_daily_closes(canonical: str) -> SourceResult:
     raise SourceError(f"price chain exhausted for {canonical}: " + "; ".join(errors))
 
 
-def fetch_tiingo_monthly(canonical: str, start_date: str = "1999-01-01") -> list[tuple[str, float]]:
-    """Long MONTHLY adjusted-close history for one symbol via Tiingo.
+def fetch_tiingo_monthly(canonical: str, start_date: str = "1999-01-01",
+                         min_rows: int = 100) -> list[tuple[str, float]]:
+    """MONTHLY adjusted-close history for one symbol via Tiingo.
 
-    Feeds the S4 GSADF calibration, which needs T >= 100 (PSY finite-sample
-    critical-value tables start at T=100). QQQ goes back to 1999-03 (T ~ 329).
-    Raises ProviderNotConfigured when no Tiingo key is set (GSADF then runs on
-    the recompute's shorter series)."""
+    Default min_rows=100 serves the S4 GSADF calibration, which needs T >= 100
+    (PSY finite-sample critical-value tables start at T=100; QQQ goes back to
+    1999-03, T ~ 329). The dashboard feed fetches only 61 months and passes
+    min_rows=24 — the 100-row guard is a GSADF requirement, not a data-quality
+    property of shorter windows (live capture 2026-07-15 caught this: all six
+    feed series tripped the guard with exactly 61 valid rows).
+    Raises ProviderNotConfigured when no Tiingo key is set."""
     settings = get_settings()
     if not settings.tiingo_api_key:
         raise ProviderNotConfigured("tiingo: no TIINGO_API_KEY configured")
@@ -581,8 +585,8 @@ def fetch_tiingo_monthly(canonical: str, start_date: str = "1999-01-01") -> list
             rows.append((str(item["date"])[:10], float(item["adjClose"])))
         except (KeyError, TypeError, ValueError):
             continue
-    if len(rows) < 100:
-        raise ProviderError(f"tiingo monthly {vendor}: only {len(rows)} rows")
+    if len(rows) < min_rows:
+        raise ProviderError(f"tiingo monthly {vendor}: only {len(rows)} rows (need {min_rows})")
     rows.sort(key=lambda r: r[0])
     return rows
 

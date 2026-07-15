@@ -3,9 +3,13 @@
 **Version: 1.0 (implemented) · service_version 3.4.0 · branch `claude/dashboard-feed`**
 **Sign-off basis: dashboard-side approval of proposal v0 with decisions 1A · 2A · 3A · 4B · 5A and three key-naming requests — all honored below.**
 
-> **CAPTURE STATUS:** the example payload in §5 is *representative* pending one live run. The sandbox this was built in has a network policy that denies egress to the market-data providers (gateway 403 on CONNECT), so exact bytes must come from the production host: deploy this branch, trigger a recompute, then
+> **CAPTURE STATUS — capture #1 received (production host, recompute 2026-07-15T23:00Z), capture #2 pending.**
+> Capture #1 validated the full pipeline live: BTC series (61/61 months, provider history to 2017-08), all five FRED series, every snapshot metric (incl. `gsadf: COMPUTED 1.579` and `lppls_confidence: VALID 0.294` with dt-bands), TD fresh scalars (XAU spot, USD/JPY, USD/CHF, BTC), quarterly MMF with an honest `stale:true`, and real per-item degradation. It also exposed two issues, both now handled:
+> 1. **All six Tiingo series failed** (`only 61 rows`) — the shared monthly fetcher carried a ≥100-row guard built for GSADF's long-history need; the feed now passes `min_rows=24`. *Fixed in code; capture #2 will show these series populated.*
+> 2. **`XAG/USD` requires a paid Twelve Data plan** (XAU/USD is on the free tier) — on the free tier `silver_spot` therefore *permanently* serves the labeled SLV-close fallback (`source: tiingo:SLV`, note "NOT spot"), exactly the 1A-detectable behavior; `gold_silver_ratio` carries a `mixed - one leg spot, one leg ETF close` basis note.
+>
+> §5 remains representative until capture #2 (post-fix) replaces it: redeploy this branch, trigger a recompute, then
 > `curl -s localhost:8000/api/v1/dashboard/feed | python3 -m json.tool > feed-capture.json`
-> — the captured file replaces §5 verbatim in the next commit. The dashboard should integrate against those bytes.
 
 ---
 
@@ -136,6 +140,40 @@ GET /api/v1/dashboard/feed?sections=series&symbols=qqq,gold,btc
 }
 ```
 
+## 5b · REAL excerpts from capture #1 (production host, 2026-07-15T23:00Z)
+
+Exact bytes the dashboard can already rely on (unchanged by the capture-#2 fixes):
+
+```json
+"gsadf": {"value": 1.579, "unit": "stat", "as_of": "2026-07-13", "source": "exuber",
+          "available": true, "stale": null,
+          "detail": {"cv90": 1.9359, "cv95": 2.2215, "contested": true, "state": "COMPUTED"}},
+"lppls_confidence": {"value": 0.29411764705882354, "unit": "fraction", "as_of": "2026-07-13",
+          "source": "lppls==0.6.24", "available": true, "stale": null,
+          "detail": {"state": "VALID",
+                     "bands": {"short": {"conf": 0.0, "n": 1},
+                               "medium": {"conf": 0.125, "n": 16},
+                               "long": {"conf": 0.3382352941176471, "n": 68}},
+                     "n_windows_qualifying": 25, "n_windows_positive": 85}},
+"gold_spot": {"value": 4061.10842, "unit": "USD", "as_of": "2026-07-16",
+          "source": "twelvedata:XAU/USD", "available": true, "stale": false},
+"btc_ath": {"value": 115764.08, "unit": "USD", "as_of": "2026-07-15",
+          "source": "twelvedata:BTC/USD", "available": true, "stale": false,
+          "note": "max of provider MONTHLY closes since 2017-08 and current spot - not a curated all-time record",
+          "detail": {"basis": "monthly_closes+spot", "coverage_start": "2017-08"}},
+"cofer_gold_share_pct": {"value": null, "unit": "pct", "as_of": null, "source": "none",
+          "available": false, "stale": null, "note": "requires IMF COFER source; not connected"}
+```
+
+And a REAL degradation row (capture #1, before the min_rows fix) — this is precisely the shape any future source failure will take, 61 explicit nulls included:
+
+```json
+"gold": {"name": "Gold (GLD ETF proxy)", "kind": "price", "unit": "USD",
+         "points": [{"month": "2021-07", "value": null}, "... 60 more nulls ..."],
+         "as_of": null, "source": "tiingo:GLD", "available": false, "stale": null,
+         "note": "GLD ETF proxy for spot gold (~0.40%/yr expense drag) - not spot; source failed: tiingo monthly GLD: only 61 rows"}
+```
+
 ## 6 · Deviations from the original request (declared)
 
 1. NASDAQ-100 → QQQ; gold/silver → GLD/SLV; 10Y/3M TR → IEF/BIL — all ETF proxies, all labeled in `name`/`kind`/`note`, never silent.
@@ -143,7 +181,9 @@ GET /api/v1/dashboard/feed?sections=series&symbols=qqq,gold,btc
 3. BTC ATH basis = max(provider monthly closes, current spot), coverage start in `detail` — not a curated record. Drawdown is computed against that basis and is ≤ 0 by construction.
 4. `vix_term_state` is categorical: `value` is null (the contract requires numeric values) and the reading lives in `detail.state`; the numeric companion is `vix_term_ratio`.
 5. COFER reserve shares ship `available:false` (new IMF provider = out of scope).
-6. The §5 example is representative until the host capture lands (see banner) — a sandbox network policy, not a design choice.
+6. The §5 example is representative until capture #2 lands (see banner) — a sandbox network policy, not a design choice; §5b already carries real capture-#1 bytes.
+7. **`silver_spot` is permanently the labeled SLV-close fallback on the free Twelve Data tier** (XAG/USD needs the Grow plan; XAU/USD works free — confirmed by capture #1). The dashboard's "render prose spot only when source is true spot" rule handles this by design; `gold_silver_ratio` states its `mixed` basis. If a paid TD plan is ever added, true silver spot activates automatically with no code change.
+8. Twelve Data 1-month bars are dated at the month **start** (the current partial bar reads `YYYY-MM-01`), so the `btc` series uses a 35-day stale SLA; `btc_spot` (daily) carries the fresh date.
 
 ---
 
