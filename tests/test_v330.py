@@ -128,7 +128,7 @@ class TestQualityWeightedCoverage:
         assert d["degraded"] is False
 
     def test_partial_breadth_plus_failed_lppls_degrades(self):
-        # ...but with d4 also FIT_FAILED (dropped) it falls below 2/3 -> degraded.
+        # ...but with d4 also FLOOR (dropped) it falls below 2/3 -> degraded.
         d = self._block_d(33 / 503, d4_dropped=True)
         assert d["coverage"] < 0.667
         assert d["degraded"] is True

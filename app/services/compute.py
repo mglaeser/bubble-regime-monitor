@@ -506,8 +506,9 @@ def gather_inputs() -> RawInputs:
         closes = [c for _, c in ndx.value][-d4_lppls.LPPLS_WINDOW_MAX:] if ndx else []
         if len(closes) < d4_lppls.MIN_CLOSES:
             raw.lppls_result = {"state": "INSUFFICIENT_DATA", "value": None, "quality": 0.0,
-                                "n_windows_evaluated": 0, "n_windows_qualifying": 0,
-                                "n_closes": len(closes), "window": None, "bands": None}
+                                "n_windows_evaluated": 0, "n_windows_positive": 0,
+                                "n_windows_qualifying": 0, "n_closes": len(closes),
+                                "window": None, "bands": None}
             raise RuntimeError(f"insufficient price history (N={len(closes)})")
         settings = get_settings()
         log.info("lppls_fit_start", n=len(closes), timeout_s=settings.lppls_timeout_s)
