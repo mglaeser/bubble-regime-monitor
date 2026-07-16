@@ -43,4 +43,5 @@ def latest(series_id: str) -> SourceResult:
     """Latest non-'.' value for a series."""
     pairs = observations(series_id, limit=30)
     date, value = pairs[-1]
-    return SourceResult(value=value, provenance=Provenance(source=f"fred_{series_id}", note=f"as of {date}"))
+    return SourceResult(value=value,
+                        provenance=Provenance(source=f"fred_{series_id}", as_of=date))

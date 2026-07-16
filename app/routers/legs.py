@@ -27,8 +27,10 @@ def _latest() -> Snapshot:
 
 
 def _meta(snap: Snapshot) -> dict[str, Any]:
+    from app.routers.score import _iso_utc
+
     return {
-        "computed_at": snap.computed_at.isoformat(),
+        "computed_at": _iso_utc(snap.computed_at),
         "service_version": get_settings().service_version,
         "data_freshness": snap.data_freshness,
         "disclaimer": "Research, not advice.",

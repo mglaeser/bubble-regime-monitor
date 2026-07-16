@@ -33,9 +33,10 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -74,25 +75,82 @@ from app.references import REGISTRY
 
 log = get_logger(__name__)
 
+# Freshness SLAs in days (spec section 3): a reading older than its SLA is
+# served with stale=true. Keys are indicator ids; "v" covers the multiplier.
+FRESHNESS_SLA_DAYS: dict[str, int] = {
+    "s1": 35, "s2": 3, "s3": 3, "s4": 35, "s5": 3,
+    "d1": 3, "d2": 75, "d3": 100, "d4": 3, "v": 2,
+}
+
+
+def _age_days(as_of_iso: str | None) -> int | None:
+    if not as_of_iso:
+        return None
+    try:
+        return max(0, (datetime.now(UTC).date() - date.fromisoformat(as_of_iso[:10])).days)
+    except ValueError:
+        return None
+
+
+COVERAGE_DROP_THRESHOLD = 1.0 / 3.0  # >1/3 nominal weight lost -> block degraded
+
+
+def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
+    """Per-block QUALITY-WEIGHTED coverage: fraction of nominal weight actually
+    obtained, each live indicator scaled by its quality in [0,1].
+
+    A dropped OR stale indicator counts as fully lost weight; a low-quality one
+    (e.g. d1 measured from a partial constituent universe, quality=n/503) counts
+    as w*quality. A proxy substitution does not reduce quality. If >1/3 of a
+    block's nominal weight is lost the block is degraded (band suppressed) — so a
+    breadth reading from only a handful of names now correctly degrades Block D."""
+    blocks: dict[str, Any] = {}
+    degraded_any = False
+    for block_id, prefix in (("S", "s"), ("D", "d")):
+        total = 0.0
+        obtained = 0.0
+        for ind in indicators.values():
+            if not ind.id.startswith(prefix):
+                continue
+            w = REGISTRY[ind.id].weight
+            total += w
+            if not ind.dropped and not ind.stale:
+                obtained += w * max(0.0, min(1.0, ind.quality))
+        frac = obtained / total if total else 0.0
+        degraded = frac < (1.0 - COVERAGE_DROP_THRESHOLD)
+        degraded_any = degraded_any or degraded
+        blocks[block_id] = {"coverage": round(frac, 4), "degraded": degraded}
+    blocks["degraded"] = degraded_any
+    return blocks
+
 
 @dataclass
 class RawInputs:
-    """Everything gathered from upstream, all optional; provenance per field."""
+    """Everything gathered from upstream, all optional; provenance per field.
+
+    *_as_of fields carry the ISO date of the underlying reading (not the
+    fetch time) and drive the staleness SLA."""
 
     cape: float | None = None
     cape_source: str = "multpl"
     cape_fallback: bool = False
+    cape_as_of: str | None = None
     cape_history: list[float] | None = None
 
     real10y_decimal: float | None = None
+    real10y_as_of: str | None = None
 
     top10_pct: float | None = None
     top10_source: str = "ssga_spy_xlsx"
     top10_fallback: bool = False
+    top10_as_of: str | None = None
 
     smh_2yr_return_pct: float | None = None
     spy_2yr_return_pct: float | None = None
-    semis_symbol: str = "smh.us"
+    semis_symbol: str = "SMH"
+    semis_source: str | None = None   # real price-chain provenance, e.g. "tiingo:SMH"
+    semis_fallback: bool = False      # True when SOXX substituted for SMH
+    semis_as_of: str | None = None
 
     gsadf_stat: float | None = None
     gsadf_cv90: float | None = None
@@ -102,23 +160,41 @@ class RawInputs:
     hy_oas_bps: float | None = None
     hy_oas_history_bps: list[float] | None = None
     hy_oas_note: str | None = None
+    hy_oas_as_of: str | None = None
+
+    # Long BAA-DGS10 credit-spread proxy (bps, monthly) for the S5 long-history
+    # percentile — HY OAS is FRED-truncated to 3yr, BAA/DGS10 go back to 1997.
+    baa_spread_history_bps: list[float] | None = None
+    baa_spread_as_of: str | None = None
+
+    # Gilchrist-Zakrajsek Excess Bond Premium (pp, monthly, 1973+) — the credit-
+    # sentiment construct LSSZ (2017) actually build on; PREFERRED S5 input (v3.3.1).
+    ebp_history: list[float] | None = None
+    ebp_as_of: str | None = None
 
     breadth_pct: float | None = None
-    breadth_source: str = "constituents+stooq"
+    breadth_n: int | None = None   # constituents resolved (for d1 quality = n/503)
+    breadth_source: str = "constituents+twelvedata"
     breadth_note: str | None = None
+    breadth_as_of: str | None = None
 
     margin_balances: list[float] | None = None
     margin_note: str | None = None
+    margin_as_of: str | None = None
 
     hyperscalers: list[d3_hyperscaler_fcf.HyperscalerReading] | None = None
     hyperscaler_note: str | None = None
+    hyperscaler_as_of: str | None = None
 
     lppls_confidence: float | None = None
+    lppls_result: dict | None = None   # tri-state {state, value, n_windows_*, n_closes}
     lppls_note: str | None = None
+    lppls_as_of: str | None = None
 
     vix_ratio: float | None = None
     vix_ratio_source: str = "vixcentral"
     vix_ratio_fallback: bool = False
+    vix_as_of: str | None = None
     vix_level: float | None = None
     skew: float | None = None
 
@@ -129,8 +205,12 @@ class RawInputs:
 
     index_within_2pct_of_ath: bool = False
 
+    # last good (non-dropped) D2 reading from a prior snapshot, for the
+    # margin >90d staleness guard: {"value", "sub_score", "timestamp"}
+    margin_cached: dict[str, Any] | None = None
+
     source_health: list[dict[str, Any]] = field(default_factory=list)
-    freshness: dict[str, str] = field(default_factory=dict)
+    gather_errors: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -142,6 +222,29 @@ class IndicatorOutput:
     data_source: str
     fallback_used: bool
     note: str | None = None
+    as_of: str | None = None
+    quality: float = 1.0   # in [0,1]; < 1 discounts this indicator's live weight
+                           # in the coverage gate. v3.3.2 FIDELITY RULE: quality
+                           # measures fidelity to the indicator's construct, not
+                           # position in a fallback chain (a superior substitute
+                           # is not penalized for being a "fallback"); 0.0 means
+                           # nothing was measured (FLOOR / not computable).
+    state: str | None = None  # machine-readable indicator state where defined
+                              # (d4: VALID/VALID_ZERO/FLOOR/INSUFFICIENT_DATA;
+                              # s4: COMPUTED/FLOOR); None elsewhere
+
+    @property
+    def age_days(self) -> int | None:
+        return _age_days(self.as_of)
+
+    @property
+    def stale(self) -> bool | None:
+        """True past the indicator's freshness SLA; None when age is unknown."""
+        age = self.age_days
+        sla = FRESHNESS_SLA_DAYS.get(self.id)
+        if age is None or sla is None:
+            return None
+        return age > sla
 
     def payload(self) -> dict[str, Any]:
         meta = REGISTRY[self.id]
@@ -155,6 +258,11 @@ class IndicatorOutput:
             "data_source": self.data_source,
             "fallback_used": self.fallback_used,
             "dropped": self.dropped,
+            "as_of": self.as_of,
+            "age_days": self.age_days,
+            "stale": self.stale,
+            "quality": round(self.quality, 4),
+            "state": self.state,
             "timestamp": datetime.now(UTC).isoformat(),
         }
         if self.note:
@@ -183,9 +291,10 @@ class SnapshotData:
     trend_states: dict[str, dict[str, str]]
     fast_alarm: dict[str, Any]
     freshness: dict[str, str]
+    coverage: dict[str, Any]
 
 
-def _track(raw: RawInputs, source: str, fn: Any, note_attr: str | None = None) -> Any:
+def _track(raw: RawInputs, source: str, fn: Any) -> Any:
     """Run one gather step, recording source_health; return None on failure."""
     start = time.monotonic()
     try:
@@ -202,6 +311,7 @@ def _track(raw: RawInputs, source: str, fn: Any, note_attr: str | None = None) -
             "latency_ms": (time.monotonic() - start) * 1000.0,
             "http_status": None, "note": str(exc)[:400],
         })
+        raw.gather_errors[source] = str(exc)[:300]
         log.warning("gather_failed", source=source, error=str(exc))
         return None
 
@@ -215,18 +325,20 @@ def gather_inputs() -> RawInputs:
     from app.sources import breadth as breadth_src
     from app.sources import cape as cape_src
     from app.sources import edgar as edgar_src
+    from app.sources import fed_ebp as fed_ebp_src
     from app.sources import finra as finra_src
     from app.sources import fred as fred_src
     from app.sources import ssga as ssga_src
-    from app.sources import stooq as stooq_src
     from app.sources import vix as vix_src
 
     raw = RawInputs()
 
+    today = datetime.now(UTC).date().isoformat()
+
     r = _track(raw, "cape", cape_src.current_cape)
     if r:
         raw.cape, raw.cape_source, raw.cape_fallback = r.value, r.provenance.source, r.provenance.fallback_used
-        raw.freshness["cape"] = "0d"
+        raw.cape_as_of = r.provenance.as_of or today  # multpl updates each market close
     hist = _track(raw, "cape_history", cape_src.monthly_cape_history)
     if hist:
         raw.cape_history = hist.value
@@ -234,56 +346,93 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "fred_DFII10", lambda: fred_src.latest("DFII10"))
     if r:
         raw.real10y_decimal = r.value / 100.0
+        raw.real10y_as_of = r.provenance.as_of
 
     r = _track(raw, "ssga_spy_xlsx", ssga_src.top10_concentration)
     if r:
         raw.top10_pct, raw.top10_source, raw.top10_fallback = r.value, r.provenance.source, r.provenance.fallback_used
+        raw.top10_as_of = r.provenance.as_of or today  # holdings file is daily
 
-    # SMH/SPY 2-yr run-up (SOXX as SMH substitute).
-    spy = _track(raw, "stooq_spy", lambda: stooq_src.daily_closes("spy.us"))
+    # Prices via the v3.1 provider chain (Tiingo -> Twelve Data -> Alpha
+    # Vantage -> yfinance -> cache). Index levels use ETF proxies on free
+    # tiers (NDX->QQQ, SPX->SPY); proxy substitutions are flagged in the note.
+    from app.sources import prices as price_src
+
+    def _closes(canonical: str):
+        return price_src.get_daily_closes(canonical)
+
+    # SPY (also the ATH gate) and QQQ.
+    spy = _track(raw, "price_SPY", lambda: _closes("SPY"))
     if spy:
         raw.spy_daily = spy.value
         raw.spy_daily_closes = [c for _, c in spy.value]
         try:
-            raw.spy_2yr_return_pct = stooq_src.total_return_pct(spy.value, 504)
-        except Exception:
+            # smooth=5: 5-day endpoint averaging removes the 2yr base-date-roll
+            # artifact in the S3 run-up (D5). SPY and SMH must use the same window.
+            raw.spy_2yr_return_pct = price_src.total_return_pct(spy.value, 504, smooth=5)
+        except Exception:  # noqa: S110 -- optional 2yr-return enrichment; a short series legitimately has none (A-26)
             pass
         closes = raw.spy_daily_closes
         raw.index_within_2pct_of_ath = closes[-1] >= 0.98 * max(closes)
-    semis = _track(raw, "stooq_smh", lambda: stooq_src.daily_closes("smh.us"))
-    if semis is None:
-        semis = _track(raw, "stooq_soxx", lambda: stooq_src.daily_closes("soxx.us"))
-        raw.semis_symbol = "soxx.us"
-    if semis:
-        try:
-            raw.smh_2yr_return_pct = stooq_src.total_return_pct(semis.value, 504)
-        except Exception:
-            pass
-    qqq = _track(raw, "stooq_qqq", lambda: stooq_src.daily_closes("qqq.us"))
+    qqq = _track(raw, "price_QQQ", lambda: _closes("QQQ"))
     if qqq:
         raw.qqq_daily = qqq.value
         raw.qqq_daily_closes = [c for _, c in qqq.value]
 
-    # GSADF on Nasdaq-100 monthly log prices (R subprocess; degrade to note).
-    ndx = _track(raw, "stooq_ndx", lambda: stooq_src.daily_closes("^ndx"))
+    # SMH/SPY 2-yr run-up via the price chain (SOXX as SMH substitute).
+    semis = _track(raw, "price_SMH", lambda: _closes("SMH"))
+    if semis is None:
+        semis = _track(raw, "price_SOXX", lambda: _closes("SOXX"))
+        raw.semis_symbol = "SOXX"
+        raw.semis_fallback = True
+    if semis:
+        raw.semis_source = semis.provenance.source  # real provenance, e.g. "tiingo:SMH"
+        try:
+            raw.smh_2yr_return_pct = price_src.total_return_pct(semis.value, 504, smooth=5)
+            raw.semis_as_of = semis.provenance.as_of
+        except Exception:  # noqa: S110 -- optional 2yr-return enrichment; a short series legitimately has none (A-26)
+            pass
+
+    # GSADF on Nasdaq-100 monthly log prices via the QQQ proxy (no free raw
+    # index source); R subprocess degrades to the contested/stale 0.25 floor.
+    ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
     if ndx:
         import math
 
-        monthly = legs.monthly_closes(ndx.value)
-        out = run_gsadf([math.log(v) for v in monthly[-360:]])
+        # GSADF needs a long monthly history to calibrate (PSY tables start at
+        # T=100); fetch QQQ monthly from 1999 (T~329), falling back to the
+        # shorter recompute series if the long fetch is unavailable.
+        try:
+            gsadf_monthly = [c for _, c in price_src.fetch_tiingo_monthly("NDX")]
+            gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
+        except Exception as exc:
+            gsadf_monthly = legs.monthly_closes(ndx.value)
+            gsadf_src_note = (f"Nasdaq-100 via QQQ proxy (short series T={len(gsadf_monthly)}; "
+                              f"long history unavailable: {str(exc)[:80]})")
+        out = run_gsadf([math.log(v) for v in gsadf_monthly[-360:]],
+                        timeout_s=get_settings().gsadf_timeout_s)
         if out:
             raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
+            raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
         else:
-            raw.gsadf_note = "R/exuber unavailable or failed; sub-score floor 0.05"
+            # Reason only — the "GSADF not computable this run" prefix is added
+            # once by the s4 note builder; do not repeat it here (was double-nested).
+            raw.gsadf_note = "R/exuber unavailable or the fit failed"
     else:
-        raw.gsadf_note = "no Nasdaq-100 series; sub-score floor 0.05"
+        raw.gsadf_note = "no Nasdaq-100/QQQ series this run"
 
     # HY OAS: FRED latest + own persisted history (FRED 3-yr truncation).
     r = _track(raw, "fred_BAMLH0A0HYM2", lambda: fred_src.observations("BAMLH0A0HYM2"))
     with session_scope() as session:
         if r:
+            latest_stored = session.execute(
+                select(HyOasHistory.date).order_by(HyOasHistory.date.desc()).limit(1)
+            ).scalar_one_or_none()
+            cutoff = latest_stored - timedelta(days=7) if latest_stored else None
             for d, v in r:
-                session.merge(HyOasHistory(date=date.fromisoformat(d), oas_bps=v * 100.0))
+                day = date.fromisoformat(d)
+                if cutoff is None or day >= cutoff:  # 7-day overlap absorbs FRED revisions
+                    session.merge(HyOasHistory(date=day, oas_bps=v * 100.0))
             session.flush()
         rows = session.execute(
             select(HyOasHistory).order_by(HyOasHistory.date)
@@ -291,40 +440,103 @@ def gather_inputs() -> RawInputs:
         if rows:
             raw.hy_oas_history_bps = [row.oas_bps for row in rows]
             raw.hy_oas_bps = rows[-1].oas_bps
+            raw.hy_oas_as_of = rows[-1].date.isoformat()
             raw.hy_oas_note = "own history table; FRED 3yr truncation"
             if not r:
                 raw.hy_oas_note += "; FRED unavailable, serving persisted history (stale)"
 
+    # Long BAA-DGS10 credit-spread proxy (monthly, 1997+) for the S5 long-history
+    # percentile — both FRED series are decades-deep and NOT ICE-truncated.
+    def _baa_spread() -> list[float]:
+        baa = dict(fred_src.observations("BAA"))
+        dgs = dict(fred_src.observations("DGS10"))
+        common = sorted(set(baa) & set(dgs))
+        if len(common) < 24:
+            raise RuntimeError(f"baa spread: only {len(common)} aligned months")
+        raw.baa_spread_as_of = common[-1]
+        return [(baa[d] - dgs[d]) * 100.0 for d in common]  # % -> bps
+
+    sp = _track(raw, "fred_baa_dgs10", _baa_spread)
+    if sp:
+        raw.baa_spread_history_bps = sp
+
+    # Gilchrist-Zakrajsek Excess Bond Premium (monthly, 1973+) — PREFERRED S5
+    # input (v3.3.1). Free Fed CSV, no key; degrades to the BAA proxy on failure.
+    ebp = _track(raw, "fed_ebp", fed_ebp_src.fetch_ebp)
+    if ebp:
+        raw.ebp_history = [v for _, v in ebp]
+        raw.ebp_as_of = ebp[-1][0]
+
     r = _track(raw, "breadth", breadth_src.pct_above_200dma)
     if r:
         raw.breadth_pct, raw.breadth_note = r.value, r.provenance.note
+        raw.breadth_as_of = today  # computed live from constituent closes
+        raw.breadth_source = r.provenance.source
+        m = re.search(r"breadth from (\d+)", raw.breadth_note or "")  # "breadth from N/503 ..."
+        raw.breadth_n = int(m.group(1)) if m else None
 
     r = _track(raw, "finra_xlsx", finra_src.debit_balances)
     if r:
         raw.margin_balances = r.value
+        raw.margin_as_of = r.provenance.as_of
+    from app.models import IndicatorReading
+
+    with session_scope() as session:
+        cached_d2 = session.execute(
+            select(IndicatorReading)
+            .where(IndicatorReading.indicator_id == "d2",
+                   IndicatorReading.dropped.is_(False),
+                   IndicatorReading.sub_score.is_not(None))
+            .order_by(IndicatorReading.timestamp.desc()).limit(1)
+        ).scalars().first()
+        if cached_d2:
+            raw.margin_cached = {"value": cached_d2.value, "sub_score": cached_d2.sub_score,
+                                 "timestamp": cached_d2.timestamp.isoformat()}
 
     r = _track(raw, "sec_edgar", edgar_src.hyperscaler_readings)
     if r:
         raw.hyperscalers, raw.hyperscaler_note = r.value, r.provenance.note
+        raw.hyperscaler_as_of = r.provenance.as_of
 
-    # LPPLS confidence (drop-and-renormalize on failure).
-    def _lppls() -> float:
-        closes = ndx.value if ndx else None
-        if not closes:
-            raise RuntimeError("no index series for LPPLS")
-        return d4_lppls.compute_confidence([c for _, c in closes][-756:])
+    # LPPLS confidence (subprocess-isolated). v3.3.2 FLOOR semantics: on
+    # timeout/crash/no-windows the result row STAYS in the payload (state=FLOOR,
+    # quality=0.0) but the value is excluded from the aggregation and Block D
+    # renormalizes — an uncomputed indicator never masquerades as a zero.
+    def _lppls() -> dict:
+        closes = [c for _, c in ndx.value][-d4_lppls.LPPLS_WINDOW_MAX:] if ndx else []
+        if len(closes) < d4_lppls.MIN_CLOSES:
+            raw.lppls_result = {"state": "INSUFFICIENT_DATA", "value": None, "quality": 0.0,
+                                "n_windows_evaluated": 0, "n_windows_positive": 0,
+                                "n_windows_qualifying": 0, "n_closes": len(closes),
+                                "window": None, "bands": None}
+            raise RuntimeError(f"insufficient price history (N={len(closes)})")
+        settings = get_settings()
+        log.info("lppls_fit_start", n=len(closes), timeout_s=settings.lppls_timeout_s)
+        result = d4_lppls.compute_confidence_isolated(closes, timeout_s=settings.lppls_timeout_s)
+        raw.lppls_result = result  # kept even on failure — the FLOOR row needs it
+        # FLOOR / INSUFFICIENT_DATA raise so the "lppls" source is recorded
+        # unhealthy on the status page; VALID / VALID_ZERO keep d4 alive (an
+        # auditable zero, never a silent one).
+        if result["state"] in ("FLOOR", "INSUFFICIENT_DATA"):
+            raise RuntimeError(
+                f"LPPLS {result['state']}: {result.get('reason', '')} "
+                f"(N={result['n_closes']})".strip())
+        return result
 
     r = _track(raw, "lppls", _lppls)
     if r is not None:
-        raw.lppls_confidence = r
+        raw.lppls_confidence = r["value"]
+        raw.lppls_as_of = ndx.provenance.as_of if ndx else today
     else:
-        raw.lppls_note = "LPPLS fit failed; indicator dropped, Block D renormalized"
+        cause = raw.gather_errors.get("lppls", "unknown cause")
+        raw.lppls_note = f"LPPLS floored ({cause}); excluded from Block D, which renormalizes"
 
     r = _track(raw, "vix_term_structure", vix_src.term_structure_ratio)
     if r:
         raw.vix_ratio = r.value
         raw.vix_ratio_source = r.provenance.source
         raw.vix_ratio_fallback = r.provenance.fallback_used
+        raw.vix_as_of = r.provenance.as_of or today
     r = _track(raw, "vix_level", vix_src.vix_level)
     if r:
         raw.vix_level = r.value
@@ -360,7 +572,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         }
         mc_in.s1_sub = res.sub_score
         indicators["s1"] = IndicatorOutput("s1", raw.cape, res.sub_score, False,
-                                           raw.cape_source, raw.cape_fallback)
+                                           raw.cape_source, raw.cape_fallback,
+                                           as_of=raw.cape_as_of)
     elif raw.cape is not None and raw.real10y_decimal is not None:
         # No percentile history: ECY-only degraded blend, pct pinned to 0.99
         # only if CAPE > 35 (documented conservative shim), else 0.5.
@@ -371,7 +584,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_s["s1"] = sub
         mc_in.s1_sub = sub
         indicators["s1"] = IndicatorOutput("s1", raw.cape, sub, False, raw.cape_source,
-                                           raw.cape_fallback, note="no CAPE history; percentile shimmed")
+                                           raw.cape_fallback, as_of=raw.cape_as_of,
+                                           note="no CAPE history; percentile shimmed")
     else:
         indicators["s1"] = IndicatorOutput("s1", None, None, True, raw.cape_source, False,
                                            note="CAPE/real-yield unavailable; dropped, Block S renormalized")
@@ -382,7 +596,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_s["s2"] = sub
         mc_in.top10_pct = raw.top10_pct
         indicators["s2"] = IndicatorOutput("s2", raw.top10_pct, sub, False,
-                                           raw.top10_source, raw.top10_fallback)
+                                           raw.top10_source, raw.top10_fallback,
+                                           as_of=raw.top10_as_of)
     else:
         indicators["s2"] = IndicatorOutput("s2", None, None, True, raw.top10_source, False,
                                            note="concentration unavailable; dropped, Block S renormalized")
@@ -395,26 +610,94 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub_s["s3"] = sub
         mc_in.runup_pp = runup
         indicators["s3"] = IndicatorOutput("s3", runup, sub, False,
-                                           f"stooq:{raw.semis_symbol}",
-                                           raw.semis_symbol != "smh.us")
+                                           raw.semis_source or f"price:{raw.semis_symbol}",
+                                           raw.semis_fallback,
+                                           as_of=raw.semis_as_of)
     else:
-        indicators["s3"] = IndicatorOutput("s3", None, None, True, "stooq", False,
+        indicators["s3"] = IndicatorOutput("s3", None, None, True,
+                                           raw.semis_source or "price_chain", False,
                                            note="run-up unavailable; dropped, Block S renormalized")
 
     # ---- S4 GSADF ----
+    # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
+    # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
     s4_sub = s4_gsadf.sub_score(raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95, contested)
     sub_s["s4"] = s4_sub
     mc_in.s4_sub = s4_sub
-    s4_note = raw.gsadf_note or (f"GSADF_CONTESTED={str(contested).lower()}")
-    indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False, note=s4_note)
+    if raw.gsadf_stat is None or raw.gsadf_cv95 is None:
+        # v3.3.2 FLOOR semantics: the 0.25 stays in the aggregation (that is the
+        # documented contested/stale policy constant, unchanged), but quality=0.0
+        # tells the coverage gate — and the reader — that NOTHING was measured
+        # this run. A floored s4 must not report itself as a full-quality reading.
+        s4_state, s4_quality = "FLOOR", 0.0
+        s4_note = "GSADF not computable this run; contested/stale floor applied"
+        if raw.gsadf_note:
+            s4_note += f" ({raw.gsadf_note})"
+    else:
+        # Computed successfully. The contested CAP is epistemic policy, not a
+        # data-quality problem — a capped-but-measured s4 is a full-quality read.
+        s4_state, s4_quality = "COMPUTED", 1.0
+        s4_note = raw.gsadf_note or f"GSADF_CONTESTED={str(contested).lower()}"
+    indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False,
+                                       note=s4_note, as_of=raw.semis_as_of,
+                                       quality=s4_quality, state=s4_state)
 
     # ---- S5 credit ----
-    if raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
-        sub = s5_credit.sub_score(raw.hy_oas_bps, raw.hy_oas_history_bps)
+    if raw.ebp_history and len(raw.ebp_history) >= 24:
+        # PREFERRED (v3.3.1): Gilchrist-Zakrajsek Excess Bond Premium — the exact
+        # credit-sentiment construct LSSZ (2017) build on. Monthly, 1973+, so the
+        # LSSZ t-2yr lag is 24 observations. inverted_percentile is sign-agnostic:
+        # a LOW/negative EBP (loose credit, high risk appetite) -> HIGH fragility.
+        ebp_t2 = s5_credit.t_minus_2_value(raw.ebp_history, lag_obs=24)
+        sub = s5_credit.sub_score_t2(raw.ebp_history, lag_obs=24)
         sub_s["s5"] = sub
         mc_in.s5_sub = sub
-        indicators["s5"] = IndicatorOutput("s5", raw.hy_oas_bps, sub, False,
-                                           "fred_BAMLH0A0HYM2", False, note=raw.hy_oas_note)
+        yrs = len(raw.ebp_history) / 12.0
+        s5_note = (f"t-2yr credit-sentiment horizon (LSSZ 2017) on the Gilchrist-Zakrajsek "
+                   f"Excess Bond Premium (Fed, 1973+): inverted percentile of the t-2 EBP "
+                   f"(~{ebp_t2:+.2f}pp) over {len(raw.ebp_history)} months (~{yrs:.0f}y). "
+                   "A low/negative EBP is loose credit / elevated sentiment = high fragility.")
+        # FIDELITY quality (v3.3.2): EBP IS the LSSZ credit-sentiment construct.
+        indicators["s5"] = IndicatorOutput("s5", round(ebp_t2, 4), sub, False,
+                                           "fed_ebp", False, note=s5_note,
+                                           as_of=raw.ebp_as_of, quality=1.0)
+    elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
+        # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
+        # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
+        # own percentile is regime-limited; the Baa spread goes back to 1997.
+        spread_t2 = s5_credit.t_minus_2_value(raw.baa_spread_history_bps, lag_obs=24)
+        sub = s5_credit.sub_score_t2(raw.baa_spread_history_bps, lag_obs=24)
+        sub_s["s5"] = sub
+        mc_in.s5_sub = sub
+        yrs = len(raw.baa_spread_history_bps) / 12.0
+        s5_note = (f"t-2yr credit-sentiment horizon (LSSZ 2017) on the BAA-DGS10 long proxy: "
+                   f"inverted percentile of the t-2 spread (~{round(spread_t2)}bps) over "
+                   f"{len(raw.baa_spread_history_bps)} months (~{yrs:.0f}y); HY OAS is "
+                   "FRED-truncated to 3yr, so the long proxy is used for the percentile")
+        # FIDELITY quality 0.5 (v3.3.2): the BAA-DGS10 proxy is demonstrably NOT
+        # signal-equivalent to the credit-sentiment construct (a ~220bps BAA
+        # spread sits near its own median while ~269bps HY-OAS sits near record
+        # tights) — a usable but low-fidelity substitute.
+        indicators["s5"] = IndicatorOutput("s5", spread_t2, sub, False,
+                                           "fred_BAA_DGS10", True, note=s5_note,
+                                           as_of=raw.baa_spread_as_of, quality=0.5)
+    elif raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
+        # FALLBACK: HY-OAS t-2 over the (regime-limited) accrued 3yr history.
+        oas_t2 = s5_credit.t_minus_2_value(raw.hy_oas_history_bps)
+        sub = s5_credit.sub_score_t2(raw.hy_oas_history_bps)
+        sub_s["s5"] = sub
+        mc_in.s5_sub = sub
+        yrs = len(raw.hy_oas_history_bps) / 252.0
+        depth_note = (f"t-2yr credit-sentiment horizon (LSSZ 2017): inverted percentile of the "
+                      f"t-2 spread (~{round(oas_t2)}bps) over {len(raw.hy_oas_history_bps)} days "
+                      f"(~{yrs:.1f}y) of accrued history; regime-limited (Baa proxy unavailable)")
+        s5_note = f"{raw.hy_oas_note}; {depth_note}" if raw.hy_oas_note else depth_note
+        # FIDELITY quality 0.3 (v3.3.2): right construct family (a market credit
+        # spread) but the FRED-truncated 3yr window makes its percentile
+        # regime-limited — the weakest usable tier of the s5 chain.
+        indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
+                                           "fred_BAMLH0A0HYM2", False, note=s5_note,
+                                           as_of=raw.hy_oas_as_of, quality=0.3)
     else:
         indicators["s5"] = IndicatorOutput("s5", None, None, True, "fred_BAMLH0A0HYM2", False,
                                            note="HY OAS unavailable and no persisted history; dropped")
@@ -424,24 +707,57 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = d1_breadth.compute(raw.breadth_pct)
         sub_d["d1"] = sub
         mc_in.breadth_pct = raw.breadth_pct
+        path_note = "path=B_constituent_compute"
+        d1_note = f"{raw.breadth_note}; {path_note}" if raw.breadth_note else path_note
+        # d1 quality = resolved constituents / 503: a breadth reading from a
+        # partial universe discounts d1's live weight in the coverage gate (6b).
+        d1_quality = min(1.0, raw.breadth_n / 503.0) if raw.breadth_n else 1.0
         indicators["d1"] = IndicatorOutput("d1", raw.breadth_pct, sub, False,
-                                           raw.breadth_source, False, note=raw.breadth_note)
+                                           raw.breadth_source, False, note=d1_note,
+                                           as_of=raw.breadth_as_of, quality=d1_quality)
     else:
         indicators["d1"] = IndicatorOutput("d1", None, None, True, raw.breadth_source, False,
                                            note="breadth unavailable; dropped, Block D renormalized")
 
     # ---- D2 margin ----
-    if raw.margin_balances and len(raw.margin_balances) >= 13:
+    margin_age = _age_days(raw.margin_as_of)
+    # FINRA SLA: 75 days tolerates one skipped monthly publication (series
+    # posts ~3 weeks after month-end). Beyond that, never compute a YoY.
+    if raw.margin_balances and len(raw.margin_balances) >= 13 \
+            and (margin_age is None or margin_age <= 75):
         yoy = d2_margin.yoy_pct(raw.margin_balances)
+        # Within the FINRA SLA (75 days) the rollover confirmation is asserted
+        # normally. FINRA posts monthly ~3 weeks after month-end, so the FRESHEST
+        # possible reading is routinely ~45-75 days old — a ~71-day age is as
+        # current as the series ever gets, NOT stale. (Data older than the SLA
+        # never reaches here; it takes the cached branch below, which reports
+        # rollover as unknown.)
         rolled = d2_margin.rollover_confirmed(raw.margin_balances)
         sub = d2_margin.sub_score(yoy, rolled)
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
+        note = "rollover confirmed" if rolled else "no rollover; mult=0.6"
+        if raw.margin_note:
+            note = f"{raw.margin_note}; {note}"
         indicators["d2"] = IndicatorOutput("d2", yoy, sub, False, "finra_xlsx", False,
-                                           note=raw.margin_note or ("rollover confirmed" if rolled else None))
+                                           note=note, as_of=raw.margin_as_of)
+    elif raw.margin_cached is not None:
+        # Guard (a): data older than 90 days (or missing) never feeds a YoY
+        # across a broken window — serve the last good cached reading.
+        sub = float(raw.margin_cached["sub_score"])
+        sub_d["d2"] = sub
+        mc_in.d2_sub = sub
+        reason = (f"reference month {raw.margin_as_of} older than 75d SLA"
+                  if margin_age is not None and margin_age > 75 else "margin statistics unavailable")
+        indicators["d2"] = IndicatorOutput(
+            "d2", raw.margin_cached.get("value"), sub, False, "finra_xlsx (cached)", True,
+            note=f"{reason}; serving cached reading from {raw.margin_cached['timestamp']}; "
+                 "rollover: unknown",
+            as_of=raw.margin_as_of)
     else:
         indicators["d2"] = IndicatorOutput("d2", None, None, True, "finra_xlsx", False,
-                                           note="margin statistics unavailable; dropped (no true fallback)")
+                                           note="margin statistics unavailable, no cached reading; "
+                                                "dropped (no true fallback)")
 
     # ---- D3 hyperscaler FCF ----
     if raw.hyperscalers:
@@ -453,20 +769,48 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         note = raw.hyperscaler_note
         gate_note = "gate fired" if gate else "gate not fired; capped at 0.30"
         indicators["d3"] = IndicatorOutput("d3", round(ratio, 4), sub, False, "sec_edgar", False,
-                                           note=f"{gate_note}" + (f"; {note}" if note else ""))
+                                           note=f"{gate_note}" + (f"; {note}" if note else ""),
+                                           as_of=raw.hyperscaler_as_of)
     else:
         indicators["d3"] = IndicatorOutput("d3", None, None, True, "sec_edgar", False,
                                            note="EDGAR unavailable; dropped, Block D renormalized")
 
-    # ---- D4 LPPLS (drop-and-renormalize on failure; NEVER a placeholder) ----
+    # ---- D4 LPPLS (v3.3.2 single-endpoint dense scan; FLOOR on failure) ----
+    res = raw.lppls_result or {}
     if raw.lppls_confidence is not None:
         sub = d4_lppls.sub_score(raw.lppls_confidence)
         sub_d["d4"] = sub
         mc_in.d4_sub = sub
-        indicators["d4"] = IndicatorOutput("d4", raw.lppls_confidence, sub, False, "lppls==0.6.24", False)
+        # value = LPPLS confidence at t2=today: the fraction of START-TIME
+        # windows (dt 30..750d) qualifying at the single scanned endpoint
+        # (Sornette et al. 2015 / Demirer et al. 2019). With one endpoint,
+        # value == n_qualifying / n_evaluated by construction.
+        bands = res.get("bands") or {}
+        band_txt = ", ".join(
+            f"{k}={v['conf']:.2f}(n={v['n']})" if v and v.get("conf") is not None
+            else f"{k}=n/a" for k, v in bands.items()) if bands else "unavailable"
+        d4_note = (
+            f"LPPLS {res.get('state', 'VALID')}: confidence at t2=today = "
+            f"{res.get('n_windows_qualifying', '?')}/{res.get('n_windows_positive', '?')} "
+            f"positive-bubble start-time windows qualifying "
+            f"({res.get('n_windows_evaluated', '?')} fitted, dt 30-750d, single endpoint); "
+            f"scale bands [{band_txt}]; N={res.get('n_closes', '?')} closes")
+        indicators["d4"] = IndicatorOutput("d4", raw.lppls_confidence, sub, False,
+                                           "lppls==0.6.24", False, note=d4_note,
+                                           as_of=raw.lppls_as_of,
+                                           quality=float(res.get("quality", 1.0)),
+                                           state=res.get("state", "VALID"))
     else:
-        indicators["d4"] = IndicatorOutput("d4", None, None, True, "lppls==0.6.24", False,
-                                           note=raw.lppls_note or "LPPLS dropped; Block D renormalized")
+        # FLOOR / INSUFFICIENT_DATA: the row stays visible (state + reason +
+        # quality=0.0 for the coverage gate) but d4 is EXCLUDED from the
+        # geometric mean and Block D renormalizes — never a fabricated zero.
+        state = res.get("state") or "FLOOR"
+        reason = res.get("reason") or raw.gather_errors.get("lppls", "unknown cause")
+        indicators["d4"] = IndicatorOutput(
+            "d4", None, None, True, "lppls==0.6.24", False,
+            note=(f"LPPLS {state}: not computed this run ({reason}); row retained for "
+                  "audit, value excluded from aggregation, Block D renormalized"),
+            quality=0.0, state=state)
 
     # ---- V multiplier ----
     if raw.vix_ratio is not None:
@@ -495,6 +839,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     mc = monte_carlo(mc_in, n=n, seed=seed)
     band = action_band_with_override(mc.median, red_flags)
 
+    # Coverage gate (spec 5): if >1/3 of a block's nominal weight is dropped
+    # or stale, the block is degraded and its action band is suppressed.
+    coverage = _coverage_gate(indicators)
+    if coverage["degraded"]:
+        band = "suppressed (block degraded)"
+
     # ---- legs ----
     trend_states: dict[str, dict[str, str]] = {}
     for name, daily, closes in (("SPY", raw.spy_daily, raw.spy_daily_closes),
@@ -515,6 +865,15 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     ts_state = v_vix.state(raw.vix_ratio) if raw.vix_ratio is not None else "unknown"
     alarm = legs.fast_alarm(ts_state, raw.vix_level, raw.spy_daily_closes, raw.skew)
 
+    freshness: dict[str, str] = {}
+    for ind in indicators.values():
+        age = ind.age_days
+        if age is not None:
+            freshness[ind.id] = f"{age}d"
+    v_age = _age_days(raw.vix_as_of)
+    if v_age is not None:
+        freshness["v"] = f"{v_age}d"
+
     return SnapshotData(
         median=mc.median,
         iqr=mc.iqr,
@@ -532,7 +891,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators=indicators,
         trend_states=trend_states,
         fast_alarm=alarm.as_dict(),
-        freshness=raw.freshness,
+        freshness=freshness,
+        coverage=coverage,
     )
 
 
@@ -590,7 +950,8 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             fast_alarm=data.fast_alarm,
             judgment_call=call.text,
             judgment_stale=call.stale,
-            data_freshness=data.freshness,
+            judgment_error=call.error_class,
+            data_freshness={**data.freshness, "_coverage": data.coverage},
         )
         session.add(snap)
         session.flush()
@@ -628,5 +989,13 @@ def run_recompute() -> int | None:
         export_parquet(snap_id)
     except Exception as exc:
         log.warning("parquet_export_failed", error=str(exc))
+    # Dashboard feed (v3.4.0): built strictly AFTER the score persists — a feed
+    # failure can never affect scoring; the endpoint then serves the prior payload.
+    try:
+        from app.services.dashboard_feed import build_and_persist_feed
+
+        build_and_persist_feed(raw, data)
+    except Exception as exc:
+        log.warning("dashboard_feed_failed", error=str(exc)[:300])
     log.info("recompute_done", snapshot_id=snap_id, median=data.median, band=data.action_band)
     return snap_id

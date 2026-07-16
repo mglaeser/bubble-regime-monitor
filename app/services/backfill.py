@@ -30,8 +30,34 @@ def snapshots_dir() -> Path:
     return base / "snapshots"
 
 
+_parquet_ok: bool | None = None
+
+
+def _parquet_available() -> bool:
+    """Probe pyarrow in a SUBPROCESS before importing it in-process.
+
+    pyarrow ships native wheels that can die with SIGILL on CPUs below their
+    build baseline; an in-process import crash would kill the service. If the
+    probe fails, Parquet export is disabled with a log note — the export is
+    auxiliary and must never take down a recompute (guardrail #5)."""
+    global _parquet_ok
+    if _parquet_ok is None:
+        import subprocess
+        import sys
+
+        result = subprocess.run([sys.executable, "-c", "import pyarrow"],
+                                capture_output=True, timeout=120)
+        _parquet_ok = result.returncode == 0
+        if not _parquet_ok:
+            log.warning("parquet_export_disabled",
+                        reason="pyarrow import probe failed on this host (old CPU baseline?)")
+    return _parquet_ok
+
+
 def export_parquet(snapshot_id: int) -> Path | None:
     """Export one snapshot row to Parquet, partitioned by date."""
+    if not _parquet_available():
+        return None
     with session_scope() as session:
         snap = session.get(Snapshot, snapshot_id)
         if snap is None:

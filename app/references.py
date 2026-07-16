@@ -67,15 +67,20 @@ class Methodology:
     block: str = ""  # "S", "D", or "V"
 
 
-# TODO: verify at build time — the following three citations could not be
-# independently confirmed via search as of July 2026; embedded as given:
-#   * Chen, Chen & Huang (2026), arXiv:2604.25826
-#   * Basele, Phillips & Shi (2025), Cowles Foundation Discussion Paper d2430
-#   * BIS (2026), Annual Economic Report
-UNVERIFIED_CITATIONS: list[str] = [
-    "Chen, Chen & Huang (2026). arXiv:2604.25826 (verify at build time)",
-    "Basele, Phillips & Shi (2025). Cowles Foundation Discussion Paper d2430 (verify at build time)",
-    "Bank for International Settlements (2026). Annual Economic Report (verify at build time)",
+# RESOLVED (due-diligence audit, 2026-07-14): all three framework citations were
+# independently confirmed via search and now resolve to real sources. The earlier
+# "could not be confirmed as of July 2026" flag was over-cautious and is cleared.
+#   * Chen, Chen & Huang (2026), arXiv:2604.25826 — "General-Purpose Technology and
+#     Speculative Bubble Detection" (arxiv.org/abs/2604.25826, posted 2026-04-28)
+#   * Basele, Phillips & Shi (2025), Cowles Foundation Discussion Paper d2430 —
+#     "Speculative Bubbles in the Recent AI Boom" (cowles.yale.edu, CFDP 2430)
+#   * BIS (2026), Annual Economic Report (bis.org/publ/arpdf/ar2026e, released 2026-06-28)
+UNVERIFIED_CITATIONS: list[str] = []  # none remain unverified (audit 2026-07-14)
+
+VERIFIED_CITATIONS: list[str] = [
+    "Chen, Chen & Huang (2026). arXiv:2604.25826 — verified 2026-07-14 (arxiv.org/abs/2604.25826)",
+    "Basele, Phillips & Shi (2025). Cowles Foundation Discussion Paper d2430 — verified 2026-07-14",
+    "Bank for International Settlements (2026). Annual Economic Report — verified 2026-07-14 (bis.org)",
 ]
 
 REGISTRY: dict[str, Methodology] = {
@@ -218,7 +223,8 @@ REGISTRY: dict[str, Methodology] = {
             "1.49 — that is a SADF critical value, not GSADF; the simulated GSADF 95% CV is "
             "~1.9-2.1 depending on T. Called from Python via Rscript r/gsadf.R with JSON "
             "stdin/stdout. Sub-score mapping: gsadf_stat > cv95 AND non-contested -> 1.0; "
-            "> cv90 -> 0.5; contested-or-stale -> 0.25; else 0.05."
+            "> cv90 -> 0.5; contested-or-stale-or-data-missing -> 0.25; "
+            "tested-and-not-explosive -> 0.05."
         ),
         why=(
             "The GSADF test recursively runs right-tailed ADF regressions over expanding and rolling "
@@ -312,8 +318,9 @@ REGISTRY: dict[str, Methodology] = {
         how=(
             "Primary: StockCharts $SPXA200R or Barchart $MMTH only if anonymously accessible "
             "(verify each run; both are JS/login-gated as of July 2026, so mark best-effort). "
-            "Fallback (effectively primary): fetch the S&P 500 constituent list (Wikipedia), pull "
-            "each symbol's Stooq daily closes, compute pct = 100*#{close > SMA200}/N. "
+            "Fallback (effectively primary): fetch the S&P 500 constituent list from the SSGA "
+            "SPY holdings XLSX, pull each symbol's Twelve Data daily closes, compute "
+            "pct = 100*#{close > SMA200}/N. "
             "sub_score = clip((hi - pct)/(hi - lo), 0, 1), with MC anchors lo ~ U(35,45), "
             "hi ~ U(70,80); baseline lo = 40, hi = 75 (lower breadth => higher sub-score)."
         ),
@@ -418,20 +425,24 @@ REGISTRY: dict[str, Methodology] = {
         grounding="literature-grounded",
         block="D",
         what=(
-            "The Log-Periodic Power Law Singularity (LPPLS) confidence indicator on Nasdaq-100 and "
-            "SMH: the fraction of fitting windows whose calibrated parameters satisfy "
-            "bubble-consistency filters."
+            "The Log-Periodic Power Law Singularity (LPPLS) confidence indicator on the Nasdaq-100 "
+            "(QQQ proxy): the fraction of start-time fitting windows, at the present endpoint, whose "
+            "calibrated parameters satisfy bubble-consistency filters."
         ),
         how=(
-            "Use lppls PyPI 0.6.24 (PINNED). For each index, take daily closes over a 2-3-year "
-            "window and fit ln p(t) = A + B*(t_c - t)^m + C*(t_c - t)^m * cos(w*ln(t_c - t) - phi) "
-            "where t_c = critical (singularity) time, m = power-law exponent, w = log-periodic "
-            "angular frequency, A,B,C,phi = linear/phase parameters. Filter conditions: m in (0,1), "
-            "w in [4,25] (via mp_compute_nested_fits(..., filter_conditions_config={'m_min':0.0,"
-            "'m_max':1.0,'w_min':4.0,'w_max':25.0, ...})). confidence = fraction of fitting windows "
-            "passing the filters, scaled to [0,1]; sub_score = confidence. On computation failure "
-            "-> DROP the indicator and renormalize Block D weights (NEVER a neutral placeholder — "
-            "that was a v1 error)."
+            "Use lppls PyPI 0.6.24 (PINNED). v3.3.2 SINGLE-ENDPOINT DENSE SCAN: one fitting endpoint "
+            "t2 = the latest close; start times t1 shrink the window from 750 down to 30 trading "
+            "days in 5-day steps (~144 windows). Fit ln p(t) = A + B*(t_c - t)^m + C*(t_c - t)^m * "
+            "cos(w*ln(t_c - t) - phi); filter conditions m in (0,1), w in [4,25] (flat "
+            "filter_conditions_config dict; qualification via compute_indicators). confidence = "
+            "fraction of start-time windows passing the filters AT t2 (the library's per-endpoint "
+            "pos_conf; == n_qualifying/n_evaluated with a single endpoint); sub_score = confidence. "
+            "Three dt-band fractions (short 30-63d, medium 63-252d, long 252-750d) are partitioned "
+            "from the SAME fits as multi-scale diagnostics (payload only, never headline inputs). "
+            "States: VALID / VALID_ZERO (a computed zero ENTERS the aggregation) / "
+            "INSUFFICIENT_DATA / FLOOR (timeout/crash: row retained with quality=0.0, value "
+            "EXCLUDED from the aggregation and Block D renormalized — an uncomputed indicator "
+            "never masquerades as a zero, and NEVER a neutral placeholder — that was a v1 error)."
         ),
         why=(
             "The Johansen-Ledoit-Sornette LPPLS model formalizes a bubble as faster-than-exponential "
@@ -529,6 +540,133 @@ CHANGELOG: list[dict[str, str]] = [
         "median. The v2->v3 rise is the aggregation fix (partial compensability now punishes "
         "imbalance), NOT market deterioration.",
     },
+    {
+        "version": "v3.0.1",
+        "score": "unchanged methodology",
+        "notes": "first-live-run bugfixes: (1) Stooq pipeline hardened — typed "
+        "unavailable/CAPTCHA/limit errors, SQLite series + breadth caches with SLA reuse, "
+        ">=2s pacing, retry-once-after-60s, partial breadth coverage published with note "
+        "instead of dropping; (2) FINRA parser sorts by date (file is newest-first; a naive "
+        "read produced a -22% YoY across the 1997 series start) + >90d cached-reading guard "
+        "and 60d rollover-assertability guard; (3) GSADF data-missing now floors at the "
+        "contested/stale 0.25, not the tested-not-explosive 0.05; R/exuber self-check "
+        "surfaced in /readyz; (4) judgment call failures are machine-detectable "
+        "(text null + error_class) with SDK param fallback; (5) LPPLS requires >=500 closes, "
+        "bounded workers, 10-min hard timeout, and drop notes carry the concrete cause; "
+        "(6) timezone-aware computed_at, S5 history-depth note, SKEW raw-value logging, "
+        "renormalization regression test.",
+    },
+    {
+        "version": "v3.2.0",
+        "score": "unchanged methodology",
+        "notes": "July 2026 outage remediation. ROOT CAUSE was broken in-container DNS "
+        "(every outbound host failed name resolution, so no price provider was ever "
+        "contacted and the chain short-circuited to UNKNOWN) — NOT provider, key, plan, or "
+        "CPU/SIGILL issues. Fixes: (1) pinned DNS nameservers (1.1.1.1/8.8.8.8) in "
+        "compose.yml + curl in the image; (2) LPPLS repaired to the real lppls==0.6.24 API "
+        "— flat filter_conditions_config dict + compute_indicators pos_conf (the prior "
+        "list-of-{condition_1} form raised 'must be a dict[str, float]'); Atom-bounded fit "
+        "params, explicit N logging; (3) S3 repointed off the disabled Stooq label onto the "
+        "PriceProvider chain's real provenance (data was already Tiingo; the source string "
+        "was mislabelled stooq:*), total_return_pct moved out of the stooq module; "
+        "(4) breadth re-architected onto SSGA constituents (Wikipedia removed) with the "
+        "Twelve Data sweep moved to a credit-governed background job and a cache-only "
+        "recompute path; (5) D2 rollover guard aligned to the 75-day FINRA SLA "
+        "(a ~71-day freshest-possible reading is no longer flagged stale).",
+    },
+    {
+        "version": "v3.3.0",
+        "score": "METHODOLOGY CHANGE — headline ~40 -> ~52 on the golden fixture",
+        "notes": "Scientific-review remediation. The rise is an AGGREGATION FIX, not market "
+        "deterioration: (1) rescale-then-aggregate — each sub-score is mapped to [0.10,1] "
+        "before the weighted geometric mean (UNDP-HDI style), replacing the additive-epsilon "
+        "form under which a single 0-valued indicator entered as 0.02^w and silenced ~75% of "
+        "its block (a false-negative headline); (2) d1 breadth anchors hi 75->90 + a 0.05 soft "
+        "floor (bull-market breadth routinely hits the high 80s-90s, so hi=75 clipped normal "
+        "readings to 0); ALPHA_RANGE restored to the spec (0.40,0.60); golden fixture "
+        "regenerated. (3) full-universe breadth via the Polygon/Massive grouped-daily endpoint "
+        "(1 call/day, daily_close cache) with Twelve Data fallback + a binomial CI; "
+        "(4) LPPLS tri-state contract (VALID/VALID_ZERO/FIT_FAILED/INSUFFICIENT_DATA + window "
+        "counts) so a genuine 0 is auditable; (5) quality-weighted coverage gate (a partial "
+        "breadth universe + failed LPPLS now correctly flag Block D degraded); (6) S5 scored on "
+        "the LSSZ t-2yr spread rather than the contemporaneous value; (7) governance: judgment "
+        "completion guard, VRP units annotation, GSADF small-sample calibration flag. Still "
+        "open (host-verified follow-up): GSADF extended history + wild-bootstrap CVs, and an "
+        "S5 long-history Baa-spread proxy percentile.",
+    },
+    {
+        "version": "v3.3.1",
+        "score": "Scientific-correctness remediation (no methodology change to the aggregation)",
+        "notes": "(1) S5 credit: PREFERRED input is now the Gilchrist-Zakrajsek Excess Bond "
+        "Premium (Fed FEDS Note, monthly 1973+) — the construct LSSZ (2017) actually build on; "
+        "the BAA-DGS10 proxy (which was not signal-equivalent to HY-OAS: ~220bps BAA sits near "
+        "its median while ~269bps HY-OAS sits near record tights) is demoted to fallback. "
+        "(2) S4 GSADF: cached Monte-Carlo critical values (radf_mc_cv, a function of n only) "
+        "replace the v3.3.0 per-call wild bootstrap that timed out on the Atom N2800 and "
+        "regressed s4 to NULL; s4 remains CONTESTED and capped at 0.25, so this is a "
+        "reliability fix, not a score change. R stderr now captured on timeout; the doubled "
+        "'GSADF not computable' note fixed. (3) S3: 5-day endpoint averaging on the 2yr run-up "
+        "removes a base-date-roll artifact (s3 moved ~12pp in 48h on an unchanged market). "
+        "(4) D4 LPPLS: note rewritten to state the value is the present-time confidence "
+        "(fraction of START-TIME windows qualifying at the recent endpoints, Sornette/Demos) "
+        "and that the n_qual/n_eval ENDPOINT counts are a separate diagnostic — so a 0 value "
+        "beside '6/40' is not a contradiction. The confidence DEFINITION is unchanged: an "
+        "external review proposed value = n_qual/n_eval, but that divides over endpoints, not "
+        "start-times, and is not the LPPLS-confidence definition. (5) verified the Monte Carlo "
+        "sampler remains live (non-degenerate, seed-sensitive).",
+    },
+    {
+        "version": "v3.3.2",
+        "score": "D4 METHOD CHANGE — values not comparable across the v3.3.0->v3.3.2 boundary",
+        "notes": "(1) D4 LPPLS redesigned to a SINGLE-ENDPOINT DENSE SCAN: one endpoint t2=today, "
+        "start-time windows dt 30-750 trading days in 5-day steps (~144 windows); confidence = "
+        "fraction qualifying at t2 (Sornette 2015 / Demirer 2019 definition — with one endpoint "
+        "this equals n_qualifying/n_evaluated, dissolving the earlier reviewer dispute). Replaces "
+        "the ~40-endpoint x <=120-day grid with a recent-endpoint mean: cheaper (~144 fits vs "
+        "~600) and examines 6x the scale range, so readings are NOT comparable to v3.3.0/1. "
+        "Three dt-band diagnostics (short/medium/long) partitioned from the same fits at zero "
+        "extra cost. (2) FLOOR semantics: on timeout/crash the d4 row STAYS in the payload "
+        "(state=FLOOR, quality=0.0) but is excluded from the aggregation (Block D renormalizes) — "
+        "an uncomputed indicator never masquerades as a confident zero; VALID_ZERO (a genuinely "
+        "computed zero) still enters the aggregation at full quality. s4 gains the same "
+        "state/quality treatment (FLOOR quality=0.0 when not computable; the 0.25 policy constant "
+        "in the aggregation is unchanged). (3) FIDELITY-BASED quality across indicators: quality "
+        "measures fidelity to the construct, not fallback-chain position — s5 EBP 1.0 / BAA-DGS10 "
+        "proxy 0.5 / HY-OAS-3yr 0.3; d4 1.0 full scan, 0.5 partial (<100 windows), 0.0 FLOOR; d1 "
+        "stays n/503. (4) machine-readable `state` field added to the indicator payload.",
+    },
+    {
+        "version": "v3.4.0",
+        "score": "Dashboard feed added — METHODOLOGY UNCHANGED",
+        "notes": "New read-only GET /api/v1/dashboard/feed for the companion Crisis-Winners "
+        "dashboard (DASHBOARD_FEED_SPEC.md): 12 monthly series (61 points each, t-60..t0, "
+        "explicit nulls, honest `kind` labels — QQQ/GLD/SLV/IEF/BIL ETF proxies stated, Fed "
+        "Broad Dollar Index explicitly NOT ICE DXY) + 34 scalar metrics with per-item "
+        "value/unit/as_of/source/available/stale. Built once per recompute AFTER the score "
+        "persists (a feed failure never touches scoring); per-item degradation to "
+        "available:false, 503 only before the first payload, Cache-Control max-age=900. "
+        "New sources are non-scoring additions on already-keyed providers (Tiingo GLD/SLV/"
+        "IEF/BIL, Twelve Data BTC/XAU/XAG/FX scalars, FRED FX/rates/MMF). Score computation, "
+        "weights, and all indicator methodology are untouched.",
+    },
+    {
+        "version": "v3.5.0",
+        "score": "Auto-deploy pipeline added — METHODOLOGY UNCHANGED",
+        "notes": "Opt-in continuous deployment (docs/AUTO_DEPLOY.md). A GitHub webhook "
+        "POST /api/v1/webhooks/github is HMAC-SHA256 verified (X-Hub-Signature-256, "
+        "constant-time, FAIL-CLOSED: 503 unless GITHUB_WEBHOOK_SECRET and DEPLOY_BRANCH are "
+        "both set; 401 on a bad signature) and deploys on a push to the deploy branch OR a "
+        "merged (completed) PR whose base is the deploy branch. POST /api/v1/admin/deploy "
+        "(X-API-Key) triggers the same path manually. SECURITY BOUNDARY: the container holds "
+        "no host-control capability (no podman socket, no SSH); it only writes one atomic "
+        "JSON trigger file onto /data. A host systemd --user path unit "
+        "(deploy/systemd/bubblegauge-deploy.path) notices the file and runs deploy.sh, which "
+        "fetches the branch PINNED in the watchdog's own env (NOT any ref/sha the trigger "
+        "names), rebuilds, migrates, and health-checks with auto-rollback. Worst case of a "
+        "forged trigger is a redeploy of the legitimate branch. deploy.sh itself now "
+        "self-provisions that watchdog on a healthy deploy (idempotent, best-effort, "
+        "SETUP_AUTODEPLOY=0 to opt out). Scoring and all indicator methodology are untouched.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
@@ -577,3 +715,203 @@ LEG_CAVEATS: dict[str, str] = {
         "costs."
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# DATA-SOURCE REGISTRY — the authority/basis behind every external pull, so
+# the status UI can show "where each number comes from" and join it to the
+# live source_health matrix. health_keys are the source_health row names
+# written by services.compute.gather_inputs.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SourceSpec:
+    key: str                       # stable id
+    name: str                      # human label
+    feeds: str                     # which indicator(s)
+    basis: str                     # authority / scientific or official basis
+    sla_days: int                  # freshness SLA
+    url: str = ""
+    caveats: str = ""
+    health_keys: tuple[str, ...] = ()  # matching source_health row names
+
+
+SOURCE_REGISTRY: list[SourceSpec] = [
+    SourceSpec("cape", "Shiller CAPE (multpl / GuruFocus / shillerdata)", "S1 valuation",
+               "Robert Shiller's cyclically-adjusted P/E series (Campbell & Shiller 1988); "
+               "multpl and GuruFocus republish it, shillerdata is Shiller's own spreadsheet.",
+               35, "https://www.multpl.com/shiller-pe",
+               "Scraped from HTML/spreadsheet, not an API; post-1990 GAAP changes bias CAPE "
+               "upward (Siegel 2016).", ("cape", "cape_history")),
+    SourceSpec("fred_real10y", "FRED DFII10 (10-yr TIPS real yield)", "S1 ECY",
+               "Federal Reserve Bank of St. Louis (FRED), official series.", 3,
+               "https://fred.stlouisfed.org/series/DFII10", "", ("fred_DFII10",)),
+    SourceSpec("ssga", "SSGA SPY holdings XLSX", "S2 concentration",
+               "State Street (SPY issuer) official daily holdings file.", 3,
+               "https://www.ssga.com", "Top-10 is the sum of individual HOLDING weights, not a "
+               "sector-table figure.", ("ssga_spy_xlsx",)),
+    SourceSpec("prices", "Price layer (Tiingo->TwelveData->AlphaVantage->yfinance->cache)",
+               "S3, D4, GSADF, trend, VRP",
+               "Commercial market-data vendors; adjusted close. No free tier serves raw index "
+               "levels, so NDX/SPX use QQQ/SPY ETF proxies.", 3,
+               "https://www.tiingo.com",
+               "Stooq (former keyless primary) now behind a JS proof-of-work gate; index proxies "
+               "in use; Alpha Vantage free tier is unadjusted.",
+               ("price_SPY", "price_QQQ", "price_SMH", "price_SOXX", "price_NDX")),
+    SourceSpec("fred_hyoas", "FRED BAMLH0A0HYM2 (ICE BofA US HY OAS)", "S5 credit",
+               "ICE BofA index via FRED (official).", 3,
+               "https://fred.stlouisfed.org/series/BAMLH0A0HYM2",
+               "FRED truncated this series to a rolling 3-year window (Apr 2026); the S5 "
+               "percentile is only as deep as our own accrued history table.",
+               ("fred_BAMLH0A0HYM2",)),
+    SourceSpec("breadth", "S&P 500 constituents (SSGA holdings) + Twelve Data closes", "D1 breadth",
+               "Constituent-level computation of % > 200-day SMA; no published keyless "
+               "%>200DMA source is machine-readable.", 3, "",
+               "Partial coverage is published (N/503) rather than dropped; keyless scrape "
+               "sources are JS-gated/image-only.", ("breadth",)),
+    SourceSpec("finra", "FINRA margin-statistics XLSX", "D2 margin",
+               "FINRA official monthly customer margin-debt statistics (Rule 4521).", 75,
+               "https://www.finra.org", "Published ~3 weeks after month-end; no true fallback "
+               "(cache & tolerate staleness).", ("finra_xlsx",)),
+    SourceSpec("edgar", "SEC EDGAR companyfacts", "D3 hyperscaler FCF",
+               "SEC XBRL company facts (official regulatory filings).", 100,
+               "https://data.sec.gov", "Cloud-segment revenue is best-effort; total-revenue "
+               "proxy is conservative when segments are unavailable.", ("sec_edgar",)),
+    SourceSpec("lppls", "LPPLS fit (lppls==0.6.24 on QQQ proxy)", "D4 LPPLS",
+               "Johansen-Ledoit-Sornette log-periodic power-law singularity confidence.", 3, "",
+               "Package maintenance-inactive; ~29% precision (fires in ordinary bull markets); "
+               "runs on the QQQ index proxy.", ("lppls",)),
+    SourceSpec("vix", "VIX term structure + level + SKEW (vixcentral/CBOE/FRED)",
+               "V multiplier, fast alarm",
+               "CBOE VIX/VIX3M methodology; vixcentral republishes the futures curve.", 2, "",
+               "SKEW is COINCIDENT CONTEXT ONLY (no forward skill).",
+               ("vix_term_structure", "vix_level", "cboe_skew")),
+]
+
+
+# ---------------------------------------------------------------------------
+# KNOWN ISSUES — the scientific-correctness catalogue. Everything currently
+# known to be UNVERIFIED, CONTESTED, PROXIED, JUDGMENTAL, or a documented
+# DEVIATION is enumerated here so the status/API surface can flag it. This is
+# the "flag whatever is unclear, incomplete, or wrong" requirement made
+# concrete and always-visible (severity: error > warn > info).
+# ---------------------------------------------------------------------------
+
+KNOWN_ISSUES: list[dict[str, str]] = [
+    {"id": "citation-chen", "severity": "info", "category": "citation-verified",
+     "title": "Framework citation verified (due-diligence audit 2026-07-14)",
+     "detail": "Chen, Chen & Huang (2026, arXiv:2604.25826) — the basis for the GSADF "
+     "CONTESTED flag — resolves to 'General-Purpose Technology and Speculative Bubble "
+     "Detection' (arxiv.org/abs/2604.25826, posted 2026-04-28).",
+     "ref": "references.VERIFIED_CITATIONS"},
+    {"id": "citation-basele", "severity": "info", "category": "citation-verified",
+     "title": "Framework citation verified (due-diligence audit 2026-07-14)",
+     "detail": "Basele, Phillips & Shi (2025, Cowles d2430) resolves to 'Speculative Bubbles "
+     "in the Recent AI Boom' (cowles.yale.edu, CFDP 2430).",
+     "ref": "references.VERIFIED_CITATIONS"},
+    {"id": "citation-bis", "severity": "info", "category": "citation-verified",
+     "title": "Framework citation verified (due-diligence audit 2026-07-14)",
+     "detail": "BIS (2026) Annual Economic Report resolves to the report released 2026-06-28 "
+     "(bis.org/publ/arpdf/ar2026e), which discusses AI-boom / capex-bust risk.",
+     "ref": "references.VERIFIED_CITATIONS"},
+    {"id": "gsadf-contested", "severity": "warn", "category": "contested-method",
+     "title": "GSADF is permanently CONTESTED",
+     "detail": "Chen-Chen-Huang (2026) show GSADF-type tests spuriously reject the no-bubble "
+     "null 93-100% of the time under hump-shaped GPT fundamentals; S4 is capped at 0.25 and "
+     "carries a low weight.", "ref": "indicator s4"},
+    {"id": "index-proxy", "severity": "info", "category": "data-substitution",
+     "title": "Stock indices served via ETF proxies",
+     "detail": "No free data tier serves raw index levels, so Nasdaq-100 uses QQQ and S&P 500 "
+     "uses SPY. GSADF and LPPLS therefore run on the QQQ proxy. Enable TWELVE_DATA_INDICES on "
+     "the Grow plan for raw GSPC/NDX.", "ref": "sources.prices"},
+    {"id": "alpha-range-deviation", "severity": "info", "category": "documented-deviation",
+     "title": "Monte Carlo alpha range deviates from the written spec",
+     "detail": "Spec 5.3 states alpha ~ U(0.40,0.60), but that cannot reproduce the spec 5.5 "
+     "golden IQR (34,47); the implementation uses U(0.25,0.75), which reproduces ALL published "
+     "fixture outputs. Documented at ALPHA_RANGE in engine/montecarlo.py.",
+     "ref": "engine.montecarlo.ALPHA_RANGE"},
+    {"id": "fred-truncation", "severity": "info", "category": "data-limitation",
+     "title": "HY-OAS history is only as deep as accrued locally",
+     "detail": "FRED truncated BAMLH0A0HYM2 to a rolling 3-year window (Apr 2026); the S5 "
+     "percentile deepens over time as the service persists its own daily history.",
+     "ref": "indicator s5"},
+    {"id": "stooq-pow", "severity": "info", "category": "source-degraded",
+     "title": "Stooq disabled (JS proof-of-work anti-bot gate)",
+     "detail": "Stooq's CSV endpoint now serves a SHA-256 proof-of-work challenge; it is off by "
+     "default and the price layer requires Tiingo/Twelve Data keys.", "ref": "sources.stooq"},
+    {"id": "n4-calibration", "severity": "info", "category": "epistemic",
+     "title": "Uncalibratable by construction (n ~= 4)",
+     "detail": "The reference class of comparable US equity manias is ~4 events "
+     "{1929,2000,2007,2021}; the headline is structured expert judgment, NOT a probability.",
+     "ref": "epistemic caveat 2"},
+    {"id": "judgmental-anchors", "severity": "info", "category": "judgmental-parameter",
+     "title": "Several anchors/weights are expert-judgmental, not estimated",
+     "detail": "S2 concentration lo/hi, D1 breadth lo/hi and weight, and the alpha split have no "
+     "labeled-crash-dataset calibration; see the annual PSS sensitivity script.",
+     "ref": "indicators s2,d1"},
+    {"id": "alphavantage-unadjusted", "severity": "info", "category": "data-quality",
+     "title": "Alpha Vantage tier serves UNADJUSTED prices",
+     "detail": "If the price chain falls through to Alpha Vantage, closes are split/dividend "
+     "unadjusted (acceptable for short-window ETF math; flagged in provenance).",
+     "ref": "sources.prices"},
+    {"id": "gsadf-wb-cv", "severity": "info", "category": "calibration",
+     "title": "GSADF now uses extended history + wild-bootstrap CVs (verify on host)",
+     "detail": "v3.3.0 feeds an extended Tiingo monthly history (QQQ from 1999, T~329, past the "
+     "PSY T=100 tabulation floor) and switched exuber to wild-bootstrap critical values "
+     "(radf_wb_cv, Harvey et al. 2016; robust to the serial-correlation oversizing of "
+     "Pedersen-Schutte 2020). s4 is still capped at the contested 0.25, so this does not move "
+     "the headline — it only makes the displayed statistic honest. The R path degrades to the "
+     "0.25 floor if exuber errors; smoke-test on the host after deploy.",
+     "ref": "indicator s4"},
+]
+
+
+# ---------------------------------------------------------------------------
+# SCORE_EXAMPLE — the single, shared worked example of GET /api/v1/score
+# (golden-fixture-shaped). Used by the OpenAPI response example AND the status
+# page, so the two can never drift.
+# ---------------------------------------------------------------------------
+
+SCORE_EXAMPLE: dict = {
+    "data": {
+        "headline_median": 53, "iqr": [50, 55], "band_5_95": [47, 58], "point_score": 52.43,
+        "action_band": "trim", "override_fired": False, "red_flag_count": 0,
+        "red_flag_detail": {"gsadf_explosive_noncontested": False, "semi_runup_ge_150pp": False,
+                            "hy_oas_widen_gt_100bps": False, "breadth_lt_50_near_ath": False},
+        "block_S": {"value": 0.745, "indicators": {"s1": {"value": 41.6, "sub_score": 0.92,
+                    "weight": 0.33, "grounding": "literature-grounded", "stale": False}}},
+        "block_D": {"value": 0.369, "indicators": {"d1": {"value": 56.0, "sub_score": 0.618,
+                    "weight": 0.35, "grounding": "judgmental", "note": "path=B_constituent_compute"}}},
+        "V": {"state": "contango", "multiplier": 1.0, "label": "lagging confirmation"},
+        "trend_states": {"SPY": {"faber_10mo": "IN", "sma200": "IN"},
+                         "QQQ": {"faber_10mo": "IN", "sma200": "IN"}},
+        "fast_alarm": {"term_structure": "contango", "vrp": 12.4, "vrp_flag": False,
+                       "skew": 128, "skew_label": "coincident context only"},
+        "judgment_call": {"text": "The biggest thing lifting the reading is that shares look "
+                          "very expensive compared with their own past; the main calming factor "
+                          "is that lots of companies are still climbing together, not just a handful.",
+                          "stale": False, "error_class": None},
+    },
+    "meta": {
+        "computed_at": "2026-07-11T06:00:03+00:00", "service_version": "3.4.0",
+        "coverage": {"S": {"coverage": 1.0, "degraded": False},
+                     "D": {"coverage": 1.0, "degraded": False}, "degraded": False},
+        "disclaimer": "Research, not advice.",
+        "epistemic_caveats": ["NOT-A-PROBABILITY: 0-100 regime heuristic = structured expert "
+                              "judgment; uncalibrated.", "... (5 verbatim guardrails)"],
+    },
+}
+
+
+# LEGS_SCIENCE — the scientific basis of Legs 2-3 and the action-band edges,
+# joined for the status surface (indicator references are already surfaced;
+# these were previously only reachable via /api/v1/legs/* and /meta).
+LEGS_SCIENCE: list[dict] = [
+    {"id": "trend", "name": "Leg 2 — Faber trend trigger (SPY/QQQ 10-mo SMA)",
+     "references": LEG_REFERENCES["trend"], "caveat": LEG_CAVEATS["trend"]},
+    {"id": "fast_alarm", "name": "Leg 3 — Fast alarm (VIX term structure, VRP, SKEW)",
+     "references": LEG_REFERENCES["fast_alarm"], "caveat": LEG_CAVEATS["skew"]},
+    {"id": "action_bands", "name": "Action-band thresholds (<45 hold / 45-60 trim / >=60 de-risk)",
+     "references": LEG_REFERENCES["action_bands"], "caveat": LEG_CAVEATS["derisking"]},
+]

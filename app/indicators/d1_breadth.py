@@ -2,11 +2,13 @@
 
 WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["d1"]; summary:
 
-    pct = 100 * #{members with close > SMA200} / N  (constituents + Stooq;
-          StockCharts $SPXA200R / Barchart $MMTH only if anonymously
-          accessible — both JS/login-gated as of July 2026)
-    sub_score = clip((hi - pct)/(hi - lo), 0, 1)
-    MC anchors lo ~ U(35,45), hi ~ U(70,80); baseline lo=40, hi=75.
+    pct = 100 * #{members with close > SMA200} / N  (constituent closes via the
+          Polygon/Massive grouped-daily universe, Twelve Data fallback)
+    sub_score = max(0.05, clip((hi - pct)/(hi - lo), 0, 1))
+    MC anchors lo ~ U(30,40), hi ~ U(85,95); baseline lo=35, hi=90.
+    NOTE (v3.3.0): hi raised 75 -> 90 because bull-market breadth routinely
+    reaches the high 80s-90s, so hi=75 forced normal readings to exactly 0.0;
+    a 0.05 soft floor ensures breadth never annihilates Block D.
 
 CAVEAT (verbatim): Both the weight and the linear map are JUDGMENTAL.
 Breadth is also used in red-flag #4 with the <50%-while-index-within-2%-of-ATH
@@ -36,13 +38,16 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
-BASELINE_LO = 40.0
-BASELINE_HI = 75.0
+BASELINE_LO = 35.0
+BASELINE_HI = 90.0
+SOFT_FLOOR = 0.05  # breadth never annihilates Block D (post-rescale -> 0.145)
 
 
 def compute(pct_above_200dma: float, lo: float = BASELINE_LO, hi: float = BASELINE_HI) -> float:
-    """sub_score = clip((hi - pct)/(hi - lo), 0, 1); lower breadth => higher score."""
-    return max(0.0, min(1.0, (hi - pct_above_200dma) / (hi - lo)))
+    """sub_score = max(SOFT_FLOOR, clip((hi - pct)/(hi - lo), 0, 1)); lower
+    breadth => higher score. hi=90 reflects that bull-market breadth routinely
+    reaches the high 80s-90s (hi=75 clipped normal readings to 0)."""
+    return max(SOFT_FLOOR, min(1.0, (hi - pct_above_200dma) / (hi - lo)))
 
 
 def red_flag_breadth(pct_above_200dma: float, index_within_2pct_of_ath: bool) -> bool:

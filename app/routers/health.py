@@ -20,6 +20,8 @@ def healthz() -> dict[str, str]:
 
 @router.get("/readyz", summary="Per-source health matrix from the latest gather")
 def readyz() -> dict[str, Any]:
+    from app.engine.gsadf_runner import r_selfcheck
+
     with session_scope() as session:
         rows = session.execute(
             select(SourceHealth).order_by(SourceHealth.checked_at.desc()).limit(200)
@@ -31,4 +33,5 @@ def readyz() -> dict[str, Any]:
                 "ok": r.ok, "latency_ms": r.latency_ms, "http_status": r.http_status,
                 "checked_at": r.checked_at.isoformat(), "note": r.note,
             }
-    return {"status": "ok" if latest else "no-data", "sources": latest}
+    return {"status": "ok" if latest else "no-data", "sources": latest,
+            "gsadf_r": r_selfcheck()}

@@ -38,14 +38,14 @@ def test_single_source_down_drops_and_renormalizes(isolated_db, kill, indicator,
     assert 0.0 <= data.median <= 100.0  # scoring still completes
 
 
-def test_gsadf_unavailable_floors_not_drops(isolated_db):
+def test_gsadf_unavailable_floors_at_contested_level(isolated_db):
     raw = make_golden_raw_inputs()
     raw.gsadf_stat = raw.gsadf_cv90 = raw.gsadf_cv95 = None
-    raw.gsadf_note = "R/exuber unavailable or failed; sub-score floor 0.05"
+    raw.gsadf_note = "R/exuber unavailable"
     data = _compute(raw)
     assert not data.indicators["s4"].dropped
-    assert data.indicators["s4"].sub_score == 0.05
-    assert "unavailable" in (data.indicators["s4"].note or "")
+    assert data.indicators["s4"].sub_score == 0.25  # contested/stale/data-missing floor
+    assert "not computable" in (data.indicators["s4"].note or "")
 
 
 def test_vix_unavailable_neutral_multiplier(isolated_db):
@@ -119,3 +119,17 @@ def test_entire_block_down_raises_cleanly(isolated_db):
     raw.lppls_confidence = None
     with pytest.raises(RuntimeError):
         _compute(raw)  # admin router converts this to a degraded 200, never 500
+
+
+def test_lppls_subprocess_returns_failed_state_cleanly():
+    """The isolated LPPLS runner converts any subprocess death (missing package,
+    SIGILL on old CPUs, timeout) or a short input into an AUDITABLE state dict —
+    never an uncaught crash. v3.3.2: failures map to FLOOR (quality 0.0) /
+    INSUFFICIENT_DATA; the compute layer keeps the payload row visible but
+    excludes d4 from the aggregation and renormalizes Block D."""
+    from app.indicators.d4_lppls import compute_confidence_isolated
+
+    result = compute_confidence_isolated([100.0 + i for i in range(400)], timeout_s=120)
+    assert result["state"] in ("FLOOR", "INSUFFICIENT_DATA")
+    assert result["value"] is None
+    assert result["quality"] == 0.0

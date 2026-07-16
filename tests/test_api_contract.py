@@ -95,8 +95,11 @@ def test_methodology_endpoint(client):
     assert resp.status_code == 200
     d = resp.json()["data"]
     assert len(d["falsification_criteria"]) == 3
-    assert [c["version"] for c in d["changelog"]] == ["v1", "v2", "v3"]
-    assert d["unverified_citations"]
+    assert [c["version"] for c in d["changelog"]] == \
+        ["v1", "v2", "v3", "v3.0.1", "v3.2.0", "v3.3.0", "v3.3.1", "v3.3.2", "v3.4.0", "v3.5.0"]
+    # all framework citations verified in the 2026-07 audit: none unverified, three verified
+    assert d["unverified_citations"] == []
+    assert len(d["verified_citations"]) == 3
 
 
 def test_health_endpoints(client):
@@ -107,6 +110,18 @@ def test_health_endpoints(client):
 def test_admin_requires_key(client):
     assert client.post("/api/v1/admin/refresh").status_code == 401
     assert client.post("/api/v1/admin/refresh", headers={"X-API-Key": "wrong"}).status_code == 401
+    assert client.get("/api/v1/admin/refresh/status").status_code == 401
+
+
+def test_admin_refresh_status_shape(client):
+    from tests.conftest import TEST_ADMIN_KEY
+
+    resp = client.get("/api/v1/admin/refresh/status",
+                      headers={"X-API-Key": TEST_ADMIN_KEY})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert set(data) == {"running", "last"}
+    assert isinstance(data["running"], bool)
 
 
 def test_score_history(client_with_snapshot):

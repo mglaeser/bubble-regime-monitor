@@ -9,6 +9,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# A strong, non-placeholder admin key used across the suite (B-06/C-01).
+TEST_ADMIN_KEY = "test-admin-key-not-the-placeholder-0123456789"
+
 
 @pytest.fixture()
 def isolated_db(tmp_path, monkeypatch):
@@ -18,6 +21,9 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("MC_SAMPLES", "20000")
     monkeypatch.setenv("FRED_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    # A real (non-placeholder) admin key: the fail-closed guard (B-06/C-01)
+    # refuses to authenticate against the shipped placeholder default.
+    monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)
 
     from app.config import get_settings
     from app.db import reset_engine
@@ -35,7 +41,8 @@ def isolated_db(tmp_path, monkeypatch):
 
 
 GOLDEN_SUB_S = {"s1": 0.92, "s2": 0.80, "s3": 0.525, "s4": 0.25, "s5": 0.80}
-GOLDEN_SUB_D = {"d1": 0.543, "d2": 0.49, "d3": 0.30, "d4": 0.005}
+# d1 = (90-56)/(90-35) = 0.618 under the v3.3.0 breadth anchors (hi=90, lo=35).
+GOLDEN_SUB_D = {"d1": 0.618, "d2": 0.49, "d3": 0.30, "d4": 0.005}
 
 
 @pytest.fixture()

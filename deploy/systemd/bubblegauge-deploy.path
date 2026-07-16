@@ -1,0 +1,17 @@
+[Unit]
+Description=Watch for a bubblegauge deploy-trigger file and run deploy.sh
+Documentation=file://%h/playground/bubble-regime-monitor/docs/AUTO_DEPLOY.md
+
+[Path]
+# The app (running in the container) writes this file onto the shared /data
+# volume; the host sees it under $REPO_DIR/data/deploy-trigger/. Adjust the
+# path if your checkout lives elsewhere or DATA_DIR differs.
+#
+# PathExists fires the .service when the file appears. deploy-watch.sh CONSUMES
+# (deletes) the file, which re-arms this unit — a trigger that arrives during a
+# running deploy therefore causes exactly one more deploy afterwards.
+PathExists=%h/playground/bubble-regime-monitor/data/deploy-trigger/deploy-requested
+Unit=bubblegauge-deploy.service
+
+[Install]
+WantedBy=default.target

@@ -71,8 +71,11 @@ class TestS4:
         assert s4_gsadf.sub_score(2.0, 1.9, 2.1, contested=False) == 0.5
         assert s4_gsadf.sub_score(1.0, 1.9, 2.1, contested=False) == 0.05
 
-    def test_missing_stat_floors(self):
-        assert s4_gsadf.sub_score(None, None, None, contested=False) == 0.05
+    def test_missing_data_floors_at_contested_level(self):
+        # data-missing -> 0.25 (contested/stale floor); 0.05 is ONLY for a
+        # successfully executed test that finds no explosiveness
+        assert s4_gsadf.sub_score(None, None, None, contested=False) == 0.25
+        assert s4_gsadf.sub_score(None, None, None, contested=True) == 0.25
 
 
 class TestS5:
@@ -88,11 +91,13 @@ class TestS5:
 
 class TestD1:
     def test_fixture_value(self):
-        # (75 - 56) / (75 - 40) = 19/35 = 0.5428...
-        assert d1_breadth.compute(56.0) == pytest.approx(0.543, abs=1e-3)
+        # v3.3.0 anchors: (90 - 56) / (90 - 35) = 34/55 = 0.6182
+        assert d1_breadth.compute(56.0) == pytest.approx(0.618, abs=1e-3)
 
     def test_clipping(self):
-        assert d1_breadth.compute(90.0) == 0.0
+        # breadth >= hi (90) clips to the 0.05 soft floor (never annihilates the block)
+        assert d1_breadth.compute(90.0) == 0.05
+        assert d1_breadth.compute(95.0) == 0.05
         assert d1_breadth.compute(10.0) == 1.0
 
     def test_red_flag(self):
@@ -140,12 +145,20 @@ class TestD3:
 
 
 class TestD4:
-    def test_confidence_fraction(self):
-        assert d4_lppls.confidence_from_fits([True, False, False, False]) == 0.25
-
     def test_bounds(self):
         assert d4_lppls.sub_score(1.5) == 1.0
         assert d4_lppls.sub_score(-0.1) == 0.0
+
+    def test_band_edges_cover_the_scan_range(self):
+        # v3.3.2: bands must tile [smallest_window, window_max] with no gap, so
+        # every fitted start-time window belongs to exactly one scale band.
+        lo = d4_lppls.LPPLS_BANDS[0][1]
+        hi = d4_lppls.LPPLS_BANDS[-1][2]
+        assert lo == d4_lppls.LPPLS_SMALLEST_WINDOW
+        assert hi == d4_lppls.LPPLS_WINDOW_MAX
+        for (_, _, a_hi), (_, b_lo, _) in zip(d4_lppls.LPPLS_BANDS,
+                                              d4_lppls.LPPLS_BANDS[1:], strict=False):
+            assert a_hi == b_lo  # contiguous
 
 
 class TestV:

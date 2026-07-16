@@ -1,8 +1,22 @@
 name: ci
 
+# Audit rebuild (A-01/A-08/A-13/B-01/B-35): the previous pipeline was red on
+# every run and non-blocking ('mypy || true'), so production shipped on red.
+# This version fails closed on lint, tests, dependency CVEs and secret leaks.
+# Type-checking is EXPLICITLY advisory (continue-on-error) — not disguised as a
+# gate — until the 43 tracked mypy errors are driven to zero (A-13).
+#
+# NOTE (honesty, per the mandate): making this the *authoritative* gate also
+# requires branch protection to mark `test` a REQUIRED status check with no
+# bypass. That is a repo-settings action for the human-in-command (B-35), and
+# it is recorded as an open item in audit/06-residual-risk-register.md.
+
 on:
   push:
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -12,22 +26,34 @@ jobs:
         python-version: ["3.12"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history so the secret scan sees every commit
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install R (for GSADF/exuber subprocess)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends r-base
-      - name: Install Python deps
+      - name: Install Python deps (aligned to pyproject; anthropic+xlrd added)
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip "setuptools>=83"   # setuptools>=83 clears PYSEC-2026-3447
           pip install fastapi "uvicorn[standard]" "pydantic>=2.7" pydantic-settings \
             SQLAlchemy alembic httpx tenacity "APScheduler<4" structlog slowapi \
-            numpy pandas openpyxl beautifulsoup4 lxml pyarrow pytest ruff mypy
-      - name: Lint (ruff)
+            "numpy<2.3" "pandas<3.0" openpyxl xlrd beautifulsoup4 lxml anthropic \
+            pytest ruff mypy pip-audit detect-secrets
+      - name: Install optional LPPLS engine (best-effort; suite skips it if absent)
+        run: pip install "lppls==0.6.24" || echo "::warning::lppls unavailable — LPPLS paths self-skip (hermetic suite, A-02)"
+      - name: Lint (ruff, BLOCKING — E,F,I,W,UP,B,S)
         run: ruff check app tests scripts
-      - name: Type-check (mypy)
-        run: mypy app || true   # strict gate tracked; do not silently drop failures from logs
-      - name: Tests
+      - name: Type-check (ADVISORY — 43 tracked errors, A-13; not a gate yet)
+        run: mypy app
+        continue-on-error: true
+      - name: Security — dependency audit (BLOCKING)
+        run: pip-audit --progress-spinner off
+      - name: Security — secret scan over tracked files (BLOCKING)
+        # NB: `detect-secrets scan --baseline` exits 0 even on NEW secrets (it just
+        # re-emits an updated baseline) — it does NOT gate. `detect-secrets-hook`
+        # exits 1 when a tracked file contains a secret absent from the baseline.
+        # (This distinction was caught by adversarial verification.)
+        run: git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+      - name: Tests (BLOCKING)
         run: pytest -q
 
   image:
@@ -36,5 +62,5 @@ jobs:
       - uses: actions/checkout@v4
       # Runner lacks rootless Podman wiring; the Containerfile is OCI-compatible,
       # so docker build is the documented substitute (spec section 12).
-      - name: Build image
+      - name: Build image (validates the Containerfile incl. R/exuber)
         run: docker build -t bubblegauge -f Containerfile .

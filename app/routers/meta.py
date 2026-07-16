@@ -18,6 +18,7 @@ from app.references import (
     LEG_REFERENCES,
     REGISTRY,
     UNVERIFIED_CITATIONS,
+    VERIFIED_CITATIONS,
 )
 from app.security import READ_RATE_LIMIT, limiter, require_read_access
 
@@ -50,7 +51,8 @@ def get_methodology(request: Request, _: None = Depends(require_read_access)) ->
             for o in outcomes
         ],
         "changelog": CHANGELOG,
-        "unverified_citations": UNVERIFIED_CITATIONS,
+        "unverified_citations": UNVERIFIED_CITATIONS,   # [] — all resolved (audit 2026-07-14)
+        "verified_citations": VERIFIED_CITATIONS,
     }
     meta = {
         "computed_at": None,

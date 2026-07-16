@@ -38,6 +38,7 @@ class Snapshot(Base):
     fast_alarm: Mapped[dict] = mapped_column(JSON, default=dict)
     judgment_call: Mapped[str | None] = mapped_column(Text, nullable=True)
     judgment_stale: Mapped[bool] = mapped_column(Boolean, default=False)
+    judgment_error: Mapped[str | None] = mapped_column(String(128), nullable=True)
     data_freshness: Mapped[dict] = mapped_column(JSON, default=dict)
 
     readings: Mapped[list[IndicatorReading]] = relationship(back_populates="snapshot")
@@ -88,6 +89,64 @@ class HyOasHistory(Base):
     oas_bps: Mapped[float] = mapped_column(Float)
 
 
+class PriceSeriesCache(Base):
+    """TERMINAL price cache: last good daily close series per CANONICAL symbol.
+
+    Every successful provider fetch lands here; on total provider failure the
+    last cached series is served with stale flags (never a 500)."""
+
+    __tablename__ = "price_series_cache"
+
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)  # canonical (SPY, NDX, ...)
+    as_of: Mapped[date] = mapped_column(Date)
+    source: Mapped[str] = mapped_column(String(32))  # provider:vendor_symbol that filled it
+    closes: Mapped[list] = mapped_column(JSON)  # [[date_iso, adjclose], ...] chronological
+
+
+class ProviderHealth(Base):
+    """Consecutive-failure scoring per price provider, persisted across runs.
+
+    A provider is skipped after 3 consecutive failures and only re-tried
+    after a 6-hour cooldown."""
+
+    __tablename__ = "provider_health"
+
+    provider: Mapped[str] = mapped_column(String(32), primary_key=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class BreadthSymbolCache(Base):
+    """Per-constituent last close + SMA200 for the D1 breadth computation.
+
+    Only symbols older than the SLA are re-fetched each run, so a full
+    ~500-symbol sweep happens once and later runs touch only stale entries."""
+
+    __tablename__ = "breadth_symbol_cache"
+
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    as_of: Mapped[date] = mapped_column(Date)
+    last_close: Mapped[float] = mapped_column(Float)
+    sma200: Mapped[float] = mapped_column(Float)
+
+
+class DailyClose(Base):
+    """Per-symbol daily close for the D1 breadth 200-DMA, populated from the
+    Polygon/Massive grouped-daily endpoint (one call = the whole US market for
+    one day). Keyed (symbol, date); the 200-day SMA is computed on read from the
+    most recent 200 rows per symbol. Complements breadth_symbol_cache, which
+    stores a pre-computed SMA from the per-symbol Twelve Data fallback path."""
+
+    __tablename__ = "daily_close"
+
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    close: Mapped[float] = mapped_column(Float)
+    provider: Mapped[str] = mapped_column(String(24), default="polygon")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class FalsificationOutcome(Base):
     """Outcomes of the falsification registry criteria (spec section 15)."""
 
@@ -97,3 +156,16 @@ class FalsificationOutcome(Base):
     criterion: Mapped[str] = mapped_column(Text)
     tripped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DashboardFeed(Base):
+    """Cached dashboard-feed payload (v3.4.0, DASHBOARD_FEED_SPEC.md): the full
+    series+metrics JSON assembled once per recompute (AFTER the score persists)
+    and served verbatim by GET /api/v1/dashboard/feed — endpoints never pull
+    upstream on request. Only the newest ~14 rows are retained."""
+
+    __tablename__ = "dashboard_feed"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    payload: Mapped[str] = mapped_column(Text)  # JSON: {anchor_month, anchor_partial, series, metrics}

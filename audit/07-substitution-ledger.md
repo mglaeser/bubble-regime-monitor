@@ -1,0 +1,22 @@
+# audit/07 — Substitution ledger (Phase 6)
+
+*The deliverable specific to this operating model.* For every control a conventional audit would discharge with "a human reviews it," the automated safeguard (S1–S10) that replaces it here, and the evidence it works. A gap here is a gap where everyone assumes something is standing.
+
+Apply the test to each row: *if every human went on holiday for a month, would this still hold?*
+
+| Reviewer function (classical) | Substitution | Status here | Evidence / gap |
+|---|---|---|---|
+| "An engineer reads the diff and blocks bad code." | **S1** deterministic policy gate | **PARTIAL** | CI rebuilt to be blocking (ruff+`S`, pip-audit, detect-secrets, pytest) and locally green. **Gap:** not yet a *required* check (branch protection) — an operator can still merge on red (residual A-01/B-35). Holds on holiday only once branch protection is on. |
+| "A second engineer independently checks the risky change." | **S2** adversarial independence (different model/vendor, falsifying objective) | **PARTIAL** | A partial same-vendor adversarial verifier was run this engagement (`audit/evidence/independent-verifier.md`). **Gap:** no different-vendor verifier (A-39). Does NOT fully survive the holiday test — disclosed, not hidden. |
+| "A reviewer would notice the property is wrong by reading." | **S3** executable proof (tests, types, lint, invariants) | **STRONG-ish** | 171 tests + golden fixtures + the numbers-only-prompt invariant + ruff `S`. **Gap:** mutation score unmeasured (S4) and mypy advisory. Survives the holiday for the properties that are tested. |
+| "Someone knows whether the tests are any good." | **S4** mutation testing as meta-gate | **MISSING** | `mutmut` not wired; suite fault-detection power UNMEASURED (A-02). Does not survive the holiday — this is the top verification gap. |
+| "A human signs off before anything irreversible." | **S5** reversibility by construction | **N/A-favourable** | The only irreversible action is send-SMS (admin+schedule gated, fixed operator recipient, ≤160 chars). No tool/agent irreversibility exists (no tools). `deploy.sh` is dry-run→health-check→auto-rollback. Survives the holiday. |
+| "Someone would notice before it got too bad." | **S6** blast-radius caps in infra | **PARTIAL** | Rate limit (60/min), `max_tokens`, single-flight recompute lock, rootless+non-root container. **Gap:** no platform egress allowlist; no provider spend cap. Mostly survives; add the spend cap. |
+| "The design discussion catches the bad high-stakes change." | **S7** N-version agreement | **N/A** | Change volume and stakes (single-maintainer research tool) do not warrant N-version. Documented as disproportionate. |
+| "Watch the dashboard after deploy." | **S8** progressive exposure + auto-abort | **PARTIAL** | `deploy.sh` health-check auto-rollback fires without a human. **Gap:** no canary/percentage rollout (single instance, 100% blast radius); abort not wired to a runtime quality signal. |
+| "The name on the approval is the accountability." | **S9** attested provenance | **WEAK** | Git history + CHANGELOG + this audit are the reconstruction record; single owning role is unambiguous. **Gap:** no per-artifact model/prompt/spec provenance chain (C-37). Proportionate substitute (release notes) rather than full attestation. |
+| "On-call will intervene." | **S10** break-glass out-of-band, never counted as a control | **HELD** | There are **zero load-bearing approval queues** (A-35 PASS) — the ideal end state. The operator is break-glass only. Survives the holiday (nothing waits on a human queue). |
+
+## Honest bottom line
+
+The two substitutions that do **not** yet survive the holiday test are **S2** (no different-vendor verifier) and **S4** (no mutation testing) — and together they are exactly finding **A-39 + A-02**, the load-bearing checks the mandate warns a conventional audit walks past. Until they hold, the automated verification loop is partly self-referential and its net has unmeasured holes. Everything else either holds or has a proportionate, argued substitute for a single-maintainer research service.

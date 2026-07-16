@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
+# >=83.0.0 clears PYSEC-2026-3447 (pip-audit finding, audit A-08/B-04).
+requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -19,17 +20,35 @@ dependencies = [
     "APScheduler>=3.10,<4",
     "structlog>=24.1",
     "slowapi>=0.1.9",
-    "numpy>=1.26",
-    "pandas>=2.2",
+    # <2.3 / <3.0: newer numpy wheels raise the x86-64 CPU baseline and die
+    # with SIGILL (Illegal instruction) on older CPUs and on VMs with generic
+    # CPU models (qemu64/kvm64). Relax only if all deploy targets expose
+    # x86-64-v2+ (or the VM uses host CPU passthrough).
+    "numpy>=1.26,<2.3",
+    "pandas>=2.2,<3.0",
     "openpyxl>=3.1",
+    "xlrd>=2.0.1",  # legacy .xls support (shillerdata ie_data.xls CAPE fallback)
     "beautifulsoup4>=4.12",
     "lxml>=5.2",
-    "pyarrow>=16.0",
-    "anthropic>=0.30",
+    "anthropic>=0.116",
     "lppls==0.6.24",
 ]
 
 [project.optional-dependencies]
+# pyarrow is optional: pandas imports it eagerly when installed, and its
+# Arrow C++ wheels require SSE4.2 — SIGILL on older CPUs. Without it, the
+# Parquet export disables itself (runtime subprocess probe); everything else
+# works. Install .[parquet] on hosts with a modern CPU.
+parquet = [
+    "pyarrow>=16.0",
+]
+# yfinance is the QUATERNARY price provider (documented-unreliable, ToS-gray),
+# and the one free source of raw index levels. Not installed by default;
+# install .[yfinance] to activate that tier. When absent the price chain
+# simply skips it (ProviderNotConfigured, no health penalty).
+yfinance = [
+    "yfinance>=0.2.40",
+]
 dev = [
     "pytest>=8.2",
     "ruff>=0.4",
@@ -39,13 +58,30 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+"app.routers" = ["*.html"]
+
 [tool.ruff]
 line-length = 110
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W", "UP", "B"]
+# 'S' (flake8-bandit) added by the audit (A-08/A-13/A-26): the prior config
+# (E,F,I,W,UP,B) caught 1/4 seeded defects — it was blind to hard-coded secrets,
+# swallowed exceptions and vacuous asserts. 'S110' now blocks new try/except/pass.
+select = ["E", "F", "I", "W", "UP", "B", "S"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert (S101) and carry throwaway secret-shaped literals by design.
+"tests/**" = ["S"]
+"scripts/**" = ["S101"]
+# Intentional, isolated subprocess calls to the pinned R/lppls engines
+# (SIGILL/hang containment is the whole point). Not untrusted input.
+"app/engine/gsadf_runner.py" = ["S603", "S607"]
+"app/indicators/d4_lppls.py" = ["S603", "S607"]
+# Defensive type-narrowing assert for mypy; not a runtime control.
+"app/db.py" = ["S101"]
 
 [tool.mypy]
 python_version = "3.11"

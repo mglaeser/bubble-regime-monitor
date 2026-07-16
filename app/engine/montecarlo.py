@@ -47,23 +47,20 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from app.engine.aggregate import EPSILON, RedFlags, renormalize
+from app.engine.aggregate import RESCALE_FLOOR, RedFlags, renormalize
 
 BASE_WEIGHTS_S: dict[str, float] = {"s1": 0.33, "s2": 0.27, "s3": 0.20, "s4": 0.07, "s5": 0.13}
 BASE_WEIGHTS_D: dict[str, float] = {"d1": 0.35, "d2": 0.13, "d3": 0.32, "d4": 0.20}
 
 DIRICHLET_CONCENTRATION = 50.0
 
-# KNOWN SPEC INCONSISTENCY (documented, resolved in favor of the golden
-# fixture): spec section 5.3 lists alpha ~ U(0.40, 0.60), but that range
-# yields IQR ~= (37.3, 43.8) on the section 5.5 golden fixture — incompatible
-# with the required golden targets IQR (34, 47) +/- 2. The golden fixture is
-# the authoritative acceptance benchmark (spec Recommendations, Stage 1), and
-# alpha ~ U(0.25, 0.75) reproduces ALL of its published outputs at once:
-# median ~= 40.7, IQR ~= (35.1, 46.8), and the example-response 5-95 band
-# ~= (28.8, 53.5) vs the published (28, 55). If the upstream spec text is
-# ever corrected, change this constant (or override via settings).
-ALPHA_RANGE: tuple[float, float] = (0.25, 0.75)
+# alpha ~ U(ALPHA_RANGE), beta = 1 - alpha (spec section 5.3). Restored to the
+# spec range (0.40, 0.60) in v3.3.0: the earlier (0.25, 0.75) widening existed
+# only to reproduce the OLD golden IQR under the additive-epsilon aggregation;
+# with the rescale-then-aggregate scheme the golden fixture is regenerated, so
+# the deliberate spec deviation is no longer needed. A wider range also inflates
+# the IQR/band because asymmetric S^a*D^(1-a) exponent draws skew the product.
+ALPHA_RANGE: tuple[float, float] = (0.40, 0.60)
 
 
 @dataclass
@@ -161,11 +158,13 @@ def _s_columns(inp: MonteCarloInputs, rng: np.random.Generator, n: int) -> dict[
 def _d_columns(inp: MonteCarloInputs, rng: np.random.Generator, n: int) -> dict[str, np.ndarray]:
     cols: dict[str, np.ndarray] = {}
 
-    # d1 — breadth anchors lo ~ U(35,45), hi ~ U(70,80).
+    # d1 — breadth anchors lo ~ U(30,40), hi ~ U(85,95) (bull-market breadth
+    # routinely reaches the high 80s-90s, so the old hi~U(70,80) clipped normal
+    # readings to 0). Soft floor 0.05 so breadth never annihilates the block.
     if inp.breadth_pct is not None:
-        lo = rng.uniform(35.0, 45.0, size=n)
-        hi = rng.uniform(70.0, 80.0, size=n)
-        cols["d1"] = np.clip((hi - inp.breadth_pct) / (hi - lo), 0.0, 1.0)
+        lo = rng.uniform(30.0, 40.0, size=n)
+        hi = rng.uniform(85.0, 95.0, size=n)
+        cols["d1"] = np.maximum(0.05, np.clip((hi - inp.breadth_pct) / (hi - lo), 0.0, 1.0))
     elif inp.d1_sub is not None:
         cols["d1"] = np.full(n, inp.d1_sub)
 
@@ -189,8 +188,10 @@ def _block(
     base = renormalize(base_weights, set(ids))
     alpha_vec = np.array([base[k] for k in ids]) * DIRICHLET_CONCENTRATION
     weights = rng.dirichlet(alpha_vec, size=n)  # (n, k)
-    logs = np.column_stack([np.log(cols[k] + EPSILON) for k in ids])  # (n, k)
-    return np.exp(np.sum(weights * logs, axis=1)) - EPSILON
+    # Rescale each sub-score to [RESCALE_FLOOR, 1] before the geometric mean
+    # (mirrors aggregate.geometric_block); no additive-epsilon.
+    logs = np.column_stack([np.log(RESCALE_FLOOR + (1.0 - RESCALE_FLOOR) * cols[k]) for k in ids])
+    return np.exp(np.sum(weights * logs, axis=1))
 
 
 def monte_carlo(

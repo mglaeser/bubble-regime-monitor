@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -11,15 +12,42 @@ from app.config import get_settings
 from app.db import session_scope
 from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS
+from app.references import SCORE_EXAMPLE as _SCORE_EXAMPLE
 from app.security import READ_RATE_LIMIT, limiter, require_read_access
 
 router = APIRouter(prefix="/api/v1/score", tags=["score"])
 
 
+def _iso_utc(dt: datetime) -> str:
+    """Timezone-aware UTC ISO-8601 (SQLite returns naive datetimes)."""
+    from datetime import UTC
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.isoformat()
+
+
+def _parse_date_bound(value: str | None, field: str) -> datetime | None:
+    """Parse an ISO date/datetime query bound, or 422 on malformed input.
+
+    A-25: `datetime.fromisoformat` raises ValueError on garbage; unguarded it
+    surfaced as an HTTP 500 on a public endpoint. Validation belongs at the
+    boundary, and a bad client value is a 422, never a server error."""
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field} must be an ISO-8601 date (e.g. 2026-01-31); got {value!r}",
+        ) from exc
+
+
 def _meta(snap: Snapshot | None) -> dict[str, Any]:
     settings = get_settings()
     return {
-        "computed_at": snap.computed_at.isoformat() if snap else None,
+        "computed_at": _iso_utc(snap.computed_at) if snap else None,
         "service_version": settings.service_version,
         "data_freshness": snap.data_freshness if snap else {},
         "disclaimer": "Research, not advice.",
@@ -34,6 +62,7 @@ def _latest_snapshot() -> Snapshot | None:
         ).scalars().first()
 
 
+
 @router.get(
     "",
     summary="Headline regime score",
@@ -42,6 +71,8 @@ def _latest_snapshot() -> Snapshot | None:
         "both blocks with per-indicator objects, red flags, action band, trend states, "
         "fast alarm, and the judgment call. The headline is NOT a probability."
     ),
+    responses={200: {"description": "Latest snapshot (golden-fixture-shaped example).",
+                     "content": {"application/json": {"example": _SCORE_EXAMPLE}}}},
 )
 @limiter.limit(READ_RATE_LIMIT)
 def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[str, Any]:
@@ -68,9 +99,12 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         },
         "trend_states": snap.trend_states,
         "fast_alarm": snap.fast_alarm,
-        "judgment_call": {"text": snap.judgment_call, "stale": snap.judgment_stale},
+        "judgment_call": {"text": snap.judgment_call, "stale": snap.judgment_stale,
+                          "error_class": snap.judgment_error},
     }
-    return {"data": data, "meta": _meta(snap)}
+    meta = _meta(snap)
+    meta["coverage"] = (snap.data_freshness or {}).get("_coverage", {})
+    return {"data": data, "meta": meta}
 
 
 @router.get(
@@ -85,21 +119,28 @@ def get_history(
     to: str | None = Query(None, description="ISO date upper bound (inclusive)"),
     granularity: str = Query("raw", pattern="^(raw|daily|monthly)$",
                              description="raw = every snapshot; daily/monthly = last snapshot per period"),
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum rows returned (most recent kept)"),
     _: None = Depends(require_read_access),
 ) -> dict[str, Any]:
+    from_dt = _parse_date_bound(from_, "from")
+    to_dt = _parse_date_bound(to, "to")
     with session_scope() as session:
-        q = select(Snapshot).order_by(Snapshot.computed_at)
-        rows = session.execute(q).scalars().all()
+        q = select(Snapshot)
+        if from_dt is not None:
+            q = q.where(Snapshot.computed_at >= from_dt)
+        if to_dt is not None:
+            # 'to' is inclusive of the whole day; guard the +1-day arithmetic
+            # against OverflowError near datetime.max (e.g. ?to=9999-12-31),
+            # which otherwise surfaced as a 500 (found by adversarial verification).
+            try:
+                upper = to_dt + timedelta(days=1)
+            except OverflowError:
+                upper = datetime.max
+            q = q.where(Snapshot.computed_at < upper)
+        # filter + newest-first limit in SQL, then restore chronological order
+        q = q.order_by(Snapshot.computed_at.desc()).limit(limit)
+        rows = list(reversed(session.execute(q).scalars().all()))
 
-    def _in_range(s: Snapshot) -> bool:
-        d = s.computed_at.date().isoformat()
-        if from_ and d < from_:
-            return False
-        if to and d > to:
-            return False
-        return True
-
-    rows = [s for s in rows if _in_range(s)]
     if granularity != "raw":
         keyfn = (lambda s: s.computed_at.date().isoformat()) if granularity == "daily" \
             else (lambda s: s.computed_at.strftime("%Y-%m"))
@@ -110,7 +151,7 @@ def get_history(
 
     data = [
         {
-            "computed_at": s.computed_at.isoformat(),
+            "computed_at": _iso_utc(s.computed_at),
             "median": round(s.median, 2),
             "iqr": [round(s.iqr_lo, 2), round(s.iqr_hi, 2)],
             "band_5_95": [round(s.band5, 2), round(s.band95, 2)],

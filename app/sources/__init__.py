@@ -23,6 +23,7 @@ class Provenance:
     fallback_used: bool = False
     note: str | None = None
     fetched_at: datetime | None = None
+    as_of: str | None = None  # ISO date of the underlying reading (drives staleness)
 
     def __post_init__(self) -> None:
         if self.fetched_at is None:

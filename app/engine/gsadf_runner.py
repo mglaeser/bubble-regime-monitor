@@ -21,7 +21,6 @@ from app.logging_conf import get_logger
 log = get_logger(__name__)
 
 R_SCRIPT = Path(__file__).resolve().parents[2] / "r" / "gsadf.R"
-TIMEOUT_S = 600
 
 
 @dataclass
@@ -31,19 +30,61 @@ class GsadfOutput:
     cv95: float
 
 
-def run(monthly_log_prices: list[float]) -> GsadfOutput | None:
+def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfOutput | None:
     if shutil.which("Rscript") is None:
         log.warning("gsadf_rscript_unavailable")
         return None
+    if timeout_s is None:
+        from app.config import get_settings
+
+        timeout_s = get_settings().gsadf_timeout_s
     try:
         proc = subprocess.run(
             ["Rscript", str(R_SCRIPT)],
             input=json.dumps({"series": monthly_log_prices}),
-            capture_output=True, text=True, timeout=TIMEOUT_S, check=True,
+            capture_output=True, text=True, timeout=timeout_s, check=True,
         )
         out = json.loads(proc.stdout.strip())
         return GsadfOutput(gsadf=float(out["gsadf"]), cv90=float(out["cv90"]),
                            cv95=float(out["cv95"]))
+    except subprocess.CalledProcessError as exc:
+        log.warning("gsadf_run_failed", returncode=exc.returncode,
+                    stdout=(exc.stdout or "")[-400:], stderr=(exc.stderr or "")[-400:])
+        return None
+    except subprocess.TimeoutExpired as exc:
+        # Surface R's own stderr on a timeout too (was swallowed): distinguishes a
+        # genuinely slow fit from e.g. a package-load hang. (v3.3.1)
+        err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        log.warning("gsadf_run_timeout", timeout_s=timeout_s, stderr=err[-400:])
+        return None
     except Exception as exc:
         log.warning("gsadf_run_failed", error=str(exc))
         return None
+
+
+_r_check: dict[str, object] | None = None
+
+
+def r_selfcheck(force: bool = False) -> dict[str, object]:
+    """Cached check that Rscript exists and `library(exuber)` loads.
+
+    Surfaced in /readyz so a missing R runtime is visible as a clear message
+    instead of a mysterious S4 floor."""
+    global _r_check
+    if _r_check is not None and not force:
+        return _r_check
+    if shutil.which("Rscript") is None:
+        _r_check = {"ok": False, "note": "Rscript not on PATH — GSADF floors at 0.25"}
+        return _r_check
+    try:
+        proc = subprocess.run(["Rscript", "-e", "library(exuber)"],
+                              capture_output=True, text=True, timeout=180)
+        if proc.returncode == 0:
+            _r_check = {"ok": True, "note": "Rscript + exuber available"}
+        else:
+            _r_check = {"ok": False,
+                        "note": f"library(exuber) failed: {(proc.stderr or '')[-200:]}"}
+    except Exception as exc:
+        _r_check = {"ok": False, "note": f"Rscript self-check error: {exc}"}
+    log.info("gsadf_r_selfcheck", **_r_check)
+    return _r_check

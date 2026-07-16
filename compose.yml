@@ -3,8 +3,23 @@ services:
     build:
       context: .
       dockerfile: Containerfile
+    container_name: bubblegauge
     ports: ["8000:8000"]
     env_file: [.env]
     volumes:
       - ./data:/data:Z          # :Z applies the SELinux label for rootless Podman
+    # Pin working nameservers. Root cause of the July 2026 outage was broken
+    # in-container DNS: every outbound hostname failed with "Temporary failure
+    # in name resolution", so NO price provider was ever contacted (the chain
+    # short-circuited as ProviderNotConfigured before any HTTP request). With
+    # explicit resolvers the whole provider chain and the breadth sweep work.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    # Hardening (audit B-12): no capabilities, no privilege escalation. The
+    # container deliberately runs as container-root — under rootless Podman that
+    # maps to the unprivileged invoking user, keeping the ./data bind mount
+    # writable (an in-image USER broke the WAL pragma; see Containerfile note).
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges"]
     restart: unless-stopped

@@ -26,6 +26,8 @@ Repository: [`mglaeser/bubble-regime-monitor`](https://github.com/mglaeser/bubbl
 git clone https://github.com/mglaeser/bubble-regime-monitor.git && cd bubble-regime-monitor && cp .env.example .env && podman-compose up -d
 ```
 
+> **API keys (v3.1).** As of v3.1, bubblegauge's price layer requires two free API keys. Stooq — previously our keyless price source — now fronts its CSV endpoint with a JavaScript proof-of-work anti-bot challenge that a headless service cannot pass, so it is disabled by default. Sign up (free, ~1 minute each) at **https://www.tiingo.com** (`TIINGO_API_KEY`) and **https://twelvedata.com** (`TWELVE_DATA_API_KEY`) and place both in your `.env`. Tiingo is the primary source for ETF/equity prices; Twelve Data is the backup. Neither free tier serves raw stock-index levels, so the S&P 500 and Nasdaq-100 are represented by their ETF proxies (SPY and QQQ) unless you upgrade Twelve Data to the Grow plan ($29/mo) and set `TWELVE_DATA_INDICES=true`. An optional Alpha Vantage key (`ALPHAVANTAGE_API_KEY`, 25 requests/day) adds a thin emergency fallback for the four core tickers only. A further optional tier, **yfinance** (documented-unreliable, ToS-gray, but the one free source of raw index levels), is off unless you install the extra: `pip install '.[yfinance]'` — when absent the chain simply skips it.
+
 Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies the SELinux label (required on Fedora/RHEL rootless Podman). For boot persistence: `podman generate systemd --new --name bubblegauge` (or a Quadlet `.container` file in `~/.config/containers/systemd/`) and `systemctl --user enable --now`.
 
 ## Architecture
@@ -104,7 +106,7 @@ The upstream spec's §5.3 lists the split exponent as `α ~ U(0.40, 0.60)`, but 
 
 ## API
 
-Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`. Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
+Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the five epistemic caveats in `meta`. Each per-indicator object carries `as_of`, `age_days`, and `stale` (true past the source's freshness SLA), plus provenance (`data_source`, `fallback_used`, `dropped`, `note`). Reads rate-limited 60/min/IP; `READ_ENDPOINTS_PUBLIC` toggles key requirement; admin refresh requires `X-API-Key`.
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -114,7 +116,52 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/legs/trend` · `GET /api/v1/legs/fast-alarm` | Faber states; VIX curve/VRP/SKEW |
 | `GET /api/v1/meta/methodology` | Framework, references, falsification criteria, changelog |
 | `GET /healthz` · `GET /readyz` | Liveness; per-source health matrix |
-| `POST /api/v1/admin/refresh` | Manual recompute (X-API-Key) |
+| `POST /api/v1/admin/refresh` | Start a recompute in the background — returns 202 immediately; single-flight (X-API-Key) |
+| `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
+| `POST /api/v1/admin/send-sms` | Send the daily SMS digest now — test path (X-API-Key) |
+
+## Deployment & updates
+
+Updating a running server is a single command:
+
+```bash
+./deploy.sh        # or: make deploy
+```
+
+It performs, in order (each step announced with a `==>` banner):
+
+1. **Pull** — `git fetch` + fast-forward the deployment branch (refuses to run on a diverged/dirty tree rather than discard local work).
+2. **Build** — a container image tagged with the short commit (and `:latest`).
+3. **Migrate** — `alembic upgrade head` in a throwaway container against the same `./data` volume. Migrations run **before** the new container starts, so a bad migration aborts the deploy instead of taking the service down. Alembic is the single source of truth for the schema; a legacy database created by the old `create_all` path is detected and stamped automatically, so **you no longer need to `rm data/bubble.db` on schema changes**.
+4. **Recreate** — replaces the container with one built from the new image.
+5. **Health-check + auto-rollback** — polls `/healthz`; if the new container does not become healthy it prints the logs and rolls back to the previously running image.
+
+Configuration is via environment variables (all optional, sensible defaults): `BRANCH`, `IMAGE`, `CONTAINER`, `DATA_DIR`, `PORT`, `ENV_FILE`, `ENGINE` (podman/docker), `HEALTH_TIMEOUT`, `KEEP_IMAGES`, plus `SKIP_PULL=1` / `SKIP_BUILD=1`. Example: `PORT=8080 BRANCH=main ./deploy.sh`.
+
+The app also **self-migrates at boot** (`app.db_migrate.ensure_schema` runs `alembic upgrade head` with a `create_all` fallback), so a plain `podman-compose up -d --build` stays valid too — `deploy.sh` just makes the pull/build/migrate/health-check flow explicit and safe. To apply migrations locally without a container: `make migrate`.
+
+## Status & spec UI
+
+A self-contained status dashboard is served at **`/`** (and `/status`) on the same port as the API. It reflects the live service and — because scientific correctness is the leading design goal — foregrounds a **science audit**: a severity-ranked list of everything currently unclear, incomplete, contested, proxied, judgmental, or deviating from the written spec (unverified citations, the contested GSADF, ETF index proxies, the documented Monte-Carlo alpha-range deviation, FRED truncation, stale/dropped indicators, coverage degradation, price-provider cooldowns, and **live success/failure of every external source pull**). It also shows each indicator's methodology and scientific sources, links to the interactive API docs (Swagger `/docs`, ReDoc `/redoc`, `/openapi.json`), and shows a worked example.
+
+The same data is available as JSON at **`GET /api/v1/status`**. The page is fully self-contained (no external assets, CSP-friendly) and renders all dynamic/external strings via `textContent` so upstream error messages and source notes cannot inject markup.
+
+## Daily SMS digest (optional)
+
+The service recomputes the score **twice daily (06:00 / 18:00 UTC)** and can additionally **text a once-a-day digest** — the headline score, action band, and a tiny LLM-written report — as a single SMS via the [sipgate REST API v2](https://api.sipgate.com/v2/doc). The report body is produced by the same Anthropic model-fallback chain as the judgment call and hard-capped to one GSM-7 SMS (160 chars, ASCII-coerced so a stray Unicode character cannot halve the limit); if the LLM is unavailable it degrades to a deterministic template built from the snapshot, so the digest always sends. It is disabled by default.
+
+To enable: create a sipgate **Personal Access Token** with the `sessions:sms:write` scope, then set in `.env`:
+
+```dotenv
+SMS_ENABLED=true
+SIPGATE_TOKEN_ID=token-XXXX        # PAT id (Basic-auth username)
+SIPGATE_TOKEN=...                  # PAT secret (Basic-auth password)
+SIPGATE_SMS_ID=s0                  # your Web SMS extension
+SIPGATE_RECIPIENT=+49151...        # E.164
+SMS_DAILY_HOUR=8                   # UTC hour (default 08:00)
+```
+
+Test it immediately without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms`. Example body: `bubblegauge 41/100 hold. IQR 34-47. SPY IN, QQQ IN. Flags 0/4. Research, not advice.`
 
 ## Falsification criteria
 
@@ -129,6 +176,18 @@ Outcomes are stored in the DB and exposed via `/api/v1/meta/methodology`.
 - **v1 (score 33):** linear-additive aggregation (fully compensatory); stale concentration 40.8%; HY-OAS sign inverted; LPPLS neutral placeholder.
 - **v2 (score 28):** data fixes (concentration, HY-OAS sign, LPPLS); still fully compensatory.
 - **v3 (score ≈ 40, IQR 34–47):** two-block geometric aggregation + non-compensatory override + Monte Carlo median. **The v2→v3 rise is the aggregation fix (partial compensability now punishes imbalance), NOT market deterioration.**
+- **v3.1 (methodology unchanged; price-layer restructure):** Stooq discovered to front its CSV endpoint with a JavaScript SHA-256 proof-of-work anti-bot gate (root cause of the persistent N=0) — demoted behind `STOOQ_ENABLED=false` with typed `StooqPoWChallenge` detection and an optional pure-Python PoW solver (ToS-gated, off by default). New provider chain: **Tiingo → Twelve Data → Alpha Vantage (core tickers) → yfinance → SQLite cache**, with a centralized symbol map (NDX→QQQ, SPX→SPY ETF proxies since no free tier serves raw indices), persistent provider health scoring (3 fails → 6 h cooldown), and a coverage gate (>1/3 of a block's nominal weight dropped/stale → block degraded, action band suppressed). Breadth Path B (constituent compute via Twelve Data, 8/min, SQLite incremental) is now primary. Two free API keys (`TIINGO_API_KEY`, `TWELVE_DATA_API_KEY`) are now required. Also: Anthropic model-fallback chain (opus-4-8 → sonnet-5 → sonnet-4-6 → plain), FINRA D2 75-day SLA, S4 note reconciled to the 0.25 sub-score, LPPLS ≥500-close guard, HY-OAS own-history persistence retained.
+- **v3.0.1 (methodology unchanged):** first-live-run bugfixes — Stooq pipeline hardened (typed unavailable/CAPTCHA/limit errors, SQLite series + breadth caches with SLA reuse, ≥2 s pacing, retry-once-after-60 s, partial breadth coverage published with a note); FINRA parser sorts by date (the file is newest-first — a naive read produced −22% "YoY" across the 1997 series start) plus >90-day cached-reading and 60-day rollover-assertability guards; GSADF data-missing floors at the contested/stale 0.25 (0.05 is only for a successfully executed non-explosive test) with an R/exuber self-check in `/readyz`; judgment-call failures are machine-detectable (`text: null` + `error_class`); LPPLS requires ≥500 closes with bounded workers and a 10-minute hard timeout; timezone-aware `computed_at`; S5 history-depth note; renormalization regression tests.
+
+## Old-CPU deployments (pre-SSE4.2, e.g. Atom N2800)
+
+Modern numpy/scipy/pyarrow wheels are built for a raised x86-64 baseline and die with **SIGILL (Illegal instruction)** at import time on CPUs without SSE4.2 — including VMs with generic CPU models (`qemu64`/`kvm64`; fix those with host CPU passthrough). The service is hardened for this:
+
+- numpy/pandas are pinned to old-baseline wheel lines (numpy < 2.3, pandas < 3.0).
+- **pyarrow is an optional extra** (`pip install .[parquet]`): pandas imports pyarrow *eagerly* when it is installed (`pandas/compat/pyarrow.py`), and pyarrow's Arrow C++ wheels require SSE4.2, so merely having it installed crashes service boot on old CPUs. The Containerfile probes at build time and removes pyarrow if `import pandas` dies; the Parquet export then disables itself via its own runtime subprocess probe (SQLite persistence is unaffected).
+- The LPPLS fit runs in an isolated subprocess (a native crash in its scipy/scikit-learn/numba stack degrades to drop-and-renormalize, bounded by `LPPLS_TIMEOUT_S`, default 1800 s).
+
+Expect long recomputes on weak hardware: the GSADF critical-value simulation (R, 2000 reps) and LPPLS fits dominate.
 
 ## Development
 
@@ -140,4 +199,4 @@ make type       # mypy strict
 make sensitivity  # annual PSS main-effects report (governance)
 ```
 
-Three framework citations could not be independently verified as of July 2026 and are embedded with build-time-verification flags (see `app/references.py`): Chen, Chen & Huang (2026, arXiv 2604.25826); Basele–Phillips–Shi (Cowles d2430, 2025); BIS 2026 *Annual Economic Report*.
+Three framework citations were flagged for build-time verification and were **independently confirmed during the 2026-07 due-diligence audit** (see `app/references.py` `VERIFIED_CITATIONS`): Chen, Chen & Huang (2026, [arXiv:2604.25826](https://arxiv.org/abs/2604.25826), posted 2026-04-28); Basele–Phillips–Shi (Cowles [CFDP 2430](https://cowles.yale.edu/research/cfdp-2430-speculative-bubbles-recent-ai-boom-nasdaq-and-magnificent-seven), 2025); BIS 2026 *[Annual Economic Report](https://www.bis.org/publ/arpdf/ar2026e.htm)* (released 2026-06-28). All three resolve to real sources.
