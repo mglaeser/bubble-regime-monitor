@@ -1,9 +1,11 @@
 """Aggregation engine: hierarchical two-block weighted geometric composite.
 
-Formulas (spec section 5.1), with smoothing floor epsilon = 0.02:
+Formulas (v3.3.0 rescale-then-aggregate; supersedes the original spec-5.1
+additive-epsilon form, see the RESCALE_FLOOR note below):
 
-    S     = prod_i (s_i + eps)^(w_i) - eps      # weighted geometric mean, Block S
-    D_raw = prod_j (d_j + eps)^(w_j) - eps      # weighted geometric mean, Block D
+    r(x)  = 0.10 + 0.90 * x                     # rescale to [0.10, 1] first
+    S     = prod_i r(s_i)^(w_i)                 # weighted geometric mean, Block S
+    D_raw = prod_j r(d_j)^(w_j)                 # weighted geometric mean, Block D
     D     = min(D_raw * V, 1.0)                 # apply VIX multiplier, cap at 1
     Score_raw = 100 * S^alpha * D^beta          # baseline alpha = beta = 0.5
 

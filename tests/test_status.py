@@ -47,8 +47,13 @@ class TestStatusJson:
         assert "citation-verified" in cats
         assert "citation-unverified" not in cats
         assert "contested-method" in cats
-        assert "documented-deviation" in cats  # the alpha-range deviation
+        assert "documented-deviation" in cats  # the d1 breadth-anchor deviation
         assert "data-substitution" in cats     # ETF index proxies
+        # v3.7.1: the stale alpha-range entry (claimed U(0.25,0.75); real range
+        # is the spec's U(0.40,0.60) since v3.3.0) must never come back
+        ids = {f["id"] for f in audit["flags"]}
+        assert "alpha-range-deviation" not in ids
+        assert "d1-anchor-deviation" in ids
         # all three framework citations resolve to real sources
         assert sum(1 for f in audit["flags"] if f["category"] == "citation-verified") == 3
         # flags are severity-ordered (error, then warn, then info)

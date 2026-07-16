@@ -62,7 +62,7 @@ Rootless Podman notes: the `:Z` suffix on the `./data:/data` bind mount applies 
 
 ## How to read the score
 
-The headline is the **median** of a seeded 100 000-draw Monte Carlo distribution over the framework's own structural uncertainty (weights, anchors, the S-vs-D split exponent). It is always served with the IQR (25th–75th) and the 5–95 band. **The bands communicate uncertainty in the *framework*, not a probability of a crash.** A median of 40 means "current conditions score 40/100 under this fixed, documented methodology," nothing more. The action bands (< 45 hold; 45–60 trim; ≥ 60 or override → de-risk) follow a balanced Alessi–Detken (2011) loss with θ = 0.5; de-risking is *executed* by the Leg 2 trend trigger, never by the score alone.
+The headline is the **median** of a seeded 100 000-draw Monte Carlo distribution over the framework's own structural uncertainty (weights, anchors, the S-vs-D split exponent). It is always served with the IQR (25th–75th) and the 5–95 band. **The bands communicate uncertainty in the *framework*, not a probability of a crash.** A median of 52 means "current conditions score 52/100 under this fixed, documented methodology," nothing more. The action bands (< 45 hold; 45–60 trim; ≥ 60 or override → de-risk) follow a balanced Alessi–Detken (2011) loss with θ = 0.5; de-risking is *executed* by the Leg 2 trend trigger, never by the score alone.
 
 ## Golden fixture (July 2026)
 
@@ -73,20 +73,22 @@ The headline is the **median** of a seeded 100 000-draw Monte Carlo distribution
 | S3 | Semis GSY run-up | +108 pp | **0.525** | 0.20 |
 | S4 | GSADF (contested) | contested | **0.25** | 0.07 |
 | S5 | Credit tightness | OAS 267 bps | **0.80** | 0.13 |
-| D1 | Breadth | pct = 56 | **0.543** | 0.35 |
+| D1 | Breadth | pct = 56 | **0.618** | 0.35 |
 | D2 | Margin rollover | +53.7% YoY, no rollover | **0.49** | 0.13 |
 | D3 | Hyperscaler FCF | capex/OCF 0.94, gate off | **0.30** | 0.32 |
 | D4 | LPPLS | low confidence | **0.005** | 0.20 |
 | V  | VIX term structure | contango | **×1.00** | — |
 
-**Block S** (ε = 0.02): `ln Π = 0.33·ln(0.94) + 0.27·ln(0.82) + 0.20·ln(0.545) + 0.07·ln(0.27) + 0.13·ln(0.82) = −0.312848` ⇒ `S = e^−0.312848 − 0.02 = 0.711368`.
-**Block D** (V = 1.00): `ln Π = 0.35·ln(0.563) + 0.13·ln(0.51) + 0.32·ln(0.32) + 0.20·ln(0.025) = −1.390996` ⇒ `D = 0.228877`.
-**Score** (α = β = 0.5): `100·√(0.711368 · 0.228877) = 40.35`.
-Red-flag count 0 → override not fired. **Deterministic point score 40.35; MC median ≈ 40, IQR ≈ 34–47; action band "hold."** Reproduced by `tests/test_golden_fixture.py` (median ± 1, IQR endpoints ± 2).
+Each sub-score is first **rescaled to [0.10, 1]** (v3.3.0, `r(x) = 0.10 + 0.90·x` — UNDP-HDI style, so a single 0-valued indicator can no longer silence its whole block), then geometrically aggregated:
+**Block S:** `ln S = 0.33·ln(0.928) + 0.27·ln(0.82) + 0.20·ln(0.5725) + 0.07·ln(0.325) + 0.13·ln(0.82) = −0.294263` ⇒ `S = 0.745081`.
+**Block D** (V = 1.00): `ln D = 0.35·ln(0.6562) + 0.13·ln(0.541) + 0.32·ln(0.37) + 0.20·ln(0.1045) = −0.997189` ⇒ `D = 0.368915`.
+**Score** (α = β = 0.5): `100·√(0.745081 · 0.368915) = 52.43`.
+Red-flag count 0 → override not fired. **Deterministic point score 52.43; MC median ≈ 52.6, IQR ≈ (50, 55); action band "trim."** Reproduced exactly by `tests/test_golden_fixture.py`.
 
-### Known specification inconsistency (documented)
+### Documented deviations from the original spec text
 
-The upstream spec's §5.3 lists the split exponent as `α ~ U(0.40, 0.60)`, but that range yields IQR ≈ (37.3, 43.8) on the golden fixture — incompatible with the required golden targets IQR (34, 47) ± 2. The golden fixture is the authoritative acceptance benchmark (spec Recommendations, Stage 1), and `α ~ U(0.25, 0.75)` reproduces **all** of its published outputs simultaneously: median ≈ 40.7, IQR ≈ (35.1, 46.8), and the example-response 5–95 band ≈ (28.8, 53.5) vs the published (28, 55). The implementation therefore uses `ALPHA_RANGE = (0.25, 0.75)` (see `app/engine/montecarlo.py`), documented here and at the constant. If the spec text is corrected upstream, change that one constant.
+- **Alpha range — RESOLVED in v3.3.0.** The pre-v3.3.0 implementation widened the split exponent to `α ~ U(0.25, 0.75)` solely to reproduce the OLD golden IQR under the additive-ε aggregation. With the v3.3.0 rescale-then-aggregate scheme the golden fixture was regenerated, and `ALPHA_RANGE = (0.40, 0.60)` is back at the spec value (see `app/engine/montecarlo.py`).
+- **Breadth anchors (current deviation).** The original spec anchored d1 at (35, 75), but `hi = 75` clipped normal bull-market breadth (high 80s–90s) to exactly 0 and produced a false-negative headline; v3.3.0 raised `hi` to 90 and added a 0.05 soft floor. Tracked as `d1-anchor-deviation` in the science audit.
 
 ## Data sources & freshness SLAs
 

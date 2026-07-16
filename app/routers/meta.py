@@ -52,6 +52,13 @@ def get_methodology(request: Request, _: None = Depends(require_read_access)) ->
             {"criterion": o.criterion, "tripped_at": o.tripped_at.isoformat(), "detail": o.detail}
             for o in outcomes
         ],
+        # An empty list is the EXPECTED state: no criterion has tripped yet.
+        # Outcomes are recorded manually (operator judgment against the three
+        # criteria above) — no automated job writes this table.
+        "falsification_outcomes_note": (
+            "empty = no falsification criterion has tripped since tracking began; "
+            "outcomes are recorded manually by the operator, not by an automated job"
+        ),
         "changelog": CHANGELOG,
         "unverified_citations": UNVERIFIED_CITATIONS,   # [] — all resolved (audit 2026-07-14)
         "verified_citations": VERIFIED_CITATIONS,

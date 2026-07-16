@@ -6,14 +6,13 @@ seed = MC_SEED (default 20260711):
 - Block weights ~ Dirichlet(base_weights * 50) (independently for S and D).
 - CAPE percentile window W ~ integers U[20, 40].
 - Concentration lo ~ U(16, 20), hi ~ U(38, 44).
-- Breadth lo ~ U(35, 45), hi ~ U(70, 80).
+- Breadth lo ~ U(30, 40), hi ~ U(85, 95) (v3.3.0 anchors, baseline (35, 90)).
 - GSY sub-score ~ Beta(21, 19) in the 100-150 pp tier (mean 0.525 = the GSY
   53% crash frequency; Wilson 95% CI [0.38, 0.67] from 21 crashes in 40
   run-up episodes); ~ Beta(32, 8) in the >= 150 pp tier (mean 0.80);
   deterministic clip(0.30 * runup/100, 0, 0.30) below 100 pp.
-- alpha ~ U(ALPHA_RANGE), beta = 1 - alpha. (Spec text says U(0.40, 0.60);
-  see the ALPHA_RANGE constant below for the documented golden-fixture
-  inconsistency and its resolution.)
+- alpha ~ U(ALPHA_RANGE) = U(0.40, 0.60), beta = 1 - alpha — the spec range,
+  restored in v3.3.0 (see the ALPHA_RANGE constant note below).
 
 HEADLINE = distribution MEDIAN, always reported with the IQR (25th-75th)
 and the 5-95 band. The IQR/band communicate STRUCTURAL uncertainty in the
