@@ -1,8 +1,9 @@
 """Dashboard feed (v3.4.0): read-only current-values feed for the companion
 "Crisis Winners" dashboard (crash.klee.me). See DASHBOARD_FEED_SPEC.md.
 
-DESIGN CONTRACT (dashboard-side sign-off, 2026-07-15; decisions 1A/2A/3A/4B/5A):
-  * 12 monthly series + 34 scalar metrics; keys name the CONCEPT (gold, btc,
+DESIGN CONTRACT (dashboard-side sign-off, 2026-07-15; decisions 1A/2A/3A/4B/5A;
+v3.7.0 additive delta: +fear_greed series & metric — see spec section 7):
+  * 13 monthly series + 35 scalar metrics; keys name the CONCEPT (gold, btc,
     ust10y_tr) — sources/proxies live in name/source/note, never in the key.
   * Every series: EXACTLY 61 monthly points (t-60..t0), last close of month,
     raw values (the client rebases), LEFT-PADDED with explicit nulls when
@@ -57,6 +58,12 @@ def _td_series(symbol: str, interval: str, outputsize: int) -> list[tuple[str, f
     return price_src.fetch_twelvedata_series(symbol, interval=interval, outputsize=outputsize)
 
 
+def _fear_greed():
+    from app.sources import fear_greed as fng_src
+
+    return fng_src.fetch_fear_greed()
+
+
 # ---------------------------------------------------------------------------
 # month grid helpers
 # ---------------------------------------------------------------------------
@@ -108,6 +115,7 @@ def _stale(as_of: str | None, sla_days: int, today: date) -> bool | None:
 # ---------------------------------------------------------------------------
 
 SLA_DAILY = 7       # daily market series
+SLA_FEAR_GREED = 4  # CNN updates market days; tolerate a long weekend
 SLA_FRED_FX = 10    # FRED H.10 posts weekly
 SLA_MONTHLY_BAR = 35  # TD 1month bars are DATED AT MONTH START (live capture:
                       # the current partial bar reads "2026-07-01" mid-July),
@@ -196,7 +204,8 @@ _FRED_SERIES = [
     ("tbill3m_yield", "DTB3", "3M T-bill yield", "yield", "pct", None, SLA_DAILY),
 ]
 
-SERIES_KEYS = [k for k, *_ in _TIINGO_SERIES] + ["btc"] + [k for k, *_ in _FRED_SERIES]
+SERIES_KEYS = ([k for k, *_ in _TIINGO_SERIES] + ["btc"] + [k for k, *_ in _FRED_SERIES]
+               + ["fear_greed"])  # v3.7.0 additive
 
 METRIC_KEYS = [
     "cape", "excess_cape_yield", "sp500_top10_weight_pct", "semis_runup_2yr_pp",
@@ -209,6 +218,7 @@ METRIC_KEYS = [
     "usd_broad_index_level", "usd_broad_index_ytd_pct", "usdjpy", "usdchf",
     "ust10y_yield_pct", "tbill3m_yield_pct",
     "mmf_total_assets_usd", "cofer_gold_share_pct", "cofer_ust_share_pct",
+    "fear_greed",  # v3.7.0 additive
 ]
 
 
@@ -266,6 +276,28 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
 
         series[key] = _series_item(key, name, kind, unit, f"fred:{sid}", months,
                                    _fetch_fred, sla_days=sla, note=note)
+
+    # CNN Fear & Greed (v3.7.0): ONE fetch feeds both the series and the
+    # scalar metric below. Non-scoring sentiment context; the endpoint is
+    # unofficial, so a block/schema change degrades exactly this pair.
+    fng = None
+    fng_err: str | None = None
+    try:
+        fng = _fear_greed()
+    except Exception as exc:
+        fng_err = str(exc)[:120]
+        log.warning("dashboard_fear_greed_failed", error=str(exc)[:200])
+
+    def _fetch_fng_history() -> list[tuple[str, float]]:
+        if fng is None:
+            raise RuntimeError(fng_err or "fetch failed")
+        return fng.history
+
+    series["fear_greed"] = _series_item(
+        "fear_greed", "CNN Fear & Greed Index", "sentiment_index", "index_0_100",
+        "cnn:fear_greed", months, _fetch_fng_history, sla_days=SLA_FEAR_GREED,
+        note="last daily observation per month; CNN's payload carries only ~13 "
+             "months of history, earlier months are null; unofficial endpoint")
 
     # ---- metrics: snapshot-derived (no new pulls) ------------------------
     ind = data.indicators
@@ -452,6 +484,22 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                                              "requires IMF COFER source; not connected")
     m["cofer_ust_share_pct"] = _unavailable("pct", "none",
                                             "requires IMF COFER source; not connected")
+
+    # CNN Fear & Greed scalar (v3.7.0) — same fetch as the series above.
+    if fng is not None:
+        m["fear_greed"] = _scalar(
+            round(fng.score, 1), "index_0_100", fng.as_of, "cnn:fear_greed",
+            sla_days=SLA_FEAR_GREED,
+            note="CNN media composite of 7 technical sub-indicators; NON-SCORING "
+                 "context - enters no block or weight; unofficial endpoint",
+            detail={"rating": fng.rating, "timestamp": fng.timestamp,
+                    "previous_close": fng.previous_close,
+                    "previous_1_week": fng.previous_1_week,
+                    "previous_1_month": fng.previous_1_month,
+                    "previous_1_year": fng.previous_1_year})
+    else:
+        m["fear_greed"] = _unavailable("index_0_100", "cnn:fear_greed",
+                                       f"source failed: {fng_err}")
 
     return {
         "anchor_month": anchor_month,

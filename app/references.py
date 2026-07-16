@@ -682,6 +682,22 @@ CHANGELOG: list[dict[str, str]] = [
         "and the /api/v1/meta/methodology document. The five epistemic caveats stay in "
         "meta.epistemic_caveats; the SMS prompt still forbids advice language.",
     },
+    {
+        "version": "v3.7.0",
+        "score": "CNN Fear & Greed added to the dashboard feed — NON-SCORING, methodology unchanged",
+        "notes": "Additive dashboard-feed delta (DASHBOARD_FEED_SPEC.md section 7): new metric "
+        "`fear_greed` (score 0-100, detail: rating + previous close/1w/1m/1y) and new series "
+        "`fear_greed` (61-month grid, last daily observation per month; CNN's payload carries "
+        "only ~13 months, earlier months are explicit nulls) — feed inventory is now 13 series "
+        "+ 35 metrics. Source: CNN's UNOFFICIAL production.dataviz.cnn.io graphdata endpoint, "
+        "fetched once per recompute and persisted with the feed (snapshotted). STRICT validation "
+        "per the adopted OpenAPI spec: score hard-checked to [0,100], rating against CNN's "
+        "5-value enum, ISO timestamp parse; any deviation (HTML bot-wall, schema drift) raises "
+        "a typed SourceError and degrades exactly this metric+series pair to available:false — "
+        "scoring is untouchable by construction. CNN F&G is a media composite of 7 technical "
+        "sub-indicators with no literature grounding for bubble-regime detection; it enters no "
+        "block, no weight, no aggregation — context only.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {

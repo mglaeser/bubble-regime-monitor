@@ -47,6 +47,17 @@ def fake_td(symbol, interval, outputsize):
     return [(datetime.now(UTC).date().isoformat(), spot.get(symbol, 1.0))]
 
 
+def fake_fear_greed():
+    from app.sources.fear_greed import FearGreedReading
+
+    today = datetime.now(UTC)
+    return FearGreedReading(
+        score=46.0, rating="neutral", as_of=today.date().isoformat(),
+        timestamp=today.isoformat(), previous_close=46.0, previous_1_week=44.0,
+        previous_1_month=31.0, previous_1_year=31.0,
+        history=[(f"{m}-15", 30.0 + i) for i, m in enumerate(_months_now()[-13:])])
+
+
 @pytest.fixture()
 def snapshot(isolated_db):
     from app.services.compute import compute_snapshot
@@ -62,6 +73,7 @@ def patched_sources(monkeypatch):
     monkeypatch.setattr(df, "_tiingo_monthly", fake_tiingo)
     monkeypatch.setattr(df, "_fred_series", fake_fred)
     monkeypatch.setattr(df, "_td_series", fake_td)
+    monkeypatch.setattr(df, "_fear_greed", fake_fear_greed)
 
 
 class TestBuildFeedGolden:
@@ -70,7 +82,7 @@ class TestBuildFeedGolden:
         feed = df.build_feed(raw, data)
         assert sorted(feed["series"].keys()) == sorted(df.SERIES_KEYS)
         assert sorted(feed["metrics"].keys()) == sorted(df.METRIC_KEYS)
-        assert len(df.SERIES_KEYS) == 12 and len(df.METRIC_KEYS) == 34
+        assert len(df.SERIES_KEYS) == 13 and len(df.METRIC_KEYS) == 35  # v3.7.0: +fear_greed
 
     def test_points_always_61_and_left_padded(self, snapshot, patched_sources):
         raw, data = snapshot

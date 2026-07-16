@@ -31,7 +31,11 @@
 
 ## 2 · Frozen key inventory
 
-### Series (12)
+> **v1.1 (service v3.7.0) additive delta:** one new series key and one new
+> metric key, `fear_greed` — see **section 7**. The v1.0 inventory below is
+> unchanged; totals are now **13 series + 35 metrics**.
+
+### Series (12 + 1, see §7)
 
 | key | name | kind | unit | source | note |
 |---|---|---|---|---|---|
@@ -48,7 +52,7 @@
 | `ust10y_tr` | 10Y US Treasuries TR (IEF ETF proxy) | total_return | USD | tiingo:IEF | decision 4B |
 | `tbill3m_tr` | 3M T-bills / cash TR (BIL ETF proxy) | total_return | USD | tiingo:BIL | decision 4B |
 
-### Metrics (34)
+### Metrics (34 + 1, see §7)
 
 `cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: cv90, cv95, contested, state) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — no free raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1) · `cofer_gold_share_pct` (**always** available:false) · `cofer_ust_share_pct` (**always** available:false)
 
@@ -248,4 +252,84 @@ And a REAL degradation row (capture #1, before the min_rows fix) — this is pre
 
 ---
 
-*Research/education tooling. Not investment advice. Methodology of the bubble score is unchanged by this feed (changelog v3.4.0).*
+## 7 · v1.1 additive delta (service v3.7.0) — CNN Fear & Greed
+
+**What's new:** the key `fear_greed` appears in BOTH sections. Everything about
+the v1.0 contract (envelope, 61-point grid, per-item schema, degradation,
+caching, filters) applies unchanged; existing keys are untouched. If your
+client iterates keys generically, it needs **no change**; if it validates the
+key inventory, add `fear_greed` to both allowlists.
+
+**Provenance & honesty:** CNN's *unofficial* `production.dataviz.cnn.io`
+graphdata endpoint, fetched once per recompute (every 4 h) with strict
+validation (score ∈ [0,100], rating ∈ CNN's 5-value enum, ISO timestamp). It is
+a media-produced composite of 7 technical sub-indicators and is **NON-SCORING
+context** — it enters no block, weight, or aggregation of the bubble score. If
+CNN blocks or changes the endpoint, exactly this metric+series pair degrades to
+`available:false`; nothing else is affected.
+
+### `metrics.fear_greed`
+
+```jsonc
+"fear_greed": {
+  "value": 46.0,                       // current index, 0..100 (1 decimal)
+  "unit": "index_0_100",
+  "as_of": "2026-07-16",               // date of CNN's timestamp
+  "source": "cnn:fear_greed",
+  "available": true,
+  "stale": false,                      // SLA 4 days (market-day updates + long weekend)
+  "note": "CNN media composite of 7 technical sub-indicators; NON-SCORING context - enters no block or weight; unofficial endpoint",
+  "detail": {
+    "rating": "neutral",               // extreme fear | fear | neutral | greed | extreme greed
+    "timestamp": "2026-07-16T12:19:21+00:00",   // CNN's full timestamp, verbatim
+    "previous_close": 46.0,            // each 0..100 or null (out-of-spec values -> null)
+    "previous_1_week": 44.0,
+    "previous_1_month": 31.0,
+    "previous_1_year": 31.0
+  }
+}
+```
+
+Render suggestions: gauge/dial keyed on `value` with `detail.rating` as the
+label; the four `previous_*` values make a natural delta row. Treat any `null`
+inside `detail` as "not served this pull", not as zero.
+
+### `series.fear_greed`
+
+```jsonc
+"fear_greed": {
+  "name": "CNN Fear & Greed Index",
+  "kind": "sentiment_index",           // NEW kind value (v1.0 kinds: total_return|price|index|yield)
+  "unit": "index_0_100",
+  "points": [ {"month": "2021-07", "value": null}, …, {"month": "2026-07", "value": 46.0} ],
+  "as_of": "2026-07-16",
+  "source": "cnn:fear_greed",
+  "available": true,
+  "stale": false,
+  "note": "last daily observation per month; CNN's payload carries only ~13 months of history, earlier months are null; unofficial endpoint"
+}
+```
+
+* Same 61-point `t-60..t0` grid as every other series; **expect ≈ 48 leading
+  nulls** — CNN's payload only carries ~13 months of daily history, and months
+  outside it are explicit nulls (never interpolated, never backfilled).
+* Monthly value = the **last daily observation in that calendar month** (t0 is
+  month-to-date, like every series; `anchor_partial` applies).
+* Values are index points 0..100 — do **not** rebase this series with the
+  price/TR series; plot it on its own 0–100 axis (band shading at 25/45/55/75
+  matches CNN's fear/greed zones).
+* Your series-kind switch must tolerate the new `kind: "sentiment_index"`
+  (v1.0 promised honest kinds; this is the first non-price kind).
+
+### Failure shape (verbatim pattern)
+
+```jsonc
+"fear_greed": { "value": null, "unit": "index_0_100", "as_of": null,
+                "source": "cnn:fear_greed", "available": false, "stale": null,
+                "note": "source failed: CNN F&G: non-JSON response (HTML block page or changed endpoint)" }
+// series twin: available:false + 61 null points, same note pattern
+```
+
+---
+
+*Research/education tooling. Methodology of the bubble score is unchanged by this feed (changelog v3.4.0; v1.1 delta v3.7.0).*
