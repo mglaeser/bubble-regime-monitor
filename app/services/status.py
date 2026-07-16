@@ -23,7 +23,6 @@ from app.db import session_scope
 from app.models import ProviderHealth, Snapshot, SourceHealth
 from app.references import (
     CHANGELOG,
-    DISCLAIMER,
     EPISTEMIC_CAVEATS,
     FALSIFICATION_CRITERIA,
     KNOWN_ISSUES,
@@ -171,8 +170,8 @@ def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
     if snap is None:
         flags.append({"id": "no-snapshot", "severity": "warn", "category": "service-state",
                       "title": "No snapshot computed yet",
-                      "detail": "Trigger POST /api/v1/admin/refresh or wait for the 06:00/18:00 "
-                                "UTC schedule.", "ref": "scheduler"})
+                      "detail": "Trigger POST /api/v1/admin/refresh or wait for the 4-hourly "
+                                "(02/06/10/14/18/22 UTC) schedule.", "ref": "scheduler"})
     else:
         coverage = (snap.data_freshness or {}).get("_coverage", {})
         for block_id in ("S", "D"):
@@ -263,7 +262,7 @@ def build_status() -> dict[str, Any]:
         "service": {
             "name": "bubblegauge", "version": settings.service_version,
             "now": _iso(datetime.now(UTC)),
-            "recompute_schedule": "06:00/18:00 UTC",
+            "recompute_schedule": "every 4h (02/06/10/14/18/22 UTC)",
             "sms_enabled": settings.sms_enabled,
             "docs": {"swagger": "/docs", "redoc": "/redoc", "openapi": "/openapi.json"},
         },
@@ -278,5 +277,7 @@ def build_status() -> dict[str, Any]:
         "falsification_criteria": FALSIFICATION_CRITERIA,
         "changelog": CHANGELOG,
         "epistemic_caveats": EPISTEMIC_CAVEATS,
-        "disclaimer": DISCLAIMER,
+        # v3.6.0: the "Research, not advice." disclaimer was removed from all
+        # machine payloads (personal-use deployment). The human-facing spec
+        # pages (status HTML, /docs) still carry the full text statically.
     }

@@ -33,7 +33,6 @@ def _meta(snap: Snapshot) -> dict[str, Any]:
         "computed_at": _iso_utc(snap.computed_at),
         "service_version": get_settings().service_version,
         "data_freshness": snap.data_freshness,
-        "disclaimer": "Research, not advice.",
         "epistemic_caveats": EPISTEMIC_CAVEATS,
     }
 

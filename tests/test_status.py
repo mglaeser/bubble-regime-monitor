@@ -27,9 +27,10 @@ class TestStatusJson:
     def test_shape_on_empty_db(self, client):
         body = client.get("/api/v1/status").json()
         for k in ("service", "snapshot", "recompute", "sources", "providers", "indicators",
-                  "science_audit", "falsification_criteria", "changelog", "epistemic_caveats",
-                  "disclaimer"):
+                  "science_audit", "falsification_criteria", "changelog", "epistemic_caveats"):
             assert k in body, f"missing {k}"
+        # v3.6.0: no advice tag in machine payloads (status HTML carries it statically)
+        assert "disclaimer" not in body
         assert body["snapshot"] is None  # no recompute yet
         assert len(body["indicators"]) == 10
         assert len(body["sources"]) == 10

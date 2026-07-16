@@ -56,7 +56,7 @@ def test_score_envelope(client_with_snapshot):
             assert f in ind, f"{ind_id} missing {f}"
 
     assert meta["epistemic_caveats"] == EPISTEMIC_CAVEATS
-    assert meta["disclaimer"] == "Research, not advice."
+    assert "disclaimer" not in meta  # v3.6.0: no per-response advice tag (spec pages carry it)
     assert "computed_at" in meta and "service_version" in meta and "data_freshness" in meta
 
     v = data["V"]
@@ -96,7 +96,8 @@ def test_methodology_endpoint(client):
     d = resp.json()["data"]
     assert len(d["falsification_criteria"]) == 3
     assert [c["version"] for c in d["changelog"]] == \
-        ["v1", "v2", "v3", "v3.0.1", "v3.2.0", "v3.3.0", "v3.3.1", "v3.3.2", "v3.4.0", "v3.5.0"]
+        ["v1", "v2", "v3", "v3.0.1", "v3.2.0", "v3.3.0", "v3.3.1", "v3.3.2", "v3.4.0", "v3.5.0",
+         "v3.6.0"]
     # all framework citations verified in the 2026-07 audit: none unverified, three verified
     assert d["unverified_citations"] == []
     assert len(d["verified_citations"]) == 3

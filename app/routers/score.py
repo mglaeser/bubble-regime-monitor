@@ -50,7 +50,6 @@ def _meta(snap: Snapshot | None) -> dict[str, Any]:
         "computed_at": _iso_utc(snap.computed_at) if snap else None,
         "service_version": settings.service_version,
         "data_freshness": snap.data_freshness if snap else {},
-        "disclaimer": "Research, not advice.",
         "epistemic_caveats": EPISTEMIC_CAVEATS,
     }
 

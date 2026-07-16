@@ -10,8 +10,11 @@ character (en-dashes, curly quotes, the euro sign, emoji) would flip the
 whole message to UCS-2 and cap it at 70 chars, so those are transliterated
 to ASCII before the length cap is applied.
 
-EPISTEMIC GUARDRAIL: the digest is a research signal, never advice — the
-"Research, not advice." tag is always present.
+EPISTEMIC POSTURE: the digest is a research signal, never advice. Since
+v3.6.0 (personal-use deployment) the "Research, not advice." tag is NO
+LONGER appended — the full disclaimer lives on the spec pages (status page,
+/docs, /api/v1/meta/methodology) — which frees ~22 chars of the 160 for
+content. The prompt still forbids the LLM from producing advice language.
 """
 
 from __future__ import annotations
@@ -21,8 +24,6 @@ from app.logging_conf import get_logger
 from app.models import Snapshot
 
 log = get_logger(__name__)
-
-_TAG = "Research, not advice."
 
 # Minimal transliteration so a stray Unicode char cannot silently halve the
 # SMS length by forcing UCS-2 encoding.
@@ -41,7 +42,7 @@ and quant jargon (no CAPE, GSADF, LPPLS, VRP, IQR). Write ONE line, at most
 special symbols). Lead with the headline score out of 100 and the action band,
 then the single biggest driver in a few plain words. NO probability language, NO
 investment advice, NO price targets. Do NOT add quotes. Do NOT append any
-disclaimer (one is added automatically).
+disclaimer.
 
 Readings: score {median}/100, band {band}, rough range {iqr_lo}-{iqr_hi}, warning
 flags {flags}/4{override}. Long-term trend: SPY {spy}, QQQ {qqq}. Fragility gauges
@@ -75,10 +76,6 @@ def deterministic_report(snap: Snapshot, limit: int) -> str:
     core = (f"bubblegauge {round(snap.median)}/100 {snap.action_band}{override}. "
             f"range {round(snap.iqr_lo)}-{round(snap.iqr_hi)}. "
             f"SPY {spy}, QQQ {qqq}. Flags {snap.red_flag_count}/4.")
-    body = f"{core} {_TAG}"
-    if len(_asciify(body)) <= limit:
-        return _clip_to_sms(body, limit)
-    # Too long: drop the tag last, never the score/band.
     return _clip_to_sms(core, limit)
 
 
@@ -102,7 +99,7 @@ def generate_sms_body(snap: Snapshot) -> tuple[str, bool]:
     limit = settings.sms_max_len
     trend = snap.trend_states or {}
     prompt = SMS_PROMPT.format(
-        limit=limit - len(_TAG) - 2,  # leave room for the appended disclaimer
+        limit=limit,
         median=round(snap.median), band=snap.action_band,
         iqr_lo=round(snap.iqr_lo), iqr_hi=round(snap.iqr_hi),
         flags=snap.red_flag_count,
@@ -116,13 +113,10 @@ def generate_sms_body(snap: Snapshot) -> tuple[str, bool]:
         from app.engine.judgment import run_completion
 
         text = run_completion(prompt).strip().strip('"')
-        # Reserve room for the mandatory disclaimer so it can never be
-        # truncated away (epistemic guardrail), even if the LLM overruns.
-        reserve = max(1, limit - len(_TAG) - 1)
-        core = _clip_to_sms(text, reserve)
+        core = _clip_to_sms(text, limit)
         if len(core) < 10:  # implausibly short => treat as failure
             raise ValueError("LLM digest too short")
-        return f"{core} {_TAG}", True
+        return core, True
     except Exception as exc:
         log.warning("sms_report_degraded", error_class=type(exc).__name__, error=repr(exc)[:200])
         return deterministic_report(snap, limit), False

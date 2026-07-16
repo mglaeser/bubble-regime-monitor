@@ -57,7 +57,7 @@ async def github_webhook(
         raise HTTPException(status_code=401, detail="invalid signature")
 
     if x_github_event == "ping":
-        return {"data": {"status": "pong"}, "meta": {"disclaimer": "Research, not advice."}}
+        return {"data": {"status": "pong"}, "meta": {}}
 
     try:
         payload = json.loads(raw.decode())
@@ -83,12 +83,10 @@ async def github_webhook(
 
     if not deploy:
         log.info("webhook_ignored", gh_event=x_github_event, ref=ref, delivery=x_github_delivery)
-        return {"data": {"status": "ignored", "event": x_github_event, "ref": ref},
-                "meta": {"disclaimer": "Research, not advice."}}
+        return {"data": {"status": "ignored", "event": x_github_event, "ref": ref}, "meta": {}}
 
     trigger = write_deploy_trigger(source="github-webhook", ref=ref, sha=sha,
                                    delivery=x_github_delivery)
     log.info("webhook_deploy_triggered", gh_event=x_github_event, ref=ref, sha=sha,
              delivery=x_github_delivery)
-    return {"data": {"status": "deploy_triggered", "branch": branch, "trigger": trigger},
-            "meta": {"disclaimer": "Research, not advice."}}
+    return {"data": {"status": "deploy_triggered", "branch": branch, "trigger": trigger}, "meta": {}}

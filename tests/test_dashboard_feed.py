@@ -202,7 +202,7 @@ class TestFeedEndpoint:
         assert r.headers["cache-control"] == "public, max-age=900"
         body = r.json()
         assert body["data"]["anchor_month"] == "2026-07"
-        assert body["meta"]["disclaimer"] == "Research, not advice."
+        assert "disclaimer" not in body["meta"]  # v3.6.0: no per-response advice tag
 
     def test_sections_and_symbols_filters_are_lenient(self, client):
         self._persist_payload()

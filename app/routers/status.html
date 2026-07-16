@@ -79,7 +79,15 @@
   <h1>bubblegauge</h1>
   <span class="ver" id="ver"></span>
   <span class="refresh"><span class="muted" id="ts"></span> <button id="refresh">Refresh</button></span>
-  <div class="disclaimer" id="disclaimer"></div>
+  <!-- The disclaimer lives STATICALLY on this human-facing page (and /docs);
+       since v3.6.0 the machine JSON payloads no longer repeat it. -->
+  <div class="disclaimer" id="disclaimer">bubblegauge is a research instrument, not investment
+    advice. The headline is a 0&ndash;100 regime heuristic produced by structured expert judgment;
+    it is uncalibrated and is not a probability. The reference class of comparable US equity manias
+    is roughly four events {1929, 2000, 2007, 2021}, so no honest probability calibration is
+    possible. The current episode may be rational general-purpose-technology repricing rather than
+    a bubble. Nothing here is a recommendation to buy, sell, or hold any security. Any de-risking
+    rule may destroy value net of costs. Use at your own risk.</div>
 </header>
 <main>
   <section id="sec-headline"><h2>Headline</h2><div id="headline" class="headline"></div></section>
@@ -169,7 +177,7 @@ const ENDPOINTS = [
 function renderHeadline(s){
   const el=document.getElementById('headline'); clear(el);
   const snap=s.snapshot;
-  if(!snap){ el.appendChild(h('div','muted','No snapshot computed yet — trigger a recompute or wait for the 06:00/18:00 UTC schedule.')); return; }
+  if(!snap){ el.appendChild(h('div','muted','No snapshot computed yet — trigger a recompute or wait for the 4-hourly (02/06/10/14/18/22 UTC) schedule.')); return; }
   el.appendChild(h('div','score', snap.headline_median));
   const right=h('div');
   right.appendChild(badge(snap.action_band||'—'));
@@ -329,7 +337,6 @@ async function load(){
     const r = await fetch('/api/v1/status', {headers:{'Accept':'application/json'}});
     const s = await r.json();
     document.getElementById('ver').textContent = 'v'+((s.service&&s.service.version)||'?');
-    document.getElementById('disclaimer').textContent = (s.disclaimer||'').replace(/\*\*/g,'');
     document.getElementById('ts').textContent = 'as of '+((s.service&&s.service.now)||'');
     EXAMPLE = s.example || {};
     document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);

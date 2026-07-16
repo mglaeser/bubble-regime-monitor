@@ -38,6 +38,8 @@ def get_methodology(request: Request, _: None = Depends(require_read_access)) ->
             "Leg 2 = Faber 10-month trend trigger; Leg 3 = fast volatility alarm. "
             "The legs are NOT averaged. Action bands: < 45 hold; 45-60 trim; >= 60 or override -> de-risk."
         ),
+        # The full framework disclaimer stays HERE (this endpoint is the spec);
+        # v3.6.0 removed the per-response "Research, not advice." meta tag.
         "disclaimer": DISCLAIMER,
         "indicators": {
             m.id: {"name": m.name, "weight": m.weight, "grounding": m.grounding,
@@ -58,7 +60,6 @@ def get_methodology(request: Request, _: None = Depends(require_read_access)) ->
         "computed_at": None,
         "service_version": get_settings().service_version,
         "data_freshness": {},
-        "disclaimer": "Research, not advice.",
         "epistemic_caveats": EPISTEMIC_CAVEATS,
     }
     return {"data": data, "meta": meta}

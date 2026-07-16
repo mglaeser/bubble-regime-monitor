@@ -1,4 +1,4 @@
-"""APScheduler: full recompute twice daily at 06:00 and 18:00 UTC, an
+"""APScheduler: full recompute every 4 hours (02/06/10/14/18/22 UTC), an
 optional once-daily SMS digest, plus the on-demand run via
 POST /api/v1/admin/refresh."""
 
@@ -52,7 +52,12 @@ def start() -> BackgroundScheduler:
     if _scheduler is None:
         settings = get_settings()
         _scheduler = BackgroundScheduler(timezone="UTC")
-        _scheduler.add_job(_job, CronTrigger(hour="6,18", minute=0, timezone="UTC"),
+        # Every 4 hours, offset +2h so runs sit 1h AFTER the 01:00/13:00 breadth
+        # sweeps (fresh cache) and keep the historical 06:00/18:00 anchors.
+        # Upstream budget at 6 runs/day: price/series caches reuse within their
+        # SLAs (daily data doesn't change intraday), Polygon stays 1 call/day,
+        # breadth spends nothing here (separate job), judgment = 6 LLM calls/day.
+        _scheduler.add_job(_job, CronTrigger(hour="2,6,10,14,18,22", minute=0, timezone="UTC"),
                            id="recompute", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
         # Breadth cache refresh twice daily, off the recompute hours so the two
@@ -71,7 +76,7 @@ def start() -> BackgroundScheduler:
                 coalesce=True, misfire_grace_time=3600, max_instances=1)
             sms_schedule = f"{settings.sms_daily_hour:02d}:{settings.sms_daily_minute:02d} UTC"
         _scheduler.start()
-        log.info("scheduler_started", recompute="06:00/18:00 UTC",
+        log.info("scheduler_started", recompute="every 4h (02/06/10/14/18/22 UTC)",
                  breadth_refresh="01:00/13:00 UTC", daily_sms=sms_schedule)
     return _scheduler
 

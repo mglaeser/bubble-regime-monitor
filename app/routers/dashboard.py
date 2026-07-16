@@ -2,8 +2,8 @@
 "Crisis Winners" dashboard (crash.klee.me). Contract: DASHBOARD_FEED_SPEC.md.
 
 Semantics (dashboard-side sign-off 2026-07-15):
-  * cheap cached read of the payload built with the twice-daily recompute —
-    never an on-request upstream pull;
+  * cheap cached read of the payload built with the scheduled (4-hourly)
+    recompute — never an on-request upstream pull;
   * 503 only before the first payload exists; upstream failures never 500
     (each degraded item ships available:false inside a 200);
   * ?sections=series,metrics and ?symbols=<keys> filter the payload; every
@@ -36,7 +36,7 @@ _SECTIONS = ("series", "metrics")
         "Read-only current-values feed for the companion dashboard. Series carry exactly "
         "61 monthly points (explicit nulls, never interpolated; client rebases); every "
         "scalar carries value/unit/as_of/source/available/stale. Refreshed with the "
-        "twice-daily snapshot; per-item degradation (available:false), never a 500 on "
+        "4-hourly snapshot; per-item degradation (available:false), never a 500 on "
         "upstream failure. Filters: ?sections=series,metrics · ?symbols=qqq,gold,... "
         "(unknown keys ignored). Full contract: DASHBOARD_FEED_SPEC.md."
     ),
@@ -86,6 +86,5 @@ def get_feed(request: Request, response: Response,
         "meta": {
             "computed_at": computed_at,
             "service_version": get_settings().service_version,
-            "disclaimer": "Research, not advice.",
         },
     }

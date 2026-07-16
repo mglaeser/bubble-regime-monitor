@@ -10,7 +10,7 @@ v3.2 changes:
     already fetches successfully), NOT Wikipedia. Wikipedia's User-Agent policy
     returns 403 for generic UAs and the dependency was entirely removable.
   - The Twelve Data sweep (503 symbols, 8 req/min, ~1 credit each) is a
-    SEPARATE BACKGROUND JOB (refresh_breadth_cache), never on the twice-daily
+    SEPARATE BACKGROUND JOB (refresh_breadth_cache), never on the scheduled
     recompute hot path. Each symbol's last close + SMA200 is persisted in
     SQLite (breadth_symbol_cache); the sweep refreshes the stalest/missing
     symbols first, credit-governed, so the universe rolls over within the SLA.
