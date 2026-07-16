@@ -76,13 +76,29 @@ DEPLOY_BRANCH=main            # the branch deploy.sh should fetch & deploy
 # DEPLOY_TRIGGER_DIR=/data/deploy-trigger   # default; the app writes here
 ```
 
-Redeploy once by hand so the running container picks these up:
+Redeploy once by hand — and **this same `deploy.sh` provisions the watchdog for
+you** (steps 3–5 below run automatically on a healthy deploy):
 
 ```bash
 cd ~/playground/bubble-regime-monitor && ./deploy.sh
 ```
 
-### 3. Install the watchdog config
+On a healthy deploy, step 6 of `deploy.sh` writes
+`~/.config/bubblegauge/deploy.env` (with this checkout's real `REPO_DIR`,
+`DEPLOY_BRANCH`, and trigger path), installs the two systemd units with absolute
+paths substituted, runs `systemctl --user enable --now bubblegauge-deploy.path`,
+and `loginctl enable-linger`. It self-skips when there is no user-systemd, when
+launched by the watchdog itself, or if you set `SETUP_AUTODEPLOY=0`. It **never
+fails the deploy** — a watchdog hiccup only prints a warning.
+
+So in the common case you can **skip straight to step 5 (verify)** and then Part
+B. Steps 3–4 below document what `deploy.sh` did, and are the manual fallback if
+you run with `SETUP_AUTODEPLOY=0` or on a host where the self-install skipped.
+
+### 3. (auto) Watchdog config — what `deploy.sh` wrote
+
+`deploy.sh` creates `~/.config/bubblegauge/deploy.env` (mode 600) once, and
+never overwrites it, so hand-edits survive. To do it by hand instead:
 
 ```bash
 install -Dm600 deploy/bubblegauge-deploy.env.example ~/.config/bubblegauge/deploy.env
@@ -99,7 +115,11 @@ DEPLOY_BRANCH=main                                         # MUST match .env
 > systemd's `EnvironmentFile` is **not** a shell: write literal absolute paths,
 > no `$VAR`, no `~`, no `%h`.
 
-### 4. Install and enable the systemd units
+### 4. (auto) systemd units — what `deploy.sh` installed & enabled
+
+`deploy.sh` renders both units into `~/.config/systemd/user/` with the `%h`
+template paths replaced by your real `REPO_DIR`, reloads, enables the `.path`
+unit, and enables linger. To do it by hand instead:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -111,13 +131,7 @@ cp deploy/systemd/bubblegauge-deploy.service ~/.config/systemd/user/
 
 systemctl --user daemon-reload
 systemctl --user enable --now bubblegauge-deploy.path
-```
-
-Let the watchdog keep running after you log out (rootless Podman needs this too,
-so you may already have it):
-
-```bash
-loginctl enable-linger "$USER"
+loginctl enable-linger "$USER"   # keep the watchdog alive after logout
 ```
 
 ### 5. Smoke-test the whole chain locally (no GitHub yet)

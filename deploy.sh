@@ -11,6 +11,10 @@
 #   4. (Re)create the service container from the freshly built image.
 #   5. Health-check the new container; auto-roll-back to the previous image
 #      if it does not become healthy.
+#   6. Provision + enable the host auto-deploy watchdog (systemd --user path
+#      unit) from docs/AUTO_DEPLOY.md, so a future merged PR runs this same
+#      script. Best-effort & idempotent; self-skips off systemd or when this
+#      run was itself launched by the watchdog. Disable with SETUP_AUTODEPLOY=0.
 #
 # Everything is idempotent and safe to re-run. Configuration is via the
 # environment (shown with defaults below) so no edits to this file are needed.
@@ -38,6 +42,7 @@ PORT="${PORT:-8000}"
 ENV_FILE="${ENV_FILE:-.env}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-90}"
 KEEP_IMAGES="${KEEP_IMAGES:-5}"
+SETUP_AUTODEPLOY="${SETUP_AUTODEPLOY:-1}"   # provision the systemd watchdog (step 6)
 
 if [[ -z "${ENGINE:-}" ]]; then
   if command -v podman >/dev/null 2>&1; then ENGINE=podman
@@ -53,6 +58,59 @@ die()    { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "deploy failed at line $LINENO"' ERR
 
 cd "$(dirname "$0")"
+REPO_DIR="$PWD"
+
+# ---- auto-deploy watchdog self-install (step 6; guide steps 3-5) ---------
+# Provision & enable the host systemd --user path watchdog from
+# docs/AUTO_DEPLOY.md, so this very script is what a merged PR runs next time.
+# Best-effort and idempotent; called only on a HEALTHY deploy. Never fails the
+# deploy (invoked as `setup_autodeploy || true`).
+setup_autodeploy() {
+  [[ "$SETUP_AUTODEPLOY" == "1" ]]                 || { echo "    (skip: SETUP_AUTODEPLOY=0)"; return 0; }
+  [[ -z "${INVOCATION_ID:-}" ]]                    || { echo "    (skip: launched by the watchdog itself)"; return 0; }
+  command -v systemctl >/dev/null 2>&1             || { echo "    (skip: no systemctl — not a systemd host)"; return 0; }
+  systemctl --user show-environment >/dev/null 2>&1 || { echo "    (skip: no systemd --user session)"; return 0; }
+  local src="$REPO_DIR/deploy/systemd"
+  [[ -f "$src/bubblegauge-deploy.path" && -f "$src/bubblegauge-deploy.service" ]] \
+    || { echo "    (skip: unit templates not found under deploy/systemd)"; return 0; }
+
+  local cfgdir="${XDG_CONFIG_HOME:-$HOME/.config}/bubblegauge"
+  local envfile="$cfgdir/deploy.env"
+  local unitdir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  local trigger; trigger="$(realpath "$DATA_DIR")/deploy-trigger/deploy-requested"
+
+  # (guide step 3) env file — created ONCE with this checkout's real values;
+  # never overwritten, so hand-edits survive.
+  install -d -m 700 "$cfgdir"
+  if [[ ! -f "$envfile" ]]; then
+    ( umask 077; printf 'REPO_DIR=%s\nDEPLOY_BRANCH=%s\nTRIGGER_FILE=%s\n' \
+        "$REPO_DIR" "$BRANCH" "$trigger" >"$envfile" )
+    echo "    wrote $envfile (DEPLOY_BRANCH=$BRANCH)"
+  fi
+
+  # (guide step 4) install unit files with absolute paths substituted for the
+  # %h template defaults, then reload + enable + linger. Replace the long
+  # trigger path BEFORE the repo path so the prefix isn't mangled.
+  install -d "$unitdir"
+  sed -e "s#%h/playground/bubble-regime-monitor/data/deploy-trigger/deploy-requested#$trigger#g" \
+      -e "s#%h/playground/bubble-regime-monitor#$REPO_DIR#g" \
+      "$src/bubblegauge-deploy.path"    >"$unitdir/bubblegauge-deploy.path"
+  sed -e "s#%h/.config/bubblegauge/deploy.env#$envfile#g" \
+      -e "s#%h/playground/bubble-regime-monitor#$REPO_DIR#g" \
+      "$src/bubblegauge-deploy.service" >"$unitdir/bubblegauge-deploy.service"
+  systemctl --user daemon-reload || true
+  systemctl --user enable --now bubblegauge-deploy.path >/dev/null 2>&1 || true
+  loginctl enable-linger "$USER" >/dev/null 2>&1 || true
+
+  # (guide step 5) verify the watchdog is armed (a .path unit reads "active"
+  # once it is watching). We do NOT curl admin/deploy here — that would trigger
+  # a recursive deploy.
+  if systemctl --user is-active --quiet bubblegauge-deploy.path; then
+    echo "    watchdog active: bubblegauge-deploy.path -> bubblegauge-deploy.service"
+  else
+    echo "    WARNING: bubblegauge-deploy.path not active — run: systemctl --user status bubblegauge-deploy.path"
+  fi
+}
 
 # ---- preflight -----------------------------------------------------------
 [[ -f "$ENV_FILE" ]] || die "$ENV_FILE not found — copy .env.example to .env and fill it in."
@@ -137,6 +195,9 @@ if [[ "$healthy" == "1" ]]; then
       | awk -v i="$IMAGE" '$1 ~ "^"i":" && $1 !~ /:latest$/ {print $2}' | tail -n +"$((KEEP_IMAGES+1))")
   [[ ${#OLD[@]} -gt 0 ]] && $ENGINE rmi -f "${OLD[@]}" >/dev/null 2>&1 || true
   trap - ERR
+  # ---- 6. auto-deploy watchdog (guide steps 3-5); never fails the deploy --
+  banner "Ensuring auto-deploy watchdog (systemd --user)"
+  setup_autodeploy || echo "    (watchdog self-install skipped: non-fatal error)"
   exit 0
 fi
 

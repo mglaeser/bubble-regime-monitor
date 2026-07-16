@@ -663,8 +663,9 @@ CHANGELOG: list[dict[str, str]] = [
         "(deploy/systemd/bubblegauge-deploy.path) notices the file and runs deploy.sh, which "
         "fetches the branch PINNED in the watchdog's own env (NOT any ref/sha the trigger "
         "names), rebuilds, migrates, and health-checks with auto-rollback. Worst case of a "
-        "forged trigger is a redeploy of the legitimate branch. Scoring and all indicator "
-        "methodology are untouched.",
+        "forged trigger is a redeploy of the legitimate branch. deploy.sh itself now "
+        "self-provisions that watchdog on a healthy deploy (idempotent, best-effort, "
+        "SETUP_AUTODEPLOY=0 to opt out). Scoring and all indicator methodology are untouched.",
     },
 ]
 
