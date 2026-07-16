@@ -4,7 +4,7 @@
 **Sign-off basis: dashboard-side approval of proposal v0 with decisions 1A · 2A · 3A · 4B · 5A and three key-naming requests — all honored below.**
 
 > **CAPTURE STATUS — COMPLETE. Capture #2 (production host, `computed_at 2026-07-15T23:29:51+00:00`, commit a897198) confirms the full contract:**
-> all 12 series populated (61/61 points each), all 34 metrics present, per-item degradation and every labeled fallback behaving as specified. §5 below carries the real capture-#2 `metrics` block and a real full series verbatim; **the canonical full artifact is `feed-capture2.json`, captured by the operator from the live endpoint — the dashboard should integrate against that file plus the live endpoint** (`GET https://bubblegauge.klee.me/api/v1/dashboard/feed`).
+> all 12 series populated (61/61 points each), all 34 metrics present, per-item degradation and every labeled fallback behaving as specified. §5 below carries the real capture-#2 `metrics` block and a real full series verbatim; **the canonical full artifact is committed at [`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) — the dashboard should integrate against that file plus the live endpoint** (`GET https://bubblegauge.klee.me/api/v1/dashboard/feed`).
 >
 > Capture #1 (same day, one recompute earlier) exposed two issues, both resolved and regression-tested:
 > 1. All six Tiingo series failed (`only 61 rows`) — a ≥100-row guard meant for GSADF's long-history calibration; the feed now passes `min_rows=24`. Capture #2 shows all six populated.
@@ -137,7 +137,7 @@ A real full series (capture #2, `usd_broad_index`, first/last points shown — a
 
 Envelope (real): `"meta": {"computed_at": "2026-07-15T23:29:51.060987+00:00", "service_version": "3.4.0", "disclaimer": "Research, not advice."}` — with `data.anchor_month: "2026-07"`, `data.anchor_partial: true`.
 
-**Full-payload artifact:** `feed-capture2.json` (operator-captured from the live endpoint at the timestamp above) is the complete byte contract — every series with all 61 points. Integrate against it plus the live endpoint.
+**Full-payload artifact:** [`docs/dashboard-feed-capture2.json`](docs/dashboard-feed-capture2.json) (committed; captured from the live endpoint at the timestamp above, validated 12 series x 61 points + 34 metrics) is the complete byte contract. Integrate against it plus the live endpoint.
 
 Provider date conventions visible in the real bytes (both intentional): Tiingo monthly bars are dated at month **end** — the in-progress month carries the forward end-of-month date (`2026-07-31`) — while Twelve Data 1-month bars are dated at month **start** (`2026-07-01`); `anchor_partial` plus the per-series stale SLAs cover both.
 
@@ -242,7 +242,7 @@ And a REAL degradation row (capture #1, before the min_rows fix) — this is pre
 3. BTC ATH basis = max(provider monthly closes, current spot), coverage start in `detail` — not a curated record. Drawdown is computed against that basis and is ≤ 0 by construction.
 4. `vix_term_state` is categorical: `value` is null (the contract requires numeric values) and the reading lives in `detail.state`; the numeric companion is `vix_term_ratio`.
 5. COFER reserve shares ship `available:false` (new IMF provider = out of scope).
-6. §5 now carries real capture-#2 bytes (metrics block verbatim + envelope); the complete per-point byte contract is the operator-captured `feed-capture2.json` plus the live endpoint. The pre-capture sketch is retained under "5-legacy" for history only.
+6. §5 now carries real capture-#2 bytes (metrics block verbatim + envelope); the complete per-point byte contract is committed at `docs/dashboard-feed-capture2.json`. The pre-capture sketch is retained under "5-legacy" for history only.
 7. **`silver_spot` is permanently the labeled SLV-close fallback on the free Twelve Data tier** (XAG/USD needs the Grow plan; XAU/USD works free — confirmed by capture #1). The dashboard's "render prose spot only when source is true spot" rule handles this by design; `gold_silver_ratio` states its `mixed` basis. If a paid TD plan is ever added, true silver spot activates automatically with no code change.
 8. Twelve Data 1-month bars are dated at the month **start** (the current partial bar reads `YYYY-MM-01`), so the `btc` series uses a 35-day stale SLA; `btc_spot` (daily) carries the fresh date.
 
