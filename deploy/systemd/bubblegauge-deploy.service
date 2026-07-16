@@ -1,0 +1,23 @@
+[Unit]
+Description=bubblegauge auto-deploy (consume trigger, run deploy.sh)
+Documentation=file://%h/playground/bubble-regime-monitor/docs/AUTO_DEPLOY.md
+# Serialize with the app container's own lifecycle is unnecessary; deploy.sh is
+# idempotent and self-locks. We only need network for git fetch + registry.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# All configuration lives in this env file (REPO_DIR, DEPLOY_BRANCH, ...).
+# Copy deploy/bubblegauge-deploy.env.example there and edit it.
+EnvironmentFile=%h/.config/bubblegauge/deploy.env
+ExecStart=%h/playground/bubble-regime-monitor/deploy/deploy-watch.sh
+
+# Hardening: this unit runs as your unprivileged user (systemd --user). It needs
+# to run podman + git in the repo, so we keep it modest rather than locked down.
+NoNewPrivileges=true
+# A single deploy (build + migrate + health-check) must fit comfortably.
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=default.target

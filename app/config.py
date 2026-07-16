@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     admin_api_key: str = "change-me-to-a-long-random-string"
     read_endpoints_public: bool = True
 
+    # Auto-deploy webhook (v3.5.0, docs/AUTO_DEPLOY.md). The endpoint is
+    # FAIL-CLOSED: it returns 503 unless BOTH values are set. The secret is the
+    # GitHub webhook HMAC secret (X-Hub-Signature-256), verified constant-time —
+    # never an API key in the URL. The app only WRITES a trigger file on /data;
+    # the host-side systemd watchdog runs deploy.sh (a container cannot and
+    # must not replace itself).
+    github_webhook_secret: str = ""
+    deploy_branch: str = ""          # e.g. claude/bubblegauge-build-spec-fzthju
+    deploy_trigger_dir: str = "/data/deploy-trigger"
+
     # SEC EDGAR etiquette (MANDATORY, format: "Name email").
     # SEC_EDGAR_UA is the v3.1 name; SEC_USER_AGENT remains accepted.
     sec_user_agent: str = "bubblegauge-monitor admin@example.com"
@@ -66,7 +76,7 @@ class Settings(BaseSettings):
     lppls_timeout_s: int = 1500  # generous headroom for the Atom N2800 (background recompute; API serves the last snapshot meanwhile)
     gsadf_timeout_s: int = 1800
 
-    service_version: str = "3.4.0"
+    service_version: str = "3.5.0"
 
     @property
     def sms_configured(self) -> bool:

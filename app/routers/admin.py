@@ -89,3 +89,27 @@ def send_sms_now(_: None = Depends(require_admin_key)) -> dict[str, Any]:
 
     result = send_daily_digest(force=True)
     return {"data": result, "meta": {"disclaimer": "Research, not advice."}}
+
+
+@router.post(
+    "/deploy",
+    status_code=202,
+    summary="Request an auto-deploy now (X-API-Key required)",
+    description=(
+        "Writes a deploy-trigger file on /data; the host-side systemd watchdog then "
+        "fetches the pinned DEPLOY_BRANCH and runs deploy.sh (with its own health-check "
+        "auto-rollback). The app never runs deploy.sh itself. Returns 202 immediately. "
+        "Requires DEPLOY_BRANCH to be configured (the watchdog decides what to deploy)."
+    ),
+)
+def request_deploy(_: None = Depends(require_admin_key)) -> dict[str, Any]:
+    from app.config import get_settings
+    from app.services.deploy_trigger import write_deploy_trigger
+
+    if not get_settings().deploy_branch:
+        return {"data": {"status": "not_configured",
+                         "detail": "set DEPLOY_BRANCH to enable host-side auto-deploy"},
+                "meta": {"disclaimer": "Research, not advice."}}
+    trigger = write_deploy_trigger(source="admin-api")
+    return {"data": {"status": "deploy_triggered", "trigger": trigger},
+            "meta": {"disclaimer": "Research, not advice."}}

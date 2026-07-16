@@ -649,6 +649,23 @@ CHANGELOG: list[dict[str, str]] = [
         "IEF/BIL, Twelve Data BTC/XAU/XAG/FX scalars, FRED FX/rates/MMF). Score computation, "
         "weights, and all indicator methodology are untouched.",
     },
+    {
+        "version": "v3.5.0",
+        "score": "Auto-deploy pipeline added — METHODOLOGY UNCHANGED",
+        "notes": "Opt-in continuous deployment (docs/AUTO_DEPLOY.md). A GitHub webhook "
+        "POST /api/v1/webhooks/github is HMAC-SHA256 verified (X-Hub-Signature-256, "
+        "constant-time, FAIL-CLOSED: 503 unless GITHUB_WEBHOOK_SECRET and DEPLOY_BRANCH are "
+        "both set; 401 on a bad signature) and deploys on a push to the deploy branch OR a "
+        "merged (completed) PR whose base is the deploy branch. POST /api/v1/admin/deploy "
+        "(X-API-Key) triggers the same path manually. SECURITY BOUNDARY: the container holds "
+        "no host-control capability (no podman socket, no SSH); it only writes one atomic "
+        "JSON trigger file onto /data. A host systemd --user path unit "
+        "(deploy/systemd/bubblegauge-deploy.path) notices the file and runs deploy.sh, which "
+        "fetches the branch PINNED in the watchdog's own env (NOT any ref/sha the trigger "
+        "names), rebuilds, migrates, and health-checks with auto-rollback. Worst case of a "
+        "forged trigger is a redeploy of the legitimate branch. Scoring and all indicator "
+        "methodology are untouched.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
