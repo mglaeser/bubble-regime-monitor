@@ -18,7 +18,6 @@ def _meta() -> dict[str, Any]:
         "computed_at": None,
         "service_version": get_settings().service_version,
         "data_freshness": {},
-        "disclaimer": "Research, not advice.",
         "epistemic_caveats": EPISTEMIC_CAVEATS,
     }
 

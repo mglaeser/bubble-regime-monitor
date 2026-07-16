@@ -11,13 +11,17 @@ from app.references import EPISTEMIC_CAVEATS
 
 
 class Meta(BaseModel):
-    """Response meta block: provenance + the five verbatim epistemic caveats."""
+    """Response meta block: provenance + the five verbatim epistemic caveats.
+
+    v3.6.0: the per-response "Research, not advice." disclaimer string was
+    removed from machine payloads (personal-use deployment); the full
+    disclaimer lives on the human-facing spec surfaces (status page, /docs,
+    and the /api/v1/meta/methodology document)."""
 
     computed_at: datetime | None = Field(None, description="UTC time of the snapshot recompute")
     service_version: str = Field(..., description="bubblegauge semantic version")
     data_freshness: dict[str, str] = Field(default_factory=dict,
                                            description="Per-source age of the underlying reading")
-    disclaimer: str = Field("Research, not advice.", description="Standing research disclaimer")
     epistemic_caveats: list[str] = Field(default_factory=lambda: list(EPISTEMIC_CAVEATS),
                                          description="The five verbatim epistemic guardrails")
 
@@ -26,7 +30,7 @@ class Envelope(BaseModel):
     """Uniform envelope for every API response."""
 
     data: Any = Field(..., description="Endpoint payload")
-    meta: Meta = Field(..., description="Provenance, disclaimer, and epistemic caveats")
+    meta: Meta = Field(..., description="Provenance and epistemic caveats")
 
 
 class IndicatorPayload(BaseModel):

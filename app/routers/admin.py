@@ -61,11 +61,9 @@ def run_recompute_guarded() -> None:
 )
 def refresh(_: None = Depends(require_admin_key)) -> dict[str, Any]:
     if recompute_lock.locked():
-        return {"data": {"status": "already_running", "last": _last},
-                "meta": {"disclaimer": "Research, not advice."}}
+        return {"data": {"status": "already_running", "last": _last}, "meta": {}}
     threading.Thread(target=run_recompute_guarded, name="recompute", daemon=True).start()
-    return {"data": {"status": "started"},
-            "meta": {"disclaimer": "Research, not advice."}}
+    return {"data": {"status": "started"}, "meta": {}}
 
 
 @router.get(
@@ -73,8 +71,7 @@ def refresh(_: None = Depends(require_admin_key)) -> dict[str, Any]:
     summary="State of the current/last recompute (X-API-Key required)",
 )
 def refresh_status(_: None = Depends(require_admin_key)) -> dict[str, Any]:
-    return {"data": {"running": recompute_lock.locked(), "last": _last},
-            "meta": {"disclaimer": "Research, not advice."}}
+    return {"data": {"running": recompute_lock.locked(), "last": _last}, "meta": {}}
 
 
 @router.post(
@@ -88,7 +85,7 @@ def send_sms_now(_: None = Depends(require_admin_key)) -> dict[str, Any]:
     from app.services.digest import send_daily_digest
 
     result = send_daily_digest(force=True)
-    return {"data": result, "meta": {"disclaimer": "Research, not advice."}}
+    return {"data": result, "meta": {}}
 
 
 @router.post(
@@ -108,8 +105,6 @@ def request_deploy(_: None = Depends(require_admin_key)) -> dict[str, Any]:
 
     if not get_settings().deploy_branch:
         return {"data": {"status": "not_configured",
-                         "detail": "set DEPLOY_BRANCH to enable host-side auto-deploy"},
-                "meta": {"disclaimer": "Research, not advice."}}
+                         "detail": "set DEPLOY_BRANCH to enable host-side auto-deploy"}, "meta": {}}
     trigger = write_deploy_trigger(source="admin-api")
-    return {"data": {"status": "deploy_triggered", "trigger": trigger},
-            "meta": {"disclaimer": "Research, not advice."}}
+    return {"data": {"status": "deploy_triggered", "trigger": trigger}, "meta": {}}

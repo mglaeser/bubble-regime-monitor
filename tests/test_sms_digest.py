@@ -44,7 +44,8 @@ class TestDeterministicReport:
         body = deterministic_report(_snap(), 160)
         assert len(body) <= 160
         assert "41/100" in body and "hold" in body
-        assert "Research, not advice." in body
+        # v3.6.0: the digest carries no disclaimer tag (frees chars for content)
+        assert "Research, not advice." not in body
         assert body.isascii()
 
     def test_override_marked(self):
@@ -75,7 +76,7 @@ class TestGenerateBody:
         body, llm_used = generate_sms_body(_snap())
         assert llm_used is True
         assert len(body) <= 160 and body.isascii()
-        assert body.endswith("Research, not advice.")
+        assert "Research, not advice." not in body  # v3.6.0: no tag appended
 
 
 class TestSipgateSender:

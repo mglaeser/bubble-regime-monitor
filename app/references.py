@@ -667,6 +667,21 @@ CHANGELOG: list[dict[str, str]] = [
         "self-provisions that watchdog on a healthy deploy (idempotent, best-effort, "
         "SETUP_AUTODEPLOY=0 to opt out). Scoring and all indicator methodology are untouched.",
     },
+    {
+        "version": "v3.6.0",
+        "score": "Cadence + presentation only — METHODOLOGY UNCHANGED",
+        "notes": "(1) Recompute cadence raised from twice daily (06/18 UTC) to EVERY 4 HOURS "
+        "(02/06/10/14/18/22 UTC), offset 1h after the 01:00/13:00 breadth sweeps. Upstream "
+        "budgets hold at 6 runs/day: series caches reuse within their SLAs (daily data does "
+        "not change intraday), Polygon grouped-daily stays 1 call/day, the Twelve Data "
+        "breadth sweep is a separate unchanged job, judgment = 6 LLM calls/day. (2) The "
+        "per-response 'Research, not advice.' disclaimer string was REMOVED from all machine "
+        "payloads (every {data, meta} envelope) and from the SMS digest (personal-use "
+        "deployment; frees ~22 of the 160 GSM-7 chars for content). The full disclaimer "
+        "remains on every human-facing spec surface: the status page (statically), /docs, "
+        "and the /api/v1/meta/methodology document. The five epistemic caveats stay in "
+        "meta.epistemic_caveats; the SMS prompt still forbids advice language.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
@@ -897,7 +912,6 @@ SCORE_EXAMPLE: dict = {
         "computed_at": "2026-07-11T06:00:03+00:00", "service_version": "3.4.0",
         "coverage": {"S": {"coverage": 1.0, "degraded": False},
                      "D": {"coverage": 1.0, "degraded": False}, "degraded": False},
-        "disclaimer": "Research, not advice.",
         "epistemic_caveats": ["NOT-A-PROBABILITY: 0-100 regime heuristic = structured expert "
                               "judgment; uncalibrated.", "... (5 verbatim guardrails)"],
     },
