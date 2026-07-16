@@ -153,6 +153,7 @@ class RawInputs:
     semis_as_of: str | None = None
 
     gsadf_stat: float | None = None
+    gsadf_as_of: str | None = None   # last month of the QQQ series GSADF ran on
     gsadf_cv90: float | None = None
     gsadf_cv95: float | None = None
     gsadf_note: str | None = None
@@ -403,10 +404,13 @@ def gather_inputs() -> RawInputs:
         # T=100); fetch QQQ monthly from 1999 (T~329), falling back to the
         # shorter recompute series if the long fetch is unavailable.
         try:
-            gsadf_monthly = [c for _, c in price_src.fetch_tiingo_monthly("NDX")]
+            gsadf_pairs = price_src.fetch_tiingo_monthly("NDX")
+            gsadf_monthly = [c for _, c in gsadf_pairs]
+            raw.gsadf_as_of = gsadf_pairs[-1][0] if gsadf_pairs else None
             gsadf_src_note = f"Nasdaq-100 via QQQ proxy (Tiingo monthly 1999+, T={len(gsadf_monthly)})"
         except Exception as exc:
             gsadf_monthly = legs.monthly_closes(ndx.value)
+            raw.gsadf_as_of = ndx.provenance.as_of
             gsadf_src_note = (f"Nasdaq-100 via QQQ proxy (short series T={len(gsadf_monthly)}; "
                               f"long history unavailable: {str(exc)[:80]})")
         out = run_gsadf([math.log(v) for v in gsadf_monthly[-360:]],
@@ -638,8 +642,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # data-quality problem — a capped-but-measured s4 is a full-quality read.
         s4_state, s4_quality = "COMPUTED", 1.0
         s4_note = raw.gsadf_note or f"GSADF_CONTESTED={str(contested).lower()}"
+    # as_of = the QQQ monthly series GSADF actually ran on (v3.7.1 — was the
+    # unrelated semis-series date, a provenance mislabel).
     indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False,
-                                       note=s4_note, as_of=raw.semis_as_of,
+                                       note=s4_note, as_of=raw.gsadf_as_of,
                                        quality=s4_quality, state=s4_state)
 
     # ---- S5 credit ----

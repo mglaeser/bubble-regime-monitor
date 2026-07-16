@@ -5,7 +5,9 @@ Contract (r/gsadf.R, JSON on stdin/stdout):
     stdout: {"gsadf": <stat>, "cv90": <90% CV>, "cv95": <95% CV>}
 
 If R/Rscript is unavailable or the script fails, return None so the S4
-sub-score falls back to 0.05 with a provenance note (never crash).
+sub-score falls back to the contested/stale floor 0.25 with a provenance
+note (never crash). The 0.05 value is reserved for a SUCCESSFULLY executed
+test that finds no explosiveness (see s4_gsadf.sub_score).
 """
 
 from __future__ import annotations

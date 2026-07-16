@@ -2,9 +2,12 @@
 
 WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s5"]; summary:
 
-    oas = FRED BAMLH0A0HYM2 latest value (%; x100 for bps display)
-    sub_score = 1 - percentile(oas within its own persisted history, >=3 yr)
-    (inverted percentile: tighter spreads => higher fragility)
+    PREFERRED (v3.3.1): Fed Excess Bond Premium (monthly 1973+) at t-2yr
+    (24 monthly observations back), ranked over the FULL history:
+    sub_score = 1 - percentile(EBP_t-2)   # low/negative EBP => HIGH fragility
+    Fallback tiers (v3.3.2 fidelity quality): BAA-DGS10 proxy at t-2 (0.5),
+    then the service's own accrued HY-OAS history at t-2, >=3yr window (0.3).
+    All tiers use the same sign-agnostic inverted percentile.
 
 CAVEATS (verbatim): t-2yr STRUCTURAL horizon, NOT same-month timing. FRED
 truncated BAMLH0A0HYM2 to a rolling 3-year window in April 2026, so the

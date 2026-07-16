@@ -217,9 +217,10 @@ REGISTRY: dict[str, Methodology] = {
             "log prices."
         ),
         how=(
-            "Compute in R via exuber (JSS 103(10)): radf(y, lag = 1) with minimum window "
+            "Compute in R via exuber (JSS 103(10)): radf(y, lag = 0) with minimum window "
             "r0 = 0.01 + 1.8/sqrt(T) (the exuber default psy_minw). Finite-sample critical values "
-            "from radf_mc_cv(n = length(y), nrep = 2000, seed = 123). NEVER hard-code the blog value "
+            "from radf_mc_cv(n = length(y), nrep = 2000) after set.seed(20260711), cached as RDS "
+            "under GSADF_CV_CACHE (default /data/cv_cache), keyed by n. NEVER hard-code the blog value "
             "1.49 — that is a SADF critical value, not GSADF; the simulated GSADF 95% CV is "
             "~1.9-2.1 depending on T. Called from Python via Rscript r/gsadf.R with JSON "
             "stdin/stdout. Sub-score mapping: gsadf_stat > cv95 AND non-contested -> 1.0; "
@@ -277,10 +278,13 @@ REGISTRY: dict[str, Methodology] = {
             "economic downturn roughly two years out."
         ),
         how=(
-            "oas = FRED BAMLH0A0HYM2 latest value (ICE BofA US High Yield OAS, in %; x100 for bps "
-            "display). sub_score = 1 - percentile(oas within its own persisted history, >=3 yr, "
-            "longer as the service accrues) — an inverted percentile so that tighter spreads => "
-            "higher fragility."
+            "PREFERRED input (v3.3.1): the Fed's Excess Bond Premium (Gilchrist-Zakrajsek, monthly "
+            "1973+), read at t-2 years (24 monthly observations back) and ranked over the FULL "
+            "1973+ history — sub_score = 1 - percentile(EBP_t-2), an inverted percentile so that "
+            "low/negative EBP (frothy credit) => high fragility; fidelity quality 1.0. Fallbacks "
+            "(v3.3.2 fidelity tiers): BAA-DGS10 spread proxy at t-2 (quality 0.5), then the "
+            "service's own accrued HY-OAS history at t-2 with a >=3yr window (quality 0.3; FRED "
+            "truncated BAMLH0A0HYM2 to a rolling 3-year window in Apr 2026)."
         ),
         why=(
             "Lopez-Salido, Stein & Zakrajsek (2017), using US data 1929-2015, show that elevated "
@@ -316,13 +320,14 @@ REGISTRY: dict[str, Methodology] = {
             "participation gauge whose deterioration signals narrowing leadership."
         ),
         how=(
-            "Primary: StockCharts $SPXA200R or Barchart $MMTH only if anonymously accessible "
-            "(verify each run; both are JS/login-gated as of July 2026, so mark best-effort). "
-            "Fallback (effectively primary): fetch the S&P 500 constituent list from the SSGA "
-            "SPY holdings XLSX, pull each symbol's Twelve Data daily closes, compute "
-            "pct = 100*#{close > SMA200}/N. "
-            "sub_score = clip((hi - pct)/(hi - lo), 0, 1), with MC anchors lo ~ U(35,45), "
-            "hi ~ U(70,80); baseline lo = 40, hi = 75 (lower breadth => higher sub-score)."
+            "Primary (v3.3.0): full-universe constituent computation — S&P 500 membership from "
+            "the SSGA SPY holdings XLSX, daily closes for the whole US market from the "
+            "Polygon/Massive grouped-daily endpoint (1 call/day, daily_close cache), "
+            "pct = 100*#{close > SMA200}/N with a binomial CI on partial coverage. Fallback: "
+            "the credit-governed Twelve Data sweep cache (breadth_symbol_cache). "
+            "sub_score = max(0.05, clip((hi - pct)/(hi - lo), 0, 1)) with baseline lo = 35, "
+            "hi = 90 and a 0.05 soft floor (v3.3.0 — hi=75 clipped normal bull-market breadth "
+            "to 0); MC anchors lo ~ U(30,40), hi ~ U(85,95). Lower breadth => higher sub-score."
         ),
         why=(
             "Late-cycle market tops historically show narrowing participation — the index makes new "
@@ -698,6 +703,25 @@ CHANGELOG: list[dict[str, str]] = [
         "sub-indicators with no literature grounding for bubble-regime detection; it enters no "
         "block, no weight, no aggregation — context only.",
     },
+    {
+        "version": "v3.7.1",
+        "score": "Doc-register maintenance — METHODOLOGY UNCHANGED (golden fixture byte-identical)",
+        "notes": "Fixes the documentation drifts found by the 2026-07-16 validate-first audit "
+        "(every scoring constant was verified correct in code; only served DOCUMENTATION was "
+        "stale): (1) the KNOWN_ISSUES entry falsely claiming ALPHA_RANGE=U(0.25,0.75) replaced "
+        "by the real current deviation (d1 anchors hi 75->90 + 0.05 soft floor, v3.3.0); "
+        "(2) README worked example updated from the pre-v3.3.0 additive-epsilon arithmetic "
+        "(40.35, IQR 34-47) to the live rescale-then-aggregate fixture (52.43, IQR (50,55)); "
+        "(3) REGISTRY d1.how (Polygon grouped-daily primary, (35,90)+0.05 anchors) and s5.how "
+        "(EBP-primary t-2 with fidelity fallback tiers) brought up to the implemented v3.3.x "
+        "methodology; (4) GSADF docs corrected to the executing R code: radf(y, lag=0), "
+        "set.seed(20260711) (docs said lag=1/seed=123), runner fallback 0.25 not 0.05; "
+        "(5) s4.as_of now carries the QQQ monthly series date GSADF actually ran on (was the "
+        "unrelated semis date — provenance only); (6) empty falsification_outcomes explicitly "
+        "documented in the methodology payload (manual recording, nothing tripped); (7) new "
+        "guard tests: REGISTRY weights == engine weights, ALPHA_RANGE spec pin, and the "
+        "previously untested LPPLS VALID_ZERO producer path.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
@@ -856,12 +880,14 @@ KNOWN_ISSUES: list[dict[str, str]] = [
      "detail": "No free data tier serves raw index levels, so Nasdaq-100 uses QQQ and S&P 500 "
      "uses SPY. GSADF and LPPLS therefore run on the QQQ proxy. Enable TWELVE_DATA_INDICES on "
      "the Grow plan for raw GSPC/NDX.", "ref": "sources.prices"},
-    {"id": "alpha-range-deviation", "severity": "info", "category": "documented-deviation",
-     "title": "Monte Carlo alpha range deviates from the written spec",
-     "detail": "Spec 5.3 states alpha ~ U(0.40,0.60), but that cannot reproduce the spec 5.5 "
-     "golden IQR (34,47); the implementation uses U(0.25,0.75), which reproduces ALL published "
-     "fixture outputs. Documented at ALPHA_RANGE in engine/montecarlo.py.",
-     "ref": "engine.montecarlo.ALPHA_RANGE"},
+    {"id": "d1-anchor-deviation", "severity": "info", "category": "documented-deviation",
+     "title": "Breadth anchors deviate from the original spec text",
+     "detail": "The original spec anchored d1 at (35,75), but hi=75 clipped normal bull-market "
+     "breadth (high 80s-90s) to exactly 0 and produced a false-negative headline. v3.3.0 raised "
+     "hi to 90 and added a 0.05 soft floor; the golden fixture was regenerated (52.43). The "
+     "v3.3.0-era alpha-range deviation U(0.25,0.75) was RESOLVED in the same release — "
+     "ALPHA_RANGE is back at the spec's U(0.40,0.60) (engine/montecarlo.py).",
+     "ref": "indicator d1"},
     {"id": "fred-truncation", "severity": "info", "category": "data-limitation",
      "title": "HY-OAS history is only as deep as accrued locally",
      "detail": "FRED truncated BAMLH0A0HYM2 to a rolling 3-year window (Apr 2026); the S5 "

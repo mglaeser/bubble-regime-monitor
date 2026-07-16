@@ -2,10 +2,11 @@
 
 WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
 
-    Computed in R via exuber (JSS 103(10)): radf(y, lag=1), minimum window
-    r0 = 0.01 + 1.8/sqrt(T); finite-sample critical values from
-    radf_mc_cv(n=length(y), nrep=2000, seed=123). NEVER hard-code the blog
-    value 1.49 — that is a SADF critical value, not GSADF. Called via
+    Computed in R via exuber (JSS 103(10)): radf(y, lag=0), minimum window
+    r0 = 0.01 + 1.8/sqrt(T) (exuber default); finite-sample critical values
+    from radf_mc_cv(n=length(y), nrep=2000) after set.seed(20260711), cached
+    per n under GSADF_CV_CACHE (default /data/cv_cache). NEVER hard-code the
+    blog value 1.49 — that is a SADF critical value, not GSADF. Called via
     `Rscript r/gsadf.R` with JSON stdin/stdout.
 
     Mapping: stat > cv95 AND non-contested -> 1.0; > cv90 -> 0.5;
