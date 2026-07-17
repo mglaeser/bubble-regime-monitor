@@ -32,11 +32,11 @@ def test_c08_monthly_join_keeps_weekend_first_months():
         ("2026-02-02", 4.1),                          # Feb: no 1st
         ("2026-03-03", 4.3),                          # Mar: no 1st
     ]
-    spread, latest = monthly_baa_spread_bps(baa, dgs)
-    assert len(spread) == 3            # all three months survive (was 0)
-    assert latest == "2026-03"
+    pairs, gaps = monthly_baa_spread_bps(baa, dgs)   # v3.7.5/C-08: dated pairs + gaps
+    assert [m for m, _ in pairs] == ["2026-01", "2026-02", "2026-03"]  # all survive (was 0)
+    assert gaps == []                  # contiguous span, no holes
     # Jan spread = (5.0 - mean(4.0,4.2)) * 100 = (5.0 - 4.1)*100 = 90 bps
-    assert spread[0] == pytest.approx(90.0, abs=1e-6)
+    assert pairs[0][1] == pytest.approx(90.0, abs=1e-6)
 
 
 # ---- C-06/C-07: FINRA age from month-END and de-duplicated months ----------
@@ -58,12 +58,13 @@ def test_c06_c07_finra_month_end_and_dedup():
     # 14 months, newest = May 2026, plus a DUPLICATE May row (last wins).
     months = [(f"2025-{m:02d}", 1000.0 + m) for m in range(1, 13)]
     months += [("2026-01", 1100.0), ("2026-05", 1150.0), ("2026-05", 1155.0)]
-    values, as_of = parse_debit_balances(_finra_xlsx(months))
+    values, month_labels, as_of = parse_debit_balances(_finra_xlsx(months))
 
     assert as_of == "2026-05-31"                 # month-END, not 2026-05-01
     assert values[-1] == 1155.0                  # duplicate May collapsed, last wins
     # 12 unique 2025 months + Jan-2026 + May-2026 = 14 unique months
     assert len(values) == 14
+    assert month_labels[-1] == "2026-05" and len(month_labels) == 14  # v3.7.5/C-07
 
 
 # ---- G-04: GSADF COMPUTED requires finite, ordered CVs ----------------------
@@ -79,16 +80,20 @@ def test_g04_sub_score_floors_on_degenerate_cv():
     assert sub_score(3.0, 1.9, 2.1, contested=False) == pytest.approx(1.0)
 
 
-# ---- K-01: concentration fallback ignores stray large percentages ----------
+# ---- K-01: concentration fallback parses the holdings TABLE structurally ----
+# (v3.7.5 supersedes the v3.7.4 page-wide >10% filter — see
+# tests/test_revalidation_v375.py::test_k01_structural_table_parse.)
 
-def test_k01_slickcharts_filters_stray_percentages():
+def test_k01_slickcharts_needs_a_table_not_page_text():
+    from app.sources import SourceError
     from app.sources.ssga import _top10_from_slickcharts
 
-    # ten real single-name weights (< 8%) plus a stray "52-week 68.58%" figure
+    # A page with percentages but NO holdings table must FAIL, not harvest stray
+    # page figures as "weights" (the old regex summed these).
     html = "".join(f"{w:.2f}%" for w in [7.1, 6.2, 3.3, 2.9, 2.4, 2.1, 1.9, 1.8, 1.7, 1.5])
     html += " 52-week range 68.58% ytd 15.40%"
-    top10 = _top10_from_slickcharts(html)
-    assert top10 == pytest.approx(30.9, abs=0.01)   # stray 68.58/15.40 excluded
+    with pytest.raises(SourceError):
+        _top10_from_slickcharts(html)
 
 
 # ---- A-05: geometric_block rejects un-renormalized weights ------------------

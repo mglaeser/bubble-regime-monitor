@@ -43,11 +43,32 @@ NO_ROLLOVER_MULT = 0.6
 
 
 def yoy_pct(debit_balances_monthly: list[float]) -> float:
-    """12-month % change of the debit-balance series (chronological order)."""
+    """12-month % change of the debit-balance series (chronological order).
+
+    POSITIONAL — correct only on a gap-free monthly series. Prefer
+    yoy_pct_calendar when dated months are available (v3.7.6/C-07)."""
     if len(debit_balances_monthly) < 13:
         raise ValueError("need >= 13 monthly observations for YoY")
     latest, prior = debit_balances_monthly[-1], debit_balances_monthly[-13]
     return (latest / prior - 1.0) * 100.0
+
+
+def yoy_pct_calendar(months: list[str], values: list[float]) -> float:
+    """12-month % change matched by CALENDAR month (v3.7.6/C-07).
+
+    Finds the latest month and the month EXACTLY 12 calendar months earlier; if
+    that reference month is absent from the series (a publication gap), it raises
+    rather than silently comparing the wrong month via a positional [-13] offset
+    (on a gapped list, [-13] is 12 list-positions back, not 12 months back)."""
+    if len(values) < 13 or len(months) != len(values):
+        raise ValueError("need >= 13 dated monthly observations for YoY")
+    by_month = dict(zip(months, values, strict=True))
+    latest = max(by_month)                      # "YYYY-MM"
+    y, m = int(latest[:4]), int(latest[5:7])
+    target = f"{y - 1:04d}-{m:02d}"             # same month, one calendar year earlier
+    if target not in by_month:
+        raise ValueError(f"YoY reference month {target} missing (gap) — refusing positional fallback")
+    return (by_month[latest] / by_month[target] - 1.0) * 100.0
 
 
 def rollover_confirmed(debit_balances_monthly: list[float]) -> bool:

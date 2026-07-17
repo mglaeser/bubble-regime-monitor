@@ -41,8 +41,9 @@ class TestFinraParser:
     def test_latest_row_selected_despite_newest_first_order(self):
         from app.sources.finra import parse_debit_balances
 
-        values, as_of = parse_debit_balances(_make_finra_xlsx(newest_first=True))
+        values, months, as_of = parse_debit_balances(_make_finra_xlsx(newest_first=True))
         assert as_of == "2026-05-31"  # v3.7.4/C-06: reference month-END
+        assert months[-1] == "2026-05" and len(months) == len(values)  # v3.7.5/C-07
         assert values[-1] == pytest.approx(1_415_557.0)
         # YoY across the properly sorted window ~ +53.7%
         from app.indicators.d2_margin import sub_score, yoy_pct
@@ -54,7 +55,7 @@ class TestFinraParser:
     def test_chronological_input_also_works(self):
         from app.sources.finra import parse_debit_balances
 
-        values, as_of = parse_debit_balances(_make_finra_xlsx(newest_first=False))
+        values, months, as_of = parse_debit_balances(_make_finra_xlsx(newest_first=False))
         assert as_of == "2026-05-31"  # v3.7.4/C-06: reference month-END
         assert values[-1] == pytest.approx(1_415_557.0)
 

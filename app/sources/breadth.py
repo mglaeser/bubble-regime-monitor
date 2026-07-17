@@ -148,16 +148,21 @@ def refresh_breadth_cache(max_symbols: int = DEFAULT_BACKFILL,
 # ---------------------------------------------------------------------------
 
 def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None]:
-    """(above, counted, obs_date) computing each constituent's 200-DMA from
-    daily_close. obs_date is the newest cached trading day (the real observation
-    date — v3.7.3/B-02, so a frozen cache no longer masquerades as fresh).
+    """(above, counted, obs_date) — the %>200-DMA cross-section on ONE common
+    observation date (v3.7.6/B-07).
 
-    A constituent is counted only if it has >= 200 cached closes; the whole
-    universe is measured from the SAME set of dates (grouped-daily), so there
-    is no top-weight sampling bias — this is the full-universe reading."""
+    The prior version read each symbol's OWN last close and its own trailing 200
+    and set obs_date = max over symbols, so constituents could be judged on
+    different trading days while the reported date was a day some were never
+    evaluated on. Instead: pick a single common date = the latest trading day on
+    which at least MIN_RESOLVED constituents have a close; evaluate every
+    constituent's 200-DMA up to and including that date; count a constituent ONLY
+    if it has a close on that date AND >= 200 closes through it (a symbol absent
+    on the common date is excluded from BOTH numerator and denominator);
+    obs_date is that common date, never a later per-symbol date."""
     wanted = set(symbols)
-    series: dict[str, list[float]] = {}
-    obs_date: date | None = None
+    by_sym: dict[str, dict[date, float]] = {}
+    date_count: dict[date, int] = {}
     with session_scope() as session:
         rows = session.execute(
             select(DailyClose.symbol, DailyClose.date, DailyClose.close)
@@ -165,17 +170,24 @@ def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None
         ).all()
     for sym, d, close in rows:
         if sym in wanted:
-            series.setdefault(sym, []).append(close)
-            if obs_date is None or d > obs_date:
-                obs_date = d
+            by_sym.setdefault(sym, {})[d] = close
+            date_count[d] = date_count.get(d, 0) + 1
+    if not date_count:
+        return 0, 0, None
+    # common cross-section: the latest date with the required fraction present;
+    # if none reaches the threshold, fall back to the latest available date.
+    eligible = [d for d, c in date_count.items() if c >= MIN_RESOLVED]
+    common_date = max(eligible) if eligible else max(date_count)
     above = counted = 0
-    for closes in series.values():
+    for series in by_sym.values():
+        if common_date not in series:          # absent on the common date -> excluded
+            continue
+        closes = [series[d] for d in sorted(series) if d <= common_date]
         if len(closes) < 200:
             continue
-        sma200 = sum(closes[-200:]) / 200.0
         counted += 1
-        above += closes[-1] > sma200
-    return above, counted, obs_date
+        above += closes[-1] > sum(closes[-200:]) / 200.0
+    return above, counted, common_date
 
 
 def _cached_polygon_dates() -> set[date]:
@@ -270,12 +282,15 @@ def _pct_from_td_cache() -> SourceResult:
     current = set(sp500_symbols())   # v3.7.4/B-03: count CURRENT constituents only,
     cutoff = sla_cutoff_date()       # never ex-members still lingering in the cache
     above = counted = stale = 0
+    newest: date | None = None       # real newest cache date (v3.7.6/B-02)
     for sym, entry in cache.items():
         if sym not in current:
             continue
         counted += 1
         if entry.as_of.isoformat() < cutoff:
             stale += 1
+        if newest is None or entry.as_of > newest:
+            newest = entry.as_of
         above += entry.last_close > entry.sma200
     if counted < MIN_RESOLVED:
         raise SourceError(f"breadth: only {counted} cached constituents — too few to publish")
@@ -285,8 +300,10 @@ def _pct_from_td_cache() -> SourceResult:
             f"CI +/-{ci}pp")
     if stale:
         note += f"; {stale} past the {CACHE_SLA_DAYS}d cache SLA (background refresh pending)"
+    # as_of = the newest REAL per-symbol cache date, never today (v3.7.6/B-02):
+    # a frozen Twelve Data cache now ages honestly through the freshness SLA.
     return SourceResult(pct, Provenance(source="constituents+twelvedata", note=note,
-                                        as_of=datetime.now(UTC).date().isoformat()))
+                                        as_of=newest.isoformat() if newest else None))
 
 
 def pct_above_200dma() -> SourceResult:
@@ -303,12 +320,12 @@ def pct_above_200dma() -> SourceResult:
             if counted >= MIN_RESOLVED:
                 pct = 100.0 * above / counted
                 ci = _binomial_ci_pp(pct / 100.0, counted)
-                as_of = (obs_date or datetime.now(UTC).date()).isoformat()
+                # as_of = the real common cross-section date, NEVER `or today`
+                # (v3.7.6/B-02): a missing obs date stays None so the freshness
+                # SLA / coverage gate treats it as unverified, not fresh.
+                as_of = obs_date.isoformat() if obs_date else None
                 note = (f"breadth from {counted}/{len(symbols)} constituents "
                         f"(Polygon grouped-daily 200-DMA; obs {as_of}); CI +/-{ci}pp")
-                # as_of = the newest cached trading day, NOT today (v3.7.3/B-02):
-                # if the Polygon backfill ever stalls, the real obs date ages and
-                # the freshness SLA / coverage gate can see the staleness.
                 return SourceResult(pct, Provenance(source="constituents+polygon", note=note,
                                                     as_of=as_of))
             log.info("breadth_polygon_insufficient_history", counted=counted)

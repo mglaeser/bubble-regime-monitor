@@ -818,6 +818,49 @@ CHANGELOG: list[dict[str, str]] = [
         "deploy host (this build environment cannot reach imf.org), and the deploy host's network "
         "policy must permit imf.org for the metrics to populate.",
     },
+    {
+        "version": "v3.7.6",
+        # §2.2 three-part statement (golden / realizable-effect / freeze-class), stated
+        # separately — the third is NOT inferred from the first.
+        "score": "(a) GOLDEN: aggregation fixture BYTE-IDENTICAL (52.43) — the golden passes "
+        "computed sub-scores with today-dated provenance, so freshness/provenance fixes cannot "
+        "move it. (b) REALIZABLE EFFECT: several fixes ARE band/coverage-affecting on real inputs "
+        "(they change which indicators pass the freshness/coverage gate, not any sub-score value): "
+        "C-04 keeps the freshest monthly s5 in coverage; B-07 changes the breadth numerator/"
+        "denominator on an unsynchronized cross-section; B-02/C-07/X-01 can drop an indicator that "
+        "was previously (mis)counted. (c) FREEZE-CLASS: band-affecting patch bundle — no scored "
+        "constant, weight, anchor, tier, or lag DEFINITION changed; the score-shifting S5 "
+        "calendar-anchoring v4 (C-01/02/03) and the frozen_methodology.json artifact (F-01/L-07) "
+        "are DEFERRED by operator decision.",
+        "notes": "Corrective revalidation of the 2026-07-17 report — each fix has a RED-first "
+        "property test in tests/test_revalidation_v376.py (failing on 443f197, passing after). "
+        "B-07: breadth is computed on ONE common cross-section date (latest day >=MIN_RESOLVED "
+        "constituents have a close); a symbol absent on that date is excluded from BOTH numerator "
+        "and denominator, and obs_date is that common date, never a later per-symbol max. B-02: "
+        "breadth as_of is the real newest observation date on BOTH paths (Polygon common date; "
+        "Twelve Data newest per-symbol cache date) and NEVER falls back to today — a frozen window "
+        "now ages through the SLA. C-04: s5 (EBP/BAA) ages from the reference month-END, not its "
+        "1st, so the freshest published month is not spuriously stale (the 45d SLA marked a "
+        "month-start-dated June reading stale on 17 Jul). C-07: FINRA YoY is matched by CALENDAR "
+        "month (latest minus 12 months by name); a publication gap makes 12 list positions != 12 "
+        "months, so the positional [-13] is gone — a missing reference month drops D2 to its cached "
+        "reading instead of comparing the wrong month. C-08: monthly_baa_spread_bps returns DATED "
+        "(YYYY-MM, bps) pairs plus a gaps list and no longer claims a 'gap-free grid' it did not "
+        "build (it is an intersection); the caller logs gaps and stamps the month-END as_of. X-01: "
+        "the FRED VIX/VIX3M ratio divides ONLY on an IDENTICAL observation date (the 3-day "
+        "tolerance still mixed two sessions). K-01: the Slickcharts concentration fallback parses "
+        "the holdings TABLE's weight column structurally (pandas.read_html, lxml), so stray "
+        "sub-10% page figures (YTD move, sector weights) can no longer be summed as holding "
+        "weights. A-05: geometric_block now also rejects non-finite/negative weights and requires "
+        "weight/sub-score KEY EQUALITY (an extra un-weighted sub-score would be silently dropped). "
+        "RELABEL (§2.2 correction): the v3.7.3/v3.7.4 entries described A-03 (override wins band), "
+        "H-01 (D3 quality=usable/5), V-01 (S1 shim quality 0.5) and the C-04 SLA as 'no methodology "
+        "change' — they are band/coverage-affecting and are correctly classified here; the "
+        "underlying behaviour was already correct, only the freeze-class label was wrong. DEFERRED "
+        "(operator 1a/2a): S5 calendar anchoring v4 (C-01/02/03 — score-shifting, needs a version "
+        "bump + falsification-clock reset + dual-reporting + regenerated golden) and the "
+        "frozen_methodology.json single-artifact governance refactor (F-01/L-07).",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {

@@ -25,8 +25,13 @@ from app.sources import Provenance, SourceError, SourceResult
 XLSX_URL = "https://www.finra.org/sites/default/files/2021-03/margin-statistics.xlsx"
 
 
-def parse_debit_balances(content: bytes) -> tuple[list[float], str]:
-    """(chronological debit balances, latest reference month ISO date)."""
+def parse_debit_balances(content: bytes) -> tuple[list[float], list[str], str]:
+    """(chronological debit balances, parallel YYYY-MM month labels, latest
+    reference month-END ISO date).
+
+    The YYYY-MM labels (v3.7.6/C-07) let D2 compute a CALENDAR-anchored YoY: a
+    missing publication makes 12 list positions != 12 calendar months, so the
+    consumer matches the reference month by name rather than by [-13]."""
     raw = pd.read_excel(io.BytesIO(content), header=None)
     debit_col = None
     header_row = None
@@ -71,18 +76,23 @@ def parse_debit_balances(content: bytes) -> tuple[list[float], str]:
         if key not in by_month:
             order.append(key)
         by_month[key] = float(v)
-    chronological = [by_month[k] for k in sorted(order)]
+    sorted_keys = sorted(order)
+    chronological = [by_month[k] for k in sorted_keys]
+    months = [f"{y:04d}-{m:02d}" for y, m in sorted_keys]
     # Age from the reference month's END, not its 1st (v3.7.4/C-06): FINRA labels
     # the reference MONTH (parsed to the 1st), so aging from the 1st inflated the
     # age ~30 days and tripped the 75d SLA on the freshest reading that exists.
-    y, m = sorted(order)[-1]
+    y, m = sorted_keys[-1]
     as_of = date(y, m, calendar.monthrange(y, m)[1]).isoformat()
-    return chronological, as_of
+    return chronological, months, as_of
 
 
 def debit_balances() -> SourceResult:
     """Chronological monthly debit balances (millions USD); as_of = latest
-    reference month (drives the 45-day staleness SLA)."""
+    reference month-END (drives the 75-day staleness SLA). The parallel YYYY-MM
+    month labels ride along on the result for the calendar-anchored YoY (C-07)."""
     resp = fetch("finra_xlsx", XLSX_URL)
-    values, as_of = parse_debit_balances(resp.content)
-    return SourceResult(values, Provenance(source="finra_xlsx", as_of=as_of))
+    values, months, as_of = parse_debit_balances(resp.content)
+    result = SourceResult(values, Provenance(source="finra_xlsx", as_of=as_of))
+    result.months = months  # carried for d2's calendar YoY (v3.7.6/C-07)
+    return result
