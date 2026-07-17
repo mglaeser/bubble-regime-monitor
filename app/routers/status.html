@@ -108,6 +108,15 @@
     <div id="sources"></div>
   </section>
 
+  <section id="sec-feedsrc">
+    <h2>Dashboard-feed sources (non-scoring)</h2>
+    <p class="muted" style="margin-top:0">Per-item health of the companion-dashboard feed
+      (<span class="mono">GET /api/v1/dashboard/feed</span>) — incl. the CNN Fear &amp; Greed
+      pull. These sources feed display only; each degrades independently and never touches
+      the score.</p>
+    <div id="feedsrc"></div>
+  </section>
+
   <section id="sec-providers"><h2>Price providers</h2><div id="providers"></div></section>
 
   <section id="sec-indicators">
@@ -253,6 +262,29 @@ function renderSources(s){
   el.appendChild(grid);
 }
 
+function renderFeedSources(s){
+  const el=document.getElementById('feedsrc'); clear(el);
+  const fs=s.feed_sources;
+  if(!fs){ el.appendChild(h('div','muted','No feed payload persisted yet — builds with the next recompute.')); return; }
+  el.appendChild(h('div','ind-meta','Feed built: '+(fs.computed_at||'—')+
+    (fs.unavailable&&fs.unavailable.length?(' · unavailable: '+fs.unavailable.join(', ')):' · all items available')));
+  const wrap=h('div','overflow'); const tb=h('table');
+  const thead=h('thead'); const htr=h('tr');
+  ['key','section','source','ok','stale','as of','note'].forEach(x=>htr.appendChild(h('th',null,x)));
+  thead.appendChild(htr); tb.appendChild(thead);
+  const tbody=h('tbody');
+  (fs.items||[]).forEach(it=>{ const tr=h('tr');
+    tr.appendChild(h('td','mono',it.key));
+    tr.appendChild(h('td','muted',it.section));
+    tr.appendChild(h('td','mono',it.source||'—'));
+    const okc=h('td'); okc.appendChild(badge(it.available?'ok':'failed')); tr.appendChild(okc);
+    tr.appendChild(h('td','mono',it.stale==null?'—':String(it.stale)));
+    tr.appendChild(h('td','mono',it.as_of||'—'));
+    tr.appendChild(h('td','muted',it.note||''));
+    tbody.appendChild(tr); });
+  tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
+}
+
 function renderProviders(s){
   const el=document.getElementById('providers'); clear(el);
   const list=s.providers||[];
@@ -340,7 +372,7 @@ async function load(){
     document.getElementById('ts').textContent = 'as of '+((s.service&&s.service.now)||'');
     EXAMPLE = s.example || {};
     document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
-    renderHeadline(s); renderAudit(s); renderSources(s); renderProviders(s);
+    renderHeadline(s); renderAudit(s); renderSources(s); renderFeedSources(s); renderProviders(s);
     renderIndicators(s); renderLegs(s); renderMeta(s);
     document.getElementById('foot').textContent =
       'bubblegauge '+((s.service&&s.service.version)||'')+' · recompute '+((s.service&&s.service.recompute_schedule)||'')+

@@ -731,6 +731,22 @@ CHANGELOG: list[dict[str, str]] = [
         "now TimeoutStartSec=3600 + KillMode=process (deploy.sh re-renders the units on the "
         "next healthy deploy).",
     },
+    {
+        "version": "v3.7.2",
+        "score": "Status-page observability completed — METHODOLOGY UNCHANGED",
+        "notes": "Two visibility gaps closed on the status page (/  and GET /api/v1/status). "
+        "(1) SCORING MATRIX: the S5 PRIMARY source (Fed Excess Bond Premium CSV, v3.3.1) and "
+        "the BAA-DGS10 proxy (quality 0.5) were tracked on every recompute but wired to no "
+        "SOURCE_REGISTRY row — the matrix silently showed only the weakest S5 fallback. New "
+        "'fed_ebp' row + the fallback row now carries both fallback health_keys; the matrix "
+        "has 11 rows. (2) FEED SOURCES: the non-scoring dashboard-feed pulls (incl. CNN Fear "
+        "& Greed, Tiingo monthly series, Twelve Data scalars, FRED FX/MMF) never pass through "
+        "the gather's source_health and were invisible here by v3.4.0/v3.7.0 design. New "
+        "'feed_sources' status section + HTML table REFLECTS the latest persisted feed "
+        "payload per item (available/stale/as_of/note; no new upstream pull). Also carries "
+        "the re-applied watchdog-unit fix (TimeoutStartSec=3600, KillMode=process) that the "
+        "PR-#10 merge race dropped.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
@@ -823,12 +839,24 @@ SOURCE_REGISTRY: list[SourceSpec] = [
                "Stooq (former keyless primary) now behind a JS proof-of-work gate; index proxies "
                "in use; Alpha Vantage free tier is unadjusted.",
                ("price_SPY", "price_QQQ", "price_SMH", "price_SOXX", "price_NDX")),
-    SourceSpec("fred_hyoas", "FRED BAMLH0A0HYM2 (ICE BofA US HY OAS)", "S5 credit",
-               "ICE BofA index via FRED (official).", 3,
+    # v3.7.2: the S5 PRIMARY source (Fed EBP, v3.3.1) and the 0.5-quality proxy
+    # were tracked per-recompute but wired to NO registry row, so the status
+    # page silently omitted them — the matrix showed only the weakest fallback.
+    SourceSpec("fed_ebp", "Fed Excess Bond Premium CSV (S5 PRIMARY, quality 1.0)", "S5 credit",
+               "Gilchrist-Zakrajsek (AER 2012) Excess Bond Premium; the Fed's FEDS-Notes CSV, "
+               "monthly 1973+ — the construct LSSZ (2017) actually build on.", 45,
+               "https://www.federalreserve.gov/econres/notes/feds-notes/ebp_csv.csv",
+               "Monthly with a publication lag of several weeks; the series revises across "
+               "vintages. S5 reads the t-2yr observation against the full 1973+ history.",
+               ("fed_ebp",)),
+    SourceSpec("fred_hyoas", "FRED S5 fallbacks: BAA-DGS10 proxy + BAMLH0A0HYM2 (HY OAS)",
+               "S5 credit (fallback tiers, quality 0.5 / 0.3)",
+               "BAA-DGS10 spread proxy (quality 0.5) and ICE BofA HY OAS via FRED against the "
+               "service's own accrued history (quality 0.3) — used only when the EBP CSV fails.", 3,
                "https://fred.stlouisfed.org/series/BAMLH0A0HYM2",
-               "FRED truncated this series to a rolling 3-year window (Apr 2026); the S5 "
+               "FRED truncated BAMLH0A0HYM2 to a rolling 3-year window (Apr 2026); the HY-OAS "
                "percentile is only as deep as our own accrued history table.",
-               ("fred_BAMLH0A0HYM2",)),
+               ("fred_baa_dgs10", "fred_BAMLH0A0HYM2")),
     SourceSpec("breadth", "S&P 500 constituents (SSGA holdings) + Twelve Data closes", "D1 breadth",
                "Constituent-level computation of % > 200-day SMA; no published keyless "
                "%>200DMA source is machine-readable.", 3, "",

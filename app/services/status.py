@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import session_scope
-from app.models import ProviderHealth, Snapshot, SourceHealth
+from app.models import DashboardFeed, ProviderHealth, Snapshot, SourceHealth
 from app.references import (
     CHANGELOG,
     EPISTEMIC_CAVEATS,
@@ -84,6 +84,42 @@ def _sources_block(health: dict[str, SourceHealth]) -> list[dict[str, Any]]:
             ],
         })
     return out
+
+
+def _feed_sources_block() -> dict[str, Any] | None:
+    """Per-item health of the NON-SCORING dashboard-feed pulls (v3.7.2).
+
+    The feed builds AFTER the score persists with its own per-item degradation,
+    so its sources never pass through the gather's source_health tracking and
+    were invisible on this page (the CNN Fear & Greed gap). This block simply
+    REFLECTS the latest persisted feed payload — no new upstream pull."""
+    import json
+
+    with session_scope() as session:
+        row = session.execute(
+            select(DashboardFeed).order_by(DashboardFeed.computed_at.desc()).limit(1)
+        ).scalars().first()
+        if row is None:
+            return None
+        computed_at = _iso(row.computed_at)
+        payload = json.loads(row.payload)
+    items = []
+    for section in ("series", "metrics"):
+        for key, it in (payload.get(section) or {}).items():
+            if not isinstance(it, dict):
+                continue
+            items.append({
+                "section": section, "key": key, "source": it.get("source"),
+                "available": it.get("available"), "stale": it.get("stale"),
+                "as_of": it.get("as_of"), "note": it.get("note"),
+            })
+    return {
+        "computed_at": computed_at,
+        "note": ("non-scoring dashboard-feed pulls (GET /api/v1/dashboard/feed); each item "
+                 "degrades independently and never touches the score"),
+        "items": items,
+        "unavailable": sorted(i["key"] for i in items if i["available"] is False),
+    }
 
 
 def _providers_block() -> list[dict[str, Any]]:
@@ -269,6 +305,7 @@ def build_status() -> dict[str, Any]:
         "snapshot": snap_summary,
         "recompute": recompute,
         "sources": sources,
+        "feed_sources": _feed_sources_block(),
         "providers": providers,
         "indicators": _indicators_block(live),
         "legs_science": LEGS_SCIENCE,
