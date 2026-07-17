@@ -147,21 +147,27 @@ def refresh_breadth_cache(max_symbols: int = DEFAULT_BACKFILL,
 # Polygon/Massive grouped-daily PRIMARY path (v3.3.0)
 # ---------------------------------------------------------------------------
 
-def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int]:
-    """(above, counted) computing each constituent's 200-DMA from daily_close.
+def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None]:
+    """(above, counted, obs_date) computing each constituent's 200-DMA from
+    daily_close. obs_date is the newest cached trading day (the real observation
+    date — v3.7.3/B-02, so a frozen cache no longer masquerades as fresh).
 
     A constituent is counted only if it has >= 200 cached closes; the whole
     universe is measured from the SAME set of dates (grouped-daily), so there
     is no top-weight sampling bias — this is the full-universe reading."""
     wanted = set(symbols)
     series: dict[str, list[float]] = {}
+    obs_date: date | None = None
     with session_scope() as session:
         rows = session.execute(
-            select(DailyClose.symbol, DailyClose.close).order_by(DailyClose.symbol, DailyClose.date)
+            select(DailyClose.symbol, DailyClose.date, DailyClose.close)
+            .order_by(DailyClose.symbol, DailyClose.date)
         ).all()
-    for sym, close in rows:
+    for sym, d, close in rows:
         if sym in wanted:
             series.setdefault(sym, []).append(close)
+            if obs_date is None or d > obs_date:
+                obs_date = d
     above = counted = 0
     for closes in series.values():
         if len(closes) < 200:
@@ -169,7 +175,7 @@ def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int]:
         sma200 = sum(closes[-200:]) / 200.0
         counted += 1
         above += closes[-1] > sma200
-    return above, counted
+    return above, counted, obs_date
 
 
 def _cached_polygon_dates() -> set[date]:
@@ -179,25 +185,32 @@ def _cached_polygon_dates() -> set[date]:
 
 def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
                             pace_seconds: float = POLYGON_PACE_SECONDS) -> dict[str, int]:
-    """BACKGROUND job: backfill daily_close from Polygon grouped-daily until
-    >= target_days trading days are cached for the constituent set.
+    """BACKGROUND job: keep daily_close covering the most recent target_days
+    trading days for the constituent set (Polygon grouped-daily).
 
-    Cold start ~210 calls at 5/min (~42 min); once warm, the daily incremental
-    is a single call for the most recent missing day. One call = the whole US
-    market for a date; we keep only the SSGA constituents. Empty responses are
-    non-trading days (weekends/holidays) and are skipped."""
+    Walks BACKWARD from yesterday every run, fetching any MISSING trading day
+    and counting already-cached days toward the target without a call. Starting
+    at yesterday each time (not at the cache's end) is what makes the daily
+    incremental actually pick up new trading days: cold start ~210 calls
+    (~42 min at 5/min); once warm, ~1 call for yesterday's new close, then the
+    walk hits cached days and stops at target_days.
+
+    v3.7.3 (B-01/02/07): the previous `while len(have) < target_days` guard
+    short-circuited once the cache reached target_days total dates, so no new
+    trading day was ever fetched and breadth froze at the cold-start window.
+    One call = the whole US market for a date; we keep only the SSGA
+    constituents. Empty responses are non-trading days and cost one probe."""
     symbols = set(sp500_symbols())
     have = _cached_polygon_dates()
     day = datetime.now(UTC).date() - timedelta(days=1)  # EOD; yesterday is the latest settled day
-    calls = stored_days = 0
-    span = 0
-    while len(have) < target_days and span < POLYGON_MAX_CALENDAR_DAYS:
+    calls = stored_days = trading_seen = span = 0
+    while trading_seen < target_days and span < POLYGON_MAX_CALENDAR_DAYS:
         span += 1
-        # Skip weekends (and already-cached days) WITHOUT an API call — the
-        # grouped endpoint returns empty on non-trading days, so calling it for
-        # Sat/Sun just burns rate-limit budget and time. Holidays still cost one
-        # (empty) call since there is no local holiday calendar.
-        if day in have or day.weekday() >= 5:
+        if day.weekday() >= 5:            # weekend: not a trading day, no call
+            day -= timedelta(days=1)
+            continue
+        if day in have:                   # already-cached trading day: count, no call
+            trading_seen += 1
             day -= timedelta(days=1)
             continue
         iso = day.isoformat()
@@ -228,8 +241,10 @@ def refresh_breadth_polygon(target_days: int = POLYGON_TARGET_DAYS,
                 log.warning("breadth_polygon_write_failed", date=iso, error=str(exc)[:120])
             have.add(day)
             stored_days += 1
+            trading_seen += 1
+        # else: empty response = non-trading day (holiday); no count
         day -= timedelta(days=1)
-        if pace_seconds and len(have) < target_days:
+        if pace_seconds:
             time.sleep(pace_seconds)
 
     summary = {"target_days": target_days, "cached_days": len(have),
@@ -281,14 +296,18 @@ def pct_above_200dma() -> SourceResult:
     if get_settings().polygon_api_key:
         try:
             symbols = sp500_symbols()
-            above, counted = _breadth_from_daily_close(symbols)
+            above, counted, obs_date = _breadth_from_daily_close(symbols)
             if counted >= MIN_RESOLVED:
                 pct = 100.0 * above / counted
                 ci = _binomial_ci_pp(pct / 100.0, counted)
+                as_of = (obs_date or datetime.now(UTC).date()).isoformat()
                 note = (f"breadth from {counted}/{len(symbols)} constituents "
-                        f"(Polygon grouped-daily, full-universe 200-DMA); CI +/-{ci}pp")
+                        f"(Polygon grouped-daily 200-DMA; obs {as_of}); CI +/-{ci}pp")
+                # as_of = the newest cached trading day, NOT today (v3.7.3/B-02):
+                # if the Polygon backfill ever stalls, the real obs date ages and
+                # the freshness SLA / coverage gate can see the staleness.
                 return SourceResult(pct, Provenance(source="constituents+polygon", note=note,
-                                                    as_of=datetime.now(UTC).date().isoformat()))
+                                                    as_of=as_of))
             log.info("breadth_polygon_insufficient_history", counted=counted)
         except Exception as exc:
             log.info("breadth_polygon_read_failed_falling_back", error=str(exc)[:120])

@@ -92,9 +92,10 @@ class TestPolygonBreadth:
             for i in range(50):
                 s.merge(DailyClose(symbol="CCC", date=base + timedelta(days=i),
                                    close=100.0, provider="polygon", fetched_at=now))
-        above, counted = _breadth_from_daily_close(["AAA", "BBB", "CCC"])
+        above, counted, obs = _breadth_from_daily_close(["AAA", "BBB", "CCC"])
         assert counted == 2          # CCC excluded (<200 closes)
         assert above == 1            # only AAA above its 200-DMA
+        assert obs == base + timedelta(days=199)  # newest cached date (v3.7.3/B-02)
 
     def test_binomial_ci_shrinks_with_n(self):
         from app.sources.breadth import _binomial_ci_pp
@@ -106,14 +107,19 @@ class TestPolygonBreadth:
 class TestQualityWeightedCoverage:
     @staticmethod
     def _block_d(d1_quality, d4_dropped=False):
+        from datetime import UTC, datetime
+
         from app.services.compute import IndicatorOutput, _coverage_gate
 
+        # Fresh dates so this isolates the quality-WEIGHTING logic from the
+        # v3.7.3/A-01 freshness gate (an undated indicator is now not-fresh).
+        t = datetime.now(UTC).date().isoformat()
         inds = {
-            "d1": IndicatorOutput("d1", 56.0, 0.6, False, "x", False, quality=d1_quality),
-            "d2": IndicatorOutput("d2", 40.0, 0.5, False, "x", False),
-            "d3": IndicatorOutput("d3", 1.0, 0.3, False, "x", False),
+            "d1": IndicatorOutput("d1", 56.0, 0.6, False, "x", False, quality=d1_quality, as_of=t),
+            "d2": IndicatorOutput("d2", 40.0, 0.5, False, "x", False, as_of=t),
+            "d3": IndicatorOutput("d3", 1.0, 0.3, False, "x", False, as_of=t),
             "d4": IndicatorOutput("d4", None, None, True, "x", False) if d4_dropped
-            else IndicatorOutput("d4", 0.1, 0.1, False, "x", False),
+            else IndicatorOutput("d4", 0.1, 0.1, False, "x", False, as_of=t),
         }
         return _coverage_gate(inds)["D"]
 

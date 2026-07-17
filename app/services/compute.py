@@ -87,7 +87,10 @@ def _age_days(as_of_iso: str | None) -> int | None:
     if not as_of_iso:
         return None
     try:
-        return max(0, (datetime.now(UTC).date() - date.fromisoformat(as_of_iso[:10])).days)
+        # NOT clamped to 0 (v3.7.3/A-01,O-06): a future/clock-skewed as_of yields
+        # a NEGATIVE age, which the `stale` property flags as suspect rather than
+        # silently treating a future date as maximally fresh (age 0).
+        return (datetime.now(UTC).date() - date.fromisoformat(as_of_iso[:10])).days
     except ValueError:
         return None
 
@@ -114,7 +117,11 @@ def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
                 continue
             w = REGISTRY[ind.id].weight
             total += w
-            if not ind.dropped and not ind.stale:
+            # Only a POSITIVELY-fresh indicator counts toward obtained coverage
+            # (v3.7.3/A-01): stale is None means the reading's date is unknown —
+            # every scoring indicator has an SLA, so unknown-date == not-verified-
+            # fresh, and must not silently retain full weight (`not None` was True).
+            if not ind.dropped and ind.stale is False:
                 obtained += w * max(0.0, min(1.0, ind.quality))
         frac = obtained / total if total else 0.0
         degraded = frac < (1.0 - COVERAGE_DROP_THRESHOLD)
@@ -240,12 +247,14 @@ class IndicatorOutput:
 
     @property
     def stale(self) -> bool | None:
-        """True past the indicator's freshness SLA; None when age is unknown."""
+        """True past the indicator's freshness SLA (or dated in the future);
+        None when age is unknown. A negative age (as_of in the future =
+        clock skew / bad vintage) is treated as stale/suspect (v3.7.3/O-06)."""
         age = self.age_days
         sla = FRESHNESS_SLA_DAYS.get(self.id)
         if age is None or sla is None:
             return None
-        return age > sla
+        return age > sla or age < 0
 
     def payload(self) -> dict[str, Any]:
         meta = REGISTRY[self.id]
@@ -474,7 +483,10 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "breadth", breadth_src.pct_above_200dma)
     if r:
         raw.breadth_pct, raw.breadth_note = r.value, r.provenance.note
-        raw.breadth_as_of = today  # computed live from constituent closes
+        # Use the source's REAL observation date (newest cached trading day),
+        # not `today` (v3.7.3/B-02): a stale/frozen breadth window now ages
+        # honestly and can trip the d1 freshness SLA + coverage gate.
+        raw.breadth_as_of = r.provenance.as_of or today
         raw.breadth_source = r.provenance.source
         m = re.search(r"breadth from (\d+)", raw.breadth_note or "")  # "breadth from N/503 ..."
         raw.breadth_n = int(m.group(1)) if m else None
@@ -774,9 +786,16 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         mc_in.d3_sub = sub
         note = raw.hyperscaler_note
         gate_note = "gate fired" if gate else "gate not fired; capped at 0.30"
+        # Quality = usable/full basket (v3.7.3/H-01): a thin basket (e.g. 1 of 5
+        # issuers reachable) must discount D3's live weight in the coverage gate,
+        # not count at full quality 1.0 like the whole cohort.
+        d3_full = len(d3_hyperscaler_fcf.CIKS)
+        d3_quality = len(raw.hyperscalers) / d3_full
+        n_note = f"; {len(raw.hyperscalers)}/{d3_full} issuers"
         indicators["d3"] = IndicatorOutput("d3", round(ratio, 4), sub, False, "sec_edgar", False,
-                                           note=f"{gate_note}" + (f"; {note}" if note else ""),
-                                           as_of=raw.hyperscaler_as_of)
+                                           note=f"{gate_note}{n_note}" + (f"; {note}" if note else ""),
+                                           as_of=raw.hyperscaler_as_of,
+                                           quality=max(0.0, min(1.0, d3_quality)))
     else:
         indicators["d3"] = IndicatorOutput("d3", None, None, True, "sec_edgar", False,
                                            note="EDGAR unavailable; dropped, Block D renormalized")
@@ -846,10 +865,15 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     band = action_band_with_override(mc.median, red_flags)
 
     # Coverage gate (spec 5): if >1/3 of a block's nominal weight is dropped
-    # or stale, the block is degraded and its action band is suppressed.
+    # or stale, the block is degraded and its action band is suppressed —
+    # EXCEPT a fired non-compensatory override wins the band (v3.7.3, A-03):
+    # >=3 of 4 hard red-flag tripwires are robust to a degraded composite, and
+    # masking that forced de-risk as "suppressed" would hide the strongest
+    # bearish signal (fail-dangerous). override_fired is persisted regardless.
     coverage = _coverage_gate(indicators)
     if coverage["degraded"]:
-        band = "suppressed (block degraded)"
+        band = "de-risk (data degraded)" if red_flags.override_fired \
+            else "suppressed (block degraded)"
 
     # ---- legs ----
     trend_states: dict[str, dict[str, str]] = {}

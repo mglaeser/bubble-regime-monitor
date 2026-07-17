@@ -70,9 +70,16 @@ def golden_mc_inputs():
 
 def make_golden_raw_inputs():
     """RawInputs approximating the section 5.5 golden fixture for pipeline tests."""
+    from datetime import UTC, datetime
+
     from app.indicators.d3_hyperscaler_fcf import HyperscalerReading
     from app.services.compute import RawInputs
 
+    # Every indicator carries a fresh (today) observation date so the v3.7.3
+    # coverage gate — which now requires POSITIVE freshness (A-01) — sees the
+    # fixture as fully covered rather than unknown-dated. as_of never affects a
+    # sub-score, so the golden headline (52.43) is unchanged.
+    today = datetime.now(UTC).date().isoformat()
     # CAPE history whose 30-yr percentile of 41.6 is ~0.99
     cape_history = [15.0 + (i % 300) / 12.0 for i in range(480)]  # 15..40 sweep
     # HY OAS history where 267 bps sits at the ~20th percentile (sub ~0.80)
@@ -106,4 +113,7 @@ def make_golden_raw_inputs():
         qqq_daily=spy_daily,
         qqq_daily_closes=[c for _, c in spy_daily],
         index_within_2pct_of_ath=True,
+        cape_as_of=today, top10_as_of=today, semis_as_of=today, gsadf_as_of=today,
+        hy_oas_as_of=today, breadth_as_of=today, margin_as_of=today,
+        hyperscaler_as_of=today, lppls_as_of=today,
     )
