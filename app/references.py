@@ -720,7 +720,12 @@ CHANGELOG: list[dict[str, str]] = [
         "unrelated semis date — provenance only); (6) empty falsification_outcomes explicitly "
         "documented in the methodology payload (manual recording, nothing tripped); (7) new "
         "guard tests: REGISTRY weights == engine weights, ALPHA_RANGE spec pin, and the "
-        "previously untested LPPLS VALID_ZERO producer path.",
+        "previously untested LPPLS VALID_ZERO producer path. (8) README catch-up: endpoint "
+        "table completed (dashboard feed, webhook, admin/deploy, status), auto-deploy section "
+        "added, version history extended v3.2.0-v3.7.1 (had ended at v3.1), stale status-page "
+        "wording fixed — plus README drift GUARDS in the test suite: the latest changelog "
+        "version, the engine-computed golden number, and every mounted /api/v1 router must "
+        "appear in the README or the build fails.",
     },
 ]
 
