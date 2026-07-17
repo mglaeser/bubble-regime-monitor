@@ -267,9 +267,12 @@ def _pct_from_td_cache() -> SourceResult:
     cache = _load_cache()
     if not cache:
         raise SourceError("breadth cache empty; background sweep pending (refresh_breadth)")
-    cutoff = sla_cutoff_date()
+    current = set(sp500_symbols())   # v3.7.4/B-03: count CURRENT constituents only,
+    cutoff = sla_cutoff_date()       # never ex-members still lingering in the cache
     above = counted = stale = 0
-    for entry in cache.values():
+    for sym, entry in cache.items():
+        if sym not in current:
+            continue
         counted += 1
         if entry.as_of.isoformat() < cutoff:
             stale += 1

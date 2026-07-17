@@ -88,6 +88,13 @@ def geometric_block(sub_scores: dict[str, float], weights: dict[str, float]) -> 
     block toward L^{w_i} of its otherwise value, never to 0. `weights` must
     already be renormalized to sum to 1 over the keys present in `sub_scores`.
     """
+    # Fail loud if a caller ever passes un-renormalized weights (v3.7.4/A-05):
+    # weights must key a subset of the present sub-scores and sum to 1.
+    if not set(weights) <= set(sub_scores):
+        raise ValueError(f"weight keys {set(weights) - set(sub_scores)} absent from sub-scores")
+    wsum = sum(weights.values())
+    if abs(wsum - 1.0) > 1e-9:
+        raise ValueError(f"weights sum to {wsum}, not 1.0 (renormalize before aggregating)")
     log_sum = 0.0
     for key, w in weights.items():
         s = sub_scores[key]

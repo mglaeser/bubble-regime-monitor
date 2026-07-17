@@ -159,11 +159,12 @@ def compute_confidence(daily_closes: list[float]) -> dict:
         {state, value, quality, n_windows_evaluated, n_windows_qualifying,
          n_closes, window, bands[, reason]}
 
-    value = the LPPLS confidence at t2: the fraction of start-time windows
-    (dt from LPPLS_SMALLEST_WINDOW to LPPLS_WINDOW_MAX) whose calibrated
-    parameters pass the DS-LPPLS filters — per Sornette et al. (2015) /
-    Demirer et al. (2019). With a single endpoint, value ==
-    n_windows_qualifying / n_windows_evaluated by construction.
+    value = the LPPLS confidence at t2: the fraction of POSITIVE-BUBBLE start-
+    time windows (fit b < 0; dt from LPPLS_SMALLEST_WINDOW to LPPLS_WINDOW_MAX)
+    whose calibrated parameters pass the DS-LPPLS filters — per Sornette et al.
+    (2015) / Demirer et al. (2019). value ==
+    n_windows_qualifying / n_windows_POSITIVE (the library's pos_conf
+    denominator), NOT / n_windows_evaluated (v3.7.4/L-03 docstring fix).
     States/quality per the module-header contract. Requires lppls==0.6.24.
     """
     from app.logging_conf import get_logger
@@ -220,15 +221,23 @@ def compute_confidence(daily_closes: list[float]) -> dict:
     # windows, b < 0), so value == n_windows_qualifying / n_windows_positive
     # exactly — no repeat of the "6/40 beside 0.0" inconsistency.
     pq = _positive_qualified(fits)
+    schema_note = None
     if pq is not None:
         n_qual, n_pos = pq
-    else:  # schema surprise: recover a consistent (qual, pos) from the ratio
-        n_pos, n_qual = n_eval, round(value * n_eval)
-    return {"state": "VALID_ZERO" if value == 0.0 else "VALID",
-            "value": value, "quality": _quality(n_eval),
-            "n_windows_evaluated": n_eval, "n_windows_positive": n_pos,
-            "n_windows_qualifying": n_qual, "n_closes": n,
-            "window": window, "bands": bands}
+    else:
+        # Schema surprise (v3.7.4/L-08): report the counters as UNKNOWN rather
+        # than fabricating n_pos=n_eval / n_qual=round(value*n_eval). The value
+        # (library pos_conf) is still valid; only the audit counts are lost.
+        n_pos = n_qual = None
+        schema_note = "window counts unavailable (unexpected lppls fit schema)"
+    out = {"state": "VALID_ZERO" if value == 0.0 else "VALID",
+           "value": value, "quality": _quality(n_eval),
+           "n_windows_evaluated": n_eval, "n_windows_positive": n_pos,
+           "n_windows_qualifying": n_qual, "n_closes": n,
+           "window": window, "bands": bands}
+    if schema_note:
+        out["note"] = schema_note
+    return out
 
 
 def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800) -> dict:
