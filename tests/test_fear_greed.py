@@ -169,7 +169,12 @@ def test_feed_metric_and_series(monkeypatch, isolated_db):
     from app.services import dashboard_feed as df
     from app.services.compute import compute_snapshot
     from tests.conftest import make_golden_raw_inputs
-    from tests.test_dashboard_feed import fake_fred, fake_td, fake_tiingo
+    from tests.test_dashboard_feed import (
+        fake_fred,
+        fake_imf_reserves,
+        fake_td,
+        fake_tiingo,
+    )
 
     now = datetime.now(UTC)
     months = df.month_grid(f"{now.year:04d}-{now.month:02d}")
@@ -177,6 +182,7 @@ def test_feed_metric_and_series(monkeypatch, isolated_db):
     monkeypatch.setattr(df, "_fred_series", fake_fred)
     monkeypatch.setattr(df, "_td_series", fake_td)
     monkeypatch.setattr(df, "_fear_greed", lambda: _reading_now(months))
+    monkeypatch.setattr(df, "_imf_reserves", fake_imf_reserves)
 
     raw = make_golden_raw_inputs()
     data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711)
@@ -201,11 +207,17 @@ def test_feed_degrades_when_cnn_fails(monkeypatch, isolated_db):
     from app.services import dashboard_feed as df
     from app.services.compute import compute_snapshot
     from tests.conftest import make_golden_raw_inputs
-    from tests.test_dashboard_feed import fake_fred, fake_td, fake_tiingo
+    from tests.test_dashboard_feed import (
+        fake_fred,
+        fake_imf_reserves,
+        fake_td,
+        fake_tiingo,
+    )
 
     monkeypatch.setattr(df, "_tiingo_monthly", fake_tiingo)
     monkeypatch.setattr(df, "_fred_series", fake_fred)
     monkeypatch.setattr(df, "_td_series", fake_td)
+    monkeypatch.setattr(df, "_imf_reserves", fake_imf_reserves)
 
     def _boom():
         raise SourceError("CNN F&G: non-JSON response (HTML block page or changed endpoint)")

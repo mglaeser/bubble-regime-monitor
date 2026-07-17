@@ -64,6 +64,12 @@ def _fear_greed():
     return fng_src.fetch_fear_greed()
 
 
+def _imf_reserves():
+    from app.sources import imf_reserves as imf_src
+
+    return imf_src.fetch_reserve_shares()
+
+
 # ---------------------------------------------------------------------------
 # month grid helpers
 # ---------------------------------------------------------------------------
@@ -480,10 +486,36 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
         m["mmf_total_assets_usd"] = _unavailable("USD_mn", "fred:MMMFFAQ027S",
                                                  f"source failed: {str(exc)[:120]}")
 
-    m["cofer_gold_share_pct"] = _unavailable("pct", "none",
-                                             "requires IMF COFER source; not connected")
-    m["cofer_ust_share_pct"] = _unavailable("pct", "none",
-                                            "requires IMF COFER source; not connected")
+    # IMF official-reserves shares (v3.7.5): quarterly world aggregates, ~1
+    # quarter publication lag. ONE fetch feeds both; each degrades alone.
+    #   cofer_ust_share_pct — USD share of ALLOCATED FX reserves; this IS COFER.
+    #   cofer_gold_share_pct — gold's share of TOTAL reserves; this is IFS, NOT
+    #     COFER (COFER is FX-only and carries no gold). The key name is a frozen
+    #     dashboard-contract misnomer; the note keeps the source honest.
+    try:
+        rs = _imf_reserves()
+    except Exception as exc:
+        rs = None
+        log.warning("dashboard_imf_reserves_failed", error=str(exc)[:200])
+    if rs is not None and rs.usd_share_pct is not None:
+        m["cofer_ust_share_pct"] = _scalar(
+            rs.usd_share_pct, "pct", rs.usd_share_as_of, "imf:COFER",
+            sla_days=SLA_QUARTERLY,
+            note="USD share of ALLOCATED FX reserves (IMF COFER, world); "
+                 "quarterly, publication lags ~1 quarter")
+    else:
+        m["cofer_ust_share_pct"] = _unavailable(
+            "pct", "imf:COFER", "IMF COFER USD-share unavailable this run")
+    if rs is not None and rs.gold_share_pct is not None:
+        m["cofer_gold_share_pct"] = _scalar(
+            rs.gold_share_pct, "pct", rs.gold_share_as_of, "imf:IFS",
+            sla_days=SLA_QUARTERLY,
+            note="gold's share of TOTAL reserves (IMF IFS: monetary gold at "
+                 "market value / total reserves, world) - NOT a COFER series; "
+                 "COFER is FX-only; quarterly, lags ~1 quarter")
+    else:
+        m["cofer_gold_share_pct"] = _unavailable(
+            "pct", "imf:IFS", "IMF IFS gold-share unavailable this run")
 
     # CNN Fear & Greed scalar (v3.7.0) — same fetch as the series above.
     if fng is not None:

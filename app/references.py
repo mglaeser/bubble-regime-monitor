@@ -800,6 +800,24 @@ CHANGELOG: list[dict[str, str]] = [
         "P-01/P-02 price-series adjustment/calendar alignment (price-layer refactor); the true "
         "v4 items (band semantics already handled in v3.7.3; S5 calendar anchoring).",
     },
+    {
+        "version": "v3.7.5",
+        "score": "No score change — dashboard-feed only; golden fixture BYTE-IDENTICAL "
+        "(52.43), no methodology change",
+        "notes": "Connected the two IMF official-reserves dashboard metrics that shipped as "
+        "hardcoded 'not connected' placeholders since v3.4.0. cofer_ust_share_pct is now the "
+        "real COFER USD share of ALLOCATED FX reserves (USD-allocated / total-allocated, both "
+        "in USD millions, world aggregate), quarterly with a ~1-quarter lag. cofer_gold_share_pct "
+        "is now IMF IFS (monetary gold at market value / total reserves) — NOT a COFER series, "
+        "because COFER is FX-only and carries no gold; the frozen key name keeps its historical "
+        "misnomer but the source/note are honest. New app/sources/imf_reserves.py adapter over the "
+        "classic IMF SDMX-JSON REST service; ONE fetch feeds both metrics and each degrades "
+        "independently (a wrong/absent series never fabricates a value and never touches scoring — "
+        "worst case is the same available:false as before). NON-SCORING context: enters no block "
+        "or weight. NOTE: the exact IMF series keys are documented constants confirmed on the "
+        "deploy host (this build environment cannot reach imf.org), and the deploy host's network "
+        "policy must permit imf.org for the metrics to populate.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
