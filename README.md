@@ -117,10 +117,14 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/indicators` · `GET /api/v1/indicators/{id}` | Weights/grounding; full WHAT/HOW/WHY methodology |
 | `GET /api/v1/legs/trend` · `GET /api/v1/legs/fast-alarm` | Faber states; VIX curve/VRP/SKEW |
 | `GET /api/v1/meta/methodology` | Framework, references, falsification criteria, changelog |
+| `GET /api/v1/dashboard/feed` | Read-only feed for the companion dashboard (v3.4.0): 13 monthly series + 35 scalar metrics incl. CNN Fear & Greed (v3.7.0, non-scoring); per-item degradation; contract in `DASHBOARD_FEED_SPEC.md` |
+| `GET /api/v1/status` | Live service + science-audit status (JSON twin of the `/` status page) |
 | `GET /healthz` · `GET /readyz` | Liveness; per-source health matrix |
 | `POST /api/v1/admin/refresh` | Start a recompute in the background — returns 202 immediately; single-flight (X-API-Key) |
 | `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
 | `POST /api/v1/admin/send-sms` | Send the daily SMS digest now — test path (X-API-Key) |
+| `POST /api/v1/admin/deploy` | Write a deploy-trigger for the host watchdog — manual auto-deploy path (X-API-Key) |
+| `POST /api/v1/webhooks/github` | GitHub auto-deploy webhook — HMAC-verified, fail-closed (v3.5.0, `docs/AUTO_DEPLOY.md`) |
 
 ## Deployment & updates
 
@@ -142,9 +146,13 @@ Configuration is via environment variables (all optional, sensible defaults): `B
 
 The app also **self-migrates at boot** (`app.db_migrate.ensure_schema` runs `alembic upgrade head` with a `create_all` fallback), so a plain `podman-compose up -d --build` stays valid too — `deploy.sh` just makes the pull/build/migrate/health-check flow explicit and safe. To apply migrations locally without a container: `make migrate`.
 
+### Auto-deploy on merged PRs (v3.5.0)
+
+A merged PR into the deploy branch (or a push to it) redeploys the service automatically: GitHub calls the HMAC-verified in-app webhook (`POST /api/v1/webhooks/github`), the app writes one atomic trigger file on the `/data` volume, and a host-side `systemd --user` path watchdog runs `./deploy.sh` — the container itself holds no host-control capability. Fail-closed: the webhook returns 503 until **both** `GITHUB_WEBHOOK_SECRET` and `DEPLOY_BRANCH` are set in `.env`; the watchdog deploys only its pinned branch, ignoring anything a trigger names. `deploy.sh` self-provisions the watchdog on a healthy deploy (`SETUP_AUTODEPLOY=0` opts out). Full setup guide incl. the GitHub webhook configuration: **`docs/AUTO_DEPLOY.md`**.
+
 ## Status & spec UI
 
-A self-contained status dashboard is served at **`/`** (and `/status`) on the same port as the API. It reflects the live service and — because scientific correctness is the leading design goal — foregrounds a **science audit**: a severity-ranked list of everything currently unclear, incomplete, contested, proxied, judgmental, or deviating from the written spec (unverified citations, the contested GSADF, ETF index proxies, the documented Monte-Carlo alpha-range deviation, FRED truncation, stale/dropped indicators, coverage degradation, price-provider cooldowns, and **live success/failure of every external source pull**). It also shows each indicator's methodology and scientific sources, links to the interactive API docs (Swagger `/docs`, ReDoc `/redoc`, `/openapi.json`), and shows a worked example.
+A self-contained status dashboard is served at **`/`** (and `/status`) on the same port as the API. It reflects the live service and — because scientific correctness is the leading design goal — foregrounds a **science audit**: a severity-ranked list of everything currently unclear, incomplete, contested, proxied, judgmental, or deviating from the written spec (unverified citations, the contested GSADF, ETF index proxies, the documented d1 breadth-anchor deviation, FRED truncation, stale/dropped indicators, coverage degradation, price-provider cooldowns, and **live success/failure of every external source pull**). It also shows each indicator's methodology and scientific sources, links to the interactive API docs (Swagger `/docs`, ReDoc `/redoc`, `/openapi.json`), and shows a worked example.
 
 The same data is available as JSON at **`GET /api/v1/status`**. The page is fully self-contained (no external assets, CSP-friendly) and renders all dynamic/external strings via `textContent` so upstream error messages and source notes cannot inject markup.
 
@@ -177,9 +185,20 @@ Outcomes are stored in the DB and exposed via `/api/v1/meta/methodology`.
 
 - **v1 (score 33):** linear-additive aggregation (fully compensatory); stale concentration 40.8%; HY-OAS sign inverted; LPPLS neutral placeholder.
 - **v2 (score 28):** data fixes (concentration, HY-OAS sign, LPPLS); still fully compensatory.
-- **v3 (score ≈ 40, IQR 34–47):** two-block geometric aggregation + non-compensatory override + Monte Carlo median. **The v2→v3 rise is the aggregation fix (partial compensability now punishes imbalance), NOT market deterioration.**
-- **v3.1 (methodology unchanged; price-layer restructure):** Stooq discovered to front its CSV endpoint with a JavaScript SHA-256 proof-of-work anti-bot gate (root cause of the persistent N=0) — demoted behind `STOOQ_ENABLED=false` with typed `StooqPoWChallenge` detection and an optional pure-Python PoW solver (ToS-gated, off by default). New provider chain: **Tiingo → Twelve Data → Alpha Vantage (core tickers) → yfinance → SQLite cache**, with a centralized symbol map (NDX→QQQ, SPX→SPY ETF proxies since no free tier serves raw indices), persistent provider health scoring (3 fails → 6 h cooldown), and a coverage gate (>1/3 of a block's nominal weight dropped/stale → block degraded, action band suppressed). Breadth Path B (constituent compute via Twelve Data, 8/min, SQLite incremental) is now primary. Two free API keys (`TIINGO_API_KEY`, `TWELVE_DATA_API_KEY`) are now required. Also: Anthropic model-fallback chain (opus-4-8 → sonnet-5 → sonnet-4-6 → plain), FINRA D2 75-day SLA, S4 note reconciled to the 0.25 sub-score, LPPLS ≥500-close guard, HY-OAS own-history persistence retained.
-- **v3.0.1 (methodology unchanged):** first-live-run bugfixes — Stooq pipeline hardened (typed unavailable/CAPTCHA/limit errors, SQLite series + breadth caches with SLA reuse, ≥2 s pacing, retry-once-after-60 s, partial breadth coverage published with a note); FINRA parser sorts by date (the file is newest-first — a naive read produced −22% "YoY" across the 1997 series start) plus >90-day cached-reading and 60-day rollover-assertability guards; GSADF data-missing floors at the contested/stale 0.25 (0.05 is only for a successfully executed non-explosive test) with an R/exuber self-check in `/readyz`; judgment-call failures are machine-detectable (`text: null` + `error_class`); LPPLS requires ≥500 closes with bounded workers and a 10-minute hard timeout; timezone-aware `computed_at`; S5 history-depth note; renormalization regression tests.
+- **v3 (score ≈ 40, IQR 34–47 at release):** two-block geometric aggregation + non-compensatory override + Monte Carlo median. **The v2→v3 rise is the aggregation fix (partial compensability now punishes imbalance), NOT market deterioration.**
+- **v3.0.1 (methodology unchanged):** first-live-run bugfixes — hardened Stooq pipeline, FINRA parser date-sort (+ staleness guards), GSADF data-missing floors at the contested 0.25, machine-detectable judgment-call failures, LPPLS ≥500-close guard, timezone-aware `computed_at`.
+- **v3.1 (methodology unchanged; price-layer restructure):** Stooq behind a JS proof-of-work gate → disabled; new provider chain **Tiingo → Twelve Data → Alpha Vantage → yfinance → cache** with ETF index proxies (QQQ/SPY), provider health scoring, and the coverage gate. Two free API keys now required.
+- **v3.2.0 (methodology unchanged; July-2026 outage remediation):** root cause was broken in-container DNS — pinned nameservers; LPPLS repaired to the real `lppls==0.6.24` API; S3 provenance fixed; breadth re-architected onto SSGA constituents with a credit-governed background sweep.
+- **v3.3.0 (METHODOLOGY CHANGE — golden fixture regenerated, ~40 → 52.43):** scientific-review remediation. Rescale-then-aggregate (fixes zero-propagation false negatives), d1 anchors (35,90) + 0.05 soft floor, full-universe Polygon breadth, LPPLS tri-state contract, quality-weighted coverage gate, S5 scored at t−2; `ALPHA_RANGE` restored to the spec `U(0.40, 0.60)`. **The rise is an aggregation fix, not market deterioration.**
+- **v3.3.1 (scientific-correctness remediation):** S5 preferred input = Fed Excess Bond Premium (1973+); S4 cached Monte-Carlo critical values (Atom-safe); S3 5-day endpoint averaging.
+- **v3.3.2 (D4 METHOD CHANGE — not comparable across v3.3.0→v3.3.2):** LPPLS single-endpoint dense scan (t2 = today, dt 30–750 step 5) + dt-band diagnostics; FLOOR semantics (an uncomputed indicator never masquerades as a confident zero); fidelity-based quality tiers; machine-readable `state`.
+- **v3.4.0 (methodology unchanged):** read-only `GET /api/v1/dashboard/feed` for the companion dashboard — monthly series + scalar metrics with per-item degradation (`DASHBOARD_FEED_SPEC.md`).
+- **v3.5.0 (methodology unchanged):** auto-deploy — HMAC GitHub webhook + host systemd watchdog; the container only writes a trigger file (`docs/AUTO_DEPLOY.md`); `deploy.sh` self-provisions the watchdog.
+- **v3.6.0 (methodology unchanged):** recompute every 4 hours (02/06/10/14/18/22 UTC, was twice daily); the per-response "Research, not advice." tag removed from machine payloads and the SMS (personal-use deployment — the full disclaimer stays on the status page, `/docs`, and the methodology document).
+- **v3.7.0 (methodology unchanged):** CNN Fear & Greed Index added to the dashboard feed (non-scoring context; strictly validated unofficial endpoint; feed now 13 series + 35 metrics).
+- **v3.7.1 (methodology unchanged; doc-register maintenance):** documentation drifts found by a validate-first audit fixed (stale alpha-range claim, this README's pre-v3.3.0 worked example, REGISTRY d1/s5 recipes, GSADF seed/lag docs); `s4.as_of` provenance corrected; new guard tests pin docs to code (weights, `ALPHA_RANGE`, the LPPLS `VALID_ZERO` producer path, and this README's golden number/version).
+
+The machine-readable changelog with full per-version notes is served at `GET /api/v1/meta/methodology` (`data.changelog`).
 
 ## Old-CPU deployments (pre-SSE4.2, e.g. Atom N2800)
 
