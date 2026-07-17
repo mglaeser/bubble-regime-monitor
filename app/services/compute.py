@@ -33,6 +33,7 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -78,7 +79,13 @@ log = get_logger(__name__)
 # Freshness SLAs in days (spec section 3): a reading older than its SLA is
 # served with stale=true. Keys are indicator ids; "v" covers the multiplier.
 FRESHNESS_SLA_DAYS: dict[str, int] = {
-    "s1": 35, "s2": 3, "s3": 3, "s4": 35, "s5": 3,
+    # s5=45 (v3.7.4/C-04): the S5 PRIMARY input is the Fed Excess Bond Premium,
+    # a MONTHLY series published with a multi-week lag; the old 3-day SLA (a
+    # daily-series value) marked every EBP/BAA-proxy reading stale — and since
+    # v3.7.3/A-01 a stale indicator is excluded from coverage. A monthly SLA
+    # keeps a fresh-as-it-gets EBP month counted. The daily HY-OAS fallback is
+    # rare and simply tolerated a little longer.
+    "s1": 35, "s2": 3, "s3": 3, "s4": 35, "s5": 45,
     "d1": 3, "d2": 75, "d3": 100, "d4": 3, "v": 2,
 }
 
@@ -93,6 +100,27 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return (datetime.now(UTC).date() - date.fromisoformat(as_of_iso[:10])).days
     except ValueError:
         return None
+
+
+def monthly_baa_spread_bps(
+    baa_obs: list[tuple[str, float]], dgs_obs: list[tuple[str, float]],
+) -> tuple[list[float], str | None]:
+    """BAA-DGS10 credit spread in bps on a gap-free MONTHLY grid (v3.7.4/C-08).
+
+    BAA is monthly (FRED dates it first-of-month); DGS10 is daily. Aligning on a
+    YYYY-MM key (DGS10 monthly-averaged) instead of an exact date string keeps
+    every month whose 1st is a weekend/holiday — the exact-string intersection
+    dropped ~27% of months, and the resulting gaps made s5's positional t-2
+    offset span far more than 2 years (C-03). Returns (spread_bps, latest_YYYY-MM)."""
+    from collections import defaultdict
+
+    baa_m = {d[:7]: v for d, v in baa_obs}
+    dgs_by_month: dict[str, list[float]] = defaultdict(list)
+    for d, v in dgs_obs:
+        dgs_by_month[d[:7]].append(v)
+    dgs_m = {m: sum(vs) / len(vs) for m, vs in dgs_by_month.items()}
+    common = sorted(set(baa_m) & set(dgs_m))
+    return [(baa_m[m] - dgs_m[m]) * 100.0 for m in common], (common[-1] if common else None)
 
 
 COVERAGE_DROP_THRESHOLD = 1.0 / 3.0  # >1/3 nominal weight lost -> block degraded
@@ -461,13 +489,12 @@ def gather_inputs() -> RawInputs:
     # Long BAA-DGS10 credit-spread proxy (monthly, 1997+) for the S5 long-history
     # percentile — both FRED series are decades-deep and NOT ICE-truncated.
     def _baa_spread() -> list[float]:
-        baa = dict(fred_src.observations("BAA"))
-        dgs = dict(fred_src.observations("DGS10"))
-        common = sorted(set(baa) & set(dgs))
-        if len(common) < 24:
-            raise RuntimeError(f"baa spread: only {len(common)} aligned months")
-        raw.baa_spread_as_of = common[-1]
-        return [(baa[d] - dgs[d]) * 100.0 for d in common]  # % -> bps
+        spread, latest_month = monthly_baa_spread_bps(
+            fred_src.observations("BAA"), fred_src.observations("DGS10"))
+        if len(spread) < 24:
+            raise RuntimeError(f"baa spread: only {len(spread)} aligned months")
+        raw.baa_spread_as_of = f"{latest_month}-01"
+        return spread
 
     sp = _track(raw, "fred_baa_dgs10", _baa_spread)
     if sp:
@@ -599,9 +626,14 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         sub = max(0.0, min(1.0, 0.5 * pct + 0.5 * ext))
         sub_s["s1"] = sub
         mc_in.s1_sub = sub
+        # quality 0.5 (v3.7.4/V-01): the ECY-only shim (percentile pinned to a
+        # step at CAPE=35) is a degraded reading, so it must discount s1's live
+        # weight in the coverage gate rather than count as a full-quality value.
         indicators["s1"] = IndicatorOutput("s1", raw.cape, sub, False, raw.cape_source,
                                            raw.cape_fallback, as_of=raw.cape_as_of,
-                                           note="no CAPE history; percentile shimmed")
+                                           note="no CAPE history; percentile shimmed (0.99 if "
+                                                "CAPE>35 else 0.5); quality 0.5",
+                                           quality=0.5)
     else:
         indicators["s1"] = IndicatorOutput("s1", None, None, True, raw.cape_source, False,
                                            note="CAPE/real-yield unavailable; dropped, Block S renormalized")
@@ -640,7 +672,13 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     s4_sub = s4_gsadf.sub_score(raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95, contested)
     sub_s["s4"] = s4_sub
     mc_in.s4_sub = s4_sub
-    if raw.gsadf_stat is None or raw.gsadf_cv95 is None:
+    # COMPUTED requires a finite statistic AND both CVs finite and ordered
+    # (v3.7.4/G-04) — a missing cv90 or a NaN previously still reported COMPUTED
+    # with quality 1.0 while sub_score silently floored at 0.25.
+    _s4_ok = all(v is not None and math.isfinite(v)
+                 for v in (raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95)) \
+        and (raw.gsadf_cv90 or 0.0) < (raw.gsadf_cv95 or 0.0)
+    if not _s4_ok:
         # v3.3.2 FLOOR semantics: the 0.25 stays in the aggregation (that is the
         # documented contested/stale policy constant, unchanged), but quality=0.0
         # tells the coverage gate — and the reader — that NOTHING was measured

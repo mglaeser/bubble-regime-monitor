@@ -33,9 +33,11 @@ def test_deterministic_point_score(golden_subscores):
 
 def test_monte_carlo_median_and_iqr(golden_mc_inputs):
     result = monte_carlo(golden_mc_inputs, n=100_000, seed=MC_SEED)
-    assert result.median == pytest.approx(52.6, abs=1.0)
-    assert result.iqr[0] == pytest.approx(50.0, abs=2.0)
-    assert result.iqr[1] == pytest.approx(55.0, abs=2.0)
+    # Tight seeded reference values (v3.7.4/T-05): a fixed seed + n makes the MC
+    # deterministic, so pin the exact distribution rather than a loose +-1/+-2.
+    assert result.median == pytest.approx(52.5605, abs=1e-3)
+    assert result.iqr[0] == pytest.approx(50.0439, abs=1e-3)
+    assert result.iqr[1] == pytest.approx(54.9951, abs=1e-3)
 
 
 def test_red_flags_none_fired():
@@ -76,5 +78,8 @@ def test_full_pipeline_on_golden_raw_inputs(isolated_db):
     assert data.action_band == "trim"
     assert 48.0 <= data.median <= 57.0
     # s4 contested cap, d3 gate-off cap
-    assert data.indicators["s4"].sub_score == 0.25 or data.indicators["s4"].sub_score == 0.05
+    # s4 in the fixture has no GSADF statistic -> data-missing -> the contested
+    # floor 0.25 EXACTLY (v3.7.4/T-06: was an ambiguous 0.25-or-0.05 assertion;
+    # 0.05 is only for a successfully executed non-explosive test, not this path)
+    assert data.indicators["s4"].sub_score == 0.25
     assert data.indicators["d3"].sub_score == pytest.approx(0.30)

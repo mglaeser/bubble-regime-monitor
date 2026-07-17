@@ -16,17 +16,21 @@ y   <- inp$series                      # numeric vector, monthly log prices
 r   <- radf(y, lag = 0)                # minw defaults to 0.01 + 1.8/sqrt(T)
 
 # Monte-Carlo CVs are data-independent (function of n + the default minw for that
-# n), so cache them by n. A cache miss computes once (~seconds) and persists.
+# n), so cache them. The cache KEY includes nrep and seed (v3.7.4/G-01): those
+# change the simulated CVs, so a value cached under a different (nrep, seed)
+# must NOT be reused. Changing either constant simply lands a new cache file.
+MC_NREP <- 2000L
+MC_SEED <- 20260711L
 n         <- length(y)
 cache_dir <- Sys.getenv("GSADF_CV_CACHE", "/data/cv_cache")
-cv_path   <- file.path(cache_dir, sprintf("mc_cv_n%d.rds", n))
+cv_path   <- file.path(cache_dir, sprintf("mc_cv_n%d_nrep%d_seed%d.rds", n, MC_NREP, MC_SEED))
 cv <- NULL
 if (file.exists(cv_path)) {
   cv <- tryCatch(readRDS(cv_path), error = function(e) NULL)
 }
 if (is.null(cv)) {
-  set.seed(20260711)
-  cv <- radf_mc_cv(n = n, nrep = 2000)
+  set.seed(MC_SEED)
+  cv <- radf_mc_cv(n = n, nrep = MC_NREP)
   tryCatch({
     dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
     saveRDS(cv, cv_path)

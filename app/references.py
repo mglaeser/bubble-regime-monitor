@@ -772,6 +772,34 @@ CHANGELOG: list[dict[str, str]] = [
         "Nine new tests (tests/test_v373.py); the golden fixture gains realistic observation "
         "dates so the stricter coverage gate sees it fresh — the 52.43 headline is unchanged.",
     },
+    {
+        "version": "v3.7.4",
+        "score": "Backlog patches from the remediation validation — golden fixture "
+        "BYTE-IDENTICAL (52.43); no methodology change",
+        "notes": "The conditional/minor tail of the 2026-07-17 validation, all patch-class. "
+        "CREDIT/FRESHNESS: s5 SLA raised 3->45 days (the EBP/BAA primary is MONTHLY; the old "
+        "daily SLA marked every reading stale, C-04); FINRA as_of is now the reference "
+        "month-END and duplicate months are collapsed (C-06/C-07); the BAA-DGS10 proxy is "
+        "aligned on a gap-free monthly grid (DGS10 monthly-averaged) instead of an exact "
+        "date-string join that dropped ~27% of months, which also makes s5's t-2 offset "
+        "span the right 2 years (C-08/C-03). BREADTH: the Twelve Data fallback counts CURRENT "
+        "constituents only, never lingering ex-members (B-03). GSADF: the R MC-CV cache key "
+        "now includes nrep+seed so a value simulated under different constants is never reused "
+        "(G-01); COMPUTED requires a finite statistic and finite, ordered CVs (cv90<cv95), else "
+        "it floors (G-04). VALUATION/VIX: the S1 no-history ECY shim now discounts quality to "
+        "0.5 (V-01); the FRED VIX/VIX3M fallback only divides on a common observation date "
+        "(X-01); the Slickcharts concentration fallback filters out stray >10% page figures "
+        "(K-01). OPS/AGGREGATION: fetch_tiingo_monthly sends the token via the auth header, not "
+        "the URL (O-03); geometric_block asserts weights subset+sum-to-1 (A-05); the LPPLS "
+        "schema-surprise path reports UNKNOWN window counts instead of fabricating them (L-08). "
+        "TEST QUALITY: MC tolerances tightened to exact seeded values (T-05); the s4 golden "
+        "assertion is now unambiguous 0.25 (T-06); the golden d1 literal is checked against "
+        "d1.compute (T-02). DEFERRED (need your decision or a larger refactor, NOT done here): "
+        "B-04 breadth publish threshold 25->=478 and B-08 all-time-high watermark (score-"
+        "shifting); L-06 LPPLS init seeding, L-05 d4 quality basis, V-02 CAPE effective window, "
+        "P-01/P-02 price-series adjustment/calendar alignment (price-layer refactor); the true "
+        "v4 items (band semantics already handled in v3.7.3; S5 calendar anchoring).",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {

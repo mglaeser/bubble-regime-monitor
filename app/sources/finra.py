@@ -3,8 +3,9 @@
 URL: https://www.finra.org/sites/default/files/2021-03/margin-statistics.xlsx
 Published third week of the month following the reference month; FINRA states
 "data feeds are not available" — there is NO true fallback: cache and
-tolerate staleness (freshness SLA 45 days). MacroMicro mirrors the series for
-display only.
+tolerate staleness (the engine's operative D2 freshness SLA is 75 days, which
+covers one skipped publication; as_of is the reference month-END). MacroMicro
+mirrors the series for display only.
 
 ROW ORDER IS NOT ASSUMED. The live file lists months NEWEST-FIRST, which a
 naive column read once inverted into a -22% "YoY" computed across the series
@@ -58,8 +59,24 @@ def parse_debit_balances(content: bytes) -> tuple[list[float], str]:
     pairs = sorted(zip(date_series[mask], values[mask], strict=True), key=lambda p: p[0])
     if len(pairs) < 13:
         raise SourceError("FINRA XLSX: fewer than 13 dated monthly observations")
-    chronological = [float(v) for _, v in pairs]
-    as_of = pairs[-1][0].date().isoformat()
+    # De-duplicate by calendar month, last value wins (v3.7.4/C-07): a duplicated
+    # month would otherwise shift the 12-month YoY offset off a true year.
+    import calendar
+    from datetime import date
+
+    by_month: dict[tuple[int, int], float] = {}
+    order: list[tuple[int, int]] = []
+    for d, v in pairs:
+        key = (d.year, d.month)
+        if key not in by_month:
+            order.append(key)
+        by_month[key] = float(v)
+    chronological = [by_month[k] for k in sorted(order)]
+    # Age from the reference month's END, not its 1st (v3.7.4/C-06): FINRA labels
+    # the reference MONTH (parsed to the 1st), so aging from the 1st inflated the
+    # age ~30 days and tripped the 75d SLA on the freshest reading that exists.
+    y, m = sorted(order)[-1]
+    as_of = date(y, m, calendar.monthrange(y, m)[1]).isoformat()
     return chronological, as_of
 
 

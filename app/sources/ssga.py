@@ -89,7 +89,13 @@ def sp500_constituents() -> SourceResult:
 
 
 def _top10_from_slickcharts(html: str) -> float:
-    pcts = [float(m) for m in re.findall(r"(\d{1,2}\.\d{2})%", html)]
+    # v3.7.4/K-01: this fallback regex-harvests percentages page-wide, so a
+    # stray large figure (52-week range, YTD move, ad copy) could be summed as
+    # a "holding weight". Filter to plausible SINGLE-NAME index weights: no S&P
+    # 500 constituent exceeds ~8%, so drop anything > 10% before taking the ten
+    # largest. The SSGA XLSX primary (which parses the real Weight column) is
+    # unaffected; this only hardens the degraded fallback.
+    pcts = [p for p in (float(m) for m in re.findall(r"(\d{1,2}\.\d{2})%", html)) if p <= 10.0]
     if len(pcts) < 10:
         raise SourceError("Slickcharts: could not parse holding weights")
     top10 = sum(sorted(pcts, reverse=True)[:10])

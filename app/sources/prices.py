@@ -571,8 +571,9 @@ def fetch_tiingo_monthly(canonical: str, start_date: str = "1999-01-01",
     with httpx.Client(timeout=TIMEOUT) as client:
         resp = client.get(
             f"https://api.tiingo.com/tiingo/daily/{vendor}/prices",
-            params={"startDate": start_date, "resampleFreq": "monthly",
-                    "token": settings.tiingo_api_key})
+            params={"startDate": start_date, "resampleFreq": "monthly"},
+            headers={"Authorization": f"Token {settings.tiingo_api_key}",
+                     "Content-Type": "application/json"})  # v3.7.4/O-03: header, not URL token
     if resp.status_code == 429:
         raise RateLimited(f"tiingo monthly {vendor}: HTTP 429")
     resp.raise_for_status()

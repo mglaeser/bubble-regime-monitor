@@ -59,7 +59,14 @@ def sub_score(gsadf_stat: float | None, cv90: float | None, cv95: float | None,
     (controlled by the manual GSADF_CONTESTED config flag). Data-missing also
     floors at 0.25: the 0.05 floor is reserved for a successfully executed
     test that finds no explosiveness."""
-    if gsadf_stat is None or cv95 is None or cv90 is None:
+    # Require a finite statistic AND both CVs finite and correctly ordered
+    # (cv90 < cv95) — a NaN/inf or a missing/degenerate CV must floor at the
+    # contested 0.25, never fall through to a comparison (v3.7.4/G-04).
+    import math
+
+    if (gsadf_stat is None or cv95 is None or cv90 is None
+            or not (math.isfinite(gsadf_stat) and math.isfinite(cv90) and math.isfinite(cv95))
+            or cv90 >= cv95):
         return SUB_CONTESTED_OR_STALE
     if contested or stale:
         return SUB_CONTESTED_OR_STALE
