@@ -725,7 +725,11 @@ CHANGELOG: list[dict[str, str]] = [
         "added, version history extended v3.2.0-v3.7.1 (had ended at v3.1), stale status-page "
         "wording fixed — plus README drift GUARDS in the test suite: the latest changelog "
         "version, the engine-computed golden number, and every mounted /api/v1 router must "
-        "appear in the README or the build fails.",
+        "appear in the README or the build fails. (9) Watchdog unit hardening after the "
+        "2026-07-17 incident: an Atom cold build overran TimeoutStartSec=1800 and systemd's "
+        "default control-group kill then SIGKILLed the fresh container's podman runtime — "
+        "now TimeoutStartSec=3600 + KillMode=process (deploy.sh re-renders the units on the "
+        "next healthy deploy).",
     },
 ]
 
