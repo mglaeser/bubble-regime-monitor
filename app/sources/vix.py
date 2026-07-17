@@ -7,7 +7,6 @@ Source order: vixcentral.com scrape (primary, anonymously accessible July
 from __future__ import annotations
 
 import re
-from datetime import date
 
 from app.http_client import fetch
 from app.sources import Provenance, SourceError, SourceResult
@@ -61,11 +60,12 @@ def term_structure_ratio() -> SourceResult:
     try:
         vix = fred_latest("VIXCLS")
         vix3m = fred_latest("VIX3M")
-        # v3.7.4/X-01: VIX and VIX3M are two independent daily series — only
-        # divide them on a COMMON observation date. A >3-day gap means one leg
-        # is stale and the ratio would be mismatched; reject rather than mislead.
+        # v3.7.6/X-01: VIX and VIX3M are two independent daily series — divide
+        # them ONLY on an IDENTICAL observation date. Any mismatch (even 1 day)
+        # means the term-structure ratio mixes two different sessions; reject
+        # rather than mislead (a 3-day tolerance still divided mismatched dates).
         d1, d2 = vix.provenance.as_of, vix3m.provenance.as_of
-        if d1 and d2 and abs((date.fromisoformat(d1) - date.fromisoformat(d2)).days) > 3:
+        if d1 != d2:
             raise SourceError(f"VIX ({d1}) and VIX3M ({d2}) not on a common date")
         return SourceResult(float(vix.value) / float(vix3m.value),
                             Provenance(source="fred_vix_ratio", fallback_used=True,

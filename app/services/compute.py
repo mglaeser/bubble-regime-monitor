@@ -33,6 +33,7 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
+import calendar
 import math
 import re
 import time
@@ -102,16 +103,38 @@ def _age_days(as_of_iso: str | None) -> int | None:
         return None
 
 
+def _month_end_iso(yyyy_mm: str) -> str:
+    """ISO date of the LAST day of a YYYY-MM month (leap-safe)."""
+    y, m = int(yyyy_mm[:4]), int(yyyy_mm[5:7])
+    return f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}"
+
+
+def _month_gaps(months: list[str]) -> list[str]:
+    """Calendar months missing from a sorted YYYY-MM list between its first and
+    last entry (empty when contiguous)."""
+    if len(months) < 2:
+        return []
+    def _idx(mm: str) -> int:
+        return int(mm[:4]) * 12 + int(mm[5:7]) - 1
+    present = {_idx(m) for m in months}
+    lo, hi = _idx(months[0]), _idx(months[-1])
+    return [f"{i // 12:04d}-{i % 12 + 1:02d}" for i in range(lo, hi + 1) if i not in present]
+
+
 def monthly_baa_spread_bps(
     baa_obs: list[tuple[str, float]], dgs_obs: list[tuple[str, float]],
-) -> tuple[list[float], str | None]:
-    """BAA-DGS10 credit spread in bps on a gap-free MONTHLY grid (v3.7.4/C-08).
+) -> tuple[list[tuple[str, float]], list[str]]:
+    """BAA-DGS10 credit spread in bps as DATED monthly pairs, plus any calendar
+    gaps in the aligned span (v3.7.6/C-08).
 
     BAA is monthly (FRED dates it first-of-month); DGS10 is daily. Aligning on a
-    YYYY-MM key (DGS10 monthly-averaged) instead of an exact date string keeps
-    every month whose 1st is a weekend/holiday — the exact-string intersection
-    dropped ~27% of months, and the resulting gaps made s5's positional t-2
-    offset span far more than 2 years (C-03). Returns (spread_bps, latest_YYYY-MM)."""
+    YYYY-MM key (DGS10 monthly-averaged) keeps every month whose 1st is a
+    weekend/holiday. This is an INTERSECTION of available months, NOT a true
+    gap-free grid — so it returns dated (YYYY-MM, bps) pairs and a `gaps` list
+    (months absent from the intersection within [first, last]) rather than a
+    bare float list falsely labeled gap-free. The caller stamps the s5 as_of from
+    the latest pair's month-END and logs any gaps. (Full calendar anchoring of
+    the s5 t-2 lookup is the deferred S5 v4, C-01/02/03.)"""
     from collections import defaultdict
 
     baa_m = {d[:7]: v for d, v in baa_obs}
@@ -120,7 +143,8 @@ def monthly_baa_spread_bps(
         dgs_by_month[d[:7]].append(v)
     dgs_m = {m: sum(vs) / len(vs) for m, vs in dgs_by_month.items()}
     common = sorted(set(baa_m) & set(dgs_m))
-    return [(baa_m[m] - dgs_m[m]) * 100.0 for m in common], (common[-1] if common else None)
+    pairs = [(m, (baa_m[m] - dgs_m[m]) * 100.0) for m in common]
+    return pairs, _month_gaps(common)
 
 
 COVERAGE_DROP_THRESHOLD = 1.0 / 3.0  # >1/3 nominal weight lost -> block degraded
@@ -215,6 +239,7 @@ class RawInputs:
     breadth_as_of: str | None = None
 
     margin_balances: list[float] | None = None
+    margin_months: list[str] | None = None   # parallel YYYY-MM for calendar YoY (C-07)
     margin_note: str | None = None
     margin_as_of: str | None = None
 
@@ -489,12 +514,16 @@ def gather_inputs() -> RawInputs:
     # Long BAA-DGS10 credit-spread proxy (monthly, 1997+) for the S5 long-history
     # percentile — both FRED series are decades-deep and NOT ICE-truncated.
     def _baa_spread() -> list[float]:
-        spread, latest_month = monthly_baa_spread_bps(
+        pairs, gaps = monthly_baa_spread_bps(
             fred_src.observations("BAA"), fred_src.observations("DGS10"))
-        if len(spread) < 24:
-            raise RuntimeError(f"baa spread: only {len(spread)} aligned months")
-        raw.baa_spread_as_of = f"{latest_month}-01"
-        return spread
+        if len(pairs) < 24:
+            raise RuntimeError(f"baa spread: only {len(pairs)} aligned months")
+        if gaps:
+            log.warning("baa_spread_month_gaps", n=len(gaps), sample=gaps[:6])
+        # Age from the reference month's END, not its 1st (v3.7.6/C-04): a monthly
+        # series must not read stale on the day its freshest month is published.
+        raw.baa_spread_as_of = _month_end_iso(pairs[-1][0])
+        return [v for _, v in pairs]
 
     sp = _track(raw, "fred_baa_dgs10", _baa_spread)
     if sp:
@@ -505,15 +534,18 @@ def gather_inputs() -> RawInputs:
     ebp = _track(raw, "fed_ebp", fed_ebp_src.fetch_ebp)
     if ebp:
         raw.ebp_history = [v for _, v in ebp]
-        raw.ebp_as_of = ebp[-1][0]
+        # C-04: EBP is monthly (dated at month start); age s5 from the month END
+        # so the freshest published month is not spuriously stale under the SLA.
+        raw.ebp_as_of = _month_end_iso(ebp[-1][0][:7])
 
     r = _track(raw, "breadth", breadth_src.pct_above_200dma)
     if r:
         raw.breadth_pct, raw.breadth_note = r.value, r.provenance.note
-        # Use the source's REAL observation date (newest cached trading day),
-        # not `today` (v3.7.3/B-02): a stale/frozen breadth window now ages
-        # honestly and can trip the d1 freshness SLA + coverage gate.
-        raw.breadth_as_of = r.provenance.as_of or today
+        # Use the source's REAL observation date (newest cached trading day);
+        # NEVER `or today` (v3.7.6/B-02): if provenance is absent the date stays
+        # None so the coverage gate treats d1 as unverified-fresh, not fresh — a
+        # stalled/frozen breadth window now ages honestly through the SLA.
+        raw.breadth_as_of = r.provenance.as_of
         raw.breadth_source = r.provenance.source
         m = re.search(r"breadth from (\d+)", raw.breadth_note or "")  # "breadth from N/503 ..."
         raw.breadth_n = int(m.group(1)) if m else None
@@ -521,6 +553,7 @@ def gather_inputs() -> RawInputs:
     r = _track(raw, "finra_xlsx", finra_src.debit_balances)
     if r:
         raw.margin_balances = r.value
+        raw.margin_months = getattr(r, "months", None)   # for calendar YoY (C-07)
         raw.margin_as_of = r.provenance.as_of
     from app.models import IndicatorReading
 
@@ -777,11 +810,24 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
 
     # ---- D2 margin ----
     margin_age = _age_days(raw.margin_as_of)
+    # YoY is CALENDAR-anchored when dated months are available (v3.7.6/C-07): a
+    # skipped FINRA publication makes 12 list positions != 12 calendar months, so
+    # a positional [-13] would compare the wrong month. If the 12-month reference
+    # month is missing outright, yoy_pct_calendar raises and we drop to the cached
+    # branch rather than publish a mis-dated YoY.
+    margin_yoy: float | None = None
+    if raw.margin_balances and len(raw.margin_balances) >= 13:
+        try:
+            if raw.margin_months and len(raw.margin_months) == len(raw.margin_balances):
+                margin_yoy = d2_margin.yoy_pct_calendar(raw.margin_months, raw.margin_balances)
+            else:
+                margin_yoy = d2_margin.yoy_pct(raw.margin_balances)
+        except ValueError as exc:
+            log.warning("margin_yoy_calendar_gap", error=str(exc)[:120])
     # FINRA SLA: 75 days tolerates one skipped monthly publication (series
     # posts ~3 weeks after month-end). Beyond that, never compute a YoY.
-    if raw.margin_balances and len(raw.margin_balances) >= 13 \
-            and (margin_age is None or margin_age <= 75):
-        yoy = d2_margin.yoy_pct(raw.margin_balances)
+    if margin_yoy is not None and (margin_age is None or margin_age <= 75):
+        yoy = margin_yoy
         # Within the FINRA SLA (75 days) the rollover confirmation is asserted
         # normally. FINRA posts monthly ~3 weeks after month-end, so the FRESHEST
         # possible reading is routinely ~45-75 days old — a ~71-day age is as

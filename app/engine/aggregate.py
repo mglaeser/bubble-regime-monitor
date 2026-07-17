@@ -88,10 +88,21 @@ def geometric_block(sub_scores: dict[str, float], weights: dict[str, float]) -> 
     block toward L^{w_i} of its otherwise value, never to 0. `weights` must
     already be renormalized to sum to 1 over the keys present in `sub_scores`.
     """
-    # Fail loud if a caller ever passes un-renormalized weights (v3.7.4/A-05):
-    # weights must key a subset of the present sub-scores and sum to 1.
-    if not set(weights) <= set(sub_scores):
-        raise ValueError(f"weight keys {set(weights) - set(sub_scores)} absent from sub-scores")
+    # Fail loud on any malformed weight vector (v3.7.6/A-05). The block contract
+    # is KEY EQUALITY: `weights` must key EXACTLY the present sub-scores (not just
+    # a subset — an extra un-weighted sub-score would be silently dropped from the
+    # geometric mean), every weight must be finite and non-negative (a value like
+    # {-1, 2} sums to 1 and would otherwise pass), and the weights must sum to 1.
+    missing = set(weights) - set(sub_scores)
+    if missing:
+        raise ValueError(f"weight keys {missing} absent from sub-scores")
+    extra = set(sub_scores) - set(weights)
+    if extra:
+        raise ValueError(f"sub-score keys {extra} absent from weights "
+                         "(block contract requires weight/sub-score key equality)")
+    for key, w in weights.items():
+        if not math.isfinite(w) or w < 0.0:
+            raise ValueError(f"weight {key}={w} is not finite and non-negative")
     wsum = sum(weights.values())
     if abs(wsum - 1.0) > 1e-9:
         raise ValueError(f"weights sum to {wsum}, not 1.0 (renormalize before aggregating)")

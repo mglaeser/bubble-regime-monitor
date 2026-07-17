@@ -11,7 +11,6 @@ the Markets cross-check (manual).
 from __future__ import annotations
 
 import io
-import re
 
 import pandas as pd
 
@@ -89,19 +88,36 @@ def sp500_constituents() -> SourceResult:
 
 
 def _top10_from_slickcharts(html: str) -> float:
-    # v3.7.4/K-01: this fallback regex-harvests percentages page-wide, so a
-    # stray large figure (52-week range, YTD move, ad copy) could be summed as
-    # a "holding weight". Filter to plausible SINGLE-NAME index weights: no S&P
-    # 500 constituent exceeds ~8%, so drop anything > 10% before taking the ten
-    # largest. The SSGA XLSX primary (which parses the real Weight column) is
-    # unaffected; this only hardens the degraded fallback.
-    pcts = [p for p in (float(m) for m in re.findall(r"(\d{1,2}\.\d{2})%", html)) if p <= 10.0]
-    if len(pcts) < 10:
-        raise SourceError("Slickcharts: could not parse holding weights")
-    top10 = sum(sorted(pcts, reverse=True)[:10])
-    if not 5.0 < top10 < 80.0:
-        raise SourceError(f"Slickcharts: implausible top-10 sum {top10}")
-    return top10
+    # v3.7.6/K-01: STRUCTURAL parse — read the holdings TABLE's weight column,
+    # never harvest percentages page-wide. The prior regex (even with a >10%
+    # filter) still summed sub-10% strays (YTD move, sector figures, ad copy) as
+    # "holding weights"; a plausibility threshold is not a parse. pandas.read_html
+    # isolates real <table> columns, so page text outside the table can never
+    # enter the sum. The SSGA XLSX primary (real Weight column) is unaffected;
+    # this only hardens the degraded fallback.
+    try:
+        # flavor="lxml": use the installed parser only (never fall back to an
+        # optional html5lib), and raise ValueError (not ImportError) on no table.
+        tables = pd.read_html(io.StringIO(html), flavor="lxml")
+    except (ValueError, ImportError) as exc:
+        raise SourceError(f"Slickcharts: no HTML table found ({exc})") from exc
+    for df in tables:
+        wcol = next((c for c in df.columns
+                     if "weight" in str(c).strip().lower()
+                     or "portfolio" in str(c).strip().lower()), None)
+        if wcol is None:
+            continue
+        cleaned = (df[wcol].astype(str).str.replace("%", "", regex=False).str.strip())
+        weights = pd.to_numeric(cleaned, errors="coerce").dropna()
+        # single-name index weights only (no S&P 500 name exceeds ~8%)
+        weights = weights[(weights > 0.0) & (weights <= 10.0)]
+        if len(weights) < 10:
+            continue
+        top10 = float(weights.nlargest(10).sum())
+        if not 5.0 < top10 < 80.0:
+            raise SourceError(f"Slickcharts: implausible top-10 sum {top10}")
+        return top10
+    raise SourceError("Slickcharts: no holdings weight column in any table")
 
 
 def top10_concentration() -> SourceResult:
