@@ -197,6 +197,7 @@ Outcomes are stored in the DB and exposed via `/api/v1/meta/methodology`.
 - **v3.6.0 (methodology unchanged):** recompute every 4 hours (02/06/10/14/18/22 UTC, was twice daily); the per-response "Research, not advice." tag removed from machine payloads and the SMS (personal-use deployment — the full disclaimer stays on the status page, `/docs`, and the methodology document).
 - **v3.7.0 (methodology unchanged):** CNN Fear & Greed Index added to the dashboard feed (non-scoring context; strictly validated unofficial endpoint; feed now 13 series + 35 metrics).
 - **v3.7.1 (methodology unchanged; doc-register maintenance):** documentation drifts found by a validate-first audit fixed (stale alpha-range claim, this README's pre-v3.3.0 worked example, REGISTRY d1/s5 recipes, GSADF seed/lag docs); `s4.as_of` provenance corrected; new guard tests pin docs to code (weights, `ALPHA_RANGE`, the LPPLS `VALID_ZERO` producer path, and this README's golden number/version).
+- **v3.7.2 (methodology unchanged; status-page observability):** the S5 **primary** source (Fed EBP) and the BAA-DGS10 proxy were tracked but wired to no status-matrix row — added; new **feed-sources section** on the status page reflects per-item health of the non-scoring dashboard-feed pulls (incl. CNN Fear & Greed); watchdog-unit fix (TimeoutStartSec 3600, KillMode=process) re-applied after a merge race.
 
 The machine-readable changelog with full per-version notes is served at `GET /api/v1/meta/methodology` (`data.changelog`).
 

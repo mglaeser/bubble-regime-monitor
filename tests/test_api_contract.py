@@ -97,7 +97,7 @@ def test_methodology_endpoint(client):
     assert len(d["falsification_criteria"]) == 3
     assert [c["version"] for c in d["changelog"]] == \
         ["v1", "v2", "v3", "v3.0.1", "v3.2.0", "v3.3.0", "v3.3.1", "v3.3.2", "v3.4.0", "v3.5.0",
-         "v3.6.0", "v3.7.0", "v3.7.1"]
+         "v3.6.0", "v3.7.0", "v3.7.1", "v3.7.2"]
     # all framework citations verified in the 2026-07 audit: none unverified, three verified
     assert d["unverified_citations"] == []
     assert len(d["verified_citations"]) == 3

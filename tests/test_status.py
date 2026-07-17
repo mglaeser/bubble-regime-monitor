@@ -26,17 +26,64 @@ def client(isolated_db, monkeypatch):
 class TestStatusJson:
     def test_shape_on_empty_db(self, client):
         body = client.get("/api/v1/status").json()
-        for k in ("service", "snapshot", "recompute", "sources", "providers", "indicators",
-                  "science_audit", "falsification_criteria", "changelog", "epistemic_caveats"):
+        for k in ("service", "snapshot", "recompute", "sources", "feed_sources", "providers",
+                  "indicators", "science_audit", "falsification_criteria", "changelog",
+                  "epistemic_caveats"):
             assert k in body, f"missing {k}"
         # v3.6.0: no advice tag in machine payloads (status HTML carries it statically)
         assert "disclaimer" not in body
         assert body["snapshot"] is None  # no recompute yet
+        assert body["feed_sources"] is None  # no feed payload persisted yet
         assert len(body["indicators"]) == 10
-        assert len(body["sources"]) == 10
+        # v3.7.2: 11 rows — fed_ebp (S5 primary) added; S5 fallbacks carry both keys
+        assert len(body["sources"]) == 11
+        keys = {s["key"] for s in body["sources"]}
+        assert "fed_ebp" in keys
         # every source is "unknown" before the first pull
         assert all(s["status"] == "unknown" for s in body["sources"])
         assert body["service"]["docs"]["swagger"] == "/docs"
+
+    def test_feed_sources_reflect_latest_payload(self, client):
+        """v3.7.2: the non-scoring feed pulls (incl. CNN F&G) appear on the
+        status page, reflected from the latest persisted feed payload."""
+        import json as _json
+        from datetime import UTC, datetime
+
+        from app.db import session_scope
+        from app.models import DashboardFeed
+
+        payload = {
+            "series": {"fear_greed": {"source": "cnn:fear_greed", "available": False,
+                                      "stale": None, "as_of": None,
+                                      "note": "source failed: CNN F&G: non-JSON response"}},
+            "metrics": {"gold_spot": {"source": "twelvedata:XAU/USD", "available": True,
+                                      "stale": False, "as_of": "2026-07-16"}},
+        }
+        with session_scope() as session:
+            session.add(DashboardFeed(computed_at=datetime(2026, 7, 16, 22, 0, tzinfo=UTC),
+                                      payload=_json.dumps(payload)))
+        fs = client.get("/api/v1/status").json()["feed_sources"]
+        assert fs is not None and fs["unavailable"] == ["fear_greed"]
+        by_key = {i["key"]: i for i in fs["items"]}
+        assert by_key["fear_greed"]["source"] == "cnn:fear_greed"
+        assert by_key["fear_greed"]["available"] is False
+        assert by_key["gold_spot"]["available"] is True
+
+    def test_every_tracked_pull_has_a_registry_row(self):
+        """v3.7.2 guard: every _track() label in the gather must be wired to a
+        SOURCE_REGISTRY health_keys entry — the gap that hid fed_ebp/BAA for
+        four releases can never silently reopen."""
+        import re
+        from pathlib import Path
+
+        from app.references import SOURCE_REGISTRY
+
+        compute_src = (Path(__file__).resolve().parents[1] / "app/services/compute.py").read_text()
+        tracked = set(re.findall(r'_track\(raw, "([^"]+)"', compute_src))
+        assert tracked, "no _track labels found — gather refactored?"
+        wired = {k for spec in SOURCE_REGISTRY for k in spec.health_keys}
+        missing = sorted(tracked - wired)
+        assert not missing, f"tracked pulls invisible on the status page: {missing}"
 
     def test_known_issues_always_flagged(self, client):
         audit = client.get("/api/v1/status").json()["science_audit"]

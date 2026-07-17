@@ -16,8 +16,19 @@ ExecStart=%h/playground/bubble-regime-monitor/deploy/deploy-watch.sh
 # Hardening: this unit runs as your unprivileged user (systemd --user). It needs
 # to run podman + git in the repo, so we keep it modest rather than locked down.
 NoNewPrivileges=true
-# A single deploy (build + migrate + health-check) must fit comfortably.
-TimeoutStartSec=1800
+
+# A cold image build on a low-power host (Atom N2800) can exceed 30 min; the
+# original 1800 s killed a deploy 70 s before it finished (2026-07-17 incident).
+TimeoutStartSec=3600
+
+# CRITICAL: deploy.sh starts the long-lived rootless-podman container from
+# inside this unit, so conmon/slirp4netns/rootlessport end up in THIS unit's
+# cgroup. The default KillMode=control-group would SIGKILL the freshly
+# deployed container's runtime on any stop/timeout (exactly what the 2026-07-17
+# incident did). KillMode=process kills only deploy-watch.sh itself and leaves
+# the container processes alone.
+KillMode=process
+TimeoutStopSec=15
 
 [Install]
 WantedBy=default.target
