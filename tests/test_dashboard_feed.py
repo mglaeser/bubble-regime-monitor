@@ -58,6 +58,13 @@ def fake_fear_greed():
         history=[(f"{m}-15", 30.0 + i) for i, m in enumerate(_months_now()[-13:])])
 
 
+def fake_imf_reserves():
+    from app.sources.imf_reserves import ReserveShares
+
+    return ReserveShares(usd_share_pct=57.8, usd_share_as_of="2026-03-31",
+                         gold_share_pct=20.1, gold_share_as_of="2026-03-31")
+
+
 @pytest.fixture()
 def snapshot(isolated_db):
     from app.services.compute import compute_snapshot
@@ -74,6 +81,7 @@ def patched_sources(monkeypatch):
     monkeypatch.setattr(df, "_fred_series", fake_fred)
     monkeypatch.setattr(df, "_td_series", fake_td)
     monkeypatch.setattr(df, "_fear_greed", fake_fear_greed)
+    monkeypatch.setattr(df, "_imf_reserves", fake_imf_reserves)
 
 
 class TestBuildFeedGolden:
@@ -124,8 +132,14 @@ class TestBuildFeedGolden:
         assert m["btc_drawdown_pct"]["value"] <= 0.0
         assert m["usd_broad_index_ytd_pct"]["value"] is not None
         assert m["mmf_total_assets_usd"]["unit"] == "USD_mn"
-        assert m["cofer_gold_share_pct"]["available"] is False        # never fabricated
-        assert m["ndx_close"]["available"] is False
+        # v3.7.5: IMF reserves connected. USD share IS COFER; gold share is IFS.
+        assert m["cofer_ust_share_pct"]["available"] is True
+        assert m["cofer_ust_share_pct"]["value"] == 57.8
+        assert m["cofer_ust_share_pct"]["source"] == "imf:COFER"
+        assert m["cofer_gold_share_pct"]["available"] is True
+        assert m["cofer_gold_share_pct"]["source"] == "imf:IFS"       # NOT COFER
+        assert "NOT a COFER" in m["cofer_gold_share_pct"]["note"]
+        assert m["ndx_close"]["available"] is False                   # never fabricated
         # ECY consistency with S1 inputs
         assert m["excess_cape_yield"]["value"] == pytest.approx(
             (1.0 / raw.cape - raw.real10y_decimal) * 100.0, abs=0.05)
@@ -160,6 +174,36 @@ class TestDegradation:
         assert feed["series"]["silver"]["available"] is True
         # spot keeps its true-spot source; the ETF fallback is only for spot failure
         assert feed["metrics"]["gold_spot"]["available"] is True
+
+    def test_imf_reserves_degrade_per_item(self, snapshot, patched_sources, monkeypatch):
+        raw, data = snapshot
+        from app.sources.imf_reserves import ReserveShares
+
+        # USD share present, gold share absent -> only gold degrades
+        monkeypatch.setattr(df, "_imf_reserves",
+                            lambda: ReserveShares(usd_share_pct=57.8,
+                                                  usd_share_as_of="2026-03-31"))
+        feed = df.build_feed(raw, data)
+        m = feed["metrics"]
+        assert m["cofer_ust_share_pct"]["available"] is True
+        assert m["cofer_gold_share_pct"]["available"] is False
+        assert m["cofer_gold_share_pct"]["source"] == "imf:IFS"
+        assert m["cofer_gold_share_pct"]["value"] is None      # never fabricated
+
+    def test_imf_reserves_total_failure_degrades_both(self, snapshot, patched_sources,
+                                                      monkeypatch):
+        raw, data = snapshot
+
+        def _boom():
+            raise RuntimeError("imf 503")
+
+        monkeypatch.setattr(df, "_imf_reserves", _boom)
+        feed = df.build_feed(raw, data)
+        m = feed["metrics"]
+        assert m["cofer_ust_share_pct"]["available"] is False
+        assert m["cofer_gold_share_pct"]["available"] is False
+        # neighbours unaffected
+        assert feed["metrics"]["mmf_total_assets_usd"]["unit"] == "USD_mn"
 
     def test_spot_failure_falls_back_to_labeled_etf_close(self, snapshot, patched_sources,
                                                           monkeypatch):

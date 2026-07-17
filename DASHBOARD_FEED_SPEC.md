@@ -54,7 +54,7 @@
 
 ### Metrics (34 + 1, see §7)
 
-`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: cv90, cv95, contested, state) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — no free raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1) · `cofer_gold_share_pct` (**always** available:false) · `cofer_ust_share_pct` (**always** available:false)
+`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: cv90, cv95, contested, state) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — no free raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1) · `cofer_gold_share_pct` (IMF **IFS**: gold ÷ total reserves — **NOT** COFER; quarterly, ~1-quarter lag) · `cofer_ust_share_pct` (IMF **COFER**: USD share of allocated FX reserves; quarterly, ~1-quarter lag)
 
 ## 3 · Endpoint
 
@@ -123,10 +123,21 @@ The complete real `metrics` block, verbatim:
   "ust10y_yield_pct": {"value": 4.58, "unit": "pct", "as_of": "2026-07-14", "source": "fred:DGS10", "available": true, "stale": false},
   "tbill3m_yield_pct": {"value": 3.71, "unit": "pct", "as_of": "2026-07-14", "source": "fred:DTB3", "available": true, "stale": false},
   "mmf_total_assets_usd": {"value": 8289569.0, "unit": "USD_mn", "as_of": "2026-01-01", "source": "fred:MMMFFAQ027S", "available": true, "stale": true, "note": "Money market funds total financial assets, quarterly Z.1 - publication lags ~1 quarter"},
-  "cofer_gold_share_pct": {"value": null, "unit": "pct", "as_of": null, "source": "none", "available": false, "stale": null, "note": "requires IMF COFER source; not connected"},
-  "cofer_ust_share_pct": {"value": null, "unit": "pct", "as_of": null, "source": "none", "available": false, "stale": null, "note": "requires IMF COFER source; not connected"}
+  "cofer_gold_share_pct": {"value": 20.1, "unit": "pct", "as_of": "2026-03-31", "source": "imf:IFS", "available": true, "stale": true, "note": "gold's share of TOTAL reserves (IMF IFS: monetary gold at market value / total reserves, world) - NOT a COFER series; COFER is FX-only; quarterly, lags ~1 quarter"},
+  "cofer_ust_share_pct": {"value": 57.8, "unit": "pct", "as_of": "2026-03-31", "source": "imf:COFER", "available": true, "stale": true, "note": "USD share of ALLOCATED FX reserves (IMF COFER, world); quarterly, publication lags ~1 quarter"}
 }
 ```
+
+> **v3.7.5 — IMF reserve shares connected.** Both metrics were `available:false`
+> placeholders (`source:"none"`) from v3.4.0 through v3.7.4. They now come from
+> `app/sources/imf_reserves.py`, quarterly with a ~1-quarter lag (so `stale:true`
+> is the normal steady state between releases). **`cofer_ust_share_pct` IS COFER**
+> (USD share of allocated FX reserves). **`cofer_gold_share_pct` is IMF IFS, NOT
+> COFER** — COFER is FX-only and carries no gold; the key name is a frozen
+> historical misnomer, `source:"imf:IFS"` and the note keep it honest. Each metric
+> degrades independently, and either falls back to `available:false` (source
+> `imf:COFER` / `imf:IFS`) where the deploy host cannot reach `imf.org` or the
+> series is missing — a value is never fabricated.
 
 A real full series (capture #2, `usd_broad_index`, first/last points shown — all 61 present in the artifact):
 
@@ -191,9 +202,9 @@ Provider date conventions visible in the real bytes (both intentional): Tiingo m
       "btc_drawdown_pct": {"value": -12.4, "unit": "pct", "as_of": "2026-07-15",
                            "source": "twelvedata:BTC/USD", "available": true, "stale": false,
                            "note": "vs btc_ath (see its basis)"},
-      "cofer_gold_share_pct": {"value": null, "unit": "pct", "as_of": null, "source": "none",
-                               "available": false, "stale": null,
-                               "note": "requires IMF COFER source; not connected"}
+      "cofer_gold_share_pct": {"value": 20.1, "unit": "pct", "as_of": "2026-03-31",
+                               "source": "imf:IFS", "available": true, "stale": true,
+                               "note": "gold's share of TOTAL reserves (IMF IFS) - NOT COFER"}
       /* … the full 34-key inventory of §2 … */
     }
   },
@@ -226,8 +237,8 @@ Exact bytes the dashboard can already rely on (unchanged by the capture-#2 fixes
           "source": "twelvedata:BTC/USD", "available": true, "stale": false,
           "note": "max of provider MONTHLY closes since 2017-08 and current spot - not a curated all-time record",
           "detail": {"basis": "monthly_closes+spot", "coverage_start": "2017-08"}},
-"cofer_gold_share_pct": {"value": null, "unit": "pct", "as_of": null, "source": "none",
-          "available": false, "stale": null, "note": "requires IMF COFER source; not connected"}
+"cofer_gold_share_pct": {"value": 20.1, "unit": "pct", "as_of": "2026-03-31", "source": "imf:IFS",
+          "available": true, "stale": true, "note": "gold's share of TOTAL reserves (IMF IFS) - NOT COFER"}
 ```
 
 And a REAL degradation row (capture #1, before the min_rows fix) — this is precisely the shape any future source failure will take, 61 explicit nulls included:
@@ -245,7 +256,7 @@ And a REAL degradation row (capture #1, before the min_rows fix) — this is pre
 2. DXY → Fed Broad Dollar Index (`usd_broad_index`), never labeled DXY (ICE licensing).
 3. BTC ATH basis = max(provider monthly closes, current spot), coverage start in `detail` — not a curated record. Drawdown is computed against that basis and is ≤ 0 by construction.
 4. `vix_term_state` is categorical: `value` is null (the contract requires numeric values) and the reading lives in `detail.state`; the numeric companion is `vix_term_ratio`.
-5. COFER reserve shares ship `available:false` (new IMF provider = out of scope).
+5. ~~COFER reserve shares ship `available:false` (new IMF provider = out of scope).~~ **Resolved in v3.7.5:** both are connected via `app/sources/imf_reserves.py`. `cofer_ust_share_pct` IS COFER (USD share of allocated FX reserves); `cofer_gold_share_pct` is IMF **IFS** (gold ÷ total reserves), NOT COFER — COFER is FX-only, so the key name stays a labeled historical misnomer. Quarterly (~1-quarter lag), non-scoring, per-item graceful degradation. Requires a deploy-host network policy that allows `imf.org`.
 6. §5 now carries real capture-#2 bytes (metrics block verbatim + envelope); the complete per-point byte contract is committed at `docs/dashboard-feed-capture2.json`. The pre-capture sketch is retained under "5-legacy" for history only.
 7. **`silver_spot` is permanently the labeled SLV-close fallback on the free Twelve Data tier** (XAG/USD needs the Grow plan; XAU/USD works free — confirmed by capture #1). The dashboard's "render prose spot only when source is true spot" rule handles this by design; `gold_silver_ratio` states its `mixed` basis. If a paid TD plan is ever added, true silver spot activates automatically with no code change.
 8. Twelve Data 1-month bars are dated at the month **start** (the current partial bar reads `YYYY-MM-01`), so the `btc` series uses a 35-day stale SLA; `btc_spot` (daily) carries the fresh date.
