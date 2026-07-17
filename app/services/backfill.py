@@ -21,13 +21,21 @@ log = get_logger(__name__)
 
 
 def snapshots_dir() -> Path:
+    # v3.7.3/O-01: the old `.replace('sqlite:///','/',1).lstrip('/')` turned an
+    # ABSOLUTE 4-slash URL (sqlite:////data/bubble.db) into the RELATIVE
+    # 'data/bubble.db' (lstrip ate the leading slash), so snapshots resolved
+    # against CWD (/app/data) instead of the persisted /data volume. Parse the
+    # URL properly so an absolute DB path stays absolute.
+    from sqlalchemy.engine import make_url
+
     settings = get_settings()
-    if settings.db_url.startswith("sqlite:///"):
-        db_path = Path(settings.db_url.replace("sqlite:///", "/", 1).lstrip("/")).resolve()
-        base = db_path.parent
-    else:
-        base = Path("/data")
-    return base / "snapshots"
+    try:
+        url = make_url(settings.db_url)
+        if url.get_backend_name() == "sqlite" and url.database:
+            return Path(url.database).resolve().parent / "snapshots"
+    except Exception as exc:  # any URL surprise falls back to the pinned volume
+        log.warning("snapshots_dir_url_parse_failed", db_url=settings.db_url, error=str(exc)[:120])
+    return Path("/data") / "snapshots"
 
 
 _parquet_ok: bool | None = None

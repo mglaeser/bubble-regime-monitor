@@ -29,6 +29,16 @@ from app.http_client import fetch
 from app.indicators.d3_hyperscaler_fcf import CIKS, HyperscalerReading
 from app.sources import Provenance, SourceError, SourceResult
 
+
+def _minus_one_year(d: date) -> date:
+    """Leap-day-safe prior-year date (v3.7.3/H-04): date.replace(year=...) raises
+    on Feb 29, which would drop the WHOLE D3 indicator if a hyperscaler's fiscal
+    quarter ends on a leap day. Feb 29 -> Feb 28 of the prior year."""
+    try:
+        return d.replace(year=d.year - 1)
+    except ValueError:
+        return d.replace(year=d.year - 1, day=28)
+
 BASE = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 MIN_INTERVAL_S = 0.125  # 8 req/s self-cap
 
@@ -110,7 +120,7 @@ def ttm(facts_list: list[Fact]) -> tuple[float, date] | None:
     prior = [
         f for f in facts_list
         if abs(f.duration - cur.duration) <= 15
-        and abs((cur.end.replace(year=cur.end.year - 1) - f.end).days) <= 20
+        and abs((_minus_one_year(cur.end) - f.end).days) <= 20
     ]
     if not prior:
         return annual.val, annual.end  # cannot difference safely; annual is the honest floor

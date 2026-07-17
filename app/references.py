@@ -747,6 +747,31 @@ CHANGELOG: list[dict[str, str]] = [
         "the re-applied watchdog-unit fix (TimeoutStartSec=3600, KillMode=process) that the "
         "PR-#10 merge race dropped.",
     },
+    {
+        "version": "v3.7.3",
+        "score": "Correctness/safety patches from the 2026-07-17 remediation validation — "
+        "golden fixture BYTE-IDENTICAL (52.43); no methodology change",
+        "notes": "Six code-verified fixes (an external remediation spec was validated finding-by-"
+        "finding against the live code; its headline 'aggregation/alpha drift' was obsolete, but "
+        "these genuine defects survived adversarial verification). (A-03, fail-dangerous) a fired "
+        "non-compensatory override (>=3 of 4 red flags) now WINS the action band even when a "
+        "block is degraded — 'de-risk (data degraded)' instead of being masked as 'suppressed'. "
+        "(B-01/02/07, worst live risk on the Polygon breadth path) refresh_breadth_polygon walked "
+        "`while len(have) < target` and froze the ~210-day window once warm, never fetching a new "
+        "trading day while stamping as_of=today; it now walks back from yesterday every run "
+        "(counting cached days toward the target) so new days are always fetched, and breadth "
+        "as_of is the REAL newest cached trading day so a stall ages honestly through the "
+        "freshness SLA. (A-01/O-06) an unknown-dated reading (stale=None) no longer counts as "
+        "fresh in the coverage gate (every scoring indicator has an SLA -> unknown == "
+        "not-verified-fresh), and a future/clock-skewed as_of is flagged stale instead of "
+        "clamping to age 0. (H-01) a thin hyperscaler basket now sets D3 quality = usable/5 so 1 "
+        "of 5 issuers no longer counts at full weight. (H-04) leap-safe prior-year date in the "
+        "EDGAR TTM (a Feb-29 fiscal quarter end no longer ValueErrors and drops all of D3). "
+        "(O-01) snapshots_dir parses the SQLite URL properly so an absolute DB path keeps its "
+        "leading slash (was resolving parquet snapshots to CWD /app/data instead of /data). "
+        "Nine new tests (tests/test_v373.py); the golden fixture gains realistic observation "
+        "dates so the stricter coverage gate sees it fresh — the 52.43 headline is unchanged.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
