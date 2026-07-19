@@ -114,16 +114,19 @@ def test_b02_breadth_as_of_is_observation_date_not_today(isolated_db, monkeypatc
     from app.models import DailyClose
     from app.sources import breadth
 
-    monkeypatch.setattr(breadth, "sp500_symbols", lambda: ["AAA"])
-    # 200 closes whose NEWEST date is a KNOWN old date, so as_of != today.
+    # v3.7.7/§2.2b: a common date needs >=25 usable symbols, so seed 25 of them
+    # all ending on a KNOWN old date, so as_of is that real date, not today.
     obs = date(2026, 6, 15)
+    syms = [f"S{n:02d}" for n in range(25)]
+    monkeypatch.setattr(breadth, "sp500_symbols", lambda: syms)
     with session_scope() as session:
-        for i in range(200):  # i=199 -> obs itself is the newest
-            session.merge(DailyClose(symbol="AAA", date=obs - timedelta(days=199 - i),
-                                     close=100.0 + i, provider="polygon",
-                                     fetched_at=datetime.now(UTC)))
-    above, counted, obs_date = breadth._breadth_from_daily_close(["AAA"])
-    assert counted == 1 and obs_date == obs
+        for sym in syms:
+            for i in range(200):  # i=199 -> obs itself is the newest
+                session.merge(DailyClose(symbol=sym, date=obs - timedelta(days=199 - i),
+                                         close=100.0 + i, provider="polygon",
+                                         fetched_at=datetime.now(UTC)))
+    above, counted, obs_date = breadth._breadth_from_daily_close(syms)
+    assert counted == 25 and obs_date == obs
 
 
 # ---- A-01/O-06: freshness state — unknown/future dates are not fresh --------

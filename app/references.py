@@ -861,6 +861,38 @@ CHANGELOG: list[dict[str, str]] = [
         "bump + falsification-clock reset + dual-reporting + regenerated golden) and the "
         "frozen_methodology.json single-artifact governance refactor (F-01/L-07).",
     },
+    {
+        "version": "v3.7.7",
+        "score": "(a) GOLDEN: aggregation fixture BYTE-IDENTICAL (52.43). (b) REALIZABLE EFFECT: "
+        "the breadth eligibility fix (§2.2b) is band/coverage-affecting — it changes which "
+        "cross-section date (and therefore whether d1 publishes vs degrades to the Twelve Data "
+        "fallback) on a partially-populated universe; the s5 provisional-lag flag and the FINRA "
+        "rollover-calendar patch change no sub-score value (rollover only ever moved the D2 "
+        "multiplier, and a gap now yields the same conservative 0.6 as no-rollover). (c) "
+        "FREEZE-CLASS: band-affecting patch bundle — no scored constant/weight/anchor/tier/lag "
+        "DEFINITION changed; falsification clock untouched.",
+        "notes": "Final close-out of the v3.7.6 revalidation, each gate with a RED-first test in "
+        "tests/test_revalidation_v377.py (RED on 5ca4500, GREEN after). §2.2b: the breadth common "
+        "cross-section date is now chosen from USABLE constituents (present AND >=200 closes "
+        "through the date), backed by >= MIN_RESOLVED=25 of them — the prior presence count let a "
+        "partially-populated newest day be picked, after which `counted` fell below the floor and "
+        "breadth silently degraded to the weaker fallback; and the removed `else max(date_count)` "
+        "could pick a single-symbol date (MIN_RESOLVED=25 is the existing documented floor, coupled "
+        "to the deferred B-04 raise — no new fraction invented). §2.3: every computed s5 path "
+        "(EBP, BAA-DGS10, HY-OAS) emits {s5_lag: provisional_positional, known_defects: "
+        "[C-01,C-02,C-03]} in its runtime payload, making the deferred positional-lag limitation "
+        "visible (no sub-score/headline change). §3.1: FINRA rollover_confirmed is now "
+        "CALENDAR-aware (rollover_confirmed_calendar) — it requires three genuinely consecutive "
+        "calendar months and returns UNKNOWN (treated as not-confirmed, mult 0.6) on a publication "
+        "gap, so the D2 multiplier (tripwire ii) can no longer flip from mis-spaced positions; the "
+        "positional YoY was already fixed in v3.7.6/C-07. §4.2: the Slickcharts fallback selects "
+        "the table with the MOST single-name weight rows (the holdings table), not merely the first "
+        "with a weight/portfolio column. §4.3: the FINRA month labels ride on a TYPED "
+        "SourceResult.months field instead of a dynamic attribute. Also committed "
+        "docs/frozen_pin_manifest.md (F-01 pin manifest, documentation only — the engine is NOT "
+        "switched to load from it). DEFERRED unchanged: S5 calendar-anchoring v4 (C-01/02/03) and "
+        "the frozen_methodology.json runtime artifact (F-01/L-07 loading + hash guard).",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {

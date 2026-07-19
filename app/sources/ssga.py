@@ -101,23 +101,29 @@ def _top10_from_slickcharts(html: str) -> float:
         tables = pd.read_html(io.StringIO(html), flavor="lxml")
     except (ValueError, ImportError) as exc:
         raise SourceError(f"Slickcharts: no HTML table found ({exc})") from exc
+    # Pick the table with the MOST single-name weight rows (v3.7.7/§4.2): the real
+    # holdings table has ~500 constituents, so an incidental portfolio/performance
+    # table that merely happens to have a "weight"/"portfolio" column can no longer
+    # win over it just by appearing first.
+    best = None  # weights Series of the strongest candidate table
     for df in tables:
         wcol = next((c for c in df.columns
                      if "weight" in str(c).strip().lower()
                      or "portfolio" in str(c).strip().lower()), None)
         if wcol is None:
             continue
-        cleaned = (df[wcol].astype(str).str.replace("%", "", regex=False).str.strip())
+        cleaned = df[wcol].astype(str).str.replace("%", "", regex=False).str.strip()
         weights = pd.to_numeric(cleaned, errors="coerce").dropna()
         # single-name index weights only (no S&P 500 name exceeds ~8%)
         weights = weights[(weights > 0.0) & (weights <= 10.0)]
-        if len(weights) < 10:
-            continue
-        top10 = float(weights.nlargest(10).sum())
-        if not 5.0 < top10 < 80.0:
-            raise SourceError(f"Slickcharts: implausible top-10 sum {top10}")
-        return top10
-    raise SourceError("Slickcharts: no holdings weight column in any table")
+        if len(weights) >= 10 and (best is None or len(weights) > len(best)):
+            best = weights
+    if best is None:
+        raise SourceError("Slickcharts: no holdings weight column in any table")
+    top10 = float(best.nlargest(10).sum())
+    if not 5.0 < top10 < 80.0:
+        raise SourceError(f"Slickcharts: implausible top-10 sum {top10}")
+    return top10
 
 
 def top10_concentration() -> SourceResult:

@@ -162,7 +162,6 @@ def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None
     obs_date is that common date, never a later per-symbol date."""
     wanted = set(symbols)
     by_sym: dict[str, dict[date, float]] = {}
-    date_count: dict[date, int] = {}
     with session_scope() as session:
         rows = session.execute(
             select(DailyClose.symbol, DailyClose.date, DailyClose.close)
@@ -171,13 +170,25 @@ def _breadth_from_daily_close(symbols: list[str]) -> tuple[int, int, date | None
     for sym, d, close in rows:
         if sym in wanted:
             by_sym.setdefault(sym, {})[d] = close
-            date_count[d] = date_count.get(d, 0) + 1
-    if not date_count:
+    if not by_sym:
         return 0, 0, None
-    # common cross-section: the latest date with the required fraction present;
-    # if none reaches the threshold, fall back to the latest available date.
-    eligible = [d for d, c in date_count.items() if c >= MIN_RESOLVED]
-    common_date = max(eligible) if eligible else max(date_count)
+    # Eligibility is by USABLE symbols, not bare presence (v3.7.7/§2.2b): a symbol
+    # is usable on date d only if it has >= 200 closes up to and including d. The
+    # common cross-section date is the LATEST date backed by >= MIN_RESOLVED usable
+    # symbols. Counting mere presence let a partially-populated newest day be
+    # chosen — after which `counted` fell below MIN_RESOLVED and breadth silently
+    # degraded to the Twelve Data fallback — and the old `else max(date_count)`
+    # could select a date backed by a single symbol. (MIN_RESOLVED=25 is the
+    # existing documented floor — coupled to the deferred B-04 raise — so no new
+    # coverage fraction is invented here.)
+    usable_count: dict[date, int] = {}
+    for series in by_sym.values():
+        for d in sorted(series)[199:]:   # only dates with >= 200 closes through them
+            usable_count[d] = usable_count.get(d, 0) + 1
+    eligible = [d for d, c in usable_count.items() if c >= MIN_RESOLVED]
+    if not eligible:
+        return 0, 0, None   # no date has enough usable symbols -> honest TD fallback
+    common_date = max(eligible)
     above = counted = 0
     for series in by_sym.values():
         if common_date not in series:          # absent on the common date -> excluded

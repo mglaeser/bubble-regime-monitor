@@ -82,19 +82,24 @@ class TestPolygonBreadth:
 
         now = datetime.now(UTC)
         base = date(2026, 1, 1)
+        # v3.7.7/§2.2b requires >=25 USABLE symbols to select a common date, so use
+        # 13 rising (above SMA200) + 12 falling (below) = 25 usable, plus CCC (<200).
         with session_scope() as s:
-            # AAA: rising -> above its SMA200; BBB: flat-then-down -> below; CCC: too few closes
-            for i in range(200):
-                s.merge(DailyClose(symbol="AAA", date=base + timedelta(days=i),
-                                   close=100.0 + i, provider="polygon", fetched_at=now))
-                s.merge(DailyClose(symbol="BBB", date=base + timedelta(days=i),
-                                   close=200.0 - i, provider="polygon", fetched_at=now))
+            for n in range(13):
+                for i in range(200):
+                    s.merge(DailyClose(symbol=f"UP{n:02d}", date=base + timedelta(days=i),
+                                       close=100.0 + i, provider="polygon", fetched_at=now))
+            for n in range(12):
+                for i in range(200):
+                    s.merge(DailyClose(symbol=f"DN{n:02d}", date=base + timedelta(days=i),
+                                       close=200.0 - i, provider="polygon", fetched_at=now))
             for i in range(50):
                 s.merge(DailyClose(symbol="CCC", date=base + timedelta(days=i),
                                    close=100.0, provider="polygon", fetched_at=now))
-        above, counted, obs = _breadth_from_daily_close(["AAA", "BBB", "CCC"])
-        assert counted == 2          # CCC excluded (<200 closes)
-        assert above == 1            # only AAA above its 200-DMA
+        syms = [f"UP{n:02d}" for n in range(13)] + [f"DN{n:02d}" for n in range(12)] + ["CCC"]
+        above, counted, obs = _breadth_from_daily_close(syms)
+        assert counted == 25         # CCC excluded (<200 closes); 25 usable counted
+        assert above == 13           # the 13 rising symbols are above their 200-DMA
         assert obs == base + timedelta(days=199)  # newest cached date (v3.7.3/B-02)
 
     def test_binomial_ci_shrinks_with_n(self):

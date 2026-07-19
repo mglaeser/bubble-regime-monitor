@@ -90,6 +90,15 @@ FRESHNESS_SLA_DAYS: dict[str, int] = {
     "d1": 3, "d2": 75, "d3": 100, "d4": 3, "v": 2,
 }
 
+# v3.7.7/§2.3: the s5 t-2 lookup is a POSITIONAL index, not calendar-anchored.
+# Until the S5 v4 (C-01/C-02/C-03) lands, every computed s5 path carries this
+# flag in its runtime payload so the known limitation is visible to consumers.
+# It changes no sub-score and no headline — it is metadata only.
+S5_PROVISIONAL_LAG: dict[str, Any] = {
+    "s5_lag": "provisional_positional",
+    "known_defects": ["C-01", "C-02", "C-03"],
+}
+
 
 def _age_days(as_of_iso: str | None) -> int | None:
     if not as_of_iso:
@@ -293,6 +302,9 @@ class IndicatorOutput:
     state: str | None = None  # machine-readable indicator state where defined
                               # (d4: VALID/VALID_ZERO/FLOOR/INSUFFICIENT_DATA;
                               # s4: COMPUTED/FLOOR); None elsewhere
+    extra: dict[str, Any] | None = None  # extra machine-readable payload fields
+                              # (e.g. s5's provisional-lag flag, v3.7.7/§2.3);
+                              # merged verbatim into payload()
 
     @property
     def age_days(self) -> int | None:
@@ -330,6 +342,8 @@ class IndicatorOutput:
         }
         if self.note:
             out["note"] = self.note
+        if self.extra:
+            out.update(self.extra)   # v3.7.7/§2.3: e.g. {"s5_lag": "provisional_positional"}
         return out
 
 
@@ -749,7 +763,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # FIDELITY quality (v3.3.2): EBP IS the LSSZ credit-sentiment construct.
         indicators["s5"] = IndicatorOutput("s5", round(ebp_t2, 4), sub, False,
                                            "fed_ebp", False, note=s5_note,
-                                           as_of=raw.ebp_as_of, quality=1.0)
+                                           as_of=raw.ebp_as_of, quality=1.0,
+                                           extra=S5_PROVISIONAL_LAG)
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
         # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
@@ -769,7 +784,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # tights) — a usable but low-fidelity substitute.
         indicators["s5"] = IndicatorOutput("s5", spread_t2, sub, False,
                                            "fred_BAA_DGS10", True, note=s5_note,
-                                           as_of=raw.baa_spread_as_of, quality=0.5)
+                                           as_of=raw.baa_spread_as_of, quality=0.5,
+                                           extra=S5_PROVISIONAL_LAG)
     elif raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
         # FALLBACK: HY-OAS t-2 over the (regime-limited) accrued 3yr history.
         oas_t2 = s5_credit.t_minus_2_value(raw.hy_oas_history_bps)
@@ -786,7 +802,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # regime-limited — the weakest usable tier of the s5 chain.
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
                                            "fred_BAMLH0A0HYM2", False, note=s5_note,
-                                           as_of=raw.hy_oas_as_of, quality=0.3)
+                                           as_of=raw.hy_oas_as_of, quality=0.3,
+                                           extra=S5_PROVISIONAL_LAG)
     else:
         indicators["s5"] = IndicatorOutput("s5", None, None, True, "fred_BAMLH0A0HYM2", False,
                                            note="HY OAS unavailable and no persisted history; dropped")
@@ -834,11 +851,23 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # current as the series ever gets, NOT stale. (Data older than the SLA
         # never reaches here; it takes the cached branch below, which reports
         # rollover as unknown.)
-        rolled = d2_margin.rollover_confirmed(raw.margin_balances)
+        # Rollover confirmation is CALENDAR-aware when dated months are available
+        # (v3.7.7/§3.1): on a publication gap the positional [-3:]/[-12:] windows
+        # straddle the hole and could flip the D2 multiplier (0.6<->1.0) from
+        # mis-spaced data. UNKNOWN (None) -> treat as NOT confirmed for the
+        # multiplier, but say so honestly rather than asserting a rollover.
+        if raw.margin_months and len(raw.margin_months) == len(raw.margin_balances):
+            rolled_state = d2_margin.rollover_confirmed_calendar(
+                raw.margin_months, raw.margin_balances)
+        else:
+            rolled_state = d2_margin.rollover_confirmed(raw.margin_balances)
+        rolled = rolled_state is True
         sub = d2_margin.sub_score(yoy, rolled)
         sub_d["d2"] = sub
         mc_in.d2_sub = sub
-        note = "rollover confirmed" if rolled else "no rollover; mult=0.6"
+        note = ("rollover confirmed" if rolled_state is True else
+                "rollover unknown (calendar gap); mult=0.6" if rolled_state is None else
+                "no rollover; mult=0.6")
         if raw.margin_note:
             note = f"{raw.margin_note}; {note}"
         indicators["d2"] = IndicatorOutput("d2", yoy, sub, False, "finra_xlsx", False,

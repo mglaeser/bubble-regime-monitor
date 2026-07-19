@@ -34,3 +34,8 @@ class Provenance:
 class SourceResult:
     value: Any
     provenance: Provenance
+    # Optional per-source metadata (v3.7.7/§4.3): a TYPED field replaces the old
+    # dynamic `result.months = ...` attribute (which only worked because the
+    # dataclass has no slots). Currently populated by the FINRA adapter with the
+    # parallel YYYY-MM month labels for D2's calendar-anchored YoY (C-07).
+    months: list[str] | None = None

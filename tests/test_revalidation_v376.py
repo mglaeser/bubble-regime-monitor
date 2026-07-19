@@ -75,16 +75,19 @@ def _insert_daily(symbol: str, last_day: date, n: int = 205) -> None:
 def test_b07_common_cross_section(isolated_db):
     from app.sources.breadth import _breadth_from_daily_close
 
-    # GOOG has closes through 2026-07-14; MSFT only through 2026-07-10.
-    _insert_daily("GOOG", date(2026, 7, 14))
-    _insert_daily("MSFT", date(2026, 7, 10))
-    above, counted, obs_date = _breadth_from_daily_close(["GOOG", "MSFT"])
+    # 25 constituents have closes through 2026-07-14; LAG only through 2026-07-10.
+    # (>=25 usable is required to select a common date since v3.7.7/§2.2b.)
+    good = [f"G{i:02d}" for i in range(25)]
+    for sym in good:
+        _insert_daily(sym, date(2026, 7, 14))
+    _insert_daily("LAG", date(2026, 7, 10))
+    above, counted, obs_date = _breadth_from_daily_close([*good, "LAG"])
 
     # (i)/(iv) one common date and obs_date IS that date (never a later per-symbol max)
     assert obs_date == date(2026, 7, 14)
-    # (ii)/(iii) MSFT lacks a close on the common date -> excluded from BOTH
-    # numerator and denominator, so only GOOG is counted (v3.7.4 counted BOTH).
-    assert counted == 1
+    # (ii)/(iii) LAG lacks a close on the common date -> excluded from BOTH
+    # numerator and denominator, so only the 25 present constituents are counted.
+    assert counted == 25
     assert 0 <= above <= counted
 
 
