@@ -42,6 +42,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app import methodology as _M
 from app.config import get_settings
 from app.db import session_scope
 from app.engine import judgment, legs
@@ -78,16 +79,9 @@ log = get_logger(__name__)
 
 # Freshness SLAs in days (spec section 3): a reading older than its SLA is
 # served with stale=true. Keys are indicator ids; "v" covers the multiplier.
-FRESHNESS_SLA_DAYS: dict[str, int] = {
-    # s5=45 (v3.7.4/C-04): the S5 PRIMARY input is the Fed Excess Bond Premium,
-    # a MONTHLY series published with a multi-week lag; the old 3-day SLA (a
-    # daily-series value) marked every EBP/BAA-proxy reading stale — and since
-    # v3.7.3/A-01 a stale indicator is excluded from coverage. A monthly SLA
-    # keeps a fresh-as-it-gets EBP month counted. The daily HY-OAS fallback is
-    # rare and simply tolerated a little longer.
-    "s1": 35, "s2": 3, "s3": 3, "s4": 35, "s5": 45,
-    "d1": 3, "d2": 75, "d3": 100, "d4": 3, "v": 2,
-}
+# Freshness SLAs (days): loaded from the frozen artifact. s5=45 because the S5
+# primary (Fed EBP) is monthly; a stale indicator is excluded from coverage.
+FRESHNESS_SLA_DAYS: dict[str, int] = _M.as_dict("freshness_sla_days")
 
 # v3.7.7/§2.3: the s5 t-2 lookup is a POSITIONAL index, not calendar-anchored.
 # Until the S5 v4 (C-01/C-02/C-03) lands, every computed s5 path carries this
@@ -155,7 +149,7 @@ def monthly_baa_spread_bps(
     return pairs, _month_gaps(common)
 
 
-COVERAGE_DROP_THRESHOLD = 1.0 / 3.0  # >1/3 nominal weight lost -> block degraded
+COVERAGE_DROP_THRESHOLD = _M.get_path("coverage", "drop_threshold")  # 1/3
 
 
 def _coverage_gate(indicators: dict[str, Any]) -> dict[str, Any]:
@@ -490,7 +484,7 @@ def gather_inputs() -> RawInputs:
             raw.gsadf_as_of = ndx.provenance.as_of
             gsadf_src_note = (f"Nasdaq-100 via QQQ proxy (short series T={len(gsadf_monthly)}; "
                               f"long history unavailable: {str(exc)[:80]})")
-        out = run_gsadf([math.log(v) for v in gsadf_monthly[-360:]],
+        out = run_gsadf([math.log(v) for v in gsadf_monthly[-_M.get_path("gsadf", "series_months_max"):]],
                         timeout_s=get_settings().gsadf_timeout_s)
         if out:
             raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95

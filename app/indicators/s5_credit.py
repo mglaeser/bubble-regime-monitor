@@ -39,7 +39,9 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
-LAG_OBS_2YR = 504  # ~2 years of business-daily HY OAS observations (LSSZ t-2 horizon)
+from app import methodology as _M
+
+LAG_OBS_2YR = _M.get_path("indicators", "s5", "lag_obs_2yr_daily")  # 504  # ~2 years of business-daily HY OAS observations (LSSZ t-2 horizon)
 
 
 def inverted_percentile(oas_bps: float, history_bps: list[float]) -> float:

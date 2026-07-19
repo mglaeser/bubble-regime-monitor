@@ -38,11 +38,14 @@ from __future__ import annotations
 
 import math
 
+from app import methodology as _M
+
 CONTANGO = "contango"
 FLAT = "flat"
 BACKWARDATION = "backwardation"
 
-MULTIPLIERS = {CONTANGO: 1.00, FLAT: 1.05, BACKWARDATION: 1.15}
+MULTIPLIERS = {k: _M.get_path("indicators", "v", "multipliers", k)
+               for k in (CONTANGO, FLAT, BACKWARDATION)}
 
 
 def state(ratio: float) -> str:
@@ -51,9 +54,9 @@ def state(ratio: float) -> str:
     # the frozen neutral multiplier (1.0) with a provenance note, never mislabels.
     if not math.isfinite(ratio) or ratio <= 0.0:
         raise ValueError(f"invalid VIX/VIX3M ratio: {ratio!r}")
-    if ratio < 0.95:
+    if ratio < _M.get_path("indicators", "v", "contango_below"):
         return CONTANGO
-    if ratio <= 1.0:
+    if ratio <= _M.get_path("indicators", "v", "flat_at_or_below"):
         return FLAT
     return BACKWARDATION
 

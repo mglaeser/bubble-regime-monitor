@@ -40,10 +40,19 @@ def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfO
         from app.config import get_settings
 
         timeout_s = get_settings().gsadf_timeout_s
+    # F-01/L-07: the GSADF constants are loaded from the canonical frozen artifact
+    # and passed to R via the request, so r/gsadf.R does not independently hardcode
+    # them (the R script still keeps the same values as a defensive fallback).
+    from app import methodology as _M
+    params = {
+        "lag": _M.get_path("gsadf", "lag"),
+        "mc_nrep": _M.get_path("gsadf", "mc_nrep"),
+        "mc_seed": _M.get_path("gsadf", "mc_seed"),
+    }
     try:
         proc = subprocess.run(
             ["Rscript", str(R_SCRIPT)],
-            input=json.dumps({"series": monthly_log_prices}),
+            input=json.dumps({"series": monthly_log_prices, "params": params}),
             capture_output=True, text=True, timeout=timeout_s, check=True,
         )
         out = json.loads(proc.stdout.strip())

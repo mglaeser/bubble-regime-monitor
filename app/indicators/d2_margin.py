@@ -38,8 +38,10 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
-ROLLOVER_MULT = 1.0
-NO_ROLLOVER_MULT = 0.6
+from app import methodology as _M
+
+ROLLOVER_MULT = _M.get_path("indicators", "d2", "rollover_mult")
+NO_ROLLOVER_MULT = _M.get_path("indicators", "d2", "no_rollover_mult")
 
 
 def yoy_pct(debit_balances_monthly: list[float]) -> float:
@@ -127,5 +129,6 @@ def rollover_confirmed_calendar(months: list[str], values: list[float]) -> bool 
 
 
 def sub_score(yoy: float, rollover: bool) -> float:
-    base = max(0.0, min(1.0, (yoy - 25.0) / 35.0))
+    base = max(0.0, min(1.0, (yoy - _M.get_path("indicators", "d2", "yoy_anchor"))
+                        / _M.get_path("indicators", "d2", "yoy_span")))
     return base * (ROLLOVER_MULT if rollover else NO_ROLLOVER_MULT)

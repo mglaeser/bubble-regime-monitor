@@ -39,11 +39,13 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
-TIER_HIGH_PP = 150.0
-TIER_MID_PP = 100.0
+from app import methodology as _M
 
-BETA_HIGH = (32.0, 8.0)   # mean 0.80
-BETA_MID = (21.0, 19.0)   # mean 0.525 (GSY 53% crash frequency; Wilson 95% CI [0.38, 0.67])
+TIER_HIGH_PP = _M.get_path("indicators", "s3", "tier_high_pp")
+TIER_MID_PP = _M.get_path("indicators", "s3", "tier_mid_pp")
+
+BETA_HIGH = _M.as_tuple("indicators", "s3", "beta_high")   # (32,8) mean 0.80
+BETA_MID = _M.as_tuple("indicators", "s3", "beta_mid")   # (21,19) mean 0.525
 
 
 def runup_pp(smh_2yr_return_pct: float, spy_2yr_return_pct: float) -> float:
@@ -69,4 +71,6 @@ def baseline_sub_score(runup: float) -> float:
     if t == "mid":
         a, b = BETA_MID
         return a / (a + b)
-    return max(0.0, min(0.30, 0.30 * runup / 100.0))
+    cap = _M.get_path("indicators", "s3", "low_tier_cap")
+    scale = _M.get_path("indicators", "s3", "low_tier_scale_pp")
+    return max(0.0, min(cap, cap * runup / scale))

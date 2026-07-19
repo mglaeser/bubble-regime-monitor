@@ -45,10 +45,12 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
-SUB_EXPLOSIVE_NONCONTESTED = 1.0
-SUB_CV90 = 0.5
-SUB_CONTESTED_OR_STALE = 0.25
-SUB_NULL = 0.05
+from app import methodology as _M
+
+SUB_EXPLOSIVE_NONCONTESTED = _M.get_path("indicators", "s4", "sub_explosive_noncontested")
+SUB_CV90 = _M.get_path("indicators", "s4", "sub_cv90")
+SUB_CONTESTED_OR_STALE = _M.get_path("indicators", "s4", "sub_contested_or_stale")
+SUB_NULL = _M.get_path("indicators", "s4", "sub_null")
 
 
 def sub_score(gsadf_stat: float | None, cv90: float | None, cv95: float | None,

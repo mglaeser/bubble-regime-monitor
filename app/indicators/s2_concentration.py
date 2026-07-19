@@ -33,8 +33,10 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
-BASELINE_LO = 18.0
-BASELINE_HI = 41.0
+from app import methodology as _M
+
+BASELINE_LO = _M.get_path("indicators", "s2", "baseline_lo")
+BASELINE_HI = _M.get_path("indicators", "s2", "baseline_hi")
 
 
 def compute(top10_pct: float, lo: float = BASELINE_LO, hi: float = BASELINE_HI) -> float:
