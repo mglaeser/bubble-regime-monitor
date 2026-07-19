@@ -72,12 +72,55 @@ def yoy_pct_calendar(months: list[str], values: list[float]) -> float:
 
 
 def rollover_confirmed(debit_balances_monthly: list[float]) -> bool:
-    """Two consecutive monthly declines from a trailing-12-month high."""
+    """Two consecutive monthly declines from a trailing-12-month high.
+
+    POSITIONAL — assumes a gap-free monthly series. Prefer
+    rollover_confirmed_calendar when dated months are available (v3.7.7/§3.1)."""
     if len(debit_balances_monthly) < 3:
         return False
     trailing = debit_balances_monthly[-12:]
     peak_idx = max(range(len(trailing)), key=lambda i: trailing[i])
     last3 = debit_balances_monthly[-3:]
+    declines = last3[2] < last3[1] < last3[0]
+    peak_not_latest = peak_idx < len(trailing) - 2
+    return declines and peak_not_latest
+
+
+def _consecutive_months(months: list[str]) -> bool:
+    """True iff the YYYY-MM labels are strictly consecutive calendar months."""
+    def _idx(mm: str) -> int:
+        return int(mm[:4]) * 12 + int(mm[5:7]) - 1
+    idx = [_idx(m) for m in months]
+    return all(b - a == 1 for a, b in zip(idx, idx[1:], strict=False))
+
+
+def rollover_confirmed_calendar(months: list[str], values: list[float]) -> bool | None:
+    """Calendar-aware rollover confirmation (v3.7.7/§3.1).
+
+    The two-consecutive-monthly-declines test is only valid on genuinely
+    consecutive CALENDAR months. On a publication gap, the positional [-3:]/[-12:]
+    windows straddle the hole and can assert a rollover from mis-spaced data,
+    flipping the D2 multiplier (0.6 <-> 1.0 = tripwire ii). Returns:
+      * True/False when the last three months are consecutive (same rule as the
+        positional version, but on the dated tail);
+      * None (UNKNOWN) when the last three present months are NOT consecutive —
+        the caller must NOT confirm a rollover it cannot date."""
+    if len(values) < 3 or len(months) != len(values):
+        return None
+    if not _consecutive_months(months[-3:]):
+        return None  # UNKNOWN: mis-spaced tail, cannot assert a rollover
+    # peak from the last 12 CONSECUTIVE calendar months only (walk back while
+    # months stay contiguous, so a gap earlier never inflates the window).
+    tail_vals = [values[-1]]
+    tail_months = [months[-1]]
+    for m, v in zip(reversed(months[:-1]), reversed(values[:-1]), strict=False):
+        if len(tail_months) >= 12 or not _consecutive_months([m, tail_months[-1]]):
+            break
+        tail_months.append(m)
+        tail_vals.append(v)
+    trailing = list(reversed(tail_vals))
+    peak_idx = max(range(len(trailing)), key=lambda i: trailing[i])
+    last3 = values[-3:]
     declines = last3[2] < last3[1] < last3[0]
     peak_not_latest = peak_idx < len(trailing) - 2
     return declines and peak_not_latest
