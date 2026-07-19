@@ -36,6 +36,8 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
+import math
+
 CONTANGO = "contango"
 FLAT = "flat"
 BACKWARDATION = "backwardation"
@@ -44,6 +46,11 @@ MULTIPLIERS = {CONTANGO: 1.00, FLAT: 1.05, BACKWARDATION: 1.15}
 
 
 def state(ratio: float) -> str:
+    # v3.7.8/§9: VIX/VIX3M is a strictly positive ratio; a non-finite or <=0
+    # value is a data fault, not "contango". Raise so the caller degrades V to
+    # the frozen neutral multiplier (1.0) with a provenance note, never mislabels.
+    if not math.isfinite(ratio) or ratio <= 0.0:
+        raise ValueError(f"invalid VIX/VIX3M ratio: {ratio!r}")
     if ratio < 0.95:
         return CONTANGO
     if ratio <= 1.0:

@@ -93,6 +93,6 @@ def debit_balances() -> SourceResult:
     month labels ride along on the result for the calendar-anchored YoY (C-07)."""
     resp = fetch("finra_xlsx", XLSX_URL)
     values, months, as_of = parse_debit_balances(resp.content)
-    result = SourceResult(values, Provenance(source="finra_xlsx", as_of=as_of))
-    result.months = months  # carried for d2's calendar YoY (v3.7.6/C-07)
-    return result
+    # months carried on the TYPED SourceResult.months field (v3.7.7/§4.3) for
+    # d2's calendar-anchored YoY + rollover (C-07 / §3.1).
+    return SourceResult(values, Provenance(source="finra_xlsx", as_of=as_of), months=months)

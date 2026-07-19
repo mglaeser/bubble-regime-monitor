@@ -861,6 +861,70 @@ CHANGELOG: list[dict[str, str]] = [
         "bump + falsification-clock reset + dual-reporting + regenerated golden) and the "
         "frozen_methodology.json single-artifact governance refactor (F-01/L-07).",
     },
+    {
+        "version": "v3.7.7",
+        "score": "(a) GOLDEN: aggregation fixture BYTE-IDENTICAL (52.43). (b) REALIZABLE EFFECT: "
+        "the breadth eligibility fix (§2.2b) is band/coverage-affecting — it changes which "
+        "cross-section date (and therefore whether d1 publishes vs degrades to the Twelve Data "
+        "fallback) on a partially-populated universe; the s5 provisional-lag flag and the FINRA "
+        "rollover-calendar patch change no sub-score value (rollover only ever moved the D2 "
+        "multiplier, and a gap now yields the same conservative 0.6 as no-rollover). (c) "
+        "FREEZE-CLASS: band-affecting patch bundle — no scored constant/weight/anchor/tier/lag "
+        "DEFINITION changed; falsification clock untouched.",
+        "notes": "Final close-out of the v3.7.6 revalidation, each gate with a RED-first test in "
+        "tests/test_revalidation_v377.py (RED on 5ca4500, GREEN after). §2.2b: the breadth common "
+        "cross-section date is now chosen from USABLE constituents (present AND >=200 closes "
+        "through the date), backed by >= MIN_RESOLVED=25 of them — the prior presence count let a "
+        "partially-populated newest day be picked, after which `counted` fell below the floor and "
+        "breadth silently degraded to the weaker fallback; and the removed `else max(date_count)` "
+        "could pick a single-symbol date (MIN_RESOLVED=25 is the existing documented floor, coupled "
+        "to the deferred B-04 raise — no new fraction invented). §2.3: every computed s5 path "
+        "(EBP, BAA-DGS10, HY-OAS) emits {s5_lag: provisional_positional, known_defects: "
+        "[C-01,C-02,C-03]} in its runtime payload, making the deferred positional-lag limitation "
+        "visible (no sub-score/headline change). §3.1: FINRA rollover_confirmed is now "
+        "CALENDAR-aware (rollover_confirmed_calendar) — it requires three genuinely consecutive "
+        "calendar months and returns UNKNOWN (treated as not-confirmed, mult 0.6) on a publication "
+        "gap, so the D2 multiplier (tripwire ii) can no longer flip from mis-spaced positions; the "
+        "positional YoY was already fixed in v3.7.6/C-07. §4.2: the Slickcharts fallback selects "
+        "the table with the MOST single-name weight rows (the holdings table), not merely the first "
+        "with a weight/portfolio column. §4.3: the FINRA month labels ride on a TYPED "
+        "SourceResult.months field instead of a dynamic attribute. Also committed "
+        "docs/frozen_pin_manifest.md (F-01 pin manifest, documentation only — the engine is NOT "
+        "switched to load from it). DEFERRED unchanged: S5 calendar-anchoring v4 (C-01/02/03) and "
+        "the frozen_methodology.json runtime artifact (F-01/L-07 loading + hash guard).",
+    },
+    {
+        "version": "v3.7.8",
+        "score": "(a) GOLDEN: byte-identical (52.43) — the RNG/percentile pin is a documented "
+        "no-op (default_rng==Generator(PCG64), np.percentile default is 'linear'). (b) REALIZABLE "
+        "EFFECT: the breadth Twelve Data path now synchronizes on ONE common date and drops D1 when "
+        "coverage metadata is missing (was full-quality 1.0), so live D1 coverage can change; the "
+        "VIX/LPPLS finite guards only change behaviour on malformed input (bad data -> neutral V / "
+        "FLOOR D4, never a mislabelled reading). No sub-score value, weight, anchor, tier, or lag "
+        "DEFINITION changed. (c) FREEZE-CLASS: safe patch / provenance / validation / observability "
+        "bundle; no PIN consumed, no v4 item touched.",
+        "notes": "Safe bundle from the v3.7.7 validate-first remediation, each gate RED-first tested "
+        "in tests/test_remediation_v378.py. L-01: LPPLS rejects non-finite confidence (raise) and "
+        "FLOORs on empty/non-finite/non-positive prices, non-finite pos_conf, and pos_conf/count "
+        "mismatch. §9: v_vix.state rejects a non-finite/<=0 ratio and V degrades to the frozen "
+        "neutral 1.0 (never a mislabelled 'contango'); vix_as_of no longer fabricates today. M-01: "
+        "the PCG64 bit generator and 'linear' percentile method are pinned explicitly (identical "
+        "stream/summaries). M-02: the (q1,q3) interquartile INTERVAL is kept as the `iqr` alias and "
+        "q1/q3/iqr_width are added (the IQR proper is the width). B-02/B-06/B-05: the Twelve Data "
+        "breadth sweep stores the REAL last source date; the fallback scores ONE common observation "
+        "date with >= MIN_RESOLVED current constituents; resolved/universe/above/common_date ride on "
+        "structured SourceResult.metadata (the coverage regex is gone) and a metadata gap DROPS D1; "
+        "a partially-written Polygon day is detected by per-date universe count and re-fetched; the "
+        "invalid binomial CI is replaced by worst-case full-universe identification bounds (display "
+        "only, not fed to the score). G-06: a floored GSADF is labelled extra={imputation: "
+        "missing_to_contested_floor}. §24: unknown_red_flags lists red flags whose input was unknown "
+        "this run (observability; red_flag_count and the frozen unknown-as-false rule are unchanged). "
+        "Docs: the stale additive-eps=0.02 claim in aggregate.py corrected to the rescale floor 0.10. "
+        "DEFERRED (operator PINs / v4 / governance, NOT done here): B-04 scored-breadth minimum, "
+        "P-05 instrument policy, D3 non-positive-OCF mapping + min-issuers, B-08 true ATH, LPPLS "
+        "seed, S5 calendar v4 (C-01/02/03), S3 common-calendar returns (P-01/02), CAPE degraded MC "
+        "(V-02), and the frozen_methodology.json runtime artifact (F-01/L-07).",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {

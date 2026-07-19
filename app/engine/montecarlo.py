@@ -104,13 +104,27 @@ class MonteCarloInputs:
     red_flags: RedFlags = field(default_factory=RedFlags)
 
 
+# v3.7.8/M-01: pin the RNG bit generator and percentile interpolation that the
+# seeded reference distribution was produced with. numpy.random.default_rng(seed)
+# IS Generator(PCG64(seed)), and np.percentile defaults to 'linear', so naming
+# them here changes NO draw and NO summary value — it just makes the frozen
+# reproducibility contract explicit (and CI-checkable).
+RNG_ALGORITHM = "PCG64"
+PERCENTILE_METHOD = "linear"
+
+
 @dataclass
 class MonteCarloResult:
     median: float
-    iqr: tuple[float, float]
+    iqr: tuple[float, float]          # v3.7.8/M-02: the (q1, q3) interquartile
+                                      # INTERVAL (kept as the compatibility alias);
+                                      # the IQR proper is the width q3 - q1.
     band_5_95: tuple[float, float]
     n: int
     seed: int
+    q1: float = 0.0
+    q3: float = 0.0
+    iqr_width: float = 0.0
 
 
 def _s_columns(inp: MonteCarloInputs, rng: np.random.Generator, n: int) -> dict[str, np.ndarray]:
@@ -202,10 +216,11 @@ def monte_carlo(
 ) -> MonteCarloResult:
     """Run the seeded, deterministic Monte Carlo and summarize the distribution.
 
-    Same seed => identical median/IQR across runs (vectorized draws with
-    numpy.random.default_rng(seed)).
+    Same seed => identical median/IQR across runs (vectorized draws with the
+    pinned PCG64 bit generator; numpy.random.default_rng(seed) is exactly
+    Generator(PCG64(seed)), so this is the identical stream).
     """
-    rng = np.random.default_rng(seed)
+    rng = np.random.Generator(np.random.PCG64(seed))
     base_s = base_weights_s or BASE_WEIGHTS_S
     base_d = base_weights_d or BASE_WEIGHTS_D
 
@@ -224,10 +239,16 @@ def monte_carlo(
     if inputs.red_flags.override_fired:
         scores = np.maximum(scores, 70.0)
 
+    q1 = float(np.percentile(scores, 25, method=PERCENTILE_METHOD))
+    q3 = float(np.percentile(scores, 75, method=PERCENTILE_METHOD))
     return MonteCarloResult(
         median=float(np.median(scores)),
-        iqr=(float(np.percentile(scores, 25)), float(np.percentile(scores, 75))),
-        band_5_95=(float(np.percentile(scores, 5)), float(np.percentile(scores, 95))),
+        iqr=(q1, q3),
+        band_5_95=(float(np.percentile(scores, 5, method=PERCENTILE_METHOD)),
+                   float(np.percentile(scores, 95, method=PERCENTILE_METHOD))),
         n=n,
         seed=seed,
+        q1=q1,
+        q3=q3,
+        iqr_width=q3 - q1,
     )

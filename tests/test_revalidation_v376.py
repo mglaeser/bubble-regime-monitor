@@ -75,16 +75,19 @@ def _insert_daily(symbol: str, last_day: date, n: int = 205) -> None:
 def test_b07_common_cross_section(isolated_db):
     from app.sources.breadth import _breadth_from_daily_close
 
-    # GOOG has closes through 2026-07-14; MSFT only through 2026-07-10.
-    _insert_daily("GOOG", date(2026, 7, 14))
-    _insert_daily("MSFT", date(2026, 7, 10))
-    above, counted, obs_date = _breadth_from_daily_close(["GOOG", "MSFT"])
+    # 25 constituents have closes through 2026-07-14; LAG only through 2026-07-10.
+    # (>=25 usable is required to select a common date since v3.7.7/§2.2b.)
+    good = [f"G{i:02d}" for i in range(25)]
+    for sym in good:
+        _insert_daily(sym, date(2026, 7, 14))
+    _insert_daily("LAG", date(2026, 7, 10))
+    above, counted, obs_date = _breadth_from_daily_close([*good, "LAG"])
 
     # (i)/(iv) one common date and obs_date IS that date (never a later per-symbol max)
     assert obs_date == date(2026, 7, 14)
-    # (ii)/(iii) MSFT lacks a close on the common date -> excluded from BOTH
-    # numerator and denominator, so only GOOG is counted (v3.7.4 counted BOTH).
-    assert counted == 1
+    # (ii)/(iii) LAG lacks a close on the common date -> excluded from BOTH
+    # numerator and denominator, so only the 25 present constituents are counted.
+    assert counted == 25
     assert 0 <= above <= counted
 
 
@@ -95,15 +98,20 @@ def test_b02_td_fallback_uses_real_cache_date(isolated_db, monkeypatch):
     from app.db import session_scope
     from app.models import BreadthSymbolCache
 
+    # v3.7.8/B-02+B-07: the fallback synchronizes on ONE common date carrying
+    # >= MIN_RESOLVED constituents. Put 28 on the newer date (07-02) so it is the
+    # chosen common date, and its REAL date (not today) is stamped.
     syms = [f"S{i:03d}" for i in range(30)]
     monkeypatch.setattr(breadth, "sp500_symbols", lambda: syms)
     with session_scope() as s:
         for i, sym in enumerate(syms):
             s.merge(BreadthSymbolCache(
-                symbol=sym, as_of=date(2026, 7, 2) if i == 0 else date(2026, 7, 1),
+                symbol=sym, as_of=date(2026, 7, 2) if i < 28 else date(2026, 7, 1),
                 last_close=110.0, sma200=100.0))
     res = breadth._pct_from_td_cache()
-    assert res.provenance.as_of == "2026-07-02"    # newest REAL cache date, not today
+    assert res.provenance.as_of == "2026-07-02"    # newest common date, not today
+    assert res.metadata["common_date"] == "2026-07-02"
+    assert res.metadata["resolved"] == 28 and res.metadata["universe"] == 30
 
 
 def test_b02_polygon_none_obsdate_is_not_today(isolated_db, monkeypatch):
@@ -113,10 +121,11 @@ def test_b02_polygon_none_obsdate_is_not_today(isolated_db, monkeypatch):
         polygon_api_key = "x"
 
     monkeypatch.setattr(breadth, "get_settings", lambda: _S())
-    monkeypatch.setattr(breadth, "sp500_symbols", lambda: ["AAA"])
-    monkeypatch.setattr(breadth, "_breadth_from_daily_close", lambda syms: (10, 30, None))
+    monkeypatch.setattr(breadth, "sp500_symbols", lambda: [f"S{i:03d}" for i in range(30)])
+    monkeypatch.setattr(breadth, "_breadth_from_daily_close", lambda syms: (10, 25, None))
     res = breadth.pct_above_200dma()
     assert res.provenance.as_of is None            # never `or today`
+    assert res.metadata["common_date"] is None
 
 
 # ---- C-07: FINRA YoY is calendar-based, not positional ----------------------

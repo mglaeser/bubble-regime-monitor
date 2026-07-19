@@ -13,7 +13,9 @@ Why geometric (per OECD/JRC Handbook on Constructing Composite Indicators,
 2008): linear/additive aggregation implies full compensability — a calm
 indicator can fully offset an alarming one — which is wrong for a risk gauge.
 The weighted geometric mean makes compensation only partial and penalizes
-imbalance. The eps = 0.02 floor keeps zeros from annihilating the product.
+imbalance. The RESCALE_FLOOR = 0.10 rescale (r(x) = 0.10 + 0.90*x, applied
+BEFORE the product) keeps zeros from annihilating the block — it supersedes the
+original additive-epsilon (eps = 0.02) form, which is no longer used (v3.3.0).
 
 Non-compensatory override (OECD/JRC multi-criteria logic): if >= 3 of the 4
 red flags fire simultaneously -> Score = max(Score, 70).

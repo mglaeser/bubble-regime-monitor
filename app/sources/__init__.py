@@ -8,7 +8,7 @@ as an HTTP 500 (epistemic guardrail #5).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -34,3 +34,13 @@ class Provenance:
 class SourceResult:
     value: Any
     provenance: Provenance
+    # Optional per-source metadata (v3.7.7/§4.3): a TYPED field replaces the old
+    # dynamic `result.months = ...` attribute (which only worked because the
+    # dataclass has no slots). Currently populated by the FINRA adapter with the
+    # parallel YYYY-MM month labels for D2's calendar-anchored YoY (C-07).
+    months: list[str] | None = None
+    # Structured, machine-readable per-source metadata (v3.7.8/B-06): the breadth
+    # adapter carries {resolved, universe, common_date, above, identification_
+    # bounds_pct} here so the consumer NEVER re-parses mathematical data from the
+    # free-text provenance note.
+    metadata: dict[str, Any] = field(default_factory=dict)
