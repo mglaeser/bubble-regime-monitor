@@ -96,6 +96,7 @@ def make_golden_raw_inputs():
         hy_oas_bps=267.0,
         hy_oas_history_bps=oas_history,
         breadth_pct=56.0,
+        breadth_n=503, breadth_universe=503,   # full universe -> d1 quality 1.0 (v3.7.8/B-06)
         margin_balances=[900_000 + i * 40_000 for i in range(13)],  # +53.7%-ish YoY, no rollover
         hyperscalers=[
             HyperscalerReading("MSFT", 0.95, 40.0, 5e9),

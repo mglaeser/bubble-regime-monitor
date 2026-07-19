@@ -43,8 +43,14 @@ def test_score_envelope(client_with_snapshot):
 
     for key in ("headline_median", "iqr", "band_5_95", "action_band", "override_fired",
                 "red_flag_count", "red_flag_detail", "block_S", "block_D", "V",
-                "trend_states", "fast_alarm", "judgment_call"):
+                "trend_states", "fast_alarm", "judgment_call",
+                "q1", "q3", "iqr_width", "unknown_red_flags"):   # v3.7.8/M-02 + §24
         assert key in data, f"missing {key}"
+
+    # v3.7.8/M-02: iqr is the (q1,q3) interval; iqr_width is the IQR proper.
+    assert data["q1"] == data["iqr"][0] and data["q3"] == data["iqr"][1]
+    assert data["iqr_width"] == round(data["iqr"][1] - data["iqr"][0], 2)
+    assert isinstance(data["unknown_red_flags"], list)   # §24 observability
 
     assert set(data["red_flag_detail"]) == {
         "gsadf_explosive_noncontested", "semi_runup_ge_150pp",
@@ -97,7 +103,8 @@ def test_methodology_endpoint(client):
     assert len(d["falsification_criteria"]) == 3
     assert [c["version"] for c in d["changelog"]] == \
         ["v1", "v2", "v3", "v3.0.1", "v3.2.0", "v3.3.0", "v3.3.1", "v3.3.2", "v3.4.0", "v3.5.0",
-         "v3.6.0", "v3.7.0", "v3.7.1", "v3.7.2", "v3.7.3", "v3.7.4", "v3.7.5", "v3.7.6", "v3.7.7"]
+         "v3.6.0", "v3.7.0", "v3.7.1", "v3.7.2", "v3.7.3", "v3.7.4", "v3.7.5", "v3.7.6", "v3.7.7",
+         "v3.7.8"]
     # all framework citations verified in the 2026-07 audit: none unverified, three verified
     assert d["unverified_citations"] == []
     assert len(d["verified_citations"]) == 3

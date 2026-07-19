@@ -82,13 +82,21 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         raise HTTPException(status_code=503, detail="no snapshot computed yet; try POST /api/v1/admin/refresh")
     data = {
         "headline_median": round(snap.median),
+        # v3.7.8/M-02: `iqr` is the (q1,q3) interquartile INTERVAL (kept for
+        # compatibility); `iqr_width` is the IQR proper (q3 - q1).
         "iqr": [round(snap.iqr_lo, 2), round(snap.iqr_hi, 2)],
+        "q1": round(snap.iqr_lo, 2),
+        "q3": round(snap.iqr_hi, 2),
+        "iqr_width": round(snap.iqr_hi - snap.iqr_lo, 2),
         "band_5_95": [round(snap.band5, 2), round(snap.band95, 2)],
         "point_score": round(snap.point_score, 2),
         "action_band": snap.action_band,
         "override_fired": snap.override_fired,
         "red_flag_count": snap.red_flag_count,
         "red_flag_detail": snap.red_flag_detail,
+        # v3.7.8/§24: red flags whose input was unknown this run (observability;
+        # does NOT change red_flag_count / the frozen unknown-as-false rule).
+        "unknown_red_flags": (snap.data_freshness or {}).get("_unknown_red_flags", []),
         "block_S": snap.block_s,
         "block_D": snap.block_d,
         "V": {

@@ -67,6 +67,8 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
+import math
+
 # lppls 0.6.24 filter thresholds — a FLAT dict[str, float] (NOT the older
 # list-of-{"condition_1": {...}} form). Only m/w bounds are overridden; O_min,
 # D_min and the tc-window fractions keep the library's DS-LPPLS defaults
@@ -101,6 +103,11 @@ _RESULT_SENTINEL = "LPPLSCONF:"
 
 
 def sub_score(confidence: float) -> float:
+    # v3.7.8/L-01: a non-finite confidence must never silently become a VALID
+    # sub-score. The callers guard this (the FLOOR path handles bad fits), so a
+    # NaN/inf reaching here is a contract violation -> raise, do not clip.
+    if not math.isfinite(confidence):
+        raise ValueError(f"LPPLS confidence is non-finite: {confidence!r}")
     return max(0.0, min(1.0, confidence))
 
 
@@ -190,7 +197,13 @@ def compute_confidence(daily_closes: list[float]) -> dict:
     # i.e. one endpoint t2 = today (probed against lppls 0.6.24: len(res) == 1).
     tail = daily_closes[-window:]
     time_idx = np.arange(window, dtype=float)
-    price = np.log(np.asarray(tail, dtype=float))
+    # v3.7.8/L-01: prices must be finite and strictly positive before log — a
+    # zero/negative/NaN close would otherwise produce -inf/NaN log-prices and a
+    # non-finite fit. FLOOR instead (auditable), never a silent bad number.
+    arr = np.asarray(tail, dtype=float)
+    if arr.size == 0 or not np.all(np.isfinite(arr)) or np.any(arr <= 0.0):
+        return _floor(n, "non-finite or non-positive price input")
+    price = np.log(arr)
     model = lppls_mod.LPPLS(observations=np.array([time_idx, price]))
 
     # Step 1: raw nested fits (start times shrink toward t2). filter config is
@@ -215,7 +228,10 @@ def compute_confidence(daily_closes: list[float]) -> dict:
     n_eval = len(fits)                       # total fit windows -> drives quality
     if n_eval == 0:
         return _floor(n, "no fit windows produced")
-    value = max(0.0, min(1.0, float(row["pos_conf"])))
+    raw_value = float(row["pos_conf"])
+    if not math.isfinite(raw_value):    # v3.7.8/L-01: a non-finite pos_conf FLOORs
+        return _floor(n, f"non-finite pos_conf: {raw_value!r}")
+    value = max(0.0, min(1.0, raw_value))
     bands = band_fractions(fits)
     # Report the counts on the SAME denominator as `value` (positive-bubble
     # windows, b < 0), so value == n_windows_qualifying / n_windows_positive
@@ -224,6 +240,13 @@ def compute_confidence(daily_closes: list[float]) -> dict:
     schema_note = None
     if pq is not None:
         n_qual, n_pos = pq
+        # v3.7.8/L-01: the reported value MUST equal qualifying/positive on the
+        # same denominator (that is the whole point of computing them together).
+        # A mismatch means the schema shifted under us -> FLOOR, do not publish a
+        # value inconsistent with its own audit counts.
+        expected = 0.0 if n_pos == 0 else n_qual / n_pos
+        if abs(value - expected) > 5e-4:
+            return _floor(n, f"pos_conf/count mismatch: value={value}, expected={expected}")
     else:
         # Schema surprise (v3.7.4/L-08): report the counters as UNKNOWN rather
         # than fabricating n_pos=n_eval / n_qual=round(value*n_eval). The value

@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import calendar
 import math
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -242,7 +241,8 @@ class RawInputs:
     ebp_as_of: str | None = None
 
     breadth_pct: float | None = None
-    breadth_n: int | None = None   # constituents resolved (for d1 quality = n/503)
+    breadth_n: int | None = None   # constituents resolved on the common date
+    breadth_universe: int | None = None  # current-universe denominator (v3.7.8/B-06)
     breadth_source: str = "constituents+twelvedata"
     breadth_note: str | None = None
     breadth_as_of: str | None = None
@@ -369,6 +369,7 @@ class SnapshotData:
     fast_alarm: dict[str, Any]
     freshness: dict[str, str]
     coverage: dict[str, Any]
+    unknown_red_flags: list[str] = field(default_factory=list)  # v3.7.8/§24 (observability)
 
 
 def _track(raw: RawInputs, source: str, fn: Any) -> Any:
@@ -554,15 +555,25 @@ def gather_inputs() -> RawInputs:
 
     r = _track(raw, "breadth", breadth_src.pct_above_200dma)
     if r:
-        raw.breadth_pct, raw.breadth_note = r.value, r.provenance.note
-        # Use the source's REAL observation date (newest cached trading day);
-        # NEVER `or today` (v3.7.6/B-02): if provenance is absent the date stays
-        # None so the coverage gate treats d1 as unverified-fresh, not fresh — a
-        # stalled/frozen breadth window now ages honestly through the SLA.
-        raw.breadth_as_of = r.provenance.as_of
-        raw.breadth_source = r.provenance.source
-        m = re.search(r"breadth from (\d+)", raw.breadth_note or "")  # "breadth from N/503 ..."
-        raw.breadth_n = int(m.group(1)) if m else None
+        # v3.7.8/B-06: read the resolved/universe counts from STRUCTURED metadata,
+        # never by regex-parsing the free-text note (a reworded note must never
+        # change d1's coverage/quality). Missing metadata -> record an error so
+        # d1 drops rather than defaulting to full quality.
+        resolved = r.metadata.get("resolved")
+        universe = r.metadata.get("universe")
+        if not isinstance(resolved, int) or resolved <= 0:
+            raw.gather_errors["breadth"] = "breadth metadata missing resolved count"
+        elif not isinstance(universe, int) or universe <= 0:
+            raw.gather_errors["breadth"] = "breadth metadata missing universe count"
+        else:
+            raw.breadth_pct = float(r.value)
+            raw.breadth_n = resolved
+            raw.breadth_universe = universe
+            raw.breadth_note = r.provenance.note
+            # REAL observation date, NEVER `or today` (v3.7.6/B-02): an absent
+            # date stays None so the coverage gate sees d1 as unverified, not fresh.
+            raw.breadth_as_of = r.provenance.as_of
+            raw.breadth_source = r.provenance.source
 
     r = _track(raw, "finra_xlsx", finra_src.debit_balances)
     if r:
@@ -626,7 +637,10 @@ def gather_inputs() -> RawInputs:
         raw.vix_ratio = r.value
         raw.vix_ratio_source = r.provenance.source
         raw.vix_ratio_fallback = r.provenance.fallback_used
-        raw.vix_as_of = r.provenance.as_of or today
+        # v3.7.8/§9: never fabricate `today` — an unknown source date stays None
+        # (unverified), consistent with the breadth/EBP provenance policy. V is a
+        # multiplier, not a coverage-gated block indicator, so this is display-only.
+        raw.vix_as_of = r.provenance.as_of
     r = _track(raw, "vix_level", vix_src.vix_level)
     if r:
         raw.vix_level = r.value
@@ -734,16 +748,21 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         s4_note = "GSADF not computable this run; contested/stale floor applied"
         if raw.gsadf_note:
             s4_note += f" ({raw.gsadf_note})"
+        # v3.7.8/G-06: the 0.25 that stays in the aggregation on a FLOOR is an
+        # IMPUTATION of missing data to the contested floor, NOT a computed cap.
+        # Label it explicitly so the deferred drop-vs-impute decision is visible.
+        s4_extra = {"imputation": "missing_to_contested_floor"}
     else:
         # Computed successfully. The contested CAP is epistemic policy, not a
         # data-quality problem — a capped-but-measured s4 is a full-quality read.
         s4_state, s4_quality = "COMPUTED", 1.0
         s4_note = raw.gsadf_note or f"GSADF_CONTESTED={str(contested).lower()}"
+        s4_extra = None
     # as_of = the QQQ monthly series GSADF actually ran on (v3.7.1 — was the
     # unrelated semis-series date, a provenance mislabel).
     indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False,
                                        note=s4_note, as_of=raw.gsadf_as_of,
-                                       quality=s4_quality, state=s4_state)
+                                       quality=s4_quality, state=s4_state, extra=s4_extra)
 
     # ---- S5 credit ----
     if raw.ebp_history and len(raw.ebp_history) >= 24:
@@ -809,21 +828,26 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            note="HY OAS unavailable and no persisted history; dropped")
 
     # ---- D1 breadth ----
-    if raw.breadth_pct is not None:
+    if raw.breadth_pct is None or raw.breadth_n is None or raw.breadth_universe is None:
+        # Missing value OR missing coverage metadata -> drop (v3.7.8/B-06): never
+        # let a metadata gap fall through to a full-quality 1.0 reading.
+        note = ("breadth coverage metadata unavailable; dropped"
+                if raw.breadth_pct is not None
+                else "breadth unavailable; dropped, Block D renormalized")
+        indicators["d1"] = IndicatorOutput("d1", None, None, True, raw.breadth_source, False,
+                                           note=note, as_of=raw.breadth_as_of, quality=0.0)
+    else:
         sub = d1_breadth.compute(raw.breadth_pct)
         sub_d["d1"] = sub
         mc_in.breadth_pct = raw.breadth_pct
         path_note = "path=B_constituent_compute"
         d1_note = f"{raw.breadth_note}; {path_note}" if raw.breadth_note else path_note
-        # d1 quality = resolved constituents / 503: a breadth reading from a
-        # partial universe discounts d1's live weight in the coverage gate (6b).
-        d1_quality = min(1.0, raw.breadth_n / 503.0) if raw.breadth_n else 1.0
+        # d1 quality = resolved / CURRENT-universe (v3.7.8/B-06): a breadth reading
+        # from a partial universe discounts d1's live weight in the coverage gate.
+        d1_quality = min(1.0, raw.breadth_n / raw.breadth_universe)
         indicators["d1"] = IndicatorOutput("d1", raw.breadth_pct, sub, False,
                                            raw.breadth_source, False, note=d1_note,
                                            as_of=raw.breadth_as_of, quality=d1_quality)
-    else:
-        indicators["d1"] = IndicatorOutput("d1", None, None, True, raw.breadth_source, False,
-                                           note="breadth unavailable; dropped, Block D renormalized")
 
     # ---- D2 margin ----
     margin_age = _age_days(raw.margin_as_of)
@@ -951,11 +975,16 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             quality=0.0, state=state)
 
     # ---- V multiplier ----
+    # A non-finite/<=0 ratio now raises (v3.7.8/§9); an unknown OR invalid ratio
+    # degrades V to the frozen neutral multiplier 1.0 (unchanged rule), never a
+    # mislabelled "contango" from bad data.
+    v_state, v_mult = "contango", 1.0  # neutral default (unknown/invalid ratio)
     if raw.vix_ratio is not None:
-        v_state = v_vix.state(raw.vix_ratio)
-        v_mult = v_vix.multiplier(raw.vix_ratio)
-    else:
-        v_state, v_mult = "contango", 1.0  # neutral with provenance note
+        try:
+            v_state = v_vix.state(raw.vix_ratio)
+            v_mult = v_vix.multiplier(raw.vix_ratio)
+        except ValueError as exc:
+            log.warning("vix_ratio_invalid", ratio=raw.vix_ratio, error=str(exc))
     mc_in.v_multiplier = v_mult
 
     # ---- red flags ----
@@ -969,6 +998,19 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         index_within_2pct_of_ath=raw.index_within_2pct_of_ath,
     )
     mc_in.red_flags = red_flags
+
+    # v3.7.8/§24: observability for red flags whose INPUT is unknown this run.
+    # The frozen numerical rule is unchanged (unknown -> not-fired, red_flag_count
+    # untouched); this list just makes the epistemic gap visible to the reader.
+    unknown_red_flags: list[str] = []
+    if runup is None:
+        unknown_red_flags.append("semi_runup_ge_150pp")
+    if raw.hy_oas_bps is None or not raw.hy_oas_history_bps:
+        unknown_red_flags.append("hy_oas_widen_gt_100bps")
+    if raw.breadth_pct is None:
+        unknown_red_flags.append("breadth_lt_50_near_ath")
+    if not _s4_ok:
+        unknown_red_flags.append("gsadf_explosive_noncontested")
 
     if not sub_s or not sub_d:
         raise RuntimeError("an entire block is empty — cannot score (all sources down)")
@@ -1005,7 +1047,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                 states["sma200"] = "unknown"
         trend_states[name] = states or {"faber_10mo": "unknown", "sma200": "unknown"}
 
-    ts_state = v_vix.state(raw.vix_ratio) if raw.vix_ratio is not None else "unknown"
+    try:
+        ts_state = v_vix.state(raw.vix_ratio) if raw.vix_ratio is not None else "unknown"
+    except ValueError:
+        ts_state = "unknown"   # v3.7.8/§9: invalid ratio -> unknown, never mislabelled
     alarm = legs.fast_alarm(ts_state, raw.vix_level, raw.spy_daily_closes, raw.skew)
 
     freshness: dict[str, str] = {}
@@ -1036,6 +1081,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         fast_alarm=alarm.as_dict(),
         freshness=freshness,
         coverage=coverage,
+        unknown_red_flags=unknown_red_flags,
     )
 
 
@@ -1094,7 +1140,8 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             judgment_call=call.text,
             judgment_stale=call.stale,
             judgment_error=call.error_class,
-            data_freshness={**data.freshness, "_coverage": data.coverage},
+            data_freshness={**data.freshness, "_coverage": data.coverage,
+                            "_unknown_red_flags": data.unknown_red_flags},
         )
         session.add(snap)
         session.flush()

@@ -893,6 +893,38 @@ CHANGELOG: list[dict[str, str]] = [
         "switched to load from it). DEFERRED unchanged: S5 calendar-anchoring v4 (C-01/02/03) and "
         "the frozen_methodology.json runtime artifact (F-01/L-07 loading + hash guard).",
     },
+    {
+        "version": "v3.7.8",
+        "score": "(a) GOLDEN: byte-identical (52.43) — the RNG/percentile pin is a documented "
+        "no-op (default_rng==Generator(PCG64), np.percentile default is 'linear'). (b) REALIZABLE "
+        "EFFECT: the breadth Twelve Data path now synchronizes on ONE common date and drops D1 when "
+        "coverage metadata is missing (was full-quality 1.0), so live D1 coverage can change; the "
+        "VIX/LPPLS finite guards only change behaviour on malformed input (bad data -> neutral V / "
+        "FLOOR D4, never a mislabelled reading). No sub-score value, weight, anchor, tier, or lag "
+        "DEFINITION changed. (c) FREEZE-CLASS: safe patch / provenance / validation / observability "
+        "bundle; no PIN consumed, no v4 item touched.",
+        "notes": "Safe bundle from the v3.7.7 validate-first remediation, each gate RED-first tested "
+        "in tests/test_remediation_v378.py. L-01: LPPLS rejects non-finite confidence (raise) and "
+        "FLOORs on empty/non-finite/non-positive prices, non-finite pos_conf, and pos_conf/count "
+        "mismatch. §9: v_vix.state rejects a non-finite/<=0 ratio and V degrades to the frozen "
+        "neutral 1.0 (never a mislabelled 'contango'); vix_as_of no longer fabricates today. M-01: "
+        "the PCG64 bit generator and 'linear' percentile method are pinned explicitly (identical "
+        "stream/summaries). M-02: the (q1,q3) interquartile INTERVAL is kept as the `iqr` alias and "
+        "q1/q3/iqr_width are added (the IQR proper is the width). B-02/B-06/B-05: the Twelve Data "
+        "breadth sweep stores the REAL last source date; the fallback scores ONE common observation "
+        "date with >= MIN_RESOLVED current constituents; resolved/universe/above/common_date ride on "
+        "structured SourceResult.metadata (the coverage regex is gone) and a metadata gap DROPS D1; "
+        "a partially-written Polygon day is detected by per-date universe count and re-fetched; the "
+        "invalid binomial CI is replaced by worst-case full-universe identification bounds (display "
+        "only, not fed to the score). G-06: a floored GSADF is labelled extra={imputation: "
+        "missing_to_contested_floor}. §24: unknown_red_flags lists red flags whose input was unknown "
+        "this run (observability; red_flag_count and the frozen unknown-as-false rule are unchanged). "
+        "Docs: the stale additive-eps=0.02 claim in aggregate.py corrected to the rescale floor 0.10. "
+        "DEFERRED (operator PINs / v4 / governance, NOT done here): B-04 scored-breadth minimum, "
+        "P-05 instrument policy, D3 non-positive-OCF mapping + min-issuers, B-08 true ATH, LPPLS "
+        "seed, S5 calendar v4 (C-01/02/03), S3 common-calendar returns (P-01/02), CAPE degraded MC "
+        "(V-02), and the frozen_methodology.json runtime artifact (F-01/L-07).",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {

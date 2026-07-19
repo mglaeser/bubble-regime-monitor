@@ -102,11 +102,20 @@ class TestPolygonBreadth:
         assert above == 13           # the 13 rising symbols are above their 200-DMA
         assert obs == base + timedelta(days=199)  # newest cached date (v3.7.3/B-02)
 
-    def test_binomial_ci_shrinks_with_n(self):
-        from app.sources.breadth import _binomial_ci_pp
+    def test_identification_bounds_widen_with_missing(self):
+        # v3.7.8/B-05: the binomial CI is gone (missingness is not random).
+        # Worst-case full-universe identification bounds instead: at full coverage
+        # they collapse to the point value; more missing -> wider.
+        from app.sources.breadth import _breadth_identification_bounds_pct
 
-        assert _binomial_ci_pp(0.6, 137) > _binomial_ci_pp(0.6, 503)
-        assert _binomial_ci_pp(0.6, 503) == 0.0  # full universe -> no sampling error
+        full = _breadth_identification_bounds_pct(above=300, counted=503, universe=503)
+        assert full == (pytest.approx(300 / 503 * 100), pytest.approx(300 / 503 * 100))
+        lo, hi = _breadth_identification_bounds_pct(above=80, counted=137, universe=503)
+        assert lo == pytest.approx(80 / 503 * 100)              # all missing below
+        assert hi == pytest.approx((80 + 366) / 503 * 100)      # all missing above
+        assert (hi - lo) > 0.0
+        with pytest.raises(ValueError):
+            _breadth_identification_bounds_pct(above=10, counted=5, universe=503)  # above>counted
 
 
 class TestQualityWeightedCoverage:
