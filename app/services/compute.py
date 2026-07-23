@@ -93,6 +93,16 @@ S5_PROVISIONAL_LAG: dict[str, Any] = {
     "known_defects": ["C-01", "C-02", "C-03"],
 }
 
+# PIN-F (2026-07-23 operator decision): the "all-time high" input to the
+# breadth-near-ATH red flag is currently the max of the ADJUSTED SPY closes over
+# the <=900-row provider cache window — NOT a true price-index ATH. Until the
+# approved long-history price-index watermark exists, every snapshot labels the
+# basis honestly. Metadata only; the scored 0.98 rule is unchanged.
+ATH_PROVENANCE: dict[str, Any] = {
+    "ath_basis": "adjusted_spy_provider_window_max",
+    "ath_history_complete": False,
+}
+
 
 def _s5_extra_with_shadow(observations_dated: list[tuple[str, float]] | None,
                           cadence: str, source_tier: str,
@@ -394,6 +404,7 @@ class SnapshotData:
     freshness: dict[str, str]
     coverage: dict[str, Any]
     unknown_red_flags: list[str] = field(default_factory=list)  # v3.7.8/§24 (observability)
+    ath_provenance: dict[str, Any] = field(default_factory=lambda: dict(ATH_PROVENANCE))  # PIN-F label
 
 
 def _track(raw: RawInputs, source: str, fn: Any) -> Any:
@@ -1177,7 +1188,8 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             judgment_stale=call.stale,
             judgment_error=call.error_class,
             data_freshness={**data.freshness, "_coverage": data.coverage,
-                            "_unknown_red_flags": data.unknown_red_flags},
+                            "_unknown_red_flags": data.unknown_red_flags,
+                            "_ath_provenance": data.ath_provenance},
         )
         session.add(snap)
         session.flush()
