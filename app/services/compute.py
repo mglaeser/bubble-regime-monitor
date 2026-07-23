@@ -68,6 +68,7 @@ from app.indicators import (
     s2_concentration,
     s3_semis_gsy,
     s4_gsadf,
+    s5_calendar,
     s5_credit,
     v_vix,
 )
@@ -91,6 +92,27 @@ S5_PROVISIONAL_LAG: dict[str, Any] = {
     "s5_lag": "provisional_positional",
     "known_defects": ["C-01", "C-02", "C-03"],
 }
+
+
+def _s5_extra_with_shadow(observations_dated: list[tuple[str, float]] | None,
+                          cadence: str, source_tier: str,
+                          production_sub: float | None) -> dict[str, Any]:
+    """S5 payload extra: the v3.7.7 provisional-lag contract keys PLUS the PIN-H
+    shadow dual report (calendar-anchored candidate; operator authorization
+    2026-07-23: inactive, included_in_score=false, zero influence on any scored
+    value). A shadow failure must never break scoring (guardrail 5): it degrades
+    to an error note inside the extra instead."""
+    extra: dict[str, Any] = dict(S5_PROVISIONAL_LAG)
+    try:
+        if observations_dated:
+            extra["s5_dual_report"] = s5_calendar.build_dual_report(
+                observations=observations_dated, cadence=cadence,
+                source_tier=source_tier,
+                production_method="provisional_positional",
+                production_sub_score=production_sub)
+    except Exception as exc:
+        extra["s5_dual_report_error"] = str(exc)[:200]
+    return extra
 
 
 def _age_days(as_of_iso: str | None) -> int | None:
@@ -233,6 +255,14 @@ class RawInputs:
     # sentiment construct LSSZ (2017) actually build on; PREFERRED S5 input (v3.3.1).
     ebp_history: list[float] | None = None
     ebp_as_of: str | None = None
+
+    # DATED copies of the three S5 tier histories, feeding ONLY the shadow
+    # calendar-anchoring dual report (s5_calendar; operator PIN-H, 2026-07-23:
+    # inactive candidate). Monthly tiers are month-END dated (C-04 convention).
+    # Never consumed by any scored path.
+    ebp_history_dated: list[tuple[str, float]] | None = None
+    baa_spread_history_dated: list[tuple[str, float]] | None = None
+    hy_oas_history_dated: list[tuple[str, float]] | None = None
 
     breadth_pct: float | None = None
     breadth_n: int | None = None   # constituents resolved on the common date
@@ -514,6 +544,8 @@ def gather_inputs() -> RawInputs:
         ).scalars().all()
         if rows:
             raw.hy_oas_history_bps = [row.oas_bps for row in rows]
+            raw.hy_oas_history_dated = [(row.date.isoformat(), row.oas_bps)
+                                        for row in rows]   # shadow-only (PIN-H)
             raw.hy_oas_bps = rows[-1].oas_bps
             raw.hy_oas_as_of = rows[-1].date.isoformat()
             raw.hy_oas_note = "own history table; FRED 3yr truncation"
@@ -532,6 +564,8 @@ def gather_inputs() -> RawInputs:
         # Age from the reference month's END, not its 1st (v3.7.6/C-04): a monthly
         # series must not read stale on the day its freshest month is published.
         raw.baa_spread_as_of = _month_end_iso(pairs[-1][0])
+        raw.baa_spread_history_dated = [(_month_end_iso(m), v)
+                                        for m, v in pairs]   # shadow-only (PIN-H)
         return [v for _, v in pairs]
 
     sp = _track(raw, "fred_baa_dgs10", _baa_spread)
@@ -543,6 +577,8 @@ def gather_inputs() -> RawInputs:
     ebp = _track(raw, "fed_ebp", fed_ebp_src.fetch_ebp)
     if ebp:
         raw.ebp_history = [v for _, v in ebp]
+        raw.ebp_history_dated = [(_month_end_iso(d[:7]), v)
+                                 for d, v in ebp]   # shadow-only (PIN-H)
         # C-04: EBP is monthly (dated at month start); age s5 from the month END
         # so the freshest published month is not spuriously stale under the SLA.
         raw.ebp_as_of = _month_end_iso(ebp[-1][0][:7])
@@ -777,7 +813,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators["s5"] = IndicatorOutput("s5", round(ebp_t2, 4), sub, False,
                                            "fed_ebp", False, note=s5_note,
                                            as_of=raw.ebp_as_of, quality=1.0,
-                                           extra=S5_PROVISIONAL_LAG)
+                                           extra=_s5_extra_with_shadow(
+                                               raw.ebp_history_dated, "monthly",
+                                               "fed_ebp", sub))
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
         # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
@@ -798,7 +836,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators["s5"] = IndicatorOutput("s5", spread_t2, sub, False,
                                            "fred_BAA_DGS10", True, note=s5_note,
                                            as_of=raw.baa_spread_as_of, quality=0.5,
-                                           extra=S5_PROVISIONAL_LAG)
+                                           extra=_s5_extra_with_shadow(
+                                               raw.baa_spread_history_dated,
+                                               "monthly", "fred_BAA_DGS10", sub))
     elif raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
         # FALLBACK: HY-OAS t-2 over the (regime-limited) accrued 3yr history.
         oas_t2 = s5_credit.t_minus_2_value(raw.hy_oas_history_bps)
@@ -816,7 +856,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         indicators["s5"] = IndicatorOutput("s5", oas_t2, sub, False,
                                            "fred_BAMLH0A0HYM2", False, note=s5_note,
                                            as_of=raw.hy_oas_as_of, quality=0.3,
-                                           extra=S5_PROVISIONAL_LAG)
+                                           extra=_s5_extra_with_shadow(
+                                               raw.hy_oas_history_dated, "daily",
+                                               "fred_BAMLH0A0HYM2", sub))
     else:
         indicators["s5"] = IndicatorOutput("s5", None, None, True, "fred_BAMLH0A0HYM2", False,
                                            note="HY OAS unavailable and no persisted history; dropped")
