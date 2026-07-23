@@ -25,7 +25,13 @@ from app import methodology as M
 # v4 process (version bump + falsification-clock reset + dual-report + regenerated
 # golden), or, for a freeze-scope completion with byte-for-byte-equivalent values,
 # re-pin this hash deliberately with the clocks unchanged.
-EXPECTED_SHA256 = "d9080427830d9e334cfa9187bfa862a690ff7ee2ac3170733f50be36f7e307b9"
+# Re-pinned 2026-07-23 (operator PIN-A decision): metadata-only edit setting
+# _meta.methodology_frozen_at = "2026-07-15". The score-effective tree is
+# byte-identical (scored-tree sha256 be1cd89bfc04f0c50f0035a00df946c96eff5084
+# 3eaa1612693448649b4c2482 before AND after); no version bump, clocks otherwise
+# unchanged. Previous pin: d9080427830d9e334cfa9187bfa862a690ff7ee2ac3170733f
+# 50be36f7e307b9.
+EXPECTED_SHA256 = "0bfb716faec8808e3622ee7012a88d7a954db86274e78dd435cc0509a093415f"
 
 
 def test_sha256_byte_guard():
@@ -52,13 +58,17 @@ def test_loader_rejects_unresolved_pin_in_scored_tree(tmp_path, monkeypatch):
 
 
 def test_pin_allowed_only_in_meta():
-    # the two governance clock dates are intentionally <PIN> in _meta and must NOT
-    # block loading (they are not score-effective).
+    # PIN-A operator decision (2026-07-19 review): methodology_frozen_at is the
+    # date of the last score-effective methodology change (v3.3.2, 2026-07-15).
+    # falsification_tracking_since intentionally REMAINS <PIN> — it may only be
+    # set once a real prospective observation process exists, and must never be
+    # backdated or equated with the freeze date. A remaining _meta <PIN> must
+    # NOT block loading (it is not score-effective).
     meta = M.get_path("_meta")
-    assert meta["methodology_frozen_at"] == "<PIN>"
+    assert meta["methodology_frozen_at"] == "2026-07-15"
     assert meta["falsification_tracking_since"] == "<PIN>"
     assert meta["methodology_version"] == "v3-final"
-    M.frozen_methodology()   # loads without raising despite the _meta PINs
+    M.frozen_methodology()   # loads without raising despite the remaining _meta PIN
 
 
 # ---- IDENTITY / COMPLETENESS: runtime constant == artifact value ------------
