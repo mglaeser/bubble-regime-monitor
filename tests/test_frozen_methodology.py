@@ -32,7 +32,7 @@ from app import methodology as M
 #   0bfb716f... PIN-A: _meta.methodology_frozen_at = "2026-07-15"
 #   86c52c71... governance cleanup: _meta.unresolved_v4_constants adds
 #               S5_EMPIRICAL_CDF_TIE_METHOD = <PIN> (operator H-clarification)
-EXPECTED_SHA256 = "86c52c71a88f5e2cca3ad26e4d82b2afbc87099b6f68fa0ed4373ad020bba96e"
+EXPECTED_SHA256 = "86c52c71a88f5e2cca3ad26e4d82b2afbc87099b6f68fa0ed4373ad020bba96e"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
 
 
 def test_sha256_byte_guard():
