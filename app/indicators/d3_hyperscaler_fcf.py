@@ -41,8 +41,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-GATE_OFF_CAP = 0.30
-GATE_REVENUE_YOY_THRESHOLD = 15.0
+from app import methodology as _M
+
+GATE_OFF_CAP = _M.get_path("indicators", "d3", "gate_off_cap")
+GATE_REVENUE_YOY_THRESHOLD = _M.get_path("indicators", "d3", "gate_revenue_yoy_threshold")
 
 CIKS: dict[str, str] = {
     "MSFT": "0000789019",

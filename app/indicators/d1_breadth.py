@@ -38,9 +38,11 @@ EPISTEMIC GUARDRAILS (verbatim):
 
 from __future__ import annotations
 
-BASELINE_LO = 35.0
-BASELINE_HI = 90.0
-SOFT_FLOOR = 0.05  # breadth never annihilates Block D (post-rescale -> 0.145)
+from app import methodology as _M
+
+BASELINE_LO = _M.get_path("indicators", "d1", "baseline_lo")
+BASELINE_HI = _M.get_path("indicators", "d1", "baseline_hi")
+SOFT_FLOOR = _M.get_path("indicators", "d1", "soft_floor")  # 0.05
 
 
 def compute(pct_above_200dma: float, lo: float = BASELINE_LO, hi: float = BASELINE_HI) -> float:

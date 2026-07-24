@@ -69,13 +69,13 @@ from __future__ import annotations
 
 import math
 
+from app import methodology as _M
+
 # lppls 0.6.24 filter thresholds — a FLAT dict[str, float] (NOT the older
 # list-of-{"condition_1": {...}} form). Only m/w bounds are overridden; O_min,
 # D_min and the tc-window fractions keep the library's DS-LPPLS defaults
 # (O_min=2.5, D_min=0.5, tc_min_days=60, tc_max_days=252, tc_*_frac=0.5).
-FILTER_CONDITIONS: dict[str, float] = {
-    "m_min": 0.0, "m_max": 1.0, "w_min": 4.0, "w_max": 25.0,
-}
+FILTER_CONDITIONS: dict[str, float] = _M.as_dict("indicators", "d4", "filter_conditions")
 
 # Single-endpoint dense-scan parameters (v3.3.2). t2 = the latest close; start
 # times shrink the window from LPPLS_WINDOW_MAX down to LPPLS_SMALLEST_WINDOW
@@ -85,18 +85,17 @@ FILTER_CONDITIONS: dict[str, float] = {
 # against the v3.2 calibration of 675k point-searches ~ 64 s on a dev core,
 # Atom ~8x slower) — inside the 1500 s subprocess timeout with margin. Raise
 # max_searches only after a timed host run.
-LPPLS_WORKERS = 1
-LPPLS_WINDOW_MAX = 750          # longest lookback fitted (trading days)
-LPPLS_SMALLEST_WINDOW = 30      # shortest stable window for a 7-parameter fit
-LPPLS_INNER_INCREMENT = 5       # dt grid step
-LPPLS_MAX_SEARCHES = 15
-LPPLS_MIN_WINDOWS_FULL_QUALITY = 100  # fewer evaluated windows -> quality 0.5
-MIN_CLOSES = 500
+LPPLS_WORKERS = _M.get_path("indicators", "d4", "workers")
+LPPLS_WINDOW_MAX = _M.get_path("indicators", "d4", "window_max")          # 750 trading days
+LPPLS_SMALLEST_WINDOW = _M.get_path("indicators", "d4", "smallest_window")      # 30
+LPPLS_INNER_INCREMENT = _M.get_path("indicators", "d4", "inner_increment")       # 5
+LPPLS_MAX_SEARCHES = _M.get_path("indicators", "d4", "max_searches")
+LPPLS_MIN_WINDOWS_FULL_QUALITY = _M.get_path("indicators", "d4", "min_windows_full_quality")  # 100
+MIN_CLOSES = _M.get_path("indicators", "d4", "min_closes")
 # dt bands (trading days) for the multi-scale diagnostics; long extends to the
 # scan maximum so every fitted window belongs to exactly one band.
-LPPLS_BANDS: tuple[tuple[str, int, int], ...] = (
-    ("short", 30, 63), ("medium", 63, 252), ("long", 252, 750),
-)
+LPPLS_BANDS: tuple[tuple[str, int, int], ...] = tuple(
+    tuple(b) for b in _M.get_path("indicators", "d4", "bands"))
 # Frames the confidence result on the subprocess stdout (lppls prints fit
 # exceptions to stdout, so the result line must be unambiguously identifiable).
 _RESULT_SENTINEL = "LPPLSCONF:"

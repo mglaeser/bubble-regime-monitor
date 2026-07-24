@@ -6,6 +6,13 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app import methodology as _M
+
+
+def _frozen_mc(key: str) -> int:
+    """MC default sourced from the canonical frozen artifact (F-01/L-07)."""
+    return _M.get_path("monte_carlo", key)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -66,10 +73,12 @@ class Settings(BaseSettings):
     sms_daily_minute: int = 0
     sms_max_len: int = 160           # single-SMS GSM-7 ceiling (hard cap)
 
-    # Runtime
+    # Runtime. mc_samples / mc_seed DEFAULT to the canonical frozen artifact
+    # (F-01/L-07) so the runtime MC seed is causally the frozen value; env vars
+    # may still override for operational runs.
     tz: str = "UTC"
-    mc_samples: int = 100_000
-    mc_seed: int = 20260711
+    mc_samples: int = _frozen_mc("samples")
+    mc_seed: int = _frozen_mc("seed")
     db_url: str = "sqlite:////data/bubble.db"
     log_level: str = "INFO"
     gsadf_contested: bool = True

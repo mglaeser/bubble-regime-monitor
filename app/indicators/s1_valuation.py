@@ -43,7 +43,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-BASELINE_WINDOW_YEARS = 30
+from app import methodology as _M
+
+BASELINE_WINDOW_YEARS = _M.get_path("indicators", "s1", "cape_baseline_window_years")
 
 
 def clip01(x: float) -> float:
@@ -66,7 +68,8 @@ def excess_cape_yield(cape: float, real10y_decimal: float) -> float:
 
 def ecy_extremity(ecy_pp: float) -> float:
     """clip((4 - ecy)/4, 0, 1): ECY >= 4 pp => 0, ECY <= 0 pp => 1."""
-    return clip01((4.0 - ecy_pp) / 4.0)
+    cap = _M.get_path("indicators", "s1", "ecy_extremity_cap_pp")
+    return clip01((cap - ecy_pp) / cap)
 
 
 @dataclass
@@ -85,4 +88,5 @@ def compute(cape: float, real10y_decimal: float, monthly_history: list[float],
     ecy = excess_cape_yield(cape, real10y_decimal)
     ext = ecy_extremity(ecy)
     return S1Result(cape=cape, pct=pct, ecy_pp=ecy, ecy_extremity=ext,
-                    sub_score=clip01(0.5 * pct + 0.5 * ext))
+                    sub_score=clip01(_M.get_path("indicators", "s1", "blend_cape_weight") * pct
+                                     + _M.get_path("indicators", "s1", "blend_ecy_weight") * ext))

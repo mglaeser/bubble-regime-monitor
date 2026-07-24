@@ -13,14 +13,21 @@ library(exuber); library(jsonlite)
 
 inp <- fromJSON(file("stdin"))
 y   <- inp$series                      # numeric vector, monthly log prices
-r   <- radf(y, lag = 0)                # minw defaults to 0.01 + 1.8/sqrt(T)
+
+# F-01/L-07: lag / MC_NREP / MC_SEED are supplied by the caller from the canonical
+# frozen_methodology.json so R does not independently own these constants. The
+# literals below are kept ONLY as a defensive fallback if params are absent; the
+# service always passes them.
+GSADF_LAG <- if (!is.null(inp$params$lag))     as.integer(inp$params$lag)     else 0L
+MC_NREP   <- if (!is.null(inp$params$mc_nrep)) as.integer(inp$params$mc_nrep) else 2000L
+MC_SEED   <- if (!is.null(inp$params$mc_seed)) as.integer(inp$params$mc_seed) else 20260711L
+
+r   <- radf(y, lag = GSADF_LAG)        # minw defaults to 0.01 + 1.8/sqrt(T)
 
 # Monte-Carlo CVs are data-independent (function of n + the default minw for that
 # n), so cache them. The cache KEY includes nrep and seed (v3.7.4/G-01): those
 # change the simulated CVs, so a value cached under a different (nrep, seed)
 # must NOT be reused. Changing either constant simply lands a new cache file.
-MC_NREP <- 2000L
-MC_SEED <- 20260711L
 n         <- length(y)
 cache_dir <- Sys.getenv("GSADF_CV_CACHE", "/data/cv_cache")
 cv_path   <- file.path(cache_dir, sprintf("mc_cv_n%d_nrep%d_seed%d.rds", n, MC_NREP, MC_SEED))

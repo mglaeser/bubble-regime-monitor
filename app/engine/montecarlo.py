@@ -46,20 +46,37 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from app import methodology as _M
 from app.engine.aggregate import RESCALE_FLOOR, RedFlags, renormalize
 
-BASE_WEIGHTS_S: dict[str, float] = {"s1": 0.33, "s2": 0.27, "s3": 0.20, "s4": 0.07, "s5": 0.13}
-BASE_WEIGHTS_D: dict[str, float] = {"d1": 0.35, "d2": 0.13, "d3": 0.32, "d4": 0.20}
+# Every score-effective constant is LOADED from the canonical frozen artifact
+# (F-01/L-07) — no hardcoded duplicates remain here.
+BASE_WEIGHTS_S: dict[str, float] = _M.as_dict("aggregation", "block_s_weights")
+BASE_WEIGHTS_D: dict[str, float] = _M.as_dict("aggregation", "block_d_weights")
 
-DIRICHLET_CONCENTRATION = 50.0
+DIRICHLET_CONCENTRATION = _M.get_path("monte_carlo", "dirichlet_concentration")
 
-# alpha ~ U(ALPHA_RANGE), beta = 1 - alpha (spec section 5.3). Restored to the
-# spec range (0.40, 0.60) in v3.3.0: the earlier (0.25, 0.75) widening existed
-# only to reproduce the OLD golden IQR under the additive-epsilon aggregation;
-# with the rescale-then-aggregate scheme the golden fixture is regenerated, so
-# the deliberate spec deviation is no longer needed. A wider range also inflates
-# the IQR/band because asymmetric S^a*D^(1-a) exponent draws skew the product.
-ALPHA_RANGE: tuple[float, float] = (0.40, 0.60)
+# alpha ~ U(ALPHA_RANGE), beta = 1 - alpha (spec section 5.3), (0.40, 0.60).
+ALPHA_RANGE: tuple[float, float] = _M.as_tuple("monte_carlo", "alpha_range")
+
+_MC_SAMPLES = _M.get_path("monte_carlo", "samples")
+_MC_SEED = _M.get_path("monte_carlo", "seed")
+_AR = _M.get_path("monte_carlo", "anchor_ranges")   # MC resampling anchor ranges
+_CAPE_WIN = _M.as_tuple("monte_carlo", "anchor_ranges", "cape_window_years_int")
+_S2_LO = _M.as_tuple("monte_carlo", "anchor_ranges", "s2_lo")
+_S2_HI = _M.as_tuple("monte_carlo", "anchor_ranges", "s2_hi")
+_D1_LO = _M.as_tuple("monte_carlo", "anchor_ranges", "d1_lo")
+_D1_HI = _M.as_tuple("monte_carlo", "anchor_ranges", "d1_hi")
+_D1_FLOOR = _M.get_path("monte_carlo", "anchor_ranges", "d1_soft_floor")
+_S3_BETA_HIGH = _M.as_tuple("monte_carlo", "anchor_ranges", "s3_beta_high")
+_S3_BETA_MID = _M.as_tuple("monte_carlo", "anchor_ranges", "s3_beta_mid")
+_S3_TIER_HIGH_PP = _M.get_path("indicators", "s3", "tier_high_pp")
+_S3_TIER_MID_PP = _M.get_path("indicators", "s3", "tier_mid_pp")
+_S3_LOW_CAP = _M.get_path("indicators", "s3", "low_tier_cap")
+_S3_LOW_SCALE = _M.get_path("indicators", "s3", "low_tier_scale_pp")
+_S1_CAPE_W = _M.get_path("indicators", "s1", "blend_cape_weight")
+_S1_ECY_W = _M.get_path("indicators", "s1", "blend_ecy_weight")
+_S1_BASE_WIN = _M.get_path("indicators", "s1", "cape_baseline_window_years")
 
 
 @dataclass
@@ -132,32 +149,34 @@ def _s_columns(inp: MonteCarloInputs, rng: np.random.Generator, n: int) -> dict[
 
     # s1 — CAPE window resampling (W ~ integers U[20,40]).
     if inp.cape_pct_by_window and inp.s1_ecy_extremity is not None:
-        windows = rng.integers(20, 41, size=n)
-        pct_lookup = np.array([inp.cape_pct_by_window.get(w, np.nan) for w in range(20, 41)])
-        pcts = pct_lookup[windows - 20]
+        windows = rng.integers(_CAPE_WIN[0], _CAPE_WIN[1], size=n)
+        pct_lookup = np.array([inp.cape_pct_by_window.get(w, np.nan)
+                               for w in range(_CAPE_WIN[0], _CAPE_WIN[1])])
+        pcts = pct_lookup[windows - _CAPE_WIN[0]]
         # missing windows fall back to the baseline W=30 percentile
-        baseline = inp.cape_pct_by_window.get(30, float(np.nanmean(pct_lookup)))
+        baseline = inp.cape_pct_by_window.get(_S1_BASE_WIN, float(np.nanmean(pct_lookup)))
         pcts = np.where(np.isnan(pcts), baseline, pcts)
-        cols["s1"] = np.clip(0.5 * pcts + 0.5 * inp.s1_ecy_extremity, 0.0, 1.0)
+        cols["s1"] = np.clip(_S1_CAPE_W * pcts + _S1_ECY_W * inp.s1_ecy_extremity, 0.0, 1.0)
     elif inp.s1_sub is not None:
         cols["s1"] = np.full(n, inp.s1_sub)
 
     # s2 — concentration anchors lo ~ U(16,20), hi ~ U(38,44).
     if inp.top10_pct is not None:
-        lo = rng.uniform(16.0, 20.0, size=n)
-        hi = rng.uniform(38.0, 44.0, size=n)
+        lo = rng.uniform(_S2_LO[0], _S2_LO[1], size=n)
+        hi = rng.uniform(_S2_HI[0], _S2_HI[1], size=n)
         cols["s2"] = np.clip((inp.top10_pct - lo) / (hi - lo), 0.0, 1.0)
     elif inp.s2_sub is not None:
         cols["s2"] = np.full(n, inp.s2_sub)
 
     # s3 — GSY tier: Beta(32,8) / Beta(21,19) / deterministic linear.
     if inp.runup_pp is not None:
-        if inp.runup_pp >= 150.0:
-            cols["s3"] = rng.beta(32.0, 8.0, size=n)
-        elif inp.runup_pp >= 100.0:
-            cols["s3"] = rng.beta(21.0, 19.0, size=n)
+        if inp.runup_pp >= _S3_TIER_HIGH_PP:
+            cols["s3"] = rng.beta(_S3_BETA_HIGH[0], _S3_BETA_HIGH[1], size=n)
+        elif inp.runup_pp >= _S3_TIER_MID_PP:
+            cols["s3"] = rng.beta(_S3_BETA_MID[0], _S3_BETA_MID[1], size=n)
         else:
-            cols["s3"] = np.full(n, float(np.clip(0.30 * inp.runup_pp / 100.0, 0.0, 0.30)))
+            cols["s3"] = np.full(n, float(np.clip(
+                _S3_LOW_CAP * inp.runup_pp / _S3_LOW_SCALE, 0.0, _S3_LOW_CAP)))
     elif inp.s3_sub is not None:
         cols["s3"] = np.full(n, inp.s3_sub)
 
@@ -175,9 +194,9 @@ def _d_columns(inp: MonteCarloInputs, rng: np.random.Generator, n: int) -> dict[
     # routinely reaches the high 80s-90s, so the old hi~U(70,80) clipped normal
     # readings to 0). Soft floor 0.05 so breadth never annihilates the block.
     if inp.breadth_pct is not None:
-        lo = rng.uniform(30.0, 40.0, size=n)
-        hi = rng.uniform(85.0, 95.0, size=n)
-        cols["d1"] = np.maximum(0.05, np.clip((hi - inp.breadth_pct) / (hi - lo), 0.0, 1.0))
+        lo = rng.uniform(_D1_LO[0], _D1_LO[1], size=n)
+        hi = rng.uniform(_D1_HI[0], _D1_HI[1], size=n)
+        cols["d1"] = np.maximum(_D1_FLOOR, np.clip((hi - inp.breadth_pct) / (hi - lo), 0.0, 1.0))
     elif inp.d1_sub is not None:
         cols["d1"] = np.full(n, inp.d1_sub)
 
@@ -209,8 +228,8 @@ def _block(
 
 def monte_carlo(
     inputs: MonteCarloInputs,
-    n: int = 100_000,
-    seed: int = 20260711,
+    n: int = _MC_SAMPLES,
+    seed: int = _MC_SEED,
     base_weights_s: dict[str, float] | None = None,
     base_weights_d: dict[str, float] | None = None,
 ) -> MonteCarloResult:

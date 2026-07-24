@@ -47,21 +47,26 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-# Rescale-then-aggregate floor (UNDP HDI / OECD-JRC style strictly-positive
-# geometric mean). Every sub-score in [0,1] is first mapped to [RESCALE_FLOOR, 1]
-# before the weighted geometric mean, so a single 0-valued indicator can no
-# longer annihilate its block. Replaces the old additive-epsilon (prod(s+eps)-eps)
-# hack, which let one floored indicator silence ~75% of a block. L=0.10 keeps a
-# genuinely low reading meaningfully punitive (a floored indicator still cuts its
-# block to L^w of the otherwise value) while preventing block collapse.
-RESCALE_FLOOR = 0.10
+from app import methodology as _M
 
-RED_FLAG_KEYS = [
-    "gsadf_explosive_noncontested",
-    "semi_runup_ge_150pp",
-    "hy_oas_widen_gt_100bps",
-    "breadth_lt_50_near_ath",
-]
+# All score-effective constants below are LOADED from the canonical frozen
+# artifact (F-01/L-07) — the module no longer hardcodes them. Rescale-then-
+# aggregate floor (UNDP HDI / OECD-JRC style strictly-positive geometric mean):
+# every sub-score in [0,1] is first mapped to [RESCALE_FLOOR, 1] before the
+# weighted geometric mean, so a single 0-valued indicator can no longer
+# annihilate its block. L=0.10 keeps a low reading punitive while preventing
+# collapse (supersedes the old additive-epsilon form).
+RESCALE_FLOOR = _M.get_path("aggregation", "rescale_floor")
+
+_OVERRIDE_MIN_FLAGS = _M.get_path("override", "min_flags")
+_OVERRIDE_TARGET = _M.get_path("override", "target_score")
+_SEMI_RUNUP_GE_PP = _M.get_path("red_flags", "semi_runup_ge_pp")
+_HY_OAS_WIDEN_GT_BPS = _M.get_path("red_flags", "hy_oas_widen_gt_bps")
+_BREADTH_LT_PCT = _M.get_path("red_flags", "breadth_lt_pct")
+_BAND_DERISK_AT = _M.get_path("action_bands", "derisk_at_or_above")
+_BAND_TRIM_AT = _M.get_path("action_bands", "trim_at_or_above")
+
+RED_FLAG_KEYS = list(_M.get_path("red_flags", "keys"))
 
 
 def renormalize(weights: dict[str, float], present: set[str]) -> dict[str, float]:
@@ -150,7 +155,7 @@ class RedFlags:
 
     @property
     def override_fired(self) -> bool:
-        return self.count >= 3
+        return self.count >= _OVERRIDE_MIN_FLAGS
 
     def as_dict(self) -> dict[str, bool]:
         return {
@@ -181,18 +186,18 @@ def evaluate_red_flags(
     """
     flags = RedFlags()
     flags.gsadf_explosive_noncontested = gsadf_explosive_p05 and not gsadf_contested
-    flags.semi_runup_ge_150pp = semi_runup_pp >= 150.0
+    flags.semi_runup_ge_150pp = semi_runup_pp >= _SEMI_RUNUP_GE_PP
     if hy_oas_bps is not None and hy_oas_3yr_tight_bps is not None:
-        flags.hy_oas_widen_gt_100bps = (hy_oas_bps - hy_oas_3yr_tight_bps) > 100.0
+        flags.hy_oas_widen_gt_100bps = (hy_oas_bps - hy_oas_3yr_tight_bps) > _HY_OAS_WIDEN_GT_BPS
     if breadth_pct is not None:
-        flags.breadth_lt_50_near_ath = breadth_pct < 50.0 and index_within_2pct_of_ath
+        flags.breadth_lt_50_near_ath = breadth_pct < _BREADTH_LT_PCT and index_within_2pct_of_ath
     return flags
 
 
 def apply_override(score: float, red_flags: RedFlags) -> float:
     """If >= 3 of the 4 red flags fire simultaneously -> Score = max(Score, 70)."""
     if red_flags.override_fired:
-        return max(score, 70.0)
+        return max(score, _OVERRIDE_TARGET)
     return score
 
 
@@ -204,9 +209,9 @@ def action_band(score: float) -> str:
     alternative false-alarm-tilted band edge of 52 follows theta = 0.4
     motivated by the missing-best-days asymmetry (Estrada 2008, 2009).
     """
-    if score >= 60.0:
+    if score >= _BAND_DERISK_AT:
         return "de-risk"
-    if score >= 45.0:
+    if score >= _BAND_TRIM_AT:
         return "trim"
     return "hold"
 

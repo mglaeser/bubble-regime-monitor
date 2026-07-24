@@ -1,0 +1,142 @@
+{
+  "_meta": {
+    "methodology_version": "v3-final",
+    "methodology_frozen_at": "2026-07-15",
+    "falsification_tracking_since": "<PIN>",
+    "unresolved_v4_constants": {
+      "S5_EMPIRICAL_CDF_TIE_METHOD": "<PIN>",
+      "_note": "Operator H-clarification (2026-07-23): the empirical-CDF tie convention is an explicit methodology constant, not an implementation detail — the shadow study measured a candidate sub-score difference of up to ~0.38 between weak_le and mid_rank on tie-heavy series. It lives under _meta because the loader rejects <PIN> in any score-effective path by design; on S5-v4 activation the approved value moves to indicators.s5 as a real constant."
+    },
+    "_note": "methodology_frozen_at = 2026-07-15 was set by operator decision of record (2026-07-19 review): the last score-effective methodology change was v3.3.2 (commits 0d6c9a0/4bf5c53, 2026-07-15); every later version is 'methodology unchanged'. falsification_tracking_since was never recorded in the codebase (Phase-0 audit) and remains <PIN> until a real prospective observation process exists (first persisted production snapshot + methodology hash + append-only outcome recording); it must not be backdated. Neither field is score-effective; both are excluded from the completeness gate. Every other value below is byte-faithful to the runtime literals as of service_version 3.7.8; the seeded-MC golden headline is 52.43.",
+    "golden_headline": 52.43
+  },
+  "aggregation": {
+    "rescale_floor": 0.10,
+    "score_scale": 100.0,
+    "alpha_baseline": 0.5,
+    "block_s_weights": {"s1": 0.33, "s2": 0.27, "s3": 0.20, "s4": 0.07, "s5": 0.13},
+    "block_d_weights": {"d1": 0.35, "d2": 0.13, "d3": 0.32, "d4": 0.20},
+    "operation_order": [
+      "renormalize_present_weights",
+      "geometric_block_S",
+      "geometric_block_D_raw",
+      "apply_vix_multiplier(D_raw,V)->min(.,1.0)",
+      "combine=100*S^alpha*D^(1-alpha)",
+      "apply_override"
+    ]
+  },
+  "override": {
+    "min_flags": 3,
+    "target_score": 70.0
+  },
+  "action_bands": {
+    "derisk_at_or_above": 60.0,
+    "trim_at_or_above": 45.0,
+    "labels": {"derisk": "de-risk", "trim": "trim", "hold": "hold"}
+  },
+  "red_flags": {
+    "keys": ["gsadf_explosive_noncontested", "semi_runup_ge_150pp",
+             "hy_oas_widen_gt_100bps", "breadth_lt_50_near_ath"],
+    "semi_runup_ge_pp": 150.0,
+    "hy_oas_widen_gt_bps": 100.0,
+    "hy_oas_3yr_tight_lookback_obs": 756,
+    "breadth_lt_pct": 50.0,
+    "index_near_ath_frac": 0.98
+  },
+  "coverage": {
+    "drop_threshold": 0.3333333333333333,
+    "degraded_below_frac": 0.6666666666666667
+  },
+  "monte_carlo": {
+    "samples": 100000,
+    "seed": 20260711,
+    "rng_algorithm": "PCG64",
+    "percentile_method": "linear",
+    "dirichlet_concentration": 50.0,
+    "alpha_range": [0.40, 0.60],
+    "anchor_ranges": {
+      "cape_window_years_int": [20, 41],
+      "s2_lo": [16.0, 20.0],
+      "s2_hi": [38.0, 44.0],
+      "d1_lo": [30.0, 40.0],
+      "d1_hi": [85.0, 95.0],
+      "d1_soft_floor": 0.05,
+      "s3_beta_high": [32.0, 8.0],
+      "s3_beta_mid": [21.0, 19.0]
+    }
+  },
+  "freshness_sla_days": {
+    "s1": 35, "s2": 3, "s3": 3, "s4": 35, "s5": 45,
+    "d1": 3, "d2": 75, "d3": 100, "d4": 3, "v": 2
+  },
+  "quality": {
+    "s1_ecy_only_shim": 0.5,
+    "s4_floor": 0.0,
+    "s4_computed": 1.0,
+    "s5_ebp": 1.0,
+    "s5_baa_dgs10": 0.5,
+    "s5_hy_oas": 0.3,
+    "d4_full": 1.0,
+    "d4_partial": 0.5,
+    "d4_floor": 0.0,
+    "default": 1.0
+  },
+  "indicators": {
+    "s1": {
+      "cape_baseline_window_years": 30,
+      "ecy_extremity_cap_pp": 4.0,
+      "blend_cape_weight": 0.5,
+      "blend_ecy_weight": 0.5,
+      "no_history_shim_cape_threshold": 35.0,
+      "no_history_shim_high": 0.99,
+      "no_history_shim_low": 0.5
+    },
+    "s2": {"baseline_lo": 18.0, "baseline_hi": 41.0},
+    "s3": {
+      "tier_high_pp": 150.0, "tier_mid_pp": 100.0,
+      "beta_high": [32.0, 8.0], "beta_mid": [21.0, 19.0],
+      "low_tier_cap": 0.30, "low_tier_scale_pp": 100.0
+    },
+    "s4": {
+      "sub_explosive_noncontested": 1.0, "sub_cv90": 0.5,
+      "sub_contested_or_stale": 0.25, "sub_null": 0.05
+    },
+    "s5": {
+      "lag_obs_2yr_daily": 504, "lag_obs_monthly": 24,
+      "percentile_convention": "inverted: 1 - #{v<=x}/N"
+    },
+    "d1": {"baseline_lo": 35.0, "baseline_hi": 90.0, "soft_floor": 0.05,
+           "min_resolved_display": 25},
+    "d2": {"yoy_anchor": 25.0, "yoy_span": 35.0,
+           "rollover_mult": 1.0, "no_rollover_mult": 0.6},
+    "d3": {
+      "gate_off_cap": 0.30, "gate_revenue_yoy_threshold": 15.0,
+      "ciks": {"MSFT": "0000789019", "AMZN": "0001018724", "GOOGL": "0001652044",
+               "META": "0001326801", "ORCL": "0001341439"}
+    },
+    "d4": {
+      "filter_conditions": {"m_min": 0.0, "m_max": 1.0, "w_min": 4.0, "w_max": 25.0},
+      "library_defaults_unset_in_code": {
+        "O_min": 2.5, "D_min": 0.5, "tc_min_days": 60, "tc_max_days": 252,
+        "tc_min_frac": 0.5, "tc_max_frac": 0.5,
+        "_note": "DS-LPPLS defaults of lppls==0.6.24 used at runtime (only m/w are overridden). Documented for the freeze; confirm against the pinned library on upgrade."
+      },
+      "workers": 1, "window_max": 750, "smallest_window": 30,
+      "inner_increment": 5, "outer_increment": 1, "max_searches": 15,
+      "min_windows_full_quality": 100, "min_closes": 500,
+      "bands": [["short", 30, 63], ["medium", 63, 252], ["long", 252, 750]]
+    },
+    "v": {
+      "contango_below": 0.95, "flat_at_or_below": 1.0,
+      "multipliers": {"contango": 1.00, "flat": 1.05, "backwardation": 1.15}
+    }
+  },
+  "gsadf": {
+    "lag": 0,
+    "mc_nrep": 2000,
+    "mc_seed": 20260711,
+    "minw_rule": "exuber psy_minw = 0.01 + 1.8/sqrt(T)",
+    "series_months_max": 360,
+    "min_months_documented": 100
+  }
+}
