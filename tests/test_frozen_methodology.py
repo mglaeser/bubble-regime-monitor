@@ -25,13 +25,14 @@ from app import methodology as M
 # v4 process (version bump + falsification-clock reset + dual-report + regenerated
 # golden), or, for a freeze-scope completion with byte-for-byte-equivalent values,
 # re-pin this hash deliberately with the clocks unchanged.
-# Re-pinned 2026-07-23 (operator PIN-A decision): metadata-only edit setting
-# _meta.methodology_frozen_at = "2026-07-15". The score-effective tree is
-# byte-identical (scored-tree sha256 be1cd89bfc04f0c50f0035a00df946c96eff5084
-# 3eaa1612693448649b4c2482 before AND after); no version bump, clocks otherwise
-# unchanged. Previous pin: d9080427830d9e334cfa9187bfa862a690ff7ee2ac3170733f
-# 50be36f7e307b9.
-EXPECTED_SHA256 = "0bfb716faec8808e3622ee7012a88d7a954db86274e78dd435cc0509a093415f"
+# Re-pin history (all metadata-only; the score-effective tree hashed
+# be1cd89bfc04f0c50f0035a00df946c96eff50843eaa1612693448649b4c2482 before and
+# after every re-pin; no version bumps):
+#   d9080427... original F-01 artifact (both clocks <PIN>)
+#   0bfb716f... PIN-A: _meta.methodology_frozen_at = "2026-07-15"
+#   86c52c71... governance cleanup: _meta.unresolved_v4_constants adds
+#               S5_EMPIRICAL_CDF_TIE_METHOD = <PIN> (operator H-clarification)
+EXPECTED_SHA256 = "86c52c71a88f5e2cca3ad26e4d82b2afbc87099b6f68fa0ed4373ad020bba96e"
 
 
 def test_sha256_byte_guard():
@@ -132,6 +133,138 @@ def test_freshness_and_coverage_are_the_artifact():
 
     assert compute.FRESHNESS_SLA_DAYS == M.as_dict("freshness_sla_days")
     assert compute.COVERAGE_DROP_THRESHOLD == M.get_path("coverage", "drop_threshold")
+    # governance cleanup (operator-authorized): the ATH proximity fraction's
+    # single causal source is the artifact — the previous hardcoded 0.98 at the
+    # gather site was the F-01 completeness defect this closes.
+    assert compute._NEAR_ATH_FRAC == M.get_path("red_flags", "index_near_ath_frac")
+
+
+# ---- ANTI-RECURRENCE: no NEW scored-literal collision may appear -----------
+
+# Every numeric literal in the calculation modules whose value equals a scored
+# artifact leaf, pinned as (module, value) -> exact occurrence count. The scan
+# below fails on ANY deviation: a NEW collision (the ATH-defect class) fails
+# immediately, and fixing/removing a ledgered one forces a reviewed ledger
+# update. Classifications (operator-reported 2026-07-23, none authorized for
+# wiring yet except the ATH entry, which is FIXED and therefore absent):
+#
+# GENUINE DUPLICATES of artifact constants (same semantics, awaiting the
+# operator's wiring authorization; wiring any of them is behavior-identical):
+#   compute.py     756.0 x1  red_flags.hy_oas_3yr_tight_lookback_obs (3yr-tights slice)
+#   compute.py      24.0 x7  indicators.s5.lag_obs_monthly (s5 gates + lag_obs args)
+#   compute.py      75.0 x2  freshness_sla_days.d2 (FINRA SLA gate; FRESHNESS_SLA_DAYS
+#                            is already wired IN THIS MODULE but the gate hardcodes 75)
+#   compute.py      20/41 x1 monte_carlo.anchor_ranges.cape_window_years_int (range(20,41))
+#   compute.py      35.0/0.99 + 0.5 (3 of the 5) indicators.s1.no_history_shim_* + blend weights
+#   compute.py      0.5 x1 / 0.3 x1  quality.s5_baa_dgs10 / quality.s5_hy_oas tier literals
+#   montecarlo.py   70.0 x1  override.target_score (np.maximum(scores, 70.0))
+#   aggregate.py    0.5 x2   aggregation.alpha_baseline (combine/deterministic_score defaults)
+#   d4_lppls.py     0.5 x1   quality.d4_partial (_quality shortened-scan tier)
+#   d1_breadth.py   50.0 x1  red_flags.breadth_lt_pct — in red_flag_breadth(), which is
+#                            TEST-ONLY (production uses aggregate's wired constant)
+#
+# COINCIDENTAL COLLISIONS (same value, unrelated semantics — not defects):
+#   compute.py 4.0/5.0: round(x, 4) precisions, YYYY-MM slice indices, smooth=5
+#   compute.py 504.0 x2: the S3/SPY 2-yr TRADING-DAY window (an artifact GAP,
+#                        distinct from s5.lag_obs_2yr_daily which shares the value)
+#   compute.py 252.0: days-per-year display arithmetic
+#   montecarlo.py 5/25/75/95: percentile POINTS (reporting quantiles), not the
+#                        colliding d2/s3 anchors
+#   d2_margin.py 3.0 x5, 4.0/5.0 x2: rollover month-structure constants and
+#                        slice indices (rollover structure is an artifact GAP)
+#   d3_hyperscaler_fcf.py 0.5 x2: the (r-0.5)/0.5 ratio anchors (artifact GAP,
+#                        colliding with unrelated 0.5 leaves)
+KNOWN_COLLISIONS: dict[tuple[str, float], int] = {
+    ("app/engine/aggregate.py", 0.5): 2,
+    ("app/engine/montecarlo.py", 5.0): 1,
+    ("app/engine/montecarlo.py", 25.0): 1,
+    ("app/engine/montecarlo.py", 70.0): 1,
+    ("app/engine/montecarlo.py", 75.0): 1,
+    ("app/engine/montecarlo.py", 95.0): 1,
+    ("app/indicators/d1_breadth.py", 50.0): 1,
+    ("app/indicators/d2_margin.py", 3.0): 5,
+    ("app/indicators/d2_margin.py", 4.0): 2,
+    ("app/indicators/d2_margin.py", 5.0): 2,
+    ("app/indicators/d3_hyperscaler_fcf.py", 0.5): 2,
+    ("app/indicators/d4_lppls.py", 0.5): 1,
+    ("app/services/compute.py", 0.3): 1,
+    ("app/services/compute.py", 0.5): 5,
+    ("app/services/compute.py", 0.99): 1,
+    ("app/services/compute.py", 4.0): 6,
+    ("app/services/compute.py", 5.0): 4,
+    ("app/services/compute.py", 20.0): 1,
+    ("app/services/compute.py", 24.0): 7,
+    ("app/services/compute.py", 35.0): 1,
+    ("app/services/compute.py", 41.0): 1,
+    ("app/services/compute.py", 75.0): 2,
+    ("app/services/compute.py", 252.0): 1,
+    ("app/services/compute.py", 504.0): 2,
+    ("app/services/compute.py", 756.0): 1,
+}
+
+_SCANNED_MODULES = [
+    "app/services/compute.py", "app/engine/aggregate.py",
+    "app/engine/montecarlo.py", "app/engine/gsadf_runner.py",
+    "app/indicators/s1_valuation.py", "app/indicators/s2_concentration.py",
+    "app/indicators/s3_semis_gsy.py", "app/indicators/s4_gsadf.py",
+    "app/indicators/s5_credit.py", "app/indicators/d1_breadth.py",
+    "app/indicators/d2_margin.py", "app/indicators/d3_hyperscaler_fcf.py",
+    "app/indicators/d4_lppls.py", "app/indicators/v_vix.py",
+]
+
+# ubiquitous arithmetic values whose collisions carry no signal
+_TRIVIAL_VALUES = {0.0, 1.0, 2.0, 100.0}
+
+
+def _scored_leaf_values() -> set[float]:
+    values: set[float] = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+        elif isinstance(node, (int, float)) and not isinstance(node, bool):
+            values.add(float(node))
+
+    data = json.loads(M.FROZEN_PATH.read_bytes())
+    walk({k: v for k, v in data.items() if k != "_meta"})
+    return values
+
+
+def test_no_unregistered_scored_literal_collisions():
+    """F-01 anti-recurrence (governance cleanup): AST-scan every calculation
+    module for numeric literals equal to a scored artifact leaf. The exact
+    per-(module, value) occurrence counts are pinned in KNOWN_COLLISIONS with
+    a classification. A NEW collision — the class of defect the hardcoded ATH
+    0.98 belonged to — fails here immediately; so does silently removing one
+    (the ledger must be updated in the same reviewed change)."""
+    import ast
+    from collections import Counter
+    from pathlib import Path
+
+    root = M.FROZEN_PATH.parent
+    leaves = _scored_leaf_values()
+    found: Counter[tuple[str, float]] = Counter()
+    for rel in _SCANNED_MODULES:
+        tree = ast.parse(Path(root, rel).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
+                    and not isinstance(node.value, bool):
+                v = float(node.value)
+                if v in leaves and v not in _TRIVIAL_VALUES:
+                    found[(rel, v)] += 1
+    assert dict(found) == KNOWN_COLLISIONS, (
+        "scored-literal collision ledger drift.\n"
+        f"  new/changed: { {k: c for k, c in found.items() if KNOWN_COLLISIONS.get(k) != c} }\n"
+        f"  missing:     { {k: c for k, c in KNOWN_COLLISIONS.items() if found.get(k) != c} }\n"
+        "A NEW collision means a score-effective literal was hardcoded outside "
+        "the artifact (the ATH-0.98 defect class): wire it via app.methodology "
+        "instead. A resolved one must be removed from the ledger in the same "
+        "reviewed change."
+    )
 
 
 def test_config_mc_defaults_are_the_artifact():

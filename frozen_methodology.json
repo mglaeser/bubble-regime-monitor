@@ -3,6 +3,10 @@
     "methodology_version": "v3-final",
     "methodology_frozen_at": "2026-07-15",
     "falsification_tracking_since": "<PIN>",
+    "unresolved_v4_constants": {
+      "S5_EMPIRICAL_CDF_TIE_METHOD": "<PIN>",
+      "_note": "Operator H-clarification (2026-07-23): the empirical-CDF tie convention is an explicit methodology constant, not an implementation detail — the shadow study measured a candidate sub-score difference of up to ~0.38 between weak_le and mid_rank on tie-heavy series. It lives under _meta because the loader rejects <PIN> in any score-effective path by design; on S5-v4 activation the approved value moves to indicators.s5 as a real constant."
+    },
     "_note": "methodology_frozen_at = 2026-07-15 was set by operator decision of record (2026-07-19 review): the last score-effective methodology change was v3.3.2 (commits 0d6c9a0/4bf5c53, 2026-07-15); every later version is 'methodology unchanged'. falsification_tracking_since was never recorded in the codebase (Phase-0 audit) and remains <PIN> until a real prospective observation process exists (first persisted production snapshot + methodology hash + append-only outcome recording); it must not be backdated. Neither field is score-effective; both are excluded from the completeness gate. Every other value below is byte-faithful to the runtime literals as of service_version 3.7.8; the seeded-MC golden headline is 52.43.",
     "golden_headline": 52.43
   },

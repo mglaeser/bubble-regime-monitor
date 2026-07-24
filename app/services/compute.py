@@ -103,6 +103,12 @@ ATH_PROVENANCE: dict[str, Any] = {
     "ath_history_complete": False,
 }
 
+# Governance cleanup (operator-authorized freeze-scope completion): the ATH
+# proximity fraction is loaded from the canonical artifact — the value is
+# byte-identical to the previous literal, so behavior is unchanged; the
+# ARTIFACT is now its single causal source (F-01).
+_NEAR_ATH_FRAC: float = _M.get_path("red_flags", "index_near_ath_frac")
+
 
 def _s5_extra_with_shadow(observations_dated: list[tuple[str, float]] | None,
                           cadence: str, source_tier: str,
@@ -486,7 +492,7 @@ def gather_inputs() -> RawInputs:
         except Exception:  # noqa: S110 -- optional 2yr-return enrichment; a short series legitimately has none (A-26)
             pass
         closes = raw.spy_daily_closes
-        raw.index_within_2pct_of_ath = closes[-1] >= 0.98 * max(closes)
+        raw.index_within_2pct_of_ath = closes[-1] >= _NEAR_ATH_FRAC * max(closes)
     qqq = _track(raw, "price_QQQ", lambda: _closes("QQQ"))
     if qqq:
         raw.qqq_daily = qqq.value

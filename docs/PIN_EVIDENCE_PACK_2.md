@@ -299,6 +299,14 @@ SHA-256, window counts, runtime, peak RSS. Interpretation and the G0–G3 design
 comparison accompany the table in the session report. No production code path
 was touched; no seed constant was added anywhere.
 
+**Operator G-clarification (2026-07-23, recorded):** the G1 option is to be
+described precisely as the **deterministic reference implementation** — not
+merely "single-process deterministic" — because it may become the scientific
+baseline against which any future parallel implementation (G3 or a repaired
+multiprocessing path) is validated. Any parallel execution model must
+reproduce, or explicitly justify divergence from, the G1 reference output on
+identical input bytes and seed.
+
 ---
 
 ## Committed harnesses (runnable on the production host)

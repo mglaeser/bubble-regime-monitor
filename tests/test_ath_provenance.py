@@ -26,10 +26,12 @@ def test_snapshot_data_carries_ath_provenance():
 
 
 def test_red_flag_rule_untouched():
-    # the scored rule literal and its artifact pin are both still 0.98 —
-    # the label is metadata, not a red-flag change.
+    # governance cleanup: the rule VALUE is still 0.98, but its single causal
+    # source is now the artifact (no hardcoded 0.98 in the gather path).
     from app import methodology as M
     assert M.get_path("red_flags", "index_near_ath_frac") == 0.98
+    assert compute._NEAR_ATH_FRAC == 0.98
     import inspect
     src = inspect.getsource(compute.gather_inputs)
-    assert "0.98 * max(closes)" in src
+    assert "_NEAR_ATH_FRAC * max(closes)" in src
+    assert "0.98" not in src

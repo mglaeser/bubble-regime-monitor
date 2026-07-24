@@ -8,11 +8,16 @@ s5_lag="provisional_positional" + known_defects=[C-01,C-02,C-03]. The calendar
 result is emitted ONLY inside the s5 payload's `s5_dual_report` metadata with
 included_in_score=false.
 
-UNRESOLVED OPERATOR PINS — deliberately NOT in frozen_methodology.json, NOT
-approved, and never to be silently defaulted into scoring:
+UNRESOLVED OPERATOR PINS — NOT approved, never to be silently defaulted into
+scoring:
     S5_MAX_PRIOR_DISTANCE_MONTHLY, S5_MAX_PRIOR_DISTANCE_DAILY,
     S5_MIN_HISTORY_MONTHS, S5_EMPIRICAL_CDF_TIE_METHOD,
     S5_EBP_VINTAGE_POLICY, S5_HISTORICAL_REVISION_POLICY.
+Per the operator's 2026-07-23 H-clarification, S5_EMPIRICAL_CDF_TIE_METHOD is
+recorded in frozen_methodology.json as an explicit <PIN> under
+_meta.unresolved_v4_constants (the tie convention is a methodology constant,
+not an implementation detail — Δsub up to ~0.38 on tie-heavy series); the
+remaining five stay code-side candidates until similarly elevated or pinned.
 CANDIDATE_GRID enumerates the operator's suggested candidates to test.
 SHADOW_DISPLAY_PARAMS is the single labelled parameter set the dual report is
 rendered under; it mirrors production's existing conventions where one exists
