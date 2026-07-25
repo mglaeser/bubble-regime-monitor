@@ -379,6 +379,101 @@ class TestPanelFindingsPR23:
         mg.cmd_calibrate()      # exits nonzero via _fail if it does
 
 
+class TestPanelFindingsRound11:
+    """Four defects the panel found in the gate once full coverage put
+    mandate_gate.py in a reviewed part."""
+
+    def test_escalated_band_may_raise_but_never_lower_severity(self):
+        # the fail-open: band STOP-SHIP + escalated_band MUST-FIX escaped the
+        # blocker gate entirely
+        assert mg.effective_band(
+            {"id": "X", "band": "STOP-SHIP", "escalated_band": "MUST-FIX"}
+        ) == "STOP-SHIP"
+        assert mg.effective_band(
+            {"id": "X", "band": "MUST-FIX", "escalated_band": "STOP-SHIP"}
+        ) == "STOP-SHIP"
+        assert mg.effective_band({"id": "X", "band": "BLOCKER-2"}) == "BLOCKER-2"
+
+    def test_unparseable_escalation_fails_closed(self):
+        with pytest.raises(SystemExit):
+            mg.effective_band({"id": "X", "band": "STOP-SHIP",
+                               "escalated_band": "SEVERE-ISH"})
+
+    def test_dependencies_come_from_arrays_not_the_whole_file(self):
+        deps = mg.declared_dependencies()
+        assert "fastapi" in deps
+        # the project's own name and prose must NOT count as declared
+        assert "bubblegauge" not in deps
+        assert "readme" not in deps
+
+    def _temp_baselines(self, monkeypatch, tmp_path, records):
+        """Temp AUDIT+GOV with a CONSISTENT manifest hash, so these tests
+        exercise the loosening check and not the attestation check (they
+        initially passed for the wrong reason — the hash mismatch raised
+        first, which would have kept passing with the check deleted)."""
+        import hashlib
+        (tmp_path / "audit").mkdir(exist_ok=True)
+        baselines = tmp_path / "audit" / "ratchet-baselines.json"
+        baselines.write_text(json.dumps(
+            {"_meta": {"decision_records": records},
+             "ratchets": {"test_count_floor": 10}}))
+        gov = tmp_path / "governance" / "mandate"
+        gov.mkdir(parents=True, exist_ok=True)
+        (gov / "manifest.json").write_text(json.dumps({
+            "ratchet_baselines_sha256":
+                hashlib.sha256(baselines.read_bytes()).hexdigest()}))
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        monkeypatch.setattr(mg, "measure_ratchets",
+                            lambda: {"test_count_floor": 10})
+
+    def test_loosening_a_ratchet_without_a_decision_record_blocks(
+            self, monkeypatch, tmp_path):
+        self._temp_baselines(monkeypatch, tmp_path, records=[])
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda _p: {"ratchets": {"test_count_floor": 999}})
+        with pytest.raises(SystemExit):
+            mg.cmd_ratchet(measure_only=False)
+
+    def test_a_record_for_a_DIFFERENT_change_does_not_license_this_one(
+            self, monkeypatch, tmp_path):
+        # naming the metric once must not authorise every later loosening
+        self._temp_baselines(monkeypatch, tmp_path, records=[
+            {"metric": "test_count_floor", "change": "460 -> 457 (LOOSENING)"}])
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda _p: {"ratchets": {"test_count_floor": 999}})
+        with pytest.raises(SystemExit):
+            mg.cmd_ratchet(measure_only=False)
+
+    def test_removing_a_ratchet_entirely_blocks(self, monkeypatch):
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda _p: {"ratchets": {"a_gone_floor": 1}})
+        with pytest.raises(SystemExit):
+            mg.cmd_ratchet(measure_only=False)
+
+    def test_a_loosening_recorded_with_its_exact_values_is_permitted(
+            self, monkeypatch, tmp_path):
+        # the honest path stays open when the record matches THIS change
+        self._temp_baselines(monkeypatch, tmp_path, records=[
+            {"metric": "test_count_floor", "change": "999 -> 10 (LOOSENING)"}])
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda _p: {"ratchets": {"test_count_floor": 999}})
+        mg.cmd_ratchet(measure_only=False)      # does not raise
+
+    def test_newly_accepted_blocker_needs_a_decision_record(self, monkeypatch, tmp_path):
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        # base branch accepted nothing; A-02 appears with no _meta naming it
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: {"accepted_open_findings": []}
+                            if "accepted" in p else None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+
 class TestLiveEngagementConsistency:
     def test_live_gate_passes_end_to_end(self):
         # The committed artifacts must satisfy the gate exactly as CI runs it —

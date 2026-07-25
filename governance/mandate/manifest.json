@@ -144,7 +144,7 @@
   "C-40"
  ],
  "constitution_sha256": "18488aa0a480f9707a97a402551d762a343f840adfb791521e7b365a51fd2080",
- "ratchet_baselines_sha256": "e0e1f16f62934d0cfcea91cdcb4b9184244dceda8ef310952a60ed1724c08a2d",
+ "ratchet_baselines_sha256": "46014ab7bbb56dc98c46ced133e9cb8edfca124759f355f600953ef92e91f23d",
  "accepted_residuals_sha256": "d4d753ec199ec5b22dce98e6cce5f3ec153058958d8d2e79cc1a0365a0338baa",
  "attested": "2026-07-25",
  "write_separation": ".github/CODEOWNERS routes governance/, audit/, scripts/ and .github/ to the operator; mandate_gate verifies these hashes every CI run. The attested set includes the gate's authority files (ratchet baselines, accepted residuals) per the 2026-07-25 tamper-test finding.",

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -51,13 +52,26 @@ def effective_band(finding: dict) -> str:
     band constant, so an open FAIL silently escaped the blocker gate). A
     band value must START WITH a known band token; anything unparseable is
     a gate failure, never a silently ignored record."""
-    raw = finding.get("escalated_band") or finding["band"]
-    for band in ALL_BANDS:
-        if str(raw).startswith(band):
-            return band
-    _fail(f"{finding['id']} has unparseable band {raw!r} — a record the "
-          "gate cannot band is a record it cannot gate")
-    raise AssertionError  # unreachable; _fail exits
+    def _parse(raw) -> str | None:
+        for band in ALL_BANDS:
+            if str(raw).startswith(band):
+                return band
+        return None
+
+    base = _parse(finding["band"])
+    if base is None:
+        _fail(f"{finding['id']} has unparseable band {finding['band']!r} — a "
+              "record the gate cannot band is a record it cannot gate")
+    raw_esc = finding.get("escalated_band")
+    if not raw_esc:
+        return base
+    esc = _parse(raw_esc)
+    if esc is None:
+        _fail(f"{finding['id']} has unparseable escalated_band {raw_esc!r}")
+    # Panel finding (PR #23 round 11): the escalated band was taken verbatim,
+    # so `band: STOP-SHIP` + `escalated_band: MUST-FIX` DOWNGRADED a finding
+    # out of the blocker gate. An escalation may only ever raise severity.
+    return min(base, esc, key=ALL_BANDS.index)
 
 
 def _fail(msg: str) -> None:
@@ -72,6 +86,28 @@ def _load(path: Path):
         _fail(f"required artifact missing: {path.relative_to(ROOT)}")
     except json.JSONDecodeError as exc:
         _fail(f"unparseable artifact {path.relative_to(ROOT)}: {exc}")
+
+
+def _base_ref() -> str:
+    return os.environ.get("GITHUB_BASE_REF") or "main"
+
+
+def previous_version(rel_path: str) -> dict | None:
+    """The base branch's copy of a JSON artifact, or None if unavailable.
+
+    Panel finding (PR #23 round 11): the manifest is SELF-authenticating —
+    an agent that edits a register and updates its hash in the same change
+    satisfies every attestation. Detecting a WEAKENING therefore needs a
+    reference point outside the change itself: the base branch."""
+    for ref in (f"origin/{_base_ref()}", _base_ref()):
+        r = subprocess.run(["git", "show", f"{ref}:{rel_path}"],
+                           cwd=ROOT, capture_output=True, text=True)
+        if r.returncode == 0:
+            try:
+                return json.loads(r.stdout)
+            except json.JSONDecodeError:
+                return None
+    return None
 
 
 def _sha256(path: Path) -> str:
@@ -154,6 +190,17 @@ def compute_status() -> dict:
             band_counts[band] += 1
 
     accepted_ids = set(accepted["accepted_open_findings"])
+    prev_acc = previous_version("governance/accepted-residuals.json")
+    if prev_acc:
+        newly = accepted_ids - set(prev_acc.get("accepted_open_findings") or [])
+        if newly:
+            note = json.dumps(accepted.get("_meta", {}))
+            unrecorded = sorted(i for i in newly if i not in note)
+            if unrecorded:
+                _fail("newly accepted blocker-band findings with no decision "
+                      f"record naming them: {unrecorded} — accepting a blocker "
+                      "is an operator decision, and a self-consistent manifest "
+                      "hash is not that decision (§9.1)")
     unaccepted = sorted(set(open_blockers) - accepted_ids)
     if unaccepted:
         _fail(f"open blocker-band findings NOT in the accepted-residuals "
@@ -331,6 +378,34 @@ def cmd_ratchet(measure_only: bool) -> None:
               "ratchet_baselines_sha256 in the same change; loosening is "
               "automatically a finding)")
     baselines = _load(AUDIT / "ratchet-baselines.json")
+    prev = previous_version("audit/ratchet-baselines.json")
+    if prev:
+        records = baselines.get("_meta", {}).get("decision_records", []) or []
+
+        def _recorded(name, old, new) -> bool:
+            # The record must match THIS change, not merely mention the metric
+            # once (own-test finding while fixing round 11: a single historic
+            # record would otherwise license every future loosening of it).
+            for r in records:
+                if r.get("metric") != name:
+                    continue
+                change = str(r.get("change", ""))
+                if str(old) in change and str(new) in change:
+                    return True
+            return False
+
+        for name, old in (prev.get("ratchets") or {}).items():
+            new = baselines["ratchets"].get(name)
+            if new is None:
+                _fail(f"ratchet {name} was REMOVED from the register — "
+                      "deleting a ratchet is the strongest possible loosening")
+            weaker = (new < old) if name.endswith("_floor") else (new > old)
+            if weaker and not _recorded(name, old, new):
+                _fail(f"ratchet {name} was LOOSENED ({old} -> {new}) with no "
+                      "decision record naming it in _meta.decision_records — "
+                      "per §9.1 a loosening requires a recorded decision AND "
+                      "is automatically a finding. Updating the manifest hash "
+                      "in the same change does not substitute for one.")
     errors = []
     for name, base in baselines["ratchets"].items():
         cur = current.get(name)
@@ -430,11 +505,27 @@ def collect_imports(paths) -> set[str]:
 
 
 def declared_dependencies() -> set[str]:
-    """Distribution names declared in pyproject (normalised)."""
-    text = (ROOT / "pyproject.toml").read_text(errors="replace")
+    """Distribution names from pyproject's dependency ARRAYS only.
+
+    Panel finding (PR #23 round 11): scanning the whole file for any quoted
+    bare token treated the project name, descriptions, classifiers and URLs
+    as "declared", so a hallucinated import sharing one of those names was
+    silently accepted as real."""
+    try:
+        import tomllib
+        data = tomllib.loads((ROOT / "pyproject.toml").read_text(errors="replace"))
+    except Exception as exc:                      # unreadable pyproject: fail closed
+        _fail(f"cannot parse pyproject.toml for the dependency check: {exc}")
+    specs: list[str] = []
+    project = data.get("project") or {}
+    specs += list(project.get("dependencies") or [])
+    for extra in (project.get("optional-dependencies") or {}).values():
+        specs += list(extra)
     out = set()
-    for m in re.finditer(r'"([A-Za-z][A-Za-z0-9._-]*)\s*(?:[<>=!~\[]|")', text):
-        out.add(m.group(1).lower().replace("_", "-"))
+    for spec in specs:
+        m = re.match(r"\s*([A-Za-z][A-Za-z0-9._-]*)", str(spec))
+        if m:
+            out.add(m.group(1).lower().replace("_", "-"))
     return out
 
 
