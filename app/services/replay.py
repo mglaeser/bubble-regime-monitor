@@ -45,6 +45,78 @@ S5_GATE_TRADING_DAYS = 60
 
 _S5_TIERS = ("fed_ebp", "fred_BAA_DGS10", "fred_BAMLH0A0HYM2")
 
+
+def _easter_sunday(year: int):
+    """Gregorian Easter (Anonymous/Meeus computus) — pure arithmetic."""
+    from datetime import date as _date
+
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    g = (8 * b + 13) // 25
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7  # noqa: E741 -- canonical computus variable names
+    m = (a + 11 * h + 22 * l) // 451
+    month, day = divmod(h + l - 7 * m + 114, 31)
+    return _date(year, month, day + 1)
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int):
+    from datetime import date as _date
+    from datetime import timedelta as _td
+
+    d = _date(year, month, 1)
+    d += _td(days=(weekday - d.weekday()) % 7)
+    return d + _td(days=7 * (n - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int):
+    import calendar as _cal
+    from datetime import date as _date
+    from datetime import timedelta as _td
+
+    d = _date(year, month, _cal.monthrange(year, month)[1])
+    return d - _td(days=(d.weekday() - weekday) % 7)
+
+
+def us_market_holidays(year: int) -> set:
+    """NYSE full-day holidays (public calendar; pure date arithmetic).
+    Observance: Saturday holidays are observed the preceding Friday EXCEPT
+    New Year's (NYSE stays open at year-end); Sunday holidays the following
+    Monday. One-off special closures (e.g. days of mourning) cannot be
+    derived and remain a documented residual."""
+    from datetime import date as _date
+    from datetime import timedelta as _td
+
+    def observed(d, new_years: bool = False):
+        if d.weekday() == 5:                       # Saturday
+            return None if new_years else d - _td(days=1)
+        if d.weekday() == 6:                       # Sunday
+            return d + _td(days=1)
+        return d
+
+    days = {
+        observed(_date(year, 1, 1), new_years=True),
+        _nth_weekday(year, 1, 0, 3),               # MLK: 3rd Monday of Jan
+        _nth_weekday(year, 2, 0, 3),               # Washington's Birthday
+        _easter_sunday(year) - _td(days=2),        # Good Friday
+        _last_weekday(year, 5, 0),                 # Memorial Day
+        observed(_date(year, 6, 19)),              # Juneteenth
+        observed(_date(year, 7, 4)),               # Independence Day
+        _nth_weekday(year, 9, 0, 1),               # Labor Day
+        _nth_weekday(year, 11, 3, 4),              # Thanksgiving: 4th Thursday
+        observed(_date(year, 12, 25)),             # Christmas
+    }
+    days.discard(None)
+    return days
+
+
+def is_trading_day(d) -> bool:
+    """Mon-Fri and not an NYSE full-day holiday (panel round-2 finding on this
+    PR: plain weekdays let holiday snapshots advance the activation gate)."""
+    return d.weekday() < 5 and d not in us_market_holidays(d.year)
+
 _WS = _M.as_dict("aggregation", "block_s_weights")
 _WD = _M.as_dict("aggregation", "block_d_weights")
 _DROP = _M.get_path("coverage", "drop_threshold")          # 1/3 -> degraded < 2/3
@@ -104,17 +176,17 @@ def _s5_payload(snap: Snapshot) -> dict | None:
 
 
 def s5_tier_sufficiency() -> dict[str, Any]:
-    """Distinct TRADING days (Mon-Fri) of persisted snapshots, overall and per
+    """Distinct TRADING days (Mon-Fri minus NYSE holidays) of persisted snapshots, overall and per
     S5 source tier, against the >=60-day activation window. Per-tier adequacy
     thresholds are an operator decision and deliberately not asserted."""
-    snapshot_weekdays: set = set()
+    snapshot_weekdays: set = set()      # trading days with any snapshot (holidays excluded)
     s5_days: set = set()
     days_by_tier: dict[str, set] = {t: set() for t in _S5_TIERS}
     dual_days: set = set()
     with session_scope() as session:
         for snap in session.execute(select(Snapshot)).scalars():
             d = snap.computed_at.date()
-            if d.weekday() >= 5:
+            if not is_trading_day(d):
                 continue
             snapshot_weekdays.add(d)
             s5 = _s5_payload(snap)
@@ -139,11 +211,11 @@ def s5_tier_sufficiency() -> dict[str, Any]:
         "days_with_dual_report": len(dual_days),
         "days_by_tier": {t: len(s) for t, s in days_by_tier.items()},
         "all_tiers_observed": all(days_by_tier[t] for t in _S5_TIERS),
-        "note": ("gate counts DUAL-REPORT days only; exchange holidays are not "
-                 "excluded from the weekday approximation (extend the window "
-                 "accordingly); per-tier adequacy is an operator decision (not "
-                 "pinned) — 60 days of EBP-only success does not validate "
-                 "fallback behavior"),
+        "note": ("gate counts DUAL-REPORT days on NYSE trading days only "
+                 "(weekends + full-day exchange holidays excluded; one-off "
+                 "special closures are a documented residual); per-tier "
+                 "adequacy is an operator decision (not pinned) — 60 days of "
+                 "EBP-only success does not validate fallback behavior"),
     }
 
 

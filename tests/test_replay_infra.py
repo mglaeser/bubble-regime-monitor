@@ -139,9 +139,26 @@ class TestRM2Sufficiency:
                     added += 1
                 d += timedelta(days=1)
         out = s5_tier_sufficiency()
-        assert out["snapshot_weekdays_observed"] == 60
+        # the 60-weekday span from Mon 2026-01-05 contains TWO NYSE holidays
+        # (MLK 2026-01-19, Washington's Birthday 2026-02-16) which must NOT
+        # count as trading days (panel round-2 finding)
+        assert out["snapshot_weekdays_observed"] == 58
         assert out["gate_day_count"] == 0                    # no dual reports -> no progress
         assert out["days_remaining_to_gate"] == 60
+
+    def test_nyse_holiday_calendar(self):
+        from datetime import date
+
+        from app.services.replay import is_trading_day, us_market_holidays
+
+        h = us_market_holidays(2026)
+        assert len(h) == 10
+        assert date(2026, 4, 3) in h                # Good Friday via computus
+        assert date(2026, 7, 3) in h                # July 4 2026 is a Saturday -> observed Friday
+        assert not is_trading_day(date(2026, 11, 26))   # Thanksgiving
+        assert not is_trading_day(date(2026, 7, 4))     # Saturday anyway
+        assert is_trading_day(date(2026, 7, 6))         # ordinary Monday
+        assert date(2027, 7, 5) in us_market_holidays(2027)   # Sun -> observed Monday
 
 
 class TestRM4Policies:
