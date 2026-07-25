@@ -58,7 +58,6 @@ def _write_minimal_engagement(root: Path, *, pass_has_control: bool,
                               blocker_accepted: bool,
                               structured_control: bool = True,
                               escalated_band: str | None = None):
-    import hashlib
     (root / "audit").mkdir()
     gov = root / "governance" / "mandate"
     gov.mkdir(parents=True)
@@ -70,7 +69,8 @@ def _write_minimal_engagement(root: Path, *, pass_has_control: bool,
         {"catalogue_version": "t", "registered_check_count": 2, "checks": checks}))
     control = None
     if pass_has_control:
-        control = ({"mechanism": "ci", "demonstrated": "blocked seeded defect"}
+        control = ({"mechanism": "blocking CI job runs the gate every change",
+                    "demonstrated": "observed blocking a seeded defect"}
                    if structured_control else "ci")
     a02 = {"id": "A-02", "band": "STOP-SHIP", "priority": 10, "verdict": "FAIL"}
     if escalated_band is not None:
@@ -90,15 +90,31 @@ def _write_minimal_engagement(root: Path, *, pass_has_control: bool,
     (root / "governance" / "mandate.md").write_text("combined\n")
     (gov / "part1.md").write_text("mandate\n")
 
+    _reattest(root, required=["A-01", "A-02"])
+
+
+def _reattest(root: Path, required=None):
+    """Recompute the manifest hashes (and optionally the pinned universe) so a
+    test can exercise ONE guard without tripping the attestation first."""
+    import hashlib
+
     def _sha(p: Path) -> str:
         return hashlib.sha256(p.read_bytes()).hexdigest()
-    (gov / "manifest.json").write_text(json.dumps({
-        "part1_sha256": _sha(gov / "part1.md"),
+    mpath = root / "governance" / "mandate" / "manifest.json"
+    m = json.loads(mpath.read_text()) if mpath.exists() else {}
+    if required is not None:
+        m["required_check_ids"] = required
+    m.update({
+        "part1_sha256": _sha(root / "governance" / "mandate" / "part1.md"),
         "constitution_sha256": _sha(root / "governance" / "constitution.md"),
         "combined_mandate_sha256": _sha(root / "governance" / "mandate.md"),
         "ratchet_baselines_sha256": _sha(root / "audit" / "ratchet-baselines.json"),
         "accepted_residuals_sha256": _sha(
-            root / "governance" / "accepted-residuals.json")}))
+            root / "governance" / "accepted-residuals.json"),
+        "findings_sha256": _sha(root / "audit" / "03-findings.json"),
+        "check_catalogue_sha256": _sha(root / "audit" / "00-check-catalogue.json"),
+    })
+    mpath.write_text(json.dumps(m))
 
 
 class TestStatusInvariants:
@@ -157,6 +173,7 @@ class TestStatusInvariants:
         f = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
         f[1]["escalated_band"] = "SEVERE-ISH"
         (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(f))
+        _reattest(tmp_path)
         with pytest.raises(SystemExit):
             mg.compute_status()
 
@@ -181,6 +198,119 @@ class TestStatusInvariants:
         reg.write_text(json.dumps(d))
         with pytest.raises(SystemExit):
             mg.compute_status()
+
+
+class TestVerdictAndDenominatorGuards:
+    """Adversarial audit 2026-07-25: the gate trusted its inputs' domain."""
+
+    def _patched(self, monkeypatch, tmp_path, **kw):
+        _write_minimal_engagement(tmp_path, **kw)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+
+    @pytest.mark.parametrize("bad", ["Fail", "fail", "FAILED", "WAIVED", None])
+    def test_non_canonical_verdict_refused(self, monkeypatch, tmp_path, bad):
+        # CRITICAL fail-open: a non-canonical verdict fell out of the open-
+        # blocker loop, the PASS-control check AND the N/A check at once, so
+        # a STOP-SHIP became invisible to every gate.
+        self._patched(monkeypatch, tmp_path,
+                      pass_has_control=True, blocker_accepted=True)
+        f = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        f[1]["verdict"] = bad
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(f))
+        _reattest(tmp_path)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_tampered_findings_file_refused(self, monkeypatch, tmp_path):
+        # The findings file is now attested: flipping a verdict and
+        # regenerating status no longer launders the edit.
+        self._patched(monkeypatch, tmp_path,
+                      pass_has_control=True, blocker_accepted=True)
+        f = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        f[1]["verdict"] = "PASS"
+        f[1]["standing_control"] = {"mechanism": "a" * 20,
+                                    "demonstrated": "b" * 20}
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(f))
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_shrunk_denominator_refused(self, monkeypatch, tmp_path):
+        # Deleting a check from catalogue AND findings as a matched pair no
+        # longer shrinks the audit universe: the manifest pins it.
+        self._patched(monkeypatch, tmp_path,
+                      pass_has_control=True, blocker_accepted=False)
+        cat = json.loads((tmp_path / "audit" / "00-check-catalogue.json").read_text())
+        cat["checks"] = [c for c in cat["checks"] if c["id"] != "A-02"]
+        cat["registered_check_count"] = 1
+        (tmp_path / "audit" / "00-check-catalogue.json").write_text(json.dumps(cat))
+        f = [r for r in json.loads(
+            (tmp_path / "audit" / "03-findings.json").read_text())
+            if r["id"] != "A-02"]
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(f))
+        _reattest(tmp_path)          # hashes fresh; pinned universe unchanged
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    @pytest.mark.parametrize("vacuous", [
+        {"mechanism": "   ", "demonstrated": "   "},
+        {"mechanism": True, "demonstrated": True},
+        {"mechanism": 1, "demonstrated": [1]},
+        {"mechanism": "ci", "demonstrated": "ok"},        # too thin to mean anything
+    ])
+    def test_vacuous_standing_control_refused(self, monkeypatch, tmp_path,
+                                              vacuous):
+        self._patched(monkeypatch, tmp_path,
+                      pass_has_control=True, blocker_accepted=True)
+        f = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        f[0]["standing_control"] = vacuous
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(f))
+        _reattest(tmp_path)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+
+class TestCredentialScannerBreadth:
+    """Payloads the 2026-07-25 adversary used to walk past the scanner."""
+
+    @pytest.mark.parametrize("line", [
+        'auth = "4ed251b58a9c4b3e9f217c6d5e4a3b21"',     # hyphen-less uuid
+        'bearer = "dGhpcyBpc2FzZWNyZXR0b2tlbmFiY2RlZg=="',  # base64
+        'pat = "ghp_0123456789abcdefABCDEF"',            # provider PAT
+        'cookie = "sessionid_abcdefghijklmnop"',
+        'sipgate_token = "4ed251b5-8a9c-4b3e-9f21-7c6d5e4a3b21"',
+    ])
+    def test_catches_credential_shapes(self, tmp_path, line):
+        p = tmp_path / "c.py"
+        p.write_text(line + "\n")
+        assert mg.scan_credential_shapes([p])
+
+    @pytest.mark.parametrize("line", [
+        'TAGS = ["NetCashProvidedByUsedInOperatingActivities"]',
+        'granularity: str = Query("raw", pattern="^(raw|daily)$")',
+        'URL = "https://api.stlouisfed.org/fred/series/observations"',
+        'path_note = "path=B_constituent_compute"',
+    ])
+    def test_quiet_on_ordinary_code(self, tmp_path, line):
+        p = tmp_path / "q.py"
+        p.write_text(line + "\n")
+        assert mg.scan_credential_shapes([p]) == []
+
+    def test_import_scan_sees_local_and_app_prefixed(self, tmp_path):
+        p = tmp_path / "m.py"
+        p.write_text("def g():\n    import nonexistent_pkg\n\n"
+                     "import apptools_hallucinated\n")
+        found = mg.collect_imports([p])
+        assert found == {"nonexistent_pkg", "apptools_hallucinated"}
+        assert sorted(mg.unresolvable_imports(sorted(found))) == [
+            "apptools_hallucinated", "nonexistent_pkg"]
+
+    def test_import_scan_ignores_docstring_prose(self, tmp_path):
+        p = tmp_path / "d.py"
+        p.write_text('"""Long price histories from Stooq ^spx or import the '
+                     'committed seed CSVs."""\nimport json\n')
+        assert mg.collect_imports([p]) == {"json"}
 
 
 class TestLiveEngagementConsistency:

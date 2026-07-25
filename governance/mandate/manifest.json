@@ -144,9 +144,11 @@
   "C-40"
  ],
  "part1_sha256": "e649ea7ccb4f1bd495b9a7ab2e0a40476824a63da3507b6e33d529dcf2f90742",
- "constitution_sha256": "11f1547936a69fb200e89fdc3e9510f86b570a906e012c4f112869341a5baf74",
- "ratchet_baselines_sha256": "cd8f59a07d6b22d037ae4db06d0fdc87c17b3d433cc06329dc9d9e296250a200",
- "accepted_residuals_sha256": "760a875c60611cbf76e29720908228f633b226433b6f3227e7cd80a4211c8b4d",
+ "constitution_sha256": "18488aa0a480f9707a97a402551d762a343f840adfb791521e7b365a51fd2080",
+ "ratchet_baselines_sha256": "e29e682e8db11780a0a0572d6738e3b8be00b03cd6104b4b3539cde4744a4a35",
+ "accepted_residuals_sha256": "d4d753ec199ec5b22dce98e6cce5f3ec153058958d8d2e79cc1a0365a0338baa",
  "attested": "2026-07-25",
- "write_separation": ".github/CODEOWNERS routes governance/, audit/, scripts/ and .github/ to the operator; mandate_gate verifies these hashes every CI run. The attested set includes the gate's authority files (ratchet baselines, accepted residuals) per the 2026-07-25 tamper-test finding."
+ "write_separation": ".github/CODEOWNERS routes governance/, audit/, scripts/ and .github/ to the operator; mandate_gate verifies these hashes every CI run. The attested set includes the gate's authority files (ratchet baselines, accepted residuals) per the 2026-07-25 tamper-test finding.",
+ "findings_sha256": "6300e36c6edddca59a7e9068ba8e46ad8536a5f47df9cdf7d1393efc67cea521",
+ "check_catalogue_sha256": "b7b319a38713483eb3599a95fef2ae58354192f20c9b6bd0d7ef8e2edc54e757"
 }

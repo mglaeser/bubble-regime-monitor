@@ -1,11 +1,11 @@
 {
   "active_check_count": 119,
   "catalogue_version": "2.0",
-  "constitution_hash": "11f1547936a69fb200e89fdc3e9510f86b570a906e012c4f112869341a5baf74",
+  "constitution_hash": "18488aa0a480f9707a97a402551d762a343f840adfb791521e7b365a51fd2080",
   "constitution_state": "IN_FORCE_PROVISIONAL",
   "evidenced_check_count": 119,
   "highest_open_band": "STOP-SHIP",
-  "mandate_manifest_hash": "a99a436bccd27eaf3ec8be812086c9450feba7b4859c19e5480727d2e0652242",
+  "mandate_manifest_hash": "a6b5ac472b9f7849fdea842f4b3d1274ecd894b1714fcbed17b3e3544ed76a0d",
   "open_blocker_1_count": 12,
   "open_blocker_2_count": 18,
   "open_blocker_ids_accepted_by_operator": [

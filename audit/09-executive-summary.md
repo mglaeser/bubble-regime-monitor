@@ -1,6 +1,8 @@
 # audit/09 — Executive summary
 
-**SCOPE: TRACKS A/B/C (CATALOGUE v2.0, 119 CHECKS) EXECUTED AND EVIDENCED —
+**SCOPE: TRACKS A/B (CATALOGUE v1.0) AUDITED AGAINST THE IN-REPO MANDATE
+TEXT. TRACK C (40 CHECKS) CARRIES FOUNDING VERDICTS BUT ITS NORMATIVE TEXT IS
+NOT IN THE REPOSITORY — THOSE VERDICTS ARE NOT RE-VERIFIABLE HERE —
 CONSTITUTION `IN_FORCE_PROVISIONAL` — NOT CLEARED FOR PRODUCTION TRAFFIC:
 `production_eligible: false` (computed), OPERATOR RUNS PROD UNDER RECORDED
 ACCEPTANCE, NOT CLEARANCE.**
@@ -13,6 +15,10 @@ audit/05).*
 
 ## What is still broken (lead items)
 
+0. **Two STOP-SHIP records remain open** in the machine record: **B-06**
+   (below) and **C-01**, whose verdict was re-banded to PARTIAL in its own
+   text while its `band` field still reads STOP-SHIP — the count is
+   deliberately left conservative rather than quietly downgraded.
 1. **B-06 (STOP-SHIP):** nine provider credentials disclosed in chat remain
    unrotated. Compensating controls stand (clean repo history, fail-closed
    placeholder key); nothing substitutes for rotation.
@@ -29,10 +35,11 @@ audit/05).*
 
 ## What watches for the next break
 
-- **Every change:** blocking CI (ruff-S, pip-audit, detect-secrets, 395+
-  tests) + the mandate gate (status consistency, hash attestation over the
+- **Every change:** blocking CI (ruff-S, pip-audit, detect-secrets, the full
+  suite at the ratcheted floor) + the mandate gate (status consistency, hash attestation over the
   governance set incl. the gate's own authority files, S11 ratchets, S12
-  seeded-defect calibration) + the cross-vendor adversarial panel on PRs.
+  seeded-defect calibration) + the cross-vendor adversarial panel on pull requests (that one
+  needs a configured key and does not run on push or on the schedule).
 - **Weekly:** the same stack fires on schedule with no diff — the heartbeat
   that distinguishes "quiet" from "dead".
 - **Proven, not assumed:** 12-tamper adversarial audit 2026-07-25 — 11

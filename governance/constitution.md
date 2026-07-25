@@ -14,9 +14,17 @@ branch protection A-01/B-35, mutation measurement A-02); until then
 and no clearance exists. Provisional force is not reduced force: every
 article below binds now.
 
-Enforced by: `scripts/mandate_gate.py` (blocking, every CI run + weekly
-cadence), `.github/workflows/ci.yml`, `.github/workflows/independent-verify.yml`,
-`.github/CODEOWNERS` (write separation).
+Enforcement status, stated exactly (claims audit 2026-07-25 — the earlier
+masthead asserted as *enforced* two controls the body concedes are not):
+
+- **Blocking today:** `scripts/mandate_gate.py` (every CI run + the weekly
+  scheduled run) and `.github/workflows/ci.yml`.
+- **Blocking on pull requests only:** `.github/workflows/independent-verify.yml`
+  — and only when a panel key is configured; a same-repo keyless run exits 0
+  by documented residual. It does not run on `push` or on the schedule.
+- **Advisory until branch protection lands:** `.github/CODEOWNERS`. Nothing
+  currently prevents a merge that ignores it; the mandate gate's hash
+  attestation is the interim substitute (A-01/B-35, open).
 
 ### Preamble
 
@@ -56,22 +64,37 @@ Every change: a test that failed before and passes after, derived from the
 frozen specification and never from the code; the smallest change that makes
 it pass; the full suite; a repository-wide clone sweep; a standing control
 installed wherever a defect class was fixed; adversarial verification by the
-cross-vendor panel; and — per the operator's 2026-07-25 directive recorded
-in `CLAUDE.md` — an internal adversarial audit *before* any complex PR
-opens, so the external panel is the last line of defense, not the first
-reviewer. Mutation testing at a measured floor remains an open blocker
+cross-vendor panel; and — per the operator's 2026-07-25 directives — a **mandatory internal
+adversarial audit before any complex or multi-change PR opens** (§ below),
+so the external panel is the last line of defense, not the first reviewer.
+
+**The pre-PR adversarial pass is a required step of this article, not an
+option.** It runs as a multi-agent workflow: at least two independent
+adversarial agents with *falsifying* objectives (break the logic; find the
+false claim), plus a tamper pass against any control the change touches.
+Every finding is fixed or recorded as an explicit deviation BEFORE the push
+that opens or updates the PR. Two reasons, both binding: a defect the panel
+finds is a defect that shipped past our own review, and **each external
+panel round costs real money and wall-clock — a PR that needs eight rounds
+is a process failure, not diligence.** Target: one panel round. Batch all
+fixes into as few pushes as possible; never push a speculative fix to see
+what the panel says. Mutation testing at a measured floor remains an open blocker
 (A-02): until `mutmut` is wired, the mutation clause of this article is
 explicitly unenforced, and saying otherwise would be a false claim.
 *Derives from:* A-02 A-04 A-06 A-07 B-18; mandate Phase 5.
 
 ### Article IV — Independence
 
-The generator never grades its own work. The verifier fleet — OpenAI models
-`gpt-5.3-codex`, `gpt-5.6-sol`, `gpt-4.1-mini`, a different vendor from the
-Anthropic generator — attacks every PR under a falsifying objective, with a
-required-approver veto (Sol), proof-of-work challenge echo, and fail-closed
-gates proven by 24 unit tests and a `--selftest`. Fleet composition is
-asserted in the workflow env on every run.
+The generator never grades its own work. The verifier fleet defaults to OpenAI models
+(`gpt-5.3-codex`, `gpt-5.6-sol`, `gpt-4.1-mini`) — a different vendor from the
+Anthropic generator — attacking each pull request under a falsifying
+objective, with a required-approver veto (Sol), proof-of-work challenge echo,
+and fail-closed gates proven by 24 unit tests and a `--selftest`. Stated
+honestly: the fleet is configured through repository variables, so
+cross-vendor separation is an operator-maintained property, not one this
+repository can enforce; the challenge echo detects a lazy endpoint, not a
+malicious one; and the *fixing* agent (the Maintainer) shares a vendor with
+the generator, so independence holds for detection, not for repair.
 *Derives from:* A-39 A-03 C-14.
 
 ### Article V — The ratchet

@@ -99,3 +99,48 @@ ungated-amendment refusals are logged in
 real runner (detect-secrets flagged the manifest's own attestation hashes —
 the gate blocking its own installer until the baseline was audited), which
 is the enforcement demonstrating itself; subsequently green.
+
+## Addendum 2 — 2026-07-25 pre-PR adversarial pass (the process, now standard)
+
+Run on the operator's directive to audit the enforcement layer itself
+adversarially before any PR. Two independent agents with falsifying
+objectives (break the gate logic / find the false claim), following the
+12-tamper pass. Findings and dispositions:
+
+**Gate logic (6 fail-opens, all closed):**
+1. **CRITICAL** — no canonical-verdict whitelist: a verdict of `"Fail"`,
+   `null` or `"WAIVED"` fell out of the open-blocker loop, the PASS-control
+   check and the N/A check simultaneously, making a STOP-SHIP invisible to
+   every gate. Closed: `CANONICAL_VERDICTS` fails the build on any unknown
+   verdict; five parametrised regression tests.
+2. `03-findings.json` and `00-check-catalogue.json` were unattested, so a
+   verdict edit + `status --write` laundered itself past the drift check.
+   Closed: both joined the attested hash set.
+3. The audit denominator was self-reported by the catalogue; a matched-pair
+   deletion could shrink the universe. Closed: the manifest's
+   `required_check_ids` now pins it (previously dead data).
+4. Vacuous `standing_control` (whitespace, `true`, `1`) satisfied the PASS
+   gate. Closed: substantive-string requirement.
+5. Credential scanner missed hyphen-less UUIDs, base64 tokens, provider PATs
+   and `auth`/`bearer`/`cookie` names. Closed: widened denylist + entropy
+   check on assignment right-hand sides; five bypass payloads now caught with
+   zero false positives on live source (XBRL tags, regex patterns, URLs).
+6. Import scan missed function-local and `app*`-prefixed hallucinated
+   packages, and read docstring prose as imports. Closed: AST-based scan,
+   with pyproject-declared modules treated as environment gaps rather than
+   hallucinations.
+
+**Claims (8 findings, all corrected):** Part 2 scope overstated as fully
+audited; the panel described as fail-closed on every PR when it is
+PR-only, key-dependent and config-driven; the constitution masthead listing
+CODEOWNERS as *enforced* when it is advisory pending branch protection; the
+"dead-man switch" naming (a stopped GitHub schedule emits no signal and
+auto-disables after 60 days — now recorded as an open gap, not a wired
+control); stale test-count baselines (385/395 vs the enforced 399); the
+STOP-SHIP count discrepancy; the weekly heartbeat described as the "full
+stack"; and unusable branch-protection check names.
+
+**Process outcome:** 22 issues found and resolved internally, before any
+external panel round. This pass is now a required step of constitution
+Article III and `audit/08` — with an explicit one-round panel target,
+because each round makes paid calls to three external models.

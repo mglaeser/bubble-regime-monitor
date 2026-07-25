@@ -38,6 +38,11 @@ GOV = ROOT / "governance"
 BLOCKER_BANDS = ("STOP-SHIP", "BLOCKER-1", "BLOCKER-2")
 ALL_BANDS = BLOCKER_BANDS + ("MUST-FIX", "SHOULD-FIX", "PLAN", "ASSESS")
 OPEN_VERDICTS = ("FAIL", "PARTIAL", "NO-EVIDENCE")
+# §5: the ONLY legal verdicts. Anything else fails the build (adversarial
+# audit 2026-07-25, critical: there was no whitelist, so "Fail"/null/"WAIVED"
+# fell out of the open-blocker loop, the PASS-control check and the N/A check
+# simultaneously — a one-character edit made a STOP-SHIP invisible).
+CANONICAL_VERDICTS = ("PASS", "FAIL", "PARTIAL", "NO-EVIDENCE", "NOT-APPLICABLE")
 
 
 def effective_band(finding: dict) -> str:
@@ -88,6 +93,20 @@ def compute_status() -> dict:
     if catalogue["registered_check_count"] != len(cat_ids):
         _fail("catalogue registered_check_count does not match its own checks")
 
+    # The audit denominator is pinned by the manifest, not by the catalogue's
+    # own self-report (adversarial audit 2026-07-25: catalogue+findings could
+    # be shrunk as a matched pair to drop checks from the universe).
+    required = manifest.get("required_check_ids")
+    if not isinstance(required, list) or not required:
+        _fail("governance/mandate/manifest.json has no required_check_ids — "
+              "the audit denominator must be pinned, not inferred")
+    if set(required) != set(cat_ids):
+        missing = sorted(set(required) - set(cat_ids))
+        extra = sorted(set(cat_ids) - set(required))
+        _fail(f"catalogue does not match the manifest's pinned check universe "
+              f"— missing: {missing} extra: {extra} (founding 119 are "
+              "immutable; additions are Article XIII amendments)")
+
     f_ids = [f["id"] for f in findings]
     if len(f_ids) != len(set(f_ids)):
         _fail("findings contain duplicate ids")
@@ -96,14 +115,29 @@ def compute_status() -> dict:
         extra = sorted(set(f_ids) - set(cat_ids))
         _fail(f"findings/catalogue mismatch — missing: {missing} extra: {extra}")
 
+    for f in findings:
+        if f.get("verdict") not in CANONICAL_VERDICTS:
+            _fail(f"{f.get('id', '<no id>')} has non-canonical verdict "
+                  f"{f.get('verdict')!r} — legal values are "
+                  f"{CANONICAL_VERDICTS}. A verdict the gate cannot read is a "
+                  "finding it cannot gate (adversarial audit 2026-07-25).")
+        if not isinstance(f.get("band"), str):
+            _fail(f"{f.get('id', '<no id>')} has no string `band`")
+
     # §3/§5: a PASS with no standing control is PARTIAL, and per §5 the
     # control must be structured with a non-null `demonstrated` — a control
     # nobody has watched block something is a control being hoped about.
     for f in findings:
         if f["verdict"] == "PASS":
             sc = f.get("standing_control")
-            if not isinstance(sc, dict) or not sc.get("mechanism") \
-                    or not sc.get("demonstrated"):
+
+            def _substantive(v) -> bool:
+                # bools/ints/lists are not descriptions (adversarial audit
+                # 2026-07-25: {"mechanism": true} satisfied a truthiness test)
+                return isinstance(v, str) and len(v.strip()) >= 12
+
+            if not isinstance(sc, dict) or not _substantive(sc.get("mechanism")) \
+                    or not _substantive(sc.get("demonstrated")):
                 _fail(f"{f['id']} is PASS without a structured "
                       "standing_control carrying non-null mechanism and "
                       "demonstrated — per the mandate that verdict is "
@@ -143,6 +177,8 @@ def compute_status() -> dict:
               "manifest.json — amendments must go through the gate and "
               "bump the attested hash (Article XIII)")
     attested = {
+        "findings_sha256": AUDIT / "03-findings.json",
+        "check_catalogue_sha256": AUDIT / "00-check-catalogue.json",
         "part1_sha256": GOV / "mandate" / "part1.md",
         "combined_mandate_sha256": GOV.parent / "governance" / "mandate.md",
         "ratchet_baselines_sha256": AUDIT / "ratchet-baselines.json",
@@ -303,9 +339,31 @@ def cmd_ratchet(measure_only: bool) -> None:
 _UUID_LIT = re.compile(
     r"""=\s*["'][0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"""
     r"""[0-9a-fA-F]{4}-[0-9a-fA-F]{12}["']""")
+# Name denylist widened after the 2026-07-25 adversarial audit (auth/bearer/
+# pat/cookie/session/credential were invisible); value shapes now also cover
+# hyphen-less 32-hex and long base64-ish literals in any assignment.
 _CRED_ASSIGN = re.compile(
-    r"""\b\w*(token|api_key|secret|passwd|password)\w*\s*=\s*["'][^"']{8,}["']""",
-    re.IGNORECASE)
+    r"""\b\w*(token|api[-_]?key|secret|passwd|password|auth|bearer|"""
+    r"""credential|session|cookie)\w*\s*=\s*["'][^"']{8,}["']""",
+    re.IGNORECASE)  # NB: no "pat" alternative — it matched path_note etc;
+# real PATs (ghp_…) are caught by the entropy check below instead.
+# Value-shape detection only on an ASSIGNMENT right-hand side, and only for
+# literals with real credential entropy — a long CamelCase XBRL tag or an SQL
+# fragment is not a secret (false positives found while hardening, 2026-07-25).
+_ASSIGN_RHS = re.compile(r"""=\s*["']([^"']{16,})["']""")
+
+
+def _looks_random(v: str) -> bool:
+    if " " in v or "/" in v.strip("/") and "." in v:
+        return False
+    hexish = re.fullmatch(r"[0-9a-fA-F]{32,}", v)
+    if hexish:
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9+/=_-]{24,}", v):
+        return False
+    # require mixed case AND digits: entropy, not an identifier
+    return (any(c.isdigit() for c in v) and any(c.islower() for c in v)
+            and any(c.isupper() for c in v))
 
 
 def scan_credential_shapes(paths) -> list[str]:
@@ -319,7 +377,9 @@ def scan_credential_shapes(paths) -> list[str]:
         for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
             if "allowlist secret" in line:
                 continue
-            if _UUID_LIT.search(line) or _CRED_ASSIGN.search(line):
+            rhs = _ASSIGN_RHS.search(line)
+            if (_UUID_LIT.search(line) or _CRED_ASSIGN.search(line)
+                    or (rhs and _looks_random(rhs.group(1)))):
                 hits.append(f"{p}:{i}: {line.strip()[:80]}")
     return hits
 
@@ -334,6 +394,33 @@ def find_vacuous_test_asserts(paths) -> list[str]:
             if rx.match(line):
                 hits.append(f"{p}:{i}")
     return hits
+
+
+def collect_imports(paths) -> set[str]:
+    """Top-level module names imported by real import statements (AST, not
+    regex: docstring prose like 'from Stooq' was being read as an import)."""
+    import ast
+    names: set[str] = set()
+    for p in paths:
+        try:
+            tree = ast.parse(p.read_text(errors="replace"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names.add(node.module.split(".")[0])
+    return names - {"app", "tests"}
+
+
+def declared_dependencies() -> set[str]:
+    """Distribution names declared in pyproject (normalised)."""
+    text = (ROOT / "pyproject.toml").read_text(errors="replace")
+    out = set()
+    for m in re.finditer(r'"([A-Za-z][A-Za-z0-9._-]*)\s*(?:[<>=!~\[]|")', text):
+        out.add(m.group(1).lower().replace("_", "-"))
+    return out
 
 
 def unresolvable_imports(module_names) -> list[str]:
@@ -385,16 +472,16 @@ def cmd_calibrate() -> None:
             failures.append("class 3 (hallucinated package) NOT caught by the "
                             "import-resolution check")
         # and every real top-level app import must resolve (the standing gate)
-        top = set()
-        for p in ROOT.glob("app/**/*.py"):
-            for line in p.read_text(errors="replace").splitlines():
-                m = re.match(r"^(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", line)
-                if m and not m.group(1).startswith(("app", "tests")):
-                    top.add(m.group(1))
-        top -= {"lppls"}  # optional engine: suite is hermetic without it (A-02)
-        missing = unresolvable_imports(sorted(top))
+        top = collect_imports(ROOT.glob("app/**/*.py"))
+        declared = declared_dependencies()
+        # A module that is DECLARED in pyproject but absent here is an
+        # environment gap (optional/heavy deps), not a hallucination; an
+        # UNDECLARED unresolvable import is the seeded-class-3 signal.
+        missing = [m for m in unresolvable_imports(sorted(top))
+                   if m.lower().replace("_", "-") not in declared]
         if missing:
-            failures.append(f"live app imports do not resolve: {missing}")
+            failures.append("live app imports neither resolvable nor declared "
+                            f"in pyproject: {missing}")
 
         # 4 — vacuous assertion in a test
         vac = tdir / "test_seeded_vac.py"

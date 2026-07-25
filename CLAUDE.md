@@ -34,6 +34,11 @@ unacceptable. Before opening ANY pull request with complex or many changes:
 2. **Iterate internally until an audit round comes back clean**, then open
    the PR. The external cross-vendor panel (Sol veto) is the LAST line of
    defense, not the first reviewer.
+   **Cost rule (operator, 2026-07-25):** every panel round makes paid calls
+   to three external GPT models. TARGET ONE ROUND. Batch all fixes into as
+   few pushes as possible; never push a speculative fix to see what the
+   panel says; if a PR needs more than ~2 rounds, stop and root-cause the
+   internal pass instead of iterating against the panel.
 3. Classes of defect the panel has actually caught here — check for these
    explicitly every time:
    - gates/counters advancing on *presence* of an artifact rather than its

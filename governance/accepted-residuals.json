@@ -46,6 +46,8 @@
   "ratification_pending_operator": "constitution_state stays IN_FORCE_PROVISIONAL until B-06 rotation, branch protection and A-02 mutation measurement land (the \u00a711/Phase-7 ratification ordering is deliberately deferred to those operator actions).",
   "no_autonomous_maintainer_fleet": "\u00a79.6's standing Maintainer/Runner fleet is infeasible for a solo-operator self-hosted monitor; the Runner role is GitHub Actions (weekly heartbeat), the Maintainer role is the operator-invoked agent session bound by CLAUDE.md + constitution.",
   "catch_rate_binary": "The S12 calibration is binary (all classes must catch) rather than a quantitative ratcheted SLI; the quantitative slot is registered open in audit/ratchet-baselines.json.",
-  "progressive_rollout_inapplicable": "Single-instance self-hosted service: no traffic fractions exist; deploy.sh health-check + auto-rollback is the maximal substitute (fired live 2026-07-15)."
+  "progressive_rollout_inapplicable": "Single-instance self-hosted service: no traffic fractions exist; deploy.sh health-check + auto-rollback is the maximal substitute (fired live 2026-07-15).",
+  "part2_scope_status": "part2_status is computed from evidence coverage of Track C's 40 records, NOT from possession of the Part 2 normative text (which is absent). A COMPLETE value here means 'every Track C check carries an evidence-backed verdict', not 'Track C is re-verifiable against its spec'. See part2_text_absent. production_eligible remains false regardless.",
+  "regime_stall_detector_open": "No true dead-man switch exists: a stopped GitHub schedule emits no signal and auto-disables after 60 days of repo inactivity. Recorded as an open, unassigned gap in audit/08 rather than claimed as wired."
  }
 }
