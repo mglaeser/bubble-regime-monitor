@@ -490,24 +490,39 @@ def compute_status() -> dict:
     # A register that does not exist at the comparison point makes EVERY entry
     # new (panel finding, round 13: prev=None skipped the check entirely, so a
     # freshly-introduced register could waive every open blocker with bare ids).
+    records = accepted.get("acceptance_records") or []
+    # Shape is load-bearing (follow-on sweep): every reader below filters with
+    # `isinstance(r, dict)`, so a register whose acceptance_records is itself a
+    # MAPPING iterates its keys — plain strings — and every check silently sees
+    # zero records. That reads as "no orphans, nothing to authorise" rather
+    # than as the malformed register it is.
+    if not isinstance(records, list):
+        _fail("acceptance_records must be a LIST of records, not "
+              f"{type(records).__name__} — any other shape makes every "
+              "per-record check vacuously pass")
+    # ORPHAN PRUNE (round 17): a record for an id that is no longer accepted
+    # must be removed. Retaining it let an id be closed and later RE-accepted
+    # with the stale record satisfying the check — a second acceptance on a
+    # first decision.
+    #
+    # UNCONDITIONAL (panel round 25): this was nested under `if newly`, so the
+    # half of the exploit that CREATES the orphan — a change that only REMOVES
+    # an acceptance id and keeps its record — never ran the check at all. The
+    # prune is an invariant of the register, not a condition on new
+    # acceptances, so it is evaluated whenever the register is read.
+    orphans = sorted({r.get("finding_id") for r in records
+                      if isinstance(r, dict)
+                      and r.get("finding_id") not in accepted_ids})
+    if orphans:
+        _fail("acceptance_records exist for findings that are not "
+              f"currently accepted: {orphans} — prune them. A retained "
+              "record silently pre-authorises a future re-acceptance.")
     if prev_acc is not None or accepted_ids:
         newly = accepted_ids - set((prev_acc or {}).get("accepted_open_findings") or [])
         if newly:
             # Panel finding (PR #23 round 12): searching for the id anywhere in
             # _meta let a contributor self-accept by dropping the string into
             # any unrelated field. The record must be STRUCTURED and explicit.
-            records = accepted.get("acceptance_records") or []
-            # ORPHAN PRUNE (round 17): a record for an id that is no longer
-            # accepted must be removed. Retaining it let an id be closed and
-            # later RE-accepted with the stale record satisfying the check —
-            # a second acceptance on a first decision.
-            orphans = sorted({r.get("finding_id") for r in records
-                              if isinstance(r, dict)
-                              and r.get("finding_id") not in accepted_ids})
-            if orphans:
-                _fail("acceptance_records exist for findings that are not "
-                      f"currently accepted: {orphans} — prune them. A retained "
-                      "record silently pre-authorises a future re-acceptance.")
             # FRESHNESS: the record authorising a NEW acceptance must itself be
             # new; one carried over from the comparison point is not a decision
             # about this change.
@@ -902,9 +917,33 @@ def cmd_calibrate() -> None:
         if not scan_credential_shapes([cred]):
             failures.append("class 1 (uuid credential) NOT caught by the "
                             "credential-shape scanner")
-        # and the scanner must be clean on the actual repo
-        repo_py = [p for p in ROOT.glob("app/**/*.py")] + \
-                  [p for p in ROOT.glob("scripts/*.py")]
+        # and the scanner must be clean on the actual repo — over EVERY
+        # TRACKED .py file (panel round 25 + the follow-on sweep).
+        #
+        # This was a hand-listed set of trees (app/, scripts/), which is the
+        # "which directories did we remember" failure mode: tests/ was missing
+        # and is the one tree where nothing else looks at all — pyproject gives
+        # tests/** a blanket ruff-S per-file-ignore, so S105/S106 never fire,
+        # and detect-secrets has the documented UUID-token blind spot that this
+        # very class exists to cover. migrations/ and docs/harnesses/ were
+        # missing too. Deriving the set from `git ls-files` retires the whole
+        # class: a new top-level package is covered the day it is added.
+        # Deliberate throwaway fixtures stay legal by carrying an explicit
+        # `pragma: allowlist secret` on the line — a visible, reviewable
+        # opt-out rather than a silent tree-wide exemption.
+        listing = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=ROOT,
+                                 capture_output=True, text=True)
+        if listing.returncode != 0:
+            failures.append("git ls-files failed — the credential scan cannot "
+                            "establish which files to scan, and an unknown "
+                            "denominator is a failed check, not a clean one")
+            repo_py = []
+        else:
+            repo_py = [ROOT / f for f in listing.stdout.split("\0") if f]
+            if not repo_py:
+                failures.append("git ls-files returned no Python files — "
+                                "refusing to report a clean credential scan "
+                                "over an empty file set")
         live = scan_credential_shapes(repo_py)
         if live:
             failures.append("credential-shape scanner fired on live source: "
@@ -970,6 +1009,19 @@ def cmd_calibrate() -> None:
                 for k in node.keys:
                     if isinstance(k, _ast.Constant) and k.value == "tools":
                         return True
+            # payload["tools"] = [...] then client.post(json=payload) (panel
+            # round 25): the request body assembled by subscript never appears
+            # as a call kwarg or a dict literal, so both forms above missed it
+            # and the N/A verdict survived a real tool-enabled call.
+            #
+            # Enumerating forms is how this check keeps losing: kwarg, then
+            # dict key, then subscript — and `payload.setdefault("tools", ...)`
+            # is none of the three. The invariant is simply that app code must
+            # not name the tools field AT ALL, so the check is now on the bare
+            # string constant. Prose is unaffected: comments are not Constants
+            # and a docstring only matches if its entire value is "tools".
+            if isinstance(node, _ast.Constant) and node.value == "tools":
+                return True
         return False
 
     for path in ROOT.glob("app/**/*.py"):
@@ -989,7 +1041,12 @@ def cmd_calibrate() -> None:
                 continue
             fn = node.func
             name = fn.attr if isinstance(fn, _ast.Attribute) else getattr(fn, "id", "")
-            if name not in ("create", "stream", "generate", "complete"):
+            # The SDK entry points plus the raw-HTTP forms underneath them
+            # (round 25): the ban only covered the SDK names, so the same
+            # dynamic kwarg expanded into client.post(...)/request(...) —
+            # the transport the SDK itself uses — was unrestricted.
+            if name not in ("create", "stream", "generate", "complete",
+                            "post", "put", "patch", "request", "send"):
                 continue
             if any(k.arg is None for k in node.keywords):
                 failures.append(
@@ -1001,7 +1058,17 @@ def cmd_calibrate() -> None:
 
     # 6 — cross-tenant ownership: N/A by structure; re-validate: still no
     # per-user tables (single-tenant).
-    models_src = (ROOT / "app" / "models.py").read_text(errors="replace")
+    #
+    # EVERY ORM-bearing module, not just app/models.py (panel round 25): the
+    # claim is "no per-user TABLES anywhere", but the scan read one file, so a
+    # tenancy model declared in any other app module — app/auth.py, a
+    # models/ package, anywhere — preserved the N/A verdict untouched. Scope
+    # is now "declares ORM structure" rather than "is named models.py"; that
+    # keeps prose and plain helpers out (they cannot define a table) while
+    # closing the file-location escape.
+    _ORM_MARKERS = ("__tablename__", "mapped_column", "relationship(",
+                    "ForeignKey(", "Table(", "declarative_base",
+                    "create_table")
     # Panel finding (PR #23): a three-name denylist left `account_id`,
     # `customer_id`, an `organisation` FK or a users/accounts relationship
     # free to introduce real multi-tenancy while calibration reported N/A.
@@ -1018,9 +1085,20 @@ def cmd_calibrate() -> None:
                 # compound names too: UserAccount, TenantMembership (round 18)
                 rf"|^\s*class\s+({_ENTITIES})[A-Za-z]*\b"
                 rf"|relationship\(\s*[\"']({_ENTITIES})[A-Za-z]*[\"']")
-    if re.search(_TENANCY, models_src, re.IGNORECASE | re.MULTILINE):
-        failures.append("class 6 N/A no longer holds: per-user/tenant columns "
-                        "appeared in app/models.py — re-run C-01")
+    # migrations/ included (follow-on sweep): a migration is where tables are
+    # actually created, so `op.create_table("users", ...)` introduces real
+    # multi-tenancy without touching app/ at all — the N/A verdict would have
+    # survived the change that made it false.
+    _tenancy_scope = sorted(ROOT.glob("app/**/*.py")) + \
+        sorted(ROOT.glob("migrations/**/*.py"))
+    for path in _tenancy_scope:
+        src = path.read_text(errors="replace")
+        if not any(m in src for m in _ORM_MARKERS):
+            continue
+        if re.search(_TENANCY, src, re.IGNORECASE | re.MULTILINE):
+            failures.append("class 6 N/A no longer holds: per-user/tenant "
+                            f"tables appeared in {path.relative_to(ROOT)} — "
+                            "re-run C-01")
 
     if failures:
         _fail("seeded-defect calibration (S12) — " + " | ".join(failures) +
