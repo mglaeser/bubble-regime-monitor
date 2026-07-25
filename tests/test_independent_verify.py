@@ -430,3 +430,22 @@ class TestControlDataFiles:
         # the concrete attack: measured >= lowered floor still satisfies the
         # ratchet, so only a reader catches it — hence it must reach the panel
         assert iv.is_control_bearing("audit/ratchet-baselines.json", "M")
+
+
+class TestChunkCapClamp:
+    """The cap is the direct cost lever: each part is a full panel pass."""
+
+    def test_full_coverage_is_reachable_for_a_large_governance_pr(self, tmp_path):
+        # operator decision 2026-07-25: the ceiling moved 6 -> 8 because the
+        # panel refuses partial coverage, and a PR of this size needs more
+        # than 6 parts to show every file.
+        files = [(f"app/mod{i}.py", "Y" * 49_000) for i in range(8)]
+        chunks, omitted = iv.pack_by_risk(files, budget=50_000, max_chunks=8)
+        assert len(chunks) == 8
+        assert omitted == []
+
+    def test_cap_still_bounds_cost(self):
+        files = [(f"app/mod{i}.py", "Y" * 49_000) for i in range(20)]
+        chunks, omitted = iv.pack_by_risk(files, budget=50_000, max_chunks=8)
+        assert len(chunks) == 8          # never unbounded fan-out
+        assert omitted                    # the rest is accounted, not hidden

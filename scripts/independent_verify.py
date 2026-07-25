@@ -939,8 +939,12 @@ def main() -> int:
     try:
         mc = int(os.environ.get("VERIFIER_MAX_CHUNKS", ""))
         # floor 2: max_chunks=1 makes pack_by_risk drop everything past the
-        # first budget with no second part to catch it (audit 2026-07-25)
-        max_chunks = mc if 2 <= mc <= 6 else 2
+        # first budget with no second part to catch it (audit 2026-07-25).
+        # ceiling 8 (operator decision 2026-07-25): a governance PR of this
+        # size needs 8 parts for FULL coverage, and the panel refuses partial
+        # coverage. Each part is a full panel pass, so this is the direct cost
+        # lever — 8 is the deliberate maximum, not a default.
+        max_chunks = mc if 2 <= mc <= 8 else 2
     except ValueError:
         max_chunks = 2
     try:

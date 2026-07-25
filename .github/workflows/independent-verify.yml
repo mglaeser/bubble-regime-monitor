@@ -41,9 +41,11 @@ jobs:
           VERIFIER_MIN_OTHER_APPROVERS: ${{ vars.VERIFIER_MIN_OTHER_APPROVERS }}
           # Review-coverage budget: how many risk-ordered parts the diff may be
           # split into. Each part is a full panel pass, so this is the direct
-          # cost lever. 3 covers a large governance PR; the script clamps to
-          # 2..6 and defaults to 2, so an unset/garbage repo variable is safe.
-          VERIFIER_MAX_CHUNKS: ${{ vars.VERIFIER_MAX_CHUNKS || 3 }}
+          # cost lever. 8 gives FULL coverage of a large governance PR (the
+          # panel refuses partial coverage); ordinary PRs still pack into one
+          # part and cost one pass. The script clamps to 2..8 and falls back to
+          # 2, so an unset or garbage repo variable is safe.
+          VERIFIER_MAX_CHUNKS: ${{ vars.VERIFIER_MAX_CHUNKS || 8 }}
           # Fork PRs run WITHOUT secrets (Sol round 2), and Dependabot PRs are
           # same-repo yet ALSO run with Actions secrets withheld (Sol round 5) —
           # in both cases a no-key exit-0 would green a required check with zero
