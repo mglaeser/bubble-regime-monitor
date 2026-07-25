@@ -476,7 +476,7 @@ class TestPanelFindingsRound11:
         self._temp_baselines(monkeypatch, tmp_path, records=[
             {"metric": "test_count_floor", "change": "999 -> 10 (LOOSENING)",
              "reason": "suite intentionally reduced for this scenario",
-             "authorised_by": "operator"}])
+             "authorised_by": "operator", "is_finding": True}])
         monkeypatch.setattr(mg, "previous_version",
                             lambda _p: {"ratchets": {"test_count_floor": 999}})
         mg.cmd_ratchet(measure_only=False)      # does not raise
@@ -894,3 +894,83 @@ class TestPanelFindingsRound16:
                    rf"|^\s*class\s+({_ENT})s?\b"
                    rf"|relationship\(\s*[\"']({_ENT})s?[\"']")
         assert _re.search(pattern, src, _re.IGNORECASE | _re.MULTILINE), src
+
+
+class TestPanelFindingsRound17:
+    """Reuse and under-declaration of decision records."""
+
+    def _engagement(self, monkeypatch, tmp_path, **kw):
+        _write_minimal_engagement(tmp_path, **kw)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+
+    def test_orphan_acceptance_record_must_be_pruned(self, monkeypatch, tmp_path):
+        # retaining a record for a no-longer-accepted id pre-authorises the
+        # next acceptance of that id
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=True)
+        reg = tmp_path / "governance" / "accepted-residuals.json"
+        d = json.loads(reg.read_text())
+        d["acceptance_records"].append({
+            "finding_id": "Z-99",                 # not in accepted_open_findings
+            "reason": "a decision retained after the finding closed",
+            "authorised_by": "operator"})
+        reg.write_text(json.dumps(d))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "previous_version", lambda _p: None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_a_carried_over_record_cannot_authorise_a_new_acceptance(
+            self, monkeypatch, tmp_path):
+        # id closed then RE-accepted later, with the original record kept:
+        # the record predates this change, so it is not a decision about it
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=True)
+        _reattest(tmp_path)
+        prev = {"accepted_open_findings": [],          # A-02 not accepted then
+                "acceptance_records": [{"finding_id": "A-02",
+                                        "reason": "the original decision text",
+                                        "authorised_by": "operator"}]}
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: prev if "accepted" in p else None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_a_genuinely_new_record_authorises_the_acceptance(
+            self, monkeypatch, tmp_path):
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=True)
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: {"accepted_open_findings": [],
+                                       "acceptance_records": []}
+                            if "accepted" in p else None)
+        mg.compute_status()          # does not raise
+
+    def test_ratchet_loosening_must_declare_itself_a_finding(
+            self, monkeypatch, tmp_path):
+        # §9.1: "the loosening is itself a finding" — a well-formed record
+        # that omits is_finding satisfied the gate while breaking the rule
+        import hashlib
+        (tmp_path / "audit").mkdir(exist_ok=True)
+        baselines = tmp_path / "audit" / "ratchet-baselines.json"
+        baselines.write_text(json.dumps({
+            "_meta": {"decision_records": [{
+                "metric": "test_count_floor", "change": "999 -> 10",
+                "reason": "a deliberate reduction with a full explanation",
+                "authorised_by": "operator"}]},        # no is_finding
+            "ratchets": {"test_count_floor": 10}}))
+        gov = tmp_path / "governance" / "mandate"
+        gov.mkdir(parents=True, exist_ok=True)
+        (gov / "manifest.json").write_text(json.dumps({
+            "ratchet_baselines_sha256":
+                hashlib.sha256(baselines.read_bytes()).hexdigest()}))
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        monkeypatch.setattr(mg, "measure_ratchets", lambda: {"test_count_floor": 10})
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda _p: {"ratchets": {"test_count_floor": 999}})
+        with pytest.raises(SystemExit):
+            mg.cmd_ratchet(measure_only=False)

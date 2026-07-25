@@ -366,12 +366,30 @@ def compute_status() -> dict:
             # _meta let a contributor self-accept by dropping the string into
             # any unrelated field. The record must be STRUCTURED and explicit.
             records = accepted.get("acceptance_records") or []
+            # ORPHAN PRUNE (round 17): a record for an id that is no longer
+            # accepted must be removed. Retaining it let an id be closed and
+            # later RE-accepted with the stale record satisfying the check —
+            # a second acceptance on a first decision.
+            orphans = sorted({r.get("finding_id") for r in records
+                              if isinstance(r, dict)
+                              and r.get("finding_id") not in accepted_ids})
+            if orphans:
+                _fail("acceptance_records exist for findings that are not "
+                      f"currently accepted: {orphans} — prune them. A retained "
+                      "record silently pre-authorises a future re-acceptance.")
+            # FRESHNESS: the record authorising a NEW acceptance must itself be
+            # new; one carried over from the comparison point is not a decision
+            # about this change.
+            prev_records = {r.get("finding_id")
+                            for r in ((prev_acc or {}).get("acceptance_records") or [])
+                            if isinstance(r, dict)}
             recorded = {r.get("finding_id") for r in records
                         if isinstance(r, dict)
                         and isinstance(r.get("reason"), str)
                         and len(r["reason"].strip()) >= 20
                         and isinstance(r.get("authorised_by"), str)
-                        and r["authorised_by"].strip()}
+                        and r["authorised_by"].strip()
+                        and r.get("finding_id") not in prev_records}
             unrecorded = sorted(newly - recorded)
             if unrecorded:
                 _fail("newly accepted blocker-band findings with no structured "
@@ -573,8 +591,12 @@ def cmd_ratchet(measure_only: bool) -> None:
                 who = str(r.get("authorised_by", "")).strip()
                 # Structured and attributable, not a bare string (round 13):
                 # a fieldless record was enough to license a loosening.
+                # §9.1: "the loosening is itself a finding" — the record must
+                # declare it (round 17: a well-formed record without
+                # is_finding satisfied the gate while violating the rule).
                 if (str(old) in change and str(new) in change
-                        and len(reason) >= 20 and who):
+                        and len(reason) >= 20 and who
+                        and r.get("is_finding") is True):
                     return True
             return False
 
