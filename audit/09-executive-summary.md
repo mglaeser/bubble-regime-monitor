@@ -1,32 +1,54 @@
-# audit/08 — Executive summary
+# audit/09 — Executive summary
 
-**The single most important number first, because the mandate demands it and because it is the truest thing in this report: the existing verification pipeline caught roughly 1 of 6 seeded defects, and it was not even green — CI has been `failure` on every recent run while production shipped anyway. A green build in this repository was, until this engagement, evidence of nothing.**
+**SCOPE: TRACKS A/B/C (CATALOGUE v2.0, 119 CHECKS) EXECUTED AND EVIDENCED —
+CONSTITUTION `IN_FORCE_PROVISIONAL` — NOT CLEARED FOR PRODUCTION TRAFFIC:
+`production_eligible: false` (computed), OPERATOR RUNS PROD UNDER RECORDED
+ACCEPTANCE, NOT CLEARANCE.**
 
-## What is still broken (lead with this)
+*Rewritten 2026-07-25 at the mandate-enforcement installation + independent
+re-audit. Supersedes the founding 2026-07-14 summary (which reported the
+discovery-time state: pipeline catching ~1 of 6 seeded defects on a CI that
+no runner executed; that state is over and its record lives in audit/02 and
+audit/05).*
 
-Three items are **STOP-SHIP and are NOT closed by this engagement** — they need an operator action or a second vendor that code cannot supply:
+## What is still broken (lead items)
 
-1. **Rotate the credentials (B-06).** Every provider key and the sipgate SMS token were disclosed in a development chat channel. The git repo is clean, but a secret shown to a third party is published. Nothing is rotated yet. Do this before serving production traffic.
-2. **Enable branch protection (A-01 / B-35).** CI is now rebuilt to be blocking and green-capable, but nothing yet *enforces* it: an operator can still merge and deploy on red, and the identity that writes the code can edit the gate. Mark the `test` check required, with no bypass, owned by the human-in-command.
-3. **Get a different-vendor verifier (A-39), and measure the tests (A-02).** The verification loop is self-referential — the same model family wrote the code and its tests — and the suite's mutation score is unmeasured, so its fault-detection power is unknown. Until `mutmut` is wired and a second-vendor adversary reviews high-stakes changes, "green" is not proof.
+1. **B-06 (STOP-SHIP):** nine provider credentials disclosed in chat remain
+   unrotated. Compensating controls stand (clean repo history, fail-closed
+   placeholder key); nothing substitutes for rotation.
+2. **A-01/B-35 (BLOCKER-1):** the gates run and block, but branch protection
+   (required checks, no bypass, CODEOWNERS review) is not enabled — an
+   operator console action. Until it lands, write separation is
+   hash-attested but ultimately advisory.
+3. **A-02 (BLOCKER-1):** the suite's mutation score is unmeasured; the
+   mutation clause of constitution Article III is explicitly unenforced.
+4. 29 further operator-accepted blocker-band findings, each with
+   compensating control + tripwire (`audit/06`, machine-mirrored in
+   `governance/accepted-residuals.json` — the gate fails CI on any drift
+   between that register and reality).
 
-Until items 1 and 2 are done, **treat this system as not independently verified.**
+## What watches for the next break
 
-## What this engagement actually changed (with evidence)
+- **Every change:** blocking CI (ruff-S, pip-audit, detect-secrets, 395+
+  tests) + the mandate gate (status consistency, hash attestation over the
+  governance set incl. the gate's own authority files, S11 ratchets, S12
+  seeded-defect calibration) + the cross-vendor adversarial panel on PRs.
+- **Weekly:** the same stack fires on schedule with no diff — the heartbeat
+  that distinguishes "quiet" from "dead".
+- **Proven, not assumed:** 12-tamper adversarial audit 2026-07-25 — 11
+  fail-closed; the 1 fail-open found (hand-loosened ratchet baseline) fixed
+  same-day and re-proven. The calibration corpus caught a live secret-scan
+  gap (UUID-format tokens) during its own installation.
 
-Test-first, small, atomic, each red→green (`audit/05`). Suite `161 passed / 1 errored` → **`176 passed`** (now hermetic); ruff (with security rules) clean; `pip-audit` clean. An independent adversarial pass then **broke four of the fixes** (a bypassable 500, a missed clone, a false-assurance test, a non-blocking secret-scan) — all four were reproduced, re-fixed and regression-tested. Two honesty corrections were folded in: the red CI is **infrastructural** (Actions never executes here — jobs die in 3s with no logs), so the rebuilt gate is verified **green locally only**; and the citations flagged "unverifiable" turned out **real**.
+## What breaks next if nothing is done
 
-- **Fixed a public 500** — `/score/history?from=<garbage>` returned HTTP 500; now validated to 422 (A-25).
-- **Closed the admin door** — the guessable placeholder admin key used to authenticate; it now fails closed (B-06/C-01).
-- **Rebuilt the gate** — CI is now blocking on ruff+`S`, `pip-audit`, secret-scan and tests, with the deceptive `mypy || true` replaced by an honestly-labelled advisory step (A-01/A-08/A-13/B-01).
-- **Made the suite hermetic and honest** — the LPPLS insufficient-data path no longer hard-imports the optional engine (A-02); enabling ruff `S` lifted the seeded-defect catch rate from ~1/6 toward ~3/6.
-- **Hardened the edges** — masked the phone number in logs (C-23), annotated/blocked swallowed exceptions (A-26), non-root container (B-12), setuptools bumped to clear a CVE.
-- **Told the truth in the docs** — the three "unverifiable" citations were **independently confirmed real** during the audit (Chen et al. arXiv:2604.25826; Basele–Phillips–Shi Cowles CFDP 2430; BIS AER 2026); the stale flags are cleared (C-38). Added `SECURITY.md`, `AGENTS.md`, `LICENSE`, a `threat-model`, the OWASP-LLM matrix, and an AI-BOM.
-
-## The honest architectural verdict
-
-Most of the mandate's fearsome surface **does not exist here, and that is a real, evidence-backed reduction — not an evasion.** This is a single-tenant, self-hosted research tool whose only AI use is a **numbers-in / short-text-out hosted-API call with no tools, no RAG, no fine-tuning, and no untrusted free-text input.** That makes the agentic taxonomy (C-06/C-12/C-16–C-19), the injection/exfiltration runtime controls (B-20/C-07/C-08), the retrieval and vector-store checks (A-21/C-22/C-32/B-33), fine-tuning governance (C-21/C-35), and multi-tenant IDOR (C-01) **genuinely not-applicable** — each argued against the architecture in `audit/03`, not assumed. 31 of 119 checks resolve NOT-APPLICABLE on that basis; 8 PASS; 65 PARTIAL; **15 FAIL**.
-
-The failures cluster on one root cause the mandate predicted exactly: **the operating model's safety rests entirely on an automated gate, and that gate was decorative** — red, non-blocking, security-blind, editable by its own author, with an unmeasured test suite behind it. That is now materially repaired in code; the last mile (rotate, enforce the gate, add a second-vendor verifier, measure the suite) is operator work, specified with compensating controls and tripwires in `audit/06`.
-
-**Do not read this as "the system is now in good shape."** Read it as: the load-bearing wall was found to be decorative, it has been rebuilt, and it will not bear load until someone bolts it to the building (branch protection) and rotates the keys. The list of what remains is in `audit/06`; work it top-down.
+Nothing in this repository rotates the credentials or flips branch
+protection; those decay paths have no machine owner by nature. The regime
+converts them from silent to loud: `production_eligible` stays pinned
+`false`, the register cannot be pruned without the gate noticing, and the
+ratification path is written down (`audit/08-standing-regime.md`). The
+remaining honest exposure is anything the founding engagement's 31
+NOT-APPLICABLE verdicts assumed about the architecture — two of those
+assumptions (no tool calls, single tenancy) are now re-validated by the
+calibration on every run; the rest re-validate at the annual catalogue
+re-run.

@@ -10,7 +10,10 @@
    "title": "Deterministic verification gate on every production change",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "escalated_band": "STOP-SHIP (A-01+A-39 both fail)",
+   "within_band_order": 1
   },
   {
    "id": "A-02",
@@ -18,7 +21,9 @@
    "title": "A test suite that can actually fail",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 2
   },
   {
    "id": "A-03",
@@ -26,7 +31,9 @@
    "title": "Deterministic vs probabilistic assertions kept apart",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 1
   },
   {
    "id": "A-04",
@@ -34,7 +41,9 @@
    "title": "Testable specification that gates merges",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 1
   },
   {
    "id": "A-05",
@@ -42,7 +51,9 @@
    "title": "Domain boundaries and consistent vocabulary",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 1
   },
   {
    "id": "A-06",
@@ -50,7 +61,9 @@
    "title": "Version control, batch size, executed rollback",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 3
   },
   {
    "id": "A-07",
@@ -58,7 +71,9 @@
    "title": "Clone, churn and refactoring signature",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 2
   },
   {
    "id": "A-08",
@@ -66,7 +81,9 @@
    "title": "Security scanning as the control",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 4
   },
   {
    "id": "A-09",
@@ -74,7 +91,9 @@
    "title": "Architecture as decided, not accreted",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 2
   },
   {
    "id": "A-10",
@@ -82,7 +101,9 @@
    "title": "Injection-resistant architecture",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 3
   },
   {
    "id": "A-11",
@@ -90,7 +111,9 @@
    "title": "Least-privilege topology for agents/tools (design)",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 3
   },
   {
    "id": "A-12",
@@ -98,7 +121,9 @@
    "title": "Technical debt and the comprehension problem",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 4
   },
   {
    "id": "A-13",
@@ -106,7 +131,9 @@
    "title": "Enforced coding standards",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 5
   },
   {
    "id": "A-14",
@@ -114,7 +141,9 @@
    "title": "A written policy for how AI builds/maintains this",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 2
   },
   {
    "id": "A-15",
@@ -122,7 +151,9 @@
    "title": "Boundary between prototype and production",
    "priority": 5,
    "founding_band": "PLAN",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 1
   },
   {
    "id": "A-16",
@@ -130,7 +161,9 @@
    "title": "Last mile: stubs, edge cases, integration",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 3
   },
   {
    "id": "A-17",
@@ -138,7 +171,9 @@
    "title": "Non-functional requirements specified and measured",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 4
   },
   {
    "id": "A-18",
@@ -146,7 +181,9 @@
    "title": "Model/agent architecture chosen deliberately",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 6
   },
   {
    "id": "A-19",
@@ -154,7 +191,9 @@
    "title": "API contracts match the implementation",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 7
   },
   {
    "id": "A-20",
@@ -162,7 +201,9 @@
    "title": "Prompts/retrieval config are code and pass the gate",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 4
   },
   {
    "id": "A-21",
@@ -170,7 +211,9 @@
    "title": "Context, retrieval and memory architecture",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 8
   },
   {
    "id": "A-22",
@@ -178,7 +221,9 @@
    "title": "User outcomes, performance, accessibility",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 5
   },
   {
    "id": "A-23",
@@ -186,7 +231,9 @@
    "title": "Data architecture and ownership",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 9
   },
   {
    "id": "A-24",
@@ -194,7 +241,9 @@
    "title": "The system operates and recovers itself",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 5
   },
   {
    "id": "A-25",
@@ -202,7 +251,9 @@
    "title": "Input validation at every boundary",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 6
   },
   {
    "id": "A-26",
@@ -210,7 +261,9 @@
    "title": "Error handling that does not lie",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 10
   },
   {
    "id": "A-27",
@@ -218,7 +271,9 @@
    "title": "AI-specific non-functional requirements",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 11
   },
   {
    "id": "A-28",
@@ -226,7 +281,9 @@
    "title": "Dependency topology and blast radius",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 12
   },
   {
    "id": "A-29",
@@ -234,7 +291,9 @@
    "title": "Build vs buy vs open source, including the model",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 5
   },
   {
    "id": "A-30",
@@ -242,7 +301,9 @@
    "title": "Non-functional trade-offs analysed",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 6
   },
   {
    "id": "A-31",
@@ -250,7 +311,9 @@
    "title": "Unit economics decided at design time",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 7
   },
   {
    "id": "A-32",
@@ -258,7 +321,9 @@
    "title": "Documentation that is true and executable",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 13
   },
   {
    "id": "A-33",
@@ -266,7 +331,9 @@
    "title": "Maintainability without a maintainer",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 7
   },
   {
    "id": "A-34",
@@ -274,7 +341,9 @@
    "title": "Autonomy levels, gates, self-firing kill switch",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 8
   },
   {
    "id": "A-35",
@@ -282,7 +351,9 @@
    "title": "Runtime containment without an operator",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 8
   },
   {
    "id": "A-36",
@@ -290,7 +361,9 @@
    "title": "Calibration of the verification pipeline",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 9
   },
   {
    "id": "A-37",
@@ -298,7 +371,9 @@
    "title": "Takeover readiness",
    "priority": 5,
    "founding_band": "PLAN",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 2
   },
   {
    "id": "A-38",
@@ -306,7 +381,9 @@
    "title": "Provenance and licensing of shipped code",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 14
   },
   {
    "id": "A-39",
@@ -314,7 +391,9 @@
    "title": "Verification loop must not be self-referential",
    "priority": 5,
    "founding_band": "PLAN",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 3
   },
   {
    "id": "A-40",
@@ -322,7 +401,9 @@
    "title": "Energy and carbon as a design constraint",
    "priority": 4,
    "founding_band": "ASSESS",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 1
   },
   {
    "id": "B-01",
@@ -330,7 +411,9 @@
    "title": "The pipeline actually gates",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 6
   },
   {
    "id": "B-02",
@@ -338,7 +421,9 @@
    "title": "A paved road an agent can walk",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 9
   },
   {
    "id": "B-03",
@@ -346,7 +431,9 @@
    "title": "Observability that reaches root cause",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 7
   },
   {
    "id": "B-04",
@@ -354,7 +441,9 @@
    "title": "Dependencies that exist, are pinned, were vetted",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 8
   },
   {
    "id": "B-05",
@@ -362,7 +451,9 @@
    "title": "Models/prompts/agents have a lifecycle",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 10
   },
   {
    "id": "B-06",
@@ -370,7 +461,9 @@
    "title": "Secrets and machine identity",
    "priority": 10,
    "founding_band": "STOP-SHIP",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 1
   },
   {
    "id": "B-07",
@@ -378,7 +471,9 @@
    "title": "Every model/agent run traceable and replayable",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 11
   },
   {
    "id": "B-08",
@@ -386,7 +481,9 @@
    "title": "No path consumes unbounded tokens/money",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 15
   },
   {
    "id": "B-09",
@@ -394,7 +491,9 @@
    "title": "Signed provenance for everything shipped",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 16
   },
   {
    "id": "B-10",
@@ -402,7 +501,9 @@
    "title": "Evaluation gates in the pipeline",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 12
   },
   {
    "id": "B-11",
@@ -410,7 +511,9 @@
    "title": "Rollback for code, prompts and models",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 9
   },
   {
    "id": "B-12",
@@ -418,7 +521,9 @@
    "title": "Runtime defence",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 13
   },
   {
    "id": "B-13",
@@ -426,7 +531,9 @@
    "title": "Pinned model versions \u2014 no floating aliases",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 14
   },
   {
    "id": "B-14",
@@ -434,7 +541,9 @@
    "title": "Governance over prompt/config changes",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 10
   },
   {
    "id": "B-15",
@@ -442,7 +551,9 @@
    "title": "Guardrails are deployed artifacts and fail closed",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 15
   },
   {
    "id": "B-16",
@@ -450,7 +561,9 @@
    "title": "Cost attribution and finops",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 11
   },
   {
    "id": "B-17",
@@ -458,7 +571,9 @@
    "title": "Infrastructure as code, reconciled from VC",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 17
   },
   {
    "id": "B-18",
@@ -466,7 +581,9 @@
    "title": "Progressive delivery with automatic abort",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 12
   },
   {
    "id": "B-19",
@@ -474,7 +591,9 @@
    "title": "Service objectives with an error budget that bites",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 18
   },
   {
    "id": "B-20",
@@ -482,7 +601,9 @@
    "title": "Runtime detection+containment of injection/exfiltration",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 10
   },
   {
    "id": "B-21",
@@ -490,7 +611,9 @@
    "title": "The application survives a provider outage",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 13
   },
   {
    "id": "B-22",
@@ -498,7 +621,9 @@
    "title": "Agents deployed with least privilege, enforced",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 11
   },
   {
    "id": "B-23",
@@ -506,7 +631,9 @@
    "title": "Behavioural baselines for agents",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 19
   },
   {
    "id": "B-24",
@@ -514,7 +641,9 @@
    "title": "Quality drift detection",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 20
   },
   {
    "id": "B-25",
@@ -522,7 +651,9 @@
    "title": "Environment separation and parity",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 21
   },
   {
    "id": "B-26",
@@ -530,7 +661,9 @@
    "title": "Feature flags and self-firing kill switches",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 14
   },
   {
    "id": "B-27",
@@ -538,7 +671,9 @@
    "title": "Artifact integrity",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 22
   },
   {
    "id": "B-28",
@@ -546,7 +681,9 @@
    "title": "Detection that triggers action, not just notification",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 16
   },
   {
    "id": "B-29",
@@ -554,7 +691,9 @@
    "title": "Reliability primitives validated by breaking things",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 23
   },
   {
    "id": "B-30",
@@ -562,7 +701,9 @@
    "title": "Capacity, including inference capacity",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 15
   },
   {
    "id": "B-31",
@@ -570,7 +711,9 @@
    "title": "Backups you have actually restored",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 17
   },
   {
    "id": "B-32",
@@ -578,7 +721,9 @@
    "title": "Drift detection",
    "priority": 5,
    "founding_band": "PLAN",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 4
   },
   {
    "id": "B-33",
@@ -586,7 +731,9 @@
    "title": "Integrity of the retrieval corpus",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 24
   },
   {
    "id": "B-34",
@@ -594,7 +741,9 @@
    "title": "Latency budgets for inference",
    "priority": 5,
    "founding_band": "PLAN",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 5
   },
   {
    "id": "B-35",
@@ -602,7 +751,9 @@
    "title": "Segregate the gate from the gated",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 16
   },
   {
    "id": "B-36",
@@ -610,7 +761,9 @@
    "title": "Model deprecation is a plan, not an outage",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 17
   },
   {
    "id": "B-37",
@@ -618,7 +771,9 @@
    "title": "Retirement of AI artifacts and right to erasure",
    "priority": 5,
    "founding_band": "PLAN",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 6
   },
   {
    "id": "B-38",
@@ -626,7 +781,9 @@
    "title": "Inference economics",
    "priority": 4,
    "founding_band": "ASSESS",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 2
   },
   {
    "id": "B-39",
@@ -634,7 +791,9 @@
    "title": "Design against a named reference framework",
    "priority": 5,
    "founding_band": "PLAN",
-   "status": "active"
+   "status": "active",
+   "volume": "part1",
+   "within_band_order": 7
   },
   {
    "id": "C-01",
@@ -642,7 +801,9 @@
    "title": "Core application security",
    "priority": 10,
    "founding_band": "STOP-SHIP",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 2
   },
   {
    "id": "C-02",
@@ -650,7 +811,9 @@
    "title": "Threat model",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 18
   },
   {
    "id": "C-03",
@@ -658,7 +821,9 @@
    "title": "Supply-chain security and hallucinated packages",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 12
   },
   {
    "id": "C-04",
@@ -666,7 +831,9 @@
    "title": "Privacy and data governance",
    "priority": 10,
    "founding_band": "STOP-SHIP",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 3
   },
   {
    "id": "C-05",
@@ -674,7 +841,9 @@
    "title": "LLM application risk taxonomy, mapped and tested",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 13
   },
   {
    "id": "C-06",
@@ -682,7 +851,9 @@
    "title": "The agentic risk taxonomy",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 19
   },
   {
    "id": "C-07",
@@ -690,7 +861,9 @@
    "title": "Prompt injection",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 14
   },
   {
    "id": "C-08",
@@ -698,7 +871,9 @@
    "title": "The dangerous three: never combine all",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 20
   },
   {
    "id": "C-09",
@@ -706,7 +881,9 @@
    "title": "EU AI Act",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 15
   },
   {
    "id": "C-10",
@@ -714,7 +891,9 @@
    "title": "Evaluation methodology",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 21
   },
   {
    "id": "C-11",
@@ -722,7 +901,9 @@
    "title": "A running AI risk-management programme",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 25
   },
   {
    "id": "C-12",
@@ -730,7 +911,9 @@
    "title": "Excessive agency and the autonomy policy",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 26
   },
   {
    "id": "C-13",
@@ -738,7 +921,9 @@
    "title": "AI management system",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 18
   },
   {
    "id": "C-14",
@@ -746,7 +931,9 @@
    "title": "Validating the judge",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 19
   },
   {
    "id": "C-15",
@@ -754,7 +941,9 @@
    "title": "Guardrails have their own tests and adversary",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 27
   },
   {
    "id": "C-16",
@@ -762,7 +951,9 @@
    "title": "Machine identity and agent-to-agent trust",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 28
   },
   {
    "id": "C-17",
@@ -770,7 +961,9 @@
    "title": "Tool poisoning",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 29
   },
   {
    "id": "C-18",
@@ -778,7 +971,9 @@
    "title": "Connector and tool-server security",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 30
   },
   {
    "id": "C-19",
@@ -786,7 +981,9 @@
    "title": "Memory and context poisoning",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 20
   },
   {
    "id": "C-20",
@@ -794,7 +991,9 @@
    "title": "Responsible-AI dimensions with owners and numbers",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 21
   },
   {
    "id": "C-21",
@@ -802,7 +1001,9 @@
    "title": "Training and fine-tuning data governance",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 31
   },
   {
    "id": "C-22",
@@ -810,7 +1011,9 @@
    "title": "Retrieval evaluated separately from generation",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 32
   },
   {
    "id": "C-23",
@@ -818,7 +1021,9 @@
    "title": "Personal data in prompts, logs and traces",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 22
   },
   {
    "id": "C-24",
@@ -826,7 +1031,9 @@
    "title": "Disclosure via memorisation/system-prompt leakage",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 33
   },
   {
    "id": "C-25",
@@ -834,7 +1041,9 @@
    "title": "Copyright and licensing of generated code",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 22
   },
   {
    "id": "C-26",
@@ -842,7 +1051,9 @@
    "title": "SBOM, AI-BOM, provenance, cyber-resilience",
    "priority": 8,
    "founding_band": "BLOCKER-2",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 23
   },
   {
    "id": "C-27",
@@ -850,7 +1061,9 @@
    "title": "Sector compliance baseline",
    "priority": 9,
    "founding_band": "BLOCKER-1",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 16
   },
   {
    "id": "C-28",
@@ -858,7 +1071,9 @@
    "title": "Residency and regulatory scope",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 34
   },
   {
    "id": "C-29",
@@ -866,7 +1081,9 @@
    "title": "Content safety and misuse prevention",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 23
   },
   {
    "id": "C-30",
@@ -874,7 +1091,9 @@
    "title": "Jailbreak resistance",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 24
   },
   {
    "id": "C-31",
@@ -882,7 +1101,9 @@
    "title": "Adversarial technique taxonomy / agentic layers",
    "priority": 5,
    "founding_band": "PLAN",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 8
   },
   {
    "id": "C-32",
@@ -890,7 +1111,9 @@
    "title": "Vector and embedding weaknesses",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 25
   },
   {
    "id": "C-33",
@@ -898,7 +1121,9 @@
    "title": "An AI usage policy that is enforced",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 26
   },
   {
    "id": "C-34",
@@ -906,7 +1131,9 @@
    "title": "Provider training on your data",
    "priority": 7,
    "founding_band": "MUST-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 35
   },
   {
    "id": "C-35",
@@ -914,7 +1141,9 @@
    "title": "Benchmark contamination / who evaluates the evaluator",
    "priority": 4,
    "founding_band": "ASSESS",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 3
   },
   {
    "id": "C-36",
@@ -922,7 +1151,9 @@
    "title": "Transparency and marking of generated output",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 27
   },
   {
    "id": "C-37",
@@ -930,7 +1161,9 @@
    "title": "Accountability without a signature",
    "priority": 5,
    "founding_band": "PLAN",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 9
   },
   {
    "id": "C-38",
@@ -938,7 +1171,9 @@
    "title": "Fabrication and downstream reliance",
    "priority": 6,
    "founding_band": "SHOULD-FIX",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 28
   },
   {
    "id": "C-39",
@@ -946,7 +1181,9 @@
    "title": "Lifecycle process and vocabulary standards",
    "priority": 4,
    "founding_band": "ASSESS",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 4
   },
   {
    "id": "C-40",
@@ -954,7 +1191,10 @@
    "title": "Societal and environmental impact",
    "priority": 4,
    "founding_band": "ASSESS",
-   "status": "active"
+   "status": "active",
+   "volume": "part2",
+   "within_band_order": 5
   }
- ]
+ ],
+ "_note": "Founding manifest reconstructed 2026-07-25 from the July engagement's findings. Grounded fields only: \u00a76.5 door membership and structural-fix flags were not recorded at founding and are NOT fabricated here; the reconstructed structural ledger lives in audit/04-remediation-plan.md (\u00a76.5.6 addendum)."
 }

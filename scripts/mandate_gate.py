@@ -36,7 +36,23 @@ AUDIT = ROOT / "audit"
 GOV = ROOT / "governance"
 
 BLOCKER_BANDS = ("STOP-SHIP", "BLOCKER-1", "BLOCKER-2")
+ALL_BANDS = BLOCKER_BANDS + ("MUST-FIX", "SHOULD-FIX", "PLAN", "ASSESS")
 OPEN_VERDICTS = ("FAIL", "PARTIAL", "NO-EVIDENCE")
+
+
+def effective_band(finding: dict) -> str:
+    """Escalations applied, fail-closed (2026-07-25 audit finding: the
+    free-text escalated_band 'STOP-SHIP (A-01+A-39 both fail)' matched no
+    band constant, so an open FAIL silently escaped the blocker gate). A
+    band value must START WITH a known band token; anything unparseable is
+    a gate failure, never a silently ignored record."""
+    raw = finding.get("escalated_band") or finding["band"]
+    for band in ALL_BANDS:
+        if str(raw).startswith(band):
+            return band
+    _fail(f"{finding['id']} has unparseable band {raw!r} — a record the "
+          "gate cannot band is a record it cannot gate")
+    raise AssertionError  # unreachable; _fail exits
 
 
 def _fail(msg: str) -> None:
@@ -80,16 +96,25 @@ def compute_status() -> dict:
         extra = sorted(set(f_ids) - set(cat_ids))
         _fail(f"findings/catalogue mismatch — missing: {missing} extra: {extra}")
 
-    # §3 conditional escalation: a PASS with no standing control is PARTIAL.
+    # §3/§5: a PASS with no standing control is PARTIAL, and per §5 the
+    # control must be structured with a non-null `demonstrated` — a control
+    # nobody has watched block something is a control being hoped about.
     for f in findings:
-        if f["verdict"] == "PASS" and not f.get("standing_control"):
-            _fail(f"{f['id']} is PASS with a null standing_control — "
-                  "per the mandate that verdict is PARTIAL, always")
+        if f["verdict"] == "PASS":
+            sc = f.get("standing_control")
+            if not isinstance(sc, dict) or not sc.get("mechanism") \
+                    or not sc.get("demonstrated"):
+                _fail(f"{f['id']} is PASS without a structured "
+                      "standing_control carrying non-null mechanism and "
+                      "demonstrated — per the mandate that verdict is "
+                      "PARTIAL, always (§5)")
+        if f["verdict"] == "NOT-APPLICABLE" and not f.get("na_justification"):
+            _fail(f"{f['id']} is NOT-APPLICABLE without na_justification (§5)")
 
     open_blockers: list[str] = []
     band_counts = {b: 0 for b in BLOCKER_BANDS}
     for f in findings:
-        band = f.get("escalated_band") or f["band"]
+        band = effective_band(f)
         if f["verdict"] in OPEN_VERDICTS and band in BLOCKER_BANDS:
             open_blockers.append(f["id"])
             band_counts[band] += 1
@@ -107,19 +132,42 @@ def compute_status() -> dict:
               f"open blockers: {stale} — prune the register (a closed "
               "acceptance left in place is a future bypass)")
 
-    # Governance hash attestation (Article XI / B-35).
+    # Governance hash attestation (Article XI / B-35). The attested set
+    # includes the gate's own authority files — the ratchet baselines and the
+    # accepted-residuals register — because a register the measured thing can
+    # hand-edit is a diary, not a gate (§9.8; tamper-test finding 2026-07-25).
     const_path = GOV / "constitution.md"
     const_hash = _sha256(const_path)
     if manifest["constitution_sha256"] != const_hash:
         _fail("constitution.md hash does not match governance/mandate/"
               "manifest.json — amendments must go through the gate and "
               "bump the attested hash (Article XIII)")
-    p1 = GOV / "mandate" / "part1.md"
-    if manifest["part1_sha256"] != _sha256(p1):
-        _fail("governance/mandate/part1.md hash mismatch vs manifest — "
-              "the mandate text is immutable (§9.9)")
+    attested = {
+        "part1_sha256": GOV / "mandate" / "part1.md",
+        "combined_mandate_sha256": GOV.parent / "governance" / "mandate.md",
+        "ratchet_baselines_sha256": AUDIT / "ratchet-baselines.json",
+        "accepted_residuals_sha256": GOV / "accepted-residuals.json",
+    }
+    for key, path in attested.items():
+        if manifest.get(key) != _sha256(path):
+            _fail(f"{path.relative_to(ROOT)} hash mismatch vs manifest — "
+                  "changing this file is an Article XIII amendment: update "
+                  f"{key} in governance/mandate/manifest.json in the same "
+                  "change (loosening anything is automatically a finding)")
 
     evidenced = sum(1 for f in findings if f["verdict"] != "NO-EVIDENCE")
+    pending = sorted(f["id"] for f in findings if f["verdict"] == "NO-EVIDENCE")
+
+    def _volume_complete(tracks: tuple[str, ...]) -> str:
+        # Computed, never asserted (§8): a volume is COMPLETE when every one
+        # of its checks carries an evidence-backed verdict. Open accepted
+        # residuals affect production_eligible, not phase completion — the §8
+        # eligibility chain requires BOTH separately, so the states are
+        # deliberately distinct.
+        vol = [f for f in findings if f["id"].split("-")[0] in tracks]
+        return ("COMPLETE" if all(f["verdict"] != "NO-EVIDENCE" for f in vol)
+                else "IN_PROGRESS")
+
     production_eligible = (
         not open_blockers
         and evidenced == len(cat_ids)
@@ -131,8 +179,9 @@ def compute_status() -> dict:
         "active_check_count": len(cat_ids),
         "present_check_count": len(f_ids),
         "evidenced_check_count": evidenced,
-        "part1_status": "COMPLETE",
-        "part2_status": "COMPLETE",
+        "pending_check_ids": pending,
+        "part1_status": _volume_complete(("A", "B")),
+        "part2_status": _volume_complete(("C",)),
         "phase": "STANDING_REGIME",
         "highest_open_band": next((b for b in BLOCKER_BANDS
                                    if band_counts[b]), "MUST-FIX-OR-BELOW"),
@@ -220,6 +269,16 @@ def cmd_ratchet(measure_only: bool) -> None:
     if measure_only:
         print(json.dumps(current, indent=2))
         return
+    # The baseline file is attested (tamper-test finding 2026-07-25: a
+    # hand-loosened floor passed silently). Verify even when ratchet runs
+    # standalone, not only via status.
+    manifest = _load(GOV / "mandate" / "manifest.json")
+    if manifest.get("ratchet_baselines_sha256") != _sha256(
+            AUDIT / "ratchet-baselines.json"):
+        _fail("audit/ratchet-baselines.json hash mismatch vs manifest — "
+              "baseline changes are Article XIII amendments (update "
+              "ratchet_baselines_sha256 in the same change; loosening is "
+              "automatically a finding)")
     baselines = _load(AUDIT / "ratchet-baselines.json")
     errors = []
     for name, base in baselines["ratchets"].items():

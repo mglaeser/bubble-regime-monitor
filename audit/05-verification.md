@@ -60,3 +60,42 @@ An independent adversarial agent was tasked to **break** the five code fixes (no
 ## A correction, recorded honestly (CI cannot run in this environment)
 
 An initial reconstruction blamed the red CI on the install list omitting `lppls`. **Job-timing evidence refutes that:** every CI job — pre-audit and audit alike — "completes" in ~3 seconds with no downloadable logs, i.e. **no runner executes it** (the git remote here is a local proxy; Actions execution is not wired up). See `audit/evidence/ci-runs.md`. Consequence: the rebuilt gate is verified **GREEN LOCALLY ONLY** (all four gate commands pass here); it **cannot be confirmed green on a runner** in this environment. A functioning CI executor (or a pre-push executor on the deploy host) is therefore a prerequisite carried in `audit/06`.
+
+## Addendum — 2026-07-25 independent re-audit and tamper verification
+
+Executed on the operator's "check and ensure thoroughly" directive by three
+independent agent sessions (same-vendor limitation disclosed — the
+cross-vendor panel additionally reviews the resulting PR):
+
+**Verdict-sample re-audit (the §9.8 audit-of-the-audit).** Two conformance
+agents re-examined the engagement record against the mandate text
+independently (§5 schema, Phases 2–7, §8 deliverables, §6.5, §7).
+Disagreements with the standing record — i.e. findings against the audit
+itself — and their resolutions:
+
+1. **Blocker gate fail-open on free-text escalation bands** (A-01's
+   `escalated_band` matched no band constant and escaped the gate/counts/
+   register). FIXED: `effective_band()` parses fail-closed; unparseable
+   bands fail the build; regression-tested.
+2. `engagement-status.json` part statuses were asserted, and
+   `pending_check_ids` was missing. FIXED: both computed.
+3. PASS standing controls were free-text without `demonstrated`. FIXED: all
+   10 structured with real demonstrations; the gate now enforces the shape.
+4. Structural ledger (§6.5.6), canonical `governance/mandate.md`, manifest
+   structure, scope-labelled executive summary — all missing. FIXED.
+5. Hand-loosened ratchet baseline passed silently (tamper test #1). FIXED:
+   baselines + accepted-residuals register joined the attested hash set.
+6. Non-retrofittable gaps (founding record schema subset, Part 2 text,
+   quantitative catch-rate SLI, autonomous fleet) recorded as explicit
+   deviations in `governance/accepted-residuals.json` — not papered over.
+
+**Tamper verification.** 12 adversarial tampers against the gate in an
+isolated worktree: 11 failed closed with the exact expected error; 1
+fail-open (above, fixed and re-proven). CLI edge cases exit nonzero. The
+ungated-amendment refusals are logged in
+`audit/evidence/amendment-refusal-2026-07-25.md`.
+
+**CI-runner proof.** The first push of the enforcement commit FAILED on the
+real runner (detect-secrets flagged the manifest's own attestation hashes —
+the gate blocking its own installer until the baseline was audited), which
+is the enforcement demonstrating itself; subsequently green.

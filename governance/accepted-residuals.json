@@ -7,6 +7,7 @@
  "constitution_state": "IN_FORCE_PROVISIONAL",
  "production_note": "Operator runs production under the compensating controls of audit/06; this is a recorded acceptance, not a clearance. Closing B-06 (rotation), A-01/B-35 (branch protection) and A-02 (mutation measurement) is the ratification path.",
  "accepted_open_findings": [
+  "A-01",
   "A-02",
   "A-04",
   "A-06",
@@ -38,5 +39,13 @@
   "C-10",
   "C-23",
   "C-26"
- ]
+ ],
+ "recorded_deviations": {
+  "founding_record_schema_subset": "The 119 founding finding records predate the \u00a75 machine schema and carry a subset of its fields (no probe/clone_sweep/structural_fix/gate_decision/attestation per record; those live aggregated in audit/01-05). Retrofitting them would fabricate discovery-time detail. New/updated records must meet the enforced subset: evidence, na_justification on N/A, structured standing_control on PASS.",
+  "part2_text_absent": "Track C verdicts exist (founding engagement) but the Part 2 normative text is not in-repo; recorded in mandate/manifest.json.",
+  "ratification_pending_operator": "constitution_state stays IN_FORCE_PROVISIONAL until B-06 rotation, branch protection and A-02 mutation measurement land (the \u00a711/Phase-7 ratification ordering is deliberately deferred to those operator actions).",
+  "no_autonomous_maintainer_fleet": "\u00a79.6's standing Maintainer/Runner fleet is infeasible for a solo-operator self-hosted monitor; the Runner role is GitHub Actions (weekly heartbeat), the Maintainer role is the operator-invoked agent session bound by CLAUDE.md + constitution.",
+  "catch_rate_binary": "The S12 calibration is binary (all classes must catch) rather than a quantitative ratcheted SLI; the quantitative slot is registered open in audit/ratchet-baselines.json.",
+  "progressive_rollout_inapplicable": "Single-instance self-hosted service: no traffic fractions exist; deploy.sh health-check + auto-rollback is the maximal substitute (fired live 2026-07-15)."
+ }
 }

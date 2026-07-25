@@ -4,14 +4,14 @@
   "title": "Deterministic verification gate on every production change",
   "priority": 9,
   "band": "BLOCKER-1",
-  "verdict": "FAIL",
+  "verdict": "PARTIAL",
   "summary": "The only production gate (CI) is red on every recent run and non-blocking; production shipped from a red commit; no branch protection; no independent verifier. STOP-SHIP by \u00a73 escalation (A-01+A-39).",
-  "escalated_band": "STOP-SHIP (A-01+A-39 both fail)",
   "evidence": [
    "audit/evidence/ci-runs.md: runs #34-#43 all conclusion=failure, on feature AND base branch; both jobs fail.",
    "a916e8d was built+deployed to the host while its CI was red (user deploy log).",
    "ci.yml:29 'mypy app || true' discards the type-check exit code; no required-status-check enforces green.",
-   "No policy-as-code bundle; the 'gate' is a single human who does not line-review AI output."
+   "No policy-as-code bundle; the 'gate' is a single human who does not line-review AI output.",
+   "2026-07-25 audit: the paired STOP-SHIP escalation (A-01+A-39 both fail) is void \u2014 A-39 is PASS (cross-vendor panel live). CI executes and blocks on real runners (live runs incl. failures that blocked merges). Remaining gap: branch protection (required checks, no bypass) \u2014 operator console action, accepted in audit/06 and governance/accepted-residuals.json. The 2026-07-25 tamper audit also found this record's free-text escalated_band escaped the blocker gate \u2014 the gate now parses bands fail-closed."
   ],
   "impact": "Nothing \u2014 no human and no machine \u2014 independently verifies any line of production code. Every green build is meaningless; every 'PASS' elsewhere that rests on CI is void.",
   "fix": "Make CI green (install the full prod dep set incl lppls/anthropic OR skip cleanly when absent) and blocking (remove '|| true'; add security gates); require the check for merge (branch protection); add an independent adversarial verifier (S2). See Phase 5 for the CI-gate rebuild.",
@@ -20,7 +20,8 @@
    "S2",
    "S3"
   ],
-  "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service"
+  "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
+  "standing_control": "blocking ci.yml + mandate_gate.py all + independent-verify.yml on every PR; weekly heartbeat; full enforcement pending branch protection (accepted residual)"
  },
  {
   "id": "A-02",
@@ -176,7 +177,13 @@
    "S5"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "numbers-only prompt invariant regression tests (incl. SMS prompt, verifier finding) in blocking CI; mandate_gate calibration class 5 re-validates the no-tool architecture every run"
+  "standing_control": {
+   "mechanism": "numbers-only prompt invariant tests (incl. SMS prompt) in blocking CI; mandate_gate calibration class 5 re-validates the no-tool architecture",
+   "cadence": "every change",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "2026-07-25 tamper audit (audit/05 addendum + audit/evidence/amendment-refusal-2026-07-25.md): seeding tools= into app/ makes calibrate fail the build"
+  }
  },
  {
   "id": "A-11",
@@ -292,7 +299,13 @@
   ],
   "fix": "None; record the choice in an ADR (A-09).",
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "architecture recorded in spec/references CHANGELOG discipline; re-validated on \u00a79.5 architecture-change triggers per audit/08-standing-regime.md"
+  "standing_control": {
+   "mechanism": "architecture decisions recorded in spec + references CHANGELOG; \u00a79.5 re-run triggers wired via calibration classes 5/6",
+   "cadence": "every change (structural assumptions) + annual catalogue re-run",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "2026-07-25 tamper audit (audit/05 addendum + audit/evidence/amendment-refusal-2026-07-25.md): class 5/6 architecture-void seeds fail the build when the assumed architecture changes"
+  }
  },
  {
   "id": "A-19",
@@ -401,7 +414,13 @@
    "S3"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "regression tests run in blocking CI on every change; ruff S rules block new unguarded patterns."
+  "standing_control": {
+   "mechanism": "regression tests (TestHistoryInputValidation incl. timedelta-overflow bypass) in the blocking suite; ruff S rules",
+   "cadence": "every change",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "red->green captured in audit/05 (HTTP 500 before, 422 after); the verifier's bypass reproduced and closed with its own regression test"
+  }
  },
  {
   "id": "A-26",
@@ -554,7 +573,13 @@
    "S10"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "runtime containment flags (--cap-drop=ALL, no-new-privileges) version-controlled in deploy.sh/compose.yml; deploy-time health check auto-rollback (proven live, audit/05)"
+  "standing_control": {
+   "mechanism": "--cap-drop=ALL --security-opt no-new-privileges in deploy.sh/compose.yml (version-controlled); deploy health-check auto-rollback",
+   "cadence": "every deploy",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "auto-rollback fired live on the failed B-12 USER deploy (2026-07-15, audit/05) \u2014 prod stayed on the prior image"
+  }
  },
  {
   "id": "A-36",
@@ -619,7 +644,13 @@
   "compensating_control": "Deterministic golden-fixture + mutation gate (once wired) as the non-model arbiter.",
   "tripwire": "Mutation score below threshold blocks merge.",
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "independent-verify.yml runs on every PR, fail-closed (no-key exit only for same-repo PRs, VERIFIER_REQUIRE_KEY for forks/dependabot); tests/test_independent_verify.py (24 tests) gate its own logic in blocking CI; fleet composition asserted in workflow env."
+  "standing_control": {
+   "mechanism": "independent-verify.yml: fail-closed cross-vendor panel (OpenAI; required approver gpt-5.6-sol veto; deterministic arbiter; VERIFIER_REQUIRE_KEY for forks); tests/test_independent_verify.py (24 tests) in blocking CI",
+   "cadence": "every pull request",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "16 live veto rounds on PRs #21/#22 blocked merges until each finding was fixed or refuted with test evidence (Actions runs 30165282911, 30165646149 et al., 2026-07-25)"
+  }
  },
  {
   "id": "A-40",
@@ -953,7 +984,13 @@
    "S5"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "hermetic degradation tests (test_outage_remediation_320.py et al.) in blocking CI prove provider-outage paths every change"
+  "standing_control": {
+   "mechanism": "hermetic provider-outage degradation tests (test_outage_remediation_320 et al.) in blocking CI",
+   "cadence": "every change",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "suite passes with lppls AND Rscript absent (audit/05); FRED-outage path serves persisted history with stale labeling, asserted by tests"
+  }
  },
  {
   "id": "B-22",
@@ -1069,7 +1106,13 @@
    "S6"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "single-user self-hosted capacity bounded by design; /healthz + freshness watchdog on the host (docs/AUTO_DEPLOY.md)"
+  "standing_control": {
+   "mechanism": "single-user self-hosted bounded capacity; /healthz + /readyz + host freshness watchdog (docs/AUTO_DEPLOY.md)",
+   "cadence": "runtime continuous",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "watchdog restart/rollback path exercised at deploy time by deploy.sh health gate (live rollback 2026-07-15, audit/05)"
+  }
  },
  {
   "id": "B-31",
@@ -1295,7 +1338,13 @@
   "compensating_control": "Numbers-only prompt invariant (add a regression test).",
   "tripwire": "Test fails if any free-text external field enters PROMPT_TEMPLATE.",
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "numbers-only invariant tests in blocking CI; calibration class 5 (no tools=) re-validated every run by mandate_gate"
+  "standing_control": {
+   "mechanism": "numbers-only invariant tests + no free-text user input path; calibration class 5 asserts no tools= in app/",
+   "cadence": "every change",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "2026-07-25 tamper audit (audit/05 addendum + audit/evidence/amendment-refusal-2026-07-25.md): seeded tools= fails the build; prompt regression tests red->green history in audit/05"
+  }
  },
  {
   "id": "C-08",
@@ -1314,7 +1363,13 @@
    "S6"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "structurally absent (no tool calls, no autonomy, no private-data prompt); mandate_gate calibration classes 5/6 re-validate absence every run"
+  "standing_control": {
+   "mechanism": "structural absence of the dangerous three (no tool calls, no autonomy, no private data in prompts); calibration classes 5/6 re-validate",
+   "cadence": "every change",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "2026-07-25 tamper audit (audit/05 addendum + audit/evidence/amendment-refusal-2026-07-25.md): seeding either a tools= parameter or per-user columns fails the build (classes 5/6 observed firing in the tamper audit)"
+  }
  },
  {
   "id": "C-09",
@@ -1518,7 +1573,13 @@
    "S3"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "recipient masking test (TestRecipientMasking) in blocking CI; no user data enters prompts (single-operator system)"
+  "standing_control": {
+   "mechanism": "recipient masking (TestRecipientMasking) in blocking CI; no user data enters prompts (single-operator)",
+   "cadence": "every change",
+   "blocks_on_breach": "merge (CI red)",
+   "owning_role": "operator (mglaeser)",
+   "demonstrated": "red->green in audit/05 (_mask_recipient did not exist before); test in the blocking suite since"
+  }
  },
  {
   "id": "C-25",

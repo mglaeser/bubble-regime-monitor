@@ -55,7 +55,10 @@ class TestImportResolution:
 
 
 def _write_minimal_engagement(root: Path, *, pass_has_control: bool,
-                              blocker_accepted: bool):
+                              blocker_accepted: bool,
+                              structured_control: bool = True,
+                              escalated_band: str | None = None):
+    import hashlib
     (root / "audit").mkdir()
     gov = root / "governance" / "mandate"
     gov.mkdir(parents=True)
@@ -65,21 +68,37 @@ def _write_minimal_engagement(root: Path, *, pass_has_control: bool,
                "founding_band": "STOP-SHIP", "status": "active"}]
     (root / "audit" / "00-check-catalogue.json").write_text(json.dumps(
         {"catalogue_version": "t", "registered_check_count": 2, "checks": checks}))
+    control = None
+    if pass_has_control:
+        control = ({"mechanism": "ci", "demonstrated": "blocked seeded defect"}
+                   if structured_control else "ci")
+    a02 = {"id": "A-02", "band": "STOP-SHIP", "priority": 10, "verdict": "FAIL"}
+    if escalated_band is not None:
+        a02["escalated_band"] = escalated_band
     findings = [
         {"id": "A-01", "band": "BLOCKER-1", "priority": 9, "verdict": "PASS",
-         "standing_control": ("ci" if pass_has_control else None)},
-        {"id": "A-02", "band": "STOP-SHIP", "priority": 10, "verdict": "FAIL"},
+         "standing_control": control},
+        a02,
     ]
     (root / "audit" / "03-findings.json").write_text(json.dumps(findings))
+    (root / "audit" / "ratchet-baselines.json").write_text(
+        json.dumps({"ratchets": {}}))
     (root / "governance" / "accepted-residuals.json").write_text(json.dumps(
         {"constitution_state": "IN_FORCE_PROVISIONAL",
          "accepted_open_findings": (["A-02"] if blocker_accepted else [])}))
     (root / "governance" / "constitution.md").write_text("law\n")
+    (root / "governance" / "mandate.md").write_text("combined\n")
     (gov / "part1.md").write_text("mandate\n")
-    import hashlib
+
+    def _sha(p: Path) -> str:
+        return hashlib.sha256(p.read_bytes()).hexdigest()
     (gov / "manifest.json").write_text(json.dumps({
-        "part1_sha256": hashlib.sha256(b"mandate\n").hexdigest(),
-        "constitution_sha256": hashlib.sha256(b"law\n").hexdigest()}))
+        "part1_sha256": _sha(gov / "part1.md"),
+        "constitution_sha256": _sha(root / "governance" / "constitution.md"),
+        "combined_mandate_sha256": _sha(root / "governance" / "mandate.md"),
+        "ratchet_baselines_sha256": _sha(root / "audit" / "ratchet-baselines.json"),
+        "accepted_residuals_sha256": _sha(
+            root / "governance" / "accepted-residuals.json")}))
 
 
 class TestStatusInvariants:
@@ -112,6 +131,54 @@ class TestStatusInvariants:
         self._patched(monkeypatch, tmp_path,
                       pass_has_control=True, blocker_accepted=True)
         (tmp_path / "governance" / "constitution.md").write_text("weakened law\n")
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_unstructured_pass_control_refused(self, monkeypatch, tmp_path):
+        # 2026-07-25 re-audit finding 3: a one-word string satisfied the old
+        # truthiness check; §5 demands mechanism + demonstrated.
+        self._patched(monkeypatch, tmp_path, pass_has_control=True,
+                      blocker_accepted=True, structured_control=False)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_freetext_escalated_band_fails_closed(self, monkeypatch, tmp_path):
+        # 2026-07-25 re-audit finding 1: 'STOP-SHIP (A-01+A-39 both fail)'
+        # matched no band constant and the record silently ESCAPED the
+        # blocker gate. A parseable prefix must band normally; garbage must
+        # fail the build, never skip the record.
+        self._patched(monkeypatch, tmp_path, pass_has_control=True,
+                      blocker_accepted=True,
+                      escalated_band="STOP-SHIP (paired escalation)")
+        status = mg.compute_status()          # prefix parses -> still gated
+        assert status["open_stop_ship_count"] == 1
+        self._patched2 = None
+        # unparseable band: fail closed
+        f = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        f[1]["escalated_band"] = "SEVERE-ISH"
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(f))
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_tampered_ratchet_baselines_refused(self, monkeypatch, tmp_path):
+        # Tamper-test fail-open (2026-07-25): a hand-loosened baseline passed
+        # silently. The baseline file is now in the attested hash set.
+        self._patched(monkeypatch, tmp_path,
+                      pass_has_control=True, blocker_accepted=True)
+        (tmp_path / "audit" / "ratchet-baselines.json").write_text(
+            json.dumps({"ratchets": {"test_count_floor": 1}}))
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_tampered_accepted_residuals_refused(self, monkeypatch, tmp_path):
+        # Same class: silently ADDING an acceptance would legalize a new
+        # blocker without a decision record.
+        self._patched(monkeypatch, tmp_path,
+                      pass_has_control=True, blocker_accepted=True)
+        reg = tmp_path / "governance" / "accepted-residuals.json"
+        d = json.loads(reg.read_text())
+        d["accepted_open_findings"].append("A-99")
+        reg.write_text(json.dumps(d))
         with pytest.raises(SystemExit):
             mg.compute_status()
 
