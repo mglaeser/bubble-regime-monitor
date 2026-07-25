@@ -107,7 +107,8 @@ def s5_tier_sufficiency() -> dict[str, Any]:
     """Distinct TRADING days (Mon-Fri) of persisted snapshots, overall and per
     S5 source tier, against the >=60-day activation window. Per-tier adequacy
     thresholds are an operator decision and deliberately not asserted."""
-    days_total: set = set()
+    snapshot_weekdays: set = set()
+    s5_days: set = set()
     days_by_tier: dict[str, set] = {t: set() for t in _S5_TIERS}
     dual_days: set = set()
     with session_scope() as session:
@@ -115,24 +116,34 @@ def s5_tier_sufficiency() -> dict[str, Any]:
             d = snap.computed_at.date()
             if d.weekday() >= 5:
                 continue
-            days_total.add(d)
+            snapshot_weekdays.add(d)
             s5 = _s5_payload(snap)
             if not s5 or s5.get("sub_score") is None:
                 continue
+            s5_days.add(d)
             src = s5.get("data_source")
             if src in days_by_tier:
                 days_by_tier[src].add(d)
             if isinstance(s5.get("s5_dual_report"), dict):
                 dual_days.add(d)
+    # The GATE counts only days on which the dual comparison actually ran
+    # (panel finding on this PR: counting every weekday snapshot let 60
+    # S5-less days read as gate progress). Tier adequacy is NEVER auto-
+    # satisfied here — nonempty is reported, adequacy is the operator's call.
     return {
         "gate_trading_days": S5_GATE_TRADING_DAYS,
-        "trading_days_observed": len(days_total),
-        "days_remaining_to_gate": max(0, S5_GATE_TRADING_DAYS - len(days_total)),
+        "gate_day_count": len(dual_days),
+        "days_remaining_to_gate": max(0, S5_GATE_TRADING_DAYS - len(dual_days)),
+        "snapshot_weekdays_observed": len(snapshot_weekdays),
+        "s5_observation_days": len(s5_days),
         "days_with_dual_report": len(dual_days),
         "days_by_tier": {t: len(s) for t, s in days_by_tier.items()},
         "all_tiers_observed": all(days_by_tier[t] for t in _S5_TIERS),
-        "note": ("per-tier adequacy is an operator decision (not pinned); "
-                 "60 days of EBP-only success does not validate fallback behavior"),
+        "note": ("gate counts DUAL-REPORT days only; exchange holidays are not "
+                 "excluded from the weekday approximation (extend the window "
+                 "accordingly); per-tier adequacy is an operator decision (not "
+                 "pinned) — 60 days of EBP-only success does not validate "
+                 "fallback behavior"),
     }
 
 
@@ -346,8 +357,10 @@ def assemble_decision_packages() -> dict[str, Any]:
                               "needs": "Atom runtime benchmark: G1 deterministic "
                                        "reference vs multiprocessing path"},
         "H_s5_calendar": {
-            "status": ("GATE_MET" if sufficiency["trading_days_observed"]
-                       >= S5_GATE_TRADING_DAYS and sufficiency["all_tiers_observed"]
+            # Never a mechanical GATE_MET (panel finding): the day condition is
+            # computable, tier ADEQUACY is an operator judgment by design.
+            "status": ("DAY_GATE_MET_TIER_ADEQUACY_OPERATOR_JUDGMENT"
+                       if sufficiency["gate_day_count"] >= S5_GATE_TRADING_DAYS
                        else "EVIDENCE_ACCUMULATING"),
             "sufficiency": sufficiency,
             "dual_report": s5_dual_report(),

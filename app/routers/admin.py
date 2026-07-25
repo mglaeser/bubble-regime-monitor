@@ -98,10 +98,16 @@ def send_sms_now(_: None = Depends(require_admin_key)) -> dict[str, Any]:
 )
 def record_falsification(body: dict[str, Any],
                          _: None = Depends(require_admin_key)) -> dict[str, Any]:
+    from fastapi import HTTPException
+
     from app.services.replay import record_outcome
 
-    outcome_id = record_outcome(str(body.get("criterion", "")),
-                                (str(body["detail"])[:2000] if body.get("detail") else None))
+    try:
+        outcome_id = record_outcome(str(body.get("criterion", "")),
+                                    (str(body["detail"])[:2000] if body.get("detail") else None))
+    except ValueError as exc:
+        # panel finding: an empty criterion must be a client error, never a 500
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"data": {"id": outcome_id, "recorded": True}, "meta": {}}
 
 

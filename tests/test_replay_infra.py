@@ -109,11 +109,39 @@ class TestRM2Sufficiency:
         _persist_golden()
         out = s5_tier_sufficiency()
         assert out["gate_trading_days"] == S5_GATE_TRADING_DAYS == 60
-        # the golden snapshot computes on a weekday EBP tier
-        assert out["days_by_tier"]["fed_ebp"] in (0, 1)
-        assert out["trading_days_observed"] in (0, 1)
-        assert out["days_remaining_to_gate"] >= 59
-        assert out["all_tiers_observed"] is False   # only EBP present -> honest False
+        # the gate counts DUAL-REPORT days only (panel finding on PR #22)
+        assert out["gate_day_count"] == out["days_with_dual_report"]
+        assert out["days_remaining_to_gate"] == 60 - out["gate_day_count"]
+        assert out["s5_observation_days"] <= out["snapshot_weekdays_observed"]
+        assert out["all_tiers_observed"] is False   # one tier present -> honest False
+
+    def test_gate_ignores_s5_less_snapshots(self, isolated_db):
+        # 60 weekday snapshots WITHOUT any computed s5 must contribute ZERO
+        # gate progress (the false-GATE_MET path the panel refuted)
+        from datetime import UTC, datetime, timedelta
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.replay import s5_tier_sufficiency
+
+        base = datetime(2026, 1, 5, 12, tzinfo=UTC)          # a Monday
+        with session_scope() as session:
+            d = base
+            added = 0
+            while added < 60:
+                if d.weekday() < 5:
+                    session.add(Snapshot(
+                        computed_at=d, service_version="test", median=50.0,
+                        iqr_lo=45.0, iqr_hi=55.0, band5=40.0, band95=60.0,
+                        point_score=50.0, action_band="hold",
+                        block_s={"indicators": {}}, block_d={"indicators": {}},
+                        trend_states={}, fast_alarm={}, data_freshness={}))
+                    added += 1
+                d += timedelta(days=1)
+        out = s5_tier_sufficiency()
+        assert out["snapshot_weekdays_observed"] == 60
+        assert out["gate_day_count"] == 0                    # no dual reports -> no progress
+        assert out["days_remaining_to_gate"] == 60
 
 
 class TestRM4Policies:
@@ -170,6 +198,8 @@ class TestRM5Assembler:
         for pin in ("DE_d3_ocf_quorum", "F_ath_basis", "G_lppls_execution", "C_ndx_identity"):
             assert pkg[pin]["status"] == "PENDING_HOST"
         assert pkg["H_s5_calendar"]["status"] == "EVIDENCE_ACCUMULATING"
+        assert "GATE_MET" not in str(pkg["H_s5_calendar"]["status"]).replace(
+            "DAY_GATE_MET_TIER_ADEQUACY_OPERATOR_JUDGMENT", "")
         assert pkg["B_coverage_floor"]["report"]["snapshots"] == 1
         assert any("six S5 constants" in r for r in pkg["H_s5_calendar"]["activation_requires"])
 
@@ -189,6 +219,10 @@ class TestApiSurfaces:
             suf = client.get("/api/v1/replay/sufficiency")
             assert suf.status_code == 200
             assert suf.json()["data"]["gate_trading_days"] == 60
+            # panel finding: empty criterion is a 422 client error, never a 500
+            bad = client.post("/api/v1/admin/falsification", json={},
+                              headers={"X-API-Key": TEST_ADMIN_KEY})
+            assert bad.status_code == 422
             # unauthenticated recording is rejected; keyed recording appends
             assert client.post("/api/v1/admin/falsification",
                                json={"criterion": "c"}).status_code in (401, 403)
