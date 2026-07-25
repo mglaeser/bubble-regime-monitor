@@ -324,6 +324,114 @@ def truncate_marked(text: str, cap: int, label: str) -> str:
             f"\n[{label} TRUNCATED — {len(text) - cap} of {len(text)} bytes omitted]")
 
 
+# Risk order for review packing (PR #23 finding: `git diff` emits paths
+# ALPHABETICALLY, so bulk `audit/*.json` consumed the whole body budget and
+# the panel never saw `scripts/mandate_gate.py` — it approved with
+# "gate implementation truncated". Content-blind truncation means the
+# highest-risk file in a change can be the one nobody reviews.)
+_RISK_ORDER: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (0, (".github/", "scripts/")),        # the gate and the panel itself
+    (1, ("app/",)),                       # production code
+    (2, ("migrations/", "Containerfile", "compose.yml", "deploy.sh",
+         "pyproject.toml")),              # runtime/build surface
+    (3, ("frozen_methodology.json",)),    # the scored artifact
+    (4, ("tests/",)),                     # test code
+    (5, ("governance/",)),                # law (prose, but control-bearing)
+)
+_RISK_DEFAULT = 6                          # docs, audit records, data blobs
+
+
+def path_risk(path: str) -> int:
+    """Lower = reviewed earlier. Ties keep git's own ordering (deterministic)."""
+    for rank, prefixes in _RISK_ORDER:
+        if any(path.startswith(pfx) for pfx in prefixes):
+            return rank
+    return _RISK_DEFAULT
+
+
+def is_code(path: str) -> bool:
+    """Paths whose omission from review is a real gap (vs docs/data)."""
+    return path_risk(path) <= 4
+
+
+def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
+                 max_chunks: int) -> tuple[list[str], list[str]]:
+    """Pack per-file diffs into at most `max_chunks` bodies of ~`budget` chars,
+    highest-risk first. Returns (chunks, omitted_paths).
+
+    A single file larger than the budget is truncated WITH ITS MARKER rather
+    than dropped silently — a cut must stay visible (round-3 finding)."""
+    ordered = sorted(file_diffs, key=lambda fd: path_risk(fd[0]))
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    omitted: list[str] = []
+    for path, text in ordered:
+        if len(text) > budget:
+            text = truncate_marked(text, budget, f"FILE {path}")
+        if cur_len + len(text) > budget and cur:
+            if len(chunks) + 1 >= max_chunks:
+                omitted.append(path)
+                continue
+            chunks.append("\n".join(cur))
+            cur, cur_len = [], 0
+        cur.append(text)
+        cur_len += len(text)
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks, omitted
+
+
+def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
+                      ) -> tuple[list[str], list[str]]:
+    """Review payloads in RISK ORDER, so the gate is never the part that gets
+    truncated away. Each payload repeats the COMPLETE file list and diffstat;
+    only the code body is split. Returns (payloads, omitted_code_paths)."""
+    mb = _sh(["git", "merge-base", f"origin/{base_branch()}", "HEAD"],
+             required=True).strip()
+    if not mb:
+        raise DiffError(f"empty merge-base for origin/{base_branch()}...HEAD")
+    cmds = diff_commands(mb)
+    names = _sh(cmds["names"], required=True)
+    stat = _sh(cmds["stat"], required=True)
+    if not names.strip():
+        body_probe = _sh(cmds["body"], required=True)
+        if not body_probe.strip():
+            return [], []
+    paths = [ln.split("\t")[-1] for ln in names.splitlines() if ln.strip()]
+    file_diffs: list[tuple[str, str]] = []
+    for path in paths:
+        text = _sh(["git", "diff", f"{mb}...HEAD", "--", path] + _EXCLUDES)
+        if text.strip():
+            file_diffs.append((path, text))
+    if not file_diffs:
+        return [], []
+    chunks, omitted = pack_by_risk(file_diffs, budget, max_chunks)
+    omitted_code = [p for p in omitted if is_code(p)]
+    header = (
+        f"# COMPLETE changed-file list (authoritative — ALL changed paths, "
+        f"including files whose CONTENT is privacy-excluded; contents of "
+        f"excluded classes are never sent):\n"
+        f"{truncate_marked(names, 100_000, 'FILE LIST')}\n\n"
+        f"# Diffstat:\n{truncate_marked(stat, 8_000, 'DIFFSTAT')}\n\n")
+    warn = ""
+    if omitted_code:
+        warn = ("\n# WARNING — the following CODE files did not fit the review "
+                "budget and are NOT shown below. Unreviewed code that touches a "
+                "gate, a control or a scored value is grounds for refutation:\n"
+                + "".join(f"#   {p}\n" for p in omitted_code) + "\n")
+    payloads = []
+    for i, body in enumerate(chunks, 1):
+        part = (f"# REVIEW PART {i} of {len(chunks)} — files are ordered "
+                f"HIGHEST-RISK FIRST (gate/panel, then app code, then the rest). "
+                f"Other parts are reviewed in separate passes of this same "
+                f"panel; judge THIS part on its own merits.\n\n"
+                if len(chunks) > 1 else "")
+        payloads.append(header + part + warn +
+                        f"# Code changes (binaries/assets/data excluded):\n{body}")
+    return payloads, omitted_code
+
+
 def build_diff() -> str:
     """COMPLETE changed-file list (--name-status) + capped stat + capped body,
     every cap explicitly marked; base = merge-base with main."""
@@ -658,12 +766,20 @@ def main() -> int:
               "  secret (see docs/INDEPENDENT_REVIEW_PANEL.md).")
         return 0   # same-repo only: no fake block; the residual is documented and visible
 
+    # Bounded cost: each part is a full panel pass, so the worst case is
+    # max_chunks x today's spend. Risk ordering means one part covers the
+    # gate/app code on virtually every real PR.
     try:
-        d = build_diff()
+        mc = int(os.environ.get("VERIFIER_MAX_CHUNKS", ""))
+        max_chunks = mc if 1 <= mc <= 6 else 2
+    except ValueError:
+        max_chunks = 2
+    try:
+        payloads, omitted_code = build_diff_chunks(max_chunks=max_chunks)
     except DiffError as exc:
         print(f"BLOCK diff assembly failed — cannot review, fail-closed: {exc}", file=sys.stderr)
         return 1
-    if not d.strip():
+    if not payloads:
         print("[independent-verify] No diff to review. Green.")
         return 0
 
@@ -689,41 +805,58 @@ def main() -> int:
           + (" (VERIFIER_MODEL pinned)" if os.environ.get("VERIFIER_MODEL") else ""))
     print(f'[independent-verify] Required approver: "{required_approver}" must approve + >= {min_others} other(s).')
 
+    if omitted_code:
+        print(f"[independent-verify] WARNING: {len(omitted_code)} code file(s) "
+              f"exceeded the review budget and were flagged to the panel as "
+              f"unreviewed: {', '.join(omitted_code[:5])}"
+              + (" …" if len(omitted_code) > 5 else ""))
+    if len(payloads) > 1:
+        print(f"[independent-verify] Diff split into {len(payloads)} risk-ordered "
+              f"parts (cap {max_chunks}); EVERY part must pass — green requires "
+              "green on all of them.")
+
     challenge = secrets.token_hex(9)   # fresh 18-hex challenge per run
     sys_base = build_system_prompt(challenge)
-    user_prompt = "DIFF (overview + code excerpt):\n\n" + d
 
-    votes = [verify_once(models[i], sys_base + LENSES[i % len(LENSES)], user_prompt)
-             for i in range(panel)]
-    for i, x in enumerate(votes):
-        if not x.get("ok"):
-            print(f"  Verifier {i + 1}/{panel} ({models[i]}): error ({x.get('reason')})")
-            continue
-        v = x.get("v") or {}
-        # json.dumps escapes all control chars -> single-line, injection-safe log
-        reason = json.dumps(v.get("reason"))[:1000] if v.get("reason") else '"(no reason given)"'
-        print(f"  Verifier {i + 1}/{panel} ({models[i]}): refuted={v.get('refuted')} "
-              f"confidence={v.get('confidence')} — reason: {reason}")
+    # Every part runs the full gate set; the FIRST block anywhere ends the run
+    # (fail-closed: a later green can never overwrite an earlier refutation).
+    for part, payload in enumerate(payloads, 1):
+        label = f" [part {part}/{len(payloads)}]" if len(payloads) > 1 else ""
+        user_prompt = "DIFF (overview + code excerpt):\n\n" + payload
+        votes = [verify_once(models[i], sys_base + LENSES[i % len(LENSES)], user_prompt)
+                 for i in range(panel)]
+        for i, x in enumerate(votes):
+            if not x.get("ok"):
+                print(f"  Verifier {i + 1}/{panel}{label} ({models[i]}): error ({x.get('reason')})")
+                continue
+            v = x.get("v") or {}
+            # json.dumps escapes all control chars -> single-line, injection-safe log
+            reason = json.dumps(v.get("reason"))[:1000] if v.get("reason") else '"(no reason given)"'
+            print(f"  Verifier {i + 1}/{panel}{label} ({models[i]}): refuted={v.get('refuted')} "
+                  f"confidence={v.get('confidence')} — reason: {reason}")
 
-    verdict = require_approvals(votes, models, required_approver, min_others, challenge)
-    if verdict["block"]:
-        print(f"BLOCK required-approver gate: {verdict['reason']}", file=sys.stderr)
-        return 1
-    if (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes"):
-        strict = strict_any_refutation(votes, models)
-        if strict["block"]:
-            print(f"BLOCK strict-mode gate: {strict['reason']}", file=sys.stderr)
+        verdict = require_approvals(votes, models, required_approver, min_others, challenge)
+        if verdict["block"]:
+            print(f"BLOCK required-approver gate{label}: {verdict['reason']}", file=sys.stderr)
             return 1
-    attest = attest_reasons(votes, panel)
-    if attest["block"]:
-        print(f"BLOCK integrity gate (sham green): {attest['reason']}", file=sys.stderr)
-        return 1
-    proof = attest_proof(votes, challenge, panel)
-    if proof["block"]:
-        print(f"BLOCK proof-of-check gate: {proof['reason']}", file=sys.stderr)
-        return 1
-    print(f"[independent-verify] Cross-vendor panel confirms (required approver: {verdict['reason']}; "
-          f"{attest['reason']}; {proof['reason']}). Green.")
+        if (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes"):
+            strict = strict_any_refutation(votes, models)
+            if strict["block"]:
+                print(f"BLOCK strict-mode gate{label}: {strict['reason']}", file=sys.stderr)
+                return 1
+        attest = attest_reasons(votes, panel)
+        if attest["block"]:
+            print(f"BLOCK integrity gate (sham green){label}: {attest['reason']}", file=sys.stderr)
+            return 1
+        proof = attest_proof(votes, challenge, panel)
+        if proof["block"]:
+            print(f"BLOCK proof-of-check gate{label}: {proof['reason']}", file=sys.stderr)
+            return 1
+        print(f"[independent-verify] Part {part}/{len(payloads)} confirms "
+              f"(required approver: {verdict['reason']}; {attest['reason']}; "
+              f"{proof['reason']}).")
+    print(f"[independent-verify] Cross-vendor panel confirms all "
+          f"{len(payloads)} part(s). Green.")
     return 0
 
 

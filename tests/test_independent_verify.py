@@ -245,3 +245,58 @@ class TestPanelFindingsOnItself:
         votes = [canned_approve, sol_good, low_ref]
         assert iv.require_approvals(votes, models, "gpt-5.6-sol", 1, ch)["block"] is False
         assert iv.attest_reasons(votes, 3)["block"] is True   # the conjunctive gate catches it
+
+
+class TestRiskOrderedReviewPacking:
+    """PR #23 finding: `git diff` emits paths ALPHABETICALLY, so bulk
+    `audit/*.json` consumed the body budget and the panel approved the mandate
+    gate having never seen it ("gate implementation truncated"). Review order
+    must be risk-driven, and any omission must stay visible."""
+
+    def test_gate_and_code_outrank_docs_and_data(self):
+        assert iv.path_risk("scripts/mandate_gate.py") == 0
+        assert iv.path_risk(".github/workflows/ci.yml") == 0
+        assert iv.path_risk("app/services/compute.py") == 1
+        assert iv.path_risk("frozen_methodology.json") == 3
+        assert iv.path_risk("tests/test_x.py") == 4
+        # docs/records rank last — they may be truncated, code may not
+        assert iv.path_risk("audit/03-findings.json") > iv.path_risk("app/x.py")
+        assert iv.path_risk("README.md") > iv.path_risk("scripts/x.py")
+
+    def test_is_code_distinguishes_real_gaps_from_records(self):
+        assert iv.is_code("scripts/mandate_gate.py")
+        assert iv.is_code("app/db.py")
+        assert iv.is_code("tests/test_y.py")
+        assert not iv.is_code("audit/03-findings.json")
+        assert not iv.is_code("docs/GOVERNANCE_FREEZE_RULE.md")
+
+    def test_high_risk_file_lands_in_first_chunk_despite_alphabetical_order(self):
+        # the exact failure: a huge 'audit/...' file sorts BEFORE 'scripts/...'
+        files = [("audit/03-findings.json", "A" * 900),
+                 ("scripts/mandate_gate.py", "GATEBODY")]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert "GATEBODY" in chunks[0]
+        assert omitted == []
+
+    def test_oversized_single_file_is_truncated_with_marker_not_dropped(self):
+        files = [("scripts/huge.py", "X" * 5000)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert omitted == []
+        assert "TRUNCATED" in chunks[0]          # the cut is visible
+        assert "scripts/huge.py" in chunks[0]
+
+    def test_chunk_cap_bounds_cost_and_reports_what_it_dropped(self):
+        # cost control: never unbounded fan-out; whatever does not fit is
+        # returned as omitted rather than silently discarded
+        files = [(f"app/mod{i}.py", "Y" * 800) for i in range(10)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert len(chunks) == 2
+        assert omitted                            # the rest is accounted for
+        assert all(p.startswith("app/") for p in omitted)
+
+    def test_everything_fits_stays_a_single_chunk(self):
+        # the common case must NOT multiply panel cost
+        files = [("app/a.py", "a" * 100), ("audit/b.json", "b" * 100)]
+        chunks, omitted = iv.pack_by_risk(files, budget=10_000, max_chunks=2)
+        assert len(chunks) == 1
+        assert omitted == []
