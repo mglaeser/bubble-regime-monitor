@@ -1209,3 +1209,82 @@ class TestPanelFindingsRound22:
                 if name in ("create", "stream", "generate", "complete"):
                     assert not any(k.arg is None for k in node.keywords), \
                         f"** expansion at judgment.py:{node.lineno}"
+
+
+class TestPanelFindingsRound23:
+    """Freshness judged one step back could be defeated by delete-then-re-add
+    across two commits. 'Seen anywhere before' is the wrong correction — it
+    flags every honest persisting record — so replay is detected as
+    present -> absent -> present."""
+
+    def _fake_history(self, monkeypatch, snapshots):
+        """snapshots: oldest-first list of record-lists per commit."""
+        monkeypatch.setattr(mg, "comparison_point", lambda: "base")
+        shas = [f"c{i}" for i in range(len(snapshots))]
+
+        def _run(args, **kw):
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            r = R()
+            if args[:2] == ["git", "rev-list"]:
+                r.stdout = "\n".join(shas)
+            elif args[:2] == ["git", "show"]:
+                sha = args[2].split(":")[0]
+                recs = snapshots[shas.index(sha)]
+                r.stdout = json.dumps({"acceptance_records": recs})
+            return r
+        monkeypatch.setattr(mg.subprocess, "run", _run)
+
+    def test_a_persisting_record_is_not_a_replay(self, monkeypatch):
+        rec = {"finding_id": "B-06", "reason": "r" * 25, "authorised_by": "op"}
+        self._fake_history(monkeypatch, [[rec], [rec], [rec]])
+        assert mg.reintroduced_fingerprints(
+            "governance/accepted-residuals.json",
+            lambda d: d.get("acceptance_records", [])) == set()
+
+    def test_delete_then_readd_is_detected_as_a_replay(self, monkeypatch):
+        rec = {"finding_id": "B-06", "reason": "r" * 25, "authorised_by": "op"}
+        self._fake_history(monkeypatch, [[rec], [], [rec]])
+        assert mg.reintroduced_fingerprints(
+            "governance/accepted-residuals.json",
+            lambda d: d.get("acceptance_records", [])) == {
+                mg.record_fingerprint(rec)}
+
+    def test_a_genuinely_new_record_is_not_a_replay(self, monkeypatch):
+        old = {"finding_id": "B-06", "reason": "r" * 25, "authorised_by": "op"}
+        new = {"finding_id": "C-01", "reason": "n" * 25, "authorised_by": "op"}
+        self._fake_history(monkeypatch, [[old], [old], [old, new]])
+        assert mg.reintroduced_fingerprints(
+            "governance/accepted-residuals.json",
+            lambda d: d.get("acceptance_records", [])) == set()
+
+    def test_surface_refuses_an_unknown_or_empty_file_set(self, monkeypatch, tmp_path):
+        (tmp_path / "audit").mkdir(exist_ok=True)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+
+        class R:
+            returncode = 128
+            stdout = ""
+            stderr = "fatal: not a git repository"
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: R())
+        with pytest.raises(SystemExit):
+            mg.cmd_surface()
+
+    def test_surface_handles_paths_containing_spaces(self, monkeypatch, tmp_path):
+        # whitespace splitting mangled "we ird name.py" into two entries
+        (tmp_path / "audit").mkdir(exist_ok=True)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+
+        class R:
+            returncode = 0
+            stdout = "app/we ird name.py\0app/x.py\0"
+            stderr = ""
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: R())
+        mg.cmd_surface()
+        surface = json.loads((tmp_path / "audit" / "00-audit-surface.json").read_text())
+        assert "app/we ird name.py" in surface["python_modules"]
+        assert surface["files_tracked"] == 2

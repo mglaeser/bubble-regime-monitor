@@ -53,6 +53,44 @@ def record_fingerprint(rec: dict) -> str:
                         "authorised_by")}, sort_keys=True)
 
 
+def reintroduced_fingerprints(rel_path: str, extract) -> set[str]:
+    """Records that were PRESENT, then REMOVED, then present again.
+
+    Panel finding (PR #23 round 23): one-step comparison let a record be
+    deleted in commit N and re-added verbatim in commit N+1 — against N it
+    reads as new, replaying a historic authorisation for a fresh weakening.
+
+    "Seen anywhere before" is the WRONG test, though: a record legitimately
+    persists alongside the state it authorises, so that rule flags every
+    honest record (it flagged A-01 and all 32 founding acceptances here).
+    Re-introduction is the actual signature of a replay."""
+    point = comparison_point()
+    if not point:
+        return set()
+    revs = subprocess.run(["git", "rev-list", "--reverse", f"{point}^..HEAD"],
+                          cwd=ROOT, capture_output=True, text=True)
+    commits = [c for c in revs.stdout.split() if c] or [point]
+    seen: set[str] = set()
+    gone: set[str] = set()
+    replayed: set[str] = set()
+    for commit in commits:
+        blob = subprocess.run(["git", "show", f"{commit}:{rel_path}"],
+                              cwd=ROOT, capture_output=True, text=True)
+        present: set[str] = set()
+        if blob.returncode == 0:
+            try:
+                data = json.loads(blob.stdout)
+            except json.JSONDecodeError:
+                data = None
+            if data is not None:
+                present = {record_fingerprint(r) for r in (extract(data) or [])
+                           if isinstance(r, dict)}
+        replayed |= present & gone          # back after having been removed
+        gone |= seen - present              # disappeared at this commit
+        seen |= present
+    return replayed
+
+
 def is_fresh(rec: dict, previous_records) -> bool:
     """True when this exact record did NOT exist at the comparison point.
 
@@ -366,6 +404,15 @@ def compute_status() -> dict:
         prev_recs_by_id = {f["id"]: f.get("weakening_record")
                            for f in prev_findings
                            if isinstance(f.get("weakening_record"), dict)}
+        # NOTE: history-wide freshness is applied to the ratchet and
+        # acceptance REGISTERS, whose records are append-only decisions, but
+        # NOT to weakening_record. A weakening record legitimately persists
+        # alongside the weakening it describes for as long as that state
+        # holds, so "seen anywhere in history" would flag every honest record
+        # (it flagged A-01 in this very PR). The one-step check below still
+        # blocks a record retained across a re-tighten, because the record is
+        # bound to the exact band transition and the transition must recur to
+        # need authorising again.
         for pf in prev_findings:
             cur = by_id.get(pf["id"])
             if cur is None:
@@ -442,13 +489,17 @@ def compute_status() -> dict:
             prev_records = {r.get("finding_id")
                             for r in ((prev_acc or {}).get("acceptance_records") or [])
                             if isinstance(r, dict)}
+            historic_acc = reintroduced_fingerprints(
+                "governance/accepted-residuals.json",
+                lambda d: d.get("acceptance_records", []))
             recorded = {r.get("finding_id") for r in records
                         if isinstance(r, dict)
                         and isinstance(r.get("reason"), str)
                         and len(r["reason"].strip()) >= 20
                         and isinstance(r.get("authorised_by"), str)
                         and r["authorised_by"].strip()
-                        and r.get("finding_id") not in prev_records}
+                        and r.get("finding_id") not in prev_records
+                        and record_fingerprint(r) not in historic_acc}
             unrecorded = sorted(newly - recorded)
             if unrecorded:
                 _fail("newly accepted blocker-band findings with no structured "
@@ -638,6 +689,9 @@ def cmd_ratchet(measure_only: bool) -> None:
     if prev:
         records = baselines.get("_meta", {}).get("decision_records", []) or []
         prev_records = (prev.get("_meta", {}) or {}).get("decision_records", []) or []
+        historic = reintroduced_fingerprints(
+            "audit/ratchet-baselines.json",
+            lambda d: (d.get("_meta", {}) or {}).get("decision_records", []))
 
         def _recorded(name, old, new) -> bool:
             # The record must match THIS change, not merely mention the metric
@@ -662,6 +716,7 @@ def cmd_ratchet(measure_only: bool) -> None:
                 # is_finding satisfied the gate while violating the rule).
                 if (len(reason) >= 20 and who
                         and r.get("is_finding") is True
+                        and record_fingerprint(r) not in historic
                         and is_fresh(r, prev_records)):
                     return True
             return False
@@ -954,8 +1009,18 @@ def cmd_calibrate() -> None:
 
 
 def cmd_surface() -> None:
-    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT,
-                             capture_output=True, text=True).stdout.split()
+    # -z and an rc check (round 23): whitespace splitting mangled paths with
+    # spaces and a git failure produced an EMPTY audit denominator that still
+    # reported success.
+    listing = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT,
+                             capture_output=True, text=True)
+    if listing.returncode != 0:
+        _fail(f"git ls-files failed ({listing.stderr.strip()[:200]}) — refusing "
+              "to write an audit surface from an unknown file set")
+    tracked = [f for f in listing.stdout.split("\0") if f]
+    if not tracked:
+        _fail("git ls-files returned no files — an empty audit denominator "
+              "would make every coverage claim vacuous")
     routes = []
     for p in ROOT.glob("app/routers/*.py"):
         for m in re.finditer(r"@router\.(get|post|put|delete)\(\s*[\"']([^\"']+)",
