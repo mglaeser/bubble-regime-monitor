@@ -421,3 +421,33 @@ class TestImmutableTextExemptionIsNarrow:
     def test_other_governance_files_are_never_exempt(self):
         for status in ("A", "M"):
             assert iv.is_control_bearing("governance/constitution.md", status)
+
+
+class TestControlDataFiles:
+    """Panel finding (PR #23 round 7): 'it's only JSON, not code' let the
+    scored artifact and the gate's own thresholds be omitted from review with
+    no deterministic block."""
+
+    def test_scored_artifact_and_thresholds_are_control_bearing(self):
+        for path in ("frozen_methodology.json", "audit/ratchet-baselines.json",
+                     ".secrets.baseline"):
+            assert iv.is_control_bearing(path, "M"), path
+
+    def test_control_data_is_ranked_for_early_review(self):
+        # small files that must never be crowded out by bulk records
+        for path in ("frozen_methodology.json", "audit/ratchet-baselines.json"):
+            assert iv.path_risk(path) < iv.path_risk("app/x.py"), path
+            assert iv.path_risk(path) < iv.path_risk("audit/03-findings.json")
+
+    def test_bulk_records_rely_on_the_deterministic_gate_not_the_panel(self):
+        # documented scope: these carry no panel-review requirement because
+        # mandate_gate validates them semantically on every run (set equality,
+        # canonical verdicts, standing controls, computed-status drift)
+        for path in ("audit/03-findings.json", "audit/engagement-status.json",
+                     "audit/00-check-catalogue.json"):
+            assert not iv.is_control_bearing(path, "M"), path
+
+    def test_a_lowered_ratchet_floor_would_be_reviewed(self):
+        # the concrete attack: measured >= lowered floor still satisfies the
+        # ratchet, so only a reader catches it — hence it must reach the panel
+        assert iv.is_control_bearing("audit/ratchet-baselines.json", "M")

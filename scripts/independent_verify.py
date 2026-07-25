@@ -385,7 +385,9 @@ def truncate_marked(text: str, cap: int, label: str) -> str:
 _RISK_ORDER: tuple[tuple[int, tuple[str, ...]], ...] = (
     (0, (".github/", "scripts/")),        # the gate and the panel itself
     (1, ("governance/constitution.md", "governance/accepted-residuals.json",
-         "governance/mandate/manifest.json")),   # the law + the attestations:
+         "governance/mandate/manifest.json",
+         "frozen_methodology.json", "audit/ratchet-baselines.json",
+         ".secrets.baseline")),                  # the law + the attestations:
     #      small, control-bearing, and previously ranked BELOW tests, so the
     #      hash manifest fell out of budget (panel finding, PR #23 part 1)
     (2, ("app/",)),                       # production code
@@ -417,6 +419,22 @@ _CODE_NAMES = ("Makefile", "Dockerfile", "Containerfile", "compose.yml",
 _IMMUTABLE_TEXT = ("governance/mandate.md", "governance/mandate/part1.md",
                    "governance/mandate/part2.md")
 
+# Not code, but load-bearing: the scored artifact and the gate's thresholds,
+# verdicts and computed state. Changing any of these changes what the system
+# scores or what the gate permits.
+# Scope note: the bulk audit records (03-findings.json, engagement-status.json,
+# 00-check-catalogue.json) are deliberately NOT here. They are hash-attested in
+# the manifest AND semantically validated every CI run by mandate_gate
+# (findings/catalogue set-equality, canonical verdicts, PASS standing controls,
+# accepted-residuals reconciliation, computed-status drift) — a deterministic
+# control that does not depend on a model reading 94KB of JSON. The files below
+# have NO such semantic check: a lowered ratchet floor still satisfies the
+# ratchet (measured >= floor), and the scored artifact and secret baseline are
+# trusted inputs, so these must be read by the panel.
+_CONTROL_DATA = ("frozen_methodology.json",
+                 "audit/ratchet-baselines.json",
+                 ".secrets.baseline")
+
 
 def is_control_bearing(path: str, status: str = "M") -> bool:
     """Files whose UNREVIEWED omission must block, beyond executable code.
@@ -438,6 +456,13 @@ def is_control_bearing(path: str, status: str = "M") -> bool:
         # and must be reviewed or block — which is the case that matters,
         # because that is how an agent would rewrite the rules it runs under.
         return False
+    # Data files that ARE controls (panel finding, PR #23 round 7): these
+    # carry the scored artifact and the gate's own thresholds, so "it's only
+    # JSON, not code" is exactly the reasoning an attacker wants — a loosened
+    # ratchet floor or an edited scored artifact could be omitted from review
+    # with no deterministic block.
+    if path in _CONTROL_DATA:
+        return True
     return (is_code(path)
             or path.startswith("governance/")
             or path.startswith(".github/")
