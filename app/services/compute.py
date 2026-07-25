@@ -38,7 +38,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 
@@ -111,7 +111,7 @@ _NEAR_ATH_FRAC: float = _M.get_path("red_flags", "index_near_ath_frac")
 
 
 def _s5_extra_with_shadow(observations_dated: list[tuple[str, float]] | None,
-                          cadence: str, source_tier: str,
+                          cadence: Literal["monthly", "daily"], source_tier: str,
                           production_sub: float | None) -> dict[str, Any]:
     """S5 payload extra: the v3.7.7 provisional-lag contract keys PLUS the PIN-H
     shadow dual report (calendar-anchored candidate; operator authorization
