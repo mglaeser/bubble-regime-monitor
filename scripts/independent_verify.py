@@ -361,18 +361,24 @@ def truncate_marked(text: str, cap: int, label: str) -> str:
 # highest-risk file in a change can be the one nobody reviews.)
 _RISK_ORDER: tuple[tuple[int, tuple[str, ...]], ...] = (
     (0, (".github/", "scripts/")),        # the gate and the panel itself
-    (1, ("app/",)),                       # production code
-    (2, ("migrations/", "Containerfile", "compose.yml", "deploy.sh",
+    (1, ("governance/constitution.md", "governance/accepted-residuals.json",
+         "governance/mandate/manifest.json")),   # the law + the attestations:
+    #      small, control-bearing, and previously ranked BELOW tests, so the
+    #      hash manifest fell out of budget (panel finding, PR #23 part 1)
+    (2, ("app/",)),                       # production code
+    (3, ("migrations/", "Containerfile", "compose.yml", "deploy.sh",
          "pyproject.toml")),              # runtime/build surface
-    (3, ("frozen_methodology.json",)),    # the scored artifact
-    (4, ("tests/",)),                     # test code
-    (5, ("governance/",)),                # law (prose, but control-bearing)
+    (4, ("frozen_methodology.json",)),    # the scored artifact
+    (5, ("tests/",)),                     # test code
+    (6, ("governance/",)),                # remaining law prose
 )
-_RISK_DEFAULT = 6                          # docs, audit records, data blobs
+_RISK_DEFAULT = 7                          # docs, audit records, data blobs
 
 
 def path_risk(path: str) -> int:
     """Lower = reviewed earlier. Ties keep git's own ordering (deterministic)."""
+    if path in _IMMUTABLE_TEXT:
+        return _RISK_DEFAULT + 1          # hash-pinned spec: review last
     for rank, prefixes in _RISK_ORDER:
         if any(path.startswith(pfx) for pfx in prefixes):
             return rank
@@ -383,6 +389,27 @@ _CODE_SUFFIXES = (".py", ".sh", ".R", ".r", ".sql", ".yml", ".yaml", ".toml",
                   ".ini", ".cfg", ".service", ".timer", ".mk", ".bash")
 _CODE_NAMES = ("Makefile", "Dockerfile", "Containerfile", "compose.yml",
                "requirements.txt", "alembic.ini", ".pre-commit-config.yaml")
+
+
+_IMMUTABLE_TEXT = ("governance/mandate.md", "governance/mandate/part1.md",
+                   "governance/mandate/part2.md")
+
+
+def is_control_bearing(path: str) -> bool:
+    """Files whose UNREVIEWED omission must block, beyond executable code.
+
+    Panel finding (PR #23, part 1): omissions of `governance/*.md` and
+    `.github/CODEOWNERS` were discarded with no warning and no block, so a
+    padded diff could rewrite the law or the write-separation rules while
+    every part greened. The mandate TEXT is exempt: it is immutable and
+    hash-pinned in the manifest, and the manifest IS reviewed — so a change
+    to it cannot pass unnoticed even when its body does not fit."""
+    if path in _IMMUTABLE_TEXT:
+        return False
+    return (is_code(path)
+            or path.startswith("governance/")
+            or path.startswith(".github/")
+            or path.rsplit("/", 1)[-1] == "CODEOWNERS")
 
 
 def is_code(path: str) -> bool:
@@ -477,6 +504,7 @@ def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
                   required=True)
     paths = parse_name_status_z(names_z)
     file_diffs: list[tuple[str, str]] = []
+    excluded_content: list[str] = []
     for path in paths:
         # required=True (round-6 finding, re-opened by this change): a git
         # failure or timeout must BLOCK, never silently drop a file from review
@@ -484,20 +512,29 @@ def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
                    required=True)
         if text.strip():
             file_diffs.append((path, text))
+        else:
+            # Panel finding (PR #23): a path whose CONTENT is privacy-excluded
+            # produced no body AND appeared in no omission list — reviewed by
+            # nobody, reported to nobody. Now it is always declared.
+            excluded_content.append(path)
     if not file_diffs:
         # Every changed file's CONTENT is privacy-excluded, but the change is
         # real: the panel still reviews the complete file list (round-4
         # finding — an excluded-only PR must never auto-green with zero votes).
-        return [header_only(names, stat)], []
+        return ([header_only(names, stat)],
+                [p for p in excluded_content if is_control_bearing(p)])
     chunks, omitted = pack_by_risk(file_diffs, budget, max_chunks)
-    omitted_code = [p for p in omitted if is_code(p)]
+    unreviewed = omitted + excluded_content
+    omitted_code = [p for p in unreviewed if is_control_bearing(p)]
     header = _payload_header(names, stat)
     warn = ""
-    if omitted_code:
-        warn = ("\n# WARNING — the following CODE files did not fit the review "
-                "budget and are NOT shown below. Unreviewed code that touches a "
-                "gate, a control or a scored value is grounds for refutation:\n"
-                + "".join(f"#   {p}\n" for p in omitted_code) + "\n")
+    if unreviewed:
+        warn = ("\n# WARNING — the following changed files are NOT shown below "
+                "(they did not fit the review budget, or their CONTENT is in a "
+                "privacy-excluded class). Nothing here was reviewed by any "
+                "model; unreviewed changes to a gate, a control, the law or a "
+                "scored value are grounds for refutation:\n"
+                + "".join(f"#   {p}\n" for p in unreviewed) + "\n")
     payloads = []
     for i, body in enumerate(chunks, 1):
         part = (f"# REVIEW PART {i} of {len(chunks)} — files are ordered "
@@ -890,8 +927,9 @@ def main() -> int:
         # pad the diff until the malicious file fell out of the budget and
         # still green. Unreviewed code is unreviewed — fail closed.
         print("BLOCK review-coverage gate: "
-              f"{len(omitted_code)} code file(s) did not fit the review budget "
-              f"and were therefore reviewed by NO model: "
+              f"{len(omitted_code)} control-bearing file(s) (code, gate config, "
+              f"or governance) were reviewed by NO model — they did not fit "
+              f"the budget or their content is privacy-excluded: "
               f"{', '.join(omitted_code[:8])}"
               + (" …" if len(omitted_code) > 8 else "")
               + f". Raise VERIFIER_MAX_CHUNKS (currently {max_chunks}) or split "

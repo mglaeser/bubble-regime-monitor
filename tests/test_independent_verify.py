@@ -254,14 +254,20 @@ class TestRiskOrderedReviewPacking:
     must be risk-driven, and any omission must stay visible."""
 
     def test_gate_and_code_outrank_docs_and_data(self):
-        assert iv.path_risk("scripts/mandate_gate.py") == 0
-        assert iv.path_risk(".github/workflows/ci.yml") == 0
-        assert iv.path_risk("app/services/compute.py") == 1
-        assert iv.path_risk("frozen_methodology.json") == 3
-        assert iv.path_risk("tests/test_x.py") == 4
+        # ORDERING invariants, not absolute ranks (ranks get renumbered as
+        # classes are inserted; the relations are what the gate depends on)
+        r = iv.path_risk
+        assert r("scripts/mandate_gate.py") == 0 == r(".github/workflows/ci.yml")
+        # the law + attestations outrank app code, which outranks tests
+        assert r("governance/mandate/manifest.json") < r("app/services/compute.py")
+        assert r("governance/constitution.md") < r("app/services/compute.py")
+        assert r("app/services/compute.py") < r("tests/test_x.py")
+        assert r("frozen_methodology.json") < r("tests/test_x.py")
         # docs/records rank last — they may be truncated, code may not
-        assert iv.path_risk("audit/03-findings.json") > iv.path_risk("app/x.py")
-        assert iv.path_risk("README.md") > iv.path_risk("scripts/x.py")
+        assert r("audit/03-findings.json") > r("app/x.py")
+        assert r("README.md") > r("scripts/x.py")
+        # the huge hash-pinned mandate text sinks below everything
+        assert r("governance/mandate.md") > r("audit/03-findings.json")
 
     def test_is_code_distinguishes_real_gaps_from_records(self):
         assert iv.is_code("scripts/mandate_gate.py")
@@ -357,3 +363,26 @@ class TestChunkingAdversarialFixes:
         assert "data/seed.sql" in payload
         assert "NONE SHOWN" in payload
         assert "judge the change from the paths" in payload
+
+
+class TestControlBearingCoverage:
+    """Panel findings on the chunking change itself (PR #23, part 1): omitted
+    non-code CONTROL files and privacy-excluded code were both discarded with
+    no warning and no block."""
+
+    def test_law_and_gate_config_are_control_bearing(self):
+        for path in ("governance/constitution.md",
+                     "governance/accepted-residuals.json",
+                     ".github/CODEOWNERS", ".github/workflows/ci.yml",
+                     "scripts/mandate_gate.py", "conftest.py"):
+            assert iv.is_control_bearing(path), path
+
+    def test_immutable_hash_pinned_mandate_text_is_exempt(self):
+        # it is pinned by manifest hash and the manifest itself is reviewed,
+        # so a 270KB spec file must not permanently block the panel
+        for path in iv._IMMUTABLE_TEXT:
+            assert not iv.is_control_bearing(path), path
+
+    def test_ordinary_docs_and_records_are_not_control_bearing(self):
+        for path in ("README.md", "audit/03-findings.json", "docs/NOTES.md"):
+            assert not iv.is_control_bearing(path), path
