@@ -121,3 +121,30 @@ class TestEmptyEnvVarsAreAbsent:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         assert mod.BASE == "https://api.openai.com/v1"
+
+
+class TestPanelFindingsOnItself:
+    """Sol's veto on PR #21 raised two findings about the panel's own code;
+    both responses are pinned here."""
+
+    def test_privacy_excludes_are_case_insensitive(self):
+        # uppercase .PNG/.SVG/.PDF must be excluded exactly like lowercase
+        assert all(spec.startswith(":(exclude,icase,glob)") for spec in iv._EXCLUDES)
+
+    def test_strict_mode_blocks_any_high_medium_refutation(self):
+        models = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
+        ok = {"ok": True, "v": {"refuted": False, "reason": "reason long enough"}}
+        rf = {"ok": True, "v": {"refuted": True, "confidence": "high", "reason": "bug"}}
+        low = {"ok": True, "v": {"refuted": True, "confidence": "low", "reason": "doubt"}}
+        assert iv.strict_any_refutation([ok, ok, rf], models)["block"] is True
+        assert iv.strict_any_refutation([ok, ok, low], models)["block"] is False
+        assert iv.strict_any_refutation([ok, ok, ok], models)["block"] is False
+
+    def test_default_mode_stays_reference_identical(self):
+        # WITHOUT strict mode the reference semantics hold: Sol + one distinct
+        # corroborator green even when a third voice refutes high-confidence.
+        models = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
+        ok = {"ok": True, "v": {"refuted": False, "reason": "reason long enough x"}}
+        ok2 = {"ok": True, "v": {"refuted": False, "reason": "reason long enough y"}}
+        rf = {"ok": True, "v": {"refuted": True, "confidence": "high", "reason": "bug"}}
+        assert iv.require_approvals([rf, ok, ok2], models, "gpt-5.6-sol", 1)["block"] is False

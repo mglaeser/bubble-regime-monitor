@@ -81,6 +81,21 @@ gates that judge it.
    `cross-vendor` (and `test`) as **required status checks**, and enable
    **Require review from Code Owners** so CODEOWNERS actually enforces.
 
+## The panel's first live act: vetoing its own PR
+
+On PR #21 — the PR that introduced it — the live panel's required approver
+refuted with two findings about the panel's own implementation. Both are
+addressed:
+
+1. **Privacy excludes were case-sensitive** (uppercase `.PNG`/`.SVG`/`.PDF`
+   would have reached the vendor): fixed with git `icase` pathspec magic;
+   pinned by test. The reference repo carries the same latent gap.
+2. **Non-Sol high/medium refutations do not block once Sol + a corroborator
+   approve.** That is the reference's *documented* semantics (its selftest
+   asserts it), so the default stays mechanism-identical; an **opt-in strict
+   mode** (`VERIFIER_STRICT_ANY_REFUTATION=true`) now blocks on ANY
+   high/medium refutation for operators who want the harder rule.
+
 ## Verification
 
 - `python scripts/independent_verify.py --selftest` exercises every pure gate

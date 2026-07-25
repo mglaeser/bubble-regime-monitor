@@ -200,6 +200,21 @@ def _green(votes: list[dict]) -> list[dict]:
     return [x for x in votes if _is_valid(x) and not decide(x["v"])["block"]]
 
 
+def strict_any_refutation(votes: list[dict], models: list[str]) -> dict[str, Any]:
+    """OPT-IN strict mode (VERIFIER_STRICT_ANY_REFUTATION=true): block when ANY
+    valid voice refutes with confidence high/medium — not only the required
+    approver. OFF by default to stay mechanism-identical to the reference,
+    whose documented semantics green on Sol + one corroborator even if a third
+    voice refutes (that property was flagged by the panel itself — Sol veto on
+    PR #21 — and is hereby operator-selectable)."""
+    for i, x in enumerate(votes):
+        if _is_valid(x) and decide(x["v"])["block"]:
+            return {"block": True,
+                    "reason": f"strict mode: {models[i]} refutes "
+                              f'(confidence={x["v"].get("confidence", "?")}) -> fail-closed'}
+    return {"block": False, "reason": "strict mode: no high/medium refutation"}
+
+
 def attest_reasons(votes: list[dict], panel_size: int) -> dict[str, Any]:
     """Anti sham-green gate: a MAJORITY of the green-carrying votes must have a
     substantive reason, and a MAJORITY of those must be mutually DISTINCT after
@@ -238,7 +253,9 @@ def attest_proof(votes: list[dict], challenge: str, panel_size: int) -> dict[str
 # excluded as a category.
 EXCLUDE_EXTS = ["webp", "png", "jpg", "jpeg", "gif", "ico", "svg", "avif", "bmp", "tiff",
                 "woff", "woff2", "ttf", "otf", "eot", "pdf", "geojson", "db", "rds", "xlsx"]
-_EXCLUDES = [":(exclude,glob)data/**"] + [f":(exclude,glob)**/*.{e}" for e in EXCLUDE_EXTS]
+# icase: pathspecs are case-sensitive by default — an uppercase .PNG/.SVG would
+# otherwise reach the vendor (found by the panel itself: Sol veto on PR #21).
+_EXCLUDES = [":(exclude,icase,glob)data/**"] + [f":(exclude,icase,glob)**/*.{e}" for e in EXCLUDE_EXTS]
 
 
 def _sh(args: list[str]) -> str:
@@ -595,6 +612,11 @@ def main() -> int:
     if verdict["block"]:
         print(f"BLOCK required-approver gate: {verdict['reason']}", file=sys.stderr)
         return 1
+    if (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes"):
+        strict = strict_any_refutation(votes, models)
+        if strict["block"]:
+            print(f"BLOCK strict-mode gate: {strict['reason']}", file=sys.stderr)
+            return 1
     attest = attest_reasons(votes, panel)
     if attest["block"]:
         print(f"BLOCK integrity gate (sham green): {attest['reason']}", file=sys.stderr)
