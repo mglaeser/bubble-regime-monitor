@@ -83,6 +83,35 @@ class TestRM1Evidence:
                 session.flush()
             session.rollback()
 
+    def test_insert_or_replace_cannot_rewrite_outcomes(self, isolated_db):
+        # Panel round-8 finding: INSERT OR REPLACE resolves a PK conflict by
+        # DELETING the existing row, and with recursive_triggers OFF (SQLite
+        # default) that implicit delete fires NO delete trigger — so the
+        # append-only pair alone could be bypassed. The BEFORE INSERT guard
+        # rejects id-reuse before conflict resolution (and the engine also
+        # sets PRAGMA recursive_triggers=ON as depth).
+        import sqlalchemy.exc
+        from sqlalchemy import text
+
+        from app.db import session_scope
+        from app.models import FalsificationOutcome
+        from app.services.replay import record_outcome
+
+        oid = record_outcome("original criterion", "original detail")
+        with session_scope() as session:
+            with pytest.raises(sqlalchemy.exc.DatabaseError, match="append-only"):
+                session.execute(text(
+                    "INSERT OR REPLACE INTO falsification_outcomes "
+                    "(id, criterion, tripped_at, detail) "
+                    "VALUES (:i, 'tampered', '2026-07-25T00:00:00+00:00', 'x')"),
+                    {"i": oid})
+            session.rollback()
+        with session_scope() as session:
+            row = session.get(FalsificationOutcome, oid)
+            assert row.criterion == "original criterion"    # untouched
+            assert row.detail == "original detail"
+        assert record_outcome("second criterion") == oid + 1  # appends still work
+
     def test_record_outcome_rejects_empty_criterion(self, isolated_db):
         from app.services.replay import record_outcome
 

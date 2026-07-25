@@ -155,11 +155,11 @@ class DailyClose(Base):
 class FalsificationOutcome(Base):
     """Outcomes of the falsification registry criteria (spec section 15).
 
-    APPEND-ONLY (RM-1, v3.8.0): DB-level triggers reject UPDATE and DELETE so
-    recorded history cannot be silently rewritten. Installed BOTH by migration
-    0006 (existing DBs) and by the after_create DDL below (create_all path,
-    incl. the test suite) — the guarantee must not depend on which schema
-    bootstrap ran."""
+    APPEND-ONLY (RM-1, v3.8.0): DB-level triggers reject UPDATE, DELETE and
+    id-reusing INSERT (the INSERT OR REPLACE bypass) so recorded history
+    cannot be silently rewritten. Installed BOTH by migration 0006 (existing
+    DBs) and by the after_create DDL below (create_all path, incl. the test
+    suite) — the guarantee must not depend on which schema bootstrap ran."""
 
     __tablename__ = "falsification_outcomes"
 
@@ -181,6 +181,27 @@ BEGIN
 END
 """).execute_if(dialect="sqlite"),
     )
+
+# INSERT OR REPLACE resolves a PK conflict by DELETING the existing row, and
+# with recursive_triggers OFF (SQLite's default) that implicit delete does NOT
+# fire the DELETE trigger (panel round-8 finding) — so an id-reusing insert
+# must be rejected BEFORE conflict resolution. RAISE(ABORT) in a trigger
+# overrides any OR REPLACE/OR IGNORE clause; fresh inserts pass because their
+# autoincrement id is still NULL at BEFORE INSERT time.
+event.listen(
+    FalsificationOutcome.__table__,
+    "after_create",
+    DDL("""
+CREATE TRIGGER IF NOT EXISTS falsification_outcomes_no_replace
+BEFORE INSERT ON falsification_outcomes
+WHEN NEW.id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM falsification_outcomes WHERE id = NEW.id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'falsification_outcomes is append-only (RM-1)');
+END
+""").execute_if(dialect="sqlite"),
+)
 
 
 class DashboardFeed(Base):

@@ -36,6 +36,20 @@ BEGIN
     SELECT RAISE(ABORT, 'falsification_outcomes is append-only (RM-1)');
 END
 """
+# INSERT OR REPLACE deletes the conflicting row WITHOUT firing the DELETE
+# trigger when recursive_triggers is OFF (SQLite default) — reject id-reusing
+# inserts before conflict resolution instead. Fresh autoincrement inserts have
+# NEW.id NULL here and pass.
+_NO_REPLACE = """
+CREATE TRIGGER falsification_outcomes_no_replace
+BEFORE INSERT ON falsification_outcomes
+WHEN NEW.id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM falsification_outcomes WHERE id = NEW.id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'falsification_outcomes is append-only (RM-1)');
+END
+"""
 
 
 def upgrade() -> None:
@@ -43,9 +57,11 @@ def upgrade() -> None:
     op.add_column("snapshots", sa.Column("methodology_version", sa.String(32), nullable=True))
     op.execute(_NO_UPDATE)
     op.execute(_NO_DELETE)
+    op.execute(_NO_REPLACE)
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS falsification_outcomes_no_replace")
     op.execute("DROP TRIGGER IF EXISTS falsification_outcomes_no_update")
     op.execute("DROP TRIGGER IF EXISTS falsification_outcomes_no_delete")
     with op.batch_alter_table("snapshots") as batch:
