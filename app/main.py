@@ -57,14 +57,21 @@ async def lifespan(app: FastAPI):
     # quick HY-OAS seed / GSADF self-check behind it.
     import threading
 
-    threading.Thread(target=_seed, name="hy-oas-seed", daemon=True).start()
-    threading.Thread(target=_breadth_backfill, name="breadth-backfill", daemon=True).start()
+    # TESTING skips warm-ups + scheduler: every TestClient(app) runs this
+    # lifespan, and leaked daemon threads writing through stale engine handles
+    # corrupted OTHER tests' throwaway sqlite DBs on CI (intermittent
+    # "file is not a database" at fixture setup).
+    if not settings.testing:
+        threading.Thread(target=_seed, name="hy-oas-seed", daemon=True).start()
+        threading.Thread(target=_breadth_backfill, name="breadth-backfill", daemon=True).start()
 
     from app import scheduler
 
-    scheduler.start()
+    if not settings.testing:
+        scheduler.start()
     yield
-    scheduler.shutdown()
+    if not settings.testing:
+        scheduler.shutdown()
     from app.http_client import close_client
 
     close_client()

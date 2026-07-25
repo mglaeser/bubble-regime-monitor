@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+os.environ["TESTING"] = "true"   # before any Settings(): no boot threads/scheduler in tests
+
 import sys
 from pathlib import Path
 
