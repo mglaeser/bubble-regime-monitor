@@ -114,7 +114,13 @@ addressed:
    **(Round 4) Wrong diff base:** `origin/main` was hard-coded; PRs targeting
    another branch were mis-based and could green unreviewed. Fixed via
    `GITHUB_BASE_REF` (empty-string-safe) with `main` fallback.
-5. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
+5. **(Round 5) Dependabot bypass:** Dependabot PRs are same-repo (so the fork
+   test passes) yet run with Actions secrets withheld — no-key exit 0 would
+   green a required check with zero votes. `VERIFIER_REQUIRE_KEY` now also
+   triggers for `dependabot*` actors; mirror the vendor key into the
+   **Dependabot secrets store** if those PRs should be reviewed rather than
+   blocked.
+6. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
    `pull_request` runs, so the no-key exit-0 would have let a fork PR pass a
    *required* `cross-vendor` check with zero review. Fixed: the workflow sets
    `VERIFIER_REQUIRE_KEY=true` exactly when the head repo differs from the
