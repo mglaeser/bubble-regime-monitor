@@ -810,3 +810,87 @@ class TestFindingsRegisterLaundering:
         monkeypatch.setattr(mg, "previous_version", lambda _p: None)
         with pytest.raises(SystemExit):
             mg.compute_status()
+
+
+class TestPanelFindingsRound16:
+    """Three bypasses, the first in the fix written the round before — a
+    strict check and a lax one guarding the same invariant is the recurring
+    shape of these defects."""
+
+    @pytest.mark.parametrize("rec", [
+        {},                                              # the empty-dict bypass
+        {"change": "STOP-SHIP->PLAN"},                   # no reason/authoriser
+        {"change": "STOP-SHIP->PLAN", "reason": "short", "authorised_by": "x"},
+        {"change": "STOP-SHIP->PLAN", "reason": "a" * 25, "authorised_by": "  "},
+        {"change": "WRONG->CHANGE", "reason": "a" * 25, "authorised_by": "op"},
+        True, "a string", None,
+    ])
+    def test_invalid_weakening_records_are_rejected(self, rec):
+        assert not mg.valid_weakening_record(rec, "STOP-SHIP->PLAN")
+
+    def test_a_complete_weakening_record_is_accepted(self):
+        assert mg.valid_weakening_record(
+            {"change": "STOP-SHIP->PLAN",
+             "reason": "fixed with red-to-green evidence recorded in audit/05",
+             "authorised_by": "operator"}, "STOP-SHIP->PLAN")
+
+    def test_empty_record_cannot_license_a_founding_band_downgrade(
+            self, monkeypatch, tmp_path):
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=False)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        cur = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        for r in cur:
+            if r["id"] == "A-02":
+                r["band"] = "PLAN"                 # catalogue says STOP-SHIP
+                r["weakening_record"] = {}          # the bypass
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(cur))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "previous_version", lambda _p: None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    @pytest.mark.parametrize("justification", [True, 1, "", "  ", "too short"])
+    def test_non_substantive_na_justification_blocks(
+            self, monkeypatch, tmp_path, justification):
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=False)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        cur = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        for r in cur:
+            if r["id"] == "A-02":
+                r["verdict"] = "NOT-APPLICABLE"
+                r["na_justification"] = justification
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(cur))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "previous_version", lambda _p: None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    @pytest.mark.parametrize("src", [
+        "class User(Base):\n    __tablename__ = 'users'\n",
+        "    owner = relationship('User', back_populates='items')\n",
+        "    account_id: Mapped[int] = mapped_column(Integer)\n",
+        '    x: Mapped[int] = mapped_column(ForeignKey("accounts.id"))\n',
+    ])
+    def test_tenancy_revalidation_sees_models_and_relationships(
+            self, monkeypatch, tmp_path, src):
+        # a tenancy MODEL or a relationship to one is multi-tenancy before any
+        # *_id column appears; class-6 previously stayed green on both
+        (tmp_path / "app").mkdir(parents=True)
+        (tmp_path / "app" / "models.py").write_text(src)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        _ENT = (r"user|tenant|owner|account|customer|org|organisation|"
+                r"organization|workspace|member|subject|principal")
+        import re as _re
+        pattern = (rf"\b({_ENT})_id\b"
+                   r"|ForeignKey\(\s*[\"']"
+                   r"(users|accounts|tenants|orgs|organisations|organizations|"
+                   r"customers|members|workspaces)\."
+                   rf"|^\s*class\s+({_ENT})s?\b"
+                   rf"|relationship\(\s*[\"']({_ENT})s?[\"']")
+        assert _re.search(pattern, src, _re.IGNORECASE | _re.MULTILINE), src

@@ -46,6 +46,24 @@ OPEN_VERDICTS = ("FAIL", "PARTIAL", "NO-EVIDENCE")
 CANONICAL_VERDICTS = ("PASS", "FAIL", "PARTIAL", "NO-EVIDENCE", "NOT-APPLICABLE")
 
 
+def valid_weakening_record(rec, change: str | None = None) -> bool:
+    """A weakening record must be structured, substantive and attributable.
+
+    Panel finding (PR #23 round 16): the catalogue cross-check accepted ANY
+    dict, so `weakening_record: {}` licensed a founding-band downgrade."""
+    if not isinstance(rec, dict):
+        return False
+    reason = rec.get("reason")
+    who = rec.get("authorised_by")
+    if not (isinstance(reason, str) and len(reason.strip()) >= 20):
+        return False
+    if not (isinstance(who, str) and who.strip()):
+        return False
+    if change is not None and str(rec.get("change", "")).strip() != change:
+        return False
+    return True
+
+
 def effective_band(finding: dict) -> str:
     """Escalations applied, fail-closed (2026-07-25 audit finding: the
     free-text escalated_band 'STOP-SHIP (A-01+A-39 both fail)' matched no
@@ -270,8 +288,14 @@ def compute_status() -> dict:
                       "standing_control carrying non-null mechanism and "
                       "demonstrated — per the mandate that verdict is "
                       "PARTIAL, always (§5)")
-        if f["verdict"] == "NOT-APPLICABLE" and not f.get("na_justification"):
-            _fail(f"{f['id']} is NOT-APPLICABLE without na_justification (§5)")
+        if f["verdict"] == "NOT-APPLICABLE":
+            # Bare truthiness accepted na_justification=true (round 16); §4
+            # requires an argued justification referencing the architecture.
+            j = f.get("na_justification")
+            if not (isinstance(j, str) and len(j.strip()) >= 20):
+                _fail(f"{f['id']} is NOT-APPLICABLE without a substantive "
+                      "na_justification — §4 requires it to be ARGUED against "
+                      "the actual architecture, never assumed")
 
     open_blockers: list[str] = []
     band_counts = {b: 0 for b in BLOCKER_BANDS}
@@ -305,13 +329,7 @@ def compute_status() -> dict:
                 continue
             change = (f"{was}->{now}" if weaker
                       else f"{pf['verdict']}->{cur['verdict']}")
-            rec = cur.get("weakening_record")
-            if not (isinstance(rec, dict)
-                    and str(rec.get("change", "")).strip() == change
-                    and isinstance(rec.get("reason"), str)
-                    and len(rec["reason"].strip()) >= 20
-                    and isinstance(rec.get("authorised_by"), str)
-                    and rec["authorised_by"].strip()):
+            if not valid_weakening_record(cur.get("weakening_record"), change):
                 _fail(f"{pf['id']} was WEAKENED out of the blocker set "
                       f"({change}) with no structured `weakening_record` "
                       "(change, reason, authorised_by) — refreshing "
@@ -328,7 +346,9 @@ def compute_status() -> dict:
         if not founding:
             continue
         if ALL_BANDS.index(effective_band(f)) > ALL_BANDS.index(founding):
-            if not isinstance(f.get("weakening_record"), dict):
+            if not valid_weakening_record(
+                    f.get("weakening_record"),
+                    f"{founding}->{effective_band(f)}"):
                 _fail(f"{f['id']} is banded {effective_band(f)} but the "
                       f"immutable catalogue records {founding} — a check's "
                       "founding band may not be softened in the findings "
@@ -781,12 +801,17 @@ def cmd_calibrate() -> None:
     # Panel finding (PR #23): a three-name denylist left `account_id`,
     # `customer_id`, an `organisation` FK or a users/accounts relationship
     # free to introduce real multi-tenancy while calibration reported N/A.
-    _TENANCY = (r"\b(user|tenant|owner|account|customer|org|organisation|"
-                r"organization|workspace|member|subject|principal)_id\b"
+    _ENTITIES = (r"user|tenant|owner|account|customer|org|organisation|"
+                 r"organization|workspace|member|subject|principal")
+    _TENANCY = (rf"\b({_ENTITIES})_id\b"
                 r"|ForeignKey\(\s*[\"']"
                 r"(users|accounts|tenants|orgs|organisations|organizations|"
-                r"customers|members|workspaces)\.")
-    if re.search(_TENANCY, models_src, re.IGNORECASE):
+                r"customers|members|workspaces)\."
+                # a tenancy MODEL or a relationship to one is multi-tenancy
+                # even before a column appears (round 16)
+                rf"|^\s*class\s+({_ENTITIES})s?\b"
+                rf"|relationship\(\s*[\"']({_ENTITIES})s?[\"']")
+    if re.search(_TENANCY, models_src, re.IGNORECASE | re.MULTILINE):
         failures.append("class 6 N/A no longer holds: per-user/tenant columns "
                         "appeared in app/models.py — re-run C-01")
 
