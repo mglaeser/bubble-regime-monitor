@@ -974,3 +974,102 @@ class TestPanelFindingsRound17:
                             lambda _p: {"ratchets": {"test_count_floor": 999}})
         with pytest.raises(SystemExit):
             mg.cmd_ratchet(measure_only=False)
+
+
+class TestPanelFindingsRound18:
+    """Freshness is now ONE mechanism applied to every record type, rather
+    than a per-type patch each round; plus two calibration evasions."""
+
+    def test_record_freshness_is_generic(self):
+        rec = {"metric": "m", "change": "9 -> 1", "reason": "r" * 25,
+               "authorised_by": "operator"}
+        assert mg.is_fresh(rec, [])
+        assert mg.is_fresh(rec, [{"metric": "other", "change": "9 -> 1"}])
+        assert not mg.is_fresh(rec, [dict(rec)])          # byte-identical carry-over
+
+    def test_fingerprint_ignores_incidental_fields(self):
+        a = {"metric": "m", "change": "c", "reason": "r", "authorised_by": "o"}
+        b = dict(a, date="2026-07-25", note="cosmetic")
+        assert mg.record_fingerprint(a) == mg.record_fingerprint(b)
+
+    def test_retained_weakening_record_cannot_reauthorise(
+            self, monkeypatch, tmp_path):
+        # re-tighten then downgrade again: the ORIGINAL record must not license
+        # the second downgrade
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=False)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        rec = {"change": "STOP-SHIP->MUST-FIX",
+               "reason": "an earlier downgrade decision entirely",
+               "authorised_by": "operator"}
+        cur = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        for r in cur:
+            if r["id"] == "A-02":
+                r["band"] = "MUST-FIX"
+                r["weakening_record"] = dict(rec)
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(cur))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: [{"id": "A-02", "band": "STOP-SHIP",
+                                        "verdict": "FAIL",
+                                        "weakening_record": dict(rec)}]
+                            if "03-findings" in p else None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_softening_the_catalogue_founding_band_blocks(
+            self, monkeypatch, tmp_path):
+        # pre-downgrading the IMMUTABLE founding band lets every future
+        # finding on that check sit lower without any weakening record
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        cat = json.loads((tmp_path / "audit" / "00-check-catalogue.json").read_text())
+        for c in cat["checks"]:
+            if c["id"] == "A-02":
+                c["founding_band"] = "MUST-FIX"       # was STOP-SHIP
+        (tmp_path / "audit" / "00-check-catalogue.json").write_text(json.dumps(cat))
+        _reattest(tmp_path)
+
+        def _pv(path):
+            if "check-catalogue" in path:
+                return {"checks": [{"id": "A-02", "founding_band": "STOP-SHIP"}]}
+            if "manifest" in path:
+                return {"required_check_ids": ["A-01", "A-02"]}
+            return None
+        monkeypatch.setattr(mg, "previous_version", _pv)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    @pytest.mark.parametrize("snippet", [
+        'kwargs["tools"] = [t]',
+        'create(**{"tools": [t]})',
+        "payload['tools'] = x",
+        "tools=[t]",
+    ])
+    def test_class5_catches_computed_key_tool_enabling(self, snippet):
+        import re as _re
+        assert _re.search(r"""["']tools["']|(?<![\w.])tools\s*[=:]""", snippet)
+
+    @pytest.mark.parametrize("snippet,expected", [
+        ("class UserAccount(Base):", True),
+        ('    x = relationship("UserAccount")', True),
+        ("    userId: Mapped[int]", True),
+        ("class Snapshot(Base):", False),
+        ("    computed_at: Mapped[datetime]", False),
+        ('    readings = relationship("IndicatorReading")', False),
+    ])
+    def test_class6_catches_compound_and_camelcase_tenancy(self, snippet, expected):
+        import re as _re
+        ENT = (r"user|tenant|owner|account|customer|org|organisation|"
+               r"organization|workspace|member|subject|principal")
+        pat = (rf"\b({ENT})[_]?id\b"
+               r"|ForeignKey\(\s*[\"'](users|accounts|tenants|orgs|"
+               r"organisations|organizations|customers|members|workspaces)\."
+               rf"|^\s*class\s+({ENT})[A-Za-z]*\b"
+               rf"|relationship\(\s*[\"']({ENT})[A-Za-z]*[\"']")
+        assert bool(_re.search(pat, snippet, _re.I | _re.M)) is expected

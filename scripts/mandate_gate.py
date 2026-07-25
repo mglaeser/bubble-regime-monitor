@@ -46,6 +46,25 @@ OPEN_VERDICTS = ("FAIL", "PARTIAL", "NO-EVIDENCE")
 CANONICAL_VERDICTS = ("PASS", "FAIL", "PARTIAL", "NO-EVIDENCE", "NOT-APPLICABLE")
 
 
+def record_fingerprint(rec: dict) -> str:
+    """Identity of a decision record, for freshness comparison."""
+    return json.dumps({k: rec.get(k) for k in
+                       ("metric", "change", "finding_id", "reason",
+                        "authorised_by")}, sort_keys=True)
+
+
+def is_fresh(rec: dict, previous_records) -> bool:
+    """True when this exact record did NOT exist at the comparison point.
+
+    Panel rounds 17-18: every record type could be RETAINED and re-used to
+    authorise a later, separate weakening — the record is a decision about
+    one change, not a standing licence. One mechanism, applied to all three
+    record types, rather than a per-type patch each round."""
+    prev = {record_fingerprint(r) for r in (previous_records or [])
+            if isinstance(r, dict)}
+    return record_fingerprint(rec) not in prev
+
+
 def valid_weakening_record(rec, change: str | None = None) -> bool:
     """A weakening record must be structured, substantive and attributable.
 
@@ -239,6 +258,20 @@ def compute_status() -> dict:
               "treating the pinned universe as newly established")
     if prev_manifest:
         prev_required = set(prev_manifest.get("required_check_ids") or [])
+        prev_cat = previous_version("audit/00-check-catalogue.json")
+        if prev_cat:
+            prev_bands = {c["id"]: c.get("founding_band")
+                          for c in (prev_cat.get("checks") or [])}
+            for c in catalogue["checks"]:
+                was = prev_bands.get(c["id"])
+                now = c.get("founding_band")
+                if not was or not now or was == now:
+                    continue
+                if ALL_BANDS.index(now) > ALL_BANDS.index(was):
+                    _fail(f"{c['id']}'s FOUNDING band was softened in the "
+                          f"catalogue ({was}->{now}) — the founding catalogue "
+                          "is immutable (§9.9). Softening it silently "
+                          "pre-downgrades every future finding on that check.")
         dropped = sorted(prev_required - set(required))
         if dropped:
             _fail(f"checks were REMOVED from the pinned universe: {dropped} — "
@@ -315,6 +348,9 @@ def compute_status() -> dict:
     prev_findings = previous_version("audit/03-findings.json")
     if prev_findings:
         by_id = {f["id"]: f for f in findings}
+        prev_recs_by_id = {f["id"]: f.get("weakening_record")
+                           for f in prev_findings
+                           if isinstance(f.get("weakening_record"), dict)}
         for pf in prev_findings:
             cur = by_id.get(pf["id"])
             if cur is None:
@@ -329,7 +365,15 @@ def compute_status() -> dict:
                 continue
             change = (f"{was}->{now}" if weaker
                       else f"{pf['verdict']}->{cur['verdict']}")
-            if not valid_weakening_record(cur.get("weakening_record"), change):
+            rec = cur.get("weakening_record")
+            prior = prev_recs_by_id.get(pf["id"])
+            if (valid_weakening_record(rec, change)
+                    and not is_fresh(rec, [prior] if prior else [])):
+                _fail(f"{pf['id']} carries a weakening_record RETAINED from "
+                      "the comparison point — a record authorises one change, "
+                      "not every later repeat of it (re-tighten then downgrade "
+                      "again and the old record would license it)")
+            if not valid_weakening_record(rec, change):
                 _fail(f"{pf['id']} was WEAKENED out of the blocker set "
                       f"({change}) with no structured `weakening_record` "
                       "(change, reason, authorised_by) — refreshing "
@@ -578,6 +622,7 @@ def cmd_ratchet(measure_only: bool) -> None:
     prev = previous_version("audit/ratchet-baselines.json")
     if prev:
         records = baselines.get("_meta", {}).get("decision_records", []) or []
+        prev_records = (prev.get("_meta", {}) or {}).get("decision_records", []) or []
 
         def _recorded(name, old, new) -> bool:
             # The record must match THIS change, not merely mention the metric
@@ -596,7 +641,8 @@ def cmd_ratchet(measure_only: bool) -> None:
                 # is_finding satisfied the gate while violating the rule).
                 if (str(old) in change and str(new) in change
                         and len(reason) >= 20 and who
-                        and r.get("is_finding") is True):
+                        and r.get("is_finding") is True
+                        and is_fresh(r, prev_records)):
                     return True
             return False
 
@@ -812,7 +858,9 @@ def cmd_calibrate() -> None:
     # Panel finding (PR #23): matching only `tools=` let
     # `create(..., **{"tools": [...]})` enable tool use while calibration
     # still reported the class N/A. Match the kwarg in every spelling.
-    if re.search(r"""["']?\btools["']?\s*[=:]""", llm_src):
+    # `kwargs["tools"] = [...]` then `create(**kwargs)` defeated the
+    # assignment-anchored form (round 18): any quoted "tools" key counts.
+    if re.search(r"""["']tools["']|(?<![\w.])tools\s*[=:]""", llm_src):
         failures.append("class 5 N/A no longer holds: a `tools=` parameter "
                         "appeared in app/ — the no-tool-call architecture "
                         "assumption is void; re-run A-10/C-06/C-07")
@@ -823,16 +871,19 @@ def cmd_calibrate() -> None:
     # Panel finding (PR #23): a three-name denylist left `account_id`,
     # `customer_id`, an `organisation` FK or a users/accounts relationship
     # free to introduce real multi-tenancy while calibration reported N/A.
+    # camelCase and compound names (UserAccount, userId) evaded the
+    # snake_case-only forms (round 18)
     _ENTITIES = (r"user|tenant|owner|account|customer|org|organisation|"
                  r"organization|workspace|member|subject|principal")
-    _TENANCY = (rf"\b({_ENTITIES})_id\b"
+    _TENANCY = (rf"\b({_ENTITIES})[_]?id\b"
                 r"|ForeignKey\(\s*[\"']"
                 r"(users|accounts|tenants|orgs|organisations|organizations|"
                 r"customers|members|workspaces)\."
                 # a tenancy MODEL or a relationship to one is multi-tenancy
                 # even before a column appears (round 16)
-                rf"|^\s*class\s+({_ENTITIES})s?\b"
-                rf"|relationship\(\s*[\"']({_ENTITIES})s?[\"']")
+                # compound names too: UserAccount, TenantMembership (round 18)
+                rf"|^\s*class\s+({_ENTITIES})[A-Za-z]*\b"
+                rf"|relationship\(\s*[\"']({_ENTITIES})[A-Za-z]*[\"']")
     if re.search(_TENANCY, models_src, re.IGNORECASE | re.MULTILINE):
         failures.append("class 6 N/A no longer holds: per-user/tenant columns "
                         "appeared in app/models.py — re-run C-01")
