@@ -553,16 +553,8 @@ _CODEOWNERS_EXEMPT = ("audit/03-findings.json",
                       "audit/engagement-status.json")
 
 
-def codeowners_patterns() -> list[str]:
-    """Path patterns from CODEOWNERS, or [] when it cannot be read.
-
-    An unreadable CODEOWNERS must not WIDEN anything, but it must not narrow
-    the classification either: the rules above stand on their own, so this
-    only ever adds."""
-    try:
-        raw = Path(_CODEOWNERS_PATH).read_text(errors="replace")
-    except OSError:
-        return []
+def _parse_codeowners(raw: str) -> list[str]:
+    """Path patterns from CODEOWNERS text."""
     out = []
     for line in raw.splitlines():
         line = line.split("#", 1)[0].strip()
@@ -572,6 +564,49 @@ def codeowners_patterns() -> list[str]:
         if pattern:
             out.append(pattern)
     return out
+
+
+def _codeowners_at(rev: str | None) -> str:
+    """CODEOWNERS as of `rev` (None = the working tree)."""
+    if rev is None:
+        try:
+            return Path(_CODEOWNERS_PATH).read_text(errors="replace")
+        except OSError:
+            return ""
+    return _sh(["git", "show", f"{rev}:{_CODEOWNERS_PATH}"])
+
+
+def codeowners_patterns() -> list[str]:
+    """Owner-routed patterns: the UNION of the merge base and HEAD.
+
+    Reading HEAD alone (round 30) meant the pull request under review chose
+    its own reviewability: delete `/CLAUDE.md @owner` in the same change that
+    rewrites CLAUDE.md, and the file is no longer control-bearing, so padding
+    it out of the budget drops it from omitted_code and the coverage gate
+    stops blocking (panel round 31).
+
+    A rule that existed at the comparison point governs THIS change, whatever
+    the change does to it — the same principle the mandate gate applies to
+    every register it reads. Adding a rule still takes effect immediately,
+    since the union includes HEAD; only removal is deferred, and the removal
+    itself is reviewed because CODEOWNERS is control-bearing on both counts.
+    An unreadable base cannot narrow anything: the union only ever adds."""
+    seen, out = set(), []
+    for rev in (merge_base_rev(), None):
+        for pattern in _parse_codeowners(_codeowners_at(rev)):
+            if pattern not in seen:
+                seen.add(pattern)
+                out.append(pattern)
+    return out
+
+
+def merge_base_rev() -> str | None:
+    """The comparison point, or None when it cannot be resolved."""
+    try:
+        mb = _sh(["git", "merge-base", f"origin/{base_branch()}", "HEAD"]).strip()
+    except Exception:
+        return None
+    return mb or None
 
 
 def owned_by_codeowners(path: str) -> bool:

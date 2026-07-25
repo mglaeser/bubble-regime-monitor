@@ -802,3 +802,82 @@ class TestCodeownersDerivedControl:
         assert iv.is_control_bearing("secrets/server.pem", "M")
         assert iv.is_control_bearing("deploy/prod.env", "M")
         assert not iv.is_control_bearing("notes.txt", "M")
+
+
+class TestCodeownersCannotBeSelfRepealed:
+    """Panel round 31, a defect in round 30's own fix. Reading CODEOWNERS at
+    HEAD let the change under review decide what counts as governed: delete
+    the owner rule for a non-code file in the same commit that rewrites and
+    pads it, and it is no longer control-bearing, so it drops out of
+    omitted_code and the coverage gate stops blocking."""
+
+    def _repo(self, tmp_path, head_codeowners):
+        import subprocess
+
+        def git(*a):
+            return subprocess.run(["git", *a], cwd=tmp_path, check=True,
+                                  capture_output=True, text=True)
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / ".github").mkdir()
+        (tmp_path / ".github" / "CODEOWNERS").write_text(
+            "/.github/     @owner\n/scripts/     @owner\n/CLAUDE.md    @owner\n")
+        (tmp_path / "CLAUDE.md").write_text("standing law\n")
+        git("add", "-A")
+        git("commit", "-qm", "base")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        # THE EXPLOIT: repeal the rule and rewrite the file it protected
+        (tmp_path / ".github" / "CODEOWNERS").write_text(
+            "/.github/     @owner\n/scripts/     @owner\n")
+        (tmp_path / "CLAUDE.md").write_text("weakened law\n" + "pad\n" * 4000)
+        git("add", "-A")
+        git("commit", "-qm", "repeal")
+        return git
+
+    def test_a_repealed_rule_still_governs_this_change(
+            self, tmp_path, monkeypatch):
+        self._repo(tmp_path, head_codeowners=None)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "base_branch", lambda: "main")
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", ".github/CODEOWNERS")
+        assert "/CLAUDE.md" in iv.codeowners_patterns()
+        assert iv.is_control_bearing("CLAUDE.md", "M")
+
+    def test_head_only_reading_would_have_declassified_it(self, tmp_path,
+                                                          monkeypatch):
+        # pins WHY the union is needed: at HEAD alone the rule is simply gone
+        self._repo(tmp_path, head_codeowners=None)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", ".github/CODEOWNERS")
+        head_only = iv._parse_codeowners(iv._codeowners_at(None))
+        assert "/CLAUDE.md" not in head_only
+
+    def test_a_newly_added_rule_takes_effect_immediately(self, tmp_path,
+                                                         monkeypatch):
+        # BOTH SIDES: the union includes HEAD, so tightening is never deferred
+        self._repo(tmp_path, head_codeowners=None)
+        (tmp_path / ".github" / "CODEOWNERS").write_text(
+            "/.github/  @owner\n/brand_new_policy.md   @owner\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "base_branch", lambda: "main")
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", ".github/CODEOWNERS")
+        assert iv.is_control_bearing("brand_new_policy.md", "M")
+
+    def test_an_unresolvable_base_never_narrows_the_set(self, tmp_path,
+                                                        monkeypatch):
+        self._repo(tmp_path, head_codeowners=None)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "merge_base_rev", lambda: None)
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", ".github/CODEOWNERS")
+        # HEAD rules still apply, and the standing rules are untouched
+        assert iv.is_control_bearing("scripts/mandate_gate.py", "M")
+        assert iv.is_control_bearing(".github/CODEOWNERS", "M")
+
+    def test_the_repeal_itself_is_always_reviewed(self):
+        # defence in depth: CODEOWNERS is control-bearing by two independent
+        # rules, so the deleting hunk cannot itself be evicted unseen
+        assert iv.is_control_bearing(".github/CODEOWNERS", "M")
+        files = [(".github/CODEOWNERS", "c" * 5000)]
+        _, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=3)
+        assert omitted == [".github/CODEOWNERS"]
