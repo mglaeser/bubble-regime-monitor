@@ -49,5 +49,199 @@
   "progressive_rollout_inapplicable": "Single-instance self-hosted service: no traffic fractions exist; deploy.sh health-check + auto-rollback is the maximal substitute (fired live 2026-07-15).",
   "part2_scope_status": "part2_status is computed from evidence coverage of Track C's 40 records, NOT from possession of the Part 2 normative text (which is absent). A COMPLETE value here means 'every Track C check carries an evidence-backed verdict', not 'Track C is re-verifiable against its spec'. See part2_text_absent. production_eligible remains false regardless.",
   "regime_stall_detector_open": "No true dead-man switch exists: a stopped GitHub schedule emits no signal and auto-disables after 60 days of repo inactivity. Recorded as an open, unassigned gap in audit/08 rather than claimed as wired."
- }
+ },
+ "acceptance_records": [
+  {
+   "finding_id": "A-01",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-02",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-04",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-06",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-08",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-09",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-17",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-22",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-24",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-33",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "A-34",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-01",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-02",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-03",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-04",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-05",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-06",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-07",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-10",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-11",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-12",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-13",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-28",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "B-31",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "C-01",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "C-02",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "C-03",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "C-05",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "C-09",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "C-10",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "C-23",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  },
+  {
+   "finding_id": "C-26",
+   "reason": "Founding engagement acceptance (2026-07-14): compensating control + executable tripwire recorded in audit/06-residual-risk-register.md.",
+   "authorised_by": "operator (mglaeser), audit/06 'Acceptance' section",
+   "date": "2026-07-14"
+  }
+ ]
 }

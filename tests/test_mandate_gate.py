@@ -482,3 +482,71 @@ class TestLiveEngagementConsistency:
         status = mg.compute_status()
         assert status["present_check_count"] == 119
         assert status["production_eligible"] is False   # honest until ratified
+
+
+class TestPanelFindingsRound12:
+    """Two more gate defects, found in part 2 of the full-coverage review."""
+
+    def test_push_to_main_does_not_compare_state_to_itself(self, monkeypatch):
+        # GITHUB_BASE_REF unset (a push) must fall back to the PARENT commit;
+        # comparing HEAD to origin/main on main compared new state to itself,
+        # silently passing every weakening check
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        monkeypatch.setattr(mg, "_resolve", lambda ref: "parentsha"
+                            if ref == "HEAD~1" else None)
+        assert mg.comparison_point() == "parentsha"
+
+    def test_pull_request_compares_against_the_merge_base(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_BASE_REF", "main")
+        monkeypatch.setattr(mg, "_resolve", lambda ref: "tipsha")
+
+        class _R:
+            returncode = 0
+            stdout = "mergebasesha\n"
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: _R())
+        assert mg.comparison_point() == "mergebasesha"
+
+    def test_unresolvable_base_in_ci_fails_closed(self, monkeypatch):
+        # previously returned None, which SKIPPED every weakening check
+        monkeypatch.setenv("GITHUB_BASE_REF", "main")
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(mg, "_resolve", lambda ref: None)
+        with pytest.raises(SystemExit):
+            mg.comparison_point()
+
+    def test_acceptance_needs_a_structured_record_not_a_substring(
+            self, monkeypatch, tmp_path):
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        reg = tmp_path / "governance" / "accepted-residuals.json"
+        d = json.loads(reg.read_text())
+        # the old bypass: mention the id in any unrelated _meta field
+        d["_meta"] = {"note": "see A-02 in the docs"}
+        reg.write_text(json.dumps(d))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: {"accepted_open_findings": []}
+                            if "accepted" in p else None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_a_proper_acceptance_record_is_honoured(self, monkeypatch, tmp_path):
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        reg = tmp_path / "governance" / "accepted-residuals.json"
+        d = json.loads(reg.read_text())
+        d["acceptance_records"] = [{"finding_id": "A-02",
+                                    "reason": "compensating control recorded",
+                                    "authorised_by": "operator"}]
+        reg.write_text(json.dumps(d))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: {"accepted_open_findings": []}
+                            if "accepted" in p else None)
+        mg.compute_status()          # does not raise

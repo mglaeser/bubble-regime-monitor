@@ -92,21 +92,53 @@ def _base_ref() -> str:
     return os.environ.get("GITHUB_BASE_REF") or "main"
 
 
-def previous_version(rel_path: str) -> dict | None:
-    """The base branch's copy of a JSON artifact, or None if unavailable.
+def _resolve(ref: str) -> str | None:
+    r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref],
+                       cwd=ROOT, capture_output=True, text=True)
+    return r.stdout.strip() or None
 
-    Panel finding (PR #23 round 11): the manifest is SELF-authenticating —
-    an agent that edits a register and updates its hash in the same change
-    satisfies every attestation. Detecting a WEAKENING therefore needs a
-    reference point outside the change itself: the base branch."""
-    for ref in (f"origin/{_base_ref()}", _base_ref()):
-        r = subprocess.run(["git", "show", f"{ref}:{rel_path}"],
-                           cwd=ROOT, capture_output=True, text=True)
-        if r.returncode == 0:
-            try:
-                return json.loads(r.stdout)
-            except json.JSONDecodeError:
-                return None
+
+def comparison_point() -> str | None:
+    """The commit this change should be judged AGAINST.
+
+    Panel findings (PR #23 round 12): comparing to `origin/main` on a
+    push-to-main compares the new state to ITSELF, so every weakening check
+    silently passed; and an unresolvable ref returned None, which skipped the
+    checks entirely rather than blocking. On a pull request the reference is
+    the MERGE BASE (the branch point, not the moving tip); elsewhere it is the
+    parent commit."""
+    base = os.environ.get("GITHUB_BASE_REF")
+    if base:
+        for ref in (f"origin/{base}", base):
+            if _resolve(ref):
+                mb = subprocess.run(["git", "merge-base", ref, "HEAD"],
+                                    cwd=ROOT, capture_output=True, text=True)
+                if mb.returncode == 0 and mb.stdout.strip():
+                    return mb.stdout.strip()
+        # In CI a declared base that cannot be resolved is a broken checkout,
+        # not a licence to skip the weakening checks.
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            _fail(f"cannot resolve base ref {base!r} — refusing to run the "
+                  "weakening checks against no reference (fail-closed)")
+        return None
+    return _resolve("HEAD~1")
+
+
+def previous_version(rel_path: str) -> dict | None:
+    """The comparison point's copy of a JSON artifact, or None if the file did
+    not exist there (a genuinely new artifact has nothing to weaken)."""
+    point = comparison_point()
+    if not point:
+        return None
+    r = subprocess.run(["git", "show", f"{point}:{rel_path}"],
+                       cwd=ROOT, capture_output=True, text=True)
+    if r.returncode != 0:
+        return None                      # absent at the comparison point
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        _fail(f"{rel_path} is unparseable at the comparison point — cannot "
+              "verify whether this change weakens it")
     return None
 
 
@@ -194,13 +226,21 @@ def compute_status() -> dict:
     if prev_acc:
         newly = accepted_ids - set(prev_acc.get("accepted_open_findings") or [])
         if newly:
-            note = json.dumps(accepted.get("_meta", {}))
-            unrecorded = sorted(i for i in newly if i not in note)
+            # Panel finding (PR #23 round 12): searching for the id anywhere in
+            # _meta let a contributor self-accept by dropping the string into
+            # any unrelated field. The record must be STRUCTURED and explicit.
+            records = accepted.get("acceptance_records") or []
+            recorded = {r.get("finding_id") for r in records
+                        if isinstance(r, dict) and r.get("reason")
+                        and r.get("authorised_by")}
+            unrecorded = sorted(newly - recorded)
             if unrecorded:
-                _fail("newly accepted blocker-band findings with no decision "
-                      f"record naming them: {unrecorded} — accepting a blocker "
-                      "is an operator decision, and a self-consistent manifest "
-                      "hash is not that decision (§9.1)")
+                _fail("newly accepted blocker-band findings with no structured "
+                      f"acceptance record: {unrecorded} — each needs an entry "
+                      "in `acceptance_records` with finding_id, reason and "
+                      "authorised_by. Accepting a blocker is an operator "
+                      "decision; a matching manifest hash is not that "
+                      "decision (§9.1)")
     unaccepted = sorted(set(open_blockers) - accepted_ids)
     if unaccepted:
         _fail(f"open blocker-band findings NOT in the accepted-residuals "
