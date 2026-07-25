@@ -728,3 +728,77 @@ class TestRound26ClaimsRefuted:
         files = [("scripts/mandate_gate.py", "G" * 5000)]
         _, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=3)
         assert [p for p in omitted if iv.is_control_bearing(p, "M")]
+
+
+class TestCodeownersDerivedControl:
+    """Panel round 30. CODEOWNERS is the repository's own declaration of which
+    paths are governing — it routes them to the operator precisely because a
+    code-writing identity must not change them alone. The panel kept a SECOND,
+    hand-written list, and the two had drifted: seven owner-routed paths,
+    CLAUDE.md among them, were not control-bearing, so budget eviction could
+    drop them with no coverage block."""
+
+    def test_every_owner_routed_path_is_control_bearing(self):
+        import pathlib
+        owned = [ln.split()[0] for ln in
+                 pathlib.Path(".github/CODEOWNERS").read_text().splitlines()
+                 if ln.split("#", 1)[0].strip()]
+        assert owned, "CODEOWNERS parsed to nothing — the check would be vacuous"
+        for pattern in owned:
+            probe = pattern.lstrip("/")
+            probe = probe + "probe.md" if probe.endswith("/") else probe
+            if probe in iv._CODEOWNERS_EXEMPT:
+                continue
+            assert iv.is_control_bearing(probe, "M"), pattern
+
+    def test_the_standing_law_for_ai_sessions_blocks_when_unreviewed(self):
+        # the reported instance: CLAUDE.md governs every future change made
+        # in this repository by an AI session
+        assert iv.is_control_bearing("CLAUDE.md", "M")
+        files = [("CLAUDE.md", "C" * 5000), ("README.md", "r" * 50)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=3)
+        assert omitted == ["CLAUDE.md"]          # omitted, never truncated
+        assert "TRUNCATED" not in "".join(chunks)
+
+    def test_ordinary_docs_are_still_not_control_bearing(self):
+        # BOTH SIDES: reading CODEOWNERS must not sweep the whole repo in
+        for path in ("README.md", "CHANGELOG.md", "docs/AUTO_DEPLOY.md"):
+            assert not iv.is_control_bearing(path, "M"), path
+
+    def test_the_documented_audit_exemption_is_preserved(self):
+        # the bulk machine registers keep their documented status; whether the
+        # deterministic gate suffices for their free text is an OPERATOR
+        # decision recorded in audit/10, not something settled as a side
+        # effect of reading CODEOWNERS
+        for path in iv._CODEOWNERS_EXEMPT:
+            assert not iv.is_control_bearing(path, "M"), path
+
+    def test_an_unreadable_codeowners_never_narrows_the_classification(
+            self, monkeypatch):
+        # fail-safe direction: losing the declaration must not silently
+        # declassify code, governance or .github
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", "does/not/exist")
+        assert iv.codeowners_patterns() == []
+        assert iv.is_control_bearing("scripts/mandate_gate.py", "M")
+        assert iv.is_control_bearing("governance/constitution.md", "M")
+        assert iv.is_control_bearing(".github/workflows/ci.yml", "M")
+
+    def test_a_newly_owned_path_is_covered_without_touching_this_module(
+            self, tmp_path, monkeypatch):
+        # the point of deriving rather than paraphrasing: adding a path to
+        # CODEOWNERS covers it the same day
+        co = tmp_path / "CODEOWNERS"
+        co.write_text("# comment\n/newly_governed.md   @operator\n"
+                      "/policy/                @operator\n")
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", str(co))
+        assert iv.is_control_bearing("newly_governed.md", "M")
+        assert iv.is_control_bearing("policy/anything.txt", "M")
+        assert not iv.is_control_bearing("unrelated.md", "M")
+
+    def test_glob_patterns_match_path_and_basename(self, tmp_path, monkeypatch):
+        co = tmp_path / "CODEOWNERS"
+        co.write_text("*.pem      @operator\ndeploy/*.env   @operator\n")
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", str(co))
+        assert iv.is_control_bearing("secrets/server.pem", "M")
+        assert iv.is_control_bearing("deploy/prod.env", "M")
+        assert not iv.is_control_bearing("notes.txt", "M")

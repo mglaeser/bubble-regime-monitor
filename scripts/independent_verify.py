@@ -59,6 +59,7 @@ Usage:
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -68,6 +69,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 KEY = os.environ.get("SECOND_VENDOR_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -520,10 +522,76 @@ def is_control_bearing(path: str, status: str = "M") -> bool:
     # with no deterministic block.
     if path in _CONTROL_DATA:
         return True
+    if path in _CODEOWNERS_EXEMPT:
+        return False
     return (is_code(path)
             or path.startswith("governance/")
             or path.startswith(".github/")
-            or path.rsplit("/", 1)[-1] == "CODEOWNERS")
+            or path.rsplit("/", 1)[-1] == "CODEOWNERS"
+            or owned_by_codeowners(path))
+
+
+# The repository already declares which paths are governing: CODEOWNERS routes
+# them to the operator precisely because a code-writing identity must not
+# change them alone. Maintaining a SECOND hand-written list here is the
+# "which paths did we remember" failure that keeps recurring — CLAUDE.md (the
+# standing law for every AI session), GOVERNANCE_FREEZE_RULE.md and the three
+# PIN evidence packs were all owner-routed and none was control-bearing, so
+# budget eviction could drop them with no coverage block (panel round 30).
+# Reading the declaration instead of paraphrasing it keeps the two in step by
+# construction: a path added to CODEOWNERS is covered the same day.
+_CODEOWNERS_PATH = ".github/CODEOWNERS"
+
+# ONE documented exception, carried over rather than silently dropped: the bulk
+# machine registers under audit/ are validated semantically by mandate_gate on
+# every run (id-set equality, canonical verdicts, standing controls, weakening
+# records, computed-status drift). Whether that is sufficient for their FREE
+# TEXT is an open operator decision recorded in audit/10 — it is not settled
+# here as a side effect of reading CODEOWNERS.
+_CODEOWNERS_EXEMPT = ("audit/03-findings.json",
+                      "audit/00-check-catalogue.json",
+                      "audit/engagement-status.json")
+
+
+def codeowners_patterns() -> list[str]:
+    """Path patterns from CODEOWNERS, or [] when it cannot be read.
+
+    An unreadable CODEOWNERS must not WIDEN anything, but it must not narrow
+    the classification either: the rules above stand on their own, so this
+    only ever adds."""
+    try:
+        raw = Path(_CODEOWNERS_PATH).read_text(errors="replace")
+    except OSError:
+        return []
+    out = []
+    for line in raw.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        pattern = line.split()[0]
+        if pattern:
+            out.append(pattern)
+    return out
+
+
+def owned_by_codeowners(path: str) -> bool:
+    """True when CODEOWNERS routes `path` to an owner.
+
+    gitignore-style semantics for the forms CODEOWNERS actually uses; anything
+    unrecognised is treated as MATCHING, because failing toward "this is
+    governed" is the safe direction for a review-coverage gate."""
+    for pattern in codeowners_patterns():
+        p = pattern.lstrip("/")
+        if p.endswith("/"):                       # /governance/ -> a subtree
+            if path.startswith(p):
+                return True
+        elif "*" in p or "?" in p or "[" in p:    # glob: whole path or basename
+            if fnmatch.fnmatch(path, p) or fnmatch.fnmatch(
+                    path.rsplit("/", 1)[-1], p):
+                return True
+        elif path == p or path.startswith(p + "/"):
+            return True
+    return False
 
 
 def is_code(path: str) -> bool:
