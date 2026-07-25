@@ -61,6 +61,11 @@ jobs:
       - name: Tests (BLOCKING)
         run: pytest -q
       - name: Mandate gate (BLOCKING — §9.10 of governance/mandate/part1.md)
+        env:
+          # The state this push should be judged against. On a multi-commit
+          # push HEAD~1 is the pushed branch's own (possibly weakened) parent;
+          # github.event.before is what was actually there beforehand.
+          MANDATE_PUSH_BEFORE: ${{ github.event.before }}
         # status: findings/catalogue/acceptance/hash consistency, fail-closed;
         # ratchet: S11 floors and ceilings; calibrate: S12 seeded-defect corpus
         # re-proven against the live gates. See audit/08-standing-regime.md.

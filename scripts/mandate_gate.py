@@ -98,6 +98,12 @@ def _resolve(ref: str) -> str | None:
     return r.stdout.strip() or None
 
 
+def _is_shallow() -> bool:
+    r = subprocess.run(["git", "rev-parse", "--is-shallow-repository"],
+                       cwd=ROOT, capture_output=True, text=True)
+    return r.stdout.strip() == "true"
+
+
 def comparison_point() -> str | None:
     """The commit this change should be judged AGAINST.
 
@@ -107,6 +113,9 @@ def comparison_point() -> str | None:
     checks entirely rather than blocking. On a pull request the reference is
     the MERGE BASE (the branch point, not the moving tip); elsewhere it is the
     parent commit."""
+    if _is_shallow() and os.environ.get("GITHUB_ACTIONS") == "true":
+        _fail("shallow checkout: the weakening checks need real history — "
+              "set fetch-depth: 0 (fail-closed rather than skip them)")
     base = os.environ.get("GITHUB_BASE_REF")
     if base:
         for ref in (f"origin/{base}", base):
@@ -121,6 +130,19 @@ def comparison_point() -> str | None:
             _fail(f"cannot resolve base ref {base!r} — refusing to run the "
                   "weakening checks against no reference (fail-closed)")
         return None
+    # Panel finding (PR #23 round 14): HEAD~1 judges a multi-commit push
+    # against its own already-weakened parent — weaken in commit N-2, and the
+    # only CI run compares the tip to the weakened commit and passes. The
+    # pre-push SHA is the state that was actually reviewed before.
+    before = (os.environ.get("MANDATE_PUSH_BEFORE") or "").strip()
+    if before and set(before) != {"0"}:          # all-zeros = branch created
+        resolved = _resolve(before)
+        if resolved:
+            return resolved
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            _fail(f"pre-push SHA {before!r} is not present in this checkout — "
+                  "the weakening checks cannot be run against it (fail-closed; "
+                  "ensure fetch-depth: 0)")
     return _resolve("HEAD~1")
 
 
@@ -138,10 +160,24 @@ def previous_version(rel_path: str) -> dict | None:
     point = comparison_point()
     if not point:
         return None
+    # Panel finding (PR #23 round 14): treating ANY git failure as "the file
+    # did not exist" meant a shallow clone or a truncated history silently
+    # disabled every weakening check. Absence and unreadability must be
+    # distinguished: ls-tree answers presence, and it only fails when the
+    # history itself cannot be read.
+    listed = subprocess.run(["git", "ls-tree", "--name-only", point, "--", rel_path],
+                            cwd=ROOT, capture_output=True, text=True)
+    if listed.returncode != 0:
+        _fail(f"cannot read history at the comparison point {point[:12]} for "
+              f"{rel_path} ({listed.stderr.strip()[:200]}) — refusing to skip "
+              "the weakening checks (fail-closed; ensure fetch-depth: 0)")
+    if not listed.stdout.strip():
+        return None                      # genuinely absent at that commit
     r = subprocess.run(["git", "show", f"{point}:{rel_path}"],
                        cwd=ROOT, capture_output=True, text=True)
     if r.returncode != 0:
-        return None                      # absent at the comparison point
+        _fail(f"{rel_path} is listed at {point[:12]} but unreadable — "
+              "fail-closed rather than assume it is new")
     try:
         return json.loads(r.stdout)
     except json.JSONDecodeError:

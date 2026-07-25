@@ -642,3 +642,67 @@ class TestPanelFindingsRound13:
                             lambda _p: {"ratchets": {"test_count_floor": 999}})
         with pytest.raises(SystemExit):      # no reason, no authorised_by
             mg.cmd_ratchet(measure_only=False)
+
+
+class TestPanelFindingsRound14:
+    """Both defects were in code written during rounds 12-13 — hardening a
+    control under review keeps introducing the class it is meant to close."""
+
+    def test_push_is_judged_against_the_pre_push_sha(self, monkeypatch):
+        # HEAD~1 judges a multi-commit push against its OWN weakened parent:
+        # weaken in commit N-2 and the only CI run compares tip to it, passing
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        monkeypatch.setenv("MANDATE_PUSH_BEFORE", "beforesha")
+        monkeypatch.setattr(mg, "_is_shallow", lambda: False)
+        monkeypatch.setattr(mg, "_resolve",
+                            lambda ref: "resolved-before" if ref == "beforesha"
+                            else "parent")
+        assert mg.comparison_point() == "resolved-before"
+
+    def test_branch_creation_sentinel_falls_back_to_parent(self, monkeypatch):
+        # github.event.before is all-zeros when the branch is new
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        monkeypatch.setenv("MANDATE_PUSH_BEFORE", "0" * 40)
+        monkeypatch.setattr(mg, "_is_shallow", lambda: False)
+        monkeypatch.setattr(mg, "_resolve",
+                            lambda ref: "parent" if ref == "HEAD~1" else None)
+        assert mg.comparison_point() == "parent"
+
+    def test_missing_pre_push_sha_in_ci_fails_closed(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setenv("MANDATE_PUSH_BEFORE", "absentsha")
+        monkeypatch.setattr(mg, "_is_shallow", lambda: False)
+        monkeypatch.setattr(mg, "_resolve", lambda ref: None)
+        with pytest.raises(SystemExit):
+            mg.comparison_point()
+
+    def test_shallow_checkout_in_ci_fails_closed(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(mg, "_is_shallow", lambda: True)
+        with pytest.raises(SystemExit):
+            mg.comparison_point()
+
+    def test_unreadable_history_blocks_instead_of_reading_as_absent(
+            self, monkeypatch):
+        # ANY git failure previously meant "the file did not exist", so a
+        # truncated history silently disabled every weakening check
+        monkeypatch.setattr(mg, "comparison_point", lambda: "deadbeef")
+
+        class _R:
+            returncode = 128
+            stdout = ""
+            stderr = "fatal: not a tree object"
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: _R())
+        with pytest.raises(SystemExit):
+            mg.previous_version("audit/ratchet-baselines.json")
+
+    def test_genuinely_absent_artifact_returns_none(self, monkeypatch):
+        monkeypatch.setattr(mg, "comparison_point", lambda: "deadbeef")
+
+        class _R:
+            returncode = 0
+            stdout = ""            # ls-tree lists nothing -> truly absent
+            stderr = ""
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: _R())
+        assert mg.previous_version("audit/ratchet-baselines.json") is None
