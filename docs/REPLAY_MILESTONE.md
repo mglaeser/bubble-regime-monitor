@@ -8,9 +8,29 @@ this milestone is the highest-value next investment.
 judgement. With replay, B (coverage floor), D/E (D3 OCF/quorum), F (ATH basis),
 G (LPPLS execution model), and H (S5 calendar activation) become **measurable**.
 
-**Status: PROPOSAL.** Workstream scopes below await operator review before any
-implementation; RM-1 is a runtime (non-scoring) change and is explicitly
-gated on authorization.
+**Status: IMPLEMENTED (v3.8.0)** on operator authorization ("Go for it!
+Implement all"). Per-workstream delivery:
+
+- **RM-1 SHIPPED** — snapshot methodology stamp (migration 0006 +
+  `Snapshot.methodology_sha256/_version`), append-only `falsification_outcomes`
+  (DB triggers via migration AND model DDL), `POST /api/v1/admin/falsification`,
+  `GET /api/v1/replay/evidence`.
+- **RM-2 SHIPPED** — `GET /api/v1/replay/sufficiency`: distinct trading days
+  overall + per S5 tier vs the ≥60-day gate; per-tier adequacy deliberately
+  unpinned. Snapshots are never pruned (no retention job exists), so the
+  comparison window accumulates by default.
+- **RM-3 SHIPPED (tooling)** — `docs/harnesses/alfred_vintage_harness.py`
+  (true PIT vintages via ALFRED realtime windows; runs on the production
+  host, needs FRED_API_KEY); EDGAR PIT + price-seed harnesses were already
+  committed.
+- **RM-4 SHIPPED** — `scripts/replay_report.py`: B0–B5 candidate coverage
+  policies and the S5 positional-vs-calendar dual report incl. the
+  hypothetical headline delta, over persisted snapshots; D/F/C studies run
+  via their harnesses on the host.
+- **RM-5 SHIPPED** — `replay_report.py assemble`: per-PIN decision packages;
+  host-dependent studies explicitly `PENDING_HOST`.
+
+Original scoped proposal below, retained as the specification of record.
 
 ---
 

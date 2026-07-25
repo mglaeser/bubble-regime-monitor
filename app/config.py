@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     lppls_timeout_s: int = 1500  # generous headroom for the Atom N2800 (background recompute; API serves the last snapshot meanwhile)
     gsadf_timeout_s: int = 1800
 
-    service_version: str = "3.7.8"
+    service_version: str = "3.8.0"
 
     @property
     def sms_configured(self) -> bool:

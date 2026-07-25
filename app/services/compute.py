@@ -1196,6 +1196,10 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             data_freshness={**data.freshness, "_coverage": data.coverage,
                             "_unknown_red_flags": data.unknown_red_flags,
                             "_ath_provenance": data.ath_provenance},
+            # RM-1: stamp the methodology actually in force in THIS process —
+            # read from the loader, never re-stated by hand.
+            methodology_sha256=_M.frozen_sha256(),
+            methodology_version=_M.get_path("_meta", "methodology_version"),
         )
         session.add(snap)
         session.flush()

@@ -37,6 +37,12 @@ def _set_sqlite_pragmas(dbapi_connection: object, _record: object) -> None:
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA synchronous=NORMAL")
+    # With the default OFF, the implicit DELETE performed by INSERT OR
+    # REPLACE conflict resolution does NOT fire DELETE triggers (panel
+    # round-8 finding on PR #22) — ON makes the append-only DELETE trigger
+    # on falsification_outcomes cover the REPLACE path too. The BEFORE
+    # INSERT guard trigger is the primary defense; this is depth.
+    cursor.execute("PRAGMA recursive_triggers=ON")
     cursor.close()
 
 

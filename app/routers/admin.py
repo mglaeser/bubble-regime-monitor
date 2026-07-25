@@ -89,6 +89,29 @@ def send_sms_now(_: None = Depends(require_admin_key)) -> dict[str, Any]:
 
 
 @router.post(
+    "/falsification",
+    status_code=201,
+    summary="Record a falsification outcome (X-API-Key required; append-only)",
+    description=("RM-1 manual recording path (spec 15): appends one outcome row. "
+                 "The table is append-only at the DB level (triggers, migration "
+                 "0006) — recorded history cannot be silently rewritten."),
+)
+def record_falsification(body: dict[str, Any],
+                         _: None = Depends(require_admin_key)) -> dict[str, Any]:
+    from fastapi import HTTPException
+
+    from app.services.replay import record_outcome
+
+    try:
+        outcome_id = record_outcome(str(body.get("criterion", "")),
+                                    (str(body["detail"])[:2000] if body.get("detail") else None))
+    except ValueError as exc:
+        # panel finding: an empty criterion must be a client error, never a 500
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"data": {"id": outcome_id, "recorded": True}, "meta": {}}
+
+
+@router.post(
     "/deploy",
     status_code=202,
     summary="Request an auto-deploy now (X-API-Key required)",
