@@ -209,10 +209,19 @@ def s5_tier_sufficiency() -> dict[str, Any]:
                 # NOT read as DAY_GATE_MET with zero real comparisons).
                 # The production side is already non-None here (filtered
                 # above); the candidate side is checked explicitly.
-                if (dual.get("candidate_v4") or {}).get("sub_score") is not None:
+                cand = dual.get("candidate_v4") or {}
+                if cand.get("sub_score") is not None:
                     valid_days.add(d)
-                    if src in comparison_days_by_tier:
-                        comparison_days_by_tier[src].add(d)
+                    # Tier attribution uses the dual report's OWN source_tier
+                    # (panel round-7): that labels the series the comparison
+                    # actually ran on. Today it always equals production's
+                    # data_source (the shadow is fed the production tier's
+                    # series), but a legacy/foreign payload could diverge —
+                    # and a missing label attributes to NO tier (fail-closed)
+                    # rather than inheriting production's.
+                    cand_tier = cand.get("source_tier")
+                    if cand_tier in comparison_days_by_tier:
+                        comparison_days_by_tier[cand_tier].add(d)
     # The GATE counts only days on which the dual comparison actually ran
     # AND produced both sides (panel findings on this PR: counting every
     # weekday snapshot let 60 S5-less days read as gate progress; counting

@@ -186,6 +186,63 @@ class TestRM2Sufficiency:
         assert out["comparison_days_by_tier"]["fred_BAMLH0A0HYM2"] == 0
         assert out["all_tiers_compared"] is False
 
+    def test_comparison_tier_follows_dual_report_label(self, isolated_db):
+        # Panel round-7 finding: comparison days must be bucketed by the dual
+        # report's OWN source_tier (the series the comparison ran on), not by
+        # production's data_source; a missing label attributes to NO tier
+        # (fail-closed) while still advancing the overall gate.
+        from datetime import UTC, datetime
+        from datetime import date as _d
+        from datetime import timedelta as _td
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from app.services.replay import s5_tier_sufficiency
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        end = _d(2026, 6, 29)                 # resolving candidate: 10-day
+        n = len(raw.hy_oas_history_bps)       # spacing hits the 730-day target
+        raw.hy_oas_history_dated = [
+            ((end - _td(days=10 * (n - 1 - i))).isoformat(), v)
+            for i, v in enumerate(raw.hy_oas_history_bps)]
+        data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
+        persist_snapshot(data, raw)
+
+        def _relabel(tier_value, *, drop=False):
+            with session_scope() as session:
+                snap = session.execute(select(Snapshot)).scalars().first()
+                snap.computed_at = datetime(2026, 6, 29, 12, tzinfo=UTC)
+                block = dict(snap.block_s)
+                inds = dict(block["indicators"])
+                s5 = dict(inds["s5"])
+                dual = dict(s5["s5_dual_report"])
+                cand = dict(dual["candidate_v4"])
+                if drop:
+                    cand.pop("source_tier", None)
+                else:
+                    cand["source_tier"] = tier_value
+                dual["candidate_v4"] = cand
+                s5["s5_dual_report"] = dual
+                inds["s5"] = s5
+                block["indicators"] = inds
+                snap.block_s = block
+
+        # a legacy/foreign payload whose comparison ran on a DIFFERENT tier
+        _relabel("fed_ebp")
+        out = s5_tier_sufficiency()
+        assert out["gate_day_count"] == 1
+        assert out["comparison_days_by_tier"]["fed_ebp"] == 1
+        assert out["comparison_days_by_tier"]["fred_BAMLH0A0HYM2"] == 0
+        assert out["days_by_tier"]["fred_BAMLH0A0HYM2"] == 1  # observation stays
+
+        # no label at all: the day still counts, no tier claims the evidence
+        _relabel(None, drop=True)
+        out = s5_tier_sufficiency()
+        assert out["gate_day_count"] == 1
+        assert all(v == 0 for v in out["comparison_days_by_tier"].values())
+
     def test_nyse_holiday_calendar(self):
         from datetime import date
 
