@@ -251,8 +251,15 @@ def attest_proof(votes: list[dict], challenge: str, panel_size: int) -> dict[str
 # PRIVACY: only code goes to the foreign vendor. One exclude pathspec PER
 # extension (git ':(glob)' does not brace-expand). data/ (runtime DB volume)
 # excluded as a category.
+# Data-file classes added after the panel's own round-3 finding (root-level
+# customers.csv/backup.sql would have gone to the vendor). NOTE: .json stays
+# reviewable ON PURPOSE — frozen_methodology.json IS the methodology and must
+# be visible to the panel. A denylist is inherently incomplete; that residual
+# is documented in docs/INDEPENDENT_REVIEW_PANEL.md.
 EXCLUDE_EXTS = ["webp", "png", "jpg", "jpeg", "gif", "ico", "svg", "avif", "bmp", "tiff",
-                "woff", "woff2", "ttf", "otf", "eot", "pdf", "geojson", "db", "rds", "xlsx"]
+                "woff", "woff2", "ttf", "otf", "eot", "pdf", "geojson", "db", "rds", "xlsx",
+                "csv", "tsv", "sql", "jsonl", "ndjson", "parquet", "feather", "sqlite",
+                "sqlite3", "dump", "bak", "pickle", "pkl", "npz", "npy"]
 # icase: pathspecs are case-sensitive by default — an uppercase .PNG/.SVG would
 # otherwise reach the vendor (found by the panel itself: Sol veto on PR #21).
 _EXCLUDES = [":(exclude,icase,glob)data/**"] + [f":(exclude,icase,glob)**/*.{e}" for e in EXCLUDE_EXTS]
@@ -266,15 +273,29 @@ def _sh(args: list[str]) -> str:
         return ""
 
 
+def truncate_marked(text: str, cap: int, label: str) -> str:
+    """Cap text with an EXPLICIT marker — silent truncation let unreviewed
+    changes green (panel round-3 finding); a cut must be visible to reviewers."""
+    if len(text) <= cap:
+        return text
+    return (text[:cap] +
+            f"\n[{label} TRUNCATED — {len(text) - cap} of {len(text)} bytes omitted]")
+
+
 def build_diff() -> str:
-    """Full file overview (--stat) + code excerpt, base = merge-base with main."""
+    """COMPLETE changed-file list (--name-status) + capped stat + capped body,
+    every cap explicitly marked; base = merge-base with main."""
     base = _sh(["git", "merge-base", "origin/main", "HEAD"]).strip() or "HEAD~1"
-    stat = _sh(["git", "diff", "--stat", f"{base}...HEAD", "--", "."] + _EXCLUDES)[:8000]
-    body = _sh(["git", "diff", f"{base}...HEAD", "--", "."] + _EXCLUDES)[:50_000]
-    if not stat.strip() and not body.strip():
+    names = _sh(["git", "diff", "--name-status", f"{base}...HEAD", "--", "."] + _EXCLUDES)
+    stat = _sh(["git", "diff", "--stat", f"{base}...HEAD", "--", "."] + _EXCLUDES)
+    body = _sh(["git", "diff", f"{base}...HEAD", "--", "."] + _EXCLUDES)
+    if not names.strip() and not body.strip():
         return ""
-    return (f"# Changed files (complete overview):\n{stat}\n\n"
-            f"# Code changes (excerpt; binaries/assets/data excluded):\n{body}")
+    return (f"# COMPLETE changed-file list (authoritative; never omits a file):\n"
+            f"{truncate_marked(names, 100_000, 'FILE LIST')}\n\n"
+            f"# Diffstat:\n{truncate_marked(stat, 8_000, 'DIFFSTAT')}\n\n"
+            f"# Code changes (binaries/assets/data excluded):\n"
+            f"{truncate_marked(body, 50_000, 'DIFF BODY')}")
 
 
 # ------------------------------------------------------------------ prompts --
@@ -299,7 +320,10 @@ def build_system_prompt(challenge: str) -> str:
         "path; hypothetical hardening; anything without nameable misbehavior. BOUNDARY: refute "
         "ONLY on a CONCRETE, reproducible defect with nameable misbehavior (wrong output, "
         "crash, a control demonstrably no longer firing, a really exploitable hole WITH an "
-        "attack path). No concrete failure path -> refuted=false. Do NOT refute over the "
+        "attack path). The changed-FILE LIST is COMPLETE; diffstat/body may be truncated, "
+        "and any truncation is explicitly marked — if a marked truncation hides files you "
+        "would need to see to approve, say so instead of approving blind. "
+        "No concrete failure path -> refuted=false. Do NOT refute over the "
         "inherent cross-vendor trust assumption itself (that a malicious endpoint could fool "
         "the verifier including the challenge echo) — that is the DOCUMENTED residual, "
         "compensated by the deterministic CI gate; it is not a defect of THIS diff. "
@@ -515,6 +539,12 @@ def is_transient(status: int) -> bool:
     return status in (0, 401, 408, 409, 429) or status >= 500
 
 
+def should_fallback_responses(status: int, body: Any) -> bool:
+    """Chat-completions rejection that names the Responses API — 404 or 400."""
+    return (status in (400, 404) and isinstance(body, str)
+            and re.search(r"v1/responses|responses endpoint|only supported in", body, re.I) is not None)
+
+
 def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
     status, data = _http_json(f"{BASE}/chat/completions", {
         "model": model,
@@ -525,8 +555,10 @@ def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
         content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
         v = parse_verdict(content or "")
         return {"ok": True, "v": v, "decision": decide(v)}
-    # Some models only support the Responses API — the 404 says so; switch over.
-    if status == 404 and isinstance(data, str) and re.search(r"v1/responses|responses endpoint", data, re.I):
+    # Some models only support the Responses API — the rejection may be a 404 OR
+    # a documented 400 (panel round-3 finding: a 400-only model would have
+    # blocked the panel permanently); switch on either when the body says so.
+    if should_fallback_responses(status, data):
         s2, d2 = _http_json(f"{BASE}/responses",
                             {"model": model, "instructions": sys_prompt, "input": user_prompt})
         if s2 == 200:

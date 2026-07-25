@@ -158,3 +158,25 @@ class TestPanelFindingsOnItself:
                              timeout=60, env=env)
         assert out.returncode == 1
         assert "fork-origin" in out.stderr
+
+    def test_round3_data_denylist_extended(self):
+        for ext in ("csv", "tsv", "sql", "jsonl", "parquet", "sqlite", "dump", "bak"):
+            assert ext in iv.EXCLUDE_EXTS
+        # .json stays reviewable ON PURPOSE: frozen_methodology.json IS the
+        # methodology and must be visible to the panel.
+        assert "json" not in iv.EXCLUDE_EXTS
+
+    def test_round3_truncation_is_explicitly_marked(self):
+        long = "x" * 100
+        marked = iv.truncate_marked(long, 40, "DIFF BODY")
+        assert marked.startswith("x" * 40)
+        assert "DIFF BODY TRUNCATED — 60 of 100 bytes omitted" in marked
+        assert iv.truncate_marked("short", 40, "DIFF BODY") == "short"
+
+    def test_round3_responses_fallback_on_400_and_404(self):
+        msg = "This model is only supported in v1/responses"
+        assert iv.should_fallback_responses(400, msg) is True
+        assert iv.should_fallback_responses(404, msg) is True
+        assert iv.should_fallback_responses(400, "bad request: temperature") is False
+        assert iv.should_fallback_responses(403, msg) is False
+        assert iv.should_fallback_responses(400, None) is False

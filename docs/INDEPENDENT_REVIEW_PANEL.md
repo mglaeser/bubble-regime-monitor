@@ -95,7 +95,18 @@ addressed:
    asserts it), so the default stays mechanism-identical; an **opt-in strict
    mode** (`VERIFIER_STRICT_ANY_REFUTATION=true`) now blocks on ANY
    high/medium refutation for operators who want the harder rule.
-3. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
+3. **(Round 3) Incomplete data denylist** (`customers.csv`/`backup.sql` would
+   have reached the vendor): data-file classes added (`csv/tsv/sql/jsonl/
+   parquet/sqlite/dump/bak/pickle/npy…`). `.json` stays reviewable ON PURPOSE —
+   the frozen methodology artifact is JSON and must be visible to the panel.
+   Residual, stated honestly: a denylist is inherently incomplete; novel data
+   extensions or extensionless dumps would still be sent. **(Round 3) Silent
+   truncation**: the diff now carries a COMPLETE `--name-status` file list and
+   every cap (file list 100k / diffstat 8k / body 50k) is explicitly marked;
+   the prompt instructs reviewers not to approve blind past a marked cut.
+   **(Round 3) Responses-API fallback** now triggers on the documented 400
+   rejection as well as 404 (a 400-only model would have blocked permanently).
+4. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
    `pull_request` runs, so the no-key exit-0 would have let a fork PR pass a
    *required* `cross-vendor` check with zero review. Fixed: the workflow sets
    `VERIFIER_REQUIRE_KEY=true` exactly when the head repo differs from the
