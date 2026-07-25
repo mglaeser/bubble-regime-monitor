@@ -541,8 +541,10 @@ def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
     """Pack per-file diffs into at most `max_chunks` bodies of ~`budget` chars,
     highest-risk first. Returns (chunks, omitted_paths).
 
-    A single file larger than the budget is truncated WITH ITS MARKER rather
-    than dropped silently — a cut must stay visible (round-3 finding)."""
+    A single NON-control file larger than the budget is truncated with its
+    marker rather than dropped silently (round-3 finding). A CONTROL-BEARING
+    file larger than the budget is reported as omitted instead: its tail
+    cannot be reviewed, and a partially-read control is an unreviewed one."""
     rank = risk_of or path_risk
     ordered = sorted(file_diffs, key=lambda fd: rank(fd[0]))
     chunks: list[str] = []
@@ -551,6 +553,14 @@ def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
     omitted: list[str] = []
     capped = False
     for path, text in ordered:
+        # A control-bearing file too large for the budget CANNOT be reviewed
+        # in full. Truncating it in place left the tail unread while the run
+        # greened, because only `omitted` reaches the coverage gate (found
+        # independently by this repo's own sweep and by the panel, round 20).
+        # Non-control content may still be truncated with its marker.
+        if len(text) > budget and is_control_bearing(path):
+            omitted.append(path)
+            continue
         if capped:
             # Risk ordering must govern EVICTION too, not just arrival
             # (adversarial audit 2026-07-25: a 49k gate file that missed the
@@ -595,7 +605,15 @@ def _payload_header(names: str, stat: str) -> str:
         f"# Diffstat:\n{truncate_marked(stat, 8_000, 'DIFFSTAT')}\n\n")
 
 
-def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
+# Per-part content budget in characters (~1/4 that in tokens). 50k was a
+# conservative first guess and is now too small for this repo's own control
+# files: a single file above the budget cannot be reviewed in full, so the
+# budget must exceed the largest control file's diff, not merely the average.
+# Larger parts also mean FEWER parts, i.e. fewer panel passes.
+DEFAULT_PART_BUDGET = 90_000
+
+
+def build_diff_chunks(budget: int = DEFAULT_PART_BUDGET, max_chunks: int = 2
                       ) -> tuple[list[str], list[str]]:
     """Review payloads in RISK ORDER, so the gate is never the part that gets
     truncated away. Each payload repeats the COMPLETE file list and diffstat;
@@ -1011,6 +1029,11 @@ def main() -> int:
     # max_chunks x today's spend. Risk ordering means one part covers the
     # gate/app code on virtually every real PR.
     try:
+        pb = int(os.environ.get("VERIFIER_PART_BUDGET", ""))
+        part_budget = pb if 20_000 <= pb <= 200_000 else DEFAULT_PART_BUDGET
+    except ValueError:
+        part_budget = DEFAULT_PART_BUDGET
+    try:
         mc = int(os.environ.get("VERIFIER_MAX_CHUNKS", ""))
         # floor 2: max_chunks=1 makes pack_by_risk drop everything past the
         # first budget with no second part to catch it (audit 2026-07-25).
@@ -1022,7 +1045,8 @@ def main() -> int:
     except ValueError:
         max_chunks = 2
     try:
-        payloads, omitted_code = build_diff_chunks(max_chunks=max_chunks)
+        payloads, omitted_code = build_diff_chunks(budget=part_budget,
+                                                   max_chunks=max_chunks)
     except DiffError as exc:
         print(f"BLOCK diff assembly failed — cannot review, fail-closed: {exc}", file=sys.stderr)
         return 1

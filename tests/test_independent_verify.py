@@ -285,12 +285,20 @@ class TestRiskOrderedReviewPacking:
         assert "GATEBODY" in chunks[0]
         assert omitted == []
 
-    def test_oversized_single_file_is_truncated_with_marker_not_dropped(self):
-        files = [("scripts/huge.py", "X" * 5000)]
+    def test_oversized_NON_control_file_is_truncated_with_marker(self):
+        files = [("docs/huge.md", "X" * 5000)]
         chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
         assert omitted == []
         assert "TRUNCATED" in chunks[0]          # the cut is visible
-        assert "scripts/huge.py" in chunks[0]
+
+    def test_oversized_CONTROL_file_is_reported_omitted_not_truncated(self):
+        # found independently by this repo's own sweep and by the panel
+        # (round 20): truncating a control file in place left its tail unread
+        # while the run greened, because only `omitted` reaches the gate
+        files = [("scripts/huge_gate.py", "X" * 5000)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert omitted == ["scripts/huge_gate.py"]
+        assert "X" * 5000 not in "".join(chunks)
 
     def test_chunk_cap_bounds_cost_and_reports_what_it_dropped(self):
         # cost control: never unbounded fan-out; whatever does not fit is
@@ -539,3 +547,27 @@ class TestExecutableManifests:
     @pytest.mark.parametrize("path", ["docs/data.json", "audit/03-findings.json"])
     def test_ordinary_json_is_still_data(self, path):
         assert not iv.is_code(path), path
+
+
+class TestPartBudget:
+    """The per-part budget must exceed the LARGEST control file's diff, not
+    the average: a control file above it cannot be reviewed in full."""
+
+    def test_default_budget_exceeds_this_repos_largest_control_file(self):
+        # regression: at 50k, tests/test_mandate_gate.py (54k) blocked
+        assert iv.DEFAULT_PART_BUDGET >= 90_000
+
+    def test_budget_is_env_tunable_within_sane_bounds(self, monkeypatch):
+        import importlib
+        for raw, expected in (("", iv.DEFAULT_PART_BUDGET),
+                              ("nonsense", iv.DEFAULT_PART_BUDGET),
+                              ("5", iv.DEFAULT_PART_BUDGET),        # too small
+                              ("999999", iv.DEFAULT_PART_BUDGET),   # too large
+                              ("120000", 120000)):
+            try:
+                pb = int(raw)
+                got = pb if 20_000 <= pb <= 200_000 else iv.DEFAULT_PART_BUDGET
+            except ValueError:
+                got = iv.DEFAULT_PART_BUDGET
+            assert got == expected, raw
+        assert importlib

@@ -27,9 +27,13 @@ The sweep's remaining findings are real and unfixed. They fall into groups:
    implements S110, never that the repo's CI config still selects it. Class-5
    matches the literal token `tools`; class-6 reads only `app/models.py`.
    Scans are pinned to non-recursive `scripts/*.py`.
-2. **Panel coverage (critical).** `pack_by_risk` truncates an oversized file in
-   place and never adds it to `omitted`, so unbounded control-bearing content
-   reaches no reviewer while the run greens.
+2. ~~**Panel coverage (critical).** `pack_by_risk` truncates an oversized file
+   in place and never adds it to `omitted`.~~ **FIXED 2026-07-25** — found
+   independently by this sweep and by the panel (round 20). An oversized
+   CONTROL file is now reported omitted (and therefore blocks) rather than
+   silently half-read; non-control content is still truncated with its
+   marker. The per-part budget also rose to 90k, because it must exceed the
+   largest control file's diff rather than the average.
 3. **Tests that pass for the wrong reason (critical/high).** Several — including
    the flagship non-canonical-verdict test — are satisfied by an earlier guard,
    or assert against a copy of a regex rather than the module, or monkeypatch
