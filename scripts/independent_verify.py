@@ -457,7 +457,18 @@ _EXTENSIONLESS_NON_CODE = frozenset({
     "CHANGELOG", "README", "VERSION", "MANIFEST", ".gitignore",
     ".gitattributes", ".dockerignore", ".secrets.baseline"})
 _CODE_NAMES = ("Makefile", "Dockerfile", "Containerfile", "compose.yml",
-               "requirements.txt", "alembic.ini", ".pre-commit-config.yaml")
+               "requirements.txt", "alembic.ini", ".pre-commit-config.yaml",
+               # Executable manifests: these carry lifecycle scripts and
+               # dependency resolution, so a change to one runs code at
+               # install/build time exactly like a script does (round 19:
+               # a package.json lifecycle-script edit could be omitted from
+               # review because ".json" reads as data).
+               "package.json", "package-lock.json", "pnpm-lock.yaml",
+               "yarn.lock", "composer.json", "Gemfile", "Gemfile.lock",
+               "Cargo.toml", "Cargo.lock", "go.mod", "go.sum",
+               "poetry.lock", "uv.lock", "Pipfile", "Pipfile.lock",
+               "Procfile", "Justfile", "justfile", "Rakefile", "renovate.json",
+               ".npmrc", ".nvmrc", ".tool-versions")
 
 
 # Not code, but load-bearing: the scored artifact and the gate's thresholds,

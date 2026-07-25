@@ -520,3 +520,22 @@ class TestCodeClassifierBreadth:
         # an unknown extensionless file must be treated as code, not as prose
         assert iv.is_code("bin/some-new-entrypoint")
         assert iv.is_control_bearing("bin/some-new-entrypoint", "A")
+
+
+class TestExecutableManifests:
+    """Panel round 19: `.json` reads as data, but an executable manifest runs
+    code at install/build time — a package.json lifecycle-script edit could be
+    omitted from review with no coverage block."""
+
+    @pytest.mark.parametrize("path", [
+        "package.json", "frontend/package.json", "package-lock.json",
+        "yarn.lock", "pnpm-lock.yaml", "Gemfile", "Cargo.toml", "go.mod",
+        "poetry.lock", "Procfile", "renovate.json", ".npmrc",
+    ])
+    def test_executable_manifests_are_control_bearing(self, path):
+        assert iv.is_code(path), path
+        assert iv.is_control_bearing(path, "M"), path
+
+    @pytest.mark.parametrize("path", ["docs/data.json", "audit/03-findings.json"])
+    def test_ordinary_json_is_still_data(self, path):
+        assert not iv.is_code(path), path
