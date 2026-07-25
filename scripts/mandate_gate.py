@@ -124,6 +124,14 @@ def comparison_point() -> str | None:
     return _resolve("HEAD~1")
 
 
+# HONEST LIMIT (panel rounds 11-13, recorded rather than papered over): every
+# register below is writable by the same identity that writes the code it
+# governs, so these checks RAISE THE COST of laundering a weakening — they
+# force it to be explicit, attributable and diffable — but they cannot make it
+# impossible. Only B-35 write separation (branch protection + CODEOWNERS
+# review, an open operator action) removes the class. Do not read a green gate
+# as proof that no weakening occurred; read it as proof that none occurred
+# WITHOUT a recorded, reviewable decision.
 def previous_version(rel_path: str) -> dict | None:
     """The comparison point's copy of a JSON artifact, or None if the file did
     not exist there (a genuinely new artifact has nothing to weaken)."""
@@ -168,6 +176,16 @@ def compute_status() -> dict:
     if not isinstance(required, list) or not required:
         _fail("governance/mandate/manifest.json has no required_check_ids — "
               "the audit denominator must be pinned, not inferred")
+    prev_manifest = previous_version("governance/mandate/manifest.json")
+    if prev_manifest:
+        prev_required = set(prev_manifest.get("required_check_ids") or [])
+        dropped = sorted(prev_required - set(required))
+        if dropped:
+            _fail(f"checks were REMOVED from the pinned universe: {dropped} — "
+                  "the founding catalogue is immutable (§9.9). A check made "
+                  "moot by architecture is retired to NOT-APPLICABLE with a "
+                  "justification; it is never deleted. Refreshing the manifest "
+                  "hash in the same change does not authorise a deletion.")
     if set(required) != set(cat_ids):
         missing = sorted(set(required) - set(cat_ids))
         extra = sorted(set(cat_ids) - set(required))
@@ -223,16 +241,22 @@ def compute_status() -> dict:
 
     accepted_ids = set(accepted["accepted_open_findings"])
     prev_acc = previous_version("governance/accepted-residuals.json")
-    if prev_acc:
-        newly = accepted_ids - set(prev_acc.get("accepted_open_findings") or [])
+    # A register that does not exist at the comparison point makes EVERY entry
+    # new (panel finding, round 13: prev=None skipped the check entirely, so a
+    # freshly-introduced register could waive every open blocker with bare ids).
+    if prev_acc is not None or accepted_ids:
+        newly = accepted_ids - set((prev_acc or {}).get("accepted_open_findings") or [])
         if newly:
             # Panel finding (PR #23 round 12): searching for the id anywhere in
             # _meta let a contributor self-accept by dropping the string into
             # any unrelated field. The record must be STRUCTURED and explicit.
             records = accepted.get("acceptance_records") or []
             recorded = {r.get("finding_id") for r in records
-                        if isinstance(r, dict) and r.get("reason")
-                        and r.get("authorised_by")}
+                        if isinstance(r, dict)
+                        and isinstance(r.get("reason"), str)
+                        and len(r["reason"].strip()) >= 20
+                        and isinstance(r.get("authorised_by"), str)
+                        and r["authorised_by"].strip()}
             unrecorded = sorted(newly - recorded)
             if unrecorded:
                 _fail("newly accepted blocker-band findings with no structured "
@@ -427,10 +451,15 @@ def cmd_ratchet(measure_only: bool) -> None:
             # once (own-test finding while fixing round 11: a single historic
             # record would otherwise license every future loosening of it).
             for r in records:
-                if r.get("metric") != name:
+                if not isinstance(r, dict) or r.get("metric") != name:
                     continue
                 change = str(r.get("change", ""))
-                if str(old) in change and str(new) in change:
+                reason = str(r.get("reason", "")).strip()
+                who = str(r.get("authorised_by", "")).strip()
+                # Structured and attributable, not a bare string (round 13):
+                # a fieldless record was enough to license a loosening.
+                if (str(old) in change and str(new) in change
+                        and len(reason) >= 20 and who):
                     return True
             return False
 

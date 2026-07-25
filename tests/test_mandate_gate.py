@@ -17,6 +17,17 @@ mg = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(mg)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch):
+    """These tests must not depend on ambient CI variables or on the real
+    repository's git history (CI failure 2026-07-25: with GITHUB_BASE_REF set,
+    temp fixtures were compared against the LIVE repo, so they read as
+    brand-new registers and tripped the acceptance check). Tests that need a
+    comparison point monkeypatch `previous_version` themselves."""
+    monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+
 class TestCredentialShapeScanner:
     def test_catches_uuid_token_and_named_assignment(self, tmp_path):
         bad = tmp_path / "bad.py"
@@ -58,7 +69,8 @@ class TestImportResolution:
 def _write_minimal_engagement(root: Path, *, pass_has_control: bool,
                               blocker_accepted: bool,
                               structured_control: bool = True,
-                              escalated_band: str | None = None):
+                              escalated_band: str | None = None,
+                              with_acceptance_record: bool = True):
     (root / "audit").mkdir()
     gov = root / "governance" / "mandate"
     gov.mkdir(parents=True)
@@ -86,7 +98,12 @@ def _write_minimal_engagement(root: Path, *, pass_has_control: bool,
         json.dumps({"ratchets": {}}))
     (root / "governance" / "accepted-residuals.json").write_text(json.dumps(
         {"constitution_state": "IN_FORCE_PROVISIONAL",
-         "accepted_open_findings": (["A-02"] if blocker_accepted else [])}))
+         "accepted_open_findings": (["A-02"] if blocker_accepted else []),
+         "acceptance_records": ([{
+             "finding_id": "A-02",
+             "reason": "compensating control and tripwire recorded in audit/06",
+             "authorised_by": "operator (test fixture)"}]
+             if blocker_accepted and with_acceptance_record else [])}))
     (root / "governance" / "constitution.md").write_text("law\n")
     (root / "governance" / "mandate.md").write_text("combined\n")
     (gov / "part1.md").write_text("mandate\n")
@@ -439,7 +456,9 @@ class TestPanelFindingsRound11:
             self, monkeypatch, tmp_path):
         # naming the metric once must not authorise every later loosening
         self._temp_baselines(monkeypatch, tmp_path, records=[
-            {"metric": "test_count_floor", "change": "460 -> 457 (LOOSENING)"}])
+            {"metric": "test_count_floor", "change": "460 -> 457 (LOOSENING)",
+             "reason": "an unrelated earlier decision, not this change",
+             "authorised_by": "operator"}])
         monkeypatch.setattr(mg, "previous_version",
                             lambda _p: {"ratchets": {"test_count_floor": 999}})
         with pytest.raises(SystemExit):
@@ -455,14 +474,17 @@ class TestPanelFindingsRound11:
             self, monkeypatch, tmp_path):
         # the honest path stays open when the record matches THIS change
         self._temp_baselines(monkeypatch, tmp_path, records=[
-            {"metric": "test_count_floor", "change": "999 -> 10 (LOOSENING)"}])
+            {"metric": "test_count_floor", "change": "999 -> 10 (LOOSENING)",
+             "reason": "suite intentionally reduced for this scenario",
+             "authorised_by": "operator"}])
         monkeypatch.setattr(mg, "previous_version",
                             lambda _p: {"ratchets": {"test_count_floor": 999}})
         mg.cmd_ratchet(measure_only=False)      # does not raise
 
     def test_newly_accepted_blocker_needs_a_decision_record(self, monkeypatch, tmp_path):
         _write_minimal_engagement(tmp_path, pass_has_control=True,
-                                  blocker_accepted=True)
+                                  blocker_accepted=True,
+                                  with_acceptance_record=False)
         monkeypatch.setattr(mg, "ROOT", tmp_path)
         monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
         monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
@@ -517,7 +539,8 @@ class TestPanelFindingsRound12:
     def test_acceptance_needs_a_structured_record_not_a_substring(
             self, monkeypatch, tmp_path):
         _write_minimal_engagement(tmp_path, pass_has_control=True,
-                                  blocker_accepted=True)
+                                  blocker_accepted=True,
+                                  with_acceptance_record=False)
         reg = tmp_path / "governance" / "accepted-residuals.json"
         d = json.loads(reg.read_text())
         # the old bypass: mention the id in any unrelated _meta field
@@ -550,3 +573,72 @@ class TestPanelFindingsRound12:
                             lambda p: {"accepted_open_findings": []}
                             if "accepted" in p else None)
         mg.compute_status()          # does not raise
+
+
+class TestPanelFindingsRound13:
+    """Three instances of one class: every register the gate trusts is written
+    by the change it authorises. These raise the cost of laundering; only
+    B-35 write separation removes the class (documented in the module)."""
+
+    def _patched(self, monkeypatch, tmp_path, **kw):
+        _write_minimal_engagement(tmp_path, **kw)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+
+    def test_removing_a_check_from_the_pinned_universe_blocks(
+            self, monkeypatch, tmp_path):
+        # deleting the same id from manifest + catalogue + findings and
+        # refreshing every hash silently shrank the audited universe
+        self._patched(monkeypatch, tmp_path, pass_has_control=True,
+                      blocker_accepted=True)
+        for name in ("00-check-catalogue.json", "03-findings.json"):
+            path = tmp_path / "audit" / name
+            data = json.loads(path.read_text())
+            if isinstance(data, dict):
+                data["checks"] = [c for c in data["checks"] if c["id"] != "A-02"]
+                data["registered_check_count"] = 1
+            else:
+                data = [r for r in data if r["id"] != "A-02"]
+            path.write_text(json.dumps(data))
+        reg = tmp_path / "governance" / "accepted-residuals.json"
+        d = json.loads(reg.read_text())
+        d["accepted_open_findings"] = []
+        d["acceptance_records"] = []
+        reg.write_text(json.dumps(d))
+        _reattest(tmp_path, required=["A-01"])          # universe shrunk too
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: {"required_check_ids": ["A-01", "A-02"]}
+                            if "manifest" in p else None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_a_brand_new_register_still_needs_records(self, monkeypatch, tmp_path):
+        # prev=None made every entry "new" AND skipped the check entirely
+        self._patched(monkeypatch, tmp_path, pass_has_control=True,
+                      blocker_accepted=True, with_acceptance_record=False)
+        monkeypatch.setattr(mg, "previous_version", lambda _p: None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_a_fieldless_ratchet_record_does_not_license_a_loosening(
+            self, monkeypatch, tmp_path):
+        import hashlib
+        (tmp_path / "audit").mkdir(exist_ok=True)
+        baselines = tmp_path / "audit" / "ratchet-baselines.json"
+        baselines.write_text(json.dumps({
+            "_meta": {"decision_records": [
+                {"metric": "test_count_floor", "change": "999 -> 10"}]},
+            "ratchets": {"test_count_floor": 10}}))
+        gov = tmp_path / "governance" / "mandate"
+        gov.mkdir(parents=True, exist_ok=True)
+        (gov / "manifest.json").write_text(json.dumps({
+            "ratchet_baselines_sha256":
+                hashlib.sha256(baselines.read_bytes()).hexdigest()}))
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        monkeypatch.setattr(mg, "measure_ratchets", lambda: {"test_count_floor": 10})
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda _p: {"ratchets": {"test_count_floor": 999}})
+        with pytest.raises(SystemExit):      # no reason, no authorised_by
+            mg.cmd_ratchet(measure_only=False)
