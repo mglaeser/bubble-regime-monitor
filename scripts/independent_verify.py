@@ -71,7 +71,12 @@ import urllib.request
 from typing import Any
 
 KEY = os.environ.get("SECOND_VENDOR_API_KEY") or os.environ.get("OPENAI_API_KEY")
-BASE = os.environ.get("VERIFIER_BASE_URL", "https://api.openai.com/v1")
+# `or`, not .get(default): the workflow passes VERIFIER_BASE_URL from a repo
+# VARIABLE, and GitHub Actions injects an EMPTY STRING when the variable is
+# unset — .get(name, default) would keep "" and every request would crash with
+# "unknown url type" (observed live on PR #21). The reference JS used ||,
+# which is empty-string-safe; this is the Python equivalent.
+BASE = os.environ.get("VERIFIER_BASE_URL") or "https://api.openai.com/v1"
 
 # Preference order (new -> old): without an explicit VERIFIER_MODEL the panel
 # resolves each wanted ID against the account's /v1/models list.

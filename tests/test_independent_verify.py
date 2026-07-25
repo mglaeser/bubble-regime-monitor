@@ -107,3 +107,17 @@ class TestNoKeyResidualMode:
                               timeout=60, env=env)
         assert out2.returncode == 0                 # never fake-blocks
         assert "RESIDUAL" in out2.stdout            # never fake-green either: loudly inactive
+
+
+class TestEmptyEnvVarsAreAbsent:
+    def test_empty_base_url_falls_back_to_default(self, monkeypatch):
+        # GitHub Actions injects EMPTY strings for unset repo variables; an
+        # empty VERIFIER_BASE_URL must behave like an absent one (observed
+        # live: BASE="" crashed every request with "unknown url type").
+        monkeypatch.setenv("VERIFIER_BASE_URL", "")
+        spec = importlib.util.spec_from_file_location(
+            "independent_verify_emptyenv",
+            Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.BASE == "https://api.openai.com/v1"
