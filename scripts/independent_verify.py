@@ -436,8 +436,26 @@ def path_risk(path: str) -> int:
     return _RISK_DEFAULT
 
 
-_CODE_SUFFIXES = (".py", ".sh", ".R", ".r", ".sql", ".yml", ".yaml", ".toml",
-                  ".ini", ".cfg", ".service", ".timer", ".mk", ".bash")
+# Matched case-INSENSITIVELY (own sweep: the privacy excludes are icase while
+# this was case-sensitive, so `.SQL` was privacy-excluded AND classified
+# non-code — excluded from the body and from the coverage block at once).
+_CODE_SUFFIXES = (
+    ".py", ".pyi", ".sh", ".bash", ".zsh", ".r", ".sql", ".yml", ".yaml",
+    ".toml", ".ini", ".cfg", ".conf", ".mk", ".make", ".cmake", ".gradle",
+    ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".rb", ".rs", ".c",
+    ".h", ".cc", ".cpp", ".hpp", ".java", ".kt", ".cs", ".php", ".pl", ".lua",
+    ".ps1", ".bat", ".cmd", ".tf", ".tfvars", ".nix", ".sql", ".proto",
+    # systemd/init units arm host automation exactly like a script does
+    ".service", ".timer", ".path", ".socket", ".mount", ".target")
+
+# Extensionless files are treated as CODE by default (fail-closed): entrypoint
+# scripts, hooks and unit files routinely have no suffix, and misclassifying
+# one hides it from the coverage block. Only these well-known text artifacts
+# are exempt.
+_EXTENSIONLESS_NON_CODE = frozenset({
+    "LICENSE", "LICENCE", "NOTICE", "AUTHORS", "CONTRIBUTORS", "COPYRIGHT",
+    "CHANGELOG", "README", "VERSION", "MANIFEST", ".gitignore",
+    ".gitattributes", ".dockerignore", ".secrets.baseline"})
 _CODE_NAMES = ("Makefile", "Dockerfile", "Containerfile", "compose.yml",
                "requirements.txt", "alembic.ini", ".pre-commit-config.yaml")
 
@@ -500,7 +518,11 @@ def is_code(path: str) -> bool:
     base = path.rsplit("/", 1)[-1]
     if base in _CODE_NAMES or base.startswith("Dockerfile"):
         return True
-    return path.endswith(_CODE_SUFFIXES)
+    if "." not in base.lstrip("."):        # extensionless -> code (fail-closed)
+        return base not in _EXTENSIONLESS_NON_CODE
+    if base in _EXTENSIONLESS_NON_CODE:
+        return False
+    return base.lower().endswith(_CODE_SUFFIXES)
 
 
 def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,

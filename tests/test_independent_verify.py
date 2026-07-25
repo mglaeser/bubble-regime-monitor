@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _SPEC = importlib.util.spec_from_file_location(
     "independent_verify", Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
 iv = importlib.util.module_from_spec(_SPEC)
@@ -487,3 +489,34 @@ class TestRenameLaundering:
         chunks, _ = iv.pack_by_risk(files, budget=1000, max_chunks=2,
                                     risk_of=lambda p: 0 if "old_notes" in p else 9)
         assert "LAUNDERED" in chunks[0]
+
+
+class TestCodeClassifierBreadth:
+    """Panel round 15 + own sweep: the classifier missed extensionless files,
+    most common languages, systemd units, and matched suffixes case-sensitively
+    while the privacy excludes are icase — so `.SQL` was excluded from the body
+    AND from the coverage block simultaneously."""
+
+    @pytest.mark.parametrize("path", [
+        "deploy/systemd/bubblegauge-deploy.path",   # arms host auto-deploy
+        "deploy/systemd/bubblegauge.service",
+        "scripts/entrypoint",                       # extensionless script
+        "hooks/pre-commit",
+        "app/migrate.SQL",                          # icase
+        "web/app.ts", "web/app.js", "svc/main.go", "lib/thing.rb",
+        "lib/thing.rs", "src/Main.java", "infra/main.tf", "build.gradle",
+    ])
+    def test_executable_and_automation_paths_are_code(self, path):
+        assert iv.is_code(path), path
+
+    @pytest.mark.parametrize("path", [
+        "LICENSE", "README", "CHANGELOG", "NOTICE", "VERSION",
+        "docs/NOTES.md", "audit/03-findings.json",
+    ])
+    def test_text_artifacts_are_not_code(self, path):
+        assert not iv.is_code(path), path
+
+    def test_extensionless_defaults_to_code_fail_closed(self):
+        # an unknown extensionless file must be treated as code, not as prose
+        assert iv.is_code("bin/some-new-entrypoint")
+        assert iv.is_control_bearing("bin/some-new-entrypoint", "A")
