@@ -46,6 +46,20 @@ The sweep's remaining findings are real and unfixed. They fall into groups:
    deploy-admission gate the mandate describes does not exist, so the field
    reaches no enforcement point.
 
+6. **Panel scope of the attested registers (medium, OPERATOR DECISION).**
+   `audit/03-findings.json` and `audit/00-check-catalogue.json` are excluded
+   from `_CONTROL_DATA`, so an oversized diff of either is truncated rather
+   than omitted and never blocks. The written rationale is that
+   `mandate_gate` validates them semantically on every run, which is true for
+   structure and transitions. It is NOT true for the free text: a
+   `weakening_record` whose `reason` cites evidence that does not exist
+   satisfies every machine check (length >= 20, `authorised_by` non-empty)
+   and only a reader catches it — the same argument that put
+   `audit/ratchet-baselines.json` IN the list. Raising it here rather than
+   flipping it: the classification is a documented decision, and including
+   the register would block any future pull request whose findings diff
+   exceeds the part budget. Observed round 28, not acted on.
+
 **Nothing above is claimed as fixed.** Group 3 in particular means several
 existing tests are weaker evidence than their names suggest; treat the suite's
 coverage claims with that in mind until they are repaired.

@@ -12,7 +12,7 @@
     "Anthropic API",
     "OpenAI API (CI panel)"
   ],
-  "files_tracked": 180,
+  "files_tracked": 183,
   "generated_by": "scripts/mandate_gate.py surface",
   "identities": [
     "operator (mglaeser) \u2014 human-in-command",
@@ -118,6 +118,7 @@
     "scripts/sensitivity.py",
     "tests/__init__.py",
     "tests/conftest.py",
+    "tests/mandate_gate_support.py",
     "tests/test_api_contract.py",
     "tests/test_ath_provenance.py",
     "tests/test_audit_v331.py",
@@ -133,6 +134,8 @@
     "tests/test_independent_verify.py",
     "tests/test_lifespan_hygiene.py",
     "tests/test_mandate_gate.py",
+    "tests/test_mandate_gate_calibration.py",
+    "tests/test_mandate_gate_registers.py",
     "tests/test_migrations.py",
     "tests/test_montecarlo.py",
     "tests/test_normalization.py",

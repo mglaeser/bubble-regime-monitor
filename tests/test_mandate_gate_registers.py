@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.mandate_gate_support import (  # noqa: F401 -- hermetic_env is autouse
-    hermetic_env,
+from tests.mandate_gate_support import (
+    clear_ambient_ci_env,
     mg,
 )
 from tests.mandate_gate_support import (
@@ -21,6 +21,11 @@ from tests.mandate_gate_support import (
 from tests.mandate_gate_support import (
     write_minimal_engagement as _write_minimal_engagement,
 )
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch):
+    clear_ambient_ci_env(monkeypatch)
 
 
 class TestFindingsRegisterLaundering:

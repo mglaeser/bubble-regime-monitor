@@ -12,15 +12,12 @@ import importlib.util
 import json
 from pathlib import Path
 
-import pytest
-
 _SPEC = importlib.util.spec_from_file_location(
     "mandate_gate", Path(__file__).resolve().parents[1] / "scripts" / "mandate_gate.py")
 mg = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(mg)
 
-@pytest.fixture(autouse=True)
-def hermetic_env(monkeypatch):
+def clear_ambient_ci_env(monkeypatch):
     """These tests must not depend on ambient CI variables or on the real
     repository's git history (CI failure 2026-07-25: with GITHUB_BASE_REF set,
     temp fixtures were compared against the LIVE repo, so they read as
