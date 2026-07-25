@@ -1145,3 +1145,67 @@ class TestPanelFindingsRound21:
         monkeypatch.setattr(mg, "_resolve", lambda ref: None)
         with pytest.raises(SystemExit):
             mg.comparison_point()
+
+
+class TestPanelFindingsRound22:
+    """Class-5 moved from text scanning to AST + a structural ban, because a
+    literal scan can neither prove absence (`{"tool"+"s": ...}`) nor avoid
+    firing on prose (this repo's own comment tripped it)."""
+
+    def _calibrate_in(self, monkeypatch, tmp_path, src):
+        (tmp_path / "app").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "app" / "llm.py").write_text(src)
+        (tmp_path / "app" / "models.py").write_text("class Snapshot:\n    pass\n")
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+
+    @pytest.mark.parametrize("src", [
+        "client.messages.create(model=m, tools=[t])\n",
+        'payload = {"tools": [t]}\n',
+        'cfg = {"model": m, "tools": []}\n',
+    ])
+    def test_ast_sees_real_tool_arguments(self, src):
+        import ast
+        tree = ast.parse(src)
+        found = any(
+            (isinstance(n, ast.Call) and any(k.arg == "tools" for k in n.keywords))
+            or (isinstance(n, ast.Dict) and any(
+                isinstance(k, ast.Constant) and k.value == "tools" for k in n.keys))
+            for n in ast.walk(tree))
+        assert found, src
+
+    @pytest.mark.parametrize("src", [
+        '# a comment mentioning "tools" must not fire\n',
+        'DOC = "we never pass tools to the model"\n',
+    ])
+    def test_prose_about_tools_does_not_fire(self, src):
+        import ast
+        tree = ast.parse(src)
+        found = any(
+            (isinstance(n, ast.Call) and any(k.arg == "tools" for k in n.keywords))
+            or (isinstance(n, ast.Dict) and any(
+                isinstance(k, ast.Constant) and k.value == "tools" for k in n.keys))
+            for n in ast.walk(tree))
+        assert not found, src
+
+    def test_kwargs_expansion_into_a_model_call_is_forbidden(self):
+        # the structural half: with no ** expansion every tool-enabling form
+        # is a literal the AST can see, so `{"tool"+"s": ...}` has nowhere to go
+        import ast
+        tree = ast.parse("client.messages.create(**base)\n")
+        expansions = [n for n in ast.walk(tree)
+                      if isinstance(n, ast.Call)
+                      and any(k.arg is None for k in n.keywords)]
+        assert expansions
+
+    def test_live_app_passes_model_keywords_explicitly(self):
+        # regression: app/engine/judgment.py used **base at three call sites
+        import ast
+        src = Path(mg.ROOT, "app", "engine", "judgment.py").read_text()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                name = (fn.attr if isinstance(fn, ast.Attribute)
+                        else getattr(fn, "id", ""))
+                if name in ("create", "stream", "generate", "complete"):
+                    assert not any(k.arg is None for k in node.keywords), \
+                        f"** expansion at judgment.py:{node.lineno}"

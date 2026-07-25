@@ -873,17 +873,51 @@ def cmd_calibrate() -> None:
 
     # 5 — untrusted text -> tool call: N/A by structure; re-validate (§9.9):
     # the LLM judgment path must pass NO tools to the API.
-    llm_src = "".join(p.read_text(errors="replace")
-                      for p in ROOT.glob("app/**/*.py"))
-    # Panel finding (PR #23): matching only `tools=` let
-    # `create(..., **{"tools": [...]})` enable tool use while calibration
-    # still reported the class N/A. Match the kwarg in every spelling.
-    # `kwargs["tools"] = [...]` then `create(**kwargs)` defeated the
-    # assignment-anchored form (round 18): any quoted "tools" key counts.
-    if re.search(r"""["']tools["']|(?<![\w.])tools\s*[=:]""", llm_src):
-        failures.append("class 5 N/A no longer holds: a `tools=` parameter "
-                        "appeared in app/ — the no-tool-call architecture "
-                        "assumption is void; re-run A-10/C-06/C-07")
+    # Class 5 is checked on the AST, not the text: a source scan fires on
+    # prose (this repo's own comment about the invariant tripped it) and can
+    # be hidden by string-building. The AST sees real kwargs and real dict
+    # keys only. The complementary ban on ** expansion at model call sites
+    # is what makes this complete — with no dynamic kwargs, every tool-enabling
+    # form is a literal the AST can see (round 22).
+    import ast as _ast
+
+    def _tool_enabling(tree) -> bool:
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Call):
+                if any(k.arg == "tools" for k in node.keywords):
+                    return True
+            if isinstance(node, _ast.Dict):
+                for k in node.keys:
+                    if isinstance(k, _ast.Constant) and k.value == "tools":
+                        return True
+        return False
+
+    for path in ROOT.glob("app/**/*.py"):
+        try:
+            tree = _ast.parse(path.read_text(errors="replace"))
+        except SyntaxError:
+            failures.append(f"{path.relative_to(ROOT)} does not parse — the "
+                            "no-tool invariant cannot be checked")
+            continue
+        if _tool_enabling(tree):
+            failures.append(
+                f"class 5 N/A no longer holds: {path.relative_to(ROOT)} passes "
+                "a `tools` argument or key — the no-tool-call architecture "
+                "assumption is void; re-run A-10/C-06/C-07")
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, _ast.Attribute) else getattr(fn, "id", "")
+            if name not in ("create", "stream", "generate", "complete"):
+                continue
+            if any(k.arg is None for k in node.keywords):
+                failures.append(
+                    f"{path.relative_to(ROOT)}:{node.lineno} expands **kwargs "
+                    f"into a model call ({name}) — forbidden, because a "
+                    "dynamically-built kwarg can enable tool use without any "
+                    "literal appearing in source. Pass keywords explicitly so "
+                    "the no-tool invariant stays checkable.")
 
     # 6 — cross-tenant ownership: N/A by structure; re-validate: still no
     # per-user tables (single-tenant).

@@ -537,7 +537,8 @@ def is_code(path: str) -> bool:
 
 
 def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
-                 max_chunks: int, risk_of=None) -> tuple[list[str], list[str]]:
+                 max_chunks: int, risk_of=None,
+                 control_of=None) -> tuple[list[str], list[str]]:
     """Pack per-file diffs into at most `max_chunks` bodies of ~`budget` chars,
     highest-risk first. Returns (chunks, omitted_paths).
 
@@ -546,6 +547,11 @@ def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
     file larger than the budget is reported as omitted instead: its tail
     cannot be reviewed, and a partially-read control is an unreviewed one."""
     rank = risk_of or path_risk
+    # control_of carries rename ORIGINS: a renamed control file above the
+    # budget was classified by its destination only, so
+    # scripts/mandate_gate.py -> docs/old_notes.txt got truncated rather than
+    # omitted and its tail went unreviewed (round 22).
+    is_control = control_of or (lambda p: is_control_bearing(p))
     ordered = sorted(file_diffs, key=lambda fd: rank(fd[0]))
     chunks: list[str] = []
     cur: list[str] = []
@@ -558,7 +564,7 @@ def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
         # greened, because only `omitted` reaches the coverage gate (found
         # independently by this repo's own sweep and by the panel, round 20).
         # Non-control content may still be truncated with its marker.
-        if len(text) > budget and is_control_bearing(path):
+        if len(text) > budget and is_control(path):
             omitted.append(path)
             continue
         if capped:
@@ -667,7 +673,8 @@ def build_diff_chunks(budget: int = DEFAULT_PART_BUDGET, max_chunks: int = 2
         # finding — an excluded-only PR must never auto-green with zero votes).
         return ([header_only(names, stat)],
                 [p for p in excluded_content if _control(p)])
-    chunks, omitted = pack_by_risk(file_diffs, budget, max_chunks, risk_of=_rank)
+    chunks, omitted = pack_by_risk(file_diffs, budget, max_chunks,
+                                   risk_of=_rank, control_of=_control)
     unreviewed = omitted + excluded_content
     omitted_code = [p for p in unreviewed if _control(p)]
     header = _payload_header(names, stat)

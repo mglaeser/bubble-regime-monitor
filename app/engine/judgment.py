@@ -89,23 +89,29 @@ def run_completion(prompt: str) -> str:
     last_exc: Exception | None = None
 
     def _call(model: str, thinking: bool) -> str:
-        base: dict[str, object] = {
-            "model": model,
-            "max_tokens": settings.anthropic_max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        }
+        # Keywords are passed EXPLICITLY, never via ** expansion: a
+        # dynamically-built kwarg could enable tool use without the literal
+        # "tools" ever appearing in source, which would make the C-06/C-07
+        # no-tool invariant unverifiable by any source scan (mandate-gate
+        # class-5; panel finding PR #23 round 22).
+        messages = [{"role": "user", "content": prompt}]
         if thinking:
             try:
                 resp = client.messages.create(
-                    **base, thinking={"type": "adaptive"},
+                    model=model, max_tokens=settings.anthropic_max_tokens,
+                    messages=messages, thinking={"type": "adaptive"},
                     output_config={"effort": settings.anthropic_effort})
             except TypeError:
                 # SDK predates the kwargs: pass them straight through.
                 resp = client.messages.create(
-                    **base, extra_body={"thinking": {"type": "adaptive"},
-                                        "output_config": {"effort": settings.anthropic_effort}})
+                    model=model, max_tokens=settings.anthropic_max_tokens,
+                    messages=messages,
+                    extra_body={"thinking": {"type": "adaptive"},
+                                "output_config": {"effort": settings.anthropic_effort}})
         else:
-            resp = client.messages.create(**base)
+            resp = client.messages.create(
+                model=model, max_tokens=settings.anthropic_max_tokens,
+                messages=messages)
         text = "".join(b.text for b in resp.content if b.type == "text").strip()
         if not text:
             raise ValueError("empty completion")

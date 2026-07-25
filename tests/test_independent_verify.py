@@ -571,3 +571,20 @@ class TestPartBudget:
                 got = iv.DEFAULT_PART_BUDGET
             assert got == expected, raw
         assert importlib
+
+
+class TestRenamedOversizeControl:
+    """Round 22: the oversized-control check used the NEW path only, so a
+    renamed control file above budget was truncated rather than omitted."""
+
+    def test_control_classifier_is_injectable_for_rename_origins(self):
+        files = [("docs/old_notes.txt", "X" * 5000)]
+        # destination alone looks harmless -> truncated
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert omitted == []
+        # with origin awareness the same file is a control -> omitted
+        chunks, omitted = iv.pack_by_risk(
+            files, budget=1000, max_chunks=2,
+            control_of=lambda p: p == "docs/old_notes.txt")
+        assert omitted == ["docs/old_notes.txt"]
+        assert "X" * 5000 not in "".join(chunks)
