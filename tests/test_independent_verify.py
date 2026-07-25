@@ -180,3 +180,17 @@ class TestPanelFindingsOnItself:
         assert iv.should_fallback_responses(400, "bad request: temperature") is False
         assert iv.should_fallback_responses(403, msg) is False
         assert iv.should_fallback_responses(400, None) is False
+
+    def test_round4_base_branch_from_github_base_ref(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        assert iv.base_branch() == "main"
+        monkeypatch.setenv("GITHUB_BASE_REF", "")     # Actions empty-string trap
+        assert iv.base_branch() == "main"
+        monkeypatch.setenv("GITHUB_BASE_REF", "develop")
+        assert iv.base_branch() == "develop"
+
+    def test_round4_file_list_unfiltered_contents_filtered(self):
+        cmds = iv.diff_commands("BASE")
+        assert not any(a.startswith(":(exclude") for a in cmds["names"])
+        assert any(a.startswith(":(exclude") for a in cmds["stat"])
+        assert any(a.startswith(":(exclude") for a in cmds["body"])

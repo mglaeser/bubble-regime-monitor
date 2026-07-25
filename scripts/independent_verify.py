@@ -273,6 +273,26 @@ def _sh(args: list[str]) -> str:
         return ""
 
 
+def base_branch() -> str:
+    """The PR's target branch (GITHUB_BASE_REF; empty on non-PR events -> main).
+    Round-4 panel finding: a hard-coded origin/main mis-based the diff for PRs
+    targeting any other branch, letting them green unreviewed."""
+    return os.environ.get("GITHUB_BASE_REF") or "main"
+
+
+def diff_commands(merge_base: str) -> dict[str, list[str]]:
+    """The three diff invocations. The NAME-STATUS list carries ALL changed
+    paths WITHOUT excludes (round-4 panel finding: filtering the authoritative
+    list let an excluded-only PR return an empty diff and auto-green with zero
+    votes) — paths are not content; the privacy excludes protect CONTENTS and
+    stay on stat/body."""
+    return {
+        "names": ["git", "diff", "--name-status", f"{merge_base}...HEAD"],
+        "stat": ["git", "diff", "--stat", f"{merge_base}...HEAD", "--", "."] + _EXCLUDES,
+        "body": ["git", "diff", f"{merge_base}...HEAD", "--", "."] + _EXCLUDES,
+    }
+
+
 def truncate_marked(text: str, cap: int, label: str) -> str:
     """Cap text with an EXPLICIT marker — silent truncation let unreviewed
     changes green (panel round-3 finding); a cut must be visible to reviewers."""
@@ -285,13 +305,16 @@ def truncate_marked(text: str, cap: int, label: str) -> str:
 def build_diff() -> str:
     """COMPLETE changed-file list (--name-status) + capped stat + capped body,
     every cap explicitly marked; base = merge-base with main."""
-    base = _sh(["git", "merge-base", "origin/main", "HEAD"]).strip() or "HEAD~1"
-    names = _sh(["git", "diff", "--name-status", f"{base}...HEAD", "--", "."] + _EXCLUDES)
-    stat = _sh(["git", "diff", "--stat", f"{base}...HEAD", "--", "."] + _EXCLUDES)
-    body = _sh(["git", "diff", f"{base}...HEAD", "--", "."] + _EXCLUDES)
+    mb = _sh(["git", "merge-base", f"origin/{base_branch()}", "HEAD"]).strip() or "HEAD~1"
+    cmds = diff_commands(mb)
+    names = _sh(cmds["names"])
+    stat = _sh(cmds["stat"])
+    body = _sh(cmds["body"])
     if not names.strip() and not body.strip():
         return ""
-    return (f"# COMPLETE changed-file list (authoritative; never omits a file):\n"
+    return (f"# COMPLETE changed-file list (authoritative — ALL changed paths, including "
+            f"files whose CONTENT is privacy-excluded; contents of excluded classes are "
+            f"never sent):\n"
             f"{truncate_marked(names, 100_000, 'FILE LIST')}\n\n"
             f"# Diffstat:\n{truncate_marked(stat, 8_000, 'DIFFSTAT')}\n\n"
             f"# Code changes (binaries/assets/data excluded):\n"

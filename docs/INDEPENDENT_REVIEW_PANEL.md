@@ -106,7 +106,15 @@ addressed:
    the prompt instructs reviewers not to approve blind past a marked cut.
    **(Round 3) Responses-API fallback** now triggers on the documented 400
    rejection as well as 404 (a 400-only model would have blocked permanently).
-4. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
+4. **(Round 4) Excluded-only auto-green:** the privacy excludes were applied
+   to the authoritative file list too, so a PR touching only excluded-content
+   files produced an empty diff and greened with ZERO votes. Fixed: the
+   `--name-status` list now carries ALL changed paths unfiltered (paths are
+   not content); the excludes keep protecting contents (stat/body only).
+   **(Round 4) Wrong diff base:** `origin/main` was hard-coded; PRs targeting
+   another branch were mis-based and could green unreviewed. Fixed via
+   `GITHUB_BASE_REF` (empty-string-safe) with `main` fallback.
+5. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
    `pull_request` runs, so the no-key exit-0 would have let a fork PR pass a
    *required* `cross-vendor` check with zero review. Fixed: the workflow sets
    `VERIFIER_REQUIRE_KEY=true` exactly when the head repo differs from the
