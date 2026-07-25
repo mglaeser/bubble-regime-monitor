@@ -194,3 +194,20 @@ class TestPanelFindingsOnItself:
         assert not any(a.startswith(":(exclude") for a in cmds["names"])
         assert any(a.startswith(":(exclude") for a in cmds["stat"])
         assert any(a.startswith(":(exclude") for a in cmds["body"])
+
+    def test_round6_sh_failure_blocks_and_bad_utf8_stays_visible(self):
+        import pytest as _pytest
+        with _pytest.raises(iv.DiffError):
+            iv._sh(["git", "rev-parse", "--verify", "no-such-ref-xyz123"], required=True)
+        assert iv._sh(["false"]) == ""            # non-required keeps soft behavior
+        out = iv._sh([sys.executable, "-c",
+                      "import sys; sys.stdout.buffer.write(b'ok\\xff\\xfebad')"])
+        assert "ok" in out and "bad" in out       # invalid UTF-8 visible, not vanished
+        assert "�" in out
+
+    def test_round6_diff_error_blocks_main(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", "fake-key-for-test")
+        def boom():
+            raise iv.DiffError("git exploded")
+        monkeypatch.setattr(iv, "build_diff", boom)
+        assert iv.main() == 1

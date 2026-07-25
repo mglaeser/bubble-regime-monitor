@@ -265,12 +265,28 @@ EXCLUDE_EXTS = ["webp", "png", "jpg", "jpeg", "gif", "ico", "svg", "avif", "bmp"
 _EXCLUDES = [":(exclude,icase,glob)data/**"] + [f":(exclude,icase,glob)**/*.{e}" for e in EXCLUDE_EXTS]
 
 
-def _sh(args: list[str]) -> str:
+class DiffError(RuntimeError):
+    """A REQUIRED diff command failed — the panel must BLOCK, never green on
+    the resulting emptiness (round-6 panel finding: text=True decode errors and
+    git failures were silently converted to empty output)."""
+
+
+def _sh(args: list[str], *, required: bool = False) -> str:
+    """Run a git command; decode with errors="replace" so invalid UTF-8 becomes
+    VISIBLE replacement characters instead of an empty (falsely reviewable)
+    diff. required=True turns any failure into a blocking DiffError."""
     try:
-        return subprocess.run(  # noqa: S603 -- fixed git argv built from constants, no shell
-            args, capture_output=True, text=True, timeout=120).stdout
-    except Exception:
+        proc = subprocess.run(  # noqa: S603 -- fixed git argv built from constants, no shell
+            args, capture_output=True, timeout=120)
+    except Exception as exc:
+        if required:
+            raise DiffError(f"{' '.join(args[:3])}...: {exc}") from exc
         return ""
+    out = proc.stdout.decode("utf-8", errors="replace")
+    if required and proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace")[:200]
+        raise DiffError(f"{' '.join(args[:3])}... exited {proc.returncode}: {err}")
+    return out
 
 
 def base_branch() -> str:
@@ -307,9 +323,9 @@ def build_diff() -> str:
     every cap explicitly marked; base = merge-base with main."""
     mb = _sh(["git", "merge-base", f"origin/{base_branch()}", "HEAD"]).strip() or "HEAD~1"
     cmds = diff_commands(mb)
-    names = _sh(cmds["names"])
-    stat = _sh(cmds["stat"])
-    body = _sh(cmds["body"])
+    names = _sh(cmds["names"], required=True)
+    stat = _sh(cmds["stat"], required=True)
+    body = _sh(cmds["body"], required=True)
     if not names.strip() and not body.strip():
         return ""
     return (f"# COMPLETE changed-file list (authoritative — ALL changed paths, including "
@@ -630,7 +646,11 @@ def main() -> int:
               "  secret (see docs/INDEPENDENT_REVIEW_PANEL.md).")
         return 0   # same-repo only: no fake block; the residual is documented and visible
 
-    d = build_diff()
+    try:
+        d = build_diff()
+    except DiffError as exc:
+        print(f"BLOCK diff assembly failed — cannot review, fail-closed: {exc}", file=sys.stderr)
+        return 1
     if not d.strip():
         print("[independent-verify] No diff to review. Green.")
         return 0
