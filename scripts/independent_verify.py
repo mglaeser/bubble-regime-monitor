@@ -197,7 +197,13 @@ def require_approvals(votes: list[dict], models: list[str], required_approver: s
 
 
 def _green(votes: list[dict]) -> list[dict]:
-    return [x for x in votes if _is_valid(x) and not decide(x["v"])["block"]]
+    """Votes that CARRY a green: explicit approvals only (refuted is False).
+    Round-8 panel finding: the previous filter ("everything decide() does not
+    block") also admitted LOW-CONFIDENCE REFUTATIONS, so a dissenter's
+    reason/proof could satisfy the attestation majorities while an actual
+    approving corroborator rode through canned and unattested. A low-confidence
+    refutation neither blocks nor attests."""
+    return [x for x in votes if _is_valid(x) and x["v"]["refuted"] is False]
 
 
 def strict_any_refutation(votes: list[dict], models: list[str]) -> dict[str, Any]:

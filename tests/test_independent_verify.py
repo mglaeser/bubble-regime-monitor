@@ -219,3 +219,29 @@ class TestPanelFindingsOnItself:
         monkeypatch.setenv("GITHUB_BASE_REF", "definitely-not-a-branch-xyz")
         with _pytest.raises(iv.DiffError):
             iv.build_diff()
+
+    def test_round8_low_refutation_does_not_attest(self):
+        ch = "selftest-challenge"
+        sol_good = {"ok": True, "v": {"refuted": False, "reason": "reason long enough sol",
+                                      "proof": f"{ch}-7"}}
+        low_ref = {"ok": True, "v": {"refuted": True, "confidence": "low",
+                                     "reason": "substantive doubt here", "proof": f"{ch}-9"}}
+        canned = {"ok": True, "v": {"refuted": False, "reason": ""}}
+        # a low refutation's reason/proof must NOT count toward the green majorities
+        assert iv.attest_reasons([sol_good, low_ref, canned], 3)["block"] is True
+        assert iv.attest_proof([sol_good, low_ref, canned], ch, 3)["block"] is True
+
+    def test_round8_canned_corroborator_blocked_end_to_end(self):
+        # require_approvals alone would green (Sol + codex approve), but the
+        # canned codex approval fails attest_reasons now that the dissenting
+        # low-refutation no longer attests on its behalf.
+        ch = "selftest-challenge"
+        models = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
+        canned_approve = {"ok": True, "v": {"refuted": False, "reason": "", "proof": f"{ch}-3"}}
+        sol_good = {"ok": True, "v": {"refuted": False, "reason": "reason long enough sol",
+                                      "proof": f"{ch}-7"}}
+        low_ref = {"ok": True, "v": {"refuted": True, "confidence": "low",
+                                     "reason": "substantive doubt here", "proof": f"{ch}-9"}}
+        votes = [canned_approve, sol_good, low_ref]
+        assert iv.require_approvals(votes, models, "gpt-5.6-sol", 1, ch)["block"] is False
+        assert iv.attest_reasons(votes, 3)["block"] is True   # the conjunctive gate catches it

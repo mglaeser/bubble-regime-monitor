@@ -126,7 +126,13 @@ addressed:
    only a multi-commit PR's tip. Fixed: bytes decoding with visible
    replacement characters, `DiffError` fail-closed on any required diff
    command including the merge-base — no fallback narrows the review window.
-7. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
+7. **(Round 8) Dissent must not attest:** the attestation pool admitted
+   low-confidence refutations as "green-carrying", so a dissenter's
+   reason/proof could satisfy the integrity majorities while an approving
+   corroborator rode through canned. `_green` now includes explicit approvals
+   only — a low-confidence refutation neither blocks nor attests. (Same
+   latent conflation exists in the reference's `attestReasons` filter.)
+8. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
    `pull_request` runs, so the no-key exit-0 would have let a fork PR pass a
    *required* `cross-vendor` check with zero review. Fixed: the workflow sets
    `VERIFIER_REQUIRE_KEY=true` exactly when the head repo differs from the
