@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -311,6 +312,71 @@ class TestCredentialScannerBreadth:
         p.write_text('"""Long price histories from Stooq ^spx or import the '
                      'committed seed CSVs."""\nimport json\n')
         assert mg.collect_imports([p]) == {"json"}
+
+
+class TestPanelFindingsPR23:
+    """Defects the cross-vendor panel found once risk-ordered chunking put
+    mandate_gate.py inside the reviewed payload for the first time."""
+
+    def test_collection_failure_blocks_instead_of_measuring(self, monkeypatch):
+        # rc was ignored: a suite with import errors still prints
+        # "N tests collected", so a broken suite could satisfy the floor.
+        import subprocess
+
+        class _Result:
+            returncode = 2
+            stdout = "!!!! Interrupted: 3 errors during collection !!!!\n" \
+                     "500 tests collected\n"
+            stderr = ""
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
+        with pytest.raises(SystemExit):
+            mg.measure_ratchets()
+
+    def test_collection_errors_in_output_block(self, monkeypatch):
+        import subprocess
+
+        class _Result:
+            returncode = 0        # rc clean but errors reported
+            stdout = "ERROR tests/test_x.py\n400 tests collected\n"
+            stderr = ""
+
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result())
+        with pytest.raises(SystemExit):
+            mg.measure_ratchets()
+
+    @pytest.mark.parametrize("snippet", [
+        "client.messages.create(model=m, tools=[t])",
+        'client.messages.create(model=m, **{"tools": [t]})',
+        "payload = {'tools': [t]}",
+    ])
+    def test_class5_detects_every_tools_spelling(self, snippet):
+        # only `tools=` was matched; the dict/**kwargs spellings enabled tool
+        # use while calibration still reported the class not-applicable
+        assert re.search(r"""["']?\btools["']?\s*[=:]""", snippet)
+
+    @pytest.mark.parametrize("col", [
+        "user_id", "tenant_id", "owner_id",          # original three
+        "account_id", "customer_id", "workspace_id",  # the bypasses
+        "organisation_id", "member_id",
+    ])
+    def test_class6_detects_tenancy_columns_beyond_the_original_three(self, col):
+        src = f"    {col}: Mapped[int] = mapped_column(Integer)"
+        pattern = (r"\b(user|tenant|owner|account|customer|org|organisation|"
+                   r"organization|workspace|member|subject|principal)_id\b")
+        assert re.search(pattern, src, re.IGNORECASE), col
+
+    def test_class6_detects_tenancy_foreign_keys(self):
+        src = 'x: Mapped[int] = mapped_column(ForeignKey("accounts.id"))'
+        pattern = (r"""ForeignKey\(\s*["']"""
+                   r"(users|accounts|tenants|orgs|organisations|organizations|"
+                   r"customers|members|workspaces)\.")
+        assert re.search(pattern, src, re.IGNORECASE)
+
+    def test_live_models_stay_single_tenant(self):
+        # the real invariant: this repo must remain single-tenant, so the
+        # broadened pattern must NOT fire on the actual models module
+        mg.cmd_calibrate()      # exits nonzero via _fail if it does
 
 
 class TestLiveEngagementConsistency:

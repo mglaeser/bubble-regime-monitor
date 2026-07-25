@@ -287,6 +287,19 @@ def measure_ratchets() -> dict[str, int]:
     collected = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q"],
         cwd=ROOT, capture_output=True, text=True)
+    # Panel finding (PR #23, first run that could actually SEE this file): the
+    # return code was ignored, so a suite with collection/import errors still
+    # printed "N tests collected" and greened the ratchet whenever N happened
+    # to reach the floor — a broken suite reading as a healthy one.
+    if collected.returncode != 0:
+        _fail("pytest collection FAILED (rc="
+              f"{collected.returncode}) — a suite that cannot be collected "
+              "cannot measure a floor: "
+              + (collected.stdout or collected.stderr or "")[-600:])
+    if re.search(r"error(s)? during collection|^ERROR ", collected.stdout,
+                 re.MULTILINE | re.IGNORECASE):
+        _fail("pytest reported collection errors — refusing to measure a "
+              "ratchet from a partially-collected suite")
     m = re.search(r"(\d+) tests? collected", collected.stdout)
     if not m:
         _fail("could not measure collected test count (pytest --collect-only)")
@@ -497,7 +510,10 @@ def cmd_calibrate() -> None:
     # the LLM judgment path must pass NO tools to the API.
     llm_src = "".join(p.read_text(errors="replace")
                       for p in ROOT.glob("app/**/*.py"))
-    if re.search(r"\btools\s*=", llm_src):
+    # Panel finding (PR #23): matching only `tools=` let
+    # `create(..., **{"tools": [...]})` enable tool use while calibration
+    # still reported the class N/A. Match the kwarg in every spelling.
+    if re.search(r"""["']?\btools["']?\s*[=:]""", llm_src):
         failures.append("class 5 N/A no longer holds: a `tools=` parameter "
                         "appeared in app/ — the no-tool-call architecture "
                         "assumption is void; re-run A-10/C-06/C-07")
@@ -505,7 +521,15 @@ def cmd_calibrate() -> None:
     # 6 — cross-tenant ownership: N/A by structure; re-validate: still no
     # per-user tables (single-tenant).
     models_src = (ROOT / "app" / "models.py").read_text(errors="replace")
-    if re.search(r"user_id|tenant_id|owner_id", models_src):
+    # Panel finding (PR #23): a three-name denylist left `account_id`,
+    # `customer_id`, an `organisation` FK or a users/accounts relationship
+    # free to introduce real multi-tenancy while calibration reported N/A.
+    _TENANCY = (r"\b(user|tenant|owner|account|customer|org|organisation|"
+                r"organization|workspace|member|subject|principal)_id\b"
+                r"|ForeignKey\(\s*[\"']"
+                r"(users|accounts|tenants|orgs|organisations|organizations|"
+                r"customers|members|workspaces)\.")
+    if re.search(_TENANCY, models_src, re.IGNORECASE):
         failures.append("class 6 N/A no longer holds: per-user/tenant columns "
                         "appeared in app/models.py — re-run C-01")
 

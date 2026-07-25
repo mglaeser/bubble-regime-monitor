@@ -19,6 +19,15 @@ governance hash attestation. Two rules you will hit first:
 `audit/engagement-status.json` is computed, never hand-edited — regenerate
 with `mandate_gate.py status --write` when findings legitimately change.
 
+**Attestation + secret-scan workflow.** Changing an attested file means a new
+SHA-256 in `governance/mandate/manifest.json`, and detect-secrets reads that
+hex as a high-entropy secret. The correct sequence is: edit → update the
+manifest hash → `mandate_gate.py status --write` → `detect-secrets scan
+--baseline .secrets.baseline` → `git add`. **Do NOT** "fix" this by excluding
+`governance/` from the secret scan or by disabling the entropy plugin —
+that trades a real control for convenience. The hashes are public
+attestations; re-baselining is the intended path.
+
 ## Pre-PR adversarial audit (MANDATORY — operator directive, 2026-07-25)
 
 PR #22 needed **eight** rounds of external cross-vendor review because
