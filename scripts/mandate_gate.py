@@ -172,7 +172,7 @@ def comparison_point() -> str | None:
     # only CI run compares the tip to the weakened commit and passes. The
     # pre-push SHA is the state that was actually reviewed before.
     before = (os.environ.get("MANDATE_PUSH_BEFORE") or "").strip()
-    if before and set(before) != {"0"}:          # all-zeros = branch created
+    if before and set(before) != {"0"}:
         resolved = _resolve(before)
         if resolved:
             return resolved
@@ -180,6 +180,21 @@ def comparison_point() -> str | None:
             _fail(f"pre-push SHA {before!r} is not present in this checkout — "
                   "the weakening checks cannot be run against it (fail-closed; "
                   "ensure fetch-depth: 0)")
+    if before and set(before) == {"0"}:
+        # Branch CREATION: there is no prior state on this branch, so HEAD~1 is
+        # this push's own earlier commit and a weakening hidden there would
+        # compare against itself (round 21). The default branch is the state
+        # that was actually reviewed before this branch existed.
+        for ref in ("origin/main", "main"):
+            if _resolve(ref):
+                mb = subprocess.run(["git", "merge-base", ref, "HEAD"],
+                                    cwd=ROOT, capture_output=True, text=True)
+                if mb.returncode == 0 and mb.stdout.strip():
+                    return mb.stdout.strip()
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            _fail("new branch and no resolvable default branch to compare "
+                  "against — refusing to run the weakening checks against no "
+                  "reference (fail-closed)")
     return _resolve("HEAD~1")
 
 
@@ -632,6 +647,12 @@ def cmd_ratchet(measure_only: bool) -> None:
                 if not isinstance(r, dict) or r.get("metric") != name:
                     continue
                 change = str(r.get("change", ""))
+                # Substring matching let "120 -> 210" authorise an actual
+                # 20 -> 21 loosening (round 21). Parse the transition and
+                # compare the TOKENS exactly.
+                m_t = re.match(r"\s*(\S+)\s*->\s*(\S+)", change)
+                if not m_t or m_t.group(1) != str(old) or m_t.group(2) != str(new):
+                    continue
                 reason = str(r.get("reason", "")).strip()
                 who = str(r.get("authorised_by", "")).strip()
                 # Structured and attributable, not a bare string (round 13):
@@ -639,8 +660,7 @@ def cmd_ratchet(measure_only: bool) -> None:
                 # §9.1: "the loosening is itself a finding" — the record must
                 # declare it (round 17: a well-formed record without
                 # is_finding satisfied the gate while violating the rule).
-                if (str(old) in change and str(new) in change
-                        and len(reason) >= 20 and who
+                if (len(reason) >= 20 and who
                         and r.get("is_finding") is True
                         and is_fresh(r, prev_records)):
                     return True

@@ -1073,3 +1073,75 @@ class TestPanelFindingsRound18:
                rf"|^\s*class\s+({ENT})[A-Za-z]*\b"
                rf"|relationship\(\s*[\"']({ENT})[A-Za-z]*[\"']")
         assert bool(_re.search(pat, snippet, _re.I | _re.M)) is expected
+
+
+class TestPanelFindingsRound21:
+    """Two precise bypasses: a numeric substring collision, and the one push
+    shape where the pre-push SHA does not exist."""
+
+    @pytest.mark.parametrize("change,old,new,should_match", [
+        ("120 -> 210", 20, 21, False),      # the collision: contains 20 and 21
+        ("20 -> 21", 20, 21, True),
+        ("460 -> 457 (LOOSENING)", 460, 457, True),
+        ("21 -> 20", 20, 21, False),        # direction matters
+        ("about 20 to 21", 20, 21, False),  # prose is not a transition
+        ("", 20, 21, False),
+    ])
+    def test_transition_is_parsed_not_substring_matched(
+            self, change, old, new, should_match):
+        import re as _re
+        m = _re.match(r"\s*(\S+)\s*->\s*(\S+)", change)
+        got = bool(m and m.group(1) == str(old) and m.group(2) == str(new))
+        assert got is should_match, change
+
+    def test_substring_collision_cannot_license_a_loosening(
+            self, monkeypatch, tmp_path):
+        import hashlib
+        (tmp_path / "audit").mkdir(exist_ok=True)
+        baselines = tmp_path / "audit" / "ratchet-baselines.json"
+        # a CEILING rising is the loosening (a floor rising is a tightening)
+        baselines.write_text(json.dumps({
+            "_meta": {"decision_records": [{
+                "metric": "noqa_ceiling", "change": "120 -> 210",
+                "reason": "a completely unrelated recorded decision",
+                "authorised_by": "operator", "is_finding": True}]},
+            "ratchets": {"noqa_ceiling": 21}}))
+        gov = tmp_path / "governance" / "mandate"
+        gov.mkdir(parents=True, exist_ok=True)
+        (gov / "manifest.json").write_text(json.dumps({
+            "ratchet_baselines_sha256":
+                hashlib.sha256(baselines.read_bytes()).hexdigest()}))
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        monkeypatch.setattr(mg, "measure_ratchets",
+                            lambda: {"noqa_ceiling": 21})
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda _p: {"ratchets": {"noqa_ceiling": 20}})
+        with pytest.raises(SystemExit):
+            mg.cmd_ratchet(measure_only=False)
+
+    def test_branch_creation_compares_against_the_default_branch(
+            self, monkeypatch):
+        # zero SHA means no prior state on this branch: HEAD~1 would be this
+        # push's OWN earlier commit, hiding a weakening placed there
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        monkeypatch.setenv("MANDATE_PUSH_BEFORE", "0" * 40)
+        monkeypatch.setattr(mg, "_is_shallow", lambda: False)
+        monkeypatch.setattr(mg, "_resolve",
+                            lambda ref: "mainsha" if ref == "origin/main" else None)
+
+        class _R:
+            returncode = 0
+            stdout = "branchpoint\n"
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: _R())
+        assert mg.comparison_point() == "branchpoint"
+
+    def test_branch_creation_without_a_default_branch_fails_closed_in_ci(
+            self, monkeypatch):
+        monkeypatch.delenv("GITHUB_BASE_REF", raising=False)
+        monkeypatch.setenv("MANDATE_PUSH_BEFORE", "0" * 40)
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(mg, "_is_shallow", lambda: False)
+        monkeypatch.setattr(mg, "_resolve", lambda ref: None)
+        with pytest.raises(SystemExit):
+            mg.comparison_point()
