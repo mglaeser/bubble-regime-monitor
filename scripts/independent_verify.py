@@ -345,6 +345,34 @@ def parse_name_status_z(raw: str) -> list[str]:
     return paths
 
 
+def parse_rename_origins_z(raw: str) -> dict[str, str]:
+    """{new_path: old_path} for rename/copy records.
+
+    Panel finding (PR #23 round 10): keeping only the NEW path let a rename
+    launder a control file out of its classification —
+    `git mv scripts/mandate_gate.py docs/old_notes.txt` makes the entry
+    non-control, so budget eviction dropped it with no coverage block and the
+    REMOVAL of a gate went unreviewed. Both endpoints must be classified."""
+    parts = raw.split("\0")
+    out: dict[str, str] = {}
+    i = 0
+    while i < len(parts):
+        status = parts[i]
+        if not status:
+            i += 1
+            continue
+        if status[0] in ("R", "C"):
+            if i + 2 >= len(parts) or not parts[i + 2] or not parts[i + 1]:
+                break
+            out[parts[i + 2]] = parts[i + 1]
+            i += 3
+        else:
+            if i + 1 >= len(parts) or not parts[i + 1]:
+                break
+            i += 2
+    return out
+
+
 def parse_status_map_z(raw: str) -> dict[str, str]:
     """{path: git status letter} from `--name-status -z` (A/M/D/R###/C###)."""
     parts = raw.split("\0")
@@ -476,13 +504,14 @@ def is_code(path: str) -> bool:
 
 
 def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
-                 max_chunks: int) -> tuple[list[str], list[str]]:
+                 max_chunks: int, risk_of=None) -> tuple[list[str], list[str]]:
     """Pack per-file diffs into at most `max_chunks` bodies of ~`budget` chars,
     highest-risk first. Returns (chunks, omitted_paths).
 
     A single file larger than the budget is truncated WITH ITS MARKER rather
     than dropped silently — a cut must stay visible (round-3 finding)."""
-    ordered = sorted(file_diffs, key=lambda fd: path_risk(fd[0]))
+    rank = risk_of or path_risk
+    ordered = sorted(file_diffs, key=lambda fd: rank(fd[0]))
     chunks: list[str] = []
     cur: list[str] = []
     cur_len = 0
@@ -553,6 +582,20 @@ def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
                   required=True)
     paths = parse_name_status_z(names_z)
     statuses = parse_status_map_z(names_z)
+    origins = parse_rename_origins_z(names_z)
+
+    def _control(path: str) -> bool:
+        # EITHER endpoint of a rename being control-bearing makes the change
+        # control-bearing: renaming a gate to a docs path must not launder it
+        status = statuses.get(path, "M")
+        if is_control_bearing(path, status):
+            return True
+        old = origins.get(path)
+        return bool(old and is_control_bearing(old, status))
+
+    def _rank(path: str) -> int:
+        old = origins.get(path)
+        return min(path_risk(path), path_risk(old)) if old else path_risk(path)
     file_diffs: list[tuple[str, str]] = []
     excluded_content: list[str] = []
     for path in paths:
@@ -572,12 +615,10 @@ def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
         # real: the panel still reviews the complete file list (round-4
         # finding — an excluded-only PR must never auto-green with zero votes).
         return ([header_only(names, stat)],
-                [p for p in excluded_content
-                 if is_control_bearing(p, statuses.get(p, "M"))])
-    chunks, omitted = pack_by_risk(file_diffs, budget, max_chunks)
+                [p for p in excluded_content if _control(p)])
+    chunks, omitted = pack_by_risk(file_diffs, budget, max_chunks, risk_of=_rank)
     unreviewed = omitted + excluded_content
-    omitted_code = [p for p in unreviewed
-                    if is_control_bearing(p, statuses.get(p, "M"))]
+    omitted_code = [p for p in unreviewed if _control(p)]
     header = _payload_header(names, stat)
     warn = ""
     if unreviewed:

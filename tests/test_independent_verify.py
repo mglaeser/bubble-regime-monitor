@@ -449,3 +449,41 @@ class TestChunkCapClamp:
         chunks, omitted = iv.pack_by_risk(files, budget=50_000, max_chunks=8)
         assert len(chunks) == 8          # never unbounded fan-out
         assert omitted                    # the rest is accounted, not hidden
+
+
+class TestRenameLaundering:
+    """Panel finding (PR #23 round 10): keeping only the NEW path of a rename
+    let a control file be laundered out of its classification, so budget
+    eviction dropped the REMOVAL of a gate with no coverage block."""
+
+    def test_rename_origins_are_recovered(self):
+        raw = ("R100\0scripts/mandate_gate.py\0docs/old_notes.txt\0"
+               "M\0app/x.py\0A\0app/y.py\0")
+        assert iv.parse_rename_origins_z(raw) == {
+            "docs/old_notes.txt": "scripts/mandate_gate.py"}
+
+    def test_non_rename_records_have_no_origin(self):
+        assert iv.parse_rename_origins_z("M\0app/x.py\0A\0app/y.py\0") == {}
+
+    def test_truncated_rename_record_is_ignored(self):
+        assert iv.parse_rename_origins_z("R100\0only_old\0") == {}
+
+    def test_gate_renamed_to_docs_is_still_control_bearing(self):
+        # the laundering attack: the destination alone looks harmless
+        assert not iv.is_control_bearing("docs/old_notes.txt", "R100")
+        assert iv.is_control_bearing("scripts/mandate_gate.py", "R100")
+
+    def test_renamed_control_file_is_ranked_by_its_strongest_endpoint(self):
+        # a renamed gate must still be reviewed EARLY, not sink to docs rank
+        assert iv.path_risk("scripts/mandate_gate.py") < iv.path_risk("docs/old_notes.txt")
+        strongest = min(iv.path_risk("docs/old_notes.txt"),
+                        iv.path_risk("scripts/mandate_gate.py"))
+        assert strongest == iv.path_risk("scripts/mandate_gate.py")
+
+    def test_pack_by_risk_honours_a_custom_rank_function(self):
+        files = [("docs/old_notes.txt", "LAUNDERED" * 100),
+                 ("audit/bulk.json", "B" * 900)]
+        # without the override the docs path sorts by its own (low) risk
+        chunks, _ = iv.pack_by_risk(files, budget=1000, max_chunks=2,
+                                    risk_of=lambda p: 0 if "old_notes" in p else 9)
+        assert "LAUNDERED" in chunks[0]
