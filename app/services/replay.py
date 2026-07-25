@@ -185,6 +185,7 @@ def s5_tier_sufficiency() -> dict[str, Any]:
     s5_days: set = set()
     days_by_tier: dict[str, set] = {t: set() for t in _S5_TIERS}
     dual_days: set = set()
+    valid_days: set = set()
     with session_scope() as session:
         for snap in session.execute(select(Snapshot)).scalars():
             d = snap.computed_at.date()
@@ -198,22 +199,35 @@ def s5_tier_sufficiency() -> dict[str, Any]:
             src = s5.get("data_source")
             if src in days_by_tier:
                 days_by_tier[src].add(d)
-            if isinstance(s5.get("s5_dual_report"), dict):
+            dual = s5.get("s5_dual_report")
+            if isinstance(dual, dict):
                 dual_days.add(d)
+                # A day advances the GATE only if the candidate actually
+                # produced a comparable sub-score (panel round-5 finding:
+                # 60 days of INSUFFICIENT_HISTORY candidate failures must
+                # NOT read as DAY_GATE_MET with zero real comparisons).
+                # The production side is already non-None here (filtered
+                # above); the candidate side is checked explicitly.
+                if (dual.get("candidate_v4") or {}).get("sub_score") is not None:
+                    valid_days.add(d)
     # The GATE counts only days on which the dual comparison actually ran
-    # (panel finding on this PR: counting every weekday snapshot let 60
-    # S5-less days read as gate progress). Tier adequacy is NEVER auto-
-    # satisfied here — nonempty is reported, adequacy is the operator's call.
+    # AND produced both sides (panel findings on this PR: counting every
+    # weekday snapshot let 60 S5-less days read as gate progress; counting
+    # dict presence let candidate failures read as progress). Tier adequacy
+    # is NEVER auto-satisfied here — adequacy is the operator's call.
     return {
         "gate_trading_days": S5_GATE_TRADING_DAYS,
-        "gate_day_count": len(dual_days),
-        "days_remaining_to_gate": max(0, S5_GATE_TRADING_DAYS - len(dual_days)),
+        "gate_day_count": len(valid_days),
+        "days_remaining_to_gate": max(0, S5_GATE_TRADING_DAYS - len(valid_days)),
         "snapshot_weekdays_observed": len(snapshot_weekdays),
         "s5_observation_days": len(s5_days),
         "days_with_dual_report": len(dual_days),
+        "days_with_valid_comparison": len(valid_days),
         "days_by_tier": {t: len(s) for t, s in days_by_tier.items()},
         "all_tiers_observed": all(days_by_tier[t] for t in _S5_TIERS),
-        "note": ("gate counts DUAL-REPORT days on NYSE trading days only "
+        "note": ("gate counts days with a VALID dual comparison (both the "
+                 "production and candidate sub-scores present) on NYSE "
+                 "trading days only "
                  "(weekends + full-day exchange holidays excluded; one-off "
                  "special closures are a documented residual); per-tier "
                  "adequacy is an operator decision (not pinned) — 60 days of "
@@ -349,6 +363,7 @@ def s5_dual_report() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     statuses: dict[str, int] = {}
     tiers: dict[str, int] = {}
+    mismatches = 0
     with session_scope() as session:
         for snap in _snapshot_rows(session):
             s5 = _s5_payload(snap) or {}
@@ -385,12 +400,21 @@ def s5_dual_report() -> dict[str, Any]:
                     flags = _flags_from_detail(snap.red_flag_detail)
                     base = deterministic_score(dict(sub_s), dict(sub_d),
                                                snap.v_multiplier, flags, _WS, _WD).score
-                    swapped = dict(sub_s)
-                    swapped["s5"] = cand_sub
-                    cand_score = deterministic_score(swapped, dict(sub_d),
-                                                     snap.v_multiplier, flags,
-                                                     _WS, _WD).score
-                    entry["headline_delta"] = round(cand_score - base, 4)
+                    # Baseline validation (panel round-5): the re-derived
+                    # baseline must reproduce the RECORDED point score. If it
+                    # doesn't, the reconstructed inclusion set diverged from
+                    # what production actually scored (legacy/foreign payload)
+                    # — flag the row and emit NO delta rather than a wrong one.
+                    if abs(base - snap.point_score) > 1e-6:
+                        entry["baseline_mismatch"] = True
+                        mismatches += 1
+                    else:
+                        swapped = dict(sub_s)
+                        swapped["s5"] = cand_sub
+                        cand_score = deterministic_score(swapped, dict(sub_d),
+                                                         snap.v_multiplier, flags,
+                                                         _WS, _WD).score
+                        entry["headline_delta"] = round(cand_score - base, 4)
             rows.append(entry)
 
     deltas = [r["sub_delta"] for r in rows if r["sub_delta"] is not None]
@@ -407,11 +431,15 @@ def s5_dual_report() -> dict[str, Any]:
         "snapshots_with_dual_report": len(rows),
         "selection_statuses": statuses,
         "source_tiers": tiers,
+        "baseline_mismatches": mismatches,
         "sub_score_delta": _agg(deltas),
         "headline_delta": _agg(hdeltas),
         "series": rows,
-        "note": ("hypothetical side-computation over recorded sub-scores; the "
-                 "candidate remains included_in_score=false in production and "
+        "note": ("hypothetical side-computation over recorded sub-scores; "
+                 "rows whose re-derived baseline does not reproduce the "
+                 "recorded point score are flagged and excluded from the "
+                 "headline delta; the candidate remains "
+                 "included_in_score=false in production and "
                  "its parameters remain unapproved operator PINs"),
     }
 

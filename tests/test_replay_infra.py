@@ -109,8 +109,9 @@ class TestRM2Sufficiency:
         _persist_golden()
         out = s5_tier_sufficiency()
         assert out["gate_trading_days"] == S5_GATE_TRADING_DAYS == 60
-        # the gate counts DUAL-REPORT days only (panel finding on PR #22)
-        assert out["gate_day_count"] == out["days_with_dual_report"]
+        # the gate counts VALID-comparison days only (panel findings on PR #22)
+        assert out["gate_day_count"] == out["days_with_valid_comparison"]
+        assert out["days_with_valid_comparison"] <= out["days_with_dual_report"]
         assert out["days_remaining_to_gate"] == 60 - out["gate_day_count"]
         assert out["s5_observation_days"] <= out["snapshot_weekdays_observed"]
         assert out["all_tiers_observed"] is False   # one tier present -> honest False
@@ -144,6 +145,38 @@ class TestRM2Sufficiency:
         # count as trading days (panel round-2 finding)
         assert out["snapshot_weekdays_observed"] == 58
         assert out["gate_day_count"] == 0                    # no dual reports -> no progress
+        assert out["days_remaining_to_gate"] == 60
+
+    def test_gate_rejects_candidate_failures(self, isolated_db):
+        # Panel round-5 finding: a dual report whose CANDIDATE failed
+        # (INSUFFICIENT_HISTORY -> sub_score None) must not advance the gate
+        # — 60 candidate failures are zero real comparisons, not DAY_GATE_MET.
+        from datetime import UTC, datetime
+        from datetime import date as _d
+        from datetime import timedelta as _td
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from app.services.replay import s5_tier_sufficiency
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        # production s5 scores from the full undated history, but the shadow
+        # gets only 10 dated observations -> candidate INSUFFICIENT_HISTORY
+        end = _d(2026, 6, 29)
+        raw.hy_oas_history_dated = [
+            ((end - _td(days=9 - i)).isoformat(), v)
+            for i, v in enumerate((raw.hy_oas_history_bps or [])[-10:])]
+        data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
+        persist_snapshot(data, raw)
+        with session_scope() as session:      # pin to a known NYSE trading day
+            snap = session.execute(select(Snapshot)).scalars().first()
+            snap.computed_at = datetime(2026, 6, 29, 12, tzinfo=UTC)  # Monday
+        out = s5_tier_sufficiency()
+        assert out["days_with_dual_report"] == 1
+        assert out["days_with_valid_comparison"] == 0
+        assert out["gate_day_count"] == 0
         assert out["days_remaining_to_gate"] == 60
 
     def test_nyse_holiday_calendar(self):
@@ -243,6 +276,7 @@ class TestRM4Policies:
             snap.block_s = block
         rep = s5_dual_report()                              # must not raise
         assert rep["snapshots_with_dual_report"] == 2
+        assert rep["baseline_mismatches"] == 0    # inclusion set == production's
         assert all(r["headline_delta"] is not None or r["candidate_sub"] is None
                    for r in rep["series"])
 
@@ -252,12 +286,61 @@ class TestRM4Policies:
         _persist_golden()
         rep = s5_dual_report()
         assert rep["snapshots_with_dual_report"] == 1
+        # the re-derived baseline reproduces the recorded point score exactly
+        # (round-5 refutation evidence: the sub_score-not-None inclusion set
+        # IS production's inclusion set — stale indicators are scored,
+        # dropped ones persist sub_score None)
+        assert rep["baseline_mismatches"] == 0
         row = rep["series"][0]
         assert row["tier"] == "fred_BAMLH0A0HYM2"
         if row["sub_delta"] is not None:        # candidate resolved on this data
             assert rep["sub_score_delta"]["n"] == 1
             assert row["headline_delta"] is not None
         assert "included_in_score=false" in rep["note"]
+
+    def test_headline_delta_fail_closed_on_baseline_mismatch(self, isolated_db):
+        # Panel round-5 guard: if the re-derived baseline does NOT reproduce
+        # the recorded point score (legacy/foreign payload whose inclusion set
+        # diverged from production), the row is flagged and NO delta is
+        # emitted — never a delta against a wrong baseline.
+        from datetime import date as _d
+        from datetime import timedelta as _td
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from app.services.replay import s5_dual_report
+        from tests.conftest import make_golden_raw_inputs
+
+        raw = make_golden_raw_inputs()
+        # a 10-day-spaced dated series spans 990 days, past the 24-month
+        # calendar target (730 days back from 2026-06-29), and 730 is a
+        # multiple of 10 — the target is hit EXACTly, so the candidate
+        # RESOLVES (unlike the golden 100-observation daily series, which
+        # is INSUFFICIENT_HISTORY)
+        end = _d(2026, 6, 29)
+        n = len(raw.hy_oas_history_bps)
+        raw.hy_oas_history_dated = [
+            ((end - _td(days=10 * (n - 1 - i))).isoformat(), v)
+            for i, v in enumerate(raw.hy_oas_history_bps)]
+        data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
+        persist_snapshot(data, raw)
+
+        rep = s5_dual_report()                    # positive path first
+        assert rep["baseline_mismatches"] == 0
+        row = rep["series"][0]
+        assert row["candidate_sub"] is not None
+        assert row["headline_delta"] is not None  # real delta on a real baseline
+
+        with session_scope() as session:
+            snap = session.execute(select(Snapshot)).scalars().first()
+            snap.point_score = snap.point_score + 5.0     # simulate divergence
+        rep = s5_dual_report()
+        assert rep["baseline_mismatches"] == 1
+        row = rep["series"][0]
+        assert row.get("baseline_mismatch") is True
+        assert row["headline_delta"] is None
+        assert rep["headline_delta"] is None              # excluded from agg
 
 
 class TestRM5Assembler:
