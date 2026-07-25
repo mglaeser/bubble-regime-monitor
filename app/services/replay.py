@@ -240,9 +240,13 @@ def _block_coverage(indicators: dict[str, Any], weights: dict[str, float]) -> di
             if p.get("sub_score") is not None:
                 resolved += 1
         contribution = w * (max(0.0, min(1.0, q)) if fresh else 0.0)
-        lost[key] = round(w - contribution, 6)
+        lost[key] = w - contribution
     frac = obtained / total if total else 0.0
-    return {"fraction": round(frac, 4), "resolved_count": resolved, "lost_weight": lost}
+    # EXACT values, never rounded (panel round-4 finding on this PR): these
+    # feed the B2/B3/B4 threshold comparisons, and round(0.66666, 4) = 0.6667
+    # would read a below-2/3 snapshot as available. Rounding is display-only
+    # and none of these values are emitted verbatim in the report.
+    return {"fraction": frac, "resolved_count": resolved, "lost_weight": lost}
 
 
 def _snapshot_rows(session) -> list[Snapshot]:

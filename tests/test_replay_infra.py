@@ -198,6 +198,19 @@ class TestRM4Policies:
         assert rep["policies"]["B0"]["available"] == 1       # current behavior keeps it
         assert "d1" in rep["worst_suppression_drivers"]
 
+    def test_block_coverage_fraction_is_exact_at_policy_boundaries(self):
+        # Panel round-4 finding: fractions were rounded to 4 dp BEFORE the
+        # B2/B3/B4 threshold comparisons — round(0.66666, 4) = 0.6667 read a
+        # below-2/3 snapshot as available. Coverage must stay exact.
+        from app.services.replay import _block_coverage
+
+        payload = {"x": {"dropped": False, "stale": False,
+                         "quality": 0.66666, "sub_score": 0.5}}
+        cov = _block_coverage(payload, {"x": 1.0})
+        assert cov["fraction"] == 0.66666          # not 0.6667
+        assert cov["fraction"] < 2.0 / 3.0         # boundary verdict preserved
+        assert cov["lost_weight"]["x"] == 1.0 - 0.66666
+
     def test_dual_report_survives_degraded_and_stray_payloads(self, isolated_db):
         # Refutation evidence for the round-3 panel claim that partial sub maps
         # with full frozen weights abort the report: deterministic_score
