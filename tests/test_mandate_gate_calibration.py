@@ -500,3 +500,86 @@ class TestPanelFindingsRound27:
         surface = json.loads(
             (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
         assert len(surface["routes"]) >= 19
+
+
+class TestPanelFindingsRound29:
+    """Four checks that were each one generalisation short: the fix landed on
+    the reported instance and the adjacent case stayed open."""
+
+    def _calib(self, monkeypatch, tmp_path, files):
+        return TestPanelFindingsRound25._calibrate_app(
+            TestPanelFindingsRound25(), monkeypatch, tmp_path, files)
+
+    def _err(self):
+        return TestPanelFindingsRound25._calib_error(TestPanelFindingsRound25())
+
+    def test_raw_http_module_is_in_scope_for_the_dynamic_key_ban(
+            self, monkeypatch, tmp_path):
+        # THE EXPLOIT: no SDK import at all, so the ban did not apply — yet the
+        # module addresses the model endpoint directly and can enable tools.
+        self._calib(monkeypatch, tmp_path, {"llm_http.py": (
+            'import httpx\n'
+            'def call(msgs, payload):\n'
+            '    payload["".join(["to", "ols"])] = [{"name": "shell"}]\n'
+            '    return httpx.post("https://api.anthropic.com/v1/messages",\n'
+            '                      json=payload)\n')})
+        assert "builds a mapping key dynamically" in self._err()
+
+    def test_module_touching_no_model_endpoint_is_untouched(
+            self, monkeypatch, tmp_path):
+        # BOTH SIDES: an ordinary HTTP client for a price feed keeps its
+        # dynamic keys; widening scope must not become a blanket ban
+        self._calib(monkeypatch, tmp_path, {"prices.py": (
+            'import httpx\n'
+            'def fetch(sym, out, key):\n'
+            '    out[key] = httpx.get("https://stooq.com/q/d/l/")\n'
+            '    return out\n')})
+        mg.cmd_calibrate()           # does not raise
+
+    def test_raw_sql_create_table_is_caught_without_orm_markers(
+            self, monkeypatch, tmp_path):
+        # THE EXPLOIT: a real per-user table, no ORM marker anywhere, so the
+        # marker gate skipped the file and the N/A verdict survived
+        self._calib(monkeypatch, tmp_path, {
+            "models.py": 'class Snapshot(Base):\n    __tablename__ = "s"\n',
+            "bootstrap.py": (
+                'def init(conn):\n'
+                '    conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")\n')})
+        err = self._err()
+        assert "class 6 N/A no longer holds" in err
+        assert "bootstrap.py" in err
+
+    def test_raw_sql_create_table_of_a_normal_table_is_fine(
+            self, monkeypatch, tmp_path):
+        # BOTH SIDES: CREATE TABLE is not itself the signal — the tenancy
+        # entity in its name is
+        self._calib(monkeypatch, tmp_path, {
+            "models.py": 'class Snapshot(Base):\n    __tablename__ = "s"\n',
+            "bootstrap.py": (
+                'def init(conn):\n'
+                '    conn.execute("CREATE TABLE snapshots (id INTEGER)")\n')})
+        mg.cmd_calibrate()           # does not raise
+
+    def test_dotted_decorator_routes_reach_the_denominator(
+            self, monkeypatch, tmp_path):
+        # THE EXPLOIT: @api.router.get is an ordinary FastAPI form and the
+        # bare-name pattern missed it, so the endpoint existed in traffic but
+        # not in the audit surface
+        (tmp_path / "audit").mkdir()
+        (tmp_path / "app").mkdir(parents=True)
+        (tmp_path / "app" / "api.py").write_text(
+            '@api.router.get("/deep/nested")\ndef a(): ...\n'
+            '@v1.router.patch("/deep/patched")\ndef b(): ...\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+
+        class R:
+            returncode = 0
+            stdout = "app/api.py\0"
+            stderr = ""
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: R())
+        mg.cmd_surface()
+        found = {(r["method"], r["path"]) for r in json.loads(
+            (tmp_path / "audit" / "00-audit-surface.json").read_text())["routes"]}
+        assert ("GET", "/deep/nested") in found
+        assert ("PATCH", "/deep/patched") in found

@@ -449,15 +449,22 @@ def compute_status() -> dict:
         by_id = {f["id"]: f for f in findings}
         prev_recs_by_id = {f["id"]: weakening_records(f.get("weakening_record"))
                            for f in prev_findings}
-        # NOTE: history-wide freshness is applied to the ratchet and
-        # acceptance REGISTERS, whose records are append-only decisions, but
-        # NOT to weakening_record. A weakening record legitimately persists
-        # alongside the weakening it describes for as long as that state
-        # holds, so "seen anywhere in history" would flag every honest record
-        # (it flagged A-01 in this very PR). The one-step check below still
-        # blocks a record retained across a re-tighten, because the record is
-        # bound to the exact band transition and the transition must recur to
-        # need authorising again.
+        # Replay detection over FULL history, the same mechanism the ratchet
+        # and acceptance registers use (panel round 29). The one-step check
+        # below compares against the comparison point only, so the sequence
+        # "weaken with a record / re-tighten and delete the record / weaken
+        # again re-adding the same record" passed: at the second weakening the
+        # record is absent from the comparison point, hence 'fresh'. One
+        # authorisation, spent twice.
+        #
+        # This is re-INTRODUCTION (present -> absent -> present), not "seen
+        # anywhere before" — which is the rule that wrongly flags a record
+        # legitimately persisting alongside the state it authorises, as it
+        # flagged A-01 and all 32 founding acceptances when tried.
+        historic_weak = reintroduced_fingerprints(
+            "audit/03-findings.json",
+            lambda d: [r for f in (d or [])
+                       for r in weakening_records(f.get("weakening_record"))])
         for pf in prev_findings:
             cur = by_id.get(pf["id"])
             if cur is None:
@@ -495,6 +502,13 @@ def compute_status() -> dict:
                     _fail(f"{pf['id']} carries a weakening_record RETAINED "
                           f"from the comparison point for {change} — a record "
                           "authorises one change, not every later repeat of it")
+                if record_fingerprint(match) in historic_weak:
+                    _fail(f"{pf['id']} carries a weakening_record for {change} "
+                          "that was REMOVED and later re-added verbatim — the "
+                          "same authorisation cannot be spent on a second "
+                          "weakening. Deleting a record during a re-tighten "
+                          "and restoring it at the next downgrade defeats the "
+                          "comparison-point check; record a new decision.")
 
     # CRITICAL 2: the catalogue carries the authoritative founding_band for all
     # 119 checks and was compared on ID SETS ONLY, so a band downgrade in the
@@ -1089,14 +1103,28 @@ def cmd_calibrate() -> None:
         return _const_str(node) == "tools"
 
     _LLM_SDKS = ("anthropic", "openai")
+    # A module reaches a model either through a vendor SDK or by addressing the
+    # endpoint directly over HTTP. Scoping by import alone (round 27) covered
+    # only the first: a module using httpx against api.anthropic.com is exactly
+    # as capable of enabling tools and imported no SDK, so the ban did not
+    # apply to it (panel round 29). Endpoint hosts and paths are the other half
+    # of "can reach a model".
+    _LLM_ENDPOINTS = ("api.anthropic.com", "api.openai.com",
+                      "/v1/messages", "/v1/complete", "/v1/chat/completions",
+                      "/v1/responses", "anthropic.com/v1", "openai.com/v1")
 
-    def _imports_llm_sdk(tree) -> bool:
+    def _reaches_a_model(tree) -> bool:
         for node in _ast.walk(tree):
             if isinstance(node, _ast.Import):
                 if any(a.name.split(".")[0] in _LLM_SDKS for a in node.names):
                     return True
             if isinstance(node, _ast.ImportFrom):
                 if (node.module or "").split(".")[0] in _LLM_SDKS:
+                    return True
+            # any literal naming a model endpoint, however it is assembled
+            if isinstance(node, (_ast.Constant, _ast.BinOp, _ast.JoinedStr)):
+                s = _const_str(node)
+                if s and any(e in s for e in _LLM_ENDPOINTS):
                     return True
         return False
 
@@ -1139,12 +1167,20 @@ def cmd_calibrate() -> None:
         # x[i], you may not WRITE a key you computed. A key the AST cannot
         # read is not a key anyone reviewing this file can read either.
         #
-        # Deliberately scoped to LLM-SDK importers rather than all of app/:
-        # dynamic mapping writes are ordinary and frequent elsewhere (16
-        # modules), and a check that fires on all of them is one the operator
-        # learns to wave through. app/engine/judgment.py, the only such module
-        # today, has none.
-        if not _imports_llm_sdk(tree):
+        # Deliberately scoped to modules that can REACH a model rather than
+        # all of app/: dynamic mapping writes are ordinary and frequent
+        # elsewhere (16 modules), and a check that fires on all of them is one
+        # the operator learns to wave through.
+        #
+        # STATED LIMIT (do not read this check as complete): two shapes are
+        # outside it by construction — a module addressing the endpoint purely
+        # through config (no SDK import, no literal host), and one that
+        # computes keys here and hands the mapping to a different module that
+        # makes the call. Both need dataflow the AST pass does not do. The
+        # global "tools" literal check still covers app/ in full; what these
+        # evade is only the unreadable-key ban. Recorded in audit/10 rather
+        # than left as an assumed-complete check.
+        if not _reaches_a_model(tree):
             continue
         for node in _ast.walk(tree):
             dynamic = None
@@ -1202,16 +1238,35 @@ def cmd_calibrate() -> None:
     # actually created, so `op.create_table("users", ...)` introduces real
     # multi-tenancy without touching app/ at all — the N/A verdict would have
     # survived the change that made it false.
+    # A tenancy table can also be created in RAW SQL, which carries no ORM
+    # marker at all (panel round 29): `conn.execute("CREATE TABLE users ...")`
+    # made a real per-user table while the marker gate skipped the file
+    # entirely. Split by signal strength instead of gating everything on ORM
+    # context: a CREATE TABLE naming a tenancy entity, or a declared tenancy
+    # model, IS multi-tenancy on its own and needs no corroboration. Only the
+    # weak `<entity>_id` column signal needs ORM context, because that is the
+    # one that false-positives on ordinary code.
+    _STRONG_TENANCY = (
+        rf"CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?[\"'`\[]?"
+        rf"({_ENTITIES})[A-Za-z_]*\b"
+        rf"|create_table\(\s*[\"']({_ENTITIES})[A-Za-z_]*"
+        rf"|^\s*class\s+({_ENTITIES})[A-Za-z]*\s*\("
+    )
     _tenancy_scope = sorted(ROOT.glob("app/**/*.py")) + \
         sorted(ROOT.glob("migrations/**/*.py"))
     for path in _tenancy_scope:
         src = path.read_text(errors="replace")
+        rel = path.relative_to(ROOT)
+        if re.search(_STRONG_TENANCY, src, re.IGNORECASE | re.MULTILINE):
+            failures.append("class 6 N/A no longer holds: a per-user/tenant "
+                            f"TABLE is declared or created in {rel} — "
+                            "re-run C-01")
+            continue
         if not any(m in src for m in _ORM_MARKERS):
             continue
         if re.search(_TENANCY, src, re.IGNORECASE | re.MULTILINE):
             failures.append("class 6 N/A no longer holds: per-user/tenant "
-                            f"tables appeared in {path.relative_to(ROOT)} — "
-                            "re-run C-01")
+                            f"tables appeared in {rel} — re-run C-01")
 
     if failures:
         _fail("seeded-defect calibration (S12) — " + " | ".join(failures) +
@@ -1253,10 +1308,14 @@ def cmd_surface(check: bool = False) -> None:
     # @app.get in main.py or a router defined outside that one directory was
     # live traffic the audit denominator did not know existed. The methods
     # come from the ASGI verb set rather than a remembered subset.
+    # The decorator target may be any dotted expression (panel round 29):
+    # `@api.router.get(...)` is an ordinary FastAPI form and `@(\w+)` matched
+    # only a bare name, so those endpoints were live traffic missing from the
+    # denominator.
     _VERBS = "get|post|put|delete|patch|head|options|trace|api_route"
     routes = []
     for p in sorted(ROOT.glob("app/**/*.py")):
-        for m in re.finditer(rf"@(\w+)\.({_VERBS})\(\s*[\"']([^\"']+)",
+        for m in re.finditer(rf"@([\w.]+)\.({_VERBS})\(\s*[\"']([^\"']+)",
                              p.read_text(errors="replace")):
             verb = m.group(2).upper()
             routes.append({"method": "ANY" if verb == "API_ROUTE" else verb,

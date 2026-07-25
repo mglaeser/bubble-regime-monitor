@@ -60,6 +60,16 @@ The sweep's remaining findings are real and unfixed. They fall into groups:
    the register would block any future pull request whose findings diff
    exceeds the part budget. Observed round 28, not acted on.
 
+7. **Class-5 dynamic-key ban: two shapes remain out of scope (medium).**
+   The ban applies to modules that reach a model via an SDK import or a
+   literal endpoint. It cannot see a module that addresses the endpoint
+   purely through config (no import, no literal), nor one that computes the
+   key and hands the mapping to a different module that makes the call —
+   both need dataflow analysis the AST pass does not do. The global "tools"
+   literal check still covers `app/` in full, so what these evade is only the
+   unreadable-key ban. Stated in the code rather than left implied; the live
+   path uses the SDK and is covered. Recorded round 29.
+
 **Nothing above is claimed as fixed.** Group 3 in particular means several
 existing tests are weaker evidence than their names suggest; treat the suite's
 coverage claims with that in mind until they are repaired.

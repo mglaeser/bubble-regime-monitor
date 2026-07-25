@@ -48,6 +48,34 @@ unacceptable. Before opening ANY pull request with complex or many changes:
    few pushes as possible; never push a speculative fix to see what the
    panel says; if a PR needs more than ~2 rounds, stop and root-cause the
    internal pass instead of iterating against the panel.
+### Fix the CLASS, not the instance (root cause of PR #23, rounds 24-29)
+
+PR #23 ran to **29** rounds, and the diagnosis is specific: nearly every
+round after 23 found the *adjacent case* of the previous round's fix. The
+tools check went `tools=` kwarg -> `{"tools":}` literal -> `payload["tools"]`
+-> `setdefault` -> `"to"+"ols"` -> raw-HTTP module, one round each. The
+tenancy scan went one file -> ORM modules -> migrations -> raw SQL. Every
+fix was correct and every fix was one generalisation short.
+
+So before calling any fix done, **write down the complete space the
+invariant must cover, then cover it or record why not**:
+
+- Which FILES can violate this? (not "which does today" — a new top-level
+  package, a migration, a test, a raw-SQL bootstrap). Prefer deriving the
+  set from `git ls-files` over listing directories by hand.
+- Which SYNTACTIC FORMS express it? If the answer is an enumeration, the
+  check is wrong: invert it to refuse the unreadable rather than matching
+  known-bad shapes (that is why the LLM path bans computed keys outright).
+- Which CALLERS/TRANSPORTS reach it? An SDK has a raw-HTTP equivalent
+  underneath; a decorator target may be dotted; a register has siblings
+  that need the same mechanism.
+- Does an equivalent artifact exist that I did NOT touch? Three decision
+  registers exist; a mechanism added to two of them is a bug in the third.
+
+A fix that closes only the reported input is not finished, and shipping it
+costs a full paid panel round to learn what a minute of enumeration would
+have shown.
+
 3. Classes of defect the panel has actually caught here — check for these
    explicitly every time:
    - gates/counters advancing on *presence* of an artifact rather than its

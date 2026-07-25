@@ -721,3 +721,67 @@ class TestPanelFindingsRound24:
         a39 = next(f for f in findings if f["id"] == "A-39")
         changes = {r["change"] for r in a39["weakening_record"]}
         assert changes == {"STOP-SHIP->PLAN", "FAIL->PASS"}
+
+
+class TestPanelFindingsRound29:
+    """The weakening record was the one decision type without history-wide
+    replay detection: remove it during a re-tighten, restore it at the next
+    downgrade, and the comparison-point check reads it as brand new."""
+
+    RECORD = {"change": "STOP-SHIP->PLAN",
+              "reason": "re-banded on evidence recorded in audit/05",
+              "authorised_by": "operator"}
+
+    def _fixture(self, monkeypatch, tmp_path, *, historic):
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=False)
+        fp = tmp_path / "audit" / "03-findings.json"
+        fs = json.loads(fp.read_text())
+        for f in fs:
+            if f["id"] == "A-02":
+                f["band"] = "PLAN"                     # weakened again ...
+                f["weakening_record"] = self.RECORD    # ... same record as before
+        fp.write_text(json.dumps(fs))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        # comparison point: A-02 open at STOP-SHIP with NO record — the record
+        # was deleted when the finding was re-tightened
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: [{"id": "A-02", "band": "STOP-SHIP",
+                                        "verdict": "FAIL"}]
+                            if "03-findings" in p else None)
+        monkeypatch.setattr(
+            mg, "reintroduced_fingerprints",
+            lambda rel, extract: ({mg.record_fingerprint(self.RECORD)}
+                                  if historic else set()))
+
+    def test_a_record_removed_and_re_added_cannot_authorise_again(
+            self, monkeypatch, tmp_path):
+        self._fixture(monkeypatch, tmp_path, historic=True)
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), pytest.raises(SystemExit):
+            mg.compute_status()
+        assert "REMOVED and later re-added" in err.getvalue()
+
+    def test_a_genuinely_new_record_still_authorises(
+            self, monkeypatch, tmp_path):
+        # BOTH SIDES: replay detection must not block a first, honest weakening
+        self._fixture(monkeypatch, tmp_path, historic=False)
+        mg.compute_status()          # does not raise
+
+    def test_replay_detection_is_wired_for_all_three_record_types(self):
+        # the defect was that ONE of the three registers lacked the mechanism;
+        # pin that they all carry it now
+        src = (Path(mg.__file__).read_text() if hasattr(mg, "__file__")
+               else "")
+        src = src or (Path(__file__).resolve().parents[1]
+                      / "scripts" / "mandate_gate.py").read_text()
+        assert src.count("reintroduced_fingerprints(") >= 4   # def + 3 uses
+        for register in ("audit/03-findings.json",
+                         "governance/accepted-residuals.json",
+                         "audit/ratchet-baselines.json"):
+            assert register in src
