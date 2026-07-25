@@ -159,6 +159,12 @@ class TestRM2Sufficiency:
         assert not is_trading_day(date(2026, 7, 4))     # Saturday anyway
         assert is_trading_day(date(2026, 7, 6))         # ordinary Monday
         assert date(2027, 7, 5) in us_market_holidays(2027)   # Sun -> observed Monday
+        # NYSE adopted Juneteenth in 2022: not a holiday before, observed after
+        assert len(us_market_holidays(2021)) == 9
+        assert is_trading_day(date(2021, 6, 18))               # pre-adoption Friday
+        assert date(2022, 6, 20) in us_market_holidays(2022)   # 2022: Sun -> Monday
+
+
 
 
 class TestRM4Policies:
@@ -191,6 +197,41 @@ class TestRM4Policies:
         assert rep["policies"]["B1"]["available"] == 0       # withheld under B1
         assert rep["policies"]["B0"]["available"] == 1       # current behavior keeps it
         assert "d1" in rep["worst_suppression_drivers"]
+
+    def test_dual_report_survives_degraded_and_stray_payloads(self, isolated_db):
+        # Refutation evidence for the round-3 panel claim that partial sub maps
+        # with full frozen weights abort the report: deterministic_score
+        # renormalizes over PRESENT keys (production's own drop path). Also
+        # hardened: a STRAY key in a legacy payload is excluded, not fatal.
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from app.services.replay import s5_dual_report
+        from tests.conftest import make_golden_raw_inputs
+
+        _persist_golden()                                   # full snapshot
+        raw = make_golden_raw_inputs()                      # degraded snapshot
+        raw.breadth_pct = None                              # d1 drops
+        if raw.hy_oas_history_bps:
+            from datetime import date, timedelta
+
+            end = date(2026, 6, 29)
+            n = len(raw.hy_oas_history_bps)
+            raw.hy_oas_history_dated = [
+                ((end - timedelta(days=n - 1 - i)).isoformat(), v)
+                for i, v in enumerate(raw.hy_oas_history_bps)]
+        data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
+        persist_snapshot(data, raw)
+        with session_scope() as session:                    # inject a stray key
+            snap = session.execute(select(Snapshot)).scalars().first()
+            block = dict(snap.block_s)
+            block["indicators"] = dict(block["indicators"])
+            block["indicators"]["s9_legacy"] = {"sub_score": 0.5}
+            snap.block_s = block
+        rep = s5_dual_report()                              # must not raise
+        assert rep["snapshots_with_dual_report"] == 2
+        assert all(r["headline_delta"] is not None or r["candidate_sub"] is None
+                   for r in rep["series"])
 
     def test_s5_dual_report_headline_delta(self, isolated_db):
         from app.services.replay import s5_dual_report

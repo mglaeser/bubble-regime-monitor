@@ -102,7 +102,9 @@ def us_market_holidays(year: int) -> set:
         _nth_weekday(year, 2, 0, 3),               # Washington's Birthday
         _easter_sunday(year) - _td(days=2),        # Good Friday
         _last_weekday(year, 5, 0),                 # Memorial Day
-        observed(_date(year, 6, 19)),              # Juneteenth
+        # Juneteenth: NYSE first observed it in 2022 (panel round-3 finding —
+        # applying it earlier excludes valid pre-2022 trading days).
+        observed(_date(year, 6, 19)) if year >= 2022 else None,
         observed(_date(year, 7, 4)),               # Independence Day
         _nth_weekday(year, 9, 0, 1),               # Labor Day
         _nth_weekday(year, 11, 3, 4),              # Thanksgiving: 4th Thursday
@@ -364,12 +366,17 @@ def s5_dual_report() -> dict[str, Any]:
             }
             if prod_sub is not None and cand_sub is not None:
                 entry["sub_delta"] = round(cand_sub - prod_sub, 6)
+                # keys restricted to the frozen weight vectors: a stray key in
+                # a legacy/foreign payload must be excluded, not abort the
+                # report (geometric_block's A-05 contract rejects un-weighted
+                # extras; PARTIAL maps are fine — deterministic_score
+                # renormalizes over present keys, production's own drop path)
                 sub_s = {k: v.get("sub_score") for k, v in
                          ((snap.block_s or {}).get("indicators") or {}).items()
-                         if v.get("sub_score") is not None}
+                         if v.get("sub_score") is not None and k in _WS}
                 sub_d = {k: v.get("sub_score") for k, v in
                          ((snap.block_d or {}).get("indicators") or {}).items()
-                         if v.get("sub_score") is not None}
+                         if v.get("sub_score") is not None and k in _WD}
                 if "s5" in sub_s and sub_d:
                     flags = _flags_from_detail(snap.red_flag_detail)
                     base = deterministic_score(dict(sub_s), dict(sub_d),
