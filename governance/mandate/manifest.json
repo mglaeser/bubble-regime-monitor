@@ -1,0 +1,7 @@
+{
+ "part1_sha256": "e649ea7ccb4f1bd495b9a7ab2e0a40476824a63da3507b6e33d529dcf2f90742",
+ "part2": "NOT-IN-REPO: Track C (40 checks) was audited in the founding July 2026 engagement (audit/03-findings.json carries all 119 verdicts with evidence), but the Part 2 instruction text was not retained. Honest gap: re-registering the Part 2 text when available is an additive change; the findings and catalogue are the operative record.",
+ "constitution_sha256": "11f1547936a69fb200e89fdc3e9510f86b570a906e012c4f112869341a5baf74",
+ "attested": "2026-07-25",
+ "write_separation": ".github/CODEOWNERS routes governance/, audit/, scripts/ and .github/ to the operator; mandate_gate verifies these hashes every CI run (an ungated edit fails the build)."
+}

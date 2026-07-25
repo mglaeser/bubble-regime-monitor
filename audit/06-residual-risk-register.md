@@ -21,3 +21,16 @@ Owning role for all items: **operator (mglaeser)** — the sole maintainer and h
 ## Acceptance
 
 The **STOP-SHIP** items (B-06 rotation, A-01/B-35 branch protection, A-39 independent verifier) are **not closed by this engagement** — they require operator/repo-settings actions and a second vendor. They are accepted here only *with* the compensating controls and tripwires above, and they are the lead items in `audit/08`. Per the mandate, the honest status is: **the system should not be treated as independently verified until branch protection is enabled and credentials are rotated.**
+
+## Addendum — 2026-07-25 (mandate-enforcement installation)
+
+- **A-39 CLOSED**: the independent different-vendor adversarial verifier now
+  exists and enforces — `independent-verify.yml` (OpenAI panel, required-
+  approver veto, fail-closed deterministic arbiter), proven live across 16
+  veto rounds on PRs #21/#22. Removed from the STOP-SHIP set.
+- **A-01/B-01 partially discharged**: CI demonstrably executes and blocks on
+  GitHub-hosted runners (the "no runner executes it" state is over). Branch
+  protection remains the open operator action.
+- The register above is now machine-enforced: `governance/accepted-residuals.json`
+  mirrors it, and `scripts/mandate_gate.py` fails CI on any open blocker-band
+  finding not in it, and on any entry that has closed but was not pruned.

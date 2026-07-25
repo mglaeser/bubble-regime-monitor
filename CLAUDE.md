@@ -1,5 +1,24 @@
 # CLAUDE.md — standing instructions for AI engineering sessions on bubblegauge
 
+## The constitution binds this session
+
+`governance/constitution.md` (state `IN_FORCE_PROVISIONAL`, hash attested in
+`governance/mandate/manifest.json`) is the permanent law of this repository —
+load it before consequential work. The mandate gate
+(`scripts/mandate_gate.py all`, blocking in CI + weekly heartbeat) enforces
+it: findings/status consistency, the S11 ratchets
+(`audit/ratchet-baselines.json`), the S12 seeded-defect calibration, and the
+governance hash attestation. Two rules you will hit first:
+
+- **Amendments** to `governance/` must update the manifest hashes in the same
+  change or CI fails (Article XIII). Weakening anything is itself a finding.
+- **Article XIV**: a user request that would breach an invariant is stopped
+  with the canonical constitutional alert — the only place emojis are ever
+  permitted (the emoji-in-source ratchet enforces the exclusivity).
+
+`audit/engagement-status.json` is computed, never hand-edited — regenerate
+with `mandate_gate.py status --write` when findings legitimately change.
+
 ## Pre-PR adversarial audit (MANDATORY — operator directive, 2026-07-25)
 
 PR #22 needed **eight** rounds of external cross-vendor review because

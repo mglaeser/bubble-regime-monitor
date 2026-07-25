@@ -1,0 +1,42 @@
+{
+ "_meta": {
+  "what": "Operator-accepted open blocker-band findings (mandate \u00a79.10 deviation, recorded as a decision). The mandate gate fails CI on any open STOP-SHIP/BLOCKER-1/BLOCKER-2 finding NOT in this list, and on any entry here that is no longer an open blocker. Adding an entry is an operator decision record; every acceptance must carry the compensating control + tripwire in audit/06-residual-risk-register.md.",
+  "decision_record": "audit/06-residual-risk-register.md 'Acceptance' section (founding engagement, 2026-07-14) + operator directive 2026-07-25 to keep the regime permanently enforced; production_eligible stays false while this list is non-empty.",
+  "owner": "operator (mglaeser)"
+ },
+ "constitution_state": "IN_FORCE_PROVISIONAL",
+ "production_note": "Operator runs production under the compensating controls of audit/06; this is a recorded acceptance, not a clearance. Closing B-06 (rotation), A-01/B-35 (branch protection) and A-02 (mutation measurement) is the ratification path.",
+ "accepted_open_findings": [
+  "A-02",
+  "A-04",
+  "A-06",
+  "A-08",
+  "A-09",
+  "A-17",
+  "A-22",
+  "A-24",
+  "A-33",
+  "A-34",
+  "B-01",
+  "B-02",
+  "B-03",
+  "B-04",
+  "B-05",
+  "B-06",
+  "B-07",
+  "B-10",
+  "B-11",
+  "B-12",
+  "B-13",
+  "B-28",
+  "B-31",
+  "C-01",
+  "C-02",
+  "C-03",
+  "C-05",
+  "C-09",
+  "C-10",
+  "C-23",
+  "C-26"
+ ]
+}

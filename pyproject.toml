@@ -80,6 +80,9 @@ ignore = ["E501"]
 # (SIGILL/hang containment is the whole point). Not untrusted input.
 "app/engine/gsadf_runner.py" = ["S603", "S607"]
 "app/indicators/d4_lppls.py" = ["S603", "S607"]
+# The mandate gate invokes fixed argv (ruff/git/pytest, no untrusted input)
+# to re-prove the other gates (S12); same containment rationale as above.
+"scripts/mandate_gate.py" = ["S603", "S607"]
 # Defensive type-narrowing assert for mypy; not a runtime control.
 "app/db.py" = ["S101"]
 

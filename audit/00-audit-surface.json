@@ -1,0 +1,261 @@
+{
+  "data_stores": [
+    "SQLite (DB_URL; snapshots, indicator_readings, falsification_outcomes append-only, dashboard_feed, daily_close, breadth caches)"
+  ],
+  "egress": [
+    "FRED/ALFRED",
+    "SEC EDGAR",
+    "Shiller xls",
+    "Stooq/price",
+    "CNN Fear&Greed",
+    "sipgate SMS",
+    "Anthropic API",
+    "OpenAI API (CI panel)"
+  ],
+  "files_tracked": 167,
+  "generated_by": "scripts/mandate_gate.py surface",
+  "identities": [
+    "operator (mglaeser) \u2014 human-in-command",
+    "GitHub Actions runner (CI gates)",
+    "container app user (runtime)"
+  ],
+  "model_providers": [
+    "Anthropic (judgment note; generator vendor)",
+    "OpenAI (independent verifier panel; second vendor)"
+  ],
+  "policy_bundle": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/independent-verify.yml",
+    "scripts/independent_verify.py",
+    "scripts/mandate_gate.py",
+    "governance/ (CODEOWNERS-protected)"
+  ],
+  "prompts": [
+    "app/llm.py (judgment note; numbers-only invariant)",
+    "app/notify/ (SMS text)"
+  ],
+  "python_modules": [
+    "app/__init__.py",
+    "app/config.py",
+    "app/db.py",
+    "app/db_migrate.py",
+    "app/engine/__init__.py",
+    "app/engine/aggregate.py",
+    "app/engine/gsadf_runner.py",
+    "app/engine/judgment.py",
+    "app/engine/legs.py",
+    "app/engine/montecarlo.py",
+    "app/engine/sms_report.py",
+    "app/http_client.py",
+    "app/indicators/__init__.py",
+    "app/indicators/d1_breadth.py",
+    "app/indicators/d2_margin.py",
+    "app/indicators/d3_hyperscaler_fcf.py",
+    "app/indicators/d4_lppls.py",
+    "app/indicators/s1_valuation.py",
+    "app/indicators/s2_concentration.py",
+    "app/indicators/s3_semis_gsy.py",
+    "app/indicators/s4_gsadf.py",
+    "app/indicators/s5_calendar.py",
+    "app/indicators/s5_credit.py",
+    "app/indicators/v_vix.py",
+    "app/logging_conf.py",
+    "app/main.py",
+    "app/methodology.py",
+    "app/models.py",
+    "app/notify/__init__.py",
+    "app/notify/sipgate.py",
+    "app/references.py",
+    "app/routers/__init__.py",
+    "app/routers/admin.py",
+    "app/routers/dashboard.py",
+    "app/routers/health.py",
+    "app/routers/indicators.py",
+    "app/routers/legs.py",
+    "app/routers/meta.py",
+    "app/routers/replay.py",
+    "app/routers/score.py",
+    "app/routers/status.py",
+    "app/routers/webhooks.py",
+    "app/scheduler.py",
+    "app/schemas.py",
+    "app/security.py",
+    "app/services/__init__.py",
+    "app/services/backfill.py",
+    "app/services/compute.py",
+    "app/services/dashboard_feed.py",
+    "app/services/deploy_trigger.py",
+    "app/services/digest.py",
+    "app/services/replay.py",
+    "app/services/status.py",
+    "app/sources/__init__.py",
+    "app/sources/breadth.py",
+    "app/sources/cape.py",
+    "app/sources/edgar.py",
+    "app/sources/fear_greed.py",
+    "app/sources/fed_ebp.py",
+    "app/sources/finra.py",
+    "app/sources/fred.py",
+    "app/sources/imf_reserves.py",
+    "app/sources/prices.py",
+    "app/sources/ssga.py",
+    "app/sources/stooq.py",
+    "app/sources/vix.py",
+    "docs/harnesses/alfred_vintage_harness.py",
+    "docs/harnesses/c_ndx_drift_harness.py",
+    "docs/harnesses/de_d3_pit_harness.py",
+    "docs/harnesses/f_ath_continuity_harness.py",
+    "migrations/env.py",
+    "migrations/versions/0001_initial.py",
+    "migrations/versions/0002_caches_and_judgment_error.py",
+    "migrations/versions/0003_price_layer.py",
+    "migrations/versions/0004_daily_close.py",
+    "migrations/versions/0005_dashboard_feed.py",
+    "migrations/versions/0006_replay_evidence.py",
+    "scripts/independent_verify.py",
+    "scripts/replay_report.py",
+    "scripts/sensitivity.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/test_api_contract.py",
+    "tests/test_ath_provenance.py",
+    "tests/test_audit_v331.py",
+    "tests/test_auto_deploy.py",
+    "tests/test_bugfix_301.py",
+    "tests/test_d2_rollover_calendar.py",
+    "tests/test_dashboard_feed.py",
+    "tests/test_degradation.py",
+    "tests/test_fear_greed.py",
+    "tests/test_frozen_methodology.py",
+    "tests/test_golden_fixture.py",
+    "tests/test_imf_reserves.py",
+    "tests/test_independent_verify.py",
+    "tests/test_lifespan_hygiene.py",
+    "tests/test_migrations.py",
+    "tests/test_montecarlo.py",
+    "tests/test_normalization.py",
+    "tests/test_outage_remediation_320.py",
+    "tests/test_prices.py",
+    "tests/test_readme_guards.py",
+    "tests/test_remediation_v378.py",
+    "tests/test_replay_infra.py",
+    "tests/test_revalidation_v376.py",
+    "tests/test_revalidation_v377.py",
+    "tests/test_s5_calendar_shadow.py",
+    "tests/test_sms_digest.py",
+    "tests/test_sources.py",
+    "tests/test_status.py",
+    "tests/test_v330.py",
+    "tests/test_v331.py",
+    "tests/test_v332.py",
+    "tests/test_v371.py",
+    "tests/test_v373.py",
+    "tests/test_v374.py"
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "module": "app/routers/status.py",
+      "path": "/"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/status.py",
+      "path": "/api/v1/status"
+    },
+    {
+      "method": "POST",
+      "module": "app/routers/admin.py",
+      "path": "/deploy"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/replay.py",
+      "path": "/evidence"
+    },
+    {
+      "method": "POST",
+      "module": "app/routers/admin.py",
+      "path": "/falsification"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/legs.py",
+      "path": "/fast-alarm"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/dashboard.py",
+      "path": "/feed"
+    },
+    {
+      "method": "POST",
+      "module": "app/routers/webhooks.py",
+      "path": "/github"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/health.py",
+      "path": "/healthz"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/score.py",
+      "path": "/history"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/meta.py",
+      "path": "/methodology"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/health.py",
+      "path": "/readyz"
+    },
+    {
+      "method": "POST",
+      "module": "app/routers/admin.py",
+      "path": "/refresh"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/admin.py",
+      "path": "/refresh/status"
+    },
+    {
+      "method": "POST",
+      "module": "app/routers/admin.py",
+      "path": "/send-sms"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/status.py",
+      "path": "/status"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/replay.py",
+      "path": "/sufficiency"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/legs.py",
+      "path": "/trend"
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/indicators.py",
+      "path": "/{indicator_id}"
+    }
+  ],
+  "scheduled_jobs": [
+    "4-hourly recompute (APScheduler, app/main.py)",
+    "deploy watchdog (host systemd, docs/AUTO_DEPLOY.md)"
+  ],
+  "workflows": [
+    ".github/CODEOWNERS",
+    ".github/workflows/ci.yml",
+    ".github/workflows/independent-verify.yml"
+  ]
+}

@@ -1,0 +1,960 @@
+{
+ "catalogue_version": "2.0",
+ "registered_check_count": 119,
+ "source": "governance/mandate/part1.md (Tracks A/B; Track C activated in the founding July 2026 engagement \u2014 Part 2 text not retained in-repo, recorded honestly in governance/mandate/manifest.json)",
+ "founding_immutable": true,
+ "checks": [
+  {
+   "id": "A-01",
+   "track": "A",
+   "title": "Deterministic verification gate on every production change",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "A-02",
+   "track": "A",
+   "title": "A test suite that can actually fail",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "A-03",
+   "track": "A",
+   "title": "Deterministic vs probabilistic assertions kept apart",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-04",
+   "track": "A",
+   "title": "Testable specification that gates merges",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "A-05",
+   "track": "A",
+   "title": "Domain boundaries and consistent vocabulary",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-06",
+   "track": "A",
+   "title": "Version control, batch size, executed rollback",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "A-07",
+   "track": "A",
+   "title": "Clone, churn and refactoring signature",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-08",
+   "track": "A",
+   "title": "Security scanning as the control",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "A-09",
+   "track": "A",
+   "title": "Architecture as decided, not accreted",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "A-10",
+   "track": "A",
+   "title": "Injection-resistant architecture",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "A-11",
+   "track": "A",
+   "title": "Least-privilege topology for agents/tools (design)",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-12",
+   "track": "A",
+   "title": "Technical debt and the comprehension problem",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-13",
+   "track": "A",
+   "title": "Enforced coding standards",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-14",
+   "track": "A",
+   "title": "A written policy for how AI builds/maintains this",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-15",
+   "track": "A",
+   "title": "Boundary between prototype and production",
+   "priority": 5,
+   "founding_band": "PLAN",
+   "status": "active"
+  },
+  {
+   "id": "A-16",
+   "track": "A",
+   "title": "Last mile: stubs, edge cases, integration",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-17",
+   "track": "A",
+   "title": "Non-functional requirements specified and measured",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "A-18",
+   "track": "A",
+   "title": "Model/agent architecture chosen deliberately",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-19",
+   "track": "A",
+   "title": "API contracts match the implementation",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-20",
+   "track": "A",
+   "title": "Prompts/retrieval config are code and pass the gate",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-21",
+   "track": "A",
+   "title": "Context, retrieval and memory architecture",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-22",
+   "track": "A",
+   "title": "User outcomes, performance, accessibility",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "A-23",
+   "track": "A",
+   "title": "Data architecture and ownership",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-24",
+   "track": "A",
+   "title": "The system operates and recovers itself",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "A-25",
+   "track": "A",
+   "title": "Input validation at every boundary",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "A-26",
+   "track": "A",
+   "title": "Error handling that does not lie",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-27",
+   "track": "A",
+   "title": "AI-specific non-functional requirements",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-28",
+   "track": "A",
+   "title": "Dependency topology and blast radius",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-29",
+   "track": "A",
+   "title": "Build vs buy vs open source, including the model",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-30",
+   "track": "A",
+   "title": "Non-functional trade-offs analysed",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-31",
+   "track": "A",
+   "title": "Unit economics decided at design time",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-32",
+   "track": "A",
+   "title": "Documentation that is true and executable",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-33",
+   "track": "A",
+   "title": "Maintainability without a maintainer",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "A-34",
+   "track": "A",
+   "title": "Autonomy levels, gates, self-firing kill switch",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "A-35",
+   "track": "A",
+   "title": "Runtime containment without an operator",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-36",
+   "track": "A",
+   "title": "Calibration of the verification pipeline",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-37",
+   "track": "A",
+   "title": "Takeover readiness",
+   "priority": 5,
+   "founding_band": "PLAN",
+   "status": "active"
+  },
+  {
+   "id": "A-38",
+   "track": "A",
+   "title": "Provenance and licensing of shipped code",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "A-39",
+   "track": "A",
+   "title": "Verification loop must not be self-referential",
+   "priority": 5,
+   "founding_band": "PLAN",
+   "status": "active"
+  },
+  {
+   "id": "A-40",
+   "track": "A",
+   "title": "Energy and carbon as a design constraint",
+   "priority": 4,
+   "founding_band": "ASSESS",
+   "status": "active"
+  },
+  {
+   "id": "B-01",
+   "track": "B",
+   "title": "The pipeline actually gates",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "B-02",
+   "track": "B",
+   "title": "A paved road an agent can walk",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "B-03",
+   "track": "B",
+   "title": "Observability that reaches root cause",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "B-04",
+   "track": "B",
+   "title": "Dependencies that exist, are pinned, were vetted",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "B-05",
+   "track": "B",
+   "title": "Models/prompts/agents have a lifecycle",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "B-06",
+   "track": "B",
+   "title": "Secrets and machine identity",
+   "priority": 10,
+   "founding_band": "STOP-SHIP",
+   "status": "active"
+  },
+  {
+   "id": "B-07",
+   "track": "B",
+   "title": "Every model/agent run traceable and replayable",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "B-08",
+   "track": "B",
+   "title": "No path consumes unbounded tokens/money",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-09",
+   "track": "B",
+   "title": "Signed provenance for everything shipped",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-10",
+   "track": "B",
+   "title": "Evaluation gates in the pipeline",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "B-11",
+   "track": "B",
+   "title": "Rollback for code, prompts and models",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "B-12",
+   "track": "B",
+   "title": "Runtime defence",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "B-13",
+   "track": "B",
+   "title": "Pinned model versions \u2014 no floating aliases",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "B-14",
+   "track": "B",
+   "title": "Governance over prompt/config changes",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-15",
+   "track": "B",
+   "title": "Guardrails are deployed artifacts and fail closed",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "B-16",
+   "track": "B",
+   "title": "Cost attribution and finops",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-17",
+   "track": "B",
+   "title": "Infrastructure as code, reconciled from VC",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-18",
+   "track": "B",
+   "title": "Progressive delivery with automatic abort",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-19",
+   "track": "B",
+   "title": "Service objectives with an error budget that bites",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-20",
+   "track": "B",
+   "title": "Runtime detection+containment of injection/exfiltration",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "B-21",
+   "track": "B",
+   "title": "The application survives a provider outage",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-22",
+   "track": "B",
+   "title": "Agents deployed with least privilege, enforced",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "B-23",
+   "track": "B",
+   "title": "Behavioural baselines for agents",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-24",
+   "track": "B",
+   "title": "Quality drift detection",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-25",
+   "track": "B",
+   "title": "Environment separation and parity",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-26",
+   "track": "B",
+   "title": "Feature flags and self-firing kill switches",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-27",
+   "track": "B",
+   "title": "Artifact integrity",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-28",
+   "track": "B",
+   "title": "Detection that triggers action, not just notification",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "B-29",
+   "track": "B",
+   "title": "Reliability primitives validated by breaking things",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-30",
+   "track": "B",
+   "title": "Capacity, including inference capacity",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-31",
+   "track": "B",
+   "title": "Backups you have actually restored",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "B-32",
+   "track": "B",
+   "title": "Drift detection",
+   "priority": 5,
+   "founding_band": "PLAN",
+   "status": "active"
+  },
+  {
+   "id": "B-33",
+   "track": "B",
+   "title": "Integrity of the retrieval corpus",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-34",
+   "track": "B",
+   "title": "Latency budgets for inference",
+   "priority": 5,
+   "founding_band": "PLAN",
+   "status": "active"
+  },
+  {
+   "id": "B-35",
+   "track": "B",
+   "title": "Segregate the gate from the gated",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-36",
+   "track": "B",
+   "title": "Model deprecation is a plan, not an outage",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "B-37",
+   "track": "B",
+   "title": "Retirement of AI artifacts and right to erasure",
+   "priority": 5,
+   "founding_band": "PLAN",
+   "status": "active"
+  },
+  {
+   "id": "B-38",
+   "track": "B",
+   "title": "Inference economics",
+   "priority": 4,
+   "founding_band": "ASSESS",
+   "status": "active"
+  },
+  {
+   "id": "B-39",
+   "track": "B",
+   "title": "Design against a named reference framework",
+   "priority": 5,
+   "founding_band": "PLAN",
+   "status": "active"
+  },
+  {
+   "id": "C-01",
+   "track": "C",
+   "title": "Core application security",
+   "priority": 10,
+   "founding_band": "STOP-SHIP",
+   "status": "active"
+  },
+  {
+   "id": "C-02",
+   "track": "C",
+   "title": "Threat model",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "C-03",
+   "track": "C",
+   "title": "Supply-chain security and hallucinated packages",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "C-04",
+   "track": "C",
+   "title": "Privacy and data governance",
+   "priority": 10,
+   "founding_band": "STOP-SHIP",
+   "status": "active"
+  },
+  {
+   "id": "C-05",
+   "track": "C",
+   "title": "LLM application risk taxonomy, mapped and tested",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "C-06",
+   "track": "C",
+   "title": "The agentic risk taxonomy",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "C-07",
+   "track": "C",
+   "title": "Prompt injection",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "C-08",
+   "track": "C",
+   "title": "The dangerous three: never combine all",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "C-09",
+   "track": "C",
+   "title": "EU AI Act",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "C-10",
+   "track": "C",
+   "title": "Evaluation methodology",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "C-11",
+   "track": "C",
+   "title": "A running AI risk-management programme",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-12",
+   "track": "C",
+   "title": "Excessive agency and the autonomy policy",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-13",
+   "track": "C",
+   "title": "AI management system",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-14",
+   "track": "C",
+   "title": "Validating the judge",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-15",
+   "track": "C",
+   "title": "Guardrails have their own tests and adversary",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-16",
+   "track": "C",
+   "title": "Machine identity and agent-to-agent trust",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-17",
+   "track": "C",
+   "title": "Tool poisoning",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-18",
+   "track": "C",
+   "title": "Connector and tool-server security",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-19",
+   "track": "C",
+   "title": "Memory and context poisoning",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-20",
+   "track": "C",
+   "title": "Responsible-AI dimensions with owners and numbers",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-21",
+   "track": "C",
+   "title": "Training and fine-tuning data governance",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-22",
+   "track": "C",
+   "title": "Retrieval evaluated separately from generation",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-23",
+   "track": "C",
+   "title": "Personal data in prompts, logs and traces",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "C-24",
+   "track": "C",
+   "title": "Disclosure via memorisation/system-prompt leakage",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-25",
+   "track": "C",
+   "title": "Copyright and licensing of generated code",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-26",
+   "track": "C",
+   "title": "SBOM, AI-BOM, provenance, cyber-resilience",
+   "priority": 8,
+   "founding_band": "BLOCKER-2",
+   "status": "active"
+  },
+  {
+   "id": "C-27",
+   "track": "C",
+   "title": "Sector compliance baseline",
+   "priority": 9,
+   "founding_band": "BLOCKER-1",
+   "status": "active"
+  },
+  {
+   "id": "C-28",
+   "track": "C",
+   "title": "Residency and regulatory scope",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-29",
+   "track": "C",
+   "title": "Content safety and misuse prevention",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-30",
+   "track": "C",
+   "title": "Jailbreak resistance",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-31",
+   "track": "C",
+   "title": "Adversarial technique taxonomy / agentic layers",
+   "priority": 5,
+   "founding_band": "PLAN",
+   "status": "active"
+  },
+  {
+   "id": "C-32",
+   "track": "C",
+   "title": "Vector and embedding weaknesses",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-33",
+   "track": "C",
+   "title": "An AI usage policy that is enforced",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-34",
+   "track": "C",
+   "title": "Provider training on your data",
+   "priority": 7,
+   "founding_band": "MUST-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-35",
+   "track": "C",
+   "title": "Benchmark contamination / who evaluates the evaluator",
+   "priority": 4,
+   "founding_band": "ASSESS",
+   "status": "active"
+  },
+  {
+   "id": "C-36",
+   "track": "C",
+   "title": "Transparency and marking of generated output",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-37",
+   "track": "C",
+   "title": "Accountability without a signature",
+   "priority": 5,
+   "founding_band": "PLAN",
+   "status": "active"
+  },
+  {
+   "id": "C-38",
+   "track": "C",
+   "title": "Fabrication and downstream reliance",
+   "priority": 6,
+   "founding_band": "SHOULD-FIX",
+   "status": "active"
+  },
+  {
+   "id": "C-39",
+   "track": "C",
+   "title": "Lifecycle process and vocabulary standards",
+   "priority": 4,
+   "founding_band": "ASSESS",
+   "status": "active"
+  },
+  {
+   "id": "C-40",
+   "track": "C",
+   "title": "Societal and environmental impact",
+   "priority": 4,
+   "founding_band": "ASSESS",
+   "status": "active"
+  }
+ ]
+}

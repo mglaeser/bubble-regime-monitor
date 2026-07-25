@@ -14,6 +14,11 @@ name: ci
 on:
   push:
   pull_request:
+  schedule:
+    # §9.2 heartbeat: the full gate stack runs weekly on an empty diff, so a
+    # gate that silently stopped catching is discovered within a week even if
+    # nobody pushes. A red scheduled run is a frozen regime, not noise.
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -55,6 +60,11 @@ jobs:
         run: git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
       - name: Tests (BLOCKING)
         run: pytest -q
+      - name: Mandate gate (BLOCKING — §9.10 of governance/mandate/part1.md)
+        # status: findings/catalogue/acceptance/hash consistency, fail-closed;
+        # ratchet: S11 floors and ceilings; calibrate: S12 seeded-defect corpus
+        # re-proven against the live gates. See audit/08-standing-regime.md.
+        run: python scripts/mandate_gate.py all
 
   image:
     runs-on: ubuntu-latest
