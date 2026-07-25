@@ -315,6 +315,36 @@ def diff_commands(merge_base: str) -> dict[str, list[str]]:
     }
 
 
+def parse_name_status_z(raw: str) -> list[str]:
+    """Paths from `git diff --name-status -z`.
+
+    `-z` is mandatory (adversarial audit 2026-07-25): without it git C-quotes
+    any path containing non-ASCII, a quote or a backslash, so
+    `app/caf\303\251_backdoor.py` was passed to `git diff` verbatim, matched
+    nothing, produced an empty body, and the file was reviewed by NOBODY —
+    with no warning, because an empty diff never reaches the omitted list.
+    Rename/copy records carry two paths; the NEW path is the reviewed one."""
+    parts = raw.split("\0")
+    paths: list[str] = []
+    i = 0
+    while i < len(parts):
+        status = parts[i]
+        if not status:
+            i += 1
+            continue
+        if status[0] in ("R", "C"):      # status, old, new
+            if i + 2 >= len(parts) or not parts[i + 2]:
+                break                    # truncated record: never invent a path
+            paths.append(parts[i + 2])
+            i += 3
+        else:                            # status, path
+            if i + 1 >= len(parts) or not parts[i + 1]:
+                break
+            paths.append(parts[i + 1])
+            i += 2
+    return paths
+
+
 def truncate_marked(text: str, cap: int, label: str) -> str:
     """Cap text with an EXPLICIT marker — silent truncation let unreviewed
     changes green (panel round-3 finding); a cut must be visible to reviewers."""
@@ -349,9 +379,24 @@ def path_risk(path: str) -> int:
     return _RISK_DEFAULT
 
 
+_CODE_SUFFIXES = (".py", ".sh", ".R", ".r", ".sql", ".yml", ".yaml", ".toml",
+                  ".ini", ".cfg", ".service", ".timer", ".mk", ".bash")
+_CODE_NAMES = ("Makefile", "Dockerfile", "Containerfile", "compose.yml",
+               "requirements.txt", "alembic.ini", ".pre-commit-config.yaml")
+
+
 def is_code(path: str) -> bool:
-    """Paths whose omission from review is a real gap (vs docs/data)."""
-    return path_risk(path) <= 4
+    """Paths whose omission from review is a real gap.
+
+    Adversarial audit (2026-07-25) on THIS change: keying "is it code?" off the
+    directory tier declared Makefile, conftest.py, docs/harnesses/*.py, *.R,
+    deploy/*.sh and every new top-level *.py to be non-code — so dropping them
+    produced NO warning anywhere. Executable content is code wherever it sits;
+    a backdoor in conftest.py runs in CI exactly like one in app/."""
+    base = path.rsplit("/", 1)[-1]
+    if base in _CODE_NAMES or base.startswith("Dockerfile"):
+        return True
+    return path.endswith(_CODE_SUFFIXES)
 
 
 def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
@@ -366,12 +411,22 @@ def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
     cur: list[str] = []
     cur_len = 0
     omitted: list[str] = []
+    capped = False
     for path, text in ordered:
+        if capped:
+            # Risk ordering must govern EVICTION too, not just arrival
+            # (adversarial audit 2026-07-25: a 49k gate file that missed the
+            # last chunk was dropped while a 500-byte tests/ file that fit was
+            # admitted — the attacker picks the sizes). Once the budget is
+            # spent, everything remaining is omitted in risk order.
+            omitted.append(path)
+            continue
         if len(text) > budget:
             text = truncate_marked(text, budget, f"FILE {path}")
         if cur_len + len(text) > budget and cur:
             if len(chunks) + 1 >= max_chunks:
                 omitted.append(path)
+                capped = True
                 continue
             chunks.append("\n".join(cur))
             cur, cur_len = [], 0
@@ -380,6 +435,26 @@ def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
     if cur:
         chunks.append("\n".join(cur))
     return chunks, omitted
+
+
+def header_only(names: str, stat: str) -> str:
+    """Review payload carrying the authoritative file list and diffstat but no
+    body — used when every changed file's CONTENT is privacy-excluded."""
+    return (_payload_header(names, stat) +
+            "# Code changes: NONE SHOWN — every changed file's CONTENT falls "
+            "into a privacy-excluded class (data/binaries/assets). The FILE "
+            "LIST above is complete and authoritative: judge the change from "
+            "the paths, and refute if a path implies a risk you cannot rule "
+            "out without seeing its contents.\n")
+
+
+def _payload_header(names: str, stat: str) -> str:
+    return (
+        f"# COMPLETE changed-file list (authoritative — ALL changed paths, "
+        f"including files whose CONTENT is privacy-excluded; contents of "
+        f"excluded classes are never sent):\n"
+        f"{truncate_marked(names, 100_000, 'FILE LIST')}\n\n"
+        f"# Diffstat:\n{truncate_marked(stat, 8_000, 'DIFFSTAT')}\n\n")
 
 
 def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
@@ -398,22 +473,25 @@ def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
         body_probe = _sh(cmds["body"], required=True)
         if not body_probe.strip():
             return [], []
-    paths = [ln.split("\t")[-1] for ln in names.splitlines() if ln.strip()]
+    names_z = _sh(["git", "diff", "--name-status", "-z", f"{mb}...HEAD"],
+                  required=True)
+    paths = parse_name_status_z(names_z)
     file_diffs: list[tuple[str, str]] = []
     for path in paths:
-        text = _sh(["git", "diff", f"{mb}...HEAD", "--", path] + _EXCLUDES)
+        # required=True (round-6 finding, re-opened by this change): a git
+        # failure or timeout must BLOCK, never silently drop a file from review
+        text = _sh(["git", "diff", f"{mb}...HEAD", "--", path] + _EXCLUDES,
+                   required=True)
         if text.strip():
             file_diffs.append((path, text))
     if not file_diffs:
-        return [], []
+        # Every changed file's CONTENT is privacy-excluded, but the change is
+        # real: the panel still reviews the complete file list (round-4
+        # finding — an excluded-only PR must never auto-green with zero votes).
+        return [header_only(names, stat)], []
     chunks, omitted = pack_by_risk(file_diffs, budget, max_chunks)
     omitted_code = [p for p in omitted if is_code(p)]
-    header = (
-        f"# COMPLETE changed-file list (authoritative — ALL changed paths, "
-        f"including files whose CONTENT is privacy-excluded; contents of "
-        f"excluded classes are never sent):\n"
-        f"{truncate_marked(names, 100_000, 'FILE LIST')}\n\n"
-        f"# Diffstat:\n{truncate_marked(stat, 8_000, 'DIFFSTAT')}\n\n")
+    header = _payload_header(names, stat)
     warn = ""
     if omitted_code:
         warn = ("\n# WARNING — the following CODE files did not fit the review "
@@ -771,7 +849,9 @@ def main() -> int:
     # gate/app code on virtually every real PR.
     try:
         mc = int(os.environ.get("VERIFIER_MAX_CHUNKS", ""))
-        max_chunks = mc if 1 <= mc <= 6 else 2
+        # floor 2: max_chunks=1 makes pack_by_risk drop everything past the
+        # first budget with no second part to catch it (audit 2026-07-25)
+        max_chunks = mc if 2 <= mc <= 6 else 2
     except ValueError:
         max_chunks = 2
     try:
@@ -806,22 +886,34 @@ def main() -> int:
     print(f'[independent-verify] Required approver: "{required_approver}" must approve + >= {min_others} other(s).')
 
     if omitted_code:
-        print(f"[independent-verify] WARNING: {len(omitted_code)} code file(s) "
-              f"exceeded the review budget and were flagged to the panel as "
-              f"unreviewed: {', '.join(omitted_code[:5])}"
-              + (" …" if len(omitted_code) > 5 else ""))
+        # Adversarial audit 2026-07-25: warning-only meant an attacker could
+        # pad the diff until the malicious file fell out of the budget and
+        # still green. Unreviewed code is unreviewed — fail closed.
+        print("BLOCK review-coverage gate: "
+              f"{len(omitted_code)} code file(s) did not fit the review budget "
+              f"and were therefore reviewed by NO model: "
+              f"{', '.join(omitted_code[:8])}"
+              + (" …" if len(omitted_code) > 8 else "")
+              + f". Raise VERIFIER_MAX_CHUNKS (currently {max_chunks}) or split "
+              "the pull request.", file=sys.stderr)
+        return 1
     if len(payloads) > 1:
         print(f"[independent-verify] Diff split into {len(payloads)} risk-ordered "
               f"parts (cap {max_chunks}); EVERY part must pass — green requires "
               "green on all of them.")
 
-    challenge = secrets.token_hex(9)   # fresh 18-hex challenge per run
-    sys_base = build_system_prompt(challenge)
+    run_challenge = secrets.token_hex(9)   # fresh 18-hex challenge per run
 
     # Every part runs the full gate set; the FIRST block anywhere ends the run
     # (fail-closed: a later green can never overwrite an earlier refutation).
     for part, payload in enumerate(payloads, 1):
         label = f" [part {part}/{len(payloads)}]" if len(payloads) > 1 else ""
+        # PER-PART challenge (adversarial audit 2026-07-25): one challenge for
+        # all parts made a byte-identical response set valid for every part,
+        # so a cache or a stateful endpoint could turn N reviews into one.
+        challenge = (run_challenge if len(payloads) == 1
+                     else f"{run_challenge}p{part}")
+        sys_base = build_system_prompt(challenge)
         user_prompt = "DIFF (overview + code excerpt):\n\n" + payload
         votes = [verify_once(models[i], sys_base + LENSES[i % len(LENSES)], user_prompt)
                  for i in range(panel)]

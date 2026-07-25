@@ -300,3 +300,60 @@ class TestRiskOrderedReviewPacking:
         chunks, omitted = iv.pack_by_risk(files, budget=10_000, max_chunks=2)
         assert len(chunks) == 1
         assert omitted == []
+
+
+class TestChunkingAdversarialFixes:
+    """Findings from the internal adversarial pass on the chunking change
+    itself (2026-07-25). Each test pins a hole that pass opened or found."""
+
+    def test_quoted_and_non_ascii_paths_are_parsed(self):
+        # CRITICAL: without -z, git C-quotes these and the per-file diff
+        # matched nothing — the file was reviewed by nobody, silently.
+        raw = "A\0app/café_backdoor.py\0M\0app/normal.py\0"
+        assert iv.parse_name_status_z(raw) == ["app/café_backdoor.py",
+                                               "app/normal.py"]
+
+    def test_rename_records_yield_the_new_path(self):
+        raw = "R089\0scripts/old_gate.py\0scripts/new_gate.py\0M\0app/x.py\0"
+        assert iv.parse_name_status_z(raw) == ["scripts/new_gate.py", "app/x.py"]
+
+    def test_truncated_record_does_not_invent_a_path(self):
+        assert iv.parse_name_status_z("R100\0only_old_path\0") == []
+        assert iv.parse_name_status_z("") == []
+
+    def test_is_code_covers_executable_content_outside_app_and_scripts(self):
+        # HIGH: tier-based is_code() called these "not code", so dropping them
+        # produced no warning at all — a backdoor in conftest.py runs in CI.
+        for path in ("conftest.py", "Makefile", "Dockerfile", "alembic.ini",
+                     "docs/harnesses/alfred_vintage_harness.py",
+                     "deploy/deploy-watch.sh", "r/gsadf.R",
+                     "deploy/systemd/bubblegauge.service", "evil.py"):
+            assert iv.is_code(path), path
+        for path in ("README.md", "audit/03-findings.json", "docs/NOTES.md"):
+            assert not iv.is_code(path), path
+
+    def test_capped_packing_never_admits_lower_risk_over_higher(self):
+        # HIGH: the gate file that missed the last chunk was dropped while a
+        # small tests/ file that happened to fit was admitted.
+        files = [("scripts/a_gate.py", "A" * 49_000),
+                 ("scripts/b_gate.py", "B" * 49_000),
+                 ("scripts/c_mandate_gate.py", "C" * 49_000),
+                 ("app/tiny.py", "d" * 500),
+                 ("tests/t.py", "e" * 400)]
+        chunks, omitted = iv.pack_by_risk(files, budget=50_000, max_chunks=2)
+        body = "\n".join(chunks)
+        assert "scripts/c_mandate_gate.py" in omitted
+        # once the cap forces an omission, nothing lower-risk sneaks in
+        assert "d" * 500 not in body
+        assert "e" * 400 not in body
+        assert set(omitted) == {"scripts/c_mandate_gate.py", "app/tiny.py",
+                                "tests/t.py"}
+
+    def test_excluded_content_only_change_still_gets_a_payload(self):
+        # CRITICAL: per-file assembly made an all-excluded PR produce zero
+        # payloads -> "No diff to review. Green." with no votes at all.
+        payload = iv.header_only("A\tdata/seed.sql\nA\tdata/config.csv\n",
+                                 " data/seed.sql | 10 +\n")
+        assert "data/seed.sql" in payload
+        assert "NONE SHOWN" in payload
+        assert "judge the change from the paths" in payload
