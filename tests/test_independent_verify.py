@@ -148,3 +148,13 @@ class TestPanelFindingsOnItself:
         ok2 = {"ok": True, "v": {"refuted": False, "reason": "reason long enough y"}}
         rf = {"ok": True, "v": {"refuted": True, "confidence": "high", "reason": "bug"}}
         assert iv.require_approvals([rf, ok, ok2], models, "gpt-5.6-sol", 1)["block"] is False
+
+    def test_fork_origin_without_key_fails_closed(self):
+        # Sol round 2: fork PRs run with secrets withheld; no-key there must
+        # BLOCK (exit 1), while same-repo no-key stays green-but-loud.
+        script = str(Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
+        env = {"PATH": "/usr/bin:/bin", "VERIFIER_REQUIRE_KEY": "true"}
+        out = subprocess.run([sys.executable, script], capture_output=True, text=True,
+                             timeout=60, env=env)
+        assert out.returncode == 1
+        assert "fork-origin" in out.stderr

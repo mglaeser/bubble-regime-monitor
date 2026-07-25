@@ -558,12 +558,22 @@ def main() -> int:
         return 0
 
     if not KEY:
+        # Fork-PR bypass (found by the panel itself, Sol veto round 2): GitHub
+        # withholds secrets from fork-originated pull_request runs, so "no key"
+        # on a fork PR is NOT the operator's documented residual state — it is
+        # an untrusted origin that must FAIL CLOSED, or a required cross-vendor
+        # check would pass with zero review. The workflow sets
+        # VERIFIER_REQUIRE_KEY=true exactly when head repo != base repo.
+        if (os.environ.get("VERIFIER_REQUIRE_KEY") or "").lower() == "true":
+            print("BLOCK fork-origin run without a vendor key: secrets are withheld "
+                  "from fork PRs, so the panel cannot review — fail-closed.", file=sys.stderr)
+            return 1
         print("[independent-verify] RESIDUAL: no second-vendor key (SECOND_VENDOR_API_KEY or "
               "OPENAI_API_KEY) provisioned.\n"
               "  The independent cross-vendor review panel is NOT active. Compensation: the\n"
               "  deterministic CI gate remains the sole merge authority. To activate: set the\n"
               "  secret (see docs/INDEPENDENT_REVIEW_PANEL.md).")
-        return 0   # no fake block; the residual is documented and visible
+        return 0   # same-repo only: no fake block; the residual is documented and visible
 
     d = build_diff()
     if not d.strip():

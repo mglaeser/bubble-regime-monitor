@@ -39,4 +39,8 @@ jobs:
           VERIFIER_PANEL_MODELS: ${{ vars.VERIFIER_PANEL_MODELS }}
           VERIFIER_REQUIRED_APPROVER: ${{ vars.VERIFIER_REQUIRED_APPROVER }}
           VERIFIER_MIN_OTHER_APPROVERS: ${{ vars.VERIFIER_MIN_OTHER_APPROVERS }}
+          # Fork PRs run WITHOUT secrets; a no-key exit-0 there would let a fork
+          # bypass a required cross-vendor check (panel finding, Sol round 2).
+          # Same-repo no-key runs keep the documented residual behavior.
+          VERIFIER_REQUIRE_KEY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: python scripts/independent_verify.py
