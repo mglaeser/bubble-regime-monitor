@@ -1,0 +1,24 @@
+# Separation of powers (ported from RoseLohr/roses-food-blog CODEOWNERS; same
+# role): the gate, the review panel, and the frozen-methodology governance
+# surfaces must NOT be modifiable by the same identity that writes the code
+# they gate, without a separate explicit approval by the responsible role. In
+# this solo setup without a separate policy repo, this is the structural
+# substitute: changes to any protected path below require the owner's own
+# distinct sign-off.
+#
+# NOTE: CODEOWNERS only ENFORCES once branch protection enables
+# "Require review from Code Owners" — a repo-settings action for the
+# human-in-command (same open item as required status checks).
+
+# The deterministic gate and the review panel itself
+/.github/               @mglaeser
+/scripts/               @mglaeser
+
+# The frozen-methodology governance surfaces (F-01/L-07)
+/frozen_methodology.json            @mglaeser
+/app/methodology.py                 @mglaeser
+/tests/test_frozen_methodology.py   @mglaeser
+/docs/GOVERNANCE_FREEZE_RULE.md     @mglaeser
+/docs/PINS_DECISION_MEMO.md         @mglaeser
+/docs/PIN_EVIDENCE_PACK.md          @mglaeser
+/docs/PIN_EVIDENCE_PACK_2.md        @mglaeser

@@ -1,0 +1,50 @@
+# Independent cross-vendor PR review panel — ported from
+# RoseLohr/roses-food-blog (same mechanism, same roles). Active AS SOON AS the
+# operator provisions a second-vendor secret (SECOND_VENDOR_API_KEY, a vendor
+# other than Anthropic; OPENAI_API_KEY is accepted since OpenAI is the default
+# provider — no renaming needed). Without a secret the job reports the
+# documented residual and does NOT block (no fake green); with a secret the
+# panel attacks the diff and blocks unless the required approver ("Sol",
+# gpt-5.6-sol) explicitly approves AND at least one independent model
+# corroborates, with anti-sham-green and proof-of-check integrity gates.
+#
+# NOTE (honesty): making this an AUTHORITATIVE gate additionally requires
+# branch protection to mark `cross-vendor` a REQUIRED status check — a
+# repo-settings action for the human-in-command (same open item as for `test`).
+name: Independent-Verify
+
+on:
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  cross-vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cross-vendor review panel (required approver + corroboration)
+        env:
+          SECOND_VENDOR_API_KEY: ${{ secrets.SECOND_VENDOR_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          VERIFIER_BASE_URL: ${{ vars.VERIFIER_BASE_URL }}
+          VERIFIER_MODEL: ${{ vars.VERIFIER_MODEL }}
+          VERIFIER_PANEL_MODELS: ${{ vars.VERIFIER_PANEL_MODELS }}
+          VERIFIER_REQUIRED_APPROVER: ${{ vars.VERIFIER_REQUIRED_APPROVER }}
+          VERIFIER_MIN_OTHER_APPROVERS: ${{ vars.VERIFIER_MIN_OTHER_APPROVERS }}
+          # Fork PRs run WITHOUT secrets (Sol round 2), and Dependabot PRs are
+          # same-repo yet ALSO run with Actions secrets withheld (Sol round 5) —
+          # in both cases a no-key exit-0 would green a required check with zero
+          # votes, so the panel must fail closed there. Operator remedy for
+          # Dependabot: mirror the key into the Dependabot secrets store to get
+          # those PRs reviewed instead of blocked. Same-repo human no-key runs
+          # keep the documented residual behavior.
+          VERIFIER_REQUIRE_KEY: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.actor, 'dependabot')) }}
+        run: python scripts/independent_verify.py

@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     # (F-01/L-07) so the runtime MC seed is causally the frozen value; env vars
     # may still override for operational runs.
     tz: str = "UTC"
+    # Set by the test suite (conftest): skips the boot warm-up threads and the
+    # scheduler in lifespan. Leaked daemon threads (hy-oas-seed /
+    # breadth-backfill) crossing test boundaries corrupted other tests'
+    # throwaway sqlite DBs on CI ("file is not a database", intermittent).
+    testing: bool = False
     mc_samples: int = _frozen_mc("samples")
     mc_seed: int = _frozen_mc("seed")
     db_url: str = "sqlite:////data/bubble.db"
