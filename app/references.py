@@ -925,6 +925,32 @@ CHANGELOG: list[dict[str, str]] = [
         "seed, S5 calendar v4 (C-01/02/03), S3 common-calendar returns (P-01/02), CAPE degraded MC "
         "(V-02), and the frozen_methodology.json runtime artifact (F-01/L-07).",
     },
+    {
+        "version": "v3.8.0",
+        "score": "METHODOLOGY UNCHANGED — golden fixture byte-identical (52.43). Historical "
+        "Replay Infrastructure (RM-1..RM-5): evidence and policy-replay layer only; no scored "
+        "value, weight, anchor, threshold, seed, or lag touched; the frozen artifact and its "
+        "SHA-256 pin are unchanged.",
+        "notes": "RM-1: every snapshot now records the frozen-artifact SHA-256 and methodology "
+        "version in force at compute time (migration 0006; per-snapshot evidence for the "
+        "falsification-clock rule), and falsification_outcomes is APPEND-ONLY at the DB level "
+        "(triggers installed by both the migration and the model's after_create DDL) with a "
+        "keyed manual recording path POST /api/v1/admin/falsification. RM-2: "
+        "GET /api/v1/replay/sufficiency tracks distinct trading days overall and per S5 source "
+        "tier against the >=60-day activation window (per-tier adequacy deliberately NOT "
+        "pinned); GET /api/v1/replay/evidence surfaces the stamp + outcome summary. RM-4: "
+        "scripts/replay_report.py replays the operator's candidate policies over persisted "
+        "snapshots — B0-B5 coverage policies (availability, degraded rates, longest gaps, "
+        "suppression drivers, B4 cross-block masking) and the S5 positional-vs-calendar dual "
+        "report including a hypothetical deterministic-headline delta computed by swapping the "
+        "candidate sub-score into the RECORDED sub-score set (side computation; the shadow "
+        "stays included_in_score=false). RM-3: docs/harnesses/alfred_vintage_harness.py pulls "
+        "true point-in-time ALFRED vintages (evidence source for the S5 vintage-policy PIN). "
+        "RM-5: replay_report.py assemble collates per-PIN decision packages; host-dependent "
+        "studies (EDGAR PIT grid, ATH continuity, NDX drift, Atom G1 benchmarks) are marked "
+        "PENDING_HOST, never silently omitted. All candidate thresholds exercised are the "
+        "operator's previously enumerated candidates; nothing is recommended or pinned.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {

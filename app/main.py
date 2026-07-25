@@ -98,6 +98,7 @@ def create_app() -> FastAPI:
         indicators,
         legs,
         meta,
+        replay,
         score,
         status,
         webhooks,
@@ -135,6 +136,7 @@ def create_app() -> FastAPI:
     app.include_router(status.router)
     app.include_router(dashboard.router)
     app.include_router(webhooks.router)
+    app.include_router(replay.router)
     return app
 
 
