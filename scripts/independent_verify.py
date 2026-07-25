@@ -345,6 +345,29 @@ def parse_name_status_z(raw: str) -> list[str]:
     return paths
 
 
+def parse_status_map_z(raw: str) -> dict[str, str]:
+    """{path: git status letter} from `--name-status -z` (A/M/D/R###/C###)."""
+    parts = raw.split("\0")
+    out: dict[str, str] = {}
+    i = 0
+    while i < len(parts):
+        status = parts[i]
+        if not status:
+            i += 1
+            continue
+        if status[0] in ("R", "C"):
+            if i + 2 >= len(parts) or not parts[i + 2]:
+                break
+            out[parts[i + 2]] = status
+            i += 3
+        else:
+            if i + 1 >= len(parts) or not parts[i + 1]:
+                break
+            out[parts[i + 1]] = status
+            i += 2
+    return out
+
+
 def truncate_marked(text: str, cap: int, label: str) -> str:
     """Cap text with an EXPLICIT marker — silent truncation let unreviewed
     changes green (panel round-3 finding); a cut must be visible to reviewers."""
@@ -395,7 +418,7 @@ _IMMUTABLE_TEXT = ("governance/mandate.md", "governance/mandate/part1.md",
                    "governance/mandate/part2.md")
 
 
-def is_control_bearing(path: str) -> bool:
+def is_control_bearing(path: str, status: str = "M") -> bool:
     """Files whose UNREVIEWED omission must block, beyond executable code.
 
     Panel finding (PR #23, part 1): omissions of `governance/*.md` and
@@ -404,7 +427,16 @@ def is_control_bearing(path: str) -> bool:
     every part greened. The mandate TEXT is exempt: it is immutable and
     hash-pinned in the manifest, and the manifest IS reviewed — so a change
     to it cannot pass unnoticed even when its body does not fit."""
-    if path in _IMMUTABLE_TEXT:
+    if path in _IMMUTABLE_TEXT and status.startswith("A"):
+        # Panel finding (PR #23 part 1): a blanket exemption meant law text
+        # could land unreviewed because "the manifest hash matches" — but a
+        # hash written by the same change proves BYTES, not legitimacy. The
+        # exemption now covers only the FIRST IMPORT of the operator-supplied
+        # specification (status A), whose provenance is the operator's own
+        # upload and whose arrival is visible in the complete file list every
+        # part carries. Any later MODIFICATION of the law is control-bearing
+        # and must be reviewed or block — which is the case that matters,
+        # because that is how an agent would rewrite the rules it runs under.
         return False
     return (is_code(path)
             or path.startswith("governance/")
@@ -503,6 +535,7 @@ def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
     names_z = _sh(["git", "diff", "--name-status", "-z", f"{mb}...HEAD"],
                   required=True)
     paths = parse_name_status_z(names_z)
+    statuses = parse_status_map_z(names_z)
     file_diffs: list[tuple[str, str]] = []
     excluded_content: list[str] = []
     for path in paths:
@@ -522,10 +555,12 @@ def build_diff_chunks(budget: int = 50_000, max_chunks: int = 2
         # real: the panel still reviews the complete file list (round-4
         # finding — an excluded-only PR must never auto-green with zero votes).
         return ([header_only(names, stat)],
-                [p for p in excluded_content if is_control_bearing(p)])
+                [p for p in excluded_content
+                 if is_control_bearing(p, statuses.get(p, "M"))])
     chunks, omitted = pack_by_risk(file_diffs, budget, max_chunks)
     unreviewed = omitted + excluded_content
-    omitted_code = [p for p in unreviewed if is_control_bearing(p)]
+    omitted_code = [p for p in unreviewed
+                    if is_control_bearing(p, statuses.get(p, "M"))]
     header = _payload_header(names, stat)
     warn = ""
     if unreviewed:

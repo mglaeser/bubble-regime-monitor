@@ -377,12 +377,47 @@ class TestControlBearingCoverage:
                      "scripts/mandate_gate.py", "conftest.py"):
             assert iv.is_control_bearing(path), path
 
-    def test_immutable_hash_pinned_mandate_text_is_exempt(self):
-        # it is pinned by manifest hash and the manifest itself is reviewed,
-        # so a 270KB spec file must not permanently block the panel
+    def test_immutable_text_is_exempt_only_on_first_import(self):
+        # narrowed after the panel refuted the blanket version: the one-time
+        # import of the operator-supplied spec is exempt; every later edit of
+        # the law is control-bearing (see TestImmutableTextExemptionIsNarrow)
         for path in iv._IMMUTABLE_TEXT:
-            assert not iv.is_control_bearing(path), path
+            assert not iv.is_control_bearing(path, "A"), path
+            assert iv.is_control_bearing(path, "M"), path
 
     def test_ordinary_docs_and_records_are_not_control_bearing(self):
         for path in ("README.md", "audit/03-findings.json", "docs/NOTES.md"):
             assert not iv.is_control_bearing(path), path
+
+
+class TestImmutableTextExemptionIsNarrow:
+    """Panel finding (PR #23): a blanket exemption for the mandate text meant
+    law could land unreviewed on the grounds that "the manifest hash matches"
+    — but a hash written by the same change proves bytes, not legitimacy."""
+
+    def test_first_import_of_operator_supplied_spec_is_exempt(self):
+        # provenance: the operator uploaded it, and its arrival is visible in
+        # the complete file list that every review part carries
+        assert not iv.is_control_bearing("governance/mandate/part1.md", "A")
+
+    def test_later_modification_of_the_law_must_be_reviewed(self):
+        # the case that actually matters: an agent rewriting the rules it runs
+        # under. Every non-add status is control-bearing.
+        for status in ("M", "D", "R100", "C075"):
+            assert iv.is_control_bearing("governance/mandate/part1.md", status), status
+            assert iv.is_control_bearing("governance/mandate.md", status), status
+
+    def test_status_defaults_to_modified_when_unknown(self):
+        # fail-closed: an unparsed status must never buy the exemption
+        assert iv.is_control_bearing("governance/mandate.md")
+
+    def test_status_map_parses_add_modify_and_rename(self):
+        raw = "A\0governance/mandate.md\0M\0scripts/x.py\0R090\0old.py\0new.py\0"
+        assert iv.parse_status_map_z(raw) == {
+            "governance/mandate.md": "A",
+            "scripts/x.py": "M",
+            "new.py": "R090"}
+
+    def test_other_governance_files_are_never_exempt(self):
+        for status in ("A", "M"):
+            assert iv.is_control_bearing("governance/constitution.md", status)
