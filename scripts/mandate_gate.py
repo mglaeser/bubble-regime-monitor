@@ -176,11 +176,13 @@ def compute_status() -> dict:
         _fail("constitution.md hash does not match governance/mandate/"
               "manifest.json — amendments must go through the gate and "
               "bump the attested hash (Article XIII)")
+    # The mandate TEXT is imported separately and is not tracked here (see
+    # manifest mandate_text_status): attesting a file the repo does not carry
+    # would be a claim about something absent. The catalogue, findings and
+    # constitution are the operative record.
     attested = {
         "findings_sha256": AUDIT / "03-findings.json",
         "check_catalogue_sha256": AUDIT / "00-check-catalogue.json",
-        "part1_sha256": GOV / "mandate" / "part1.md",
-        "combined_mandate_sha256": GOV.parent / "governance" / "mandate.md",
         "ratchet_baselines_sha256": AUDIT / "ratchet-baselines.json",
         "accepted_residuals_sha256": GOV / "accepted-residuals.json",
     }

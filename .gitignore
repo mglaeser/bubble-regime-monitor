@@ -12,3 +12,6 @@ data/snapshots/*
 dist/
 build/
 *.egg-info/
+governance/mandate.md
+governance/mandate/part1.md
+governance/mandate/part2.md

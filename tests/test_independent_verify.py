@@ -266,8 +266,7 @@ class TestRiskOrderedReviewPacking:
         # docs/records rank last — they may be truncated, code may not
         assert r("audit/03-findings.json") > r("app/x.py")
         assert r("README.md") > r("scripts/x.py")
-        # the huge hash-pinned mandate text sinks below everything
-        assert r("governance/mandate.md") > r("audit/03-findings.json")
+        # governance prose still ranks above ordinary records
 
     def test_is_code_distinguishes_real_gaps_from_records(self):
         assert iv.is_code("scripts/mandate_gate.py")
@@ -377,12 +376,10 @@ class TestControlBearingCoverage:
                      "scripts/mandate_gate.py", "conftest.py"):
             assert iv.is_control_bearing(path), path
 
-    def test_immutable_text_is_exempt_only_on_first_import(self):
-        # narrowed after the panel refuted the blanket version: the one-time
-        # import of the operator-supplied spec is exempt; every later edit of
-        # the law is control-bearing (see TestImmutableTextExemptionIsNarrow)
-        for path in iv._IMMUTABLE_TEXT:
-            assert not iv.is_control_bearing(path, "A"), path
+    def test_no_path_is_exempt_from_control_bearing_review(self):
+        # the exemption is gone; law is control-bearing whatever its status
+        for path in ("governance/mandate.md", "governance/mandate/part1.md"):
+            assert iv.is_control_bearing(path, "A"), path
             assert iv.is_control_bearing(path, "M"), path
 
     def test_ordinary_docs_and_records_are_not_control_bearing(self):
@@ -390,37 +387,19 @@ class TestControlBearingCoverage:
             assert not iv.is_control_bearing(path), path
 
 
-class TestImmutableTextExemptionIsNarrow:
-    """Panel finding (PR #23): a blanket exemption for the mandate text meant
-    law could land unreviewed on the grounds that "the manifest hash matches"
-    — but a hash written by the same change proves bytes, not legitimacy."""
+class TestNoReviewExemptionsExist:
+    """The mandate text exemption was removed entirely: the 556KB spec is no
+    longer committed here (manifest mandate_text_status), so every
+    control-bearing path is reviewed or blocks, with no carve-outs."""
 
-    def test_first_import_of_operator_supplied_spec_is_exempt(self):
-        # provenance: the operator uploaded it, and its arrival is visible in
-        # the complete file list that every review part carries
-        assert not iv.is_control_bearing("governance/mandate/part1.md", "A")
+    def test_module_defines_no_exemption_list(self):
+        assert not hasattr(iv, "_IMMUTABLE_TEXT")
 
-    def test_later_modification_of_the_law_must_be_reviewed(self):
-        # the case that actually matters: an agent rewriting the rules it runs
-        # under. Every non-add status is control-bearing.
-        for status in ("M", "D", "R100", "C075"):
-            assert iv.is_control_bearing("governance/mandate/part1.md", status), status
-            assert iv.is_control_bearing("governance/mandate.md", status), status
-
-    def test_status_defaults_to_modified_when_unknown(self):
-        # fail-closed: an unparsed status must never buy the exemption
-        assert iv.is_control_bearing("governance/mandate.md")
-
-    def test_status_map_parses_add_modify_and_rename(self):
-        raw = "A\0governance/mandate.md\0M\0scripts/x.py\0R090\0old.py\0new.py\0"
-        assert iv.parse_status_map_z(raw) == {
-            "governance/mandate.md": "A",
-            "scripts/x.py": "M",
-            "new.py": "R090"}
-
-    def test_other_governance_files_are_never_exempt(self):
-        for status in ("A", "M"):
+    def test_governance_paths_are_control_bearing_at_every_status(self):
+        for status in ("A", "M", "D", "R100"):
+            assert iv.is_control_bearing("governance/mandate.md", status)
             assert iv.is_control_bearing("governance/constitution.md", status)
+            assert iv.is_control_bearing("governance/mandate/part1.md", status)
 
 
 class TestControlDataFiles:

@@ -402,8 +402,6 @@ _RISK_DEFAULT = 7                          # docs, audit records, data blobs
 
 def path_risk(path: str) -> int:
     """Lower = reviewed earlier. Ties keep git's own ordering (deterministic)."""
-    if path in _IMMUTABLE_TEXT:
-        return _RISK_DEFAULT + 1          # hash-pinned spec: review last
     for rank, prefixes in _RISK_ORDER:
         if any(path.startswith(pfx) for pfx in prefixes):
             return rank
@@ -415,9 +413,6 @@ _CODE_SUFFIXES = (".py", ".sh", ".R", ".r", ".sql", ".yml", ".yaml", ".toml",
 _CODE_NAMES = ("Makefile", "Dockerfile", "Containerfile", "compose.yml",
                "requirements.txt", "alembic.ini", ".pre-commit-config.yaml")
 
-
-_IMMUTABLE_TEXT = ("governance/mandate.md", "governance/mandate/part1.md",
-                   "governance/mandate/part2.md")
 
 # Not code, but load-bearing: the scored artifact and the gate's thresholds,
 # verdicts and computed state. Changing any of these changes what the system
@@ -445,17 +440,14 @@ def is_control_bearing(path: str, status: str = "M") -> bool:
     every part greened. The mandate TEXT is exempt: it is immutable and
     hash-pinned in the manifest, and the manifest IS reviewed — so a change
     to it cannot pass unnoticed even when its body does not fit."""
-    if path in _IMMUTABLE_TEXT and status.startswith("A"):
-        # Panel finding (PR #23 part 1): a blanket exemption meant law text
-        # could land unreviewed because "the manifest hash matches" — but a
-        # hash written by the same change proves BYTES, not legitimacy. The
-        # exemption now covers only the FIRST IMPORT of the operator-supplied
-        # specification (status A), whose provenance is the operator's own
-        # upload and whose arrival is visible in the complete file list every
-        # part carries. Any later MODIFICATION of the law is control-bearing
-        # and must be reviewed or block — which is the case that matters,
-        # because that is how an agent would rewrite the rules it runs under.
-        return False
+    # NOTE: there is deliberately NO exemption here. An earlier revision
+    # exempted the 556KB operator-supplied mandate text so it could not
+    # permanently block the budget; the panel refused that twice, correctly —
+    # a hash written by the same change proves bytes, not legitimacy. The
+    # resolution was to stop committing that prose to this repository at all
+    # (see governance/mandate/manifest.json mandate_text_status), which
+    # removes the conflict instead of arguing it. Every control-bearing path
+    # is now reviewed or blocks, with no carve-outs.
     # Data files that ARE controls (panel finding, PR #23 round 7): these
     # carry the scored artifact and the gate's own thresholds, so "it's only
     # JSON, not code" is exactly the reasoning an attacker wants — a loosened
