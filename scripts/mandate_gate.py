@@ -213,6 +213,12 @@ def compute_status() -> dict:
         _fail("governance/mandate/manifest.json has no required_check_ids — "
               "the audit denominator must be pinned, not inferred")
     prev_manifest = previous_version("governance/mandate/manifest.json")
+    if prev_manifest is None and comparison_point():
+        # Round-13 fixed this for the acceptance register but not here: a
+        # register absent at the comparison point is only benign for a
+        # genuinely new artifact, and the manifest is not new.
+        print("[mandate-gate] note: no manifest at the comparison point — "
+              "treating the pinned universe as newly established")
     if prev_manifest:
         prev_required = set(prev_manifest.get("required_check_ids") or [])
         dropped = sorted(prev_required - set(required))
@@ -274,6 +280,59 @@ def compute_status() -> dict:
         if f["verdict"] in OPEN_VERDICTS and band in BLOCKER_BANDS:
             open_blockers.append(f["id"])
             band_counts[band] += 1
+
+    # CRITICAL (own adversarial sweep, 2026-07-25): audit/03-findings.json —
+    # the ONLY register that carries the verdicts and bands the blocker set is
+    # computed from — was never compared against the comparison point. Its sole
+    # defence was manifest findings_sha256, which the same commit legitimately
+    # refreshes. Re-banding every open blocker down (or closing its verdict)
+    # therefore erased all 32 blockers and flipped production_eligible to true
+    # while the gate printed "status: OK". Reproduced end-to-end.
+    prev_findings = previous_version("audit/03-findings.json")
+    if prev_findings:
+        by_id = {f["id"]: f for f in findings}
+        for pf in prev_findings:
+            cur = by_id.get(pf["id"])
+            if cur is None:
+                continue                      # deletions: pinned-universe check
+            was = effective_band(pf)
+            if was not in BLOCKER_BANDS or pf.get("verdict") not in OPEN_VERDICTS:
+                continue
+            now = effective_band(cur)
+            weaker = ALL_BANDS.index(now) > ALL_BANDS.index(was)
+            closed = cur["verdict"] not in OPEN_VERDICTS
+            if not (weaker or closed):
+                continue
+            change = (f"{was}->{now}" if weaker
+                      else f"{pf['verdict']}->{cur['verdict']}")
+            rec = cur.get("weakening_record")
+            if not (isinstance(rec, dict)
+                    and str(rec.get("change", "")).strip() == change
+                    and isinstance(rec.get("reason"), str)
+                    and len(rec["reason"].strip()) >= 20
+                    and isinstance(rec.get("authorised_by"), str)
+                    and rec["authorised_by"].strip()):
+                _fail(f"{pf['id']} was WEAKENED out of the blocker set "
+                      f"({change}) with no structured `weakening_record` "
+                      "(change, reason, authorised_by) — refreshing "
+                      "findings_sha256 in the same change is not that "
+                      "decision (§9.1)")
+
+    # CRITICAL 2: the catalogue carries the authoritative founding_band for all
+    # 119 checks and was compared on ID SETS ONLY, so a band downgrade in the
+    # findings left check_catalogue_sha256 valid and the two records silently
+    # contradicting each other.
+    cat_by_id = {c["id"]: c for c in catalogue["checks"]}
+    for f in findings:
+        founding = cat_by_id.get(f["id"], {}).get("founding_band")
+        if not founding:
+            continue
+        if ALL_BANDS.index(effective_band(f)) > ALL_BANDS.index(founding):
+            if not isinstance(f.get("weakening_record"), dict):
+                _fail(f"{f['id']} is banded {effective_band(f)} but the "
+                      f"immutable catalogue records {founding} — a check's "
+                      "founding band may not be softened in the findings "
+                      "without a structured weakening_record (§9.9)")
 
     accepted_ids = set(accepted["accepted_open_findings"])
     prev_acc = previous_version("governance/accepted-residuals.json")

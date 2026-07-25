@@ -706,3 +706,107 @@ class TestPanelFindingsRound14:
             stderr = ""
         monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: _R())
         assert mg.previous_version("audit/ratchet-baselines.json") is None
+
+
+class TestFindingsRegisterLaundering:
+    """CRITICAL, from this repository's own adversarial sweep (2026-07-25):
+    audit/03-findings.json — the ONLY register carrying the verdicts and bands
+    the blocker set is computed from — had no comparison-point check. Editing
+    it and refreshing findings_sha256 erased all 32 open blockers and flipped
+    production_eligible to true while the gate printed 'status: OK'."""
+
+    def _engagement(self, monkeypatch, tmp_path, **kw):
+        _write_minimal_engagement(tmp_path, **kw)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+
+    def _prev(self, monkeypatch, findings):
+        def _pv(path):
+            if "03-findings" in path:
+                return findings
+            return None
+        monkeypatch.setattr(mg, "previous_version", _pv)
+
+    def test_band_downgrade_out_of_the_blocker_set_blocks(self, monkeypatch, tmp_path):
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=False)
+        cur = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        for r in cur:
+            if r["id"] == "A-02":
+                r["band"] = "MUST-FIX"          # STOP-SHIP -> MUST-FIX
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(cur))
+        _reattest(tmp_path)
+        self._prev(monkeypatch, [{"id": "A-02", "band": "STOP-SHIP",
+                                  "verdict": "FAIL"}])
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_closing_an_open_blockers_verdict_blocks(self, monkeypatch, tmp_path):
+        # the second route: leave the band, flip the verdict to PASS/N-A
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=False)
+        cur = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        for r in cur:
+            if r["id"] == "A-02":
+                r["verdict"] = "NOT-APPLICABLE"
+                r["na_justification"] = "claims to no longer apply"
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(cur))
+        _reattest(tmp_path)
+        self._prev(monkeypatch, [{"id": "A-02", "band": "STOP-SHIP",
+                                  "verdict": "FAIL"}])
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_a_structured_weakening_record_permits_the_change(
+            self, monkeypatch, tmp_path):
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=False)
+        cur = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        for r in cur:
+            if r["id"] == "A-02":
+                r["band"] = "MUST-FIX"
+                r["weakening_record"] = {
+                    "change": "STOP-SHIP->MUST-FIX",
+                    "reason": "fixed with red-to-green evidence in audit/05",
+                    "authorised_by": "operator"}
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(cur))
+        _reattest(tmp_path)
+        self._prev(monkeypatch, [{"id": "A-02", "band": "STOP-SHIP",
+                                  "verdict": "FAIL"}])
+        mg.compute_status()          # does not raise
+
+    def test_a_record_for_a_DIFFERENT_change_does_not_license_this_one(
+            self, monkeypatch, tmp_path):
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=False)
+        cur = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        for r in cur:
+            if r["id"] == "A-02":
+                r["band"] = "MUST-FIX"
+                r["weakening_record"] = {
+                    "change": "BLOCKER-1->MUST-FIX",     # not this change
+                    "reason": "an unrelated earlier decision entirely",
+                    "authorised_by": "operator"}
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(cur))
+        _reattest(tmp_path)
+        self._prev(monkeypatch, [{"id": "A-02", "band": "STOP-SHIP",
+                                  "verdict": "FAIL"}])
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_findings_band_may_not_contradict_the_immutable_catalogue(
+            self, monkeypatch, tmp_path):
+        # the catalogue carries the authoritative founding_band and was
+        # compared on ID SETS only, so a downgrade left its hash valid
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=False)
+        cur = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        for r in cur:
+            if r["id"] == "A-02":
+                r["band"] = "PLAN"       # catalogue says STOP-SHIP
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(cur))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "previous_version", lambda _p: None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()

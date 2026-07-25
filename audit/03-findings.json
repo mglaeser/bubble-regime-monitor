@@ -21,7 +21,13 @@
    "S3"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "blocking ci.yml + mandate_gate.py all + independent-verify.yml on every PR; weekly heartbeat; full enforcement pending branch protection (accepted residual)"
+  "standing_control": "blocking ci.yml + mandate_gate.py all + independent-verify.yml on every PR; weekly heartbeat; full enforcement pending branch protection (accepted residual)",
+  "weakening_record": {
+   "change": "STOP-SHIP->BLOCKER-1",
+   "reason": "The paired escalation 'A-01+A-39 both fail' is void: A-39 is PASS since 2026-07-25 (cross-vendor panel live and enforcing). A-01 returns to its own founding band; branch protection remains open.",
+   "authorised_by": "evidence-backed reconciliation recorded in audit/05 addenda",
+   "date": "2026-07-25"
+  }
  },
  {
   "id": "A-02",
@@ -142,7 +148,13 @@
    "S3"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "blocking CI scans + mandate_gate ratchet (noqa/type-ignore ceilings) + weekly seeded-defect calibration incl. the credential-shape class."
+  "standing_control": "blocking CI scans + mandate_gate ratchet (noqa/type-ignore ceilings) + weekly seeded-defect calibration incl. the credential-shape class.",
+  "weakening_record": {
+   "change": "FAIL->PARTIAL",
+   "reason": "CI now blocks on ruff-S, pip-audit and detect-secrets on real runners, and the credential-shape scanner closes the UUID-token gap; suppression counts are ratcheted. Branch protection remains open, so PARTIAL not PASS.",
+   "authorised_by": "evidence-backed reconciliation, audit/05 addenda",
+   "date": "2026-07-25"
+  }
  },
  {
   "id": "A-09",
@@ -420,6 +432,12 @@
    "blocks_on_breach": "merge (CI red)",
    "owning_role": "operator (mglaeser)",
    "demonstrated": "red->green captured in audit/05 (HTTP 500 before, 422 after); the verifier's bypass reproduced and closed with its own regression test"
+  },
+  "weakening_record": {
+   "change": "FAIL->PASS",
+   "reason": "Boundary parsing 500->422 fixed with red->green evidence (audit/05) including the verifier's timedelta-overflow bypass; regression tests run in the blocking suite.",
+   "authorised_by": "evidence-backed reconciliation recorded in audit/05 addenda",
+   "date": "2026-07-25"
   }
  },
  {
@@ -650,6 +668,12 @@
    "blocks_on_breach": "merge (CI red)",
    "owning_role": "operator (mglaeser)",
    "demonstrated": "16 live veto rounds on PRs #21/#22 blocked merges until each finding was fixed or refuted with test evidence (Actions runs 30165282911, 30165646149 et al., 2026-07-25)"
+  },
+  "weakening_record": {
+   "change": "STOP-SHIP->PLAN",
+   "reason": "The independent cross-vendor adversarial verifier now exists and enforces: independent-verify.yml with a required-approver veto, proven by 16 live blocking rounds across PRs #21/#22/#23.",
+   "authorised_by": "evidence-backed reconciliation recorded in audit/05 addenda",
+   "date": "2026-07-25"
   }
  },
  {
@@ -680,7 +704,13 @@
    "S1"
   ],
   "owning_role": "operator (mglaeser) \u2014 sole owning role for this single-maintainer self-hosted service",
-  "standing_control": "blocking ci.yml jobs + mandate_gate.py all + independent-verify.yml on every PR; weekly scheduled run as heartbeat."
+  "standing_control": "blocking ci.yml jobs + mandate_gate.py all + independent-verify.yml on every PR; weekly scheduled run as heartbeat.",
+  "weakening_record": {
+   "change": "FAIL->PARTIAL",
+   "reason": "The 'no runner executes CI' state is over: GitHub Actions demonstrably executes and blocks, with failed runs blocking merges. Branch protection (required checks, no bypass) remains an open operator action.",
+   "authorised_by": "evidence-backed reconciliation, audit/05 addenda",
+   "date": "2026-07-25"
+  }
  },
  {
   "id": "B-02",

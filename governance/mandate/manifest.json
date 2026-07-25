@@ -144,11 +144,11 @@
   "C-40"
  ],
  "constitution_sha256": "18488aa0a480f9707a97a402551d762a343f840adfb791521e7b365a51fd2080",
- "ratchet_baselines_sha256": "26763ffa5cbe356d390a164a5899937052d10f2a6cbb938d7e3b07c8500a90ad",
+ "ratchet_baselines_sha256": "ad00fe2229fe0f360ee17b9325368683348b90e1b3106a96708d7b45904417b5",
  "accepted_residuals_sha256": "4ea3c37be35f2f15f507e338b0c785f646449b589c620abe446e1546f1cdc81e",
  "attested": "2026-07-25",
  "write_separation": ".github/CODEOWNERS routes governance/, audit/, scripts/ and .github/ to the operator; mandate_gate verifies these hashes every CI run. The attested set includes the gate's authority files (ratchet baselines, accepted residuals) per the 2026-07-25 tamper-test finding.",
- "findings_sha256": "6300e36c6edddca59a7e9068ba8e46ad8536a5f47df9cdf7d1393efc67cea521",
+ "findings_sha256": "464186574b4aa8ee211601548878294be3a0b42bad1eca5cc879468e10a73963",
  "check_catalogue_sha256": "b7b319a38713483eb3599a95fef2ae58354192f20c9b6bd0d7ef8e2edc54e757",
  "mandate_text_status": "PENDING-IMPORT: the operator-supplied specification text is not committed in this change. It is imported separately (operator commit or its own PR), which keeps 556KB of prose out of every review budget and removes the need for any review exemption. The catalogue, findings and constitution are the operative record until it lands."
 }
