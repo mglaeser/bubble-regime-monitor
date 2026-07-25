@@ -160,6 +160,16 @@
   "routes": [
     {
       "method": "GET",
+      "module": "app/routers/indicators.py",
+      "path": ""
+    },
+    {
+      "method": "GET",
+      "module": "app/routers/score.py",
+      "path": ""
+    },
+    {
+      "method": "GET",
       "module": "app/routers/status.py",
       "path": "/"
     },

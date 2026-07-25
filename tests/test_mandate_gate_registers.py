@@ -785,3 +785,100 @@ class TestPanelFindingsRound29:
                          "governance/accepted-residuals.json",
                          "audit/ratchet-baselines.json"):
             assert register in src
+
+
+class TestPanelFindingsRound32:
+    """An acceptance is a STANDING decision, so its record must stand with it.
+    Round 25 made the orphan prune unconditional -- a record whose id is no
+    longer accepted blocks -- but left the mirror case conditional on `newly`,
+    so an already-accepted id could have its record deleted and nothing
+    looked. All 32 waived blockers could lose their justification while the
+    gate printed OK."""
+
+    PREV = {"accepted_open_findings": ["A-02"],
+            "acceptance_records": [{
+                "finding_id": "A-02",
+                "reason": "compensating control and tripwire recorded in audit/06",
+                "authorised_by": "operator (test fixture)"}]}
+
+    def _fixture(self, monkeypatch, tmp_path, mutate):
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        reg = tmp_path / "governance" / "accepted-residuals.json"
+        d = json.loads(reg.read_text())
+        mutate(d)                       # A-02 stays ACCEPTED throughout
+        reg.write_text(json.dumps(d))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        # the id is NOT newly accepted -- it was already there. That is what
+        # made `newly` empty and skipped the check.
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: (self.PREV
+                                       if "accepted-residuals" in p else None))
+
+    def _err(self, monkeypatch, tmp_path, mutate) -> str:
+        import contextlib
+        import io
+        self._fixture(monkeypatch, tmp_path, mutate)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), pytest.raises(SystemExit):
+            mg.compute_status()
+        return err.getvalue()
+
+    def test_deleting_the_record_of_a_standing_acceptance_blocks(
+            self, monkeypatch, tmp_path):
+        err = self._err(monkeypatch, tmp_path,
+                        lambda d: d.__setitem__("acceptance_records", []))
+        assert "acceptance_record is missing or malformed" in err
+
+    def test_falsy_malformed_containers_cannot_normalise_past_the_shape_check(
+            self, monkeypatch, tmp_path):
+        # `... or []` turned {}, 0 and "" into an empty list BEFORE the shape
+        # guard could object -- exactly the values a tamper would use
+        for i, bad in enumerate(({}, 0, "")):
+            case = tmp_path / f"case{i}"
+            case.mkdir()
+            err = self._err(monkeypatch, case,
+                            lambda d, b=bad: d.__setitem__("acceptance_records", b))
+            assert ("acceptance_record is missing or malformed" in err
+                    or "must be a LIST" in err), bad
+
+    def test_a_non_falsy_wrong_shape_still_names_the_shape(
+            self, monkeypatch, tmp_path):
+        err = self._err(monkeypatch, tmp_path,
+                        lambda d: d.__setitem__("acceptance_records",
+                                                {"A-02": "waived"}))
+        assert "must be a LIST" in err
+
+    def test_a_hollowed_out_record_does_not_count_as_documentation(
+            self, monkeypatch, tmp_path):
+        for i, bad in enumerate(({"finding_id": "A-02"},
+                                 {"finding_id": "A-02", "reason": "short",
+                                  "authorised_by": "operator"},
+                                 {"finding_id": "A-02", "reason": "x" * 30,
+                                  "authorised_by": "  "})):
+            case = tmp_path / f"case{i}"
+            case.mkdir()
+            err = self._err(monkeypatch, case,
+                            lambda d, b=bad: d.__setitem__("acceptance_records", [b]))
+            assert "acceptance_record is missing or malformed" in err, bad
+
+    def test_an_intact_standing_acceptance_still_passes(
+            self, monkeypatch, tmp_path):
+        # BOTH SIDES: the ordinary steady state -- accepted with a good record,
+        # nothing newly accepted -- must stay green
+        self._fixture(monkeypatch, tmp_path, lambda d: None)
+        mg.compute_status()          # does not raise
+
+    def test_the_live_register_documents_every_acceptance(self):
+        # the property this pins for the real repository: 32 accepted, 32 records
+        accepted = json.loads(
+            (Path(mg.ROOT) / "governance" / "accepted-residuals.json").read_text())
+        ids = set(accepted["accepted_open_findings"])
+        documented = {r["finding_id"] for r in accepted["acceptance_records"]
+                      if isinstance(r, dict)
+                      and len(str(r.get("reason", "")).strip()) >= 20
+                      and str(r.get("authorised_by", "")).strip()}
+        assert ids and ids <= documented

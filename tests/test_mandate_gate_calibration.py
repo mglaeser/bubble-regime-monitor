@@ -583,3 +583,52 @@ class TestPanelFindingsRound29:
             (tmp_path / "audit" / "00-audit-surface.json").read_text())["routes"]}
         assert ("GET", "/deep/nested") in found
         assert ("PATCH", "/deep/patched") in found
+
+
+class TestRoutePathExtraction:
+    """The decorator's path may be positional or the `path=` keyword, in any
+    argument position, and may be the EMPTY string (a route mounted at the
+    router prefix). Both live "" endpoints were missing from the denominator."""
+
+    def _surface(self, monkeypatch, tmp_path, source):
+        (tmp_path / "audit").mkdir()
+        (tmp_path / "app").mkdir(parents=True)
+        (tmp_path / "app" / "r.py").write_text(source)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+
+        class R:
+            returncode = 0
+            stdout = "app/r.py\0"
+            stderr = ""
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: R())
+        mg.cmd_surface()
+        return {(r["method"], r["path"]) for r in json.loads(
+            (tmp_path / "audit" / "00-audit-surface.json").read_text())["routes"]}
+
+    def test_every_path_form_reaches_the_denominator(self, monkeypatch, tmp_path):
+        found = self._surface(monkeypatch, tmp_path, (
+            '@router.get("/positional")\ndef a(): ...\n'
+            '@router.get(path="/keyword")\ndef b(): ...\n'
+            '@router.post(response_model=X, path="/late-keyword")\ndef c(): ...\n'
+            '@router.patch("/with-kwargs", tags=["x"])\ndef d(): ...\n'
+            '@api.router.put(path = "/spaced")\ndef e(): ...\n'))
+        assert ("GET", "/positional") in found
+        assert ("GET", "/keyword") in found
+        assert ("POST", "/late-keyword") in found
+        assert ("PATCH", "/with-kwargs") in found
+        assert ("PUT", "/spaced") in found
+
+    def test_an_empty_path_is_a_real_route_not_a_parse_failure(
+            self, monkeypatch, tmp_path):
+        found = self._surface(monkeypatch, tmp_path, (
+            '@router.get(\n    "",\n    summary="Headline",\n)\ndef a(): ...\n'))
+        assert ("GET", "") in found
+        assert not any("summary" in p for _, p in found)   # no garbage capture
+
+    def test_the_live_surface_carries_both_empty_path_routes(self):
+        surface = json.loads(
+            (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
+        empties = [r for r in surface["routes"] if r["path"] == ""]
+        assert len(empties) == 2, empties
+        assert len(surface["routes"]) >= 21

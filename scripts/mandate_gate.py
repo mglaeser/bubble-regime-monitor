@@ -24,6 +24,7 @@ fail-closed — a check that cannot run is a failed check, not a skipped one.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -533,16 +534,22 @@ def compute_status() -> dict:
     # A register that does not exist at the comparison point makes EVERY entry
     # new (panel finding, round 13: prev=None skipped the check entirely, so a
     # freshly-introduced register could waive every open blocker with bare ids).
-    records = accepted.get("acceptance_records") or []
-    # Shape is load-bearing (follow-on sweep): every reader below filters with
+    # Shape is load-bearing: every reader below filters with
     # `isinstance(r, dict)`, so a register whose acceptance_records is itself a
     # MAPPING iterates its keys — plain strings — and every check silently sees
     # zero records. That reads as "no orphans, nothing to authorise" rather
     # than as the malformed register it is.
-    if not isinstance(records, list):
+    #
+    # Read the RAW value first (panel round 32): `... or []` normalises every
+    # FALSY malformed value — {}, 0, "" — to an empty list before the shape
+    # check can object, so exactly the values a tamper would use slipped past
+    # the guard added to catch them.
+    raw_records = accepted.get("acceptance_records")
+    if raw_records is not None and not isinstance(raw_records, list):
         _fail("acceptance_records must be a LIST of records, not "
-              f"{type(records).__name__} — any other shape makes every "
+              f"{type(raw_records).__name__} — any other shape makes every "
               "per-record check vacuously pass")
+    records = raw_records or []
     # ORPHAN PRUNE (round 17): a record for an id that is no longer accepted
     # must be removed. Retaining it let an id be closed and later RE-accepted
     # with the stale record satisfying the check — a second acceptance on a
@@ -602,6 +609,33 @@ def compute_status() -> dict:
         _fail(f"accepted-residuals register lists findings that are no longer "
               f"open blockers: {stale} — prune the register (a closed "
               "acceptance left in place is a future bypass)")
+
+    # STANDING INVARIANT, both directions (panel round 32). Round 25 made the
+    # orphan prune unconditional — a RECORD whose id is no longer accepted
+    # blocks — but left the mirror case conditional on `newly`: an id that was
+    # already accepted at the comparison point could have its record DELETED
+    # and nothing looked, because nothing was newly accepted. All 32 waived
+    # blockers could lose their justification while the gate printed OK.
+    #
+    # An acceptance is a standing operator decision, so the record backing it
+    # must exist for as long as the acceptance does — not merely at the moment
+    # it is granted. Freshness (below) still governs NEW acceptances; this
+    # governs every one of them, every run.
+    undocumented = sorted(
+        fid for fid in accepted_ids
+        if not any(isinstance(r, dict)
+                   and r.get("finding_id") == fid
+                   and isinstance(r.get("reason"), str)
+                   and len(r["reason"].strip()) >= 20
+                   and isinstance(r.get("authorised_by"), str)
+                   and r["authorised_by"].strip()
+                   for r in records))
+    if undocumented:
+        _fail("accepted blocker-band findings whose acceptance_record is "
+              f"missing or malformed: {undocumented} — an acceptance is a "
+              "standing decision and its record must stand with it. Deleting "
+              "the justification while keeping the waiver leaves an open "
+              "blocker suppressed by nothing at all.")
 
     # Governance hash attestation (Article XI / B-35). The attested set
     # includes the gate's own authority files — the ratchet baselines and the
@@ -1312,15 +1346,47 @@ def cmd_surface(check: bool = False) -> None:
     # `@api.router.get(...)` is an ordinary FastAPI form and `@(\w+)` matched
     # only a bare name, so those endpoints were live traffic missing from the
     # denominator.
-    _VERBS = "get|post|put|delete|patch|head|options|trace|api_route"
+    _VERBS = {"get", "post", "put", "delete", "patch",
+              "head", "options", "trace", "api_route"}
     routes = []
     for p in sorted(ROOT.glob("app/**/*.py")):
-        for m in re.finditer(rf"@([\w.]+)\.({_VERBS})\(\s*[\"']([^\"']+)",
-                             p.read_text(errors="replace")):
-            verb = m.group(2).upper()
-            routes.append({"method": "ANY" if verb == "API_ROUTE" else verb,
-                           "path": m.group(3),
-                           "module": str(p.relative_to(ROOT))})
+        # PARSED, not pattern-matched. Every regex here has been wrong in a
+        # different way: positional-only missed `path=`; anchoring on the
+        # paren missed `path=` after another kwarg; a fixed character window
+        # read the NEXT decorator's `path=` and mis-assigned it; and requiring
+        # one-or-more characters skipped `@router.get("")` -- a real endpoint
+        # mounted at the router prefix -- then captured garbage from the
+        # following quote. The decorator is Python, so the parser answers all
+        # of it exactly, including multi-line forms.
+        try:
+            tree = ast.parse(p.read_text(errors="replace"))
+        except SyntaxError as exc:
+            _fail(f"{p.relative_to(ROOT)} does not parse ({exc}) — refusing to "
+                  "write a route inventory that silently omits its endpoints")
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for dec in node.decorator_list:
+                if not isinstance(dec, ast.Call):
+                    continue
+                fn = dec.func
+                if not isinstance(fn, ast.Attribute) or fn.attr not in _VERBS:
+                    continue
+                route = None
+                for kw in dec.keywords:
+                    if kw.arg == "path" and isinstance(kw.value, ast.Constant):
+                        route = kw.value.value
+                if route is None and dec.args:
+                    first = dec.args[0]
+                    if isinstance(first, ast.Constant) and isinstance(
+                            first.value, str):
+                        route = first.value
+                if route is None:
+                    continue
+                verb = fn.attr.upper()
+                routes.append({"method": "ANY" if verb == "API_ROUTE" else verb,
+                               "path": route,
+                               "module": str(p.relative_to(ROOT))})
     surface = {
         "generated_by": "scripts/mandate_gate.py surface",
         "files_tracked": len(tracked),
