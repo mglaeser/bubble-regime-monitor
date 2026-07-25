@@ -15,7 +15,8 @@ Runs in CI on every change (blocking) and on the weekly cadence. Subcommands:
              the gates still catch each class in the calibration corpus, and
              that the two NOT-APPLICABLE classes are still structurally absent.
   surface    Regenerate audit/00-audit-surface.json (the audit denominator).
-  all        status + ratchet + calibrate (the CI entry point).
+             `--check` fails on drift instead of writing.
+  all        status + ratchet + calibrate + surface --check (the CI entry point).
 
 Design rules: stdlib only (subprocess for the real gate tools), deterministic,
 fail-closed — a check that cannot run is a failed check, not a skipped one.
@@ -119,6 +120,22 @@ def valid_weakening_record(rec, change: str | None = None) -> bool:
     if change is not None and str(rec.get("change", "")).strip() != change:
         return False
     return True
+
+
+def weakening_records(raw) -> list:
+    """Normalise `weakening_record` to a list of candidate records.
+
+    A finding that is re-banded AND closed in one change needs one record per
+    transition (panel round 24), so the field accepts either a single dict or
+    a list of them. EVERY reader must go through this: a list-shaped field
+    read as a dict silently reduces to "no record" — which blocks a legitimate
+    change at the catalogue cross-check, and, on the prior side of the
+    freshness comparison, makes a RETAINED list look fresh."""
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [r for r in raw if isinstance(r, dict)]
+    return []
 
 
 def effective_band(finding: dict) -> str:
@@ -401,9 +418,8 @@ def compute_status() -> dict:
     prev_findings = previous_version("audit/03-findings.json")
     if prev_findings:
         by_id = {f["id"]: f for f in findings}
-        prev_recs_by_id = {f["id"]: f.get("weakening_record")
-                           for f in prev_findings
-                           if isinstance(f.get("weakening_record"), dict)}
+        prev_recs_by_id = {f["id"]: weakening_records(f.get("weakening_record"))
+                           for f in prev_findings}
         # NOTE: history-wide freshness is applied to the ratchet and
         # acceptance REGISTERS, whose records are append-only decisions, but
         # NOT to weakening_record. A weakening record legitimately persists
@@ -425,22 +441,31 @@ def compute_status() -> dict:
             closed = cur["verdict"] not in OPEN_VERDICTS
             if not (weaker or closed):
                 continue
-            change = (f"{was}->{now}" if weaker
-                      else f"{pf['verdict']}->{cur['verdict']}")
-            rec = cur.get("weakening_record")
-            prior = prev_recs_by_id.get(pf["id"])
-            if (valid_weakening_record(rec, change)
-                    and not is_fresh(rec, [prior] if prior else [])):
-                _fail(f"{pf['id']} carries a weakening_record RETAINED from "
-                      "the comparison point — a record authorises one change, "
-                      "not every later repeat of it (re-tighten then downgrade "
-                      "again and the old record would license it)")
-            if not valid_weakening_record(rec, change):
-                _fail(f"{pf['id']} was WEAKENED out of the blocker set "
-                      f"({change}) with no structured `weakening_record` "
-                      "(change, reason, authorised_by) — refreshing "
-                      "findings_sha256 in the same change is not that "
-                      "decision (§9.1)")
+            # BOTH a re-band and a verdict closure can happen in one change.
+            # Taking whichever came first left the other unauthorised (panel
+            # round 24), so every weakening that occurred needs its own record.
+            required_changes = []
+            if weaker:
+                required_changes.append(f"{was}->{now}")
+            if closed:
+                required_changes.append(f"{pf['verdict']}->{cur['verdict']}")
+            recs = weakening_records(cur.get("weakening_record"))
+            priors = prev_recs_by_id.get(pf["id"], [])
+            for change in required_changes:
+                match = next((r for r in recs
+                              if valid_weakening_record(r, change)), None)
+                if match is None:
+                    _fail(f"{pf['id']} was WEAKENED out of the blocker set "
+                          f"({change}) with no structured `weakening_record` "
+                          "(change, reason, authorised_by) — refreshing "
+                          "findings_sha256 in the same change is not that "
+                          "decision (§9.1). When a finding is both re-banded "
+                          "AND closed, each transition needs its own record; "
+                          "weakening_record may be a list.")
+                if not is_fresh(match, priors):
+                    _fail(f"{pf['id']} carries a weakening_record RETAINED "
+                          f"from the comparison point for {change} — a record "
+                          "authorises one change, not every later repeat of it")
 
     # CRITICAL 2: the catalogue carries the authoritative founding_band for all
     # 119 checks and was compared on ID SETS ONLY, so a band downgrade in the
@@ -452,9 +477,9 @@ def compute_status() -> dict:
         if not founding:
             continue
         if ALL_BANDS.index(effective_band(f)) > ALL_BANDS.index(founding):
-            if not valid_weakening_record(
-                    f.get("weakening_record"),
-                    f"{founding}->{effective_band(f)}"):
+            change = f"{founding}->{effective_band(f)}"
+            if not any(valid_weakening_record(r, change)
+                       for r in weakening_records(f.get("weakening_record"))):
                 _fail(f"{f['id']} is banded {effective_band(f)} but the "
                       f"immutable catalogue records {founding} — a check's "
                       "founding band may not be softened in the findings "
@@ -1008,7 +1033,17 @@ def cmd_calibrate() -> None:
 # --------------------------------------------------------------- surface ----
 
 
-def cmd_surface() -> None:
+def cmd_surface(check: bool = False) -> None:
+    """Regenerate the audit surface, or (check=True) prove the committed copy
+    still matches it.
+
+    The surface is the audit DENOMINATOR — every coverage claim divides by
+    `files_tracked`. Nothing verified it, and the repo consequently carried a
+    copy reading `files_tracked: 2` with two fixture module names, leaked from
+    a test that patched ROOT before the tests were made hermetic. A stale
+    denominator does not fail loudly; it makes partial coverage look total.
+    So it is now a computed property with a drift check, exactly like
+    audit/engagement-status.json."""
     # -z and an rc check (round 23): whitespace splitting mangled paths with
     # spaces and a git failure produced an EMPTY audit denominator that still
     # reported success.
@@ -1055,7 +1090,22 @@ def cmd_surface() -> None:
                     "app/notify/ (SMS text)"],
     }
     out = AUDIT / "00-audit-surface.json"
-    out.write_text(json.dumps(surface, indent=2, sort_keys=True) + "\n")
+    rendered = json.dumps(surface, indent=2, sort_keys=True) + "\n"
+    if check:
+        try:
+            committed = out.read_text()
+        except OSError:
+            _fail("audit/00-audit-surface.json is missing — the audit "
+                  "denominator must be committed; run `surface` and commit it")
+        if committed != rendered:
+            _fail("audit/00-audit-surface.json drifted from the computed "
+                  "surface — regenerate with `surface` and commit (the file "
+                  "is a computed property, never hand-edited). Tracked files: "
+                  f"committed={json.loads(committed).get('files_tracked')!r} "
+                  f"computed={len(tracked)}")
+        print(f"surface: OK — {len(tracked)} tracked files, {len(routes)} routes")
+        return
+    out.write_text(rendered)
     print(f"wrote {out.relative_to(ROOT)} ({len(tracked)} tracked files, "
           f"{len(routes)} routes)")
 
@@ -1076,11 +1126,12 @@ def main() -> int:
     elif cmd == "calibrate":
         cmd_calibrate()
     elif cmd == "surface":
-        cmd_surface()
+        cmd_surface(check="--check" in args)
     elif cmd == "all":
         cmd_status(write=False)
         cmd_ratchet(measure_only=False)
         cmd_calibrate()
+        cmd_surface(check=True)
         print("mandate-gate: ALL OK")
     else:
         print(f"unknown subcommand {cmd!r}", file=sys.stderr)

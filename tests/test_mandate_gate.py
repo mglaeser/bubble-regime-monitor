@@ -1288,3 +1288,179 @@ class TestPanelFindingsRound23:
         surface = json.loads((tmp_path / "audit" / "00-audit-surface.json").read_text())
         assert "app/we ird name.py" in surface["python_modules"]
         assert surface["files_tracked"] == 2
+
+
+class TestSurfaceDriftCheck:
+    """The audit denominator is a computed property. Nothing verified the
+    committed copy, and the repo carried one reading `files_tracked: 2` —
+    fixture content leaked by a test written before the surface tests were
+    made hermetic. Stale coverage denominators fail quietly, which is worse
+    than failing loudly."""
+
+    def _repo(self, monkeypatch, tmp_path, tracked):
+        (tmp_path / "audit").mkdir(exist_ok=True)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+
+        class R:
+            returncode = 0
+            stdout = "\0".join(tracked) + "\0"
+            stderr = ""
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: R())
+
+    def test_check_passes_on_a_freshly_generated_surface(self, monkeypatch, tmp_path):
+        self._repo(monkeypatch, tmp_path, ["app/a.py", "app/b.py"])
+        mg.cmd_surface()
+        mg.cmd_surface(check=True)          # does not raise
+
+    def test_check_blocks_a_stale_denominator(self, monkeypatch, tmp_path):
+        self._repo(monkeypatch, tmp_path, ["app/a.py", "app/b.py"])
+        mg.cmd_surface()
+        self._repo(monkeypatch, tmp_path,
+                   ["app/a.py", "app/b.py", "app/c.py"])   # repo grew
+        with pytest.raises(SystemExit):
+            mg.cmd_surface(check=True)
+
+    def test_check_blocks_a_hand_edited_surface(self, monkeypatch, tmp_path):
+        self._repo(monkeypatch, tmp_path, ["app/a.py", "app/b.py"])
+        mg.cmd_surface()
+        out = tmp_path / "audit" / "00-audit-surface.json"
+        d = json.loads(out.read_text())
+        d["files_tracked"] = 999
+        out.write_text(json.dumps(d, indent=2, sort_keys=True) + "\n")
+        with pytest.raises(SystemExit):
+            mg.cmd_surface(check=True)
+
+    def test_check_blocks_a_missing_surface(self, monkeypatch, tmp_path):
+        self._repo(monkeypatch, tmp_path, ["app/a.py"])
+        with pytest.raises(SystemExit):
+            mg.cmd_surface(check=True)
+
+    def test_check_never_writes(self, monkeypatch, tmp_path):
+        self._repo(monkeypatch, tmp_path, ["app/a.py"])
+        out = tmp_path / "audit" / "00-audit-surface.json"
+        out.write_text("{}\n")
+        with pytest.raises(SystemExit):
+            mg.cmd_surface(check=True)
+        assert out.read_text() == "{}\n"   # a check that repairs is not a check
+
+    def test_live_surface_matches_the_repository(self):
+        # regression: the committed denominator was fixture content
+        surface = json.loads(
+            (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
+        assert surface["files_tracked"] > 100
+        assert "app/main.py" in surface["python_modules"]
+
+
+class TestPanelFindingsRound24:
+    """A finding can be re-banded AND closed in one change; authorising only
+    the first transition left the second unrecorded."""
+
+    def _engagement(self, monkeypatch, tmp_path, **kw):
+        _write_minimal_engagement(tmp_path, **kw)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+
+    def _apply(self, tmp_path, monkeypatch, record):
+        cur = json.loads((tmp_path / "audit" / "03-findings.json").read_text())
+        for r in cur:
+            if r["id"] == "A-02":
+                r["band"] = "MUST-FIX"          # re-band ...
+                r["verdict"] = "PASS"           # ... AND close
+                r["standing_control"] = {
+                    "mechanism": "blocking CI job runs the gate every change",
+                    "demonstrated": "observed blocking a seeded defect"}
+                if record is not None:
+                    r["weakening_record"] = record
+        (tmp_path / "audit" / "03-findings.json").write_text(json.dumps(cur))
+        _reattest(tmp_path)
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: [{"id": "A-02", "band": "STOP-SHIP",
+                                        "verdict": "FAIL"}]
+                            if "03-findings" in p else None)
+
+    def test_authorising_only_the_reband_leaves_the_closure_unrecorded(
+            self, monkeypatch, tmp_path):
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=False)
+        self._apply(tmp_path, monkeypatch, {
+            "change": "STOP-SHIP->MUST-FIX",
+            "reason": "re-banded on evidence recorded in audit/05",
+            "authorised_by": "operator"})
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_authorising_only_the_closure_leaves_the_reband_unrecorded(
+            self, monkeypatch, tmp_path):
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=False)
+        self._apply(tmp_path, monkeypatch, {
+            "change": "FAIL->PASS",
+            "reason": "closed on evidence recorded in audit/05",
+            "authorised_by": "operator"})
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_a_record_per_transition_is_accepted(self, monkeypatch, tmp_path):
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=False)
+        self._apply(tmp_path, monkeypatch, [
+            {"change": "STOP-SHIP->MUST-FIX",
+             "reason": "re-banded on evidence recorded in audit/05",
+             "authorised_by": "operator"},
+            {"change": "FAIL->PASS",
+             "reason": "closed on evidence recorded in audit/05",
+             "authorised_by": "operator"}])
+        mg.compute_status()          # does not raise
+
+    def test_a_retained_list_record_is_not_fresh(self, monkeypatch, tmp_path):
+        # The list shape must be read on the PRIOR side of the freshness
+        # comparison too: collecting only dict-shaped priors made a record
+        # carried over verbatim look brand new, so a re-tightened finding
+        # could be re-weakened for free on the strength of the old decision.
+        recs = [{"change": "STOP-SHIP->MUST-FIX",
+                 "reason": "re-banded on evidence recorded in audit/05",
+                 "authorised_by": "operator"},
+                {"change": "FAIL->PASS",
+                 "reason": "closed on evidence recorded in audit/05",
+                 "authorised_by": "operator"}]
+        self._engagement(monkeypatch, tmp_path, pass_has_control=True,
+                         blocker_accepted=False)
+        self._apply(tmp_path, monkeypatch, recs)
+        monkeypatch.setattr(mg, "previous_version",
+                            lambda p: [{"id": "A-02", "band": "STOP-SHIP",
+                                        "verdict": "FAIL",
+                                        "weakening_record": recs}]
+                            if "03-findings" in p else None)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_catalogue_crosscheck_reads_the_list_shape(self, monkeypatch, tmp_path):
+        # The founding-band cross-check ran valid_weakening_record() on the raw
+        # field, so a list — the shape a dual transition REQUIRES — reduced to
+        # "no record" and blocked a properly authorised change.
+        assert not mg.valid_weakening_record(
+            [{"change": "STOP-SHIP->MUST-FIX",
+              "reason": "re-banded on evidence recorded in audit/05",
+              "authorised_by": "operator"}], "STOP-SHIP->MUST-FIX")
+        assert any(
+            mg.valid_weakening_record(r, "STOP-SHIP->MUST-FIX")
+            for r in mg.weakening_records(
+                [{"change": "STOP-SHIP->MUST-FIX",
+                  "reason": "re-banded on evidence recorded in audit/05",
+                  "authorised_by": "operator"}]))
+
+    def test_weakening_records_rejects_non_dict_members(self):
+        assert mg.weakening_records(["authorised", None, 7]) == []
+        assert mg.weakening_records(None) == []
+        assert mg.weakening_records("operator said so") == []
+
+    def test_live_A39_records_both_of_its_transitions(self):
+        # regression: A-39 was re-banded STOP-SHIP->PLAN and closed FAIL->PASS
+        # in this PR, but only the band change was ever recorded
+        findings = json.loads(
+            (Path(mg.ROOT) / "audit" / "03-findings.json").read_text())
+        a39 = next(f for f in findings if f["id"] == "A-39")
+        changes = {r["change"] for r in a39["weakening_record"]}
+        assert changes == {"STOP-SHIP->PLAN", "FAIL->PASS"}

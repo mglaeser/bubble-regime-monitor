@@ -669,12 +669,20 @@
    "owning_role": "operator (mglaeser)",
    "demonstrated": "16 live veto rounds on PRs #21/#22 blocked merges until each finding was fixed or refuted with test evidence (Actions runs 30165282911, 30165646149 et al., 2026-07-25)"
   },
-  "weakening_record": {
-   "change": "STOP-SHIP->PLAN",
-   "reason": "The independent cross-vendor adversarial verifier now exists and enforces: independent-verify.yml with a required-approver veto, proven by 16 live blocking rounds across PRs #21/#22/#23.",
-   "authorised_by": "evidence-backed reconciliation recorded in audit/05 addenda",
-   "date": "2026-07-25"
-  }
+  "weakening_record": [
+   {
+    "change": "STOP-SHIP->PLAN",
+    "reason": "The independent cross-vendor adversarial verifier now exists and enforces: independent-verify.yml with a required-approver veto, proven by 16 live blocking rounds across PRs #21/#22/#23.",
+    "authorised_by": "evidence-backed reconciliation recorded in audit/05 addenda",
+    "date": "2026-07-25"
+   },
+   {
+    "change": "FAIL->PASS",
+    "reason": "The independent cross-vendor adversarial verifier exists and enforces: independent-verify.yml with a required-approver veto, proven by live blocking rounds across PRs #21/#22/#23. The verdict closes on that evidence, separately from the band change.",
+    "authorised_by": "evidence-backed reconciliation, audit/05 addenda",
+    "date": "2026-07-25"
+   }
+  ]
  },
  {
   "id": "A-40",

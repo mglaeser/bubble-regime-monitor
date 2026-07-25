@@ -18,6 +18,7 @@ change, so a regression is discovered at the next push, not the next audit).
 | Mandate gate — status | `scripts/mandate_gate.py status` | findings/catalogue mismatch; PASS with null standing_control; any open blocker not operator-accepted; stale acceptance; governance hash mismatch; engagement-status drift |
 | Mandate gate — ratchet | `mandate_gate.py ratchet` vs `audit/ratchet-baselines.json` | test-count floor falls; noqa/type-ignore/emoji ceilings rise |
 | Mandate gate — calibration (S12) | `mandate_gate.py calibrate`: seeded corpus re-proven | any seeded class uncaught; credential-shape or vacuous-assert hit in live source; unresolvable live import; N/A-class architecture assumption voided |
+| Mandate gate — surface | `mandate_gate.py surface --check`: the audit denominator (`audit/00-audit-surface.json`) is recomputed from the tracked file set and compared | the committed surface drifts from the repository, is hand-edited, or is missing — a stale denominator makes partial coverage read as total, and one carrying test-fixture content (`files_tracked: 2`) survived undetected until this check existed |
 | Independent adversarial verifier (S2) — **pull requests only, needs a key** | `independent-verify.yml`: cross-vendor OpenAI panel, Sol veto, deterministic arbiter | refuted verdict, missing proof, insufficient approvals |
 | Write separation (B-35) | `.github/CODEOWNERS`: `.github/`, `scripts/`, `governance/`, frozen artifacts → operator | full force requires branch protection (open item below) |
 

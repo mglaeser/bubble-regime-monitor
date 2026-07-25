@@ -68,7 +68,9 @@ jobs:
           MANDATE_PUSH_BEFORE: ${{ github.event.before }}
         # status: findings/catalogue/acceptance/hash consistency, fail-closed;
         # ratchet: S11 floors and ceilings; calibrate: S12 seeded-defect corpus
-        # re-proven against the live gates. See audit/08-standing-regime.md.
+        # re-proven against the live gates; surface: the audit denominator is
+        # recomputed and compared, so a stale coverage base fails loudly.
+        # See audit/08-standing-regime.md.
         run: python scripts/mandate_gate.py all
 
   image:
