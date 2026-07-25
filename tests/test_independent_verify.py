@@ -211,3 +211,11 @@ class TestPanelFindingsOnItself:
             raise iv.DiffError("git exploded")
         monkeypatch.setattr(iv, "build_diff", boom)
         assert iv.main() == 1
+
+    def test_round7_merge_base_failure_blocks_not_narrows(self, monkeypatch):
+        import pytest as _pytest
+        # a missing base ref must raise DiffError (block), never silently fall
+        # back to HEAD~1 (which reviews only the tip commit of a multi-commit PR)
+        monkeypatch.setenv("GITHUB_BASE_REF", "definitely-not-a-branch-xyz")
+        with _pytest.raises(iv.DiffError):
+            iv.build_diff()

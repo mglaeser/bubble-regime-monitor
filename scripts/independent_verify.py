@@ -321,7 +321,13 @@ def truncate_marked(text: str, cap: int, label: str) -> str:
 def build_diff() -> str:
     """COMPLETE changed-file list (--name-status) + capped stat + capped body,
     every cap explicitly marked; base = merge-base with main."""
-    mb = _sh(["git", "merge-base", f"origin/{base_branch()}", "HEAD"]).strip() or "HEAD~1"
+    # No HEAD~1 fallback (round-7 panel finding): a failed merge-base on a
+    # multi-commit PR would silently shrink the review to the TIP commit only.
+    # checkout runs with fetch-depth: 0, so origin/<base> is always present in
+    # CI; a merge-base failure is a real fault and must BLOCK.
+    mb = _sh(["git", "merge-base", f"origin/{base_branch()}", "HEAD"], required=True).strip()
+    if not mb:
+        raise DiffError(f"empty merge-base for origin/{base_branch()}...HEAD")
     cmds = diff_commands(mb)
     names = _sh(cmds["names"], required=True)
     stat = _sh(cmds["stat"], required=True)

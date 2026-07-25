@@ -120,7 +120,13 @@ addressed:
    triggers for `dependabot*` actors; mirror the vendor key into the
    **Dependabot secrets store** if those PRs should be reviewed rather than
    blocked.
-6. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
+6. **(Rounds 6-7) Failure-as-emptiness:** `_sh` converted git errors and
+   invalid-UTF-8 decodes into empty output (empty diff → green with zero
+   votes), and a failed merge-base silently fell back to `HEAD~1`, reviewing
+   only a multi-commit PR's tip. Fixed: bytes decoding with visible
+   replacement characters, `DiffError` fail-closed on any required diff
+   command including the merge-base — no fallback narrows the review window.
+7. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
    `pull_request` runs, so the no-key exit-0 would have let a fork PR pass a
    *required* `cross-vendor` check with zero review. Fixed: the workflow sets
    `VERIFIER_REQUIRE_KEY=true` exactly when the head repo differs from the
