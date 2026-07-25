@@ -349,7 +349,7 @@ def selftest() -> None:
     expect(require_approvals([A, A2, A], DUP, "gpt-5.6-sol", 2)["block"] is True, "same model twice counts once -> < 2 -> block")
     expect(require_approvals([RF, A2, RF], MDL, "gpt-5.6-sol", float("nan"))["block"] is True, "NaN min_others -> need 1; none approve -> block")
     expect(require_approvals([A, A2, RF], MDL, "gpt-5.6-sol", float("nan"))["block"] is False, "NaN min_others -> need 1; codex approves -> green")
-    CH2 = "abc123def456"
+    CH2 = "selftest-challenge"
     sol_empty = {"ok": True, "v": {"refuted": False, "reason": "", "proof": f"{CH2}-7"}}
     sol_no_proof = {"ok": True, "v": {"refuted": False, "reason": "reason long enough sol"}}
     sol_good = {"ok": True, "v": {"refuted": False, "reason": "reason long enough sol", "proof": f"{CH2}-7"}}
@@ -379,7 +379,7 @@ def selftest() -> None:
     expect(attest_reasons([{"ok": True, "v": None}, R(g1), R(g2)], 3)["block"] is False, "unparsable vote ignored, rest distinct -> pass")
     expect(attest_reasons([R("reason solo aaaa")], 1)["block"] is False, "panel=1 with a real reason passes")
     # attest_proof()
-    CH = "abc123def456"
+    CH = "selftest-challenge"
     def PR(proof: str, refuted: bool = False) -> dict:
         return {"ok": True, "v": {"refuted": refuted, "reason": "reason long enough", "proof": proof}}
     expect(attest_proof([PR(f"{CH}-7"), PR(f"{CH}-42"), PR(f"{CH}-9")], CH, 3)["block"] is False, "3 valid echoes must pass")

@@ -68,7 +68,7 @@ class TestRequiredApproverRole:
         assert iv.require_approvals([A, A2, RF], MDL, "gpt-5.6-sol", float("nan"))["block"] is False
 
     def test_sol_approval_must_be_proven(self):
-        ch = "abc123def456"
+        ch = "selftest-challenge"
         empty = {"ok": True, "v": {"refuted": False, "reason": "", "proof": f"{ch}-7"}}
         noproof = {"ok": True, "v": {"refuted": False, "reason": "reason long enough sol"}}
         good = {"ok": True, "v": {"refuted": False, "reason": "reason long enough sol",
@@ -87,7 +87,7 @@ class TestIntegrityGates:
         assert iv.attest_reasons([r("reason a x1"), r("reason b x2"), r("reason c x3")], 3)["block"] is False
 
     def test_proof_of_check_bounds(self):
-        ch = "abc123def456"
+        ch = "selftest-challenge"
         pr = lambda p: {"ok": True, "v": {"refuted": False, "reason": "reason long enough", "proof": p}}  # noqa: E731
         assert iv.attest_proof([pr(f"{ch}-1"), pr(f"{ch}-9999"), pr(f"{ch}-500")], ch, 3)["block"] is False
         assert iv.attest_proof([pr(f"{ch}-0"), pr(f"{ch}-0"), pr(f"{ch}-0")], ch, 3)["block"] is True
