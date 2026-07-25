@@ -184,6 +184,7 @@ def s5_tier_sufficiency() -> dict[str, Any]:
     snapshot_weekdays: set = set()      # trading days with any snapshot (holidays excluded)
     s5_days: set = set()
     days_by_tier: dict[str, set] = {t: set() for t in _S5_TIERS}
+    comparison_days_by_tier: dict[str, set] = {t: set() for t in _S5_TIERS}
     dual_days: set = set()
     valid_days: set = set()
     with session_scope() as session:
@@ -210,6 +211,8 @@ def s5_tier_sufficiency() -> dict[str, Any]:
                 # above); the candidate side is checked explicitly.
                 if (dual.get("candidate_v4") or {}).get("sub_score") is not None:
                     valid_days.add(d)
+                    if src in comparison_days_by_tier:
+                        comparison_days_by_tier[src].add(d)
     # The GATE counts only days on which the dual comparison actually ran
     # AND produced both sides (panel findings on this PR: counting every
     # weekday snapshot let 60 S5-less days read as gate progress; counting
@@ -223,13 +226,22 @@ def s5_tier_sufficiency() -> dict[str, Any]:
         "s5_observation_days": len(s5_days),
         "days_with_dual_report": len(dual_days),
         "days_with_valid_comparison": len(valid_days),
+        # production-observation days per tier vs VALID-comparison days per
+        # tier are reported separately (panel round-6 finding: a tier can be
+        # observed by production for weeks while the candidate never once
+        # resolved on it — that is zero tier evidence for the H decision)
         "days_by_tier": {t: len(s) for t, s in days_by_tier.items()},
-        "all_tiers_observed": all(days_by_tier[t] for t in _S5_TIERS),
+        "comparison_days_by_tier": {t: len(s) for t, s
+                                    in comparison_days_by_tier.items()},
+        "all_tiers_observed_production": all(days_by_tier[t] for t in _S5_TIERS),
+        "all_tiers_compared": all(comparison_days_by_tier[t] for t in _S5_TIERS),
         "note": ("gate counts days with a VALID dual comparison (both the "
                  "production and candidate sub-scores present) on NYSE "
                  "trading days only "
                  "(weekends + full-day exchange holidays excluded; one-off "
-                 "special closures are a documented residual); per-tier "
+                 "special closures are a documented residual); tier EVIDENCE "
+                 "means comparison days (all_tiers_compared), not mere "
+                 "production observation; per-tier "
                  "adequacy is an operator decision (not pinned) — 60 days of "
                  "EBP-only success does not validate fallback behavior"),
     }
@@ -278,21 +290,26 @@ def b_policy_report() -> dict[str, Any]:
     two_thirds = 1.0 - _DROP
     policies = ["B0", "B1", "B2@0.50", "B3@2/3", "B4@0.50", "B4@2/3",
                 "B5@k=2", "B5@k=3", "B5@k=4"]
-    stats = {p: {"available": 0, "unavailable": 0, "longest_gap": 0, "_gap": 0}
-             for p in policies}
+    stats: dict[str, dict[str, Any]] = {
+        p: {"available": 0, "unavailable": 0, "longest_gap_days": 0,
+            "_gap_dates": set()}
+        for p in policies}
     n = one_degraded = both_degraded = overrides = suppressed_bands = 0
     drivers: dict[str, int] = {}
     masking: dict[str, int] = {"B4@0.50": 0, "B4@2/3": 0}
 
-    def _mark(p: str, available: bool) -> None:
+    def _mark(p: str, available: bool, day) -> None:
+        # The unavailable streak is measured in DISTINCT snapshot days, not
+        # consecutive rows (panel round-6 finding: the 4-hourly recompute
+        # persists ~6 rows/day, so a one-day outage read as a 6-"period" gap).
         s = stats[p]
         if available:
             s["available"] += 1
-            s["_gap"] = 0
+            s["_gap_dates"].clear()
         else:
             s["unavailable"] += 1
-            s["_gap"] += 1
-            s["longest_gap"] = max(s["longest_gap"], s["_gap"])
+            s["_gap_dates"].add(day)
+            s["longest_gap_days"] = max(s["longest_gap_days"], len(s["_gap_dates"]))
 
     with session_scope() as session:
         for snap in _snapshot_rows(session):
@@ -313,21 +330,22 @@ def b_policy_report() -> dict[str, Any]:
                     drivers[worst[0]] = drivers.get(worst[0], 0) + 1
             if snap.override_fired:
                 overrides += 1
-            _mark("B0", True)
-            _mark("B1", not (deg_s or deg_d))
-            _mark("B2@0.50", min(ws, wd) >= 0.50)
-            _mark("B3@2/3", min(ws, wd) >= two_thirds)
+            day = snap.computed_at.date()
+            _mark("B0", True, day)
+            _mark("B1", not (deg_s or deg_d), day)
+            _mark("B2@0.50", min(ws, wd) >= 0.50, day)
+            _mark("B3@2/3", min(ws, wd) >= two_thirds, day)
             for theta, key in ((0.50, "B4@0.50"), (two_thirds, "B4@2/3")):
                 combined_ok = (ws + wd) / 2 >= theta
-                _mark(key, combined_ok)
+                _mark(key, combined_ok, day)
                 if combined_ok and min(ws, wd) < theta:
                     masking[key] += 1     # a full block masking a sparse one
             for k in (2, 3, 4):
                 _mark(f"B5@k={k}", min(cov_s["resolved_count"],
-                                       cov_d["resolved_count"]) >= k)
+                                       cov_d["resolved_count"]) >= k, day)
 
     for s in stats.values():
-        s.pop("_gap", None)
+        s.pop("_gap_dates", None)
         s["available_pct"] = round(100.0 * s["available"] / n, 1) if n else None
     return {
         "snapshots": n,

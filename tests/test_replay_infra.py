@@ -114,7 +114,9 @@ class TestRM2Sufficiency:
         assert out["days_with_valid_comparison"] <= out["days_with_dual_report"]
         assert out["days_remaining_to_gate"] == 60 - out["gate_day_count"]
         assert out["s5_observation_days"] <= out["snapshot_weekdays_observed"]
-        assert out["all_tiers_observed"] is False   # one tier present -> honest False
+        # one tier present at most -> both flags honestly False
+        assert out["all_tiers_observed_production"] is False
+        assert out["all_tiers_compared"] is False
 
     def test_gate_ignores_s5_less_snapshots(self, isolated_db):
         # 60 weekday snapshots WITHOUT any computed s5 must contribute ZERO
@@ -178,6 +180,11 @@ class TestRM2Sufficiency:
         assert out["days_with_valid_comparison"] == 0
         assert out["gate_day_count"] == 0
         assert out["days_remaining_to_gate"] == 60
+        # round-6: production observed the HY tier that day, but the candidate
+        # never resolved — observation is NOT comparison evidence for the tier
+        assert out["days_by_tier"]["fred_BAMLH0A0HYM2"] == 1
+        assert out["comparison_days_by_tier"]["fred_BAMLH0A0HYM2"] == 0
+        assert out["all_tiers_compared"] is False
 
     def test_nyse_holiday_calendar(self):
         from datetime import date
@@ -211,7 +218,7 @@ class TestRM4Policies:
         # the headline available and no masking fires
         for policy, s in rep["policies"].items():
             assert s["available"] == 1, policy
-            assert s["longest_gap"] == 0
+            assert s["longest_gap_days"] == 0
         assert rep["both_blocks_degraded"] == 0
         assert rep["b4_masking_events"] == {"B4@0.50": 0, "B4@2/3": 0}
         assert "no policy or constant is recommended" in rep["note"]
@@ -230,6 +237,24 @@ class TestRM4Policies:
         assert rep["policies"]["B1"]["available"] == 0       # withheld under B1
         assert rep["policies"]["B0"]["available"] == 1       # current behavior keeps it
         assert "d1" in rep["worst_suppression_drivers"]
+
+    def test_longest_gap_counts_distinct_days_not_rows(self, isolated_db):
+        # Panel round-6 finding: the 4-hourly recompute persists several rows
+        # per day, so counting consecutive ROWS inflated the "longest
+        # continuous unavailable period" (a one-day outage read as ~6). Two
+        # degraded snapshots on the SAME day are ONE gap day.
+        from app.services.compute import compute_snapshot, persist_snapshot
+        from app.services.replay import b_policy_report
+        from tests.conftest import make_golden_raw_inputs
+
+        for _ in range(2):                    # both persisted "today"
+            raw = make_golden_raw_inputs()
+            raw.breadth_pct = None            # d1 drops -> B1 unavailable
+            data = compute_snapshot(raw, mc_samples=5_000, mc_seed=20260711)
+            persist_snapshot(data, raw)
+        rep = b_policy_report()
+        assert rep["policies"]["B1"]["unavailable"] == 2      # rows counted
+        assert rep["policies"]["B1"]["longest_gap_days"] == 1  # days counted
 
     def test_block_coverage_fraction_is_exact_at_policy_boundaries(self):
         # Panel round-4 finding: fractions were rounded to 4 dp BEFORE the
