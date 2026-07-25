@@ -315,6 +315,14 @@ def diff_commands(merge_base: str) -> dict[str, list[str]]:
     }
 
 
+_TRUNCATED = (
+    "git diff --name-status -z ended mid-record (dangling {status!r} entry) — "
+    "the changed-file list is incomplete. Returning the short list would drop "
+    "the remaining files from review silently, with no warning and no "
+    "coverage block, so an unparseable stream fails closed instead."
+)
+
+
 def parse_name_status_z(raw: str) -> list[str]:
     """Paths from `git diff --name-status -z`.
 
@@ -334,12 +342,12 @@ def parse_name_status_z(raw: str) -> list[str]:
             continue
         if status[0] in ("R", "C"):      # status, old, new
             if i + 2 >= len(parts) or not parts[i + 2]:
-                break                    # truncated record: never invent a path
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
             paths.append(parts[i + 2])
             i += 3
         else:                            # status, path
             if i + 1 >= len(parts) or not parts[i + 1]:
-                break
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
             paths.append(parts[i + 1])
             i += 2
     return paths
@@ -363,12 +371,12 @@ def parse_rename_origins_z(raw: str) -> dict[str, str]:
             continue
         if status[0] in ("R", "C"):
             if i + 2 >= len(parts) or not parts[i + 2] or not parts[i + 1]:
-                break
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
             out[parts[i + 2]] = parts[i + 1]
             i += 3
         else:
             if i + 1 >= len(parts) or not parts[i + 1]:
-                break
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
             i += 2
     return out
 
@@ -385,12 +393,12 @@ def parse_status_map_z(raw: str) -> dict[str, str]:
             continue
         if status[0] in ("R", "C"):
             if i + 2 >= len(parts) or not parts[i + 2]:
-                break
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
             out[parts[i + 2]] = status
             i += 3
         else:
             if i + 1 >= len(parts) or not parts[i + 1]:
-                break
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
             out[parts[i + 1]] = status
             i += 2
     return out
@@ -658,9 +666,32 @@ def build_diff_chunks(budget: int = DEFAULT_PART_BUDGET, max_chunks: int = 2
     for path in paths:
         # required=True (round-6 finding, re-opened by this change): a git
         # failure or timeout must BLOCK, never silently drop a file from review
-        text = _sh(["git", "diff", f"{mb}...HEAD", "--", path] + _EXCLUDES,
+        #
+        # :(literal) — panel round 26. `--` stops OPTION parsing but not
+        # PATHSPEC MAGIC, so a changed file whose own NAME is a pathspec
+        # rewrote the query that was supposed to fetch it. A file named
+        # `:(exclude)*.py` excludes every .py file — itself included — and the
+        # command returns some other file's diff instead: non-empty, so the
+        # entry was recorded as reviewed with a body that was never its own,
+        # its real content reached no model, and omitted_code stayed empty so
+        # the coverage gate greened. Reproduced end-to-end before this fix.
+        spec = f":(literal){path}"
+        text = _sh(["git", "diff", f"{mb}...HEAD", "--", spec] + _EXCLUDES,
                    required=True)
+        # ...and PROVE the body belongs to the path it is filed under. Pathspec
+        # magic is one way for that to break; this guard does not care which
+        # way it broke. git reports the names for the very same query, NUL
+        # separated so no quoting or escaping is involved.
         if text.strip():
+            got = [p for p in _sh(
+                ["git", "diff", "--name-only", "-z", f"{mb}...HEAD",
+                 "--", spec] + _EXCLUDES, required=True).split("\0") if p]
+            if got != [path]:
+                raise DiffError(
+                    f"per-file diff for {path!r} returned content for "
+                    f"{got!r} — the body does not belong to the path it "
+                    "would be filed under; refusing to present a "
+                    "misattributed diff as reviewed")
             file_diffs.append((path, text))
         else:
             # Panel finding (PR #23): a path whose CONTENT is privacy-excluded

@@ -272,7 +272,13 @@ def previous_version(rel_path: str) -> dict | None:
     # disabled every weakening check. Absence and unreadability must be
     # distinguished: ls-tree answers presence, and it only fails when the
     # history itself cannot be read.
-    listed = subprocess.run(["git", "ls-tree", "--name-only", point, "--", rel_path],
+    # :(literal) — `--` stops option parsing but NOT pathspec magic, so a name
+    # that is itself a pathspec would answer a different question than "does
+    # this file exist here" (panel round 26, found in the panel script; these
+    # paths are gate constants rather than attacker-supplied, but the property
+    # should hold locally instead of resting on every caller).
+    listed = subprocess.run(["git", "ls-tree", "--name-only", point, "--",
+                             f":(literal){rel_path}"],
                             cwd=ROOT, capture_output=True, text=True)
     if listed.returncode != 0:
         _fail(f"cannot read history at the comparison point {point[:12]} for "

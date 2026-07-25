@@ -20,7 +20,7 @@
   ]
  },
  "ratchets": {
-  "test_count_floor": 619,
+  "test_count_floor": 626,
   "noqa_ceiling": 20,
   "type_ignore_ceiling": 2,
   "emoji_in_source_ceiling": 0

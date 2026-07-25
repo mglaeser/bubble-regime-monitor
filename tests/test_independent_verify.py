@@ -332,9 +332,19 @@ class TestChunkingAdversarialFixes:
         raw = "R089\0scripts/old_gate.py\0scripts/new_gate.py\0M\0app/x.py\0"
         assert iv.parse_name_status_z(raw) == ["scripts/new_gate.py", "app/x.py"]
 
-    def test_truncated_record_does_not_invent_a_path(self):
-        assert iv.parse_name_status_z("R100\0only_old_path\0") == []
+    def test_truncated_record_fails_closed(self):
+        # Not inventing a path was only half of it: returning the SHORT list
+        # dropped every remaining file from review silently — no warning, no
+        # coverage block (panel round 26, second reviewer). An unparseable
+        # changed-file stream is now a blocking DiffError.
+        with pytest.raises(iv.DiffError):
+            iv.parse_name_status_z("R100\0only_old_path\0")
+        with pytest.raises(iv.DiffError):
+            iv.parse_name_status_z("M\0")
+        # BOTH SIDES: genuinely empty output is not truncation, it is "no
+        # changed files", and must stay a clean empty result
         assert iv.parse_name_status_z("") == []
+        assert iv.parse_name_status_z("\0\0") == []
 
     def test_is_code_covers_executable_content_outside_app_and_scripts(self):
         # HIGH: tier-based is_code() called these "not code", so dropping them
@@ -475,8 +485,12 @@ class TestRenameLaundering:
     def test_non_rename_records_have_no_origin(self):
         assert iv.parse_rename_origins_z("M\0app/x.py\0A\0app/y.py\0") == {}
 
-    def test_truncated_rename_record_is_ignored(self):
-        assert iv.parse_rename_origins_z("R100\0only_old\0") == {}
+    def test_truncated_rename_record_fails_closed(self):
+        with pytest.raises(iv.DiffError):
+            iv.parse_rename_origins_z("R100\0only_old\0")
+        with pytest.raises(iv.DiffError):
+            iv.parse_status_map_z("R100\0only_old\0")
+        assert iv.parse_rename_origins_z("") == {}
 
     def test_gate_renamed_to_docs_is_still_control_bearing(self):
         # the laundering attack: the destination alone looks harmless
@@ -588,3 +602,129 @@ class TestRenamedOversizeControl:
             control_of=lambda p: p == "docs/old_notes.txt")
         assert omitted == ["docs/old_notes.txt"]
         assert "X" * 5000 not in "".join(chunks)
+
+
+class TestPathspecMagicInFilenames:
+    """Panel round 26 (Sol). `--` stops OPTION parsing, not PATHSPEC MAGIC, so
+    a changed file whose own NAME is a pathspec rewrites the query meant to
+    fetch it. Reproduced against a real git repository before the fix."""
+
+    def _repo(self, tmp_path):
+        import subprocess
+
+        def git(*a):
+            return subprocess.run(["git", *a], cwd=tmp_path, check=True,
+                                  capture_output=True, text=True)
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / "README.md").write_text("# doc\n")
+        git("add", "-A")
+        git("commit", "-qm", "base")
+        # a .py file whose NAME excludes every .py file — itself included
+        (tmp_path / ":(exclude)*.py").write_text("GATE_BACKDOOR = True\n")
+        (tmp_path / "README.md").write_text("# doc\nmore\n")
+        git("add", "-A")
+        git("commit", "-qm", "change")
+        # build_diff_chunks bases the diff on origin/<base>, so give the
+        # fixture a real remote-tracking ref pointing at the parent commit
+        git("update-ref", "refs/remotes/origin/main", "HEAD~1")
+        return git
+
+    def test_magic_named_file_hijacks_the_unprotected_query(self, tmp_path):
+        # THE EXPLOIT, shown at the git level: without :(literal) the per-file
+        # query for the backdoor returns SOME OTHER FILE's diff. Non-empty, so
+        # the entry was filed as reviewed, the backdoor body reached no model,
+        # and omitted_code stayed empty — the coverage gate greened.
+        import subprocess
+        self._repo(tmp_path)
+        bad = subprocess.run(
+            ["git", "diff", "HEAD~1...HEAD", "--", ":(exclude)*.py"],
+            cwd=tmp_path, capture_output=True, text=True).stdout
+        assert "GATE_BACKDOOR" not in bad
+        assert "README.md" in bad          # someone else's diff entirely
+
+    def test_literal_pathspec_returns_the_file_itself(self, tmp_path):
+        import subprocess
+        self._repo(tmp_path)
+        good = subprocess.run(
+            ["git", "diff", "HEAD~1...HEAD", "--", ":(literal):(exclude)*.py"],
+            cwd=tmp_path, capture_output=True, text=True).stdout
+        assert "GATE_BACKDOOR" in good
+        assert "README.md" not in good
+
+    def test_build_diff_chunks_shows_the_backdoor_body(self, tmp_path,
+                                                       monkeypatch):
+        # end to end through the real function: the backdoor must appear in a
+        # payload, or be declared omitted — never silently swapped for another
+        # file's content
+        self._repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "base_branch", lambda: "main")
+        monkeypatch.setattr(iv, "_sh", _sh_rebased(tmp_path))
+        payloads, omitted_code = iv.build_diff_chunks(budget=90_000,
+                                                      max_chunks=8)
+        body = "".join(payloads)
+        assert "GATE_BACKDOOR" in body or ":(exclude)*.py" in omitted_code
+
+    def test_misattributed_body_is_refused_even_if_magic_were_reintroduced(
+            self, tmp_path, monkeypatch):
+        # the identity proof does not depend on WHY the body is wrong: if a
+        # per-file query ever returns another path's content again, the run
+        # blocks rather than filing it under the wrong name
+        def wrong_names(args, *, required=False):
+            if "--name-only" in args and "--name-status" not in args:
+                return "some/other/file.py\0"
+            return _sh_rebased(tmp_path)(args, required=required)
+        self._repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "base_branch", lambda: "main")
+        monkeypatch.setattr(iv, "_sh", wrong_names)
+        with pytest.raises(iv.DiffError):
+            iv.build_diff_chunks(budget=90_000, max_chunks=8)
+
+
+def _sh_rebased(root):
+    """iv._sh with cwd pinned to the fixture repo."""
+    import subprocess
+
+    def _sh(args, *, required=False):
+        proc = subprocess.run(args, cwd=root, capture_output=True, timeout=120)
+        out = proc.stdout.decode("utf-8", errors="replace")
+        if required and proc.returncode != 0:
+            raise iv.DiffError(f"{args[:3]} exited {proc.returncode}")
+        return out
+    return _sh
+
+
+class TestRound26ClaimsRefuted:
+    """Two claims from the round-26 panel that the code already handles. The
+    house rule is to refute with a test that demonstrates the claimed failure
+    cannot occur, never with argument alone."""
+
+    def test_oversize_control_file_is_omitted_not_truncated(self):
+        # claim: "control-bearing file truncation silently turns fail-closed
+        # to fail-open". It is not truncated — it is omitted, and omitted is
+        # exactly what reaches the coverage gate and blocks.
+        files = [("scripts/mandate_gate.py", "G" * 5000),
+                 ("README.md", "r" * 100)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=3)
+        assert omitted == ["scripts/mandate_gate.py"]
+        assert "G" * 200 not in "".join(chunks)   # no partial tail shown
+        assert "TRUNCATED" not in "".join(chunks)
+
+    def test_is_code_is_case_insensitive_on_every_suffix(self):
+        # claim: "risk order check incomplete for suffix-casing mismatch in
+        # is_code"
+        for path in ("app/BACKDOOR.PY", "deploy/Run.SH", "ci/Job.YML",
+                     "unit/Timer.SERVICE", "lib/Mod.Ts", "q/Query.SQL"):
+            assert iv.is_code(path), path
+            assert iv.is_control_bearing(path, "A"), path
+
+    def test_control_bearing_omission_blocks_the_run(self):
+        # claim: "omission reported but only as warning". The warning is for
+        # the humans; the block comes from omitted_code, which is returned to
+        # main and fails the run.
+        files = [("scripts/mandate_gate.py", "G" * 5000)]
+        _, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=3)
+        assert [p for p in omitted if iv.is_control_bearing(p, "M")]
