@@ -64,12 +64,35 @@ def reintroduced_fingerprints(rel_path: str, extract) -> set[str]:
     "Seen anywhere before" is the WRONG test, though: a record legitimately
     persists alongside the state it authorises, so that rule flags every
     honest record (it flagged A-01 and all 32 founding acceptances here).
-    Re-introduction is the actual signature of a replay."""
+    Re-introduction is the actual signature of a replay.
+
+    The window is the file's FULL history (panel round 27). It began at the
+    comparison point, so an absence OLDER than the branch point was invisible:
+    a record removed on the base branch months ago reads as absent-then-present
+    inside the window — never present-then-absent-then-present — and could be
+    re-added verbatim to replay that historic authorisation for a new
+    weakening. Widening the window only adds the ability to see older
+    absences; it does NOT revert to "seen anywhere before", so a record that
+    has legitimately persisted since founding still never trips."""
     point = comparison_point()
     if not point:
         return set()
-    revs = subprocess.run(["git", "rev-list", "--reverse", f"{point}^..HEAD"],
+    # rev-list over the PATH: only commits that touched the register are
+    # examined, so full history costs a handful of blob reads, not one per
+    # repository commit.
+    revs = subprocess.run(["git", "rev-list", "--reverse", "HEAD", "--",
+                           f":(literal){rel_path}"],
                           cwd=ROOT, capture_output=True, text=True)
+    if revs.returncode != 0:
+        _fail(f"cannot enumerate the history of {rel_path} "
+              f"({revs.stderr.strip()[:200]}) — replay detection would be "
+              "silently disabled; fail closed (ensure fetch-depth: 0)")
+    shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"],
+                             cwd=ROOT, capture_output=True, text=True)
+    if shallow.stdout.strip() == "true" and os.environ.get("GITHUB_ACTIONS"):
+        _fail("shallow clone: the history behind the comparison point cannot "
+              "be read, so a replayed decision record would be invisible — "
+              "check out with fetch-depth: 0")
     commits = [c for c in revs.stdout.split() if c] or [point]
     seen: set[str] = set()
     gone: set[str] = set()
@@ -1026,8 +1049,55 @@ def cmd_calibrate() -> None:
             # not name the tools field AT ALL, so the check is now on the bare
             # string constant. Prose is unaffected: comments are not Constants
             # and a docstring only matches if its entire value is "tools".
-            if isinstance(node, _ast.Constant) and node.value == "tools":
+            # Constant-folded (panel round 27): `payload["to" + "ols"]` builds
+            # the same key with no "tools" constant anywhere in the tree.
+            if _folds_to_tools(node):
                 return True
+        return False
+
+    def _const_str(node):
+        """The string this expression provably evaluates to, or None.
+
+        Only literal composition is folded — that is the point. Anything the
+        AST cannot resolve is handled by the dynamic-construction ban below,
+        not by guessing."""
+        if isinstance(node, _ast.Constant):
+            return node.value if isinstance(node.value, str) else None
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
+            left = _const_str(node.left)
+            right = _const_str(node.right)
+            return None if left is None or right is None else left + right
+        if isinstance(node, _ast.JoinedStr):           # f-string of literals
+            parts = []
+            for v in node.values:
+                s = _const_str(v)
+                if s is None:
+                    return None
+                parts.append(s)
+            return "".join(parts)
+        # f"to{'ols'}" — the interpolated piece is a FormattedValue wrapping
+        # the expression, so an f-string of literals folds only if this is
+        # unwrapped. Conversions (!r) and format specs change the result, so
+        # anything carrying them is left unresolved for the dynamic-key ban.
+        if isinstance(node, _ast.FormattedValue):
+            if node.conversion in (-1, None) and node.format_spec is None:
+                return _const_str(node.value)
+            return None
+        return None
+
+    def _folds_to_tools(node) -> bool:
+        return _const_str(node) == "tools"
+
+    _LLM_SDKS = ("anthropic", "openai")
+
+    def _imports_llm_sdk(tree) -> bool:
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Import):
+                if any(a.name.split(".")[0] in _LLM_SDKS for a in node.names):
+                    return True
+            if isinstance(node, _ast.ImportFrom):
+                if (node.module or "").split(".")[0] in _LLM_SDKS:
+                    return True
         return False
 
     for path in ROOT.glob("app/**/*.py"):
@@ -1061,6 +1131,43 @@ def cmd_calibrate() -> None:
                     "dynamically-built kwarg can enable tool use without any "
                     "literal appearing in source. Pass keywords explicitly so "
                     "the no-tool invariant stays checkable.")
+
+        # Constant folding closes `"to" + "ols"`, but not `"".join([...])` or
+        # chr() arithmetic, and enumerating obfuscations is the losing game
+        # this check keeps playing. So in the module that actually talks to a
+        # model, every mapping key must be a visible literal: you may READ
+        # x[i], you may not WRITE a key you computed. A key the AST cannot
+        # read is not a key anyone reviewing this file can read either.
+        #
+        # Deliberately scoped to LLM-SDK importers rather than all of app/:
+        # dynamic mapping writes are ordinary and frequent elsewhere (16
+        # modules), and a check that fires on all of them is one the operator
+        # learns to wave through. app/engine/judgment.py, the only such module
+        # today, has none.
+        if not _imports_llm_sdk(tree):
+            continue
+        for node in _ast.walk(tree):
+            dynamic = None
+            if isinstance(node, (_ast.Assign, _ast.AugAssign)):
+                targets = (node.targets if isinstance(node, _ast.Assign)
+                           else [node.target])
+                for tgt in targets:
+                    if (isinstance(tgt, _ast.Subscript)
+                            and _const_str(tgt.slice) is None
+                            and not isinstance(tgt.slice, _ast.Constant)):
+                        dynamic = "subscript assignment"
+            if isinstance(node, _ast.Dict):
+                for k in node.keys:
+                    if (k is not None and _const_str(k) is None
+                            and not isinstance(k, _ast.Constant)):
+                        dynamic = "dict key"
+            if dynamic:
+                failures.append(
+                    f"{path.relative_to(ROOT)}:{node.lineno} builds a mapping "
+                    f"key dynamically ({dynamic}) in a module that calls a "
+                    "model API — forbidden, because a computed key can name "
+                    "`tools` without any readable literal, which makes the "
+                    "no-tool invariant uncheckable rather than false")
 
     # 6 — cross-tenant ownership: N/A by structure; re-validate: still no
     # per-user tables (single-tenant).
@@ -1140,11 +1247,20 @@ def cmd_surface(check: bool = False) -> None:
     if not tracked:
         _fail("git ls-files returned no files — an empty audit denominator "
               "would make every coverage claim vacuous")
+    # Every HTTP method, any decorator object, anywhere under app/ (panel
+    # round 27). The pattern was `@router.(get|post|put|delete)` under
+    # app/routers/ only, so a PATCH endpoint, a HEAD/OPTIONS handler, an
+    # @app.get in main.py or a router defined outside that one directory was
+    # live traffic the audit denominator did not know existed. The methods
+    # come from the ASGI verb set rather than a remembered subset.
+    _VERBS = "get|post|put|delete|patch|head|options|trace|api_route"
     routes = []
-    for p in ROOT.glob("app/routers/*.py"):
-        for m in re.finditer(r"@router\.(get|post|put|delete)\(\s*[\"']([^\"']+)",
+    for p in sorted(ROOT.glob("app/**/*.py")):
+        for m in re.finditer(rf"@(\w+)\.({_VERBS})\(\s*[\"']([^\"']+)",
                              p.read_text(errors="replace")):
-            routes.append({"method": m.group(1).upper(), "path": m.group(2),
+            verb = m.group(2).upper()
+            routes.append({"method": "ANY" if verb == "API_ROUTE" else verb,
+                           "path": m.group(3),
                            "module": str(p.relative_to(ROOT))})
     surface = {
         "generated_by": "scripts/mandate_gate.py surface",

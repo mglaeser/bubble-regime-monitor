@@ -1401,7 +1401,8 @@ class TestPanelFindingsRound25:
         (tmp_path / "tests").mkdir(exist_ok=True)
         (tmp_path / "scripts").mkdir(exist_ok=True)
         (tmp_path / "pyproject.toml").write_text(
-            '[project]\nname = "t"\nversion = "0"\ndependencies = []\n')
+            '[project]\nname = "t"\nversion = "0"\n'
+            'dependencies = ["anthropic"]\n')   # LLM-path fixtures import it
         # a REAL git repo: the credential scan derives its file set from
         # `git ls-files` and fails closed when that cannot run, so a fixture
         # that is not a repo would exercise the error path instead of the
@@ -1771,3 +1772,108 @@ class TestPanelFindingsRound24:
         a39 = next(f for f in findings if f["id"] == "A-39")
         changes = {r["change"] for r in a39["weakening_record"]}
         assert changes == {"STOP-SHIP->PLAN", "FAIL->PASS"}
+
+
+class TestPanelFindingsRound27:
+    """Three checks that were narrower than the property they assert: the
+    replay window, the tools-constant match, and the route inventory."""
+
+    def _calib(self, monkeypatch, tmp_path, files):
+        return TestPanelFindingsRound25._calibrate_app(
+            TestPanelFindingsRound25(), monkeypatch, tmp_path, files)
+
+    def _err(self):
+        return TestPanelFindingsRound25._calib_error(TestPanelFindingsRound25())
+
+    # --- class 5: folded and unreadable keys -------------------------------
+
+    def test_concatenated_tools_key_is_folded_and_caught(
+            self, monkeypatch, tmp_path):
+        # THE EXPLOIT: no "tools" constant exists anywhere in the tree
+        self._calib(monkeypatch, tmp_path, {"llm.py": (
+            'def call(msgs):\n'
+            '    payload = {"model": "m", "messages": msgs}\n'
+            '    payload["to" + "ols"] = [{"name": "shell"}]\n'
+            '    return client.post("/v1/messages", json=payload)\n')})
+        assert "class 5 N/A no longer holds" in self._err()
+
+    def test_fstring_composed_tools_key_is_folded_and_caught(
+            self, monkeypatch, tmp_path):
+        self._calib(monkeypatch, tmp_path, {"llm.py": (
+            'def call(payload):\n'
+            '    payload[f"to{\'ols\'}"] = []\n')})
+        assert "class 5 N/A no longer holds" in self._err()
+
+    def test_dynamic_key_write_in_the_llm_module_is_refused(
+            self, monkeypatch, tmp_path):
+        # "".join(...) and chr() arithmetic cannot be folded, and enumerating
+        # obfuscations is the losing game. In the module that calls a model,
+        # a key the AST cannot read is refused outright.
+        self._calib(monkeypatch, tmp_path, {"judgment.py": (
+            'import anthropic\n'
+            'def call(payload, key):\n'
+            '    payload["".join(["to", "ols"])] = []\n'
+            '    return client.messages.create(model="m", messages=[])\n')})
+        assert "builds a mapping key dynamically" in self._err()
+
+    def test_dynamic_key_outside_the_llm_module_is_left_alone(
+            self, monkeypatch, tmp_path):
+        # BOTH SIDES: dynamic mapping writes are ordinary everywhere else (16
+        # live modules do it). A check that fires on all of them is one the
+        # operator learns to wave through.
+        self._calib(monkeypatch, tmp_path, {
+            "compute.py": ('def build(rows, key):\n'
+                           '    out = {}\n'
+                           '    out[key] = rows\n'
+                           '    return out\n')})
+        mg.cmd_calibrate()           # does not raise
+
+    def test_llm_module_with_only_literal_keys_passes(
+            self, monkeypatch, tmp_path):
+        # the shape app/engine/judgment.py actually uses must stay green
+        self._calib(monkeypatch, tmp_path, {"judgment.py": (
+            'import anthropic\n'
+            'def call(msgs):\n'
+            '    return client.messages.create(model="m", max_tokens=8,\n'
+            '                                  messages=msgs)\n')})
+        mg.cmd_calibrate()           # does not raise
+
+    def test_live_judgment_module_has_no_dynamic_mapping_writes(self):
+        # the live invariant this rule pins
+        mg.cmd_calibrate()           # does not raise on the real repo
+
+    # --- the route inventory ----------------------------------------------
+
+    def test_surface_records_patch_and_non_router_decorators(
+            self, monkeypatch, tmp_path):
+        # THE EXPLOIT: a PATCH endpoint, or an @app.get in main.py, was live
+        # traffic the audit denominator did not know existed.
+        (tmp_path / "audit").mkdir()
+        (tmp_path / "app" / "routers").mkdir(parents=True)
+        (tmp_path / "app" / "main.py").write_text(
+            '@app.get("/root-level")\ndef r(): ...\n')
+        (tmp_path / "app" / "routers" / "admin.py").write_text(
+            '@router.patch("/admin/thing")\ndef p(): ...\n'
+            '@router.head("/admin/ping")\ndef h(): ...\n'
+            '@router.get("/admin/ok")\ndef g(): ...\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+
+        class R:
+            returncode = 0
+            stdout = "app/main.py\0app/routers/admin.py\0"
+            stderr = ""
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: R())
+        mg.cmd_surface()
+        surface = json.loads(
+            (tmp_path / "audit" / "00-audit-surface.json").read_text())
+        found = {(r["method"], r["path"]) for r in surface["routes"]}
+        assert ("PATCH", "/admin/thing") in found
+        assert ("HEAD", "/admin/ping") in found
+        assert ("GET", "/root-level") in found       # outside app/routers/
+        assert ("GET", "/admin/ok") in found
+
+    def test_live_surface_still_lists_every_route(self):
+        surface = json.loads(
+            (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
+        assert len(surface["routes"]) >= 19
