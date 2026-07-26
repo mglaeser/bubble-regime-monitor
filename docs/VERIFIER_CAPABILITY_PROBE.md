@@ -126,13 +126,17 @@ customer identifier, or repository content. The cross-vendor panel's required
 approver vetoed an earlier design in which a request id matching
 `^[A-Za-z0-9._:-]{1,128}$` was emitted verbatim — `sk-proj-abcdef123456`
 satisfies that pattern. Correlation therefore uses repository-owned values
-only: a locally derived, **run-specific** operation id whose hash binds
+only: a locally derived, **attempt-specific** operation id whose hash binds
 exactly the schema version, the workflow SHA, the workflow run id, the
-result-array position, the requested model id, the operation name and the
-payload hash — so identical operations in different runs (or at different
-positions) receive different ids. A second panel veto caught an earlier
-revision whose documentation promised the workflow SHA, run id and position
-while the hash contained none of them.
+workflow **run attempt**, the result-array position, the requested model id,
+the operation name and the payload hash — so identical operations in
+different runs, different rerun attempts (GitHub keeps `run_id` stable across
+reruns; `run_attempt` is what increments) or different positions receive
+different ids. Two panel vetoes shaped this: one caught documentation
+promising fields the hash did not contain; another caught the local-failure
+sentinel being an ordinary dict key that a provider body could forge — it is
+now a typed object `json.loads` cannot instantiate, so local-failure
+provenance is unforgeable by construction.
 
 ### Operator setup required before the first run
 

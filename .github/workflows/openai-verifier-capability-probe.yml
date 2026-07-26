@@ -104,6 +104,8 @@ jobs:
       OPENAI_BASE_URL: https://api.openai.com/v1
       WORKFLOW_SHA: ${{ github.sha }}
       WORKFLOW_RUN_ID: ${{ github.run_id }}
+      # run_id is STABLE across reruns; run_attempt distinguishes attempts.
+      WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
       WORKFLOW_JOB: ${{ github.job }}
 
     steps:
@@ -175,6 +177,24 @@ jobs:
           }
           _UNRECOGNIZED_LOCAL = "unrecognized local failure category"
 
+          class LocalFailure:
+              """Typed sentinel for failures OUR code detected.
+
+              The panel's required approver refuted the previous revision,
+              correctly: the sentinel was an ordinary dict key
+              ({"_local_failure": "timeout"}), and json.loads can produce any
+              dict — so an HTTP 200 whose BODY was that exact JSON was
+              misreported as a local timeout, forging evidence provenance.
+
+              json.loads can only ever yield dict, list, str, int, float,
+              bool and None. It cannot instantiate this class, so
+              isinstance(body, LocalFailure) is unforgeable from a provider
+              body by construction — not by shape, which is the trap every
+              prior revision of this file fell into."""
+
+              def __init__(self, category: str):
+                  self.category = category
+
           def safe_error(body: Any) -> dict[str, Any]:
               """Emit a repository-owned diagnostic and NOTHING provider-controlled.
 
@@ -205,11 +225,13 @@ jobs:
               If provider identifiers are ever genuinely needed, they must be
               checked against finite repository-owned sets (_ALLOWED_TYPES and
               friends), never against a length or character-class rule."""
-              if isinstance(body, dict) and isinstance(
-                      body.get("_local_failure"), str):
-                  # Our own sentinel, set before any provider body existed.
+              if isinstance(body, LocalFailure):
+                  # OUR typed sentinel — unforgeable from JSON. A provider body
+                  # {"_local_failure": "timeout"} is just a dict and falls
+                  # through to the provider-response branches below, so decoded
+                  # provider responses can never claim local-failure provenance.
                   return {"diagnostic": _LOCAL_FAILURES.get(
-                      body["_local_failure"], _UNRECOGNIZED_LOCAL)}
+                      body.category, _UNRECOGNIZED_LOCAL)}
               if not isinstance(body, dict):
                   return {"diagnostic": _NON_OBJECT}
               if not isinstance(body.get("error"), dict):
@@ -229,9 +251,18 @@ jobs:
                                  payload_sha256: str | None,
                                  result_index: int,
                                  workflow_sha: str | None,
-                                 workflow_run_id: str | None) -> str:
-              """A RUN-SPECIFIC correlation id built entirely from
+                                 workflow_run_id: str | None,
+                                 workflow_run_attempt: str | None) -> str:
+              """An ATTEMPT-SPECIFIC correlation id built entirely from
               repository-owned values.
+
+              github.run_id is STABLE across reruns of the same workflow run;
+              github.run_attempt is what distinguishes one attempt from the
+              next. Binding the attempt (F-05 Option A) makes the id unique
+              per attempt; without it, "run-specific" would silently mean
+              "identical across every rerun", which is the same
+              documentation-versus-hash mismatch the panel already vetoed
+              once.
 
               This replaces the provider's x-request-id. A previous revision
               accepted that header if it matched ^[A-Za-z0-9._:-]{1,128}$ and
@@ -256,6 +287,7 @@ jobs:
                   "schema_version": 1,
                   "workflow_sha": workflow_sha,
                   "workflow_run_id": workflow_run_id,
+                  "workflow_run_attempt": workflow_run_attempt,
                   "result_index": result_index,
                   "model": model,
                   "operation": operation,
@@ -293,27 +325,34 @@ jobs:
                   },
               )
               try:
-                  with urllib.request.urlopen(req, timeout=30) as response:
-                      status = response.status
-                      raw = response.read()
-              except urllib.error.HTTPError as exc:
-                  # An HTTP error IS a provider response; read its body under
-                  # the same protections.
                   try:
+                      with urllib.request.urlopen(req, timeout=30) as response:
+                          status = response.status
+                          raw = response.read()
+                  except urllib.error.HTTPError as exc:
+                      # An HTTP error IS a provider response; read its body
+                      # under the same protections (a failure while reading it
+                      # falls through to the outer boundary).
                       status = exc.code
                       raw = exc.read()
-                  except Exception:
-                      return None, {"_local_failure": "transport_error"}
               except TimeoutError:
-                  return None, {"_local_failure": "timeout"}
-              except (urllib.error.URLError, OSError):
-                  # URLError and every SSL/socket error are OSError subclasses;
-                  # their reasons/strerrors are not repository-authored text.
-                  return None, {"_local_failure": "transport_error"}
+                  return None, LocalFailure("timeout")
+              except Exception:
+                  # FINAL containment boundary (never BaseException). The
+                  # enumerated-classes approach was itself refutable:
+                  # http.client.IncompleteRead is an HTTPException, not an
+                  # OSError; EOFError is neither; and __enter__/__exit__/
+                  # .status/.read can each raise their own types. Whatever was
+                  # raised, its text is not repository-authored and must not
+                  # reach a log — the exception object is dropped here, never
+                  # stored, stringified or re-raised.
+                  return None, LocalFailure("transport_error")
               try:
                   parsed = json.loads(raw)
-              except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-                  return status, {"_local_failure": "invalid_json"}
+              except Exception:
+                  # Invalid JSON, invalid UTF-8, or an unexpected read() return
+                  # type — all become the same repository-owned category.
+                  return status, LocalFailure("invalid_json")
               return status, parsed
 
           results: list[dict[str, Any]] = []
@@ -321,6 +360,7 @@ jobs:
 
           WF_SHA = os.environ.get("WORKFLOW_SHA")
           WF_RUN_ID = os.environ.get("WORKFLOW_RUN_ID")
+          WF_RUN_ATTEMPT = os.environ.get("WORKFLOW_RUN_ATTEMPT")
 
           for result_index, requested_model in enumerate(MODELS):
               encoded_model = urllib.parse.quote(requested_model, safe="")
@@ -396,7 +436,7 @@ jobs:
                       "returned_id_matches": retrieved_model_id == requested_model,
                       "local_operation_id": local_operation_id(
                           requested_model, "models.retrieve", None,
-                          result_index, WF_SHA, WF_RUN_ID),
+                          result_index, WF_SHA, WF_RUN_ID, WF_RUN_ATTEMPT),
                       "ok": model_ok,
                       "error": None if model_ok else safe_error(model_body),
                   },
@@ -413,7 +453,8 @@ jobs:
                       "input_tokens": input_tokens if count_ok else None,
                       "local_operation_id": local_operation_id(
                           requested_model, "responses.input_tokens",
-                          payload_sha256, result_index, WF_SHA, WF_RUN_ID),
+                          payload_sha256, result_index, WF_SHA, WF_RUN_ID,
+                          WF_RUN_ATTEMPT),
                       "payload_sha256": payload_sha256,
                       "ok": count_ok,
                       "error": None if count_ok else safe_error(count_body),
@@ -427,6 +468,7 @@ jobs:
               "base_url": BASE,
               "workflow_sha": os.environ.get("WORKFLOW_SHA"),
               "workflow_run_id": os.environ.get("WORKFLOW_RUN_ID"),
+              "workflow_run_attempt": os.environ.get("WORKFLOW_RUN_ATTEMPT"),
               "workflow_job": os.environ.get("WORKFLOW_JOB"),
               "probed_at": datetime.now(timezone.utc).isoformat(),
               "results": results,

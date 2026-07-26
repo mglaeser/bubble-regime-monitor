@@ -20,7 +20,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import yaml
@@ -58,6 +58,19 @@ SHORT_REQUEST_ID_SECRET = "sk-proj-abcdef123456"  # pragma: allowlist secret -- 
 _WANTED_FUNCS = ("safe_error", "canonical_json", "local_operation_id",
                  "safe_status")
 
+_UNSET = object()
+
+
+class ProbeRun(NamedTuple):
+    stdout: str
+    stderr: str
+    summary: str
+    exit_code: int | None
+
+    @property
+    def all_output(self) -> str:
+        return self.stdout + self.stderr + self.summary
+
 
 def _load_symbols() -> dict[str, Any]:
     """Compile ONLY the sanitisers and the constants they close over.
@@ -70,6 +83,8 @@ def _load_symbols() -> dict[str, Any]:
     wanted: list[ast.stmt] = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in _WANTED_FUNCS:
+            wanted.append(node)
+        elif isinstance(node, ast.ClassDef) and node.name == "LocalFailure":
             wanted.append(node)
         elif isinstance(node, ast.Assign) and any(
                 getattr(t, "id", "").startswith("_") for t in node.targets):
@@ -172,38 +187,38 @@ class TestProviderRequestIdChannelIsRemoved:
             "the veto example must satisfy the withdrawn regex"
 
     def test_provider_request_id_is_never_persisted(self, monkeypatch, tmp_path):
-        stdout, summary = TestWholeRenderedEvidence._run(
+        res = TestWholeRenderedEvidence._run(
             monkeypatch, tmp_path,
             body={"id": "gpt-5.3-codex", "object": "response.input_tokens",
                   "input_tokens": 7},
             headers={"x-request-id": SHORT_REQUEST_ID_SECRET})
-        blob = stdout + summary
+        blob = res.all_output
         for fragment in ("sk-proj-", "abcdef123456",  # pragma: allowlist secret -- synthetic leak needles
                          SHORT_REQUEST_ID_SECRET):
             assert fragment not in blob, f"{fragment!r} reached the evidence"
 
     def test_request_id_fields_are_absent_from_the_schema(self, monkeypatch, tmp_path):
-        stdout, _ = TestWholeRenderedEvidence._run(
+        res = TestWholeRenderedEvidence._run(
             monkeypatch, tmp_path,
             body={"id": "gpt-5.3-codex", "object": "response.input_tokens",
                   "input_tokens": 7},
             headers={"x-request-id": SHORT_REQUEST_ID_SECRET})
-        evidence = json.loads(stdout)
+        evidence = json.loads(res.stdout)
         for result in evidence["results"]:
             # absent, not merely null
             assert "request_id" not in result["model_retrieve"]
             assert "request_id" not in result["input_token_count"]
         for banned in ("provider_request_id", "response_id", "request_id"):
-            assert f'"{banned}"' not in stdout
+            assert f'"{banned}"' not in res.stdout
 
     def test_correlation_uses_a_repository_owned_operation_id(
             self, monkeypatch, tmp_path):
-        stdout, _ = TestWholeRenderedEvidence._run(
+        res = TestWholeRenderedEvidence._run(
             monkeypatch, tmp_path,
             body={"id": "gpt-5.3-codex", "object": "response.input_tokens",
                   "input_tokens": 7},
             headers={"x-request-id": SHORT_REQUEST_ID_SECRET})
-        evidence = json.loads(stdout)
+        evidence = json.loads(res.stdout)
         first = evidence["results"][0]
         for section in ("model_retrieve", "input_token_count"):
             op_id = first[section]["local_operation_id"]
@@ -291,29 +306,60 @@ class TestWholeRenderedEvidence:
              headers: dict | None = None, status: int = 200,
              raise_http: bool = False, raise_exc: BaseException | None = None,
              raw: bytes | None = None,
-             read_raises: BaseException | None = None):
+             read_raises: BaseException | None = None,
+             enter_raises: BaseException | None = None,
+             exit_raises: BaseException | None = None,
+             status_exc: BaseException | None = None,
+             read_returns: Any = _UNSET,
+             responder=None) -> ProbeRun:
+        """Execute the shipped embedded script against a controllable stub.
+
+        Captures stdout, STDERR and the job summary (F-03: an escaping
+        traceback prints to stderr, so a helper that redirects only stdout
+        cannot see the very leak the transport tests exist to catch), and
+        retains the SystemExit code instead of suppressing it (F-04: a failed
+        scenario must be proven to exit 1, not merely to print sad JSON).
+
+        `responder(url, request_body_bytes) -> (status, body_dict)` builds a
+        realistic per-endpoint stub; the scalar knobs cover hostile cases."""
         import urllib.error
         import urllib.request
 
         class _Resp:
-            def __init__(self):
-                self.status = status
+            def __init__(self, st=None, bd=None):
+                self._st = status if st is None else st
+                self._bd = body if bd is None else bd
                 self.headers = headers or {}
+
+            @property
+            def status(self):
+                if status_exc is not None:
+                    raise status_exc
+                return self._st
 
             def read(self):
                 if read_raises is not None:
                     raise read_raises
+                if read_returns is not _UNSET:
+                    return read_returns
                 if raw is not None:
                     return raw
-                return json.dumps(body).encode("utf-8")
+                return json.dumps(self._bd).encode("utf-8")
 
             def __enter__(self):
+                if enter_raises is not None:
+                    raise enter_raises
                 return self
 
             def __exit__(self, *a):
+                if exit_raises is not None:
+                    raise exit_raises
                 return False
 
         def fake_urlopen(req, timeout=None):
+            if responder is not None:
+                st, bd = responder(req.full_url, req.data)
+                return _Resp(st, bd)
             if raise_exc is not None:
                 raise raise_exc
             if raise_http:
@@ -327,15 +373,26 @@ class TestWholeRenderedEvidence:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-THIS-IS-THE-REAL-KEY")  # pragma: allowlist secret -- synthetic fixture
         monkeypatch.setenv("WORKFLOW_SHA", "deadbeef")
         monkeypatch.setenv("WORKFLOW_RUN_ID", "1")
+        monkeypatch.setenv("WORKFLOW_RUN_ATTEMPT", "1")
         monkeypatch.setenv("WORKFLOW_JOB", "probe")
         summary = tmp_path / "summary.md"
         monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
 
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
-            exec(compile(_embedded_python(), "<probe>", "exec"),  # noqa: S102 -- shipped source under test
-                 {"__name__": "__probe__"})
-        return buf.getvalue(), (summary.read_text() if summary.exists() else "")
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        exit_code = None
+        with contextlib.redirect_stdout(out_buf), \
+                contextlib.redirect_stderr(err_buf):
+            try:
+                exec(compile(_embedded_python(), "<probe>", "exec"),  # noqa: S102 -- shipped source under test
+                     {"__name__": "__probe__"})
+            except SystemExit as exc:
+                exit_code = exc.code
+        return ProbeRun(
+            stdout=out_buf.getvalue(),
+            stderr=err_buf.getvalue(),
+            summary=summary.read_text() if summary.exists() else "",
+            exit_code=exit_code,
+        )
 
     def test_secrets_planted_in_every_provider_field_never_surface(
             self, monkeypatch, tmp_path):
@@ -353,9 +410,9 @@ class TestWholeRenderedEvidence:
         # The veto example, not a sentence: a full-sentence header contains
         # spaces and therefore never exercised the shape-filter bypass.
         hostile_headers = {"x-request-id": SHORT_REQUEST_ID_SECRET}
-        stdout, summary = self._run(monkeypatch, tmp_path,
+        res = self._run(monkeypatch, tmp_path,
                                     body=hostile_body, headers=hostile_headers)
-        blob = stdout + summary
+        blob = res.all_output
         assert blob.strip(), "the probe produced no evidence at all"
         for fragment in (*LEAK_FRAGMENTS, "THIS-IS-THE-REAL-KEY",
                          "not-even-an-int"):
@@ -363,12 +420,12 @@ class TestWholeRenderedEvidence:
 
     def test_hostile_run_still_fails_closed_and_reports_no_success(
             self, monkeypatch, tmp_path):
-        stdout, _ = self._run(
+        res = self._run(
             monkeypatch, tmp_path,
             body={"error": {"type": "x", "code": "y", "param": "z",
                             "message": PARTIAL_KEY_ECHO}},
             headers={"x-request-id": "req_ok-1"})
-        evidence = json.loads(stdout)
+        evidence = json.loads(res.stdout)
         assert evidence["overall_ok"] is False
         assert evidence["generation_calls"] == 0
         for result in evidence["results"]:
@@ -380,12 +437,12 @@ class TestWholeRenderedEvidence:
             self, monkeypatch, tmp_path):
         # A well-behaved provider: the evidence keeps the REQUESTED id (proved
         # equal), a boolean for the object field, and the validated request id.
-        stdout, _ = self._run(
+        res = self._run(
             monkeypatch, tmp_path,
             body={"id": "gpt-5.3-codex", "object": "response.input_tokens",
                   "input_tokens": 34},
             headers={"x-request-id": "req_valid-123"})
-        evidence = json.loads(stdout)
+        evidence = json.loads(res.stdout)
         first = evidence["results"][0]
         assert first["requested_model_id"] == "gpt-5.3-codex"
         assert first["model_retrieve"]["returned_id"] == "gpt-5.3-codex"
@@ -399,66 +456,112 @@ class TestWholeRenderedEvidence:
         assert "object" not in first["input_token_count"]
 
     def test_mismatched_model_id_is_dropped_not_echoed(self, monkeypatch, tmp_path):
-        stdout, _ = self._run(
+        res = self._run(
             monkeypatch, tmp_path,
             body={"id": "attacker/../evil-" + SHORT_SECRET,
                   "object": "response.input_tokens", "input_tokens": 1},
             headers={"x-request-id": "req_x"})
-        evidence = json.loads(stdout)
+        evidence = json.loads(res.stdout)
         first = evidence["results"][0]
         assert first["model_retrieve"]["returned_id"] is None
         assert first["model_retrieve"]["returned_id_matches"] is False
-        assert SHORT_SECRET not in stdout
+        assert SHORT_SECRET not in res.all_output
 
 
 class TestTransportFailuresCannotLeak:
-    """Section 3.1: a transport or decode failure must never print exception
-    text, because a URLError reason, an OSError strerror or a
-    UnicodeDecodeError byte excerpt is not repository-authored prose. Before
-    this fix, request() caught HTTPError ONLY, so any of these escaped as an
-    unhandled traceback — contradicting the claim that repository-owned
-    diagnostics are the only prose an error path can emit."""
+    """3.1 + F-02: a transport or decode failure must never print exception
+    text — a URLError reason, an OSError strerror, an IncompleteRead partial
+    or a UnicodeDecodeError byte excerpt is not repository-authored prose.
+    request() originally caught HTTPError ONLY, so all of these escaped as an
+    unhandled traceback; the first fix enumerated some classes but left
+    http.client.HTTPException (e.g. IncompleteRead), EOFError and context-
+    manager failures uncovered. The final containment boundary is
+    `except Exception` around the whole network/read phase — never
+    BaseException — returning a typed LocalFailure.
 
-    def _assert_contained(self, stdout, summary):
-        blob = stdout + summary
-        assert blob.strip(), "the probe produced no evidence at all"
+    Every scenario asserts over stdout AND stderr AND the job summary (F-03),
+    and pins exit code 1 (F-04)."""
+
+    def _assert_contained(self, res: ProbeRun):
+        assert res.all_output.strip(), "the probe produced no evidence at all"
         for fragment in (*LEAK_FRAGMENTS, "Traceback", "urllib.error",
                          "URLError", "OSError", "TimeoutError",
-                         "UnicodeDecodeError"):
-            assert fragment not in blob, f"{fragment!r} leaked into the evidence"
-        evidence = json.loads(stdout)
+                         "UnicodeDecodeError", "IncompleteRead", "EOFError"):
+            assert fragment not in res.all_output, \
+                f"{fragment!r} leaked into the evidence"
+        evidence = json.loads(res.stdout)
         assert evidence["overall_ok"] is False
         assert evidence["generation_calls"] == 0
+        assert res.exit_code == 1, "a failed probe must exit 1, not merely frown"
         return evidence
 
     def test_urlerror_with_secret_reason_is_contained(self, monkeypatch, tmp_path):
         import urllib.error
-        stdout, summary = TestWholeRenderedEvidence._run(
+        res = TestWholeRenderedEvidence._run(
             monkeypatch, tmp_path,
             raise_exc=urllib.error.URLError(SHORT_SECRET))
-        self._assert_contained(stdout, summary)
+        self._assert_contained(res)
 
     def test_timeout_with_secret_text_is_contained(self, monkeypatch, tmp_path):
-        stdout, summary = TestWholeRenderedEvidence._run(
+        res = TestWholeRenderedEvidence._run(
             monkeypatch, tmp_path, raise_exc=TimeoutError(SHORT_SECRET))
-        self._assert_contained(stdout, summary)
+        self._assert_contained(res)
 
     def test_oserror_with_bearer_text_is_contained(self, monkeypatch, tmp_path):
-        stdout, summary = TestWholeRenderedEvidence._run(
+        res = TestWholeRenderedEvidence._run(
             monkeypatch, tmp_path,
             raise_exc=OSError("Bearer sk-proj-DEADBEEFdeadbeef"))  # pragma: allowlist secret -- synthetic fixture
-        self._assert_contained(stdout, summary)
+        self._assert_contained(res)
+
+    def test_incomplete_read_is_contained(self, monkeypatch, tmp_path):
+        # http.client.IncompleteRead is an HTTPException, NOT an OSError —
+        # the exact class the first containment attempt missed. Its repr
+        # includes the partial bytes, which here carry a secret.
+        import http.client
+        res = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path,
+            read_raises=http.client.IncompleteRead(SHORT_SECRET.encode()))
+        self._assert_contained(res)
+
+    def test_eoferror_is_contained(self, monkeypatch, tmp_path):
+        res = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path, raise_exc=EOFError(SHORT_SECRET))
+        self._assert_contained(res)
+
+    def test_enter_raising_is_contained(self, monkeypatch, tmp_path):
+        res = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path, enter_raises=RuntimeError(SHORT_SECRET))
+        self._assert_contained(res)
+
+    def test_exit_raising_is_contained(self, monkeypatch, tmp_path):
+        res = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path,
+            body={"id": "gpt-5.3-codex"},
+            exit_raises=RuntimeError(SHORT_SECRET))
+        self._assert_contained(res)
+
+    def test_status_property_raising_is_contained(self, monkeypatch, tmp_path):
+        res = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path, status_exc=RuntimeError(SHORT_SECRET))
+        self._assert_contained(res)
 
     def test_read_raising_a_secret_bearing_error_is_contained(
             self, monkeypatch, tmp_path):
-        stdout, summary = TestWholeRenderedEvidence._run(
+        res = TestWholeRenderedEvidence._run(
             monkeypatch, tmp_path, read_raises=OSError(PARTIAL_KEY_ECHO))
-        self._assert_contained(stdout, summary)
+        self._assert_contained(res)
+
+    def test_unexpected_read_return_type_is_contained(self, monkeypatch, tmp_path):
+        # read() returning something json.loads cannot take must become the
+        # invalid_json category, not a TypeError traceback.
+        res = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path, read_returns=object())
+        self._assert_contained(res)
 
     def test_invalid_utf8_body_is_contained(self, monkeypatch, tmp_path):
-        stdout, summary = TestWholeRenderedEvidence._run(
+        res = TestWholeRenderedEvidence._run(
             monkeypatch, tmp_path, raw=b"\xff\xfe not json at all \x80")
-        evidence = self._assert_contained(stdout, summary)
+        evidence = self._assert_contained(res)
         # the invalid-JSON category maps to a repository-owned diagnostic
         first_err = evidence["results"][0]["model_retrieve"]["error"]
         assert first_err == {
@@ -467,15 +570,64 @@ class TestTransportFailuresCannotLeak:
     def test_local_failure_diagnostics_are_repository_owned(
             self, monkeypatch, tmp_path):
         import urllib.error
-        stdout, _ = TestWholeRenderedEvidence._run(
+        res = TestWholeRenderedEvidence._run(
             monkeypatch, tmp_path,
             raise_exc=urllib.error.URLError("anything"))
-        evidence = json.loads(stdout)
+        evidence = json.loads(res.stdout)
         err = evidence["results"][0]["model_retrieve"]["error"]
         assert err == {"diagnostic": ("local transport failure before a "
                                       "provider response was decoded")}
         # a local failure yields no HTTP status to validate
         assert evidence["results"][0]["model_retrieve"]["status"] is None
+
+
+class TestLocalFailureSentinelCannotBeForged:
+    """F-01 / the required approver's veto on ac5bff2, verbatim finding:
+    'provider can forge _local_failure sentinel — HTTP response body
+    {"_local_failure":"timeout"} is misreported as local timeout despite
+    decoded provider response, corrupting evidence provenance.'
+
+    Confirmed defect: the sentinel was an ordinary dict key, and json.loads
+    can produce any dict. The class fix is a TYPED LocalFailure object that
+    JSON cannot instantiate — json.loads yields only dict/list/str/int/float/
+    bool/None, so isinstance(body, LocalFailure) is unforgeable from a
+    provider body by construction."""
+
+    def test_provider_body_cannot_forge_a_local_timeout(self, monkeypatch, tmp_path):
+        # THE veto reproduction: a well-formed HTTP 200 whose body is exactly
+        # the forged sentinel. Provenance must say "provider response", never
+        # "local failure".
+        res = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path,
+            body={"_local_failure": "timeout"}, headers={})
+        evidence = json.loads(res.stdout)
+        err = evidence["results"][0]["model_retrieve"]["error"]
+        assert err == {"diagnostic": "provider returned no structured error object"}, (
+            "a decoded provider response was misreported as a local failure — "
+            "evidence provenance is forged")
+        assert "local timeout" not in res.all_output
+        assert "local transport failure" not in res.all_output
+
+    @pytest.mark.parametrize("forged", [
+        {"_local_failure": "timeout"},
+        {"_local_failure": "transport_error"},
+        {"_local_failure": "invalid_json"},
+        {"error": {"_local_failure": "timeout"}},
+    ])
+    def test_no_forged_shape_selects_a_local_diagnostic(self, safe_error, forged):
+        out = safe_error(forged)
+        assert "local" not in out["diagnostic"], (
+            f"provider JSON {forged!r} selected a local-failure diagnostic")
+
+    def test_the_sentinel_type_is_not_json_instantiable(self):
+        # The property the fix rests on, pinned: everything json.loads can
+        # produce fails the isinstance check the diagnostics now require.
+        symbols = _load_symbols()
+        local_failure_cls = symbols.get("LocalFailure")
+        assert local_failure_cls is not None, "LocalFailure class missing"
+        for value in (json.loads('{"_local_failure": "timeout"}'),
+                      json.loads('"timeout"'), json.loads("null")):
+            assert not isinstance(value, local_failure_cls)
 
 
 class TestLocalOperationIdBindsTheRun:
@@ -487,7 +639,7 @@ class TestLocalOperationIdBindsTheRun:
     operation and payload hash."""
 
     BASE_ARGS = ("gpt-5.6-sol", "responses.input_tokens", "ab" * 32, 1,
-                 "sha-A", "run-A")
+                 "sha-A", "run-A", "attempt-1")
 
     def test_same_full_inputs_give_the_same_id(self, op_id):
         assert op_id(*self.BASE_ARGS) == op_id(*self.BASE_ARGS)
@@ -499,6 +651,9 @@ class TestLocalOperationIdBindsTheRun:
         (3, 2),                     # result index
         (4, "sha-B"),               # workflow SHA
         (5, "run-B"),               # workflow run id
+        (6, "attempt-2"),           # run attempt (F-05 Option A: github.run_id
+                                    # is STABLE across reruns; run_attempt is
+                                    # what distinguishes attempt from attempt)
     ])
     def test_changing_any_bound_field_changes_the_id(self, op_id, index,
                                                      replacement):
@@ -506,7 +661,7 @@ class TestLocalOperationIdBindsTheRun:
         changed[index] = replacement
         assert op_id(*changed) != op_id(*self.BASE_ARGS), (
             f"field {index} does not enter the hash — the id is not "
-            "run-specific and the docstring is lying again")
+            "attempt-specific and the docstring is lying again")
 
     def test_live_evidence_ids_are_deterministic_and_position_distinct(
             self, monkeypatch, tmp_path):
@@ -516,11 +671,11 @@ class TestLocalOperationIdBindsTheRun:
         # identical runs.
         body = {"id": "gpt-5.3-codex", "object": "response.input_tokens",
                 "input_tokens": 7}
-        out1, _ = TestWholeRenderedEvidence._run(monkeypatch, tmp_path,
+        res1 = TestWholeRenderedEvidence._run(monkeypatch, tmp_path,
                                                  body=body, headers={})
-        out2, _ = TestWholeRenderedEvidence._run(monkeypatch, tmp_path,
+        res2 = TestWholeRenderedEvidence._run(monkeypatch, tmp_path,
                                                  body=body, headers={})
-        ev1, ev2 = json.loads(out1), json.loads(out2)
+        ev1, ev2 = json.loads(res1.stdout), json.loads(res2.stdout)
         ids1 = [r["model_retrieve"]["local_operation_id"]
                 for r in ev1["results"]]
         assert len(set(ids1)) == len(ids1)          # positions are distinct
@@ -536,7 +691,8 @@ class TestEvidenceSchemaIsClosed:
 
     EVIDENCE_KEYS = {"schema_version", "probe_type", "generation_calls",
                      "base_url", "workflow_sha", "workflow_run_id",
-                     "workflow_job", "probed_at", "results", "overall_ok"}
+                     "workflow_run_attempt", "workflow_job", "probed_at",
+                     "results", "overall_ok"}
     RESULT_KEYS = {"requested_model_id", "model_retrieve", "input_token_count"}
     MODEL_KEYS = {"status", "returned_id", "returned_id_matches",
                   "local_operation_id", "ok", "error"}
@@ -554,8 +710,8 @@ class TestEvidenceSchemaIsClosed:
     }
 
     def _evidence(self, monkeypatch, tmp_path, **kw):
-        stdout, _ = TestWholeRenderedEvidence._run(monkeypatch, tmp_path, **kw)
-        return json.loads(stdout)
+        res = TestWholeRenderedEvidence._run(monkeypatch, tmp_path, **kw)
+        return json.loads(res.stdout)
 
     @pytest.mark.parametrize("kw", [
         {"body": {"id": "gpt-5.3-codex", "object": "response.input_tokens",
@@ -612,6 +768,42 @@ class TestEvidenceSchemaIsClosed:
         for result in evidence["results"]:
             assert result["model_retrieve"]["status"] is None
             assert result["input_token_count"]["status"] is None
+
+
+class TestPositivePathIsFullyPinned:
+    """F-04: fail-closed proofs are meaningless if the success path was never
+    demonstrated against a realistic per-endpoint stub. This responder answers
+    the model-retrieval and count endpoints correctly for all three models."""
+
+    @staticmethod
+    def _responder(url, data):
+        import urllib.parse
+        if "/models/" in url:
+            model = urllib.parse.unquote(url.rsplit("/", 1)[-1])
+            return 200, {"id": model, "object": "model"}
+        payload = json.loads(data)
+        return 200, {"object": "response.input_tokens",
+                     "input_tokens": 30 + len(payload["model"])}
+
+    def test_all_three_models_green_with_no_failure_exit(
+            self, monkeypatch, tmp_path):
+        res = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path, responder=self._responder)
+        evidence = json.loads(res.stdout)
+        assert evidence["overall_ok"] is True
+        assert evidence["generation_calls"] == 0
+        assert res.exit_code is None            # the script never called exit(1)
+        assert len(evidence["results"]) == 3
+        for result in evidence["results"]:
+            model = result["requested_model_id"]
+            assert result["model_retrieve"]["ok"] is True
+            assert result["model_retrieve"]["returned_id"] == model
+            assert result["model_retrieve"]["error"] is None
+            count = result["input_token_count"]
+            assert count["ok"] is True
+            assert count["object_matches"] is True
+            assert count["input_tokens"] == 30 + len(model)
+            assert count["error"] is None
 
 
 class TestWorkflowStillSatisfiesItsOtherGuarantees:
