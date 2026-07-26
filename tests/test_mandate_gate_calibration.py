@@ -817,7 +817,77 @@ class TestBranchReviewFixes:
     def test_p1_1_absent_config_fails_closed(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mg, "ROOT", tmp_path)     # no pyproject.toml
         fires, _ = mg._ruff_s110_live()
-        assert not fires                              # ruff defaults do not select S
+        assert not fires                              # no repo config -> not a repo control
+
+    # --- CI-3.12 regression (2026-07-26): the probe must require an EXPLICIT
+    # Ruff config ROOTED IN THE REPOSITORY. Taking ruff's bare answer let the
+    # verdict come from ruff's BUILT-IN DEFAULTS, which differ by ruff version —
+    # the absent-config case above passed locally and FAILED on the CI 3.12
+    # runner — or from a config in a PARENT directory outside the repository.
+    # All three supported root forms are recognised; every uncertain state
+    # fails closed.
+
+    def test_root_ruff_toml_form_is_recognised(self, tmp_path, monkeypatch):
+        (tmp_path / "ruff.toml").write_text('[lint]\nselect = ["S"]\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        fires, _ = mg._ruff_s110_live()
+        assert fires
+
+    def test_root_dot_ruff_toml_form_is_recognised(self, tmp_path, monkeypatch):
+        (tmp_path / ".ruff.toml").write_text('[lint]\nselect = ["S"]\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        fires, _ = mg._ruff_s110_live()
+        assert fires
+
+    def test_root_pyproject_tool_ruff_form_is_recognised(self, tmp_path, monkeypatch):
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.ruff.lint]\nselect = ["S"]\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        fires, _ = mg._ruff_s110_live()
+        assert fires
+
+    def test_parent_only_config_is_refused_not_inherited(self, tmp_path, monkeypatch):
+        # The config lives one level ABOVE the repository root. Whether or not
+        # ruff would walk up and apply it, it is not part of this repository, so
+        # it can never satisfy a repository control.
+        (tmp_path / "ruff.toml").write_text('[lint]\nselect = ["S"]\n')
+        child = tmp_path / "repo"
+        child.mkdir()
+        monkeypatch.setattr(mg, "ROOT", child)
+        fires, why = mg._ruff_s110_live()
+        assert not fires
+        assert "PARENT" in why or "parent" in why
+
+    def test_malformed_root_config_fails_closed(self, tmp_path, monkeypatch):
+        (tmp_path / "ruff.toml").write_text("this is not toml [[[\n")
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        fires, why = mg._ruff_s110_live()
+        assert not fires
+        assert "malformed" in why
+
+    def test_pyproject_without_tool_ruff_fails_closed(self, tmp_path, monkeypatch):
+        # A real pyproject that simply declares no Ruff config of its own.
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "x"\nversion = "0.1"\n'
+            '[tool.black]\nline-length = 88\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        fires, why = mg._ruff_s110_live()
+        assert not fires
+        assert "[tool.ruff]" in why
+
+    def test_unrelated_ruff_failure_naming_s110_is_not_a_catch(
+            self, tmp_path, monkeypatch):
+        # Valid TOML (so the config gate passes) but an unknown rule selector:
+        # ruff exits 2, writes NOTHING to stdout, and prints the offending name
+        # — which contains the literal "S110" — to stderr. The previous
+        # `"S110" in stdout + stderr` test read that error message as a live
+        # control. Only a real diagnostic may count.
+        (tmp_path / "ruff.toml").write_text(
+            '[lint]\nselect = ["S110"]\nextend-select = ["NOT_A_RULE_S110"]\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        fires, why = mg._ruff_s110_live()
+        assert not fires
+        assert "no parseable JSON diagnostics" in why
 
     # --- P1.2: AST credential scan catches annotated assignments -------------
 

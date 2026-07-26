@@ -1234,6 +1234,54 @@ def scan_credential_shapes(paths) -> list[str]:
     return hits
 
 
+def _ruff_root_config() -> tuple[Path | None, str]:
+    """The explicit Ruff configuration ROOTED IN THIS REPOSITORY, or None+why.
+
+    CI regression (2026-07-26, Python 3.12 job): `_ruff_s110_live` asked ruff
+    whether S110 fires and took the bare answer at face value, so with NO
+    repository config the verdict came from ruff's BUILT-IN DEFAULTS — which
+    differ by ruff version (locally S110 did not fire, on the CI runner it did,
+    so a test asserting the absent-config case passed locally and failed in CI)
+    and could equally come from a config file in a PARENT directory that the
+    repository does not contain. A control whose verdict is owned by the tool's
+    defaults, or by a file outside the repository, is not a repository control
+    at all. So an explicit config at ROOT is now REQUIRED, and its absence is
+    reported rather than silently resolved by whatever ruff would have used.
+
+    Discovery mirrors ruff's own precedence (`.ruff.toml`, then `ruff.toml`,
+    then `pyproject.toml` carrying a `[tool.ruff]` TABLE) but is deliberately
+    NOT recursive: a parent-only config is REFUSED, never inherited. Malformed
+    TOML and a pyproject without `[tool.ruff]` are refusals too — both leave the
+    rule set undetermined, which is the fail-closed direction."""
+    import tomllib
+    for name in (".ruff.toml", "ruff.toml"):
+        fp = ROOT / name
+        if fp.is_file():
+            try:
+                tomllib.loads(fp.read_text(errors="replace"))
+            except tomllib.TOMLDecodeError as exc:
+                return None, (f"{name} at the repository root is malformed TOML "
+                              f"({exc}) — the effective rule set is undetermined")
+            return fp, ""
+    pp = ROOT / "pyproject.toml"
+    if not pp.is_file():
+        return None, ("no .ruff.toml, ruff.toml or pyproject.toml at the "
+                      "repository root (a config in a PARENT directory is "
+                      "deliberately NOT inherited — it is not part of this "
+                      "repository and cannot be one of its controls)")
+    try:
+        cfg = tomllib.loads(pp.read_text(errors="replace"))
+    except tomllib.TOMLDecodeError as exc:
+        return None, (f"pyproject.toml at the repository root is malformed TOML "
+                      f"({exc}) — the effective rule set is undetermined")
+    tool = cfg.get("tool")
+    if not (isinstance(tool, dict) and isinstance(tool.get("ruff"), dict)):
+        return None, ("pyproject.toml at the repository root carries no "
+                      "[tool.ruff] table, so this repository declares no Ruff "
+                      "configuration of its own")
+    return pp, ""
+
+
 def _ruff_s110_live() -> tuple[bool, str]:
     """True when the repo's OWN, fully-merged ruff config makes S110 fire on
     the app/ production surface (P1-01, review OA-12-F02 / P1.3).
@@ -1246,17 +1294,42 @@ def _ruff_s110_live() -> tuple[bool, str]:
     `extend-ignore`, per-file-ignores and `exclude`). Because it evaluates
     ruff's merged config, deleting 'S', ignoring S110, adding an `app/**`
     per-file-ignore, or excluding app/ all make the diagnostic vanish and the
-    check fail. Fails CLOSED: a ruff that errors (no S110 emitted) is a dead
-    control, not a catch. Returns (fires, detail-for-the-failure-message)."""
+    check fail.
+
+    Fails CLOSED on every uncertainty, and each in its own right: no explicit
+    repository config (`_ruff_root_config`), a ruff that could not run, and any
+    result that is not a real S110 DIAGNOSTIC all read as "not live" — a dead
+    control, never a catch. Returns (fires, detail-for-the-failure-message)."""
+    cfg, why = _ruff_root_config()
+    if cfg is None:
+        return False, ("no explicit Ruff configuration rooted in this "
+                       f"repository: {why} — an S110 verdict resting on ruff's "
+                       "built-in defaults, or on a config file the repository "
+                       "does not contain, is not a deliberate repository "
+                       "control and must never read as one")
     probe = subprocess.run(
         [sys.executable, "-m", "ruff", "check", "--force-exclude",
+         "--output-format", "json",
          "--stdin-filename", "app/_s110_probe.py", "-"],
         input="def f():\n    try:\n        g()\n    except Exception:\n"
               "        pass\n",
         capture_output=True, text=True, cwd=ROOT)
-    fires = "S110" in (probe.stdout + probe.stderr)
-    detail = (f"per-file-ignore, extend-ignore, or an app/ exclusion has "
-              f"silenced the CI gate; exit={probe.returncode}, "
+    # An actual S110 DIAGNOSTIC, not the substring anywhere in the output. A
+    # ruff that FAILS to run (exit 2 — e.g. an unknown rule selector) prints the
+    # offending rule NAME to stderr and nothing to stdout, so the previous
+    # `"S110" in stdout + stderr` test could read "S110" straight out of an
+    # error message and report a DEAD control as live. Structured output makes
+    # a diagnostic the only thing that can satisfy the check, and an
+    # unparseable/absent result fails closed.
+    try:
+        diags = json.loads(probe.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False, ("ruff emitted no parseable JSON diagnostics — the "
+                       f"probe could not run (exit={probe.returncode}, "
+                       f"err={probe.stderr.strip()[:160]!r})")
+    fires = any(isinstance(d, dict) and d.get("code") == "S110" for d in diags)
+    detail = (f"under {cfg.name}: a per-file-ignore, extend-ignore, or an app/ "
+              f"exclusion has silenced the CI gate; exit={probe.returncode}, "
               f"err={probe.stderr.strip()[:120]!r}")
     return fires, detail
 
