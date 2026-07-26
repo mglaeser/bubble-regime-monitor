@@ -48,7 +48,10 @@
 #   * calls NO generation endpoint (no /v1/responses), only model retrieval
 #     and the input-token counter;
 #   * prints sanitized evidence only: status codes, the returned model id, the
-#     token count, and provider request ids. Never the key, never full headers.
+#     token count, and locally derived operation ids. Provider request and
+#     response identifiers are NEVER read or persisted — they are
+#     provider-controlled strings, and a shape rule cannot prove such a string
+#     is not a key fragment. Never the key, never headers.
 #
 # WHAT A GREEN RUN PROVES (and nothing more) is recorded in
 # docs/VERIFIER_CAPABILITY_PROBE.md. In particular it does NOT close V-TRUST:
@@ -112,7 +115,6 @@ jobs:
           import hashlib
           import json
           import os
-          import re
           import sys
           import urllib.error
           import urllib.parse
@@ -179,7 +181,7 @@ jobs:
               one: whatever the provider puts in any error field, none of it can
               reach the log. The caller adds only repository-owned or
               separately VALIDATED values — HTTP status, operation name, the
-              requested model id, and a format-checked request id.
+              requested model id, and a locally derived operation id.
 
               If provider identifiers are ever genuinely needed, they must be
               checked against finite repository-owned sets (_ALLOWED_TYPES and
@@ -190,22 +192,43 @@ jobs:
                   return {"diagnostic": _NO_STRUCTURED}
               return {"diagnostic": _STRUCTURED}
 
-          _REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+          def local_operation_id(model: str, operation: str,
+                                 payload_sha256: str | None) -> str:
+              """A correlation id built ENTIRELY from repository-owned values.
 
-          def safe_request_id(value: Any) -> str | None:
-              """A provider request id is useful for support, but it is still
-              provider-controlled text. Accept only the documented shape and
-              drop anything else WHOLE — never truncate, because a truncated
-              secret is still a secret."""
-              if not isinstance(value, str):
-                  return None
-              return value if _REQUEST_ID.fullmatch(value) else None
+              This replaces the provider's x-request-id. A previous revision
+              accepted that header if it matched ^[A-Za-z0-9._:-]{1,128}$ and
+              emitted it verbatim — but "sk-proj-abcdef123456" satisfies that
+              pattern exactly, so the "validated" identifier was a disclosure
+              channel. That was the SECOND shape filter in this file to be
+              defeated by a short, whitespace-free secret; the first was the
+              64-character rule on error type/code/param.
+
+              A regex can only prove shape. It cannot prove that arbitrary
+              provider-controlled text is not a key, a key fragment, a bearer
+              token, a customer identifier, or repository content. So no
+              provider identifier is persisted at all: correlation uses the
+              requested model, the operation name, the payload hash, the
+              workflow SHA, the run id and the position in the results array —
+              every one of which this repository already owns."""
+              return hashlib.sha256(canonical_json({
+                  "schema_version": 1,
+                  "model": model,
+                  "operation": operation,
+                  "payload_sha256": payload_sha256,
+              })).hexdigest()
 
           def request(
               method: str,
               path: str,
               payload: dict[str, Any] | None = None,
-          ) -> tuple[int, Any, str | None]:
+          ) -> tuple[int, Any]:
+              """Returns (status, parsed_body) — deliberately NO third element.
+
+              Response HEADERS are never read. Removing the read at the source,
+              rather than sanitising downstream, is what makes the channel
+              closed: there is no provider identifier in scope to leak, so a
+              future edit cannot reintroduce one by accident."""
               data = canonical_json(payload) if payload is not None else None
               req = urllib.request.Request(
                   BASE + path,
@@ -220,20 +243,18 @@ jobs:
               try:
                   with urllib.request.urlopen(req, timeout=30) as response:
                       raw = response.read()
-                      request_id = response.headers.get("x-request-id")
                       try:
                           parsed = json.loads(raw)
                       except json.JSONDecodeError:
                           parsed = {"_invalid_json": True}
-                      return response.status, parsed, request_id
+                      return response.status, parsed
               except urllib.error.HTTPError as exc:
                   raw = exc.read()
-                  request_id = exc.headers.get("x-request-id")
                   try:
                       parsed = json.loads(raw)
                   except json.JSONDecodeError:
                       parsed = {"_invalid_json": True}
-                  return exc.code, parsed, request_id
+                  return exc.code, parsed
 
           results: list[dict[str, Any]] = []
           failed = False
@@ -241,7 +262,7 @@ jobs:
           for requested_model in MODELS:
               encoded_model = urllib.parse.quote(requested_model, safe="")
 
-              model_status, model_body, model_request_id = request(
+              model_status, model_body = request(
                   "GET",
                   f"/models/{encoded_model}",
               )
@@ -261,7 +282,7 @@ jobs:
                   canonical_json(payload)
               ).hexdigest()
 
-              count_status, count_body, count_request_id = request(
+              count_status, count_body = request(
                   "POST",
                   "/responses/input_tokens",
                   payload,
@@ -295,13 +316,12 @@ jobs:
               if not (model_ok and count_ok):
                   failed = True
 
-              # Every provider-controlled STRING is reduced to a comparison
-              # against a repository-owned expectation before it is recorded.
-              # `returned_id`, the `object` field and the request-id header are
-              # all attacker-influenceable in principle, and all three were
-              # previously written into the evidence JSON and the job summary
-              # verbatim. Emitting the EXPECTED value on a match (and nothing
-              # on a mismatch) carries the same information with no channel.
+              # NO provider-controlled string is recorded. Each is reduced to a
+              # comparison against a repository-owned expectation, and
+              # correlation uses a locally derived operation id rather than the
+              # provider's request id. Emitting the EXPECTED value on a match
+              # (and nothing on a mismatch) carries the same information with
+              # no channel.
               results.append({
                   "requested_model_id": requested_model,
                   "model_retrieve": {
@@ -310,7 +330,8 @@ jobs:
                       # never an arbitrary provider-supplied identifier
                       "returned_id": requested_model if model_ok else None,
                       "returned_id_matches": retrieved_model_id == requested_model,
-                      "request_id": safe_request_id(model_request_id),
+                      "local_operation_id": local_operation_id(
+                          requested_model, "models.retrieve", None),
                       "ok": model_ok,
                       "error": None if model_ok else safe_error(model_body),
                   },
@@ -325,7 +346,9 @@ jobs:
                       # path, where count_ok is False and the value was emitted
                       # anyway.
                       "input_tokens": input_tokens if count_ok else None,
-                      "request_id": safe_request_id(count_request_id),
+                      "local_operation_id": local_operation_id(
+                          requested_model, "responses.input_tokens",
+                          payload_sha256),
                       "payload_sha256": payload_sha256,
                       "ok": count_ok,
                       "error": None if count_ok else safe_error(count_body),

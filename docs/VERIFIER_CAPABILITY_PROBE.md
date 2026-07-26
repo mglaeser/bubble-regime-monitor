@@ -68,7 +68,7 @@ The job additionally:
 | Checkout | **none** — no branch code, dependency, config or hook runs with the key in scope |
 | Payload | **fixed synthetic string** — no diff, file content, or repository data is sent |
 | Endpoints | `GET /models/{id}` and `POST /responses/input_tokens` only — **no generation call** |
-| Output | status codes, returned model id, token count, provider request ids. Never the key, never full headers |
+| Output | status codes, the requested model id (only after proving equality), token count, and locally derived operation ids. Never the key, never headers, never a provider identifier |
 | Trigger guards | repository + operator account — **defence in depth only, not a boundary** |
 | Failure | **fail closed** — any missing/malformed result for any required model exits non-zero |
 
@@ -116,7 +116,18 @@ At the time of that run, for each of `gpt-5.3-codex`, `gpt-5.6-sol` and
 
 Actions → *OpenAI verifier capability probe* → **Run workflow** (from the
 default branch). Retain the run URL, run id, workflow SHA, the sanitized JSON
-evidence and the provider request ids.
+evidence.
+
+**Provider request/response identifiers are intentionally not persisted** in
+public evidence, because they are provider-controlled strings. A shape rule
+(a regex, a length limit, a character class) can prove only shape; it cannot
+prove that such a string is not a key, a key fragment, a bearer token, a
+customer identifier, or repository content. The cross-vendor panel's required
+approver vetoed an earlier design in which a request id matching
+`^[A-Za-z0-9._:-]{1,128}$` was emitted verbatim — `sk-proj-abcdef123456`
+satisfies that pattern. Correlation therefore uses repository-owned values
+only: a locally derived operation id, the requested model id, the payload
+hash, the workflow SHA and the workflow run id.
 
 ### Operator setup required before the first run
 
