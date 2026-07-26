@@ -68,7 +68,7 @@ The job additionally:
 | Checkout | **none** — no branch code, dependency, config or hook runs with the key in scope |
 | Payload | **fixed synthetic string** — no diff, file content, or repository data is sent |
 | Endpoints | `GET /models/{id}` and `POST /responses/input_tokens` only — **no generation call** |
-| Output | status codes, returned model id, token count, provider request ids. Never the key, never full headers |
+| Output | raw provider text and transport identifiers removed; retained are exact-match reductions (requested id on proven equality, booleans otherwise), validated scalars (range-checked status, validated token count — provider-influenced facts, which IS the capability being measured), and repository-owned diagnostics/operation ids. Never the key, never headers, never free-form provider or exception text |
 | Trigger guards | repository + operator account — **defence in depth only, not a boundary** |
 | Failure | **fail closed** — any missing/malformed result for any required model exits non-zero |
 
@@ -116,7 +116,27 @@ At the time of that run, for each of `gpt-5.3-codex`, `gpt-5.6-sol` and
 
 Actions → *OpenAI verifier capability probe* → **Run workflow** (from the
 default branch). Retain the run URL, run id, workflow SHA, the sanitized JSON
-evidence and the provider request ids.
+evidence.
+
+**Provider request/response identifiers are intentionally not persisted** in
+public evidence, because they are provider-controlled strings. A shape rule
+(a regex, a length limit, a character class) can prove only shape; it cannot
+prove that such a string is not a key, a key fragment, a bearer token, a
+customer identifier, or repository content. The cross-vendor panel's required
+approver vetoed an earlier design in which a request id matching
+`^[A-Za-z0-9._:-]{1,128}$` was emitted verbatim — `sk-proj-abcdef123456`
+satisfies that pattern. Correlation therefore uses repository-owned values
+only: a locally derived, **attempt-specific** operation id whose hash binds
+exactly the schema version, the workflow SHA, the workflow run id, the
+workflow **run attempt**, the result-array position, the requested model id,
+the operation name and the payload hash — so identical operations in
+different runs, different rerun attempts (GitHub keeps `run_id` stable across
+reruns; `run_attempt` is what increments) or different positions receive
+different ids. Two panel vetoes shaped this: one caught documentation
+promising fields the hash did not contain; another caught the local-failure
+sentinel being an ordinary dict key that a provider body could forge — it is
+now a typed object `json.loads` cannot instantiate, so local-failure
+provenance is unforgeable by construction.
 
 ### Operator setup required before the first run
 
