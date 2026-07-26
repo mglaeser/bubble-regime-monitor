@@ -632,3 +632,128 @@ class TestRoutePathExtraction:
         empties = [r for r in surface["routes"] if r["path"] == ""]
         assert len(empties) == 2, empties
         assert len(surface["routes"]) >= 21
+
+
+class TestPanelFindingsRound33:
+    """Three fidelity/scope gaps the panel found in the round-32 close-out.
+    Each is verified against the pre-fix gate (see the commit) as either a
+    false block or a silently-omitted endpoint."""
+
+    def _calibrate_app(self, monkeypatch, tmp_path, files):
+        return TestPanelFindingsRound25._calibrate_app(
+            TestPanelFindingsRound25(), monkeypatch, tmp_path, files)
+
+    def _calib_error(self):
+        return TestPanelFindingsRound25._calib_error(TestPanelFindingsRound25())
+
+    def _surface(self, monkeypatch, tmp_path, source):
+        return TestRoutePathExtraction._surface(
+            TestRoutePathExtraction(), monkeypatch, tmp_path, source)
+
+    # --- finding 1: the **kwargs ban was not scoped to model-reachers -------
+
+    def test_ordinary_http_client_kwargs_do_not_freeze_releases(
+            self, monkeypatch, tmp_path):
+        # THE BUG: the **kwargs ban keyed on method NAMES (post/put/...), so an
+        # ordinary price-feed `httpx.post(url, **opts)` in a non-model module
+        # falsely blocked. It reaches no model and must pass.
+        self._calibrate_app(monkeypatch, tmp_path, {"prices.py": (
+            'import httpx\n'
+            'def fetch(url, opts):\n'
+            '    return httpx.post(url, **opts)\n')})
+        mg.cmd_calibrate()           # does not raise
+
+    def test_kwargs_into_a_model_reaching_call_still_blocks(
+            self, monkeypatch, tmp_path):
+        # BOTH SIDES: the same expansion in a module that DOES reach a model is
+        # still forbidden (the endpoint literal makes it model-reaching).
+        self._calibrate_app(monkeypatch, tmp_path, {"llm.py": (
+            'import httpx\n'
+            'def call(opts):\n'
+            '    return httpx.post("https://api.anthropic.com/v1/messages",\n'
+            '                      **opts)\n')})
+        assert "expands **kwargs into a model call" in self._calib_error()
+
+    def test_kwargs_into_an_sdk_call_still_blocks(self, monkeypatch, tmp_path):
+        self._calibrate_app(monkeypatch, tmp_path, {"j.py": (
+            'import anthropic\n'
+            'def call(opts):\n'
+            '    return client.messages.create(**opts)\n')})
+        assert "expands **kwargs into a model call" in self._calib_error()
+
+    # --- finding 2: a non-literal route path was silently dropped -----------
+
+    def test_composed_literal_path_is_folded_into_the_surface(
+            self, monkeypatch, tmp_path):
+        found = self._surface(monkeypatch, tmp_path,
+                              '@router.get("/api" + "/x")\ndef a(): ...\n')
+        assert ("GET", "/api/x") in found
+
+    def test_runtime_computed_path_fails_closed_not_silently_dropped(
+            self, monkeypatch, tmp_path):
+        # THE BUG: `@router.get(PREFIX + "/x")` with PREFIX a Name is a live
+        # endpoint the scan cannot read. The pre-fix code set route=None and
+        # `continue`d, so it vanished from the denominator while surface --check
+        # greened. It must fail instead.
+        (tmp_path / "audit").mkdir()
+        (tmp_path / "app").mkdir(parents=True)
+        (tmp_path / "app" / "r.py").write_text(
+            'PREFIX = "/api"\n@router.get(PREFIX + "/x")\ndef a(): ...\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+
+        class R:
+            returncode = 0
+            stdout = "app/r.py\0"
+            stderr = ""
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: R())
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), pytest.raises(SystemExit):
+            mg.cmd_surface()
+        assert "not a readable literal" in err.getvalue()
+
+    # --- finding 3: api_route collapsed methods to a single ANY entry -------
+
+    def test_api_route_emits_one_entry_per_declared_method(
+            self, monkeypatch, tmp_path):
+        found = self._surface(monkeypatch, tmp_path,
+                              '@router.api_route("/x", methods=["GET", "POST"])\n'
+                              'def a(): ...\n')
+        assert ("GET", "/x") in found
+        assert ("POST", "/x") in found
+        assert ("ANY", "/x") not in found
+
+    def test_api_route_without_methods_defaults_to_get(
+            self, monkeypatch, tmp_path):
+        found = self._surface(monkeypatch, tmp_path,
+                              '@router.api_route("/y")\ndef a(): ...\n')
+        assert ("GET", "/y") in found
+
+    def test_api_route_with_non_literal_methods_fails_closed(
+            self, monkeypatch, tmp_path):
+        (tmp_path / "audit").mkdir()
+        (tmp_path / "app").mkdir(parents=True)
+        (tmp_path / "app" / "r.py").write_text(
+            'M = ["GET"]\n@router.api_route("/z", methods=M)\ndef a(): ...\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+
+        class R:
+            returncode = 0
+            stdout = "app/r.py\0"
+            stderr = ""
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: R())
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), pytest.raises(SystemExit):
+            mg.cmd_surface()
+        assert "methods=" in err.getvalue()
+
+    def test_const_str_is_the_one_shared_folder(self):
+        # the drift that produced findings 27/32/33 was two folding copies;
+        # pin that both call sites use the module-level const_str
+        assert mg.const_str(mg.ast.parse('"a" + "b"', mode="eval").body) == "ab"
+        assert mg.const_str(mg.ast.parse('x + "b"', mode="eval").body) is None

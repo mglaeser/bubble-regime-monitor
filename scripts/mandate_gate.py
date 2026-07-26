@@ -146,6 +146,40 @@ def valid_weakening_record(rec, change: str | None = None) -> bool:
     return True
 
 
+def const_str(node):
+    """The string an AST expression provably evaluates to, or None.
+
+    Only LITERAL composition is folded — that is the point. `"a" + "b"`,
+    f-strings of literals, and their nesting resolve; a Name, a call, or a
+    subscript does not. Callers decide what an unresolvable value means: the
+    tools check treats it as "not the tools literal", the route inventory
+    treats it as "an endpoint I cannot read" and fails closed. Shared by the
+    calibration tools-key check and the surface route extractor so the two
+    cannot drift (they did, across panel rounds 27/32/33)."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = const_str(node.left)
+        right = const_str(node.right)
+        return None if left is None or right is None else left + right
+    if isinstance(node, ast.JoinedStr):                # f-string of literals
+        parts = []
+        for v in node.values:
+            s = const_str(v)
+            if s is None:
+                return None
+            parts.append(s)
+        return "".join(parts)
+    # f"a{'b'}" — the interpolated piece is a FormattedValue wrapping the
+    # expression; a conversion (!r) or format spec changes the result, so
+    # those are left unresolved.
+    if isinstance(node, ast.FormattedValue):
+        if node.conversion in (-1, None) and node.format_spec is None:
+            return const_str(node.value)
+        return None
+    return None
+
+
 def weakening_records(raw) -> list:
     """Normalise `weakening_record` to a list of candidate records.
 
@@ -1103,35 +1137,10 @@ def cmd_calibrate() -> None:
                 return True
         return False
 
-    def _const_str(node):
-        """The string this expression provably evaluates to, or None.
-
-        Only literal composition is folded — that is the point. Anything the
-        AST cannot resolve is handled by the dynamic-construction ban below,
-        not by guessing."""
-        if isinstance(node, _ast.Constant):
-            return node.value if isinstance(node.value, str) else None
-        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
-            left = _const_str(node.left)
-            right = _const_str(node.right)
-            return None if left is None or right is None else left + right
-        if isinstance(node, _ast.JoinedStr):           # f-string of literals
-            parts = []
-            for v in node.values:
-                s = _const_str(v)
-                if s is None:
-                    return None
-                parts.append(s)
-            return "".join(parts)
-        # f"to{'ols'}" — the interpolated piece is a FormattedValue wrapping
-        # the expression, so an f-string of literals folds only if this is
-        # unwrapped. Conversions (!r) and format specs change the result, so
-        # anything carrying them is left unresolved for the dynamic-key ban.
-        if isinstance(node, _ast.FormattedValue):
-            if node.conversion in (-1, None) and node.format_spec is None:
-                return _const_str(node.value)
-            return None
-        return None
+    # Shared module-level folder (panel round 33): the calibration key check
+    # and the surface route extractor both need "does this fold to a literal?"
+    # and had grown separate copies that drifted. One implementation now.
+    _const_str = const_str
 
     def _folds_to_tools(node) -> bool:
         return _const_str(node) == "tools"
@@ -1174,6 +1183,26 @@ def cmd_calibrate() -> None:
                 f"class 5 N/A no longer holds: {path.relative_to(ROOT)} passes "
                 "a `tools` argument or key — the no-tool-call architecture "
                 "assumption is void; re-run A-10/C-06/C-07")
+
+        # Both DYNAMIC-ARGUMENT bans below are scoped to modules that can REACH
+        # a model. A **kwargs expansion or a computed mapping key is only a
+        # tool-enabling risk when the call actually goes to a model (panel
+        # round 33): the **kwargs ban keyed on method NAMES (post/put/...), so
+        # it fired on every HTTP client in the app — an ordinary
+        # `httpx.post(url, **opts)` to a price feed falsely froze releases.
+        # Dynamic mapping writes are likewise ordinary in 16 non-model modules;
+        # a check that fires on all of them is one the operator waves through.
+        # The `tools` LITERAL ban above still covers app/ in full — only these
+        # two dynamic-construction bans need the narrower scope.
+        #
+        # STATED LIMIT (do not read these as complete): a module addressing the
+        # endpoint purely through config (no SDK import, no literal host), or
+        # one that computes an argument here and hands it to a different module
+        # that makes the call, is outside them — both need dataflow the AST
+        # pass does not do. Recorded in audit/10.
+        if not _reaches_a_model(tree):
+            continue
+
         for node in _ast.walk(tree):
             if not isinstance(node, _ast.Call):
                 continue
@@ -1200,22 +1229,6 @@ def cmd_calibrate() -> None:
         # model, every mapping key must be a visible literal: you may READ
         # x[i], you may not WRITE a key you computed. A key the AST cannot
         # read is not a key anyone reviewing this file can read either.
-        #
-        # Deliberately scoped to modules that can REACH a model rather than
-        # all of app/: dynamic mapping writes are ordinary and frequent
-        # elsewhere (16 modules), and a check that fires on all of them is one
-        # the operator learns to wave through.
-        #
-        # STATED LIMIT (do not read this check as complete): two shapes are
-        # outside it by construction — a module addressing the endpoint purely
-        # through config (no SDK import, no literal host), and one that
-        # computes keys here and hands the mapping to a different module that
-        # makes the call. Both need dataflow the AST pass does not do. The
-        # global "tools" literal check still covers app/ in full; what these
-        # evade is only the unreadable-key ban. Recorded in audit/10 rather
-        # than left as an assumed-complete check.
-        if not _reaches_a_model(tree):
-            continue
         for node in _ast.walk(tree):
             dynamic = None
             if isinstance(node, (_ast.Assign, _ast.AugAssign)):
@@ -1372,21 +1385,57 @@ def cmd_surface(check: bool = False) -> None:
                 fn = dec.func
                 if not isinstance(fn, ast.Attribute) or fn.attr not in _VERBS:
                     continue
-                route = None
+                rel = p.relative_to(ROOT)
+                # The path is the `path=` keyword or the first positional, and
+                # may be composed from literals — `PREFIX + "/x"` is a real
+                # endpoint (panel round 33). Fold it; a value that will not fold
+                # to a literal (a bare Name, a call) is one this scan cannot
+                # read, and a route it cannot read must FAIL, not be silently
+                # dropped from the denominator — the exact fail-open the
+                # positional-only version had.
+                path_node = None
                 for kw in dec.keywords:
-                    if kw.arg == "path" and isinstance(kw.value, ast.Constant):
-                        route = kw.value.value
-                if route is None and dec.args:
-                    first = dec.args[0]
-                    if isinstance(first, ast.Constant) and isinstance(
-                            first.value, str):
-                        route = first.value
+                    if kw.arg == "path":
+                        path_node = kw.value
+                if path_node is None and dec.args:
+                    path_node = dec.args[0]
+                if path_node is None:
+                    _fail(f"{rel}:{dec.lineno} @{fn.attr} has no path argument "
+                          "— cannot record the endpoint; refusing a surface "
+                          "that silently omits it")
+                route = const_str(path_node)
                 if route is None:
-                    continue
-                verb = fn.attr.upper()
-                routes.append({"method": "ANY" if verb == "API_ROUTE" else verb,
-                               "path": route,
-                               "module": str(p.relative_to(ROOT))})
+                    _fail(f"{rel}:{dec.lineno} @{fn.attr} route path is not a "
+                          "readable literal (it is computed at runtime) — the "
+                          "audit surface cannot record an endpoint it cannot "
+                          "read; make the path a literal or extend the folder")
+                # api_route declares its verbs in methods=[...]; collapsing it
+                # to one "ANY" entry understated the method-level surface (panel
+                # round 33). Emit one route per declared method; FastAPI
+                # defaults to GET when methods= is absent. A non-literal
+                # methods= is unreadable and fails closed for the same reason.
+                if fn.attr == "api_route":
+                    methods_node = next(
+                        (kw.value for kw in dec.keywords if kw.arg == "methods"),
+                        None)
+                    if methods_node is None:
+                        methods = ["GET"]
+                    elif isinstance(methods_node, (ast.List, ast.Tuple, ast.Set)):
+                        methods = [const_str(e) for e in methods_node.elts]
+                        if any(m is None for m in methods):
+                            _fail(f"{rel}:{dec.lineno} api_route methods= holds "
+                                  "a non-literal element — cannot enumerate the "
+                                  "endpoint's verbs; make them literals")
+                        methods = [m.upper() for m in methods]
+                    else:
+                        _fail(f"{rel}:{dec.lineno} api_route methods= is not a "
+                              "readable list literal — the surface cannot record "
+                              "which verbs this endpoint serves")
+                else:
+                    methods = [fn.attr.upper()]
+                for method in methods:
+                    routes.append({"method": method, "path": route,
+                                   "module": str(rel)})
     surface = {
         "generated_by": "scripts/mandate_gate.py surface",
         "files_tracked": len(tracked),
