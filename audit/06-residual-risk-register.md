@@ -22,6 +22,44 @@ Owning role for all items: **operator (mglaeser)** — the sole maintainer and h
 
 The **STOP-SHIP** items (B-06 rotation, A-01/B-35 branch protection, A-39 independent verifier) are **not closed by this engagement** — they require operator/repo-settings actions and a second vendor. They are accepted here only *with* the compensating controls and tripwires above, and they are the lead items in `audit/08`. Per the mandate, the honest status is: **the system should not be treated as independently verified until branch protection is enabled and credentials are rotated.**
 
+## Addendum — 2026-07-26 (Part 3 / Track D non-adoption)
+
+- **D-ALL (Part 3 addendum unadopted) — STOP-SHIP, OPEN.** The independent
+  review `audit/09-part3-implementation-review.md` (2026-07-22) finds the
+  Part 3 verification-economics addendum (checks D-01…D-11) not adopted.
+  **This item cannot be closed inside this repository**, and by design must
+  not be:
+  - The Part 3 **normative source text is not in this repo** (only the review
+    is), so implementing D-01…D-11 here would require inventing the
+    band-to-rung mapping, escalation probabilities, HMAC epoch structure,
+    verdict grammar, response budgets, SVG allowlist and catch-rate baselines.
+    That is barred by the frozen-methodology rule (never invent constants —
+    `<PIN>` and stop) and by the review's own directive ("Do not fabricate…
+    declare them closed in this application repository").
+  - The review's required mechanisms are **out-of-repository by construction**:
+    a write-separated policy-bundle repo, a separately-operated Runner (not
+    PR-controlled CI), branch protection with no code-author bypass, and a
+    200-change observe-only burn-in with recorded reconstruction/drill
+    evidence. No file in this repo can satisfy or attest them.
+  - **Compensating control (now):** `production_eligible` is computed `false`
+    and stays so; the review is retained in-repo as the standing record; the
+    existing cross-vendor panel (`independent-verify.yml`) and mandate gate
+    remain in force as the partial deterministic substitute they already are.
+  - **Executable tripwire / honesty note:** `production_eligible` is already
+    computed `false` by the existing open A/B/C blockers, so nothing regresses
+    while Track D is unadopted. This item is recorded **in prose only**,
+    exactly like the review — it is deliberately **NOT** entered in the
+    findings register or `governance/accepted-residuals.json`, because no
+    D-01…D-11 check exists in the immutable catalogue and creating one
+    requires the Part 3 source text this repo does not hold. Registering
+    fabricated D-checks to get a machine tripwire would itself be the
+    substitution the review forbids. Closure requires the executable evidence
+    the review's "Re-review acceptance criteria" enumerates — not prose, not a
+    local run, and not an in-repo check invented without its spec.
+  - **Owner:** operator (mglaeser). Adoption is an operator + infrastructure
+    action (policy-bundle repo, Runner, branch protection), not a code change
+    an AI session can make in this repository.
+
 ## Addendum — 2026-07-25 (mandate-enforcement installation)
 
 - **A-39 CLOSED**: the independent different-vendor adversarial verifier now

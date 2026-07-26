@@ -70,6 +70,17 @@ The sweep's remaining findings are real and unfixed. They fall into groups:
    unreadable-key ban. Stated in the code rather than left implied; the live
    path uses the SDK and is covered. Recorded round 29.
 
+8. **Part 3 / Track D not adopted (STOP-SHIP, operator+infrastructure).**
+   `audit/09-part3-implementation-review.md` finds the verification-economics
+   addendum (D-01…D-11) unimplemented. The Part 3 source text is not in this
+   repo, so it cannot be implemented here without inventing its spec (barred
+   by the frozen-methodology rule and by the review itself), and its core
+   mechanisms — write-separated policy-bundle repo, separately-operated
+   Runner, branch protection, 200-change burn-in — are out-of-repository by
+   construction. Recorded in `audit/06` as an open STOP-SHIP residual;
+   `production_eligible` stays false. Not actionable by an AI session in this
+   repository. Observed round 33 close-out, 2026-07-26.
+
 **Nothing above is claimed as fixed.** Group 3 in particular means several
 existing tests are weaker evidence than their names suggest; treat the suite's
 coverage claims with that in mind until they are repaired.
