@@ -21,12 +21,30 @@ PR** (A-01, A-25, A-39), which are now recorded with evidence.
 
 The sweep's remaining findings are real and unfixed. They fall into groups:
 
-1. **Calibration evasion (critical/high).** The credential regex cannot match a
-   PEP 526 annotated assignment — the shape most credentials in this codebase
-   actually use. Class-2 runs `ruff --isolated`, proving the ruff *binary*
-   implements S110, never that the repo's CI config still selects it. Class-5
-   matches the literal token `tools`; class-6 reads only `app/models.py`.
-   Scans are pinned to non-recursive `scripts/*.py`.
+1. **Calibration evasion (critical/high) — LARGELY RESOLVED 2026-07-26 (branch
+   review P1.1/P1.2, and rounds 25/29/33).** As originally written this item
+   was already partly stale and is now mostly closed:
+   - ~~credential regex cannot match a PEP 526 annotated assignment~~ **FIXED
+     (P1.2):** `scan_credential_shapes` is now AST-based over Assign/AnnAssign/
+     walrus and fails closed on unparseable source; the annotated fixture
+     `api_key: str = "…"` is caught. Residual: a *low-signal* value (all
+     lowercase, non-UUID, non-hex) in a credential-named annotated assignment
+     is indistinguishable from a config placeholder default and is deliberately
+     not name-flagged — detect-secrets entropy + the UUID/entropy value scan
+     remain the catch for real high-entropy secrets.
+   - ~~class-2 runs `ruff --isolated`, never proving the repo config selects
+     S110~~ **FIXED (P1.1):** calibrate now reads `pyproject.toml
+     [tool.ruff.lint]` and fails if S/S110 is not selected or is ignored.
+   - ~~class-5 matches the literal token `tools`~~ the class-5 detector is the
+     AST `tool_enabling`, folding composed keys (rounds 27/33); the two
+     documented dataflow residuals (config-only endpoint, cross-module
+     construction) remain, disclosed in item 7 below.
+   - ~~class-6 reads only `app/models.py`~~ STALE since rounds 25/29: the
+     tenancy scan covers every ORM module under `app/` and `migrations/`, plus
+     raw-SQL `CREATE TABLE`.
+   - ~~scans pinned to non-recursive `scripts/*.py`~~ STALE: the live
+     credential scan derives its file set from `git ls-files *.py` (all tracked
+     Python).
 2. ~~**Panel coverage (critical).** `pack_by_risk` truncates an oversized file
    in place and never adds it to `omitted`.~~ **FIXED 2026-07-25** — found
    independently by this sweep and by the panel (round 20). An oversized
@@ -34,11 +52,20 @@ The sweep's remaining findings are real and unfixed. They fall into groups:
    silently half-read; non-control content is still truncated with its
    marker. The per-part budget also rose to 90k, because it must exceed the
    largest control file's diff rather than the average.
-3. **Tests that pass for the wrong reason (critical/high).** Several — including
-   the flagship non-canonical-verdict test — are satisfied by an earlier guard,
-   or assert against a copy of a regex rather than the module, or monkeypatch
-   `build_diff` which `main()` no longer calls. They would stay green with the
-   feature deleted.
+3. **Tests that pass for the wrong reason (critical/high) — PARTLY RESOLVED
+   2026-07-26 (branch review P1.5).** ~~monkeypatch `build_diff` which `main()`
+   no longer calls~~ **FIXED (P1.5-a):** the test now patches `build_diff_chunks`
+   (what `main()` calls) and asserts the return came via the DiffError branch,
+   with a companion test proving the guard is load-bearing. ~~assert against a
+   copy of a regex rather than the module~~ **FIXED (P1.5-c):** the class-5,
+   class-6 and ratchet-transition detectors are now module-level
+   (`tool_enabling`, `declares_tenancy_column`, `declares_strong_tenancy`,
+   `transition_matches`) and the tests call them, so a production regression
+   fails them. The "flagship non-canonical-verdict test" and the
+   earlier-guard-trips concern were re-examined in the review (P1.5-b) and found
+   already mitigated at HEAD — the SystemExit fixtures reattest so the intended
+   guard fires; a representative capture confirmed it. Remaining test-quality
+   work (property/mutation testing, P3.3) is deferred and operator-tracked.
 4. **False/overstated claims (high/medium).** `audit/09`'s masthead claims the
    tracks were audited "against the in-repo mandate text", which `.gitignore`
    now excludes; `audit/08` cites a stale test floor.

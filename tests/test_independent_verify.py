@@ -207,12 +207,31 @@ class TestPanelFindingsOnItself:
         assert "ok" in out and "bad" in out       # invalid UTF-8 visible, not vanished
         assert "�" in out
 
-    def test_round6_diff_error_blocks_main(self, monkeypatch):
+    def test_round6_diff_error_blocks_main(self, monkeypatch, capsys):
+        # WRONG-REASON FIX (panel review P1.5-a): this monkeypatched
+        # `build_diff`, which main() no longer calls — main() moved to
+        # build_diff_chunks. The patched boom was never invoked, so main()
+        # returned 1 for an unrelated reason (the coverage gate blocking on the
+        # real repo diff), and the test would pass even if the DiffError guard
+        # were deleted. Patch the function main ACTUALLY calls, and assert the
+        # return came via the DiffError branch, not some other block.
         monkeypatch.setattr(iv, "KEY", "fake-key-for-test")
-        def boom():
+
+        def boom(*a, **k):
             raise iv.DiffError("git exploded")
-        monkeypatch.setattr(iv, "build_diff", boom)
+        monkeypatch.setattr(iv, "build_diff_chunks", boom)
         assert iv.main() == 1
+        assert "diff assembly failed" in capsys.readouterr().err
+
+    def test_round6_diff_error_guard_is_load_bearing(self, monkeypatch, capsys):
+        # prove the guard is what blocks: with build_diff_chunks returning a
+        # clean empty diff instead of raising, main() takes the "No diff" green
+        # path (return 0) — so the return-1 above is caused by the DiffError,
+        # not by anything downstream.
+        monkeypatch.setattr(iv, "KEY", "fake-key-for-test")
+        monkeypatch.setattr(iv, "build_diff_chunks", lambda *a, **k: ([], []))
+        assert iv.main() == 0
+        assert "No diff to review" in capsys.readouterr().out
 
     def test_round7_merge_base_failure_blocks_not_narrows(self, monkeypatch):
         import pytest as _pytest

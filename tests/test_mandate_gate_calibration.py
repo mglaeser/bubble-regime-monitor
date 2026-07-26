@@ -140,7 +140,9 @@ class TestPanelFindingsRound25:
         (tmp_path / "scripts").mkdir(exist_ok=True)
         (tmp_path / "pyproject.toml").write_text(
             '[project]\nname = "t"\nversion = "0"\n'
-            'dependencies = ["anthropic"]\n')   # LLM-path fixtures import it
+            'dependencies = ["anthropic"]\n'      # LLM-path fixtures import it
+            # class-2 config check (P1.1) reads this: S must stay selected
+            '[tool.ruff.lint]\nselect = ["E", "F", "S"]\nignore = ["E501"]\n')
         # a REAL git repo: the credential scan derives its file set from
         # `git ls-files` and fails closed when that cannot run, so a fixture
         # that is not a repo would exercise the error path instead of the
@@ -757,3 +759,86 @@ class TestPanelFindingsRound33:
         # pin that both call sites use the module-level const_str
         assert mg.const_str(mg.ast.parse('"a" + "b"', mode="eval").body) == "ab"
         assert mg.const_str(mg.ast.parse('x + "b"', mode="eval").body) is None
+
+
+class TestBranchReviewFixes:
+    """Regression tests for the 2026-07-26 branch-wide review (audit/11).
+    Each pins the exact pre-fix failure and exercises both sides."""
+
+    # --- P1.1: calibrate must check the REPO's ruff config, not --isolated ---
+
+    def test_p1_1_ruff_config_check_both_ways(self):
+        assert mg._ruff_selects_s110()               # the live repo selects S
+
+    def test_p1_1_deselecting_S_is_caught(self, tmp_path, monkeypatch):
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.ruff.lint]\nselect = ["E", "F"]\nignore = []\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        assert not mg._ruff_selects_s110()
+
+    def test_p1_1_ignoring_S110_is_caught(self, tmp_path, monkeypatch):
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.ruff.lint]\nselect = ["S"]\nignore = ["S110"]\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        assert not mg._ruff_selects_s110()
+
+    def test_p1_1_absent_config_fails_closed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mg, "ROOT", tmp_path)     # no pyproject.toml
+        assert not mg._ruff_selects_s110()
+
+    # --- P1.2: AST credential scan catches annotated assignments -------------
+
+    def test_p1_2_annotated_assignment_is_caught(self, tmp_path):
+        f = tmp_path / "x.py"
+        f.write_text('api_key: str = "sk-verylongsecretvalue1234567890"\n')
+        assert mg.scan_credential_shapes([f])         # the exact review fixture
+
+    def test_p1_2_empty_and_placeholder_defaults_stay_clean(self, tmp_path):
+        f = tmp_path / "c.py"
+        f.write_text('anthropic_api_key: str = ""\n'
+                     'x: str = ""\n')
+        assert mg.scan_credential_shapes([f]) == []
+
+    def test_p1_2_unparseable_fails_closed(self, tmp_path):
+        f = tmp_path / "broken.py"
+        f.write_text("def f(:\n")
+        hits = mg.scan_credential_shapes([f])
+        assert hits and "cannot parse" in hits[0]
+
+    def test_p1_2_annotated_uuid_still_caught(self, tmp_path):
+        f = tmp_path / "u.py"
+        f.write_text('sipgate_token: str = "4ed251b5-8a9c-4b3e-9f21-7c6d5e4a3b21"\n')  # pragma: allowlist secret
+        assert mg.scan_credential_shapes([f])
+
+    # --- P2.7: surface fails on a path that does not exist -------------------
+
+    def test_p2_7_nonexistent_prompt_path_fails_closed(self, monkeypatch, tmp_path):
+        # THE BUG: the surface named app/llm.py, a file that does not exist,
+        # and drift-check (JSON==generator) never noticed. Build a real-enough
+        # ROOT (contains the gate script so validation runs) but WITHOUT the
+        # claimed prompt file, and prove it fails.
+        (tmp_path / "audit").mkdir()
+        (tmp_path / "scripts").mkdir()
+        (tmp_path / "scripts" / "mandate_gate.py").write_text("# gate\n")
+        (tmp_path / "app" / "routers").mkdir(parents=True)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+
+        class R:
+            returncode = 0
+            stdout = "scripts/mandate_gate.py\0"
+            stderr = ""
+        monkeypatch.setattr(mg.subprocess, "run", lambda *a, **k: R())
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), pytest.raises(SystemExit):
+            mg.cmd_surface()
+        assert "do not exist" in err.getvalue()
+
+    def test_p2_7_live_prompt_path_exists(self):
+        assert (Path(mg.ROOT) / "app" / "engine" / "judgment.py").exists()
+        surface = json.loads(
+            (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
+        assert any("judgment.py" in p for p in surface["prompts"])
+        assert not any("app/llm.py" in p for p in surface["prompts"])

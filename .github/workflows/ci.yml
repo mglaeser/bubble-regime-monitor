@@ -4,7 +4,9 @@ name: ci
 # every run and non-blocking ('mypy || true'), so production shipped on red.
 # This version fails closed on lint, tests, dependency CVEs and secret leaks.
 # Type-checking is EXPLICITLY advisory (continue-on-error) — not disguised as a
-# gate — until the 43 tracked mypy errors are driven to zero (A-13).
+# gate — until the tracked mypy errors are driven to zero (A-13). The exact
+# count is measured in CI and not pinned in prose (it is mypy-version
+# dependent; pinning it here only goes stale — see A-13).
 #
 # NOTE (honesty, per the mandate): making this the *authoritative* gate also
 # requires branch protection to mark `test` a REQUIRED status check with no
@@ -47,7 +49,7 @@ jobs:
         run: pip install "lppls==0.6.24" || echo "::warning::lppls unavailable — LPPLS paths self-skip (hermetic suite, A-02)"
       - name: Lint (ruff, BLOCKING — E,F,I,W,UP,B,S)
         run: ruff check app tests scripts
-      - name: Type-check (ADVISORY — 43 tracked errors, A-13; not a gate yet)
+      - name: Type-check (ADVISORY — tracked errors, A-13; not a gate yet)
         run: mypy app
         continue-on-error: true
       - name: Security — dependency audit (BLOCKING)

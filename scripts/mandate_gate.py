@@ -180,6 +180,70 @@ def const_str(node):
     return None
 
 
+def transition_matches(change: str, old, new) -> bool:
+    """True when `change` is exactly the transition old->new (tokens compared,
+    not substrings — "120 -> 210" must not satisfy 20->21). Space-tolerant
+    around the arrow. Module-level so the ratchet check and its test share it
+    (review P1.5-c)."""
+    m = re.match(r"\s*(\S+)\s*->\s*(\S+)", change)
+    return bool(m and m.group(1) == str(old) and m.group(2) == str(new))
+
+
+def tool_enabling(tree) -> bool:
+    """True if an AST names the model `tools` field in ANY form — a `tools=`
+    call kwarg, a `{"tools": …}` dict key, or any constant that folds to
+    "tools" (`payload["to" + "ols"]`). The invariant is that app code must not
+    name the field at all. Module-level so the calibration check AND its tests
+    exercise the SAME detector (panel review P1.5-c: the tests had copied a
+    regex and never ran this)."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if any(k.arg == "tools" for k in node.keywords):
+                return True
+        if isinstance(node, ast.Dict):
+            for k in node.keys:
+                if isinstance(k, ast.Constant) and k.value == "tools":
+                    return True
+        if const_str(node) == "tools":
+            return True
+    return False
+
+
+_TENANCY_ENTITIES = (r"user|tenant|owner|account|customer|org|organisation|"
+                     r"organization|workspace|member|subject|principal")
+_ORM_MARKERS = ("__tablename__", "mapped_column", "relationship(",
+                "ForeignKey(", "Table(", "declarative_base", "create_table")
+# The weaker `<entity>_id` / tenancy-FK / tenancy-relationship signal, plus a
+# tenancy class declaration; meaningful only inside an ORM-bearing module.
+_TENANCY_COLUMN = re.compile(
+    rf"\b({_TENANCY_ENTITIES})[_]?id\b"
+    r"|ForeignKey\(\s*[\"'](users|accounts|tenants|orgs|organisations|"
+    r"organizations|customers|members|workspaces)\."
+    rf"|^\s*class\s+({_TENANCY_ENTITIES})[A-Za-z]*\b"
+    rf"|relationship\(\s*[\"']({_TENANCY_ENTITIES})[A-Za-z]*[\"']",
+    re.IGNORECASE | re.MULTILINE)
+# A per-user/tenant TABLE created (raw SQL or create_table()) or a tenancy
+# model declared — multi-tenancy evidence that needs no ORM corroboration.
+_STRONG_TENANCY = re.compile(
+    rf"CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?[\"'`\[]?"
+    rf"({_TENANCY_ENTITIES})[A-Za-z_]*\b"
+    rf"|create_table\(\s*[\"']({_TENANCY_ENTITIES})[A-Za-z_]*"
+    rf"|^\s*class\s+({_TENANCY_ENTITIES})[A-Za-z]*\s*\(",
+    re.IGNORECASE | re.MULTILINE)
+
+
+def has_orm_markers(src: str) -> bool:
+    return any(m in src for m in _ORM_MARKERS)
+
+
+def declares_strong_tenancy(src: str) -> bool:
+    return bool(_STRONG_TENANCY.search(src))
+
+
+def declares_tenancy_column(src: str) -> bool:
+    return bool(_TENANCY_COLUMN.search(src))
+
+
 def weakening_records(raw) -> list:
     """Normalise `weakening_record` to a list of candidate records.
 
@@ -702,14 +766,30 @@ def compute_status() -> dict:
     pending = sorted(f["id"] for f in findings if f["verdict"] == "NO-EVIDENCE")
 
     def _volume_complete(tracks: tuple[str, ...]) -> str:
-        # Computed, never asserted (§8): a volume is COMPLETE when every one
-        # of its checks carries an evidence-backed verdict. Open accepted
-        # residuals affect production_eligible, not phase completion — the §8
-        # eligibility chain requires BOTH separately, so the states are
-        # deliberately distinct.
+        # A volume is COMPLETE only when BOTH its evidence coverage AND its
+        # mandate SOURCE TEXT are complete (panel review P0.1). The prior
+        # version checked only that every check carried an evidence-backed
+        # verdict, so Track C reported COMPLETE while its Part 2 instruction
+        # text is absent (manifest part path/sha are null) — conflating
+        # "we produced verdicts" with "the instructions we judged against are
+        # present and attested". The text half is derived entirely from the
+        # already-attested manifest: the volume's part must have a non-null
+        # path, a tracked file, and a digest that matches the recorded sha.
+        # (production_eligible remains separate; §8 requires both.)
         vol = [f for f in findings if f["id"].split("-")[0] in tracks]
-        return ("COMPLETE" if all(f["verdict"] != "NO-EVIDENCE" for f in vol)
-                else "IN_PROGRESS")
+        evidenced_ok = all(f["verdict"] != "NO-EVIDENCE" for f in vol)
+        text_ok = True
+        for part in manifest.get("parts", []):
+            if set(part.get("tracks") or []) & set(tracks):
+                path = part.get("path")
+                if not path:
+                    text_ok = False
+                    break
+                fp = ROOT / path
+                if not fp.exists() or _sha256(fp) != part.get("sha256"):
+                    text_ok = False
+                    break
+        return "COMPLETE" if (evidenced_ok and text_ok) else "IN_PROGRESS"
 
     production_eligible = (
         not open_blockers
@@ -851,12 +931,11 @@ def cmd_ratchet(measure_only: bool) -> None:
             for r in records:
                 if not isinstance(r, dict) or r.get("metric") != name:
                     continue
-                change = str(r.get("change", ""))
                 # Substring matching let "120 -> 210" authorise an actual
-                # 20 -> 21 loosening (round 21). Parse the transition and
-                # compare the TOKENS exactly.
-                m_t = re.match(r"\s*(\S+)\s*->\s*(\S+)", change)
-                if not m_t or m_t.group(1) != str(old) or m_t.group(2) != str(new):
+                # 20 -> 21 loosening (round 21). transition_matches parses the
+                # transition and compares the TOKENS exactly — module-level so
+                # the test drives the SAME parser (review P1.5-c).
+                if not transition_matches(str(r.get("change", "")), old, new):
                     continue
                 reason = str(r.get("reason", "")).strip()
                 who = str(r.get("authorised_by", "")).strip()
@@ -910,11 +989,11 @@ _UUID_LIT = re.compile(
 # Name denylist widened after the 2026-07-25 adversarial audit (auth/bearer/
 # pat/cookie/session/credential were invisible); value shapes now also cover
 # hyphen-less 32-hex and long base64-ish literals in any assignment.
-_CRED_ASSIGN = re.compile(
-    r"""\b\w*(token|api[-_]?key|secret|passwd|password|auth|bearer|"""
-    r"""credential|session|cookie)\w*\s*=\s*["'][^"']{8,}["']""",
-    re.IGNORECASE)  # NB: no "pat" alternative — it matched path_note etc;
-# real PATs (ghp_…) are caught by the entropy check below instead.
+_CRED_NAME = re.compile(
+    r"(token|api[-_]?key|secret|passwd|password|auth|bearer|"
+    r"credential|session|cookie)", re.IGNORECASE)
+# NB: no "pat" alternative — it matched path_note etc; real PATs (ghp_…) are
+# caught by the entropy check below instead.
 # Value-shape detection only on an ASSIGNMENT right-hand side, and only for
 # literals with real credential entropy — a long CamelCase XBRL tag or an SQL
 # fragment is not a secret (false positives found while hardening, 2026-07-25).
@@ -938,18 +1017,84 @@ def scan_credential_shapes(paths) -> list[str]:
     """The gate detect-secrets misses (calibration finding, 2026-07-25):
     `token` is not in its keyword denylist and hyphenated UUIDs defeat both
     entropy detectors — and UUID tokens are exactly this app's real credential
-    format. Flags exact-UUID string literals and credential-named assignments;
-    `pragma: allowlist secret` is honoured for reviewed false positives."""
+    format.
+
+    AST-based for the credential-NAMED assignment path (panel review P1.2):
+    the old regex required the credential name to sit immediately before `=`,
+    so a PEP 526 annotated assignment — `api_key: str = "…"`, the form this
+    codebase actually uses — slipped past it because the `: str ` annotation
+    broke the adjacency. The AST sees the target name and the value literal
+    regardless of annotation, covers Assign / AnnAssign / walrus, and FAILS
+    CLOSED on a file that will not parse (an unscannable file is a failed
+    scan, not a clean one). The value-shape detectors (exact UUID, high
+    entropy) stay line-based and name-independent, so a secret with no
+    credential-ish variable name is still caught anywhere it appears.
+    `pragma: allowlist secret` on the line is honoured for reviewed
+    placeholders (e.g. the fail-closed admin-key default)."""
     hits = []
     for p in paths:
-        for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
+        text = p.read_text(errors="replace")
+        lines = text.splitlines()
+        flagged: set[int] = set()
+        try:
+            tree = ast.parse(text)
+        except SyntaxError as exc:
+            hits.append(f"{p}: cannot parse ({exc.msg}) — credential scan "
+                        "fails closed rather than skipping an unreadable file")
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets, value = ([node.target] if node.target else []), node.value
+            elif isinstance(node, ast.NamedExpr):
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if not (isinstance(value, ast.Constant)
+                    and isinstance(value.value, (str, bytes))
+                    and len(value.value) >= 8):
+                continue
+            for t in targets:
+                name = getattr(t, "id", None) or getattr(t, "attr", "")
+                if _CRED_NAME.search(name):
+                    flagged.add(node.lineno)
+        for i, line in enumerate(lines, 1):
+            rhs = _ASSIGN_RHS.search(line)
+            if _UUID_LIT.search(line) or (rhs and _looks_random(rhs.group(1))):
+                flagged.add(i)
+        for i in sorted(flagged):
+            line = lines[i - 1] if i - 1 < len(lines) else ""
             if "allowlist secret" in line:
                 continue
-            rhs = _ASSIGN_RHS.search(line)
-            if (_UUID_LIT.search(line) or _CRED_ASSIGN.search(line)
-                    or (rhs and _looks_random(rhs.group(1)))):
-                hits.append(f"{p}:{i}: {line.strip()[:80]}")
+            hits.append(f"{p}:{i}: {line.strip()[:80]}")
     return hits
+
+
+def _ruff_selects_s110() -> bool:
+    """True when the repo's OWN ruff config leaves S110 reachable.
+
+    Ruff selects/ignores by code PREFIX: 'S' selects every S rule, 'ALL'
+    selects everything, and any prefix of 'S110' in `ignore` cancels it. This
+    reads pyproject.toml [tool.ruff.lint] (fail-closed: an unreadable/absent
+    config counts as NOT selected, because the CI gate then rests on nothing)
+    and returns whether S110 survives select minus ignore. Per-file-ignores
+    for app/tests/scripts are out of scope: they scope suppressions to those
+    trees, not to the app/ production surface the class-2 gate protects."""
+    import tomllib
+
+    def _prefixes(code: str) -> set[str]:
+        return {code[:i] for i in range(1, len(code) + 1)}
+    want = _prefixes("S110") | {"ALL"}
+    try:
+        cfg = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    lint = (cfg.get("tool", {}).get("ruff", {}).get("lint")
+            or cfg.get("tool", {}).get("ruff", {}))     # ruff<0.6 flat layout
+    select = set(lint.get("select") or [])
+    ignore = set(lint.get("ignore") or [])
+    return bool(select & want) and not (ignore & _prefixes("S110"))
 
 
 def find_vacuous_test_asserts(paths) -> list[str]:
@@ -1074,6 +1219,19 @@ def cmd_calibrate() -> None:
         if r.returncode == 0 or "S110" not in (r.stdout + r.stderr):
             failures.append("class 2 (swallowed exception) NOT caught by ruff "
                             f"S110 (exit={r.returncode})")
+        # ...and the REPO's own config must still select S110 (panel review
+        # P1.1). The check above uses `--isolated`, which proves the installed
+        # ruff BINARY knows the rule, not that pyproject.toml/CI still SELECT
+        # it — so deleting 'S' from select, ignoring S110, or narrowing the
+        # per-file scope would silence the live CI gate while calibration
+        # stayed green. Read the actual config and prove the rule is live.
+        if not _ruff_selects_s110():
+            failures.append(
+                "class 2 config drift: pyproject.toml [tool.ruff.lint] no "
+                "longer selects S110 (the swallowed-exception CI gate) — the "
+                "rule must be reachable by `select` and not cancelled by "
+                "`ignore`, or the blocking lint step is dead while the "
+                "calibration binary-check stays green")
 
         # 3 — non-existent dependency -> import-resolution check
         if unresolvable_imports(["reqwests_http"]) != ["reqwests_http"]:
@@ -1111,39 +1269,10 @@ def cmd_calibrate() -> None:
     # form is a literal the AST can see (round 22).
     import ast as _ast
 
-    def _tool_enabling(tree) -> bool:
-        for node in _ast.walk(tree):
-            if isinstance(node, _ast.Call):
-                if any(k.arg == "tools" for k in node.keywords):
-                    return True
-            if isinstance(node, _ast.Dict):
-                for k in node.keys:
-                    if isinstance(k, _ast.Constant) and k.value == "tools":
-                        return True
-            # payload["tools"] = [...] then client.post(json=payload) (panel
-            # round 25): the request body assembled by subscript never appears
-            # as a call kwarg or a dict literal, so both forms above missed it
-            # and the N/A verdict survived a real tool-enabled call.
-            #
-            # Enumerating forms is how this check keeps losing: kwarg, then
-            # dict key, then subscript — and `payload.setdefault("tools", ...)`
-            # is none of the three. The invariant is simply that app code must
-            # not name the tools field AT ALL, so the check is now on the bare
-            # string constant. Prose is unaffected: comments are not Constants
-            # and a docstring only matches if its entire value is "tools".
-            # Constant-folded (panel round 27): `payload["to" + "ols"]` builds
-            # the same key with no "tools" constant anywhere in the tree.
-            if _folds_to_tools(node):
-                return True
-        return False
-
-    # Shared module-level folder (panel round 33): the calibration key check
-    # and the surface route extractor both need "does this fold to a literal?"
-    # and had grown separate copies that drifted. One implementation now.
+    # tool_enabling, the tenancy detectors, and const_str now live at module
+    # level (panel rounds 27/33 + review P1.5-c) so this check and its tests
+    # exercise the same code. Alias kept for the closures below.
     _const_str = const_str
-
-    def _folds_to_tools(node) -> bool:
-        return _const_str(node) == "tools"
 
     _LLM_SDKS = ("anthropic", "openai")
     # A module reaches a model either through a vendor SDK or by addressing the
@@ -1178,7 +1307,7 @@ def cmd_calibrate() -> None:
             failures.append(f"{path.relative_to(ROOT)} does not parse — the "
                             "no-tool invariant cannot be checked")
             continue
-        if _tool_enabling(tree):
+        if tool_enabling(tree):
             failures.append(
                 f"class 5 N/A no longer holds: {path.relative_to(ROOT)} passes "
                 "a `tools` argument or key — the no-tool-call architecture "
@@ -1262,56 +1391,25 @@ def cmd_calibrate() -> None:
     # is now "declares ORM structure" rather than "is named models.py"; that
     # keeps prose and plain helpers out (they cannot define a table) while
     # closing the file-location escape.
-    _ORM_MARKERS = ("__tablename__", "mapped_column", "relationship(",
-                    "ForeignKey(", "Table(", "declarative_base",
-                    "create_table")
-    # Panel finding (PR #23): a three-name denylist left `account_id`,
-    # `customer_id`, an `organisation` FK or a users/accounts relationship
-    # free to introduce real multi-tenancy while calibration reported N/A.
-    # camelCase and compound names (UserAccount, userId) evaded the
-    # snake_case-only forms (round 18)
-    _ENTITIES = (r"user|tenant|owner|account|customer|org|organisation|"
-                 r"organization|workspace|member|subject|principal")
-    _TENANCY = (rf"\b({_ENTITIES})[_]?id\b"
-                r"|ForeignKey\(\s*[\"']"
-                r"(users|accounts|tenants|orgs|organisations|organizations|"
-                r"customers|members|workspaces)\."
-                # a tenancy MODEL or a relationship to one is multi-tenancy
-                # even before a column appears (round 16)
-                # compound names too: UserAccount, TenantMembership (round 18)
-                rf"|^\s*class\s+({_ENTITIES})[A-Za-z]*\b"
-                rf"|relationship\(\s*[\"']({_ENTITIES})[A-Za-z]*[\"']")
-    # migrations/ included (follow-on sweep): a migration is where tables are
-    # actually created, so `op.create_table("users", ...)` introduces real
-    # multi-tenancy without touching app/ at all — the N/A verdict would have
-    # survived the change that made it false.
-    # A tenancy table can also be created in RAW SQL, which carries no ORM
-    # marker at all (panel round 29): `conn.execute("CREATE TABLE users ...")`
-    # made a real per-user table while the marker gate skipped the file
-    # entirely. Split by signal strength instead of gating everything on ORM
-    # context: a CREATE TABLE naming a tenancy entity, or a declared tenancy
-    # model, IS multi-tenancy on its own and needs no corroboration. Only the
-    # weak `<entity>_id` column signal needs ORM context, because that is the
-    # one that false-positives on ordinary code.
-    _STRONG_TENANCY = (
-        rf"CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?[\"'`\[]?"
-        rf"({_ENTITIES})[A-Za-z_]*\b"
-        rf"|create_table\(\s*[\"']({_ENTITIES})[A-Za-z_]*"
-        rf"|^\s*class\s+({_ENTITIES})[A-Za-z]*\s*\("
-    )
+    # Tenancy detectors are module-level (declares_strong_tenancy /
+    # has_orm_markers / declares_tenancy_column) so the tests exercise the same
+    # regexes this loop does (review P1.5-c). migrations/ is in scope because a
+    # migration is where a table is actually created; a STRONG signal (raw-SQL
+    # CREATE TABLE, create_table(), or a tenancy class) stands alone, while the
+    # weak <entity>_id column signal needs ORM context to avoid false positives.
     _tenancy_scope = sorted(ROOT.glob("app/**/*.py")) + \
         sorted(ROOT.glob("migrations/**/*.py"))
     for path in _tenancy_scope:
         src = path.read_text(errors="replace")
         rel = path.relative_to(ROOT)
-        if re.search(_STRONG_TENANCY, src, re.IGNORECASE | re.MULTILINE):
+        if declares_strong_tenancy(src):
             failures.append("class 6 N/A no longer holds: a per-user/tenant "
                             f"TABLE is declared or created in {rel} — "
                             "re-run C-01")
             continue
-        if not any(m in src for m in _ORM_MARKERS):
+        if not has_orm_markers(src):
             continue
-        if re.search(_TENANCY, src, re.IGNORECASE | re.MULTILINE):
+        if declares_tenancy_column(src):
             failures.append("class 6 N/A no longer holds: per-user/tenant "
                             f"tables appeared in {rel} — re-run C-01")
 
@@ -1460,9 +1558,32 @@ def cmd_surface(check: bool = False) -> None:
                           "scripts/mandate_gate.py",
                           "governance/ (CODEOWNERS-protected)"],
         "workflows": sorted(f for f in tracked if f.startswith(".github/")),
-        "prompts": ["app/llm.py (judgment note; numbers-only invariant)",
+        "prompts": ["app/engine/judgment.py (judgment note; numbers-only invariant)",
                     "app/notify/ (SMS text)"],
     }
+    # Validate the hand-authored path claims against REALITY, not just against
+    # the generator (panel review P2.7): the surface carried `app/llm.py`, a
+    # file that does not exist — the real model call is app/engine/judgment.py.
+    # Drift-check only proved JSON==generator, so a dangling path survived
+    # indefinitely. Every path-shaped token in prompts/policy_bundle must
+    # resolve to a real file or directory, or the surface fails closed.
+    #
+    # Guarded on the gate script's own presence: this is only meaningful
+    # against a real checkout, and the unit tests point ROOT at a synthetic
+    # tree that deliberately omits the inventoried files. In CI, ROOT is the
+    # real repo (Path(__file__).parents[1]) so the guard always holds and the
+    # validation runs.
+    if (ROOT / "scripts" / "mandate_gate.py").exists():
+        claimed_paths = []
+        for entry in surface["prompts"] + surface["policy_bundle"]:
+            token = entry.split()[0]                 # "app/x.py (note)" -> path
+            if "/" in token or token.endswith((".py", ".yml")):
+                claimed_paths.append(token)
+        missing = [t for t in claimed_paths if not (ROOT / t).exists()]
+        if missing:
+            _fail(f"audit surface names path(s) that do not exist: {missing} — "
+                  "the inventory must describe the real repository, not a "
+                  "stale hand-edited claim (fix the surface generator)")
     out = AUDIT / "00-audit-surface.json"
     rendered = json.dumps(surface, indent=2, sort_keys=True) + "\n"
     if check:

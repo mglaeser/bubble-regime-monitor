@@ -8,7 +8,6 @@ the audit surface in test_mandate_gate_calibration.py."""
 from __future__ import annotations
 
 import json
-import re
 
 import pytest
 
@@ -148,6 +147,42 @@ class TestStatusInvariants:
         reg.write_text(json.dumps(d))
         with pytest.raises(SystemExit):
             mg.compute_status()
+
+
+class TestVolumeCompleteTextPresence:
+    """P0.1 (branch review): a volume is COMPLETE only when its mandate SOURCE
+    TEXT is present + attested, not merely when its findings are evidenced."""
+
+    def test_part2_is_in_progress_when_text_absent(self):
+        # the live repo: Part 2 text is not in the repo (manifest path null),
+        # so part2_status must read IN_PROGRESS even though every C finding is
+        # evidenced; Part 1 (text present + attested) stays COMPLETE.
+        status = mg.compute_status()
+        assert status["part1_status"] == "COMPLETE"
+        assert status["part2_status"] == "IN_PROGRESS"
+
+    def test_part1_flips_to_in_progress_if_its_text_is_tampered(
+            self, monkeypatch, tmp_path):
+        # both sides: if Part 1's committed text no longer matches its attested
+        # sha, its volume is no longer COMPLETE either.
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        # give the fixture a manifest part for tracks A/B pointing at part1.md,
+        # then corrupt the file so sha mismatches
+        import hashlib
+        gov = tmp_path / "governance" / "mandate"
+        man = json.loads((gov / "manifest.json").read_text())
+        (gov / "part1.md").write_text("real text\n")
+        man["parts"] = [{"name": "part1", "path": "governance/mandate/part1.md",
+                         "sha256": hashlib.sha256(b"real text\n").hexdigest(),
+                         "tracks": ["A", "B"]}]
+        (gov / "manifest.json").write_text(json.dumps(man))
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        assert mg.compute_status()["part1_status"] == "COMPLETE"
+        (gov / "part1.md").write_text("TAMPERED\n")   # sha no longer matches
+        assert mg.compute_status()["part1_status"] == "IN_PROGRESS"
 
 
 class TestVerdictAndDenominatorGuards:
@@ -300,9 +335,17 @@ class TestPanelFindingsPR23:
         "payload = {'tools': [t]}",
     ])
     def test_class5_detects_every_tools_spelling(self, snippet):
-        # only `tools=` was matched; the dict/**kwargs spellings enabled tool
-        # use while calibration still reported the class not-applicable
-        assert re.search(r"""["']?\btools["']?\s*[=:]""", snippet)
+        # WRONG-REASON FIX (review P1.5-c): this asserted a hand-rolled regex
+        # and never touched production, so a regression in the shipped detector
+        # would not fail it. Drive the real module-level detector instead.
+        import ast
+        assert mg.tool_enabling(ast.parse(snippet)), snippet
+
+    def test_class5_tool_enabling_is_quiet_on_benign_code(self):
+        # both sides: the production detector must NOT fire on tool-free calls
+        import ast
+        assert not mg.tool_enabling(ast.parse(
+            "client.messages.create(model=m, max_tokens=8, messages=x)"))
 
     @pytest.mark.parametrize("col", [
         "user_id", "tenant_id", "owner_id",          # original three
@@ -311,16 +354,11 @@ class TestPanelFindingsPR23:
     ])
     def test_class6_detects_tenancy_columns_beyond_the_original_three(self, col):
         src = f"    {col}: Mapped[int] = mapped_column(Integer)"
-        pattern = (r"\b(user|tenant|owner|account|customer|org|organisation|"
-                   r"organization|workspace|member|subject|principal)_id\b")
-        assert re.search(pattern, src, re.IGNORECASE), col
+        assert mg.declares_tenancy_column(src), col      # production detector
 
     def test_class6_detects_tenancy_foreign_keys(self):
         src = 'x: Mapped[int] = mapped_column(ForeignKey("accounts.id"))'
-        pattern = (r"""ForeignKey\(\s*["']"""
-                   r"(users|accounts|tenants|orgs|organisations|organizations|"
-                   r"customers|members|workspaces)\.")
-        assert re.search(pattern, src, re.IGNORECASE)
+        assert mg.declares_tenancy_column(src)           # production detector
 
     def test_live_models_stay_single_tenant(self):
         # the real invariant: this repo must remain single-tenant, so the

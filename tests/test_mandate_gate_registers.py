@@ -369,11 +369,13 @@ class TestPanelFindingsRound18:
         'kwargs["tools"] = [t]',
         'create(**{"tools": [t]})',
         "payload['tools'] = x",
-        "tools=[t]",
+        "client.create(tools=[t])",
     ])
     def test_class5_catches_computed_key_tool_enabling(self, snippet):
-        import re as _re
-        assert _re.search(r"""["']tools["']|(?<![\w.])tools\s*[=:]""", snippet)
+        # WRONG-REASON FIX (review P1.5-c): was a copied regex that never ran
+        # production. Drive the real module-level detector on each form.
+        import ast
+        assert mg.tool_enabling(ast.parse(snippet)), snippet
 
     @pytest.mark.parametrize("snippet,expected", [
         ("class UserAccount(Base):", True),
@@ -384,15 +386,10 @@ class TestPanelFindingsRound18:
         ('    readings = relationship("IndicatorReading")', False),
     ])
     def test_class6_catches_compound_and_camelcase_tenancy(self, snippet, expected):
-        import re as _re
-        ENT = (r"user|tenant|owner|account|customer|org|organisation|"
-               r"organization|workspace|member|subject|principal")
-        pat = (rf"\b({ENT})[_]?id\b"
-               r"|ForeignKey\(\s*[\"'](users|accounts|tenants|orgs|"
-               r"organisations|organizations|customers|members|workspaces)\."
-               rf"|^\s*class\s+({ENT})[A-Za-z]*\b"
-               rf"|relationship\(\s*[\"']({ENT})[A-Za-z]*[\"']")
-        assert bool(_re.search(pat, snippet, _re.I | _re.M)) is expected
+        # production detectors, not a copied regex (review P1.5-c). A strong
+        # signal (tenancy class) or the column signal both count as tenancy.
+        got = mg.declares_strong_tenancy(snippet) or mg.declares_tenancy_column(snippet)
+        assert got is expected, snippet
 
 
 class TestPanelFindingsRound21:
@@ -409,10 +406,9 @@ class TestPanelFindingsRound21:
     ])
     def test_transition_is_parsed_not_substring_matched(
             self, change, old, new, should_match):
-        import re as _re
-        m = _re.match(r"\s*(\S+)\s*->\s*(\S+)", change)
-        got = bool(m and m.group(1) == str(old) and m.group(2) == str(new))
-        assert got is should_match, change
+        # production parser (review P1.5-c): was a copied regex; call the real
+        # transition_matches the ratchet check uses.
+        assert mg.transition_matches(change, old, new) is should_match, change
 
     def test_substring_collision_cannot_license_a_loosening(
             self, monkeypatch, tmp_path):
