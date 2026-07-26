@@ -22,6 +22,33 @@ Owning role for all items: **operator (mglaeser)** — the sole maintainer and h
 
 The **STOP-SHIP** items (B-06 rotation, A-01/B-35 branch protection, A-39 independent verifier) are **not closed by this engagement** — they require operator/repo-settings actions and a second vendor. They are accepted here only *with* the compensating controls and tripwires above, and they are the lead items in `audit/08`. Per the mandate, the honest status is: **the system should not be treated as independently verified until branch protection is enabled and credentials are rotated.**
 
+## Addendum — 2026-07-26 (reconciled external review; audit/13)
+
+- **V-TRUST (verifier trust boundary) — CRITICAL, OPEN, disputes A-39=PASS.**
+  `independent-verify.yml` runs `actions/checkout` (PR head), injects
+  `SECOND_VENDOR_API_KEY`/`OPENAI_API_KEY`, then executes the PR-controlled
+  `scripts/independent_verify.py`. On a **same-repo** PR the author controls
+  both that script and the workflow, so the vendor secret is exposed to
+  PR-head code that could exfiltrate it, alter the reviewed diff, or hardcode
+  green. Therefore the panel is **not** a trustworthy *independent* control on
+  same-repo PRs, and the "independently enforced / permanently enforced" A-39
+  framing is overstated. **Recommendation (operator):** reopen A-39 to
+  PARTIAL, move verifier execution out of the application PR (a trusted
+  external service / policy repo / GitHub App that fetches the diff as inert
+  data and binds a status to exact base/head SHAs), and provision a dedicated
+  low-privilege key. Until then the panel is **conditional advisory evidence**,
+  and deterministic CI (ruff/pip-audit/detect-secrets/pytest/mandate-gate) is
+  the only trusted in-repo control. Compensating control now: single committer,
+  branch pushes only; tripwire: this residual + audit/13. Not closable in the
+  application repo by an AI session.
+- **SECRET-SCAN SCOPE — HIGH, OPEN.** The CI secret scan is
+  `git ls-files | detect-secrets-hook` = current tracked files only; it does
+  NOT scan the full PR commit range or deleted blobs, and detect-secrets
+  excludes `audit/`. The custom UUID/entropy scanner covers tracked `*.py`
+  only. Operator/follow-up: scan all tracked text, scan the PR commit range,
+  and run a trusted redaction/secret pre-flight BEFORE any external model call
+  in the verifier path. (review 3.7)
+
 ## Addendum — 2026-07-26 (Part 3 / Track D non-adoption)
 
 - **D-ALL (Part 3 addendum unadopted) — STOP-SHIP, OPEN.** The independent

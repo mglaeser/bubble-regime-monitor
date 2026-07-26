@@ -628,11 +628,16 @@ class TestRoutePathExtraction:
         assert ("GET", "") in found
         assert not any("summary" in p for _, p in found)   # no garbage capture
 
-    def test_the_live_surface_carries_both_empty_path_routes(self):
+    def test_the_live_surface_mounts_empty_decorator_paths_at_the_prefix(self):
+        # The two `@router.get("")` endpoints (score, indicators) now record
+        # their EFFECTIVE mounted paths (reconciled review F03), so they appear
+        # as /api/v1/score and /api/v1/indicators, not "".
         surface = json.loads(
             (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
-        empties = [r for r in surface["routes"] if r["path"] == ""]
-        assert len(empties) == 2, empties
+        paths = {r["path"] for r in surface["routes"]}
+        assert "" not in paths                       # no decorator-local blanks
+        assert "/api/v1/score" in paths
+        assert "/api/v1/indicators" in paths
         assert len(surface["routes"]) >= 21
 
 
@@ -842,3 +847,53 @@ class TestBranchReviewFixes:
             (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
         assert any("judgment.py" in p for p in surface["prompts"])
         assert not any("app/llm.py" in p for p in surface["prompts"])
+
+
+class TestReconciledReviewFixes:
+    """Regression tests for the 2026-07-26 reconciled review (audit/13)."""
+
+    def test_f02_ruff_live_config_probe_catches_per_file_ignore(
+            self, monkeypatch, tmp_path):
+        # THE GAP: the parser models select/ignore only; a per-file-ignore of
+        # S110 on app/** would silence the CI gate while the parser passed.
+        # The live-config probe runs ruff with the repo config against an
+        # app/-shaped stdin filename, so a suppression is caught. Here we prove
+        # the probe mechanism: tests/** ignores S, so a tests/-shaped probe
+        # yields no S110 (the same mechanism that catches an app/** ignore).
+        import subprocess
+        import sys
+        code = ("def f():\n    try:\n        g()\n"
+                "    except Exception:\n        pass\n")
+        app_probe = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", "--force-exclude",
+             "--stdin-filename", "app/_p.py", "-"], input=code,
+            capture_output=True, text=True, cwd=mg.ROOT)
+        assert "S110" in app_probe.stdout + app_probe.stderr   # live app gate
+        tests_probe = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", "--force-exclude",
+             "--stdin-filename", "tests/_p.py", "-"], input=code,
+            capture_output=True, text=True, cwd=mg.ROOT)
+        assert "S110" not in tests_probe.stdout + tests_probe.stderr  # suppressed
+
+    def test_f03_effective_route_paths_are_mounted_not_decorator_local(self):
+        surface = json.loads(
+            (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
+        paths = {r["path"] for r in surface["routes"]}
+        # the review's named acceptance test: score mounts under /api/v1/score
+        assert "/api/v1/score" in paths
+        assert "/api/v1/score/history" in paths
+        assert "" not in paths and "/history" not in paths   # no decorator-local
+
+    def test_f03_egress_lists_twelvedata_and_polygon(self):
+        surface = json.loads(
+            (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
+        joined = " ".join(surface["egress"])
+        assert "Twelve Data" in joined and "Polygon" in joined
+
+    def test_f03_scheduler_lists_the_real_jobs(self):
+        surface = json.loads(
+            (Path(mg.ROOT) / "audit" / "00-audit-surface.json").read_text())
+        joined = " ".join(surface["scheduled_jobs"])
+        assert "recompute" in joined
+        assert "breadth_refresh" in joined
+        assert "daily_sms" in joined

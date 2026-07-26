@@ -34,7 +34,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0          # full history so the secret scan sees every commit
+          # Full history for the mandate gate's comparison-point / replay
+          # logic (it walks prior commits). NOTE: the secret scan step below is
+          # `git ls-files | detect-secrets-hook`, which scans the CURRENT
+          # tracked files only — it does NOT inspect every historical commit or
+          # deleted blobs. Scanning the full PR commit range is an open item
+          # (audit/13, review 3.7), not something fetch-depth alone provides.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}

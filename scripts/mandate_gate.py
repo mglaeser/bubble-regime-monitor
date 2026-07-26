@@ -778,17 +778,20 @@ def compute_status() -> dict:
         # (production_eligible remains separate; §8 requires both.)
         vol = [f for f in findings if f["id"].split("-")[0] in tracks]
         evidenced_ok = all(f["verdict"] != "NO-EVIDENCE" for f in vol)
-        text_ok = True
-        for part in manifest.get("parts", []):
-            if set(part.get("tracks") or []) & set(tracks):
-                path = part.get("path")
-                if not path:
-                    text_ok = False
-                    break
-                fp = ROOT / path
-                if not fp.exists() or _sha256(fp) != part.get("sha256"):
-                    text_ok = False
-                    break
+        # POSITIVE ESTABLISHMENT (review OA-12-F01 / P0.6): the prior version
+        # initialised text_ok=True and only cleared it while iterating matching
+        # parts, so ZERO matching parts passed vacuously — a required volume
+        # whose manifest registration was dropped or whose tracks were
+        # misspelled would report COMPLETE with no text at all. Require exactly
+        # the parts that claim this volume's tracks to be present and attested,
+        # and require at least one.
+        matching = [p for p in manifest.get("parts", [])
+                    if set(p.get("tracks") or []) & set(tracks)]
+        text_ok = bool(matching) and all(
+            p.get("path")
+            and (ROOT / p["path"]).exists()
+            and _sha256(ROOT / p["path"]) == p.get("sha256")
+            for p in matching)
         return "COMPLETE" if (evidenced_ok and text_ok) else "IN_PROGRESS"
 
     production_eligible = (
@@ -812,7 +815,13 @@ def compute_status() -> dict:
         "open_blocker_1_count": band_counts["BLOCKER-1"],
         "open_blocker_2_count": band_counts["BLOCKER-2"],
         "open_blocker_ids_accepted_by_operator": sorted(open_blockers),
-        "security_scope_audited": True,
+        # Founding-engagement fact, not an ongoing clearance (review 1.3/3.5):
+        # the security scope was audited at the July 2026 engagement (Track A
+        # security checks A-08/A-13/A-26 etc. carry founding verdicts). It is
+        # renamed to remove the misleading present-tense implication that the
+        # security posture is continuously re-verified — it is NOT, and B-06
+        # (unrotated credentials) remains an open STOP-SHIP in that scope.
+        "security_scope_audited_at_founding": True,
         "constitution_state": accepted.get("constitution_state"),
         "production_eligible": production_eligible,
         "production_note": accepted.get("production_note", ""),
@@ -1232,6 +1241,30 @@ def cmd_calibrate() -> None:
                 "rule must be reachable by `select` and not cancelled by "
                 "`ignore`, or the blocking lint step is dead while the "
                 "calibration binary-check stays green")
+        # ...and a LIVE-CONFIG probe (review OA-12-F02 / P1.3): parsing only
+        # select/ignore misses extend-select, extend-ignore, per-file-ignores,
+        # and exclude/force-exclude. Run the real ruff with the REPO config
+        # (no --isolated) against an app/-SHAPED filename via --stdin-filename,
+        # so the production per-file rules that apply to app/*.py apply here.
+        # If a future edit adds `"app/**" = ["S110"]` to per-file-ignores, or
+        # excludes app/, the diagnostic disappears and this fails — which the
+        # parser above cannot see.
+        probe = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", "--force-exclude",
+             "--stdin-filename", "app/_s110_probe.py", "-"],
+            input="def f():\n    try:\n        g()\n    except Exception:\n"
+                  "        pass\n",
+            capture_output=True, text=True, cwd=ROOT)
+        # Fail closed both ways: S110 present under the live config is the only
+        # pass; its absence (suppressed, excluded, or ruff errored) is a dead
+        # control, never a silent catch.
+        if "S110" not in (probe.stdout + probe.stderr):
+            failures.append(
+                "class 2 live-config probe: ruff under the repository's own "
+                "config does NOT flag S110 on an app/-shaped swallowed "
+                "exception (per-file-ignore, extend-ignore, or an app/ "
+                f"exclusion has silenced the CI gate; exit={probe.returncode}, "
+                f"err={probe.stderr.strip()[:120]!r})")
 
         # 3 — non-existent dependency -> import-resolution check
         if unresolvable_imports(["reqwests_http"]) != ["reqwests_http"]:
@@ -1459,6 +1492,25 @@ def cmd_surface(check: bool = False) -> None:
     # denominator.
     _VERBS = {"get", "post", "put", "delete", "patch",
               "head", "options", "trace", "api_route"}
+    # EFFECTIVE mounted paths, not decorator-local ones (review 1.7/3.8): the
+    # surface recorded score's routes as "" and "/history" when they mount at
+    # /api/v1/score and /api/v1/score/history. Derive each module's router
+    # prefix statically from `APIRouter(prefix="…")` and prepend it. This app
+    # adds no further prefix at include_router() time; if one is ever added,
+    # the guard below fails closed rather than silently understating the path.
+    _prefix_by_module: dict[str, str] = {}
+    for p in sorted(ROOT.glob("app/**/*.py")):
+        m = re.search(r"""APIRouter\([^)]*prefix\s*=\s*(["'])([^"']*)\1""",
+                      p.read_text(errors="replace"))
+        if m:
+            _prefix_by_module[str(p.relative_to(ROOT))] = m.group(2)
+    main_src = (ROOT / "app" / "main.py").read_text(errors="replace") \
+        if (ROOT / "app" / "main.py").exists() else ""
+    if re.search(r"include_router\([^)]*\bprefix\s*=", main_src):
+        _fail("app/main.py mounts a router with an include_router(prefix=…) "
+              "the surface generator does not compose — the recorded route "
+              "paths would understate the real API; extend the prefix "
+              "derivation before regenerating the surface")
     routes = []
     for p in sorted(ROOT.glob("app/**/*.py")):
         # PARSED, not pattern-matched. Every regex here has been wrong in a
@@ -1531,22 +1583,38 @@ def cmd_surface(check: bool = False) -> None:
                               "which verbs this endpoint serves")
                 else:
                     methods = [fn.attr.upper()]
+                effective = _prefix_by_module.get(str(rel), "") + route
                 for method in methods:
-                    routes.append({"method": method, "path": route,
+                    routes.append({"method": method, "path": effective,
                                    "module": str(rel)})
     surface = {
         "generated_by": "scripts/mandate_gate.py surface",
         "files_tracked": len(tracked),
         "python_modules": sorted(f for f in tracked if f.endswith(".py")),
         "routes": sorted(routes, key=lambda r: (r["path"], r["method"])),
-        "scheduled_jobs": ["4-hourly recompute (APScheduler, app/main.py)",
-                           "deploy watchdog (host systemd, docs/AUTO_DEPLOY.md)"],
+        # The three real APScheduler jobs registered in app/scheduler.py
+        # (review 1.7): the prior list said "4-hourly recompute" + a host
+        # watchdog, omitting breadth_refresh and the conditional daily_sms and
+        # mislabelling a host-level systemd unit as an in-process job.
+        "scheduled_jobs": [
+            "recompute — composite recompute, APScheduler CronTrigger "
+            "02/06/10/14/18/22 UTC (app/scheduler.py)",
+            "breadth_refresh — breadth cache sweep, CronTrigger 01/13 UTC "
+            "(app/scheduler.py)",
+            "daily_sms — SMS report, CronTrigger at sms_daily_hour/minute, "
+            "registered only when SMS_ENABLED (app/scheduler.py)",
+            "deploy watchdog — HOST systemd unit, NOT an in-process scheduler "
+            "job (docs/AUTO_DEPLOY.md)"],
         "data_stores": ["SQLite (DB_URL; snapshots, indicator_readings, "
                         "falsification_outcomes append-only, dashboard_feed, "
                         "daily_close, breadth caches)"],
         "model_providers": ["Anthropic (judgment note; generator vendor)",
                             "OpenAI (independent verifier panel; second vendor)"],
+        # Twelve Data and Polygon added (review 1.7): both are live network
+        # egress in app/sources/prices.py and breadth.py (api.twelvedata.com,
+        # api.polygon.io) that the hand-authored list omitted.
         "egress": ["FRED/ALFRED", "SEC EDGAR", "Shiller xls", "Stooq/price",
+                   "Twelve Data (prices/breadth)", "Polygon (breadth grouped-daily)",
                    "CNN Fear&Greed", "sipgate SMS", "Anthropic API",
                    "OpenAI API (CI panel)"],
         "identities": ["operator (mglaeser) — human-in-command",

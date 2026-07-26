@@ -153,6 +153,29 @@ class TestVolumeCompleteTextPresence:
     """P0.1 (branch review): a volume is COMPLETE only when its mandate SOURCE
     TEXT is present + attested, not merely when its findings are evidenced."""
 
+    def test_zero_matching_manifest_part_fails_closed(
+            self, monkeypatch, tmp_path):
+        # F01 (reconciled review): the prior fix initialised text_ok=True and
+        # only cleared it while iterating MATCHING parts, so a volume whose
+        # manifest registration was dropped (zero matching parts) passed
+        # vacuously. Give the fixture findings for tracks A/B but a manifest
+        # whose only part claims an unrelated track, and prove part1 is NOT
+        # COMPLETE.
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        gov = tmp_path / "governance" / "mandate"
+        man = json.loads((gov / "manifest.json").read_text())
+        man["parts"] = [{"name": "other", "path": "governance/mandate/part1.md",
+                         "sha256": "x", "tracks": ["Z"]}]   # no A/B/C coverage
+        (gov / "part1.md").write_text("t\n")
+        (gov / "manifest.json").write_text(json.dumps(man))
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+        status = mg.compute_status()
+        assert status["part1_status"] == "IN_PROGRESS"   # not vacuously COMPLETE
+
+
     def test_part2_is_in_progress_when_text_absent(self):
         # the live repo: Part 2 text is not in the repo (manifest path null),
         # so part2_status must read IN_PROGRESS even though every C finding is
