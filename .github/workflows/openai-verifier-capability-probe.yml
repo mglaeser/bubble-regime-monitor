@@ -1,0 +1,282 @@
+# Trusted capability probe for the cross-vendor verifier's token accounting.
+#
+# WHY THIS EXISTS, AND WHY IT LIVES ON THE DEFAULT BRANCH
+# ------------------------------------------------------
+# The planned intra-file review planner (P0-02) must size every review request
+# against a REAL provider token count rather than a local estimate: tiktoken
+# publishes no encoding mapping for `gpt-5.3-codex` or `gpt-5.6-sol`, and its
+# encoding constructors fetch BPE assets over the network, so any local count
+# would be a guess dressed up as a measurement. The planner therefore depends
+# on POST /v1/responses/input_tokens, and that dependency has to be PROVEN
+# against the real account before it is designed in.
+#
+# The open V-TRUST residual is precisely that pull-request-controlled code can
+# receive the verifier credential. Proving this capability from a branch under
+# review would reproduce that exact defect for no reason. So this workflow:
+#
+#   * runs ONLY via workflow_dispatch, which GitHub serves from the DEFAULT
+#     branch — the code below is the code that runs, and no pull request can
+#     alter it;
+#   * performs NO checkout, so no repository code, dependency, config or hook
+#     from any branch is ever executed with the key in scope;
+#   * sends a FIXED SYNTHETIC payload — no diff, no file content, no
+#     repository data of any kind leaves the runner;
+#   * calls NO generation endpoint (no /v1/responses), only model retrieval
+#     and the input-token counter;
+#   * prints sanitized evidence only: status codes, the returned model id, the
+#     token count, and provider request ids. Never the key, never full headers.
+#
+# WHAT A GREEN RUN PROVES (and nothing more) is recorded in
+# docs/VERIFIER_CAPABILITY_PROBE.md. In particular it does NOT close V-TRUST:
+# a durable independent verifier still needs a separately operated runner that
+# treats the application pull request as inert data.
+
+name: OpenAI verifier capability probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openai-verifier-capability-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    # Same-repository, operator-triggered only. workflow_dispatch already
+    # requires write access, but this is stated explicitly so the constraint
+    # survives a future change to who may dispatch.
+    if: >-
+      github.repository == 'mglaeser/bubble-regime-monitor' &&
+      github.actor == 'mglaeser'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # A dedicated low-privilege probe key is preferred; the general verifier
+      # key is the documented fallback for this one fixed, no-generation call.
+      # `||` on the secrets context is standard GitHub expression syntax: an
+      # undefined secret evaluates to the empty string, which is falsy.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_VERIFIER_PROBE_API_KEY || secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: https://api.openai.com/v1
+      WORKFLOW_SHA: ${{ github.sha }}
+      WORKFLOW_RUN_ID: ${{ github.run_id }}
+      WORKFLOW_JOB: ${{ github.job }}
+
+    steps:
+      - name: Probe exact models and Responses input-token endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::No probe API key is configured (set OPENAI_VERIFIER_PROBE_API_KEY or OPENAI_API_KEY)"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from typing import Any
+
+          BASE = os.environ["OPENAI_BASE_URL"].rstrip("/")
+          KEY = os.environ["OPENAI_API_KEY"]
+
+          # The exact panel identities the planner will size requests for.
+          MODELS = (
+              "gpt-5.3-codex",
+              "gpt-5.6-sol",
+              "gpt-4.1-mini",
+          )
+
+          # Fixed and synthetic on purpose: this probe must never carry
+          # repository content to the provider.
+          FIXED_INSTRUCTIONS = (
+              "Capability probe only. Count this fixed synthetic request. "
+              "Do not generate a response."
+          )
+          FIXED_INPUT = "bubblegauge verifier input-token capability probe"
+
+          def canonical_json(value: Any) -> bytes:
+              return json.dumps(
+                  value,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=False,
+              ).encode("utf-8")
+
+          def safe_error(body: Any) -> dict[str, Any]:
+              """Short provider diagnostic only — never headers, never the key."""
+              if not isinstance(body, dict):
+                  return {"type": "non_json_error"}
+              err = body.get("error")
+              if not isinstance(err, dict):
+                  return {"type": "unknown_error"}
+              return {
+                  "type": err.get("type"),
+                  "code": err.get("code"),
+                  "param": err.get("param"),
+                  "message": str(err.get("message", ""))[:300],
+              }
+
+          def request(
+              method: str,
+              path: str,
+              payload: dict[str, Any] | None = None,
+          ) -> tuple[int, Any, str | None]:
+              data = canonical_json(payload) if payload is not None else None
+              req = urllib.request.Request(
+                  BASE + path,
+                  data=data,
+                  method=method,
+                  headers={
+                      "Authorization": f"Bearer {KEY}",
+                      "Content-Type": "application/json",
+                      "Accept": "application/json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      raw = response.read()
+                      request_id = response.headers.get("x-request-id")
+                      try:
+                          parsed = json.loads(raw)
+                      except json.JSONDecodeError:
+                          parsed = {"_invalid_json": True}
+                      return response.status, parsed, request_id
+              except urllib.error.HTTPError as exc:
+                  raw = exc.read()
+                  request_id = exc.headers.get("x-request-id")
+                  try:
+                      parsed = json.loads(raw)
+                  except json.JSONDecodeError:
+                      parsed = {"_invalid_json": True}
+                  return exc.code, parsed, request_id
+
+          results: list[dict[str, Any]] = []
+          failed = False
+
+          for requested_model in MODELS:
+              encoded_model = urllib.parse.quote(requested_model, safe="")
+
+              model_status, model_body, model_request_id = request(
+                  "GET",
+                  f"/models/{encoded_model}",
+              )
+              retrieved_model_id = (
+                  model_body.get("id")
+                  if isinstance(model_body, dict)
+                  else None
+              )
+
+              payload = {
+                  "model": requested_model,
+                  "instructions": FIXED_INSTRUCTIONS,
+                  "input": FIXED_INPUT,
+                  "truncation": "disabled",
+              }
+              payload_sha256 = hashlib.sha256(
+                  canonical_json(payload)
+              ).hexdigest()
+
+              count_status, count_body, count_request_id = request(
+                  "POST",
+                  "/responses/input_tokens",
+                  payload,
+              )
+
+              count_object = (
+                  count_body.get("object")
+                  if isinstance(count_body, dict)
+                  else None
+              )
+              input_tokens = (
+                  count_body.get("input_tokens")
+                  if isinstance(count_body, dict)
+                  else None
+              )
+
+              model_ok = (
+                  model_status == 200
+                  and retrieved_model_id == requested_model
+              )
+              # bool is a subclass of int — exclude it explicitly so `true`
+              # cannot masquerade as a token count of 1.
+              count_ok = (
+                  count_status == 200
+                  and count_object == "response.input_tokens"
+                  and isinstance(input_tokens, int)
+                  and not isinstance(input_tokens, bool)
+                  and input_tokens >= 0
+              )
+
+              if not (model_ok and count_ok):
+                  failed = True
+
+              results.append({
+                  "requested_model_id": requested_model,
+                  "model_retrieve": {
+                      "status": model_status,
+                      "returned_id": retrieved_model_id,
+                      "request_id": model_request_id,
+                      "ok": model_ok,
+                      "error": None if model_ok else safe_error(model_body),
+                  },
+                  "input_token_count": {
+                      "status": count_status,
+                      "object": count_object,
+                      "input_tokens": input_tokens,
+                      "request_id": count_request_id,
+                      "payload_sha256": payload_sha256,
+                      "ok": count_ok,
+                      "error": None if count_ok else safe_error(count_body),
+                  },
+              })
+
+          evidence = {
+              "schema_version": 1,
+              "probe_type": "OPENAI_RESPONSES_INPUT_TOKEN_CAPABILITY",
+              "generation_calls": 0,
+              "base_url": BASE,
+              "workflow_sha": os.environ.get("WORKFLOW_SHA"),
+              "workflow_run_id": os.environ.get("WORKFLOW_RUN_ID"),
+              "workflow_job": os.environ.get("WORKFLOW_JOB"),
+              "probed_at": datetime.now(timezone.utc).isoformat(),
+              "results": results,
+              "overall_ok": not failed,
+          }
+
+          rendered = json.dumps(
+              evidence,
+              indent=2,
+              sort_keys=True,
+              ensure_ascii=False,
+          )
+          print(rendered)
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              Path(summary_path).write_text(
+                  "## OpenAI verifier capability probe\n\n"
+                  "No generation endpoint was called.\n\n"
+                  "```json\n"
+                  + rendered
+                  + "\n```\n",
+                  encoding="utf-8",
+              )
+
+          # Fail closed: a missing or malformed result for ANY required model
+          # must not read as a capability that the planner may rely on.
+          if failed:
+              sys.exit(1)
+          PY
