@@ -16,13 +16,31 @@
     "authorised_by": "operator (chose 'Drop mandate text from this PR', 2026-07-25)",
     "is_finding": true,
     "finding_note": "Per \u00a79.1 a loosening is automatically a finding: recorded here rather than filed separately, because the metric moved for a structural reason, not a quality reason."
+   },
+   {
+    "date": "2026-07-26",
+    "metric": "noqa_ceiling",
+    "change": "20 -> 22 (SCOPE-EXPANSION)",
+    "reason": "Review R-06 (audit/13): the ratchet scanned a hand-maintained glob list (app/**, scripts/*, tests/**) that matched NO file under migrations/ or docs/harnesses/ (11 tracked *.py), so those files escaped the noqa ceiling entirely. The denominator is now the authoritative git-tracked *.py set. This reveals 2 PRE-EXISTING, already-justified suppressions in docs/harnesses (S310 fixed-base, S112 best-effort discovery) that were always in the tree, merely unscanned. No new suppression was introduced; the ceiling rises only to the now-complete measurement, and future coverage strictly tightens because migrations/harnesses are now watched.",
+    "authorised_by": "AI session implementing iter-3 review R-06 (audit/13) \u2014 scope-expansion measurement correction, surfaced to the operator in the PR diff; no operator UI choice is claimed.",
+    "is_finding": true,
+    "finding_note": "Recorded as a finding per \u00a79.1 because the measured number rises. Mechanically a loosening; substantively a coverage EXPANSION (no new debt admitted). The operator may veto by narrowing scope back, at the cost of reopening the fail-open."
+   },
+   {
+    "date": "2026-07-26",
+    "metric": "type_ignore_ceiling",
+    "change": "2 -> 7 (SCOPE-EXPANSION)",
+    "reason": "Review R-06 class-fix (audit/13): type_ignore was scanned over an even narrower glob (app/**, scripts/*) that excluded tests/ AND migrations/ AND docs/harnesses/. Routing it through the same authoritative git-tracked *.py denominator as noqa/emoji closes the adjacent-case gap (CLAUDE.md 'fix the class, not the instance'). This reveals 5 PRE-EXISTING, already-annotated `# type: ignore[assignment]` lines in docs/harnesses/c_ndx_drift_harness.py, always tracked, merely unscanned. No new suppression was introduced.",
+    "authorised_by": "AI session implementing iter-3 review R-06 (audit/13) \u2014 scope-expansion measurement correction, surfaced to the operator in the PR diff; no operator UI choice is claimed.",
+    "is_finding": true,
+    "finding_note": "Same basis as the noqa record above: a mechanical ceiling rise driven purely by expanding scope to the full tracked set, not by admitting new debt."
    }
   ]
  },
  "ratchets": {
-  "test_count_floor": 691,
-  "noqa_ceiling": 20,
-  "type_ignore_ceiling": 2,
+  "test_count_floor": 704,
+  "noqa_ceiling": 22,
+  "type_ignore_ceiling": 7,
   "emoji_in_source_ceiling": 0
  }
 }

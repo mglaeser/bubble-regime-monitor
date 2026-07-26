@@ -770,26 +770,54 @@ class TestBranchReviewFixes:
     """Regression tests for the 2026-07-26 branch-wide review (audit/11).
     Each pins the exact pre-fix failure and exercises both sides."""
 
-    # --- P1.1: calibrate must check the REPO's ruff config, not --isolated ---
+    # --- P1.1 / P1-01: calibrate proves S110 LIVE via a real-ruff probe ------
+    # The pyproject `select`/`ignore` parser was removed (P1-01): it false-
+    # blocked configs expressing S110 via `extend-select` and was blind to
+    # extend-ignore / per-file-ignores / exclude. `_ruff_s110_live` runs the
+    # real, fully-merged ruff config against an app/-shaped file, so these tests
+    # drive the SAME code path CI relies on.
 
-    def test_p1_1_ruff_config_check_both_ways(self):
-        assert mg._ruff_selects_s110()               # the live repo selects S
+    def test_p1_1_live_repo_config_flags_s110(self):
+        fires, _ = mg._ruff_s110_live()
+        assert fires                                  # the live repo config is S110-live
+
+    def test_p1_01_extend_select_is_not_false_blocked(self, tmp_path, monkeypatch):
+        # THE P1-01 regression: `extend-select = ["S"]` (no `select`) makes
+        # S110 live, and the removed parser would have wrongly reported it dead.
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.ruff.lint]\nextend-select = ["S"]\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        fires, _ = mg._ruff_s110_live()
+        assert fires
 
     def test_p1_1_deselecting_S_is_caught(self, tmp_path, monkeypatch):
         (tmp_path / "pyproject.toml").write_text(
             '[tool.ruff.lint]\nselect = ["E", "F"]\nignore = []\n')
         monkeypatch.setattr(mg, "ROOT", tmp_path)
-        assert not mg._ruff_selects_s110()
+        fires, _ = mg._ruff_s110_live()
+        assert not fires
 
     def test_p1_1_ignoring_S110_is_caught(self, tmp_path, monkeypatch):
         (tmp_path / "pyproject.toml").write_text(
             '[tool.ruff.lint]\nselect = ["S"]\nignore = ["S110"]\n')
         monkeypatch.setattr(mg, "ROOT", tmp_path)
-        assert not mg._ruff_selects_s110()
+        fires, _ = mg._ruff_s110_live()
+        assert not fires
+
+    def test_p1_01_per_file_ignore_on_app_is_caught(self, tmp_path, monkeypatch):
+        # A per-file-ignore silencing app/** — invisible to the removed parser,
+        # caught by the live probe because the stdin filename is app/-shaped.
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.ruff.lint]\nselect = ["S"]\n'
+            '[tool.ruff.lint.per-file-ignores]\n"app/**" = ["S110"]\n')
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        fires, _ = mg._ruff_s110_live()
+        assert not fires
 
     def test_p1_1_absent_config_fails_closed(self, tmp_path, monkeypatch):
         monkeypatch.setattr(mg, "ROOT", tmp_path)     # no pyproject.toml
-        assert not mg._ruff_selects_s110()
+        fires, _ = mg._ruff_s110_live()
+        assert not fires                              # ruff defaults do not select S
 
     # --- P1.2: AST credential scan catches annotated assignments -------------
 

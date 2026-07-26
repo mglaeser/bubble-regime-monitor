@@ -165,9 +165,11 @@ class TestVolumeCompleteTextPresence:
                                   blocker_accepted=True)
         gov = tmp_path / "governance" / "mandate"
         man = json.loads((gov / "manifest.json").read_text())
-        man["parts"] = [{"name": "other", "path": "governance/mandate/part1.md",
-                         "sha256": "x", "tracks": ["Z"]}]   # no A/B/C coverage
-        (gov / "part1.md").write_text("t\n")
+        # A NOT-IN-REPO part covering only track Z: it gives the A/B volume zero
+        # coverage. path=null so the R-03 reconstruction check correctly skips
+        # it (only in-repo parts are reconstructed against mandate.md).
+        man["parts"] = [{"name": "other", "path": None,
+                         "sha256": None, "tracks": ["Z"]}]   # no A/B/C coverage
         (gov / "manifest.json").write_text(json.dumps(man))
         monkeypatch.setattr(mg, "ROOT", tmp_path)
         monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
@@ -184,28 +186,212 @@ class TestVolumeCompleteTextPresence:
         assert status["part1_status"] == "COMPLETE"
         assert status["part2_status"] == "IN_PROGRESS"
 
-    def test_part1_flips_to_in_progress_if_its_text_is_tampered(
-            self, monkeypatch, tmp_path):
-        # both sides: if Part 1's committed text no longer matches its attested
-        # sha, its volume is no longer COMPLETE either.
+    @staticmethod
+    def _consistent_part1(tmp_path):
+        """Fixture where mandate.md IS the concatenation of an in-repo Part 1
+        (header + part1 bytes), part1's manifest sha matches, and the combined
+        sha matches mandate.md — i.e. every source-integrity check passes."""
+        import hashlib
         _write_minimal_engagement(tmp_path, pass_has_control=True,
                                   blocker_accepted=True)
-        # give the fixture a manifest part for tracks A/B pointing at part1.md,
-        # then corrupt the file so sha mismatches
-        import hashlib
         gov = tmp_path / "governance" / "mandate"
-        man = json.loads((gov / "manifest.json").read_text())
         (gov / "part1.md").write_text("real text\n")
+        (tmp_path / "governance" / "mandate.md").write_text(
+            "HDR\nreal text\n")                      # header + part1 verbatim
+        man = json.loads((gov / "manifest.json").read_text())
         man["parts"] = [{"name": "part1", "path": "governance/mandate/part1.md",
                          "sha256": hashlib.sha256(b"real text\n").hexdigest(),
                          "tracks": ["A", "B"]}]
+        man["combined_mandate_sha256"] = hashlib.sha256(
+            b"HDR\nreal text\n").hexdigest()
         (gov / "manifest.json").write_text(json.dumps(man))
+        return gov
+
+    def test_part1_complete_when_text_present_attested_and_reconstructs(
+            self, monkeypatch, tmp_path):
+        self._consistent_part1(tmp_path)
         monkeypatch.setattr(mg, "ROOT", tmp_path)
         monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
         monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
         assert mg.compute_status()["part1_status"] == "COMPLETE"
-        (gov / "part1.md").write_text("TAMPERED\n")   # sha no longer matches
+
+    def test_part1_in_progress_when_manifest_sha_no_longer_matches_file(
+            self, monkeypatch, tmp_path):
+        # SOFT path (R-02): if the manifest's recorded sha for Part 1 no longer
+        # matches the file, the volume is not COMPLETE — but mandate.md is still
+        # a valid concatenation, so this degrades gracefully (no hard fail).
+        gov = self._consistent_part1(tmp_path)
+        man = json.loads((gov / "manifest.json").read_text())
+        man["parts"][0]["sha256"] = "0" * 64          # wrong sha, file untouched
+        (gov / "manifest.json").write_text(json.dumps(man))
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
         assert mg.compute_status()["part1_status"] == "IN_PROGRESS"
+
+
+class TestIter3FailOpenFixes:
+    """Regression tests for the iteration-3 current-head review (audit/13).
+    Each pins the exact pre-fix fail-open and exercises both sides."""
+
+    @staticmethod
+    def _patch(monkeypatch, tmp_path):
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        monkeypatch.setattr(mg, "AUDIT", tmp_path / "audit")
+        monkeypatch.setattr(mg, "GOV", tmp_path / "governance")
+
+    # --- R-01: a volume needs EXACT track coverage, not mere intersection ----
+
+    def test_r01_partial_track_coverage_is_not_complete(
+            self, monkeypatch, tmp_path):
+        # A part claiming ONLY track A must NOT complete the A/B volume: Track B's
+        # source would be unregistered while part1 read COMPLETE.
+        import hashlib
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        gov = tmp_path / "governance" / "mandate"
+        (gov / "part1.md").write_text("real text\n")
+        (tmp_path / "governance" / "mandate.md").write_text("HDR\nreal text\n")
+        man = json.loads((gov / "manifest.json").read_text())
+        man["parts"] = [{"name": "part1", "path": "governance/mandate/part1.md",
+                         "sha256": hashlib.sha256(b"real text\n").hexdigest(),
+                         "tracks": ["A"]}]              # A only — B uncovered
+        man["combined_mandate_sha256"] = hashlib.sha256(
+            b"HDR\nreal text\n").hexdigest()
+        (gov / "manifest.json").write_text(json.dumps(man))
+        self._patch(monkeypatch, tmp_path)
+        assert mg.compute_status()["part1_status"] == "IN_PROGRESS"
+
+    # --- R-02: a registered part path must be a safe, in-repo, tracked file ---
+
+    def test_r02_absolute_path_outside_repo_is_rejected(self, tmp_path):
+        # pathlib DISCARDS ROOT when the right side is absolute; an absolute path
+        # to a matching-hash file OUTSIDE the repo must not satisfy the source.
+        import hashlib
+        outside = tmp_path / "elsewhere.md"
+        outside.write_text("smuggled\n")
+        part = {"name": "x", "path": str(outside),
+                "sha256": hashlib.sha256(b"smuggled\n").hexdigest(),
+                "tracks": ["A"]}
+        assert mg._part_source_ok(part) is False
+
+    def test_r02_traversal_path_is_rejected(self, tmp_path):
+        part = {"name": "x", "path": "../etc/passwd",
+                "sha256": "0" * 64, "tracks": ["A"]}
+        assert mg._part_source_ok(part) is False
+
+    # --- R-03: mandate.md is validated + reconstructed from the parts ---------
+
+    def test_r03_combined_sha_mismatch_hard_fails(self, monkeypatch, tmp_path):
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        # mandate.md content diverges from the attested combined sha
+        (tmp_path / "governance" / "mandate.md").write_text("TAMPERED COMBINED\n")
+        self._patch(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_r03_missing_mandate_md_hard_fails(self, monkeypatch, tmp_path):
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        (tmp_path / "governance" / "mandate.md").unlink()
+        self._patch(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_r03_part_text_not_in_combined_hard_fails(
+            self, monkeypatch, tmp_path):
+        # An in-repo part whose bytes are NOT in mandate.md means the combined
+        # text is not the concatenation of the parts — a hard integrity failure.
+        import hashlib
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        gov = tmp_path / "governance" / "mandate"
+        (gov / "part1.md").write_text("PART ONE BODY\n")
+        (tmp_path / "governance" / "mandate.md").write_text(
+            "HDR without the body\n")                  # does NOT contain part1
+        man = json.loads((gov / "manifest.json").read_text())
+        man["parts"] = [{"name": "part1", "path": "governance/mandate/part1.md",
+                         "sha256": hashlib.sha256(b"PART ONE BODY\n").hexdigest(),
+                         "tracks": ["A", "B"]}]
+        man["combined_mandate_sha256"] = hashlib.sha256(
+            b"HDR without the body\n").hexdigest()
+        (gov / "manifest.json").write_text(json.dumps(man))
+        self._patch(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit):
+            mg.compute_status()
+
+    def test_r03_valid_concatenation_passes(self, monkeypatch, tmp_path):
+        # POSITIVE side: header + part verbatim, correct combined sha -> OK.
+        import hashlib
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        gov = tmp_path / "governance" / "mandate"
+        (gov / "part1.md").write_text("PART ONE BODY\n")
+        (tmp_path / "governance" / "mandate.md").write_text(
+            "HDR\nPART ONE BODY\n")
+        man = json.loads((gov / "manifest.json").read_text())
+        man["parts"] = [{"name": "part1", "path": "governance/mandate/part1.md",
+                         "sha256": hashlib.sha256(b"PART ONE BODY\n").hexdigest(),
+                         "tracks": ["A", "B"]}]
+        man["combined_mandate_sha256"] = hashlib.sha256(
+            b"HDR\nPART ONE BODY\n").hexdigest()
+        (gov / "manifest.json").write_text(json.dumps(man))
+        self._patch(monkeypatch, tmp_path)
+        # does not raise; both volume status fields are computable
+        assert mg.compute_status()["part1_status"] == "COMPLETE"
+
+    # --- R-04: production_eligible requires BOTH volumes COMPLETE -------------
+
+    def test_r04_production_eligible_false_when_a_volume_incomplete(
+            self, monkeypatch, tmp_path):
+        # Even with the constitution RATIFIED, every finding evidenced and no
+        # open blockers, an IN_PROGRESS volume must keep production_eligible
+        # false. The minimal fixture has no in-repo part for A/B, so part1 is
+        # IN_PROGRESS regardless of the other conditions.
+        _write_minimal_engagement(tmp_path, pass_has_control=True,
+                                  blocker_accepted=True)
+        reg = tmp_path / "governance" / "accepted-residuals.json"
+        d = json.loads(reg.read_text())
+        d["constitution_state"] = "RATIFIED"
+        reg.write_text(json.dumps(d))
+        # every finding evidenced (both already have verdicts), no OPEN blocker
+        # (A-02 STOP-SHIP is accepted). Re-attest the mutated register.
+        _reattest(tmp_path)
+        self._patch(monkeypatch, tmp_path)
+        status = mg.compute_status()
+        assert status["part1_status"] == "IN_PROGRESS"
+        assert status["production_eligible"] is False
+
+    # --- R-06: ratchet denominator is the full git-tracked *.py set -----------
+
+    def test_r06_emoji_scan_covers_untracked_globs_via_git(
+            self, monkeypatch, tmp_path):
+        # A file under a directory that the OLD hand-listed globs never matched
+        # (e.g. migrations/) must still be scanned for emojis. Drive the real
+        # helper against a git repo whose only *.py file lives in such a dir.
+        import subprocess
+        (tmp_path / "migrations").mkdir()
+        (tmp_path / "migrations" / "0001_x.py").write_text('X = "rocket \U0001f680"\n')
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True,
+                       capture_output=True)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        assert mg._emoji_count() == 1                 # would be 0 under old globs
+
+    def test_r06_tracked_py_set_includes_migrations(self, monkeypatch, tmp_path):
+        import subprocess
+        (tmp_path / "migrations").mkdir()
+        (tmp_path / "migrations" / "env.py").write_text("x = 1\n")
+        (tmp_path / "top.py").write_text("y = 2\n")
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True,
+                       capture_output=True)
+        monkeypatch.setattr(mg, "ROOT", tmp_path)
+        names = {p.name for p in mg._tracked_py_files()}
+        assert names == {"env.py", "top.py"}
 
 
 class TestVerdictAndDenominatorGuards:

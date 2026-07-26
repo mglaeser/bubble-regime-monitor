@@ -106,3 +106,72 @@ repo. Recorded so they participate in the standing decision trail:
   stays computed `false`).
 - The cross-vendor check being red is the oversized-mandate-text review-budget
   block (audit/11), not an unreviewed code defect.
+
+## 5. Iteration-3 current-head review (2026-07-26) — disposition
+
+A third adversarial review (R-01…R-06, P0-01…P0-07, P1-01…P1-10) was run against
+the current branch head. Every load-bearing claim was re-checked against live
+code. The confirmed fail-opens were in **this session's own recently-written
+gate code** and are fixed here with regression tests pinning each exact failure.
+
+### 5.1 Fixed on this branch (confirmed, tested — both sides)
+
+| ID | Confirmed fail-open | Fix + regression test |
+|---|---|---|
+| **R-01** | `_volume_complete` accepted mere track *intersection*: a manifest part claiming `tracks=["A"]` completed the A/B volume, so Part 1 could read COMPLETE with Track B's source unregistered. | Require EXACT coverage — `set(tracks) <= union(covered)` over present, attested parts. `test_r01_partial_track_coverage_is_not_complete`. |
+| **R-02** | `_part_source_ok` did `ROOT / part['path']`; pathlib DISCARDS ROOT when the RHS is absolute, so an absolute path to a matching-hash file OUTSIDE the repo reported the volume COMPLETE. | Reject absolute/`..`/non-contained/symlink/untracked sources; require a 64-hex sha match on a git-tracked, repo-contained regular file. `test_r02_absolute_path_outside_repo_is_rejected`, `test_r02_traversal_path_is_rejected`. |
+| **R-03** | The manifest recorded `combined_mandate_sha256`, but `compute_status` never read `governance/mandate.md`, never checked that digest, and never proved the file is the concatenation of the attested parts — a stale/forged/part-dropping mandate.md passed unnoticed. | `_combined_mandate_failures`: mandate.md must be present, tracked, contained, hash-match the attested combined sha, AND each in-repo part's ACTUAL bytes must appear verbatim in concatenation order (reconstruction proof; header not invented). Fails closed. `test_r03_*` (combined-sha mismatch, missing file, part-not-in-combined → hard fail; valid concatenation → COMPLETE). |
+| **R-04** | `production_eligible` ignored volume completeness — a state with every finding evidenced and the constitution RATIFIED could read eligible while Part 2's Track C source text is unregistered (part2 IN_PROGRESS). | Added `part1_status == "COMPLETE" and part2_status == "COMPLETE"` to the conjunction (necessary, not sufficient; blockers/evidence conditions still stand). `test_r04_production_eligible_false_when_a_volume_incomplete`. |
+| **R-06** | The emoji/noqa/type_ignore ratchet counters iterated a hand-maintained glob list; `migrations/**/*.py` and `docs/harnesses/*.py` (11 tracked files) matched NO glob and escaped the ceilings entirely — a new top-level package/migration/harness could carry an emoji or a suppression uncounted. | Denominator is now the authoritative `git ls-files -- '*.py'` set for all three counters (`_tracked_py_files`). `test_r06_emoji_scan_covers_untracked_globs_via_git`, `test_r06_tracked_py_set_includes_migrations`. The now-complete scan revealed 2 pre-existing noqa and 5 pre-existing `type: ignore` in `docs/harnesses/`, always tracked and merely unscanned — the ceilings rise to that measured reality (`noqa 20→22`, `type_ignore 2→7`) via **transparent decision records** in `audit/ratchet-baselines.json` (`is_finding: true`, no operator UI choice claimed; no new suppression admitted). |
+| **P1-01** | The pyproject `select`/`ignore` PARSER (`_ruff_selects_s110`) FALSE-BLOCKED a config expressing S110 via `extend-select`, and was blind to extend-ignore / per-file-ignores / exclude. | Removed the parser; the live-config probe (real ruff, repo config, app/-shaped `--stdin-filename`) is authoritative — it evaluates ruff's fully-merged config. Extracted to `_ruff_s110_live`. Tests prove `extend-select` is NOT false-blocked and that deselect/ignore/app-per-file-ignore/absent-config all fail closed. |
+
+### 5.2 Recorded, NOT fixed here (with rationale)
+
+- **R-05 — distribution-name vs import-root conflation (import-resolution
+  fail-open), OPEN.** `unresolvable_imports` resolves IMPORT names via
+  `importlib.util.find_spec`, while `declared_dependencies` returns
+  DISTRIBUTION names from pyproject; the live-import check (`mandate_gate.py`
+  ~line 1420) compares an import name, naively normalised, against the
+  distribution set. Distribution ≠ import root (`PyYAML`→`yaml`,
+  `beautifulsoup4`→`bs4`), so a hallucinated import whose normalised name
+  coincides with a real distribution could be accepted as "declared" (fail
+  open), and legitimately-provided imports could be false-flagged. **Not fixed
+  here:** a correct fix needs the installed-metadata mapping
+  (`importlib.metadata.packages_distributions()`), which is environment- and
+  optional-dependency-sensitive; changing it risks false-positives that would
+  block CI on legitimate optional deps. Recorded for an operator-scoped change
+  with the metadata mapping and an explicit optional-dep policy. Compensating
+  control now: `find_spec` still catches genuinely absent modules; the seeded
+  class-3 fixture (`reqwests_http`) still fails closed.
+
+### 5.3 Architecture / operator-owned (reaffirmed from §3)
+
+The iteration-3 P0 items map onto the already-recorded operator/architecture
+set and are **not** landed by an AI session in this repo:
+- **P0-01 verifier trust root** = V-TRUST (§3, audit/06). CRITICAL, OPEN.
+- **P0-02 intra-file ReviewPlan / hunk chunking** = "Review coverage" (§3).
+  This is what structurally blocks the cross-vendor panel; see §5.4.
+- **P0-05 governance authority model** = §3 "Governance authority model".
+- **P0-06 secret scan scope** = audit/06 "SECRET-SCAN SCOPE".
+None is safe to fabricate; each needs an out-of-repo boundary (write-separated
+runner, policy authority, branch protection) the operator owns.
+
+### 5.4 Claim-integrity corrections (the review's own §6 checks, applied to us)
+
+- **audit/11's "only the oversized mandate TEXT blocks the cross-vendor check"
+  is now STALE.** `scripts/mandate_gate.py` is 97 KB and its diff vs
+  `origin/main` is **91,746 bytes**, over the 90 KB per-part control-file
+  budget — so the gate script itself is now a SECOND control-bearing file the
+  risk-packer omits rather than truncates. The cross-vendor block is therefore
+  **not** solely the mandate text; it is the general oversized-control-file
+  coverage gap (P0-02 / review-coverage §3), which only intra-file hunk
+  chunking closes. Splitting `mandate_gate.py` by concern is a candidate
+  mitigation but is deferred (it is itself a large diff to review under the
+  same budget) and recorded here rather than done speculatively.
+- **Test-count prose refreshed:** the suite is **704** tests (was 691); the
+  `test_count_floor` ratchet is bumped to 704 (a tightening, no decision
+  record required). Any prose quoting 689/691 is superseded by the computed
+  `audit/engagement-status.json`.
+- **No production clearance is claimed.** `production_eligible` stays computed
+  `false`; R-04 makes the volume-completeness precondition explicit rather than
+  changing the outcome (Part 2 text remains NOT-IN-REPO).

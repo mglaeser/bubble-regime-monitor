@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 _SPEC = importlib.util.spec_from_file_location(
@@ -108,6 +109,24 @@ def write_minimal_engagement(root: Path, *, pass_has_control: bool,
     (gov / "part1.md").write_text("mandate\n")
 
     reattest(root, required=["A-01", "A-02"])
+    stage_all(root)
+
+
+def stage_all(root: Path) -> None:
+    """Make `root` a git work tree with every fixture file TRACKED.
+
+    The gate's source-attestation checks (R-02 `_part_source_ok`, R-03
+    `_combined_mandate_failures`) require the attested files to be git-tracked —
+    a stray on-disk file that merely matches a hash is not a repository source.
+    A bare `tmp_path` is not a git repo, so these checks would fail closed on
+    the fixtures for the wrong reason. Initialise a real repo and stage the
+    files so the tracking predicate is exercised HONESTLY (tests that then
+    mutate a tracked file keep it tracked — a modified tracked file is still
+    tracked, which is exactly the tamper case the sha check must catch)."""
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True,
+                   capture_output=True)
 
 
 def reattest(root: Path, required=None):

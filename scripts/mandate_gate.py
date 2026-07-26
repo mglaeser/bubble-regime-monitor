@@ -425,6 +425,120 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _tracked(rel: str) -> bool:
+    """True when `rel` is a git-tracked path (exact, literal)."""
+    r = subprocess.run(["git", "ls-files", "--error-unmatch", "--",
+                        f":(literal){rel}"], cwd=ROOT,
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def _part_source_ok(part: dict) -> bool:
+    """A manifest part's source is present, safe, in-repo, and hash-matched.
+
+    R-02 (iter-3): the prior check did `ROOT / part['path']`, and pathlib
+    DISCARDS ROOT when the right-hand side is absolute — so an absolute path to
+    a matching-hash file OUTSIDE the repository reported the volume COMPLETE.
+    A registered source must be a RELATIVE, traversal-free, repository-contained,
+    git-tracked, regular (non-symlink) file whose bytes hash to the recorded
+    64-hex sha."""
+    path = part.get("path")
+    sha = part.get("sha256")
+    if not path or not isinstance(path, str):
+        return False
+    if os.path.isabs(path) or ".." in Path(path).parts:
+        return False
+    if not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)):
+        return False
+    fp = ROOT / path
+    try:
+        fp.resolve().relative_to(ROOT.resolve())          # containment
+    except ValueError:
+        return False
+    if fp.is_symlink() or not fp.is_file():
+        return False
+    if not _tracked(path):
+        return False
+    return _sha256(fp) == sha
+
+
+def _combined_mandate_failures(manifest: dict) -> list[str]:
+    """Validate the concatenated mandate.md against the manifest (R-03).
+
+    R-03 (iter-3): the manifest records `combined_mandate_sha256`, but
+    compute_status never read governance/mandate.md, never checked that digest,
+    and never proved the file is the concatenation of the attested parts. A
+    stale/forged mandate.md — or one silently dropping a part's text — passed
+    unnoticed. This reconstructs the concatenation the way §8 / the manifest's
+    concatenation_rule specifies (header + each in-repo part verbatim, in
+    parts[] order) and fails closed on any divergence.
+
+    Returns a list of human-readable failure reasons (empty == OK). The header
+    is NOT invented: only the property the rule guarantees is checked — every
+    in-repo part's exact bytes appear in mandate.md, in manifest order, and the
+    whole file's digest equals the attested combined sha."""
+    reasons: list[str] = []
+    sha = manifest.get("combined_mandate_sha256")
+    if not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)):
+        return ["governance/mandate/manifest.json combined_mandate_sha256 is "
+                "missing or not a 64-hex digest — the concatenated mandate "
+                "text must be attested, not asserted"]
+    rel = "governance/mandate.md"
+    fp = ROOT / rel
+    try:
+        fp.resolve().relative_to(ROOT.resolve())
+    except ValueError:
+        return [f"{rel} escapes the repository root"]
+    if fp.is_symlink() or not fp.is_file():
+        return [f"{rel} is absent or not a regular file, but the manifest "
+                "attests a combined_mandate_sha256 for it"]
+    if not _tracked(rel):
+        return [f"{rel} is not git-tracked — an untracked concatenation cannot "
+                "be attested"]
+    if _sha256(fp) != sha:
+        reasons.append(f"{rel} sha256 does not match combined_mandate_sha256 in "
+                       "the manifest — regenerate the concatenation and re-attest "
+                       "(Article XIII)")
+    # Reconstruction proof: each in-repo part's ACTUAL bytes must appear in
+    # mandate.md, in the manifest's parts[] order (the concatenation order).
+    # This is deliberately independent of the part's manifest sha256 (that is
+    # R-02 / _part_source_ok's job, surfaced through volume status) so the two
+    # checks don't double-count the same tamper; here we only need the part file
+    # to be a safe, present, tracked repository source whose real content the
+    # combined text actually carries.
+    blob = fp.read_bytes()
+    cursor = 0
+    for part in manifest.get("parts", []):
+        p_path = part.get("path")
+        if not p_path:                       # NOT-IN-REPO part (e.g. Part 2)
+            continue
+        name = part.get("name")
+        if os.path.isabs(p_path) or ".." in Path(p_path).parts:
+            reasons.append(f"manifest part {name!r} path is absolute or escapes "
+                           "the repo — refusing to reconstruct from it")
+            continue
+        pf = ROOT / p_path
+        try:
+            pf.resolve().relative_to(ROOT.resolve())
+        except ValueError:
+            reasons.append(f"manifest part {name!r} path escapes the repository")
+            continue
+        if pf.is_symlink() or not pf.is_file() or not _tracked(p_path):
+            reasons.append(f"manifest part {name!r} source is absent, a symlink, "
+                           "or untracked, so mandate.md cannot be proven to "
+                           "contain it")
+            continue
+        idx = blob.find(pf.read_bytes(), cursor)
+        if idx < 0:
+            reasons.append(f"mandate.md does not contain part {name!r} verbatim "
+                           "in concatenation order — the combined text is not the "
+                           "attested parts (a part's text was dropped, reordered, "
+                           "or altered)")
+        else:
+            cursor = idx + len(pf.read_bytes())
+    return reasons
+
+
 # ---------------------------------------------------------------- status ----
 
 
@@ -745,10 +859,13 @@ def compute_status() -> dict:
         _fail("constitution.md hash does not match governance/mandate/"
               "manifest.json — amendments must go through the gate and "
               "bump the attested hash (Article XIII)")
-    # The mandate TEXT is imported separately and is not tracked here (see
-    # manifest mandate_text_status): attesting a file the repo does not carry
-    # would be a claim about something absent. The catalogue, findings and
-    # constitution are the operative record.
+    # The concatenated mandate TEXT is now in-repo and attested: validate that
+    # governance/mandate.md matches combined_mandate_sha256 AND is the verbatim
+    # concatenation of the attested parts (R-03). Any in-repo part registered
+    # in the manifest is proven present via _part_source_ok inside this check.
+    mandate_fail = _combined_mandate_failures(manifest)
+    if mandate_fail:
+        _fail("mandate text attestation failed: " + "; ".join(mandate_fail))
     attested = {
         "findings_sha256": AUDIT / "03-findings.json",
         "check_catalogue_sha256": AUDIT / "00-check-catalogue.json",
@@ -787,17 +904,31 @@ def compute_status() -> dict:
         # and require at least one.
         matching = [p for p in manifest.get("parts", [])
                     if set(p.get("tracks") or []) & set(tracks)]
-        text_ok = bool(matching) and all(
-            p.get("path")
-            and (ROOT / p["path"]).exists()
-            and _sha256(ROOT / p["path"]) == p.get("sha256")
-            for p in matching)
+        # R-01 (iter-3): require EXACT COVERAGE, not mere intersection. The
+        # prior version accepted a part claiming tracks=["A"] as completing the
+        # A/B volume, so Part 1 read COMPLETE with Track B's source unregistered.
+        # Every requested track must be claimed by some present, attested part.
+        covered = set().union(*[set(p.get("tracks") or []) for p in matching]) \
+            if matching else set()
+        text_ok = set(tracks) <= covered and all(
+            _part_source_ok(p) for p in matching)
         return "COMPLETE" if (evidenced_ok and text_ok) else "IN_PROGRESS"
 
+    part1_status = _volume_complete(("A", "B"))
+    part2_status = _volume_complete(("C",))
+    # R-04 (iter-3): production_eligible previously ignored volume completeness,
+    # so a state with every finding evidenced and the constitution RATIFIED but
+    # Part 2's Track C source text unregistered (part2_status IN_PROGRESS) could
+    # read production_eligible=true — clearing traffic past checks whose mandate
+    # text is not even present. §8 requires BOTH volumes complete before a
+    # clearance is possible. This is a necessary (not sufficient) gate; the
+    # open-blocker and evidence conditions still stand alongside it.
     production_eligible = (
         not open_blockers
         and evidenced == len(cat_ids)
         and accepted.get("constitution_state") == "RATIFIED"
+        and part1_status == "COMPLETE"
+        and part2_status == "COMPLETE"
     )
     return {
         "catalogue_version": catalogue["catalogue_version"],
@@ -806,8 +937,8 @@ def compute_status() -> dict:
         "present_check_count": len(f_ids),
         "evidenced_check_count": evidenced,
         "pending_check_ids": pending,
-        "part1_status": _volume_complete(("A", "B")),
-        "part2_status": _volume_complete(("C",)),
+        "part1_status": part1_status,
+        "part2_status": part2_status,
         "phase": "STANDING_REGIME",
         "highest_open_band": next((b for b in BLOCKER_BANDS
                                    if band_counts[b]), "MUST-FIX-OR-BELOW"),
@@ -854,15 +985,37 @@ def cmd_status(write: bool) -> None:
 # --------------------------------------------------------------- ratchet ----
 
 
-def _count_grep(pattern: str, globs: list[str]) -> int:
+def _tracked_py_files() -> list[Path]:
+    """Every git-tracked *.py file, at any depth (R-06).
+
+    R-06 (iter-3): the ratchet counters iterated a hand-maintained glob list
+    (`app/**/*.py`, `scripts/*.py`, `tests/**/*.py`). `ROOT.glob` expands `**`
+    to include zero directories, so app/ and tests/ top files were covered — but
+    `migrations/**/*.py` and `docs/harnesses/*.py` (11 tracked files) matched NO
+    glob and escaped the emoji/noqa/type_ignore ratchets ENTIRELY. A new
+    top-level package, a migration, or a harness could carry emojis or lint
+    suppressions with the ceiling none the wiser — a silent fail-open (the
+    literal marker is spelled out below to avoid self-matching). The denominator
+    is now
+    the AUTHORITATIVE tracked set from `git ls-files`, so coverage cannot drift
+    as the tree grows (CLAUDE.md 'derive the set from git ls-files')."""
+    r = subprocess.run(["git", "ls-files", "-z", "--", "*.py"],
+                       cwd=ROOT, capture_output=True, text=True)
+    if r.returncode != 0:
+        _fail("git ls-files failed while enumerating tracked *.py files for the "
+              "ratchet denominator — refusing to measure a ceiling from an "
+              "unknown file set: " + (r.stderr or "")[-300:])
+    return [ROOT / rel for rel in r.stdout.split("\0") if rel]
+
+
+def _count_grep(pattern: str) -> int:
     n = 0
     rx = re.compile(pattern)
-    for g in globs:
-        for p in ROOT.glob(g):
-            if p.is_file():
-                for line in p.read_text(errors="replace").splitlines():
-                    if rx.search(line):
-                        n += 1
+    for p in _tracked_py_files():
+        if p.is_file():
+            for line in p.read_text(errors="replace").splitlines():
+                if rx.search(line):
+                    n += 1
     return n
 
 
@@ -871,11 +1024,11 @@ _EMOJI_RX = re.compile("[\\U0001f300-\\U0001faff\\u2600-\\u27bf]")
 
 def _emoji_count() -> int:
     # Article XIV alarm dilution: emojis are reserved for constitutional
-    # alerts; any emoji in source dilutes the only unmissable signal.
+    # alerts; any emoji in source dilutes the only unmissable signal. Scanned
+    # over the full git-tracked *.py set (R-06) so no directory escapes the ban.
     n = 0
-    for g in ("app/**/*.py", "scripts/*.py", "tests/**/*.py"):
-        for p in ROOT.glob(g):
-            n += len(_EMOJI_RX.findall(p.read_text(errors="replace")))
+    for p in _tracked_py_files():
+        n += len(_EMOJI_RX.findall(p.read_text(errors="replace")))
     return n
 
 
@@ -901,10 +1054,11 @@ def measure_ratchets() -> dict[str, int]:
         _fail("could not measure collected test count (pytest --collect-only)")
     return {
         "test_count_floor": int(m.group(1)),
-        "noqa_ceiling": _count_grep(r"#\s*noqa", ["app/**/*.py", "scripts/*.py",
-                                                  "tests/**/*.py"]),
-        "type_ignore_ceiling": _count_grep(r"#\s*type:\s*ignore",
-                                           ["app/**/*.py", "scripts/*.py"]),
+        # The three source-suppression ceilings all scan the full git-tracked
+        # *.py set (R-06); type_ignore previously also excluded tests/, another
+        # coverage gap now closed.
+        "noqa_ceiling": _count_grep(r"#\s*noqa"),
+        "type_ignore_ceiling": _count_grep(r"#\s*type:\s*ignore"),
         "emoji_in_source_ceiling": _emoji_count(),
     }
 
@@ -1080,30 +1234,31 @@ def scan_credential_shapes(paths) -> list[str]:
     return hits
 
 
-def _ruff_selects_s110() -> bool:
-    """True when the repo's OWN ruff config leaves S110 reachable.
+def _ruff_s110_live() -> tuple[bool, str]:
+    """True when the repo's OWN, fully-merged ruff config makes S110 fire on
+    the app/ production surface (P1-01, review OA-12-F02 / P1.3).
 
-    Ruff selects/ignores by code PREFIX: 'S' selects every S rule, 'ALL'
-    selects everything, and any prefix of 'S110' in `ignore` cancels it. This
-    reads pyproject.toml [tool.ruff.lint] (fail-closed: an unreadable/absent
-    config counts as NOT selected, because the CI gate then rests on nothing)
-    and returns whether S110 survives select minus ignore. Per-file-ignores
-    for app/tests/scripts are out of scope: they scope suppressions to those
-    trees, not to the app/ production surface the class-2 gate protects."""
-    import tomllib
-
-    def _prefixes(code: str) -> set[str]:
-        return {code[:i] for i in range(1, len(code) + 1)}
-    want = _prefixes("S110") | {"ALL"}
-    try:
-        cfg = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    except (OSError, tomllib.TOMLDecodeError):
-        return False
-    lint = (cfg.get("tool", {}).get("ruff", {}).get("lint")
-            or cfg.get("tool", {}).get("ruff", {}))     # ruff<0.6 flat layout
-    select = set(lint.get("select") or [])
-    ignore = set(lint.get("ignore") or [])
-    return bool(select & want) and not (ignore & _prefixes("S110"))
+    Runs the real ruff with the REPOSITORY config (no `--isolated`) against a
+    swallowed-exception snippet fed on stdin under an app/-SHAPED filename, so
+    the exact per-file rules that apply to `app/*.py` apply here. This replaces
+    a pyproject `select`/`ignore` PARSER that read only those two keys and so
+    FALSE-BLOCKED a config expressing S110 via `extend-select` (and was blind to
+    `extend-ignore`, per-file-ignores and `exclude`). Because it evaluates
+    ruff's merged config, deleting 'S', ignoring S110, adding an `app/**`
+    per-file-ignore, or excluding app/ all make the diagnostic vanish and the
+    check fail. Fails CLOSED: a ruff that errors (no S110 emitted) is a dead
+    control, not a catch. Returns (fires, detail-for-the-failure-message)."""
+    probe = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "--force-exclude",
+         "--stdin-filename", "app/_s110_probe.py", "-"],
+        input="def f():\n    try:\n        g()\n    except Exception:\n"
+              "        pass\n",
+        capture_output=True, text=True, cwd=ROOT)
+    fires = "S110" in (probe.stdout + probe.stderr)
+    detail = (f"per-file-ignore, extend-ignore, or an app/ exclusion has "
+              f"silenced the CI gate; exit={probe.returncode}, "
+              f"err={probe.stderr.strip()[:120]!r}")
+    return fires, detail
 
 
 def find_vacuous_test_asserts(paths) -> list[str]:
@@ -1228,43 +1383,28 @@ def cmd_calibrate() -> None:
         if r.returncode == 0 or "S110" not in (r.stdout + r.stderr):
             failures.append("class 2 (swallowed exception) NOT caught by ruff "
                             f"S110 (exit={r.returncode})")
-        # ...and the REPO's own config must still select S110 (panel review
-        # P1.1). The check above uses `--isolated`, which proves the installed
-        # ruff BINARY knows the rule, not that pyproject.toml/CI still SELECT
-        # it — so deleting 'S' from select, ignoring S110, or narrowing the
-        # per-file scope would silence the live CI gate while calibration
-        # stayed green. Read the actual config and prove the rule is live.
-        if not _ruff_selects_s110():
-            failures.append(
-                "class 2 config drift: pyproject.toml [tool.ruff.lint] no "
-                "longer selects S110 (the swallowed-exception CI gate) — the "
-                "rule must be reachable by `select` and not cancelled by "
-                "`ignore`, or the blocking lint step is dead while the "
-                "calibration binary-check stays green")
-        # ...and a LIVE-CONFIG probe (review OA-12-F02 / P1.3): parsing only
-        # select/ignore misses extend-select, extend-ignore, per-file-ignores,
-        # and exclude/force-exclude. Run the real ruff with the REPO config
-        # (no --isolated) against an app/-SHAPED filename via --stdin-filename,
-        # so the production per-file rules that apply to app/*.py apply here.
-        # If a future edit adds `"app/**" = ["S110"]` to per-file-ignores, or
-        # excludes app/, the diagnostic disappears and this fails — which the
-        # parser above cannot see.
-        probe = subprocess.run(
-            [sys.executable, "-m", "ruff", "check", "--force-exclude",
-             "--stdin-filename", "app/_s110_probe.py", "-"],
-            input="def f():\n    try:\n        g()\n    except Exception:\n"
-                  "        pass\n",
-            capture_output=True, text=True, cwd=ROOT)
+        # ...and the REPO's own config must still make S110 LIVE on the app/
+        # production surface. A LIVE-CONFIG probe (review OA-12-F02 / P1.3, and
+        # P1-01) is the authoritative way to prove this: it runs the real ruff
+        # with the REPO config (no --isolated) against an app/-SHAPED filename
+        # via --stdin-filename, so the exact per-file rules that apply to
+        # app/*.py apply here. It supersedes an earlier pyproject `select`/
+        # `ignore` PARSER: that parser read only `select`/`ignore` and so
+        # FALSE-BLOCKED a config expressing the same rule via `extend-select`
+        # (and was blind to extend-ignore, per-file-ignores, and exclude). The
+        # probe evaluates ruff's real, fully-merged config, covering every one
+        # of those forms — deleting 'S', ignoring S110, adding an app/**
+        # per-file-ignore, or excluding app/ all make the diagnostic vanish and
+        # fail this check.
         # Fail closed both ways: S110 present under the live config is the only
         # pass; its absence (suppressed, excluded, or ruff errored) is a dead
         # control, never a silent catch.
-        if "S110" not in (probe.stdout + probe.stderr):
+        fires, detail = _ruff_s110_live()
+        if not fires:
             failures.append(
                 "class 2 live-config probe: ruff under the repository's own "
                 "config does NOT flag S110 on an app/-shaped swallowed "
-                "exception (per-file-ignore, extend-ignore, or an app/ "
-                f"exclusion has silenced the CI gate; exit={probe.returncode}, "
-                f"err={probe.stderr.strip()[:120]!r})")
+                f"exception ({detail})")
 
         # 3 — non-existent dependency -> import-resolution check
         if unresolvable_imports(["reqwests_http"]) != ["reqwests_http"]:
