@@ -4,12 +4,12 @@
   {
    "name": "part1",
    "path": "governance/mandate/part1.md",
-   "sha256": null,
+   "sha256": "e649ea7ccb4f1bd495b9a7ab2e0a40476824a63da3507b6e33d529dcf2f90742",
    "tracks": [
     "A",
     "B"
    ],
-   "status": "PENDING-IMPORT: the operator-supplied specification text is not committed in this change. It is imported separately (operator commit or its own PR), which keeps 556KB of prose out of every review budget and removes the need for any review exemption. The catalogue, findings and constitution are the operative record until it lands."
+   "status": "IN-REPO: operator-supplied Part 1 text committed 2026-07-26, byte-identical to the founding import (same sha256)."
   },
   {
    "name": "part2",
@@ -150,5 +150,6 @@
  "write_separation": ".github/CODEOWNERS routes governance/, audit/, scripts/ and .github/ to the operator; mandate_gate verifies these hashes every CI run. The attested set includes the gate's authority files (ratchet baselines, accepted residuals) per the 2026-07-25 tamper-test finding.",
  "findings_sha256": "f65c4047a3d85bed4e517888198263e21cbb34ca89fa99458e20271c866e89ee",
  "check_catalogue_sha256": "7396788159a6771a00794eaad2356ccc0e7d599e8bf67a5fc7b4da53dfba5245",
- "mandate_text_status": "PENDING-IMPORT: the operator-supplied specification text is not committed in this change. It is imported separately (operator commit or its own PR), which keeps 556KB of prose out of every review budget and removes the need for any review exemption. The catalogue, findings and constitution are the operative record until it lands."
+ "mandate_text_status": "IN-REPO: Part 1 and the generated combined mandate.md are committed and hash-attested above. Part 2 remains NOT-IN-REPO (see parts).",
+ "combined_mandate_sha256": "66b695183852ae03522713e34e2e78f343e3c93ac3b56437441290cbb73d94e6"
 }
