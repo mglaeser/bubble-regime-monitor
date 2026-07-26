@@ -146,18 +146,60 @@ jobs:
                   ensure_ascii=False,
               ).encode("utf-8")
 
+          # Repository-owned static diagnostics. The provider's free-form text
+          # is NEVER emitted, so the wording below is the only prose that can
+          # reach a log line, and it is authored here.
+          _DIAGNOSTIC = {
+              "non_json_error": "provider returned a body that was not a JSON object",
+              "unknown_error": "provider returned JSON without a structured error object",
+              "structured_error": "provider returned a structured error; see type/code/param",
+          }
+
           def safe_error(body: Any) -> dict[str, Any]:
-              """Short provider diagnostic only — never headers, never the key."""
+              """STRICT ALLOWLIST. Free-form provider text never leaves this function.
+
+              The first version passed the provider's `error.message` through,
+              truncated to 300 characters. On an authentication failure OpenAI
+              embeds its own partially-redacted echo of the submitted key in
+              that message ("Incorrect API key provided: XXXXXXXX******XXXX"),
+              so a key fingerprint reached the workflow log despite this file
+              claiming it never prints the key. That happened on run
+              30214247762 with an invalid key.
+
+              Only these fields may ever be retained: HTTP status (added by the
+              caller), provider error type, code and param, the provider
+              request id (added by the caller), and a repository-owned static
+              diagnostic. Never the provider message, an exception repr, the
+              response body, headers, a key prefix/suffix, or bearer text."""
               if not isinstance(body, dict):
-                  return {"type": "non_json_error"}
+                  return {"type": None, "code": None, "param": None,
+                          "diagnostic": _DIAGNOSTIC["non_json_error"]}
               err = body.get("error")
               if not isinstance(err, dict):
-                  return {"type": "unknown_error"}
+                  return {"type": None, "code": None, "param": None,
+                          "diagnostic": _DIAGNOSTIC["unknown_error"]}
+
+              def _short_token(value: Any) -> Any:
+                  """Provider enum-ish fields only: bounded, and never free text.
+
+                  `type`, `code` and `param` are documented short identifiers.
+                  Bounding the length means that even if a provider ever put a
+                  sentence (or a key) in one of them, it cannot become a
+                  disclosure channel; anything unexpected is dropped entirely
+                  rather than truncated, since a truncated secret is still a
+                  secret."""
+                  if value is None:
+                      return None
+                  text = str(value)
+                  if len(text) > 64 or any(c.isspace() for c in text):
+                      return "dropped_unexpected_shape"
+                  return text
+
               return {
-                  "type": err.get("type"),
-                  "code": err.get("code"),
-                  "param": err.get("param"),
-                  "message": str(err.get("message", ""))[:300],
+                  "type": _short_token(err.get("type")),
+                  "code": _short_token(err.get("code")),
+                  "param": _short_token(err.get("param")),
+                  "diagnostic": _DIAGNOSTIC["structured_error"],
               }
 
           def request(
