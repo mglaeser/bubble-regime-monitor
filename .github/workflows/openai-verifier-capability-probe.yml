@@ -12,11 +12,35 @@
 #
 # The open V-TRUST residual is precisely that pull-request-controlled code can
 # receive the verifier credential. Proving this capability from a branch under
-# review would reproduce that exact defect for no reason. So this workflow:
+# review would reproduce that exact defect for no reason.
 #
-#   * runs ONLY via workflow_dispatch, which GitHub serves from the DEFAULT
-#     branch — the code below is the code that runs, and no pull request can
-#     alter it;
+# WHAT ACTUALLY PINS THIS TO THE DEFAULT BRANCH (corrected after the panel's
+# required approver refuted the first version of this file):
+#
+# `workflow_dispatch` does NOT restrict which ref runs. The workflow must exist
+# on the default branch to be DISPATCHABLE, but the dispatch call takes a `ref`
+# and GitHub then runs THAT REF'S VERSION of this file, with secrets available.
+# So anyone able to push a branch could copy this workflow, delete the guards
+# below, add exfiltration, dispatch their ref, and receive the credential. No
+# `if:` condition here can prevent that, because every such condition lives in
+# the very file the attacker rewrites — a guard cannot defend itself.
+#
+# The enforcement therefore CANNOT live in this file. It lives in WHERE THE KEY
+# IS STORED: the job below declares `environment: verifier-probe`, and that
+# environment must be configured (operator console) with a deployment-branch
+# policy admitting ONLY the default branch, holding the probe key as an
+# ENVIRONMENT secret. Then a branch-modified copy that keeps `environment:` is
+# refused by the branch policy, and a copy that deletes `environment:` gets no
+# key at all, because the key exists nowhere else. For the same reason there is
+# deliberately NO repository-level secret fallback: a repo-level secret is
+# readable from ANY ref and would silently defeat the environment policy.
+#
+# Until that environment exists with that policy, this probe is NOT pinned to
+# the default branch and its evidence is NOT trustworthy. The guards below are
+# defence-in-depth only and are NOT a security boundary.
+#
+# This workflow additionally:
+#
 #   * performs NO checkout, so no repository code, dependency, config or hook
 #     from any branch is ever executed with the key in scope;
 #   * sends a FIXED SYNTHETIC payload — no diff, no file content, no
@@ -45,20 +69,27 @@ concurrency:
 
 jobs:
   probe:
-    # Same-repository, operator-triggered only. workflow_dispatch already
-    # requires write access, but this is stated explicitly so the constraint
-    # survives a future change to who may dispatch.
+    # DEFENCE IN DEPTH ONLY — NOT a security boundary. An attacker dispatching
+    # a modified copy of this file from their own ref simply deletes these
+    # lines. The real control is the `environment:` deployment-branch policy
+    # below (see the header). Kept because it cheaply blocks accidental
+    # dispatch from a fork or by a non-operator on the default-branch copy.
     if: >-
       github.repository == 'mglaeser/bubble-regime-monitor' &&
       github.actor == 'mglaeser'
+    # THE ACTUAL CONTROL. This environment must be configured in the operator
+    # console with a deployment-branch policy admitting ONLY the default
+    # branch, and must hold OPENAI_VERIFIER_PROBE_API_KEY as an ENVIRONMENT
+    # secret. Until then this job cannot obtain a key and will fail closed.
+    environment: verifier-probe
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      # A dedicated low-privilege probe key is preferred; the general verifier
-      # key is the documented fallback for this one fixed, no-generation call.
-      # `||` on the secrets context is standard GitHub expression syntax: an
-      # undefined secret evaluates to the empty string, which is falsy.
-      OPENAI_API_KEY: ${{ secrets.OPENAI_VERIFIER_PROBE_API_KEY || secrets.OPENAI_API_KEY }}
+      # Environment secret ONLY. There is deliberately no
+      # `|| secrets.OPENAI_API_KEY` fallback: a repository-level secret is
+      # readable from ANY ref, so the fallback would defeat the environment's
+      # deployment-branch policy and reopen exactly the hole this closes.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_VERIFIER_PROBE_API_KEY }}
       OPENAI_BASE_URL: https://api.openai.com/v1
       WORKFLOW_SHA: ${{ github.sha }}
       WORKFLOW_RUN_ID: ${{ github.run_id }}
@@ -71,7 +102,7 @@ jobs:
           set -euo pipefail
 
           if [ -z "${OPENAI_API_KEY:-}" ]; then
-            echo "::error::No probe API key is configured (set OPENAI_VERIFIER_PROBE_API_KEY or OPENAI_API_KEY)"
+            echo "::error::No probe API key. Configure the 'verifier-probe' environment with a default-branch-only deployment policy and add OPENAI_VERIFIER_PROBE_API_KEY as an ENVIRONMENT secret. Do not add a repository-level fallback: it is readable from any ref and would defeat the branch policy."
             exit 1
           fi
 

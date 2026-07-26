@@ -27,8 +27,41 @@ The open **V-TRUST** residual is that pull-request-controlled code can receive
 the verifier credential. Proving this capability from a branch under review
 would reproduce that exact defect for no reason.
 
-`workflow_dispatch` is served from the **default branch**, so the committed
-workflow *is* the code that runs. The job additionally:
+### Correction: `workflow_dispatch` does **not** pin the ref
+
+The first version of this document claimed "`workflow_dispatch` is served from
+the default branch, so the committed workflow *is* the code that runs." **That
+was false**, and the cross-vendor panel's required approver refuted it.
+
+A workflow must exist on the default branch to be *dispatchable*, but the
+dispatch call takes a `ref`, and GitHub then runs **that ref's version** of the
+file with secrets available. Anyone able to push a branch could copy this
+workflow, delete its guards, add exfiltration, dispatch their ref and receive
+the credential. No `if:` condition in the file can prevent this, because every
+such condition lives in the file the attacker rewrites — **a guard cannot
+defend itself.**
+
+### What actually enforces it
+
+Enforcement cannot live in the workflow. It lives in **where the key is
+stored**:
+
+- the job declares `environment: verifier-probe`;
+- that environment must be configured (operator console) with a
+  **deployment-branch policy admitting only the default branch**;
+- it holds `OPENAI_VERIFIER_PROBE_API_KEY` as an **environment secret**.
+
+A branch-modified copy that keeps `environment:` is refused by the branch
+policy. A copy that deletes `environment:` gets **no key at all**, because the
+key exists nowhere else. For the same reason there is deliberately **no
+repository-level secret fallback**: a repo-level secret is readable from any
+ref and would silently defeat the policy.
+
+> **Unmet prerequisite.** Until that environment exists with that policy, this
+> probe is **not** pinned to the default branch and its evidence is **not**
+> trustworthy. The job fails closed without a key.
+
+The job additionally:
 
 | Property | Guarantee |
 |---|---|
@@ -36,7 +69,7 @@ workflow *is* the code that runs. The job additionally:
 | Payload | **fixed synthetic string** — no diff, file content, or repository data is sent |
 | Endpoints | `GET /models/{id}` and `POST /responses/input_tokens` only — **no generation call** |
 | Output | status codes, returned model id, token count, provider request ids. Never the key, never full headers |
-| Trigger | same repository, operator account, `workflow_dispatch` only |
+| Trigger guards | repository + operator account — **defence in depth only, not a boundary** |
 | Failure | **fail closed** — any missing/malformed result for any required model exits non-zero |
 
 ## What a green run proves
@@ -66,6 +99,10 @@ At the time of that run, for each of `gpt-5.3-codex`, `gpt-5.6-sol` and
   trusted probe must cover the exact final count-request shape once the request
   schema and policy PINs are settled.
 - **Not** that a later provider deployment behaves identically.
+- **Not** trustworthy at all unless the `verifier-probe` environment and its
+  default-branch-only deployment policy are actually configured. Without that,
+  the run could have originated from an attacker-modified copy of this
+  workflow on an arbitrary ref.
 - **Not** that token-count calls are free. Billing status stays
   `UNKNOWN_PENDING_OPERATOR_VERIFICATION` until independently established.
 - **Not** that the verifier implementation is correct.
@@ -81,7 +118,14 @@ Actions → *OpenAI verifier capability probe* → **Run workflow** (from the
 default branch). Retain the run URL, run id, workflow SHA, the sanitized JSON
 evidence and the provider request ids.
 
-Repository secret *name* read by the workflow (the value never appears in this
-repository): `OPENAI_VERIFIER_PROBE_API_KEY` — preferred, dedicated and
-low-privilege — or `OPENAI_API_KEY` as the documented fallback for this one
-fixed no-generation call.
+### Operator setup required before the first run
+
+1. Create an environment named `verifier-probe`.
+2. Set its **deployment branch policy** to admit **only** the default branch.
+3. Add `OPENAI_VERIFIER_PROBE_API_KEY` as an **environment secret** of that
+   environment (dedicated and low-privilege), holding the key value — which
+   never appears in this repository.
+
+Do **not** add a repository-level fallback secret: it would be readable from
+any ref and would defeat step 2. Until steps 1–3 are complete the job fails
+closed with no key, and no probe evidence may be treated as trustworthy.
