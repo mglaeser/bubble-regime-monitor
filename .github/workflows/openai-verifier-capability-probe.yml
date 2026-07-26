@@ -112,6 +112,7 @@ jobs:
           import hashlib
           import json
           import os
+          import re
           import sys
           import urllib.error
           import urllib.parse
@@ -146,61 +147,59 @@ jobs:
                   ensure_ascii=False,
               ).encode("utf-8")
 
-          # Repository-owned static diagnostics. The provider's free-form text
-          # is NEVER emitted, so the wording below is the only prose that can
-          # reach a log line, and it is authored here.
-          _DIAGNOSTIC = {
-              "non_json_error": "provider returned a body that was not a JSON object",
-              "unknown_error": "provider returned JSON without a structured error object",
-              "structured_error": "provider returned a structured error; see type/code/param",
-          }
+          # Repository-owned static diagnostics. These three strings are the
+          # ONLY prose that can reach a log line from an error path, and all
+          # three are authored here.
+          _NON_OBJECT = "provider returned a non-object error response"
+          _NO_STRUCTURED = "provider returned no structured error object"
+          _STRUCTURED = "provider returned a structured error"
 
           def safe_error(body: Any) -> dict[str, Any]:
-              """STRICT ALLOWLIST. Free-form provider text never leaves this function.
+              """Emit a repository-owned diagnostic and NOTHING provider-controlled.
 
-              The first version passed the provider's `error.message` through,
-              truncated to 300 characters. On an authentication failure OpenAI
-              embeds its own partially-redacted echo of the submitted key in
-              that message ("Incorrect API key provided: XXXXXXXX******XXXX"),
-              so a key fingerprint reached the workflow log despite this file
-              claiming it never prints the key. That happened on run
-              30214247762 with an invalid key.
+              History, because it explains why this is so blunt:
 
-              Only these fields may ever be retained: HTTP status (added by the
-              caller), provider error type, code and param, the provider
-              request id (added by the caller), and a repository-owned static
-              diagnostic. Never the provider message, an exception repr, the
-              response body, headers, a key prefix/suffix, or bearer text."""
+              v1 passed the provider's `error.message` through truncated to 300
+              characters. On an authentication failure OpenAI embeds its own
+              partially-redacted echo of the submitted key in that message
+              ("Incorrect API key provided: XXXXXXXX******XXXX"), so a key
+              fingerprint reached the workflow log on run 30214247762.
+
+              v2 dropped `message` but still forwarded `type`, `code` and
+              `param` whenever they were at most 64 characters and contained no
+              whitespace. That is a SHAPE filter, not an allowlist: a short
+              no-whitespace secret fragment — `sk-proj-abcdef123456`,
+              `Bjufbiyf`, `itvb` — passes it unchanged. The smuggling test
+              missed this because its fixture was a full sentence, and
+              sentences contain spaces.
+
+              v3 (this one) emits no provider-controlled value at all. Proving
+              that a model is retrievable and countable does not require the
+              provider's error vocabulary, so the safest allowlist is the empty
+              one: whatever the provider puts in any error field, none of it can
+              reach the log. The caller adds only repository-owned or
+              separately VALIDATED values — HTTP status, operation name, the
+              requested model id, and a format-checked request id.
+
+              If provider identifiers are ever genuinely needed, they must be
+              checked against finite repository-owned sets (_ALLOWED_TYPES and
+              friends), never against a length or character-class rule."""
               if not isinstance(body, dict):
-                  return {"type": None, "code": None, "param": None,
-                          "diagnostic": _DIAGNOSTIC["non_json_error"]}
-              err = body.get("error")
-              if not isinstance(err, dict):
-                  return {"type": None, "code": None, "param": None,
-                          "diagnostic": _DIAGNOSTIC["unknown_error"]}
+                  return {"diagnostic": _NON_OBJECT}
+              if not isinstance(body.get("error"), dict):
+                  return {"diagnostic": _NO_STRUCTURED}
+              return {"diagnostic": _STRUCTURED}
 
-              def _short_token(value: Any) -> Any:
-                  """Provider enum-ish fields only: bounded, and never free text.
+          _REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
-                  `type`, `code` and `param` are documented short identifiers.
-                  Bounding the length means that even if a provider ever put a
-                  sentence (or a key) in one of them, it cannot become a
-                  disclosure channel; anything unexpected is dropped entirely
-                  rather than truncated, since a truncated secret is still a
-                  secret."""
-                  if value is None:
-                      return None
-                  text = str(value)
-                  if len(text) > 64 or any(c.isspace() for c in text):
-                      return "dropped_unexpected_shape"
-                  return text
-
-              return {
-                  "type": _short_token(err.get("type")),
-                  "code": _short_token(err.get("code")),
-                  "param": _short_token(err.get("param")),
-                  "diagnostic": _DIAGNOSTIC["structured_error"],
-              }
+          def safe_request_id(value: Any) -> str | None:
+              """A provider request id is useful for support, but it is still
+              provider-controlled text. Accept only the documented shape and
+              drop anything else WHOLE — never truncate, because a truncated
+              secret is still a secret."""
+              if not isinstance(value, str):
+                  return None
+              return value if _REQUEST_ID.fullmatch(value) else None
 
           def request(
               method: str,
@@ -296,20 +295,37 @@ jobs:
               if not (model_ok and count_ok):
                   failed = True
 
+              # Every provider-controlled STRING is reduced to a comparison
+              # against a repository-owned expectation before it is recorded.
+              # `returned_id`, the `object` field and the request-id header are
+              # all attacker-influenceable in principle, and all three were
+              # previously written into the evidence JSON and the job summary
+              # verbatim. Emitting the EXPECTED value on a match (and nothing
+              # on a mismatch) carries the same information with no channel.
               results.append({
                   "requested_model_id": requested_model,
                   "model_retrieve": {
                       "status": model_status,
-                      "returned_id": retrieved_model_id,
-                      "request_id": model_request_id,
+                      # the exact requested id when it matched, else null —
+                      # never an arbitrary provider-supplied identifier
+                      "returned_id": requested_model if model_ok else None,
+                      "returned_id_matches": retrieved_model_id == requested_model,
+                      "request_id": safe_request_id(model_request_id),
                       "ok": model_ok,
                       "error": None if model_ok else safe_error(model_body),
                   },
                   "input_token_count": {
                       "status": count_status,
-                      "object": count_object,
-                      "input_tokens": input_tokens,
-                      "request_id": count_request_id,
+                      # a boolean, not the raw object string
+                      "object_matches": count_object == "response.input_tokens",
+                      # Only a validated non-negative int is recorded. This
+                      # field is provider-controlled too: a body carrying
+                      # {"input_tokens": "<secret>"} would previously have been
+                      # written straight into the evidence JSON on the failure
+                      # path, where count_ok is False and the value was emitted
+                      # anyway.
+                      "input_tokens": input_tokens if count_ok else None,
+                      "request_id": safe_request_id(count_request_id),
                       "payload_sha256": payload_sha256,
                       "ok": count_ok,
                       "error": None if count_ok else safe_error(count_body),
