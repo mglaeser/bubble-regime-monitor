@@ -55,7 +55,8 @@ def _embedded_python() -> str:
 # provider request id safe to print.
 SHORT_REQUEST_ID_SECRET = "sk-proj-abcdef123456"  # pragma: allowlist secret -- synthetic fixture
 
-_WANTED_FUNCS = ("safe_error",)
+_WANTED_FUNCS = ("safe_error", "canonical_json", "local_operation_id",
+                 "safe_status")
 
 
 def _load_symbols() -> dict[str, Any]:
@@ -77,7 +78,9 @@ def _load_symbols() -> dict[str, Any]:
     assert set(_WANTED_FUNCS) <= names, f"missing {set(_WANTED_FUNCS) - names}"
     module = ast.Module(body=wanted, type_ignores=[])
     ast.fix_missing_locations(module)
-    namespace: dict[str, Any] = {"Any": Any, "re": __import__("re")}
+    namespace: dict[str, Any] = {"Any": Any, "re": __import__("re"),
+                                 "hashlib": __import__("hashlib"),
+                                 "json": json}
     exec(compile(module, "<probe-workflow>", "exec"), namespace)  # noqa: S102 -- shipped source under test
     return namespace
 
@@ -85,6 +88,11 @@ def _load_symbols() -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def safe_error():
     return _load_symbols()["safe_error"]
+
+
+@pytest.fixture(scope="module")
+def op_id():
+    return _load_symbols()["local_operation_id"]
 
 
 def _flatten(value: Any) -> str:
@@ -207,20 +215,37 @@ class TestProviderRequestIdChannelIsRemoved:
 
 
 class TestSourceLevelGuardAgainstReintroduction:
-    """A behavioural test proves today's build is clean; this proves the next
-    author cannot quietly add the channel back."""
+    """Source guards over KNOWN header-access forms, plus behavioural tests.
 
-    def test_no_response_headers_are_read_anywhere_in_the_script(self):
+    Scope stated honestly: these AST checks forbid the enumerated access
+    shapes below. They are NOT a semantic proof that no header can ever be
+    read — a helper that receives the response object, or an API shape not
+    listed here, would evade them. The load-bearing guarantee is the
+    end-to-end hostile-header test (TestWholeRenderedEvidence and
+    TestProviderRequestIdChannelIsRemoved), which plants a secret in the
+    header and proves it never reaches the rendered evidence."""
+
+    # Attribute names and call names that constitute header access on
+    # http.client / urllib response objects.
+    _HEADER_ATTRS = {"headers", "hdrs"}
+    _HEADER_CALLS = {"getheader", "getheaders", "info"}
+
+    def test_no_known_header_access_form_in_the_script(self):
         # AST, not text: the docstrings deliberately DISCUSS the removed
         # header, and prose explaining a fix must not trip the guard on the
-        # fix. What matters is that no code path reads a response header.
+        # fix. What matters is that no code path uses a known access form.
         tree = ast.parse(_embedded_python())
-        reads = [n for n in ast.walk(tree)
-                 if isinstance(n, ast.Attribute) and n.attr == "headers"
-                 and isinstance(n.ctx, ast.Load)]
-        assert not reads, (
-            "the script reads response headers; the provider request id "
-            "channel is reopened")
+        attr_reads = [n for n in ast.walk(tree)
+                      if isinstance(n, ast.Attribute)
+                      and n.attr in self._HEADER_ATTRS
+                      and isinstance(n.ctx, ast.Load)]
+        call_reads = [n for n in ast.walk(tree)
+                      if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Attribute)
+                      and n.func.attr in self._HEADER_CALLS]
+        assert not attr_reads and not call_reads, (
+            "the script uses a known response-header access form; the "
+            "provider request id channel is reopened")
 
     def test_no_safe_request_id_function_remains(self):
         tree = ast.parse(_embedded_python())
@@ -262,17 +287,24 @@ class TestWholeRenderedEvidence:
     all of which were previously written out verbatim."""
 
     @staticmethod
-    def _run(monkeypatch, tmp_path, *, body: dict, headers: dict,
-             status: int = 200, raise_http: bool = False):
+    def _run(monkeypatch, tmp_path, *, body: dict | None = None,
+             headers: dict | None = None, status: int = 200,
+             raise_http: bool = False, raise_exc: BaseException | None = None,
+             raw: bytes | None = None,
+             read_raises: BaseException | None = None):
         import urllib.error
         import urllib.request
 
         class _Resp:
             def __init__(self):
                 self.status = status
-                self.headers = headers
+                self.headers = headers or {}
 
             def read(self):
+                if read_raises is not None:
+                    raise read_raises
+                if raw is not None:
+                    return raw
                 return json.dumps(body).encode("utf-8")
 
             def __enter__(self):
@@ -282,6 +314,8 @@ class TestWholeRenderedEvidence:
                 return False
 
         def fake_urlopen(req, timeout=None):
+            if raise_exc is not None:
+                raise raise_exc
             if raise_http:
                 raise urllib.error.HTTPError(
                     "https://example.invalid", status, "err",
@@ -375,6 +409,209 @@ class TestWholeRenderedEvidence:
         assert first["model_retrieve"]["returned_id"] is None
         assert first["model_retrieve"]["returned_id_matches"] is False
         assert SHORT_SECRET not in stdout
+
+
+class TestTransportFailuresCannotLeak:
+    """Section 3.1: a transport or decode failure must never print exception
+    text, because a URLError reason, an OSError strerror or a
+    UnicodeDecodeError byte excerpt is not repository-authored prose. Before
+    this fix, request() caught HTTPError ONLY, so any of these escaped as an
+    unhandled traceback — contradicting the claim that repository-owned
+    diagnostics are the only prose an error path can emit."""
+
+    def _assert_contained(self, stdout, summary):
+        blob = stdout + summary
+        assert blob.strip(), "the probe produced no evidence at all"
+        for fragment in (*LEAK_FRAGMENTS, "Traceback", "urllib.error",
+                         "URLError", "OSError", "TimeoutError",
+                         "UnicodeDecodeError"):
+            assert fragment not in blob, f"{fragment!r} leaked into the evidence"
+        evidence = json.loads(stdout)
+        assert evidence["overall_ok"] is False
+        assert evidence["generation_calls"] == 0
+        return evidence
+
+    def test_urlerror_with_secret_reason_is_contained(self, monkeypatch, tmp_path):
+        import urllib.error
+        stdout, summary = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path,
+            raise_exc=urllib.error.URLError(SHORT_SECRET))
+        self._assert_contained(stdout, summary)
+
+    def test_timeout_with_secret_text_is_contained(self, monkeypatch, tmp_path):
+        stdout, summary = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path, raise_exc=TimeoutError(SHORT_SECRET))
+        self._assert_contained(stdout, summary)
+
+    def test_oserror_with_bearer_text_is_contained(self, monkeypatch, tmp_path):
+        stdout, summary = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path,
+            raise_exc=OSError("Bearer sk-proj-DEADBEEFdeadbeef"))  # pragma: allowlist secret -- synthetic fixture
+        self._assert_contained(stdout, summary)
+
+    def test_read_raising_a_secret_bearing_error_is_contained(
+            self, monkeypatch, tmp_path):
+        stdout, summary = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path, read_raises=OSError(PARTIAL_KEY_ECHO))
+        self._assert_contained(stdout, summary)
+
+    def test_invalid_utf8_body_is_contained(self, monkeypatch, tmp_path):
+        stdout, summary = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path, raw=b"\xff\xfe not json at all \x80")
+        evidence = self._assert_contained(stdout, summary)
+        # the invalid-JSON category maps to a repository-owned diagnostic
+        first_err = evidence["results"][0]["model_retrieve"]["error"]
+        assert first_err == {
+            "diagnostic": "provider response bytes were not valid JSON"}
+
+    def test_local_failure_diagnostics_are_repository_owned(
+            self, monkeypatch, tmp_path):
+        import urllib.error
+        stdout, _ = TestWholeRenderedEvidence._run(
+            monkeypatch, tmp_path,
+            raise_exc=urllib.error.URLError("anything"))
+        evidence = json.loads(stdout)
+        err = evidence["results"][0]["model_retrieve"]["error"]
+        assert err == {"diagnostic": ("local transport failure before a "
+                                      "provider response was decoded")}
+        # a local failure yields no HTTP status to validate
+        assert evidence["results"][0]["model_retrieve"]["status"] is None
+
+
+class TestLocalOperationIdBindsTheRun:
+    """Section 3.3 / the required approver's veto on 571b5ed: the docstring
+    promised WORKFLOW_SHA, run id and result position, but the hash contained
+    none of them, so identical operations across runs produced identical ids
+    and per-run correlation was silently impossible. Option A: the hash now
+    binds exactly schema version, workflow SHA, run id, result index, model,
+    operation and payload hash."""
+
+    BASE_ARGS = ("gpt-5.6-sol", "responses.input_tokens", "ab" * 32, 1,
+                 "sha-A", "run-A")
+
+    def test_same_full_inputs_give_the_same_id(self, op_id):
+        assert op_id(*self.BASE_ARGS) == op_id(*self.BASE_ARGS)
+
+    @pytest.mark.parametrize("index,replacement", [
+        (0, "gpt-4.1-mini"),        # model
+        (1, "models.retrieve"),     # operation
+        (2, "cd" * 32),             # payload hash
+        (3, 2),                     # result index
+        (4, "sha-B"),               # workflow SHA
+        (5, "run-B"),               # workflow run id
+    ])
+    def test_changing_any_bound_field_changes_the_id(self, op_id, index,
+                                                     replacement):
+        changed = list(self.BASE_ARGS)
+        changed[index] = replacement
+        assert op_id(*changed) != op_id(*self.BASE_ARGS), (
+            f"field {index} does not enter the hash — the id is not "
+            "run-specific and the docstring is lying again")
+
+    def test_live_evidence_ids_are_deterministic_and_position_distinct(
+            self, monkeypatch, tmp_path):
+        # Cross-RUN distinctness is proven at the function level above (fields
+        # 4 and 5 of the parametrized test); here the real end-to-end script
+        # proves position distinctness within a run and determinism across
+        # identical runs.
+        body = {"id": "gpt-5.3-codex", "object": "response.input_tokens",
+                "input_tokens": 7}
+        out1, _ = TestWholeRenderedEvidence._run(monkeypatch, tmp_path,
+                                                 body=body, headers={})
+        out2, _ = TestWholeRenderedEvidence._run(monkeypatch, tmp_path,
+                                                 body=body, headers={})
+        ev1, ev2 = json.loads(out1), json.loads(out2)
+        ids1 = [r["model_retrieve"]["local_operation_id"]
+                for r in ev1["results"]]
+        assert len(set(ids1)) == len(ids1)          # positions are distinct
+        assert ids1 == [r["model_retrieve"]["local_operation_id"]
+                        for r in ev2["results"]]    # identical env -> identical ids
+
+
+class TestEvidenceSchemaIsClosed:
+    """Section 4.C/4.D: the schema is enumerated, and every public string is
+    repository-owned or an exact-match substitution. An unexpected key is a
+    failure — new fields must be added HERE at the same time as in the
+    workflow, so no field can slip into evidence unreviewed."""
+
+    EVIDENCE_KEYS = {"schema_version", "probe_type", "generation_calls",
+                     "base_url", "workflow_sha", "workflow_run_id",
+                     "workflow_job", "probed_at", "results", "overall_ok"}
+    RESULT_KEYS = {"requested_model_id", "model_retrieve", "input_token_count"}
+    MODEL_KEYS = {"status", "returned_id", "returned_id_matches",
+                  "local_operation_id", "ok", "error"}
+    COUNT_KEYS = {"status", "object_matches", "input_tokens",
+                  "local_operation_id", "payload_sha256", "ok", "error"}
+    MODELS = ("gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini")
+    DIAGNOSTICS = {
+        "provider returned a non-object error response",
+        "provider returned no structured error object",
+        "provider returned a structured error",
+        "local transport failure before a provider response was decoded",
+        "local timeout before a provider response was decoded",
+        "provider response bytes were not valid JSON",
+        "unrecognized local failure category",
+    }
+
+    def _evidence(self, monkeypatch, tmp_path, **kw):
+        stdout, _ = TestWholeRenderedEvidence._run(monkeypatch, tmp_path, **kw)
+        return json.loads(stdout)
+
+    @pytest.mark.parametrize("kw", [
+        {"body": {"id": "gpt-5.3-codex", "object": "response.input_tokens",
+                  "input_tokens": 7}, "headers": {}},
+        {"body": {"error": {"type": "x", "message": PARTIAL_KEY_ECHO}},
+         "headers": {}},
+        {"raw": b"\xff\xfe"},
+    ])
+    def test_exact_key_sets_in_every_scenario(self, monkeypatch, tmp_path, kw):
+        evidence = self._evidence(monkeypatch, tmp_path, **kw)
+        assert set(evidence) == self.EVIDENCE_KEYS
+        for result in evidence["results"]:
+            assert set(result) == self.RESULT_KEYS
+            assert set(result["model_retrieve"]) == self.MODEL_KEYS
+            assert set(result["input_token_count"]) == self.COUNT_KEYS
+
+    def test_every_string_value_is_repository_owned_or_exact_match(
+            self, monkeypatch, tmp_path):
+        evidence = self._evidence(
+            monkeypatch, tmp_path,
+            body={"id": "gpt-5.3-codex", "object": "response.input_tokens",
+                  "input_tokens": 7}, headers={})
+
+        def strings(value):
+            if isinstance(value, dict):
+                for v in value.values():
+                    yield from strings(v)
+            elif isinstance(value, list):
+                for v in value:
+                    yield from strings(v)
+            elif isinstance(value, str):
+                yield value
+
+        import re as _re
+        from datetime import datetime
+        hex64 = _re.compile(r"^[0-9a-f]{64}$")
+        allowed_fixed = {
+            "OPENAI_RESPONSES_INPUT_TOKEN_CAPABILITY",
+            "https://api.openai.invalid/v1",     # repo-set env in this test
+            "deadbeef", "1", "probe",            # repo-set env in this test
+            *self.MODELS, *self.DIAGNOSTICS,
+        }
+        for text in strings(evidence):
+            if text in allowed_fixed or hex64.fullmatch(text):
+                continue
+            # the only remaining string is the timestamp; it must parse
+            datetime.fromisoformat(text)
+
+    def test_status_appears_only_in_validated_form(self, monkeypatch, tmp_path):
+        # A status outside the HTTP range must become null, never raw.
+        evidence = self._evidence(
+            monkeypatch, tmp_path,
+            body={"error": {"type": "x"}}, headers={}, status=999)
+        for result in evidence["results"]:
+            assert result["model_retrieve"]["status"] is None
+            assert result["input_token_count"]["status"] is None
 
 
 class TestWorkflowStillSatisfiesItsOtherGuarantees:

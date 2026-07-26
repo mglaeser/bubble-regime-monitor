@@ -68,7 +68,7 @@ The job additionally:
 | Checkout | **none** — no branch code, dependency, config or hook runs with the key in scope |
 | Payload | **fixed synthetic string** — no diff, file content, or repository data is sent |
 | Endpoints | `GET /models/{id}` and `POST /responses/input_tokens` only — **no generation call** |
-| Output | status codes, the requested model id (only after proving equality), token count, and locally derived operation ids. Never the key, never headers, never a provider identifier |
+| Output | raw provider text and transport identifiers removed; retained are exact-match reductions (requested id on proven equality, booleans otherwise), validated scalars (range-checked status, validated token count — provider-influenced facts, which IS the capability being measured), and repository-owned diagnostics/operation ids. Never the key, never headers, never free-form provider or exception text |
 | Trigger guards | repository + operator account — **defence in depth only, not a boundary** |
 | Failure | **fail closed** — any missing/malformed result for any required model exits non-zero |
 
@@ -126,8 +126,13 @@ customer identifier, or repository content. The cross-vendor panel's required
 approver vetoed an earlier design in which a request id matching
 `^[A-Za-z0-9._:-]{1,128}$` was emitted verbatim — `sk-proj-abcdef123456`
 satisfies that pattern. Correlation therefore uses repository-owned values
-only: a locally derived operation id, the requested model id, the payload
-hash, the workflow SHA and the workflow run id.
+only: a locally derived, **run-specific** operation id whose hash binds
+exactly the schema version, the workflow SHA, the workflow run id, the
+result-array position, the requested model id, the operation name and the
+payload hash — so identical operations in different runs (or at different
+positions) receive different ids. A second panel veto caught an earlier
+revision whose documentation promised the workflow SHA, run id and position
+while the hash contained none of them.
 
 ### Operator setup required before the first run
 
