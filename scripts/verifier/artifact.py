@@ -85,6 +85,17 @@ def validate(skeleton: dict) -> None:
         pb = block.get("path_bytes_b64")
         if pb is not None and pb not in file_paths:
             _fail("block references unknown file")
+    # required_control_atom_ids is the load-bearing partition input, and a
+    # generated relationship's covered atom list is a disposition claim
+    # (MC2 C5): both are atom cross-references and must reference the
+    # universe, exactly like units and disposition buckets.
+    for aid in skeleton["required_control_atom_ids"]:
+        if aid not in atom_ids:
+            _fail("required_control_atom_ids references unknown atom")
+    for rel in skeleton["generated_relationships"]:
+        for aid in rel.get("covered_generated_atom_disposition", []):
+            if aid not in atom_ids:
+                _fail("generated relationship covers unknown atom")
 
     disp = skeleton["atom_dispositions"]
     for key in ("model_review", "generated_proof", "blocked_unreviewable"):

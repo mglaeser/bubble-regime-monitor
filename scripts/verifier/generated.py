@@ -116,16 +116,16 @@ def _validate_manifest(raw: bytes) -> dict:
         sha = part.get("sha256")
         if path is None:
             if sha is not None:
-                raise _err(category="null_path_with_sha", part=name)
+                raise _err(category="null_path_with_sha", part_sha256=sha256_hex(name.encode()))
             continue                          # legitimately-absent part
         if not isinstance(path, str) or not _is_hex64(sha):
-            raise _err(category="present_part_invalid", part=name)
+            raise _err(category="present_part_invalid", part_sha256=sha256_hex(name.encode()))
         norm = posixpath.normpath(path)
         if (norm != path or path.startswith("/") or ".." in path.split("/")
                 or not path.startswith(SOURCE_ROOT)):
-            raise _err(category="unsafe_source_path", part=name)
+            raise _err(category="unsafe_source_path", part_sha256=sha256_hex(name.encode()))
         if path in seen_paths:
-            raise _err(category="duplicate_source_path", part=name)
+            raise _err(category="duplicate_source_path", part_sha256=sha256_hex(name.encode()))
         seen_paths.add(path)
         present.append((path, sha))
     if not present:

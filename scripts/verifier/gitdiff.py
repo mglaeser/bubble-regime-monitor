@@ -58,6 +58,11 @@ DIFF_COMMON: tuple[str, ...] = (
     "--find-renames=50%",          # explicit threshold (git's default)
     "-l0",                         # no rename-limit truncation
     "--no-rename-empty",
+    # A submodule POINTER change is a control-bearing supply-chain event
+    # (classification forces control on 160000). Without this, ambient
+    # diff.ignoreSubmodules or a committed .gitmodules `ignore=all` erases
+    # the record from the raw universe before it is ever parsed (MC2 C0).
+    "--ignore-submodules=none",
 )
 DIFF_BODY_RENDER: tuple[str, ...] = DIFF_COMMON + (
     "--no-ext-diff", "--no-textconv",  # external drivers rewrite bodies

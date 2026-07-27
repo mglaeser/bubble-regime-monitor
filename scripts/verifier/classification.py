@@ -15,7 +15,6 @@ file's protection.
 from __future__ import annotations
 
 import fnmatch
-import os
 from dataclasses import dataclass
 
 from .canon import b64 as _b64
@@ -146,22 +145,36 @@ def owned_by_codeowners(path: bytes, patterns: list[str]) -> bool:
     SECOND hand-written list here is the "which paths did we remember" failure
     that keeps recurring (panel round 30: CLAUDE.md, GOVERNANCE_FREEZE_RULE.md
     and three PIN evidence packs were all owner-routed and none was
-    control-bearing, so budget eviction could drop them with no block)."""
+    control-bearing, so budget eviction could drop them with no block).
+
+    gitignore/CODEOWNERS anchoring (MC2 C3): a pattern with a LEADING slash,
+    or an INTERNAL slash, is anchored to the repository root; a bare
+    single-component pattern (`secrets` or `secrets/`) matches a file or
+    directory of that name at ANY depth. The union is deliberately the
+    conservative over-match direction, so an unanchored rule owning a
+    directory at depth must NOT fail open to non-control."""
     text = as_text(path)
     for pattern in patterns:
-        pat = pattern.rstrip("/")
-        if pat in ("*", "/*"):
-            return True
-        pat = pat.lstrip("/")
-        if not pat:
+        stripped = pattern.strip()
+        if not stripped:
             continue
+        anchored = stripped.startswith("/")
+        pat = stripped.strip("/")
+        if pat in ("", "*"):
+            return True
+        # Root-relative interpretation (always attempted): the pattern
+        # matches from the repository root.
         if fnmatch.fnmatch(text, pat) or fnmatch.fnmatch(text, pat + "/*"):
             return True
-        # A directory rule owns everything beneath it.
-        if text.startswith(pat + "/"):
+        if text == pat or text.startswith(pat + "/"):
             return True
-        if fnmatch.fnmatch(os.path.basename(text), pat):
-            return True
+        # Unanchored single-component pattern: match at ANY depth. A pattern
+        # with an internal slash is root-relative (gitignore rule) and must
+        # NOT match at depth.
+        if not anchored and "/" not in pat:
+            segments = text.split("/")
+            if any(fnmatch.fnmatch(seg, pat) for seg in segments):
+                return True
     return False
 
 

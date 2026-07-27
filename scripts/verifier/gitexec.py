@@ -56,6 +56,11 @@ ENVIRONMENT_POLICY = {
     "GIT_NO_REPLACE_OBJECTS": "1",
     "GIT_NO_LAZY_FETCH": "1",       # honored by git >= 2.45; the capability
     "GIT_OPTIONAL_LOCKS": "0",      # check below covers older gits
+    # A $GIT_DIR/info/grafts file re-parents the commit graph, which moves
+    # merge-base, drops commits from the reviewed range, and shifts every
+    # identity (MC2 C2). Pointing the graft file at /dev/null neutralizes
+    # it deterministically — the legacy analogue of --no-replace-objects.
+    "GIT_GRAFT_FILE": "/dev/null",
 }
 
 GLOBAL_FLAGS: tuple[str, ...] = (
