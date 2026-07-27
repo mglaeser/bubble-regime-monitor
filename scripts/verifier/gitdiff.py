@@ -17,7 +17,9 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+from . import gitexec
 from .contentpolicy import UNION_EXCLUDE_EXTS
+from .errors import FILE_DIFF_ATTRIBUTION_FAILED, GIT_COMMAND_FAILED
 
 GIT_TIMEOUT_SECONDS = 120
 
@@ -35,20 +37,29 @@ EXCLUDES: tuple[bytes, ...] = (b":(exclude,icase,glob)data/**",) + tuple(
     for e in UNION_EXCLUDE_EXTS
 )
 
-# CONFIG NEUTRALIZATION (attack finding C0): a plan must be a pure function
-# of two commits, but `git diff` output is a function of commits AND ambient
-# config — diff.noprefix moved the structural root, core.abbrev rewrote the
-# index lines, color.ui=always injected ANSI bytes that hard-blocked the
-# parser, diff.orderFile reordered the record universe. Every diff
-# invocation pins the rendering explicitly; config keys without a
-# corresponding flag are pinned with `-c`.
-_GIT = ("git", "-c", "core.quotePath=true")
-_DIFF_COMMON = (
+# DIFF RENDERING PINS (attack finding C0, extended by MC1-F02): a plan must
+# be a pure function of two commits, but `git diff` output is a function of
+# commits AND ambient config — diff.noprefix moved the structural root,
+# core.abbrev rewrote the index lines, color.ui=always injected ANSI bytes
+# that hard-blocked the parser, diff.orderFile reordered the record
+# universe, diff.renameLimit could truncate rename detection. run_git adds
+# the process-level policy (environment whitelist, config isolation,
+# --no-replace-objects, core.* pins) from gitexec; these are the
+# diff-command flags on top of it.
+#
+# RENAME POLICY (documented, MC1-F02 §4.3): threshold pinned at git's
+# default 50%; -l0 disables the rename-limit cutoff so detection is never
+# silently truncated; --no-rename-empty because an empty blob is not
+# meaningful rename evidence — an empty file "renamed" appears as D+A, and
+# both endpoints still carry obligations.
+DIFF_COMMON: tuple[str, ...] = (
     "--no-color",
     "-O/dev/null",                 # defeat diff.orderFile reordering
-    "--find-renames",              # defeat diff.renames=false/copies
+    "--find-renames=50%",          # explicit threshold (git's default)
+    "-l0",                         # no rename-limit truncation
+    "--no-rename-empty",
 )
-_DIFF_BODY_RENDER = _DIFF_COMMON + (
+DIFF_BODY_RENDER: tuple[str, ...] = DIFF_COMMON + (
     "--no-ext-diff", "--no-textconv",  # external drivers rewrite bodies
     "--no-relative",
     "--full-index",                # defeat core.abbrev on index lines
@@ -62,12 +73,18 @@ _DIFF_BODY_RENDER = _DIFF_COMMON + (
 
 
 class DiffError(RuntimeError):
-    """A REQUIRED git command failed.
+    """A REQUIRED git command failed. `code` is machine-readable (MC1-F04).
 
-    The panel must BLOCK rather than green on the resulting emptiness (round-6
-    panel finding: decode errors and git failures were silently converted to
-    empty output, and an empty diff reaches no omission list, so nobody
-    reviewed the change and nothing said so)."""
+    The planner must BLOCK rather than green on the resulting emptiness
+    (round-6 panel finding: decode errors and git failures were silently
+    converted to empty output, and an empty diff reaches no omission list,
+    so nobody reviewed the change and nothing said so). Every failure is an
+    INTEGRITY failure with a typed code, never a content-policy state."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
 
 
 @dataclass(frozen=True)
@@ -87,40 +104,53 @@ class ChangedFile:
         return self.status[:1] in ("R", "C")
 
 
-def run_git(args: list[str | bytes], *, required: bool = False,
+def run_git(args: list[str | bytes], *,
             cwd: str | os.PathLike[str] | None = None,
-            operation: str = "git") -> bytes:
-    """Run a git command and return raw stdout BYTES.
+            operation: str = "git",
+            attr_source: str | None = None) -> bytes:
+    """Run a git command HERMETICALLY and return raw stdout BYTES.
 
-    `required=True` turns any failure — non-zero exit, timeout, OSError — into
-    a blocking DiffError. Output is never decoded here: invalid UTF-8 in a
-    diff body or a path must survive to the hashing layer unchanged, and
-    `errors="replace"` at this level would corrupt the very bytes whose
-    identity we are about to attest.
+    Always fail-closed (MC1-F04/F17): there is no optional mode in which a
+    failure becomes empty output. Every invocation runs under the
+    GitExecutionPolicy — curated whitelist environment, global process flags
+    and config pins — so ambient environment, config files, replacement refs
+    and attribute files cannot reshape the answer (MC1-F02). `attr_source`
+    pins the attribute source commit for commands whose output attributes
+    can influence (diff bodies).
 
-    Errors are SANITIZED (B2): argv contains attacker-influenced path bytes
-    and stderr echoes them back, so neither may appear in an error message.
-    What survives: a repository-owned `operation` label, the failure category,
-    the return code, byte lengths and a sha256 of stderr — enough to
-    correlate with a local reproduction, nothing an attacker wrote."""
-    argv = [a if isinstance(a, bytes) else os.fsencode(a) for a in args]
+    Output is never decoded here: invalid UTF-8 in a diff body or a path
+    must survive to the hashing layer unchanged.
+
+    Errors are SANITIZED: argv contains attacker-influenced path bytes and
+    stderr echoes them back, so neither may appear in an error message. What
+    survives: a repository-owned `operation` label, the failure category,
+    the return code, byte lengths and a sha256 of stderr."""
+    if not args or args[0] != "git":
+        raise DiffError(GIT_COMMAND_FAILED,
+                        f"category=malformed_git_argv operation={operation}")
+    hermetic = ["git", *gitexec.global_flags(), *gitexec.CONFIG_PINS,
+                *args[1:]]
+    argv = [a if isinstance(a, bytes) else os.fsencode(a) for a in hermetic]
+    env = gitexec.build_env()
+    if attr_source is not None:
+        env["GIT_ATTR_SOURCE"] = attr_source
     try:
         proc = subprocess.run(  # noqa: S603 -- fixed git argv from constants; no shell
-            argv, capture_output=True, timeout=GIT_TIMEOUT_SECONDS, cwd=cwd)
+            argv, capture_output=True, timeout=GIT_TIMEOUT_SECONDS, cwd=cwd,
+            env=env)
     except subprocess.TimeoutExpired as exc:
-        if required:
-            raise DiffError(
-                f"category=git_timeout operation={operation} "
-                f"timeout_s={GIT_TIMEOUT_SECONDS}") from exc
-        return b""
-    except Exception as exc:                       # OSError and kin
-        if required:
-            raise DiffError(
-                f"category=git_exec_failure operation={operation} "
-                f"exception_class={type(exc).__name__}") from exc
-        return b""
-    if required and proc.returncode != 0:
         raise DiffError(
+            GIT_COMMAND_FAILED,
+            f"category=git_timeout operation={operation} "
+            f"timeout_s={GIT_TIMEOUT_SECONDS}") from exc
+    except Exception as exc:                       # OSError and kin
+        raise DiffError(
+            GIT_COMMAND_FAILED,
+            f"category=git_exec_failure operation={operation} "
+            f"exception_class={type(exc).__name__}") from exc
+    if proc.returncode != 0:
+        raise DiffError(
+            GIT_COMMAND_FAILED,
             f"category=git_nonzero_exit operation={operation} "
             f"returncode={proc.returncode} stderr_bytes={len(proc.stderr)} "
             f"stderr_sha256={_sha256_hex(proc.stderr)}")
@@ -132,31 +162,8 @@ def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def base_branch() -> str:
-    """The PR's target branch.
-
-    GITHUB_BASE_REF is empty on non-PR events, so it falls back to main. A
-    hard-coded origin/main mis-based the diff for PRs targeting any other
-    branch, letting them green unreviewed (round-4 panel finding)."""
-    return os.environ.get("GITHUB_BASE_REF") or "main"
-
-
-def merge_base(base_ref: str | None = None, *, cwd=None) -> str:
-    """`git merge-base origin/<base> HEAD`, fail-closed.
-
-    There is deliberately NO HEAD~1 fallback (round-7 panel finding): a failed
-    merge-base on a multi-commit PR would silently shrink the review to the tip
-    commit only. Checkout runs with fetch-depth: 0, so a failure here is a real
-    fault and must block."""
-    ref = base_ref or base_branch()
-    out = run_git(["git", "merge-base", f"origin/{ref}", "HEAD"],
-                  required=True, cwd=cwd,
-                  operation="merge-base").decode("ascii",
-                                                 errors="replace").strip()
-    if not out:
-        raise DiffError("category=empty_merge_base operation=merge-base")
-    return out
-
+# The legacy merge_base()/base_branch() helpers are gone (MC1-F17): the
+# only merge-base path is repostate.merge_base_of over two PROVEN shas.
 
 _TRUNCATED = (
     "git diff --name-status -z ended mid-record (dangling {status!r} entry) — "
@@ -191,7 +198,8 @@ def parse_name_status_z(raw: bytes) -> list[ChangedFile]:
         two_path = status[:1] in ("R", "C")
         need = 2 if two_path else 1
         if i + need >= len(parts):
-            raise DiffError(_TRUNCATED.format(status=status))
+            raise DiffError(GIT_COMMAND_FAILED,
+                            _TRUNCATED.format(status=status))
         if two_path:
             out.append(ChangedFile(path=parts[i + 2], orig_path=parts[i + 1],
                                    status=status))
@@ -209,9 +217,9 @@ def changed_files(mb: str, *, head: str = "HEAD", cwd=None) -> list[ChangedFile]
     Paths are not content: the privacy excludes protect BODIES and are applied
     only when fetching a diff body. Filtering this list would let an
     excluded-only PR report nothing changed."""
-    raw = run_git([*_GIT, "diff", *_DIFF_COMMON, "--name-status", "-z",
+    raw = run_git(["git", "diff", *DIFF_COMMON, "--name-status", "-z",
                    f"{mb}...{head}"],
-                  required=True, cwd=cwd, operation="changed-files")
+                  cwd=cwd, operation="changed-files")
     return parse_name_status_z(raw)
 
 
@@ -228,7 +236,7 @@ def literal_pathspec(path: bytes) -> bytes:
 
 
 def file_diff(mb: str, entry: ChangedFile, *, head: str = "HEAD",
-              cwd=None) -> bytes:
+              cwd=None, attr_source: str | None = None) -> bytes:
     """The unified diff for ONE file, proven to belong to that file.
 
     Pathspec magic is one way for attribution to break; this guard does not
@@ -245,15 +253,16 @@ def file_diff(mb: str, entry: ChangedFile, *, head: str = "HEAD",
     specs = [literal_pathspec(entry.path)]
     if entry.orig_path is not None:
         specs.append(literal_pathspec(entry.orig_path))
-    body = run_git([*_GIT, "diff", *_DIFF_BODY_RENDER, f"{mb}...{head}",
+    body = run_git(["git", "diff", *DIFF_BODY_RENDER, f"{mb}...{head}",
                     "--", *specs, *EXCLUDES],
-                   required=True, cwd=cwd, operation="file-diff-body")
+                   cwd=cwd, operation="file-diff-body",
+                   attr_source=attr_source or mb)
     if not body.strip():
         return b""                                 # privacy-excluded content
     names = run_git(
-        [*_GIT, "diff", *_DIFF_COMMON, "--name-only", "-z",
+        ["git", "diff", *DIFF_COMMON, "--name-only", "-z",
          f"{mb}...{head}", "--", *specs, *EXCLUDES],
-        required=True, cwd=cwd, operation="file-diff-names")
+        cwd=cwd, operation="file-diff-names", attr_source=attr_source or mb)
     got = [p for p in names.split(b"\0") if p]
     if got != [entry.path]:
         # Identified by count and hash only (B2): both the requested path and
@@ -261,6 +270,7 @@ def file_diff(mb: str, entry: ChangedFile, *, head: str = "HEAD",
         # echoed into an error message.
         returned_joined = b"\0".join(got)
         raise DiffError(
+            FILE_DIFF_ATTRIBUTION_FAILED,
             "category=misattributed_file_diff operation=file-diff-names "
             f"expected_path_sha256={_sha256_hex(entry.path)} "
             f"returned_count={len(got)} "
@@ -277,9 +287,9 @@ def patch_bytes(mb: str, *, head: str = "HEAD", cwd=None) -> bytes:
     it blind to excluded-content changes. The complete repository identity is
     identity.repository_change_sha256 over the raw-change records; this
     function remains only for provider-facing presentation needs."""
-    return run_git([*_GIT, "diff", *_DIFF_BODY_RENDER, f"{mb}...{head}",
+    return run_git(["git", "diff", *DIFF_BODY_RENDER, f"{mb}...{head}",
                     "--", b".", *EXCLUDES],
-                   required=True, cwd=cwd, operation="patch-bytes")
+                   cwd=cwd, operation="patch-bytes", attr_source=mb)
 
 
 def display_path(path: bytes) -> str:

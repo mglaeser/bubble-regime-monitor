@@ -22,8 +22,11 @@ from dataclasses import dataclass
 
 from .canon import canonical_json, digest, num
 from .errors import (
+    DUPLICATE_ATOM_DISPOSITION,
     DUPLICATE_RANGE_COVERAGE,
     INCOMPLETE_RANGE_COVERAGE,
+    INVALID_GENERATED_PROOF_REFERENCE,
+    MISSING_ATOM_DISPOSITION,
     OVERLAPPING_RANGE_COVERAGE,
     UNKNOWN_ATOM_REFERENCE,
     BlockingError,
@@ -114,6 +117,73 @@ def prove_exact_coverage(all_patch_atom_ids: list[str],
             f"{len(missing)} control-bearing changed atom(s) belong to NO "
             "review unit — unreviewed control content must never read as "
             "reviewed")
+
+
+def prove_exact_dispositions(all_patch_atom_ids: list[str],
+                             required_control_atom_ids: list[str],
+                             model_unit_atom_id_lists: list[list[str]],
+                             generated_atom_id_lists: list[list[str]],
+                             blocked_atom_ids: list[str]) -> None:
+    """Every required control atom has EXACTLY ONE disposition (MC1-F07).
+
+    Dispositions: MODEL_REVIEW (in one review unit), GENERATED_PROOF (in one
+    validated generated relationship), BLOCKED_UNREVIEWABLE. An atom may not
+    hold two dispositions; every required control atom must hold one;
+    non-control atoms may be model-reviewed but are not required. The caller
+    separately refuses to mark a plan executable while any blocked atom
+    exists — this function proves the PARTITION, not executability."""
+    universe = set(all_patch_atom_ids)
+    if len(universe) != len(all_patch_atom_ids):
+        raise BlockingError(
+            DUPLICATE_RANGE_COVERAGE,
+            "the patch atom universe contains duplicate ids")
+    required = set(required_control_atom_ids)
+    if len(required) != len(required_control_atom_ids):
+        raise BlockingError(DUPLICATE_RANGE_COVERAGE,
+                            "the required control atom set contains dupes")
+
+    # Every referenced id must exist; generated ids get a distinct code.
+    seen: dict[str, str] = {}
+
+    def assign(ids, disposition, dup_scope, unknown_code):
+        for atom_id in ids:
+            if atom_id not in universe:
+                raise BlockingError(
+                    unknown_code,
+                    f"a {disposition} reference names atom "
+                    f"{atom_id[:16]}… which is not in this patch")
+            prior = seen.get(atom_id)
+            if prior is not None:
+                raise BlockingError(
+                    DUPLICATE_ATOM_DISPOSITION,
+                    f"atom {atom_id[:16]}… holds two dispositions "
+                    f"({prior} and {disposition})")
+            seen[atom_id] = disposition
+
+    for ids in model_unit_atom_id_lists:
+        if len(set(ids)) != len(ids):
+            raise BlockingError(DUPLICATE_ATOM_DISPOSITION,
+                                "a review unit lists the same atom twice")
+        assign(ids, "MODEL_REVIEW", "model", UNKNOWN_ATOM_REFERENCE)
+    for ids in generated_atom_id_lists:
+        if len(set(ids)) != len(ids):
+            raise BlockingError(DUPLICATE_ATOM_DISPOSITION,
+                                "a generated relationship lists an atom twice")
+        assign(ids, "GENERATED_PROOF", "generated",
+               INVALID_GENERATED_PROOF_REFERENCE)
+    if len(set(blocked_atom_ids)) != len(blocked_atom_ids):
+        raise BlockingError(DUPLICATE_ATOM_DISPOSITION,
+                            "the blocked atom set contains duplicates")
+    assign(blocked_atom_ids, "BLOCKED_UNREVIEWABLE", "blocked",
+           UNKNOWN_ATOM_REFERENCE)
+
+    missing = required - set(seen)
+    if missing:
+        raise BlockingError(
+            MISSING_ATOM_DISPOSITION,
+            f"{len(missing)} control-bearing atom(s) have NO disposition "
+            f"(e.g. {sorted(missing)[0][:16]}…) — unreviewed control content "
+            "must never read as reviewed")
 
 
 def structural_plan_root(base_sha: str, head_sha: str,

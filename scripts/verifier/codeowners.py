@@ -15,6 +15,7 @@ fail-closed direction for a coverage gate.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .errors import (
@@ -24,6 +25,10 @@ from .errors import (
 )
 from .gitdiff import DiffError, run_git
 
+# The protective UNION reads all three locations. GitHub's actual PR review
+# request uses the FIRST existing file in this precedence order (MC1-F13).
+FIRST_MATCH_ORDER: tuple[bytes, ...] = (
+    b".github/CODEOWNERS", b"CODEOWNERS", b"docs/CODEOWNERS")
 LOCATIONS: tuple[bytes, ...] = (
     b"CODEOWNERS", b".github/CODEOWNERS", b"docs/CODEOWNERS")
 
@@ -36,15 +41,42 @@ class CodeownersRules:
     provenance: tuple[dict, ...]
 
 
-def _parse_patterns(text: str) -> list[str]:
+@dataclass(frozen=True)
+class EffectiveBaseRules:
+    """GitHub's ACTUAL behavior: the first existing CODEOWNERS on the base,
+    parsed. Distinct from the conservative protective union (MC1-F13)."""
+
+    location: str | None            # None when absent everywhere
+    blob_oid: str | None
+    patterns: tuple[str, ...]
+    provenance: tuple[dict, ...]
+
+
+# Syntax this matcher can represent FAITHFULLY (MC1-F13). A pattern using
+# anything outside this subset must block rather than be silently
+# approximated, because an owner rule the gate mis-parses is a protection it
+# does not actually enforce. Supported: gitignore-style path globs with an
+# optional leading '/', trailing '/', and '*'/'?' wildcards.
+_SUPPORTED_PATTERN = re.compile(r"\A/?[A-Za-z0-9._*?/\-]+/?\Z")
+
+
+def _parse_patterns(text: str, *, location: str) -> list[str]:
     out: list[str] = []
     for line in text.splitlines():
         stripped = line.split("#", 1)[0].strip()
         if not stripped:
             continue
         pattern = stripped.split()[0]
-        if pattern:
-            out.append(pattern)
+        if not pattern:
+            continue
+        if not _SUPPORTED_PATTERN.match(pattern):
+            # '!' negation, '[...]' char classes, '@'/e-mail-only lines and
+            # other syntaxes the matcher cannot represent faithfully.
+            raise BlockingError(
+                CODEOWNERS_UNREADABLE,
+                f"category=unsupported_codeowners_syntax location={location} "
+                f"pattern_bytes={len(pattern)}")
+        out.append(pattern)
     return out
 
 
@@ -53,7 +85,7 @@ def _entry_at(commit_sha: str, location: bytes, *, cwd):
     try:
         out = run_git(["git", "ls-tree", "-z", commit_sha, "--",
                        b":(literal)" + location],
-                      required=True, cwd=cwd, operation="codeowners-ls-tree")
+                      cwd=cwd, operation="codeowners-ls-tree")
     except DiffError as exc:
         raise BlockingError(REPOSITORY_STATE_INVALID, str(exc)) from exc
     entries = [e for e in out.split(b"\0") if e]
@@ -95,8 +127,7 @@ def rules_at_commit(commit_sha: str, *, cwd=None):
             continue
         try:
             blob = run_git(["git", "cat-file", "blob", oid],
-                           required=True, cwd=cwd,
-                           operation="codeowners-cat-file")
+                           cwd=cwd, operation="codeowners-cat-file")
         except DiffError as exc:
             raise BlockingError(REPOSITORY_STATE_INVALID, str(exc)) from exc
         try:
@@ -106,10 +137,46 @@ def rules_at_commit(commit_sha: str, *, cwd=None):
                 CODEOWNERS_UNREADABLE,
                 f"category=undecodable_codeowners operation=codeowners-decode "
                 f"blob_bytes={len(blob)} blob_oid={oid}") from exc
-        for pattern in _parse_patterns(text):
+        for pattern in _parse_patterns(text, location=record["location"]):
             if pattern not in patterns:
                 patterns.append(pattern)
     return patterns, provenance
+
+
+def _blob_at(commit_sha: str, location: bytes, *, cwd):
+    """(state, oid, text|None) for one committed CODEOWNERS path."""
+    state, oid = _entry_at(commit_sha, location, cwd=cwd)
+    if state == "absent":
+        return "absent", None, None
+    try:
+        blob = run_git(["git", "cat-file", "blob", oid], cwd=cwd,
+                       operation="codeowners-cat-file")
+    except DiffError as exc:
+        raise BlockingError(REPOSITORY_STATE_INVALID, str(exc)) from exc
+    try:
+        return "found", oid, blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BlockingError(
+            CODEOWNERS_UNREADABLE,
+            f"category=undecodable_codeowners blob_bytes={len(blob)} "
+            f"blob_oid={oid}") from exc
+
+
+def effective_base_rules(base_sha: str, *, cwd=None) -> EffectiveBaseRules:
+    """GitHub's real base behavior: first-match in FIRST_MATCH_ORDER."""
+    provenance: list[dict] = []
+    for location in FIRST_MATCH_ORDER:
+        loc = location.decode("ascii")
+        state, oid, text = _blob_at(base_sha, location, cwd=cwd)
+        provenance.append({"commit_sha": base_sha, "location": loc,
+                           "state": state, "blob_oid": oid})
+        if state == "found":
+            patterns = tuple(_parse_patterns(text, location=loc))
+            return EffectiveBaseRules(location=loc, blob_oid=oid,
+                                      patterns=patterns,
+                                      provenance=tuple(provenance))
+    return EffectiveBaseRules(location=None, blob_oid=None, patterns=(),
+                              provenance=tuple(provenance))
 
 
 def union_rules(base_sha: str, head_sha: str, *, cwd=None) -> CodeownersRules:

@@ -133,40 +133,44 @@ class TestCandidateUnits:
             assert len(u.atom_ids) == len(u.ordinals)
             assert u.changed_content_bytes > 0
 
+    def _records(self, built, classification):
+        return [units.unit_record(
+            u, base_sha=self.B, head_sha=self.H,
+            repository_change_sha256=self.RID,
+            provider_visible_material_sha256=self.CID,
+            classification=classification) for u in built]
+
     def test_records_are_ordered_and_hash_bound(self):
         built, _ = self._units()
-        records = units.ordered_unit_records(
-            built, base_sha=self.B, head_sha=self.H,
-            repository_change_sha256=self.RID,
-            reviewable_content_sha256=self.CID,
-            classification={"control_bearing": True})
+        records = sorted(
+            self._records(built, {"control_bearing": True}),
+            key=lambda r: (r["min_patch_ordinal"], r["max_patch_ordinal"],
+                           r["unit_sha256"]))
         keys = [(r["min_patch_ordinal"], r["max_patch_ordinal"],
                  r["unit_sha256"]) for r in records]
         assert keys == sorted(keys)
         for r in records:
             assert r["base_sha"] == self.B and r["head_sha"] == self.H
             assert r["repository_change_sha256"] == self.RID
-            assert r["reviewable_content_sha256"] == self.CID
+            assert r["provider_visible_material_sha256"] == self.CID
             assert r["classification"]["control_bearing"] is True
+            assert r["disposition"] == "MODEL_REVIEW"
             assert len(r["unit_sha256"]) == 64
             from verifier import coverage
             assert coverage.unit_hash(r) == r["unit_sha256"]
 
-    def test_context_label_is_bounded_and_display_safe(self):
+    def test_context_is_structural_facts_not_raw_text(self):
         got, content_of = added(b"# " + b"H" * 500, b"body")
         built = units.build_file_units(
             path=b"doc.md", orig_path=None, git_status="M",
             atoms=list(got), content_of=content_of, budget=10_000)
-        label = built[0].context_label
-        assert len(label) <= 120
-        assert all(ch.isprintable() for ch in label)
+        facts = built[0].context_facts
+        assert facts["context_kind"] == "markdown_heading"
+        assert len(facts["context_sha256"]) == 64
+        assert facts["context_bytes"] == 2 + 500
 
     def test_unit_hash_differs_when_atoms_differ(self):
         built, _ = self._units(budget=100)
-        records = units.ordered_unit_records(
-            built, base_sha=self.B, head_sha=self.H,
-            repository_change_sha256=self.RID,
-            reviewable_content_sha256=self.CID,
-            classification={})
+        records = self._records(built, {})
         hashes = [r["unit_sha256"] for r in records]
         assert len(hashes) == len(set(hashes))

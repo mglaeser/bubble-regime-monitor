@@ -18,6 +18,7 @@ import fnmatch
 import os
 from dataclasses import dataclass
 
+from .canon import b64 as _b64
 from .gitdiff import ChangedFile
 
 # Risk order: lower is reviewed earlier. (Panel finding, PR #23 part 1: the
@@ -62,7 +63,7 @@ _CODE_SUFFIXES = (
 _KNOWN_NON_CODE = frozenset({
     "LICENSE", "LICENCE", "NOTICE", "AUTHORS", "CONTRIBUTORS", "COPYRIGHT",
     "CHANGELOG", "README", "VERSION", "MANIFEST", ".gitignore",
-    ".gitattributes", ".dockerignore", ".gitkeep", ".mailmap",
+    ".dockerignore", ".gitkeep", ".mailmap",
     ".editorconfig"})
 
 _CODE_NAMES = (
@@ -179,6 +180,8 @@ def control_evidence(path: bytes,
     matched: list[str] = []
     if text in _CONTROL_DATA:
         return True, ["control_data"], []
+    if _is_gitattributes(path):
+        return True, ["gitattributes"], []
     if text in _CODEOWNERS_EXEMPT:
         return False, ["documented_codeowners_exemption"], []
     if is_code(path):
@@ -199,6 +202,100 @@ def control_evidence(path: bytes,
 
 def is_control_bearing(path: bytes, patterns: list[str]) -> bool:
     return control_evidence(path, patterns)[0]
+
+
+# --- mode-aware classification from RawChange (MC1-F03) --------------------
+
+EXECUTABLE_MODE = "100755"
+SYMLINK_MODE = "120000"
+SUBMODULE_MODE = "160000"
+
+
+def _is_gitattributes(path: bytes) -> bool:
+    """Any .gitattributes at any depth (MC1-F03 §5.1): the file decides
+    text/binary treatment and diff drivers, so it is control-bearing."""
+    return path.rsplit(b"/", 1)[-1] == b".gitattributes"
+
+
+def _mode_reasons(mode: str, side: str) -> list[str]:
+    reasons = []
+    if mode == EXECUTABLE_MODE:
+        reasons.append(f"{side}:executable_mode")
+    elif mode == SYMLINK_MODE:
+        reasons.append(f"{side}:symlink_mode")
+    elif mode == SUBMODULE_MODE:
+        reasons.append(f"{side}:submodule_mode")
+    return reasons
+
+
+def _side_from_raw(path: bytes, mode: str, side: str,
+                   patterns: list[str]) -> tuple[dict, bool, list[str], list[str]]:
+    control, reasons, matched = control_evidence(path, patterns)
+    reasons = [f"{side}:{r}" for r in reasons]
+    mode_reasons = _mode_reasons(mode, side)
+    if _is_gitattributes(path):
+        reasons.append(f"{side}:gitattributes")
+        control = True
+    if mode_reasons:
+        control = True
+    reasons.extend(mode_reasons)
+    record = {
+        "path_bytes_b64": _b64(path),
+        "mode": mode,
+        "risk": path_risk(path),
+        "is_code": is_code(path),
+        "control_bearing": control,
+        "reasons": reasons,
+        "matched_codeowners_rules": list(matched),
+    }
+    return record, control, reasons, matched
+
+
+def classify_record_raw(rc, patterns: list[str]) -> ClassificationRecord:
+    """Classify from the COMPLETE RawChange (MC1-F03).
+
+    Old-side and new-side facts are created only when those endpoints exist
+    (A has no old side; D has no new side), so a deleted file never carries
+    a misleading new-side record. Either endpoint being executable, a
+    symlink, a submodule, a type change, or .gitattributes forces
+    control-bearing regardless of the path's extension."""
+    status = rc.status[:1]
+    has_old = status != "A"
+    has_new = status != "D"
+    old_side = old_ctl = None
+    old_reasons: list[str] = []
+    old_matched: list[str] = []
+    new_side = new_ctl = None
+    new_reasons: list[str] = []
+    new_matched: list[str] = []
+    if has_old:
+        old_path = rc.orig_path if rc.orig_path is not None else rc.path
+        old_side, old_ctl, old_reasons, old_matched = _side_from_raw(
+            old_path, rc.old_mode, "old", patterns)
+    if has_new:
+        new_side, new_ctl, new_reasons, new_matched = _side_from_raw(
+            rc.path, rc.new_mode, "new", patterns)
+    reasons: list[str] = []
+    for r in (*(new_reasons or []), *(old_reasons or [])):
+        if r not in reasons:
+            reasons.append(r)
+    if status == "T":
+        reasons.append("status:type_change")
+    matched: list[str] = []
+    for rule in (*new_matched, *old_matched):
+        if rule not in matched:
+            matched.append(rule)
+    control = bool(old_ctl or new_ctl or status == "T")
+    entry = rc.as_changed_file()
+    return ClassificationRecord(
+        git_status=entry.status,
+        new_side=new_side,
+        old_side=old_side,
+        effective_risk=risk_of_record(entry),
+        control_bearing=control,
+        reasons=tuple(reasons),
+        matched_codeowners_rules=tuple(matched),
+    )
 
 
 def control_bearing_record(entry: ChangedFile, patterns: list[str]) -> bool:

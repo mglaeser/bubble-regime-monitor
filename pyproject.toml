@@ -80,6 +80,12 @@ ignore = ["E501"]
 # (SIGILL/hang containment is the whole point). Not untrusted input.
 "app/engine/gsadf_runner.py" = ["S603", "S607"]
 "app/indicators/d4_lppls.py" = ["S603", "S607"]
+# The verifier runs `git` from a fixed argv under a curated hermetic
+# environment (verifier.gitexec); the whole module's purpose is controlled
+# subprocess execution, so the partial-path/untrusted-input heuristics do
+# not apply. Argv is always constant; no shell; env is a whitelist.
+"scripts/verifier/gitexec.py" = ["S603", "S607"]
+"scripts/verifier/gitdiff.py" = ["S603", "S607"]
 # Defensive type-narrowing assert for mypy; not a runtime control.
 "app/db.py" = ["S101"]
 

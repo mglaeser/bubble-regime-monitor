@@ -36,6 +36,24 @@ def _have(sha: str) -> bool:
                           cwd=ROOT, capture_output=True).returncode == 0
 
 
+# MC1-F15: in a full-history hosted gate the PR25/PR23 fixture commits are
+# REQUIRED evidence — a missing object must FAIL, not skip. The env var is set
+# by the future workflow (fetch-depth: 0); locally the tests skip-and-report.
+_REQUIRE_FULL_HISTORY = __import__("os").environ.get(
+    "VERIFIER_REQUIRE_FULL_HISTORY") == "1"
+
+
+def _require_or_skip(*shas):
+    missing = [s for s in shas if not _have(s)]
+    if not missing:
+        return
+    if _REQUIRE_FULL_HISTORY:
+        raise AssertionError(
+            f"REQUIRED fixture object(s) absent under full-history CI: "
+            f"{[s[:12] for s in missing]} — the checkout is not fetch-depth 0")
+    pytest.skip(f"optional local history: {[s[:12] for s in missing]} absent")
+
+
 def _smoke(base: str, head: str):
     """Atomize every changed file in base..head; return per-file results.
 
@@ -57,8 +75,7 @@ def _smoke(base: str, head: str):
 
 class TestExplicitShaSmoke:
     def test_pr25_range_is_exactly_its_three_files(self):
-        if not (_have(PR25_BASE) and _have(PR25_HEAD)):
-            pytest.skip("PR25 range objects not present in this clone")
+        _require_or_skip(PR25_BASE, PR25_HEAD)
         files, results = _smoke(PR25_BASE, PR25_HEAD)
         # the changed-file universe is git's, not ours — assert exact equality
         assert {f.path for f in files} == PR25_FILES
@@ -69,8 +86,7 @@ class TestExplicitShaSmoke:
             assert result.blocking_code is None
 
     def test_current_branch_range_matches_git_name_status_exactly(self):
-        if not _have(PR25_HEAD):
-            pytest.skip("main base object not present in this clone")
+        _require_or_skip(PR25_HEAD)
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                               capture_output=True, text=True).stdout.strip()
         files, results = _smoke(PR25_HEAD, head)

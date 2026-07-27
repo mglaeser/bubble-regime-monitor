@@ -72,35 +72,10 @@ class TestRepositoryChangeIdentity:
         assert "file_diff" not in src
 
 
-class TestReviewableContentIdentity:
-    def _files(self, png_oid=O2, body=b"+x\n"):
-        return [
-            identity.reviewable_file_record(
-                ch(), P.INCLUDED, body_sha256=sha256_hex(body)),
-            identity.reviewable_file_record(
-                ch(path=b"img/x.png", new_oid=png_oid, ordinal=1),
-                P.PRIVACY_EXCLUDED, body_sha256=None),
-        ]
-
-    def test_excluded_only_change_leaves_reviewable_identity_unchanged(self):
-        a = identity.reviewable_content_sha256(BASE, HEAD, self._files(png_oid=O2))
-        b = identity.reviewable_content_sha256(BASE, HEAD, self._files(png_oid=O3))
-        assert a == b
-
-    def test_included_body_change_moves_both_identities(self):
-        a = identity.reviewable_content_sha256(BASE, HEAD, self._files(body=b"+x\n"))
-        b = identity.reviewable_content_sha256(BASE, HEAD, self._files(body=b"+y\n"))
-        assert a != b
-
-    def test_exclusion_marker_itself_is_bound(self):
-        # The SAME file flipping from included to excluded must change the
-        # reviewable identity even if no body hash is present either way.
-        inc = [identity.reviewable_file_record(ch(), P.INCLUDED,
-                                               body_sha256=sha256_hex(b""))]
-        exc = [identity.reviewable_file_record(ch(), P.PRIVACY_EXCLUDED,
-                                               body_sha256=None)]
-        assert (identity.reviewable_content_sha256(BASE, HEAD, inc)
-                != identity.reviewable_content_sha256(BASE, HEAD, exc))
+class TestReviewableFileRecord:
+    """The provider-visible SEMANTICS (no endpoint SHAs, stability under
+    excluded-only change) are proven in test_verifier_dispositions.py; here
+    we pin only the record's own precondition."""
 
     def test_body_hash_required_iff_included(self):
         with pytest.raises(ValueError):

@@ -47,7 +47,9 @@ class TestIsCodeHardening:
         assert not C.is_code(b"docs/README")
 
     def test_known_non_code_dotfiles_stay_non_code(self):
-        for p in (b".gitignore", b".gitattributes", b".dockerignore"):
+        # .gitattributes is now CONTROL-bearing (MC1-F03) and no longer in
+        # the known-non-code set; .gitignore/.dockerignore remain non-code.
+        for p in (b".gitignore", b".dockerignore"):
             assert not C.is_code(p), p
 
     def test_suffix_match_is_case_insensitive(self):

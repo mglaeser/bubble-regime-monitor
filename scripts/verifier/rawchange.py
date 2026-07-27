@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from .canon import b64
 from .errors import DIFF_PARSE_FAILURE, BlockingError
-from .gitdiff import ChangedFile, run_git
+from .gitdiff import DIFF_COMMON, ChangedFile, run_git
 
 _MODE = re.compile(rb"\A[0-7]{6}\Z")
 _OID = re.compile(rb"\A[0-9a-f]{40}\Z")
@@ -133,13 +133,43 @@ def parse_raw_z(raw: bytes) -> list[RawChange]:
             i += 2
         if not path or (two_paths and not orig):
             raise _err("empty_path", record_index=len(out))
+        old_m = old_mode.decode("ascii")
+        new_m = new_mode.decode("ascii")
+        old_o = old_oid.decode("ascii")
+        new_o = new_oid.decode("ascii")
+        _validate_status_semantics(len(out), status, old_m, new_m,
+                                   old_o, new_o)
         out.append(RawChange(
             ordinal=len(out), status=status, score=score,
-            old_mode=old_mode.decode("ascii"),
-            new_mode=new_mode.decode("ascii"),
-            old_oid=old_oid.decode("ascii"), new_oid=new_oid.decode("ascii"),
+            old_mode=old_m, new_mode=new_m, old_oid=old_o, new_oid=new_o,
             path=path, orig_path=orig))
     return out
+
+
+def _validate_status_semantics(index: int, status: str, old_mode: str,
+                               new_mode: str, old_oid: str,
+                               new_oid: str) -> None:
+    """Status-specific mode/OID consistency (MC1-F14).
+
+    Git guarantees these combinations; a record that violates them is
+    malformed or forged and must not become a silently-accepted atom."""
+    old_zero = (old_mode == "000000" and old_oid == ZERO_OID)
+    new_zero = (new_mode == "000000" and new_oid == ZERO_OID)
+    if status == "A":
+        if not old_zero or new_zero:
+            raise _err("add_endpoint_invalid", record_index=index)
+    elif status == "D":
+        if old_zero or not new_zero:
+            raise _err("delete_endpoint_invalid", record_index=index)
+    elif status in ("M", "R", "C"):
+        if old_zero or new_zero:
+            raise _err("modify_endpoint_invalid", record_index=index,
+                       status=status)
+    elif status == "T":
+        if old_zero or new_zero:
+            raise _err("typechange_endpoint_invalid", record_index=index)
+        if old_mode == new_mode:
+            raise _err("typechange_modes_equal", record_index=index)
 
 
 def raw_changes(base_sha: str, head_sha: str, *, cwd=None) -> list[RawChange]:
@@ -148,10 +178,9 @@ def raw_changes(base_sha: str, head_sha: str, *, cwd=None) -> list[RawChange]:
     Rendering flags are pinned explicitly (attack finding C0) so ambient
     git config — diff.renames, diff.orderFile, core.abbrev, color —
     cannot change what two runs of the same plan see."""
-    raw = run_git(["git", "-c", "core.quotePath=true", "diff", "--raw", "-z",
-                   "--no-abbrev", "--no-color", "-O/dev/null",
-                   "--find-renames", base_sha, head_sha],
-                  required=True, cwd=cwd, operation="raw-changes")
+    raw = run_git(["git", "diff", "--raw", "-z", "--no-abbrev",
+                   *DIFF_COMMON, base_sha, head_sha],
+                  cwd=cwd, operation="raw-changes")
     return parse_raw_z(raw)
 
 

@@ -131,18 +131,21 @@ class TestRepositoryState:
         base = _sha(repo, "HEAD~1")
         head = _sha(repo)
         state = repostate.build_repository_state("HEAD~1", "HEAD", cwd=repo)
-        assert state.base_sha == base
+        assert state.target_base_sha == base
         assert state.head_sha == head
-        assert state.merge_base_sha == base
+        assert state.diff_base_sha == base
         assert state.worktree_clean is True
+        assert state.object_format == "sha1"
         rec = state.to_record()
-        assert rec["base_sha"] == base and rec["head_sha"] == head
-        assert len(state.repository_id) == 64
+        assert rec["target_base_sha"] == base and rec["head_sha"] == head
+        assert rec["diff_base_sha"] == base
+        assert state.trusted_repository_id is None
+        assert len(state.repository_lineage_id) == 64
 
-    def test_repository_id_is_root_commit_bound(self, repo):
+    def test_repository_lineage_id_is_root_commit_bound(self, repo):
         head = _sha(repo)
-        rid1 = repostate.repository_identity(head, cwd=repo)
-        rid2 = repostate.repository_identity(_sha(repo, "HEAD~1"), cwd=repo)
+        rid1 = repostate.repository_lineage_id(head, cwd=repo)
+        rid2 = repostate.repository_lineage_id(_sha(repo, "HEAD~1"), cwd=repo)
         assert rid1 == rid2                    # same history, same identity
 
     def test_missing_object_blocks(self, repo):
@@ -161,7 +164,7 @@ class TestSanitizedGitErrors:
     def test_run_git_required_failure_is_sanitized(self, repo):
         with pytest.raises(gitdiff.DiffError) as e:
             gitdiff.run_git(["git", "cat-file", "-e", SECRET],
-                            required=True, cwd=repo, operation="object-probe")
+                            cwd=repo, operation="object-probe")
         text = str(e.value)
         assert SECRET not in text
         assert "object-probe" in text and "stderr_sha256" in text
@@ -171,8 +174,7 @@ class TestSanitizedGitErrors:
             raise OSError(f"exec failed for {SECRET}")
         monkeypatch.setattr(subprocess, "run", boom)
         with pytest.raises(gitdiff.DiffError) as e:
-            gitdiff.run_git(["git", "status"], required=True, cwd=repo,
-                            operation="status")
+            gitdiff.run_git(["git", "status"], cwd=repo, operation="status")
         text = str(e.value)
         assert SECRET not in text and "OSError" in text
 

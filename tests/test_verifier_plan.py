@@ -39,18 +39,30 @@ def _pr25_available():
 
 
 @pytest.fixture(scope="module")
-def pr25_skeleton():
+def clean_clone(tmp_path_factory):
+    """A clean clone of ROOT so worktree_clean is True regardless of the
+    developer's dirty working tree; the reviewed range is historical."""
     if not (_have(PR25_BASE) and _have(PR25_HEAD)):
         pytest.skip("PR25 objects absent from this clone")
-    return plan.build_skeleton(PR25_BASE, PR25_HEAD, cwd=ROOT)
+    dst = tmp_path_factory.mktemp("clone")
+    subprocess.run(["git", "clone", "-q", "--no-local", str(ROOT), str(dst)],
+                   check=True, capture_output=True)
+    return dst
+
+
+@pytest.fixture(scope="module")
+def pr25_skeleton(clean_clone):
+    return plan.build_skeleton(PR25_BASE, PR25_HEAD, cwd=clean_clone)
 
 
 class TestSkeletonShape:
     def test_repository_state_and_counts(self, pr25_skeleton):
         s = pr25_skeleton
         state = s["repository_state"]
-        assert state["base_sha"] == PR25_BASE
+        assert state["target_base_sha"] == PR25_BASE
+        assert state["diff_base_sha"] == PR25_BASE
         assert state["head_sha"] == PR25_HEAD
+        assert state["object_format"] == "sha1"
         assert state["changed_file_count"] == 3
         assert len(s["changes"]) == 3
         assert len(s["files"]) == 3
@@ -58,16 +70,19 @@ class TestSkeletonShape:
     def test_identities_and_root_present(self, pr25_skeleton):
         ids = pr25_skeleton["identities"]
         assert len(ids["repository_change_sha256"]) == 64
-        assert len(ids["reviewable_content_sha256"]) == 64
+        assert len(ids["provider_visible_material_sha256"]) == 64
         assert len(pr25_skeleton["coverage"]["structural_root"]) == 64
 
-    def test_coverage_is_proven_over_all_units(self, pr25_skeleton):
+    def test_dispositions_partition_all_control_atoms(self, pr25_skeleton):
         from verifier import coverage
         s = pr25_skeleton
         all_ids = [a["atom_id"] for a in s["atoms"]]
-        unit_lists = [u["atom_ids"] for u in s["units"]]
-        coverage.prove_exact_coverage(all_ids, s["required_control_atom_ids"],
-                                      unit_lists)
+        model = [u["atom_ids"] for u in s["units"]]
+        gen = ([s["atom_dispositions"]["generated_proof"]]
+               if s["atom_dispositions"]["generated_proof"] else [])
+        blocked = s["atom_dispositions"]["blocked_unreviewable"]
+        coverage.prove_exact_dispositions(
+            all_ids, s["required_control_atom_ids"], model, gen, blocked)
         assert s["coverage"]["atom_count"] == len(all_ids)
         assert s["coverage"]["unit_count"] == len(s["units"])
 
@@ -78,11 +93,16 @@ class TestSkeletonShape:
 
     def test_not_executable_and_pins_unset(self, pr25_skeleton):
         s = pr25_skeleton
-        assert s["executable"] is False
+        assert s["executable"] is False            # always false at stage 1
+        assert s["structurally_clean"] is True     # clean clone, no blocks
         assert s["requires_online_finalization"] is True
-        assert s["policy_pins"], "pin names must be declared"
+        assert len(s["policy_pins"]) == 12, "all 12 pin names must be declared"
         assert all(v is None for v in s["policy_pins"].values())
-        assert s["generated_relationships"] == []
+        assert s["generated_relationships"] == []      # no mandate in PR25
+
+    def test_self_hash_validates(self, pr25_skeleton):
+        from verifier import artifact
+        artifact.validate_and_check_hash(pr25_skeleton)
 
     def test_requested_models_mirror_the_live_panel_defaults(
             self, pr25_skeleton):
@@ -90,21 +110,20 @@ class TestSkeletonShape:
         assert (list(pr25_skeleton["requested_model_ids"])
                 == list(independent_verify.DEFAULT_PANEL_MODELS))
 
-    def test_deterministic_across_builds(self, pr25_skeleton):
-        again = plan.build_skeleton(PR25_BASE, PR25_HEAD, cwd=ROOT)
+    def test_deterministic_across_builds(self, pr25_skeleton, clean_clone):
+        again = plan.build_skeleton(PR25_BASE, PR25_HEAD, cwd=clean_clone)
         assert canonical_json(again) == canonical_json(pr25_skeleton)
 
 
 class TestZeroNetwork:
-    def test_build_succeeds_with_sockets_disabled(self, monkeypatch):
-        _pr25_available()
-
+    def test_build_succeeds_with_sockets_disabled(self, monkeypatch,
+                                                  clean_clone):
         def refuse(*a, **k):
             raise AssertionError("Stage 1 opened a socket")
         monkeypatch.setattr(socket, "socket", refuse)
         monkeypatch.setattr(socket, "create_connection", refuse)
-        built = plan.build_skeleton(PR25_BASE, PR25_HEAD, cwd=ROOT)
-        assert built["executable"] is False
+        built = plan.build_skeleton(PR25_BASE, PR25_HEAD, cwd=clean_clone)
+        assert built["requires_online_finalization"] is True
 
     def test_plan_layer_imports_no_network_modules(self):
         import ast
@@ -112,7 +131,8 @@ class TestZeroNetwork:
                   "socket", "requests", "ssl"}
         for name in ("plan", "units", "splitters", "coverage", "identity",
                      "contentpolicy", "classification", "codeowners",
-                     "rawchange", "repostate", "gitdiff", "atoms", "canon"):
+                     "rawchange", "repostate", "gitdiff", "gitexec",
+                     "generated", "artifact", "atoms", "canon"):
             src = (ROOT / f"scripts/verifier/{name}.py").read_text()
             tree = ast.parse(src)
             for node in ast.walk(tree):
@@ -128,31 +148,51 @@ class TestZeroNetwork:
 
 
 class TestPlanCli:
-    def test_cli_writes_canonical_artifact_without_any_key(self, tmp_path):
-        _pr25_available()
+    def test_cli_writes_canonical_artifact_without_any_key(self, tmp_path,
+                                                           clean_clone):
         out = tmp_path / "skeleton.json"
         env = {"PATH": "/usr/bin:/bin",
                "HOME": "/nonexistent"}          # no API key of any kind
         proc = subprocess.run(
-            [sys.executable, "scripts/independent_verify.py", "--plan",
+            [sys.executable,
+             str(ROOT / "scripts/independent_verify.py"), "--plan",
              "--base", PR25_BASE, "--head", PR25_HEAD,
              "--output", str(out)],
-            cwd=ROOT, capture_output=True, text=True, env=env, timeout=300)
+            cwd=clean_clone, capture_output=True, text=True, env=env,
+            timeout=300)
         assert proc.returncode == 0, proc.stderr[-2000:]
         data = json.loads(out.read_bytes())
         assert data["repository_state"]["head_sha"] == PR25_HEAD
-        # canonical bytes on disk, not pretty-printed
+        # canonical bytes on disk + self-hash validates
         assert out.read_bytes() == canonical_json(data)
-        stdout = proc.stdout
-        assert "largest file" in stdout
-        assert "units" in stdout
+        from verifier import artifact
+        artifact.validate_and_check_hash(data)
+        assert "largest file" in proc.stdout
+        assert "self-hash" in proc.stdout
 
-    def test_cli_blocks_on_unknown_base(self, tmp_path):
+    def test_cli_blocks_on_unknown_base(self, tmp_path, clean_clone):
         out = tmp_path / "skeleton.json"
         proc = subprocess.run(
-            [sys.executable, "scripts/independent_verify.py", "--plan",
+            [sys.executable,
+             str(ROOT / "scripts/independent_verify.py"), "--plan",
              "--base", "0" * 40, "--head", "HEAD",
              "--output", str(out)],
-            cwd=ROOT, capture_output=True, text=True, timeout=300)
+            cwd=clean_clone, capture_output=True, text=True, timeout=300)
         assert proc.returncode != 0
         assert not out.exists()
+
+    def test_cli_blocked_plan_exits_nonzero_and_no_artifact(self, tmp_path,
+                                                            clean_clone):
+        # A dirty worktree blocks; default (no --write-blocked) writes nothing
+        # and exits nonzero (MC1-F05).
+        (clean_clone / "dirty.txt").write_text("x\n")
+        out = tmp_path / "blocked.json"
+        proc = subprocess.run(
+            [sys.executable,
+             str(ROOT / "scripts/independent_verify.py"), "--plan",
+             "--base", PR25_BASE, "--head", PR25_HEAD,
+             "--output", str(out)],
+            cwd=clean_clone, capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 2
+        assert not out.exists()
+        (clean_clone / "dirty.txt").unlink()

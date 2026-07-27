@@ -62,7 +62,7 @@ class TestConfigIndependence:
                 _git(repo, "config", key, value)
             sk = plan.build_skeleton(base, head, cwd=repo)
             roots.append((sk["coverage"]["structural_root"],
-                          sk["identities"]["reviewable_content_sha256"]))
+                          sk["identities"]["provider_visible_material_sha256"]))
             for key, _value in pairs:
                 _git(repo, "config", "--unset", key)
         return roots

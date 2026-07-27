@@ -17,36 +17,49 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .atoms import SIDE_META, SIDE_NEW, SIDE_OLD, ChangedAtom
-from .canon import b64
+from .canon import b64, sha256_hex
 from .coverage import unit_hash
 from .splitters import split_to_budget
 
-_CONTEXT_CAP = 120
 
+def _context_facts(atoms: tuple[ChangedAtom, ...], content_of) -> dict:
+    """STRUCTURAL facts about where the unit sits — NEVER the raw source
+    text (MC1-F08). The canonical skeleton is safe to upload without any
+    changed-line content; a local display can reconstruct a label from the
+    commit at display time, but nothing here binds or persists source bytes.
 
-def _context_label(atoms: tuple[ChangedAtom, ...], content_of) -> str:
-    """A bounded, display-safe hint of where the unit sits (presentation
-    only). The first new-side line that looks like a heading/definition, else
-    the first line. Control characters are escaped so a content line cannot
-    forge log/table structure."""
-    candidate = b""
+    `context_kind` is a coarse, deterministic classification of the anchor
+    line; `context_sha256`/`context_bytes` identify it without revealing it.
+    """
+    anchor = b""
     for atom in atoms:
         if atom.side != SIDE_NEW:
             continue
         line = content_of(atom)
-        if line.lstrip()[:1] in (b"#", b"@") or line.startswith(
-                (b"def ", b"class ", b"async def ")):
-            candidate = line
+        if (line.lstrip()[:1] in (b"#", b"@")
+                or line.startswith((b"def ", b"class ", b"async def "))):
+            anchor = line
             break
-        if not candidate:
-            candidate = line
-    text = candidate.decode("utf-8", errors="surrogateescape")
-    safe = "".join(
-        ch if (ch.isprintable() and ch != "\\") else
-        ("\\\\" if ch == "\\" else f"\\x{ord(ch) & 0xFF:02x}")
-        for ch in text
-    )
-    return safe[:_CONTEXT_CAP]
+        if not anchor:
+            anchor = line
+    stripped = anchor.lstrip()
+    if stripped[:1] == b"#":
+        kind = "markdown_heading"
+    elif stripped.startswith((b"def ", b"async def ")):
+        kind = "python_function"
+    elif stripped.startswith(b"class "):
+        kind = "python_class"
+    elif stripped[:1] == b"@":
+        kind = "python_decorator"
+    elif anchor:
+        kind = "line"
+    else:
+        kind = "none"
+    return {
+        "context_kind": kind,
+        "context_bytes": len(anchor),
+        "context_sha256": sha256_hex(anchor),
+    }
 
 
 def _line_range(atoms, side) -> tuple[int, int] | None:
@@ -68,7 +81,7 @@ class CandidateUnit:
     old_line_range: tuple[int, int] | None
     new_line_range: tuple[int, int] | None
     meta_atom_count: int
-    context_label: str
+    context_facts: dict
     strategies: tuple[str, ...]
     depth: int
     changed_content_bytes: int
@@ -102,7 +115,7 @@ def build_file_units(*, path: bytes, orig_path: bytes | None,
             new_line_range=_line_range(group.atoms, SIDE_NEW),
             meta_atom_count=sum(1 for a in group.atoms
                                 if a.side == SIDE_META),
-            context_label=_context_label(group.atoms, content_of),
+            context_facts=_context_facts(group.atoms, content_of),
             strategies=group.strategies,
             depth=group.depth,
             changed_content_bytes=sum(len(content_of(a))
@@ -114,8 +127,9 @@ def build_file_units(*, path: bytes, orig_path: bytes | None,
 
 def unit_record(unit: CandidateUnit, *, base_sha: str, head_sha: str,
                 repository_change_sha256: str,
-                reviewable_content_sha256: str,
-                classification: dict) -> dict:
+                provider_visible_material_sha256: str,
+                classification: dict,
+                disposition: str = "MODEL_REVIEW") -> dict:
     record = {
         "path_bytes_b64": b64(unit.path),
         "original_path_bytes_b64": (b64(unit.orig_path)
@@ -130,30 +144,17 @@ def unit_record(unit: CandidateUnit, *, base_sha: str, head_sha: str,
         "new_line_range": list(unit.new_line_range)
         if unit.new_line_range else None,
         "meta_atom_count": unit.meta_atom_count,
-        "context_label": unit.context_label,
+        "context_facts": unit.context_facts,
         "split_strategies": list(unit.strategies),
         "split_depth": unit.depth,
         "changed_content_bytes": unit.changed_content_bytes,
         "oversized_single_atom": unit.oversized_single_atom,
+        "disposition": disposition,
         "base_sha": base_sha,
         "head_sha": head_sha,
         "repository_change_sha256": repository_change_sha256,
-        "reviewable_content_sha256": reviewable_content_sha256,
+        "provider_visible_material_sha256": provider_visible_material_sha256,
         "classification": classification,
     }
     record["unit_sha256"] = unit_hash(record)
     return record
-
-
-def ordered_unit_records(units: list[CandidateUnit], *, base_sha: str,
-                         head_sha: str, repository_change_sha256: str,
-                         reviewable_content_sha256: str,
-                         classification: dict) -> list[dict]:
-    records = [unit_record(u, base_sha=base_sha, head_sha=head_sha,
-                           repository_change_sha256=repository_change_sha256,
-                           reviewable_content_sha256=reviewable_content_sha256,
-                           classification=classification)
-               for u in units]
-    records.sort(key=lambda r: (r["min_patch_ordinal"],
-                                r["max_patch_ordinal"], r["unit_sha256"]))
-    return records
