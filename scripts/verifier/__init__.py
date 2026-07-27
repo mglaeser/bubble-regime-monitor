@@ -8,9 +8,16 @@ review-size deadlock must not itself create one.
 
 Layering, strictly one direction:
 
-    gitdiff  -> atoms -> splitters -> coverage -> plan
-    classification, generated              (leaf helpers)
-    capabilities -> provider -> cost -> executor -> evidence
+    canon -> errors -> contentpolicy -> gitdiff -> rawchange
+                                     -> repostate, codeowners
+    gitdiff -> classification
+    canon   -> atoms -> splitters -> units
+    rawchange + contentpolicy -> identity
+    coverage                            (pure proof, canon only)
+    everything above -> plan            (Stage 1)
+    capabilities -> provider -> cost -> executor -> evidence   (Cycle 3+)
 
-`plan` (Stage 1) is STRICTLY ZERO-NETWORK. Only `provider` may open a socket.
+`plan` (Stage 1) is STRICTLY ZERO-NETWORK — no socket, no HTTP client, no
+key read anywhere in this package; enforced by AST test. Only the future
+`provider` module may open a socket.
 """

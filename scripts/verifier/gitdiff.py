@@ -17,19 +17,22 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+from .contentpolicy import UNION_EXCLUDE_EXTS
+
 GIT_TIMEOUT_SECONDS = 120
 
 # Privacy-excluded CONTENT classes. These never suppress a path from the
 # authoritative changed-file list (round-4 panel finding: filtering the list
 # let an excluded-only PR return an empty diff and auto-green with zero
 # votes) — they suppress only the BODY.
-EXCLUDE_EXTS = (
-    "webp", "png", "jpg", "jpeg", "gif", "ico", "svg", "avif", "bmp", "tiff",
-    "pdf", "zip", "gz", "tar", "whl", "so", "dylib", "dll", "woff", "woff2",
-    "ttf", "eot", "mp4", "mov", "mp3", "wav", "parquet", "db", "sqlite",
-)
+#
+# B2: the extension list is OWNED by verifier.contentpolicy (the union of
+# every prior exclusion); these pathspecs are the defense-in-depth twin of
+# that policy, derived from the same constant so the two layers can never
+# disagree about what is excluded.
 EXCLUDES: tuple[bytes, ...] = (b":(exclude,icase,glob)data/**",) + tuple(
-    b":(exclude,icase,glob)**/*." + e.encode("ascii") for e in EXCLUDE_EXTS
+    b":(exclude,icase,glob)**/*." + e.encode("ascii")
+    for e in UNION_EXCLUDE_EXTS
 )
 
 

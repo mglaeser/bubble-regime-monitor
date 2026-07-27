@@ -636,6 +636,13 @@ def verify_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
 
 
 def main() -> int:
+    if "--plan" in sys.argv:
+        # Stage-1 structural planning (verifier package): STRICTLY zero
+        # network, no key read, no panel involvement. Dispatched before any
+        # key/endpoint logic so `--plan` can never depend on either.
+        from verifier import plan as _plan
+        return _plan.main(sys.argv[1:])
+
     if "--selftest" in sys.argv:
         selftest()
         return 0
