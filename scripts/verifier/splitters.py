@@ -218,6 +218,10 @@ def split_to_budget(path: bytes, atoms: list[ChangedAtom], content_of,
     midpoint is the terminal fallback. Every division is partition-checked
     at the moment it happens. Termination: every division produces >=2
     non-empty strictly-smaller groups, and a single atom is never divided."""
+    if not atoms:
+        return []                    # no atoms, no groups (finding C2): an
+    #                                  atomless SplitGroup would become a
+    #                                  vacuous unit downstream
     out: list[SplitGroup] = []
 
     def size_of(group: list[ChangedAtom]) -> int:
@@ -254,6 +258,12 @@ def assert_partition(original: list[ChangedAtom],
 
     Checked here, at the moment of division, so the failure is attributed to
     the splitter rather than surfacing later as an unexplained coverage gap."""
+    if any(not g for g in groups):
+        # An empty group is a no-progress division: recursing on it would
+        # end in RecursionError instead of an attributed failure (attack
+        # finding C1), and a persisted empty group would be a vacuous
+        # "reviewed" unit.
+        raise AssertionError("splitter produced an empty group")
     flat = [a.atom_id for g in groups for a in g]
     if len(flat) != len(set(flat)):
         raise AssertionError("splitter produced a duplicated atom")

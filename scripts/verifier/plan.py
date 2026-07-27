@@ -30,7 +30,7 @@ from . import (
     units,
 )
 from .canon import SCHEMA_VERSION, b64, canonical_json, sha256_hex, unb64
-from .errors import WORKTREE_NOT_CLEAN, BlockingError
+from .errors import DIFF_PARSE_FAILURE, WORKTREE_NOT_CLEAN, BlockingError
 from .gitdiff import DiffError, display_path
 
 # Structural per-unit changed-content budget, in BYTES of changed content.
@@ -99,17 +99,28 @@ def build_skeleton(base_ref: str, head_ref: str, *, cwd,
             change.path, change.orig_path)
 
         body = b""
+        parse_failure: str | None = None
         if path_policy == contentpolicy.INCLUDED:
             try:
                 body = gitdiff.file_diff(mb, entry, head=head, cwd=cwd)
             except DiffError:
                 path_policy = contentpolicy.UNAVAILABLE
                 policy_reason = "body_fetch_failed"
+        result = None
         if path_policy == contentpolicy.INCLUDED and body.strip():
-            result = atoms.atomize_file_change(
-                body, path=change.path, original_path=change.orig_path,
-                git_status=entry.status, repository_change_sha256=repo_id)
-        else:
+            # One malformed file must block THAT file, never abort the whole
+            # plan (attack finding C5): the file keeps an obligation via the
+            # unavailable path below, plus an explicit parse-failure block.
+            try:
+                result = atoms.atomize_file_change(
+                    body, path=change.path, original_path=change.orig_path,
+                    git_status=entry.status,
+                    repository_change_sha256=repo_id)
+            except atoms.AtomError as exc:
+                parse_failure = str(exc)
+                path_policy = contentpolicy.UNAVAILABLE
+                policy_reason = "unparseable_body"
+        if result is None:
             unavailable = path_policy == contentpolicy.UNAVAILABLE
             if path_policy == contentpolicy.INCLUDED:
                 # Included by policy but git produced no body: treat as
@@ -124,6 +135,10 @@ def build_skeleton(base_ref: str, head_ref: str, *, cwd,
                 privacy_excluded=path_policy == contentpolicy.PRIVACY_EXCLUDED)
 
         effective = _effective_policy(path_policy, result)
+        if parse_failure is not None:
+            blocking.append({"code": DIFF_PARSE_FAILURE,
+                             "reason": parse_failure,
+                             "path_bytes_b64": b64(change.path)})
         block = contentpolicy.control_block(
             control_bearing=cls.control_bearing, content_policy=effective)
         if block is not None:

@@ -35,6 +35,31 @@ EXCLUDES: tuple[bytes, ...] = (b":(exclude,icase,glob)data/**",) + tuple(
     for e in UNION_EXCLUDE_EXTS
 )
 
+# CONFIG NEUTRALIZATION (attack finding C0): a plan must be a pure function
+# of two commits, but `git diff` output is a function of commits AND ambient
+# config — diff.noprefix moved the structural root, core.abbrev rewrote the
+# index lines, color.ui=always injected ANSI bytes that hard-blocked the
+# parser, diff.orderFile reordered the record universe. Every diff
+# invocation pins the rendering explicitly; config keys without a
+# corresponding flag are pinned with `-c`.
+_GIT = ("git", "-c", "core.quotePath=true")
+_DIFF_COMMON = (
+    "--no-color",
+    "-O/dev/null",                 # defeat diff.orderFile reordering
+    "--find-renames",              # defeat diff.renames=false/copies
+)
+_DIFF_BODY_RENDER = _DIFF_COMMON + (
+    "--no-ext-diff", "--no-textconv",  # external drivers rewrite bodies
+    "--no-relative",
+    "--full-index",                # defeat core.abbrev on index lines
+    "--src-prefix=a/", "--dst-prefix=b/",  # defeat noprefix/mnemonicPrefix
+    "-U3",                         # defeat diff.context
+    "--inter-hunk-context=0",
+    "--diff-algorithm=myers",      # defeat diff.algorithm
+    "--no-indent-heuristic",
+    "--submodule=short",
+)
+
 
 class DiffError(RuntimeError):
     """A REQUIRED git command failed.
@@ -184,7 +209,7 @@ def changed_files(mb: str, *, head: str = "HEAD", cwd=None) -> list[ChangedFile]
     Paths are not content: the privacy excludes protect BODIES and are applied
     only when fetching a diff body. Filtering this list would let an
     excluded-only PR report nothing changed."""
-    raw = run_git(["git", "diff", "--find-renames", "--name-status", "-z",
+    raw = run_git([*_GIT, "diff", *_DIFF_COMMON, "--name-status", "-z",
                    f"{mb}...{head}"],
                   required=True, cwd=cwd, operation="changed-files")
     return parse_name_status_z(raw)
@@ -209,15 +234,25 @@ def file_diff(mb: str, entry: ChangedFile, *, head: str = "HEAD",
     Pathspec magic is one way for attribution to break; this guard does not
     care which way it broke. git reports the names for the very same query,
     NUL separated, so no quoting or escaping is involved in the comparison."""
-    spec = literal_pathspec(entry.path)
-    body = run_git(["git", "diff", "--find-renames", f"{mb}...{head}", "--",
-                    spec, *EXCLUDES],
+    # BOTH endpoints of a rename/copy go into the pathspec (attack finding
+    # C4): with only the destination, git cannot pair the rename, so it
+    # fabricated a whole-file ADD — the deleted old-side lines never became
+    # atoms and a forged new_file_mode obligation was recorded. With both
+    # endpoints the body is the true rename diff. A rename's source has no
+    # record of its own (the rename IS its record), so the name-only
+    # cross-check below still expects exactly [entry.path]; any richer
+    # answer (e.g. a copy whose source was also modified) fails closed.
+    specs = [literal_pathspec(entry.path)]
+    if entry.orig_path is not None:
+        specs.append(literal_pathspec(entry.orig_path))
+    body = run_git([*_GIT, "diff", *_DIFF_BODY_RENDER, f"{mb}...{head}",
+                    "--", *specs, *EXCLUDES],
                    required=True, cwd=cwd, operation="file-diff-body")
     if not body.strip():
         return b""                                 # privacy-excluded content
     names = run_git(
-        ["git", "diff", "--find-renames", "--name-only", "-z",
-         f"{mb}...{head}", "--", spec, *EXCLUDES],
+        [*_GIT, "diff", *_DIFF_COMMON, "--name-only", "-z",
+         f"{mb}...{head}", "--", *specs, *EXCLUDES],
         required=True, cwd=cwd, operation="file-diff-names")
     got = [p for p in names.split(b"\0") if p]
     if got != [entry.path]:
@@ -242,8 +277,8 @@ def patch_bytes(mb: str, *, head: str = "HEAD", cwd=None) -> bytes:
     it blind to excluded-content changes. The complete repository identity is
     identity.repository_change_sha256 over the raw-change records; this
     function remains only for provider-facing presentation needs."""
-    return run_git(["git", "diff", "--find-renames", f"{mb}...{head}", "--",
-                    b".", *EXCLUDES],
+    return run_git([*_GIT, "diff", *_DIFF_BODY_RENDER, f"{mb}...{head}",
+                    "--", b".", *EXCLUDES],
                    required=True, cwd=cwd, operation="patch-bytes")
 
 

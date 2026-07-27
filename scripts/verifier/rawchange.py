@@ -145,9 +145,11 @@ def parse_raw_z(raw: bytes) -> list[RawChange]:
 def raw_changes(base_sha: str, head_sha: str, *, cwd=None) -> list[RawChange]:
     """The authoritative raw universe for base..head (both proven commits).
 
-    `--find-renames` is passed explicitly so a local `diff.renames` config
+    Rendering flags are pinned explicitly (attack finding C0) so ambient
+    git config — diff.renames, diff.orderFile, core.abbrev, color —
     cannot change what two runs of the same plan see."""
-    raw = run_git(["git", "diff", "--raw", "-z", "--no-abbrev",
+    raw = run_git(["git", "-c", "core.quotePath=true", "diff", "--raw", "-z",
+                   "--no-abbrev", "--no-color", "-O/dev/null",
                    "--find-renames", base_sha, head_sha],
                   required=True, cwd=cwd, operation="raw-changes")
     return parse_raw_z(raw)

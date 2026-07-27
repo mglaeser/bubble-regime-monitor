@@ -44,6 +44,7 @@ from .errors import (
 )
 
 __all__ = [
+    "CONTENT_UNAVAILABLE",
     "METADATA_ONLY",
     "PRIVACY_EXCLUDED",
     "REVIEWABLE",
@@ -82,6 +83,11 @@ UNREVIEWABLE_METADATA = "unreviewable_metadata"  # obligation recorded, but the
 #                                            descriptor is a hash marker, not a
 #                                            reviewable statement (B1-01)
 PRIVACY_EXCLUDED = "privacy_excluded"
+CONTENT_UNAVAILABLE = "content_unavailable"  # fetch failure is a DIFFERENT
+#                                            fact than a privacy decision
+#                                            (attack finding C6); an artifact
+#                                            must never say "excluded by
+#                                            policy" about a git error.
 
 import re  # noqa: E402  (grouped after constants for readability)
 
@@ -205,6 +211,23 @@ def _atom_id(repository_change_sha256: str, key: bytes, side: str,
     )
 
 
+def _split_file_sections(diff_body: bytes) -> list[bytes]:
+    """Split a body at `diff --git ` record boundaries (line starts only).
+
+    Hunk lines always begin with one of `+ - space \\`, so a line beginning
+    `diff --git ` can only be a new section header. Used ONLY for status T,
+    the one shape git renders as two sections."""
+    parts: list[bytes] = []
+    start = 0
+    idx = diff_body.find(b"\ndiff --git ")
+    while idx != -1:
+        parts.append(diff_body[start:idx + 1])
+        start = idx + 1
+        idx = diff_body.find(b"\ndiff --git ", start + 1)
+    parts.append(diff_body[start:])
+    return [p for p in parts if p.strip()]
+
+
 def is_binary_diff(diff_body: bytes) -> bool:
     """git emits a `Binary files ... differ` stanza or a `GIT binary patch`
     section instead of hunks."""
@@ -272,6 +295,16 @@ class _Preamble:
             raise _err("conflicting_new_and_deleted_file_modes")
         if self.new_file_mode is not None and self.old_mode is not None:
             raise _err("conflicting_new_file_and_mode_change_records")
+        # Attack finding C4: a body claiming the file is brand-new (or
+        # deleted) while git's own status says rename/copy is a forged or
+        # misattributed body — exactly what the broken destination-only
+        # fetch used to fabricate. The contradiction blocks.
+        if git_status[:1] in ("R", "C") and self.new_file_mode is not None:
+            raise _err("new_file_body_contradicts_rename_status",
+                       git_status=git_status)
+        if git_status[:1] in ("R", "C") and self.deleted_file_mode is not None:
+            raise _err("deleted_file_body_contradicts_rename_status",
+                       git_status=git_status)
 
 
 def _mode_of(raw: bytes, prefix: bytes) -> str:
@@ -737,7 +770,8 @@ def atomize_file_change(diff_body: bytes, *, path: bytes,
             repository_change_sha256=repository_change_sha256)
         content_atoms: list[ChangedAtom] = []
         contents: dict[str, bytes] = {}
-        reviewability = PRIVACY_EXCLUDED
+        reviewability = (PRIVACY_EXCLUDED if privacy_excluded
+                         else CONTENT_UNAVAILABLE)
         blocking_code: str | None = None
         blocking_reason: str | None = None
     elif not diff_body.strip():
@@ -752,16 +786,48 @@ def atomize_file_change(diff_body: bytes, *, path: bytes,
             "review and nothing stated; refusing to synthesize an unblocked "
             "no-op from empty bytes")
     else:
-        parsed = _parse_file_diff(
-            diff_body, path=path, original_path=original_path,
-            git_status=git_status,
-            repository_change_sha256=repository_change_sha256)
+        # A typechange (status T) is the ONE shape git legitimately renders
+        # as TWO `diff --git` sections — the old file's deletion and the new
+        # type's addition (attack finding C5: rejecting the second header
+        # made every symlink<->file PR unplannable as a whole). Both
+        # sections are parsed with the same strict machinery; every other
+        # status still blocks on a second header (misattribution defense).
+        sections = (_split_file_sections(diff_body)
+                    if git_status[:1] == "T" else [diff_body])
+        if len(sections) == 1:
+            parsed = _parse_file_diff(
+                diff_body, path=path, original_path=original_path,
+                git_status=git_status,
+                repository_change_sha256=repository_change_sha256)
+            meta_preamble = parsed.preamble
+            content_atoms, contents = parsed.atoms, parsed.contents
+        elif len(sections) == 2:
+            first = _parse_file_diff(
+                sections[0], path=path, original_path=original_path,
+                git_status=git_status,
+                repository_change_sha256=repository_change_sha256)
+            second = _parse_file_diff(
+                sections[1], path=path, original_path=original_path,
+                git_status=git_status,
+                repository_change_sha256=repository_change_sha256)
+            content_atoms = list(first.atoms) + list(second.atoms)
+            contents = {**first.contents, **second.contents}
+            # One synthetic preamble drives metadata ONCE, so the
+            # type_change obligation is not duplicated per section.
+            meta_preamble = _Preamble(
+                new_file_mode=(second.preamble.new_file_mode
+                               or first.preamble.new_file_mode),
+                deleted_file_mode=(first.preamble.deleted_file_mode
+                                   or second.preamble.deleted_file_mode),
+                binary_kind=(first.preamble.binary_kind
+                             or second.preamble.binary_kind))
+        else:
+            raise _err("typechange_section_count", sections=len(sections))
         meta, meta_contents = _metadata_from_preamble(
-            parsed.preamble, path=path, original_path=original_path,
+            meta_preamble, path=path, original_path=original_path,
             git_status=git_status,
             repository_change_sha256=repository_change_sha256)
-        content_atoms, contents = parsed.atoms, parsed.contents
-        if parsed.preamble.binary_kind is not None:
+        if meta_preamble.binary_kind is not None:
             # FACT only (B1-08 closed): the policy layer decides whether an
             # unreviewable binary blocks, because that depends on whether
             # the file is control-bearing.
