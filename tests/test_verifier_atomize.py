@@ -274,35 +274,52 @@ class TestEveryChangedFileProducesAnObligation:
 class TestReviewabilityIsSeparateFromObligation:
     """A metadata atom proves a change EXISTS; it never proves the content was
     semantically reviewed. `metadata atom exists -> content reviewed` must be
-    impossible to conclude from the result."""
+    impossible to conclude from the result.
 
-    def test_binary_change_records_obligation_and_blocks(self):
+    B1-08 closed (B2): the atom layer records the unreviewability FACT with
+    no block; the control-specific block is the policy layer's decision.
+    Each test here proves BOTH halves, so the end-to-end block still exists —
+    it just lives where classification is known."""
+
+    def _policy_blocks(self, content_policy):
+        from verifier import contentpolicy as P
+        block = P.control_block(control_bearing=True,
+                                content_policy=content_policy)
+        assert block is not None
+        assert block[0] == E.PRIVACY_EXCLUDED_CONTROL
+
+    def test_binary_change_records_obligation_as_fact(self):
         body = b"Binary files a/i.png and b/i.png differ\n"
         result = atomize(body, path=b"i.png", status="M")
         assert "binary_change" in meta_kinds(result)
         assert result.reviewability == A.UNREVIEWABLE_BINARY
-        assert result.blocking_code == E.PRIVACY_EXCLUDED_CONTROL
-        assert result.blocking_reason
+        assert result.blocking_code is None
+        from verifier import contentpolicy as P
+        self._policy_blocks(P.BINARY)
 
     def test_git_binary_patch_is_detected(self):
         body = (b"index 1111111..2222222 100644\nGIT binary patch\n"
                 b"literal 5\nMcmZQzU|?tr\n")
         result = atomize(body, path=b"i.png", status="M")
         assert result.reviewability == A.UNREVIEWABLE_BINARY
-        assert result.blocking_code == E.PRIVACY_EXCLUDED_CONTROL
+        assert result.blocking_code is None
 
-    def test_privacy_excluded_records_obligation_and_blocks(self):
+    def test_privacy_excluded_records_obligation_as_fact(self):
         result = atomize(b"", path=b"data/dump.sql", status="M",
                          privacy_excluded=True)
         assert result.atoms                     # evidence of the change exists
         assert result.reviewability == A.PRIVACY_EXCLUDED
-        assert result.blocking_code == E.PRIVACY_EXCLUDED_CONTROL
+        assert result.blocking_code is None
+        from verifier import contentpolicy as P
+        self._policy_blocks(P.PRIVACY_EXCLUDED)
 
-    def test_content_unavailable_blocks(self):
+    def test_content_unavailable_is_a_fact_policy_blocks_control(self):
         result = atomize(b"", path=b"app/x.py", status="M",
                          content_available=False)
         assert result.atoms
-        assert result.blocking_code == E.PRIVACY_EXCLUDED_CONTROL
+        assert result.blocking_code is None
+        from verifier import contentpolicy as P
+        self._policy_blocks(P.UNAVAILABLE)
 
     def test_binary_with_mode_change_stays_unreviewable(self):
         body = (b"old mode 100644\nnew mode 100755\n"
@@ -310,7 +327,7 @@ class TestReviewabilityIsSeparateFromObligation:
         result = atomize(body, path=b"i.png", status="M")
         assert "mode_change" in meta_kinds(result)
         assert result.reviewability == A.UNREVIEWABLE_BINARY
-        assert result.blocking_code == E.PRIVACY_EXCLUDED_CONTROL
+        assert result.blocking_code is None
 
     def test_ordinary_content_is_reviewable_and_unblocked(self):
         result = atomize(b"@@ -1,1 +1,1 @@\n-a\n+b\n")

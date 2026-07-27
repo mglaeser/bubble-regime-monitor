@@ -40,7 +40,6 @@ from types import MappingProxyType
 from .canon import b64, canonical_json, digest, num, sha256_hex
 from .errors import (
     DIFF_PARSE_FAILURE,
-    PRIVACY_EXCLUDED_CONTROL,
     UNRECOGNIZED_HUNKLESS_CHANGE,
 )
 
@@ -162,11 +161,12 @@ class AtomizationResult:
     so the model payload can never diverge from the identity the coverage
     proof was computed over.
 
-    B1-08 carry-forward (NOT final semantics): `blocking_code` for privacy/
-    binary cases is currently pre-populated with PRIVACY_EXCLUDED_CONTROL even
-    though this layer does not know whether the file is control-bearing. B2
-    will split the FACT (unreviewable) from the POLICY (an unreviewable
-    control blocks) and move the control-specific code to the planner."""
+    Facts vs policy (B1-08, closed in B2): this layer records FACTS —
+    reviewability, atoms, and blocking codes for PARSE-INTEGRITY failures
+    only (an empty body for a reported change, an unrecognised hunkless
+    shape). Whether an unreviewable change BLOCKS is a policy question that
+    depends on classification, which this layer does not know; that decision
+    lives in verifier.contentpolicy.control_block."""
 
     atoms: tuple[ChangedAtom, ...]
     contents: Mapping[str, bytes]
@@ -728,8 +728,9 @@ def atomize_file_change(diff_body: bytes, *, path: bytes,
     if privacy_excluded or not content_available:
         # Content withheld: evidence of the change is still created from the
         # status (rename/copy/type are status-driven), but nothing is parsed
-        # and nothing is reviewed. B1-08: the control-specific code here is a
-        # provisional pre-population; B2 separates fact from policy.
+        # and nothing is reviewed. FACT only (B1-08 closed): whether an
+        # unreviewed change blocks depends on classification, which the
+        # policy layer (contentpolicy.control_block) decides.
         meta, meta_contents = _metadata_from_preamble(
             _Preamble(), path=path, original_path=original_path,
             git_status=git_status,
@@ -737,10 +738,8 @@ def atomize_file_change(diff_body: bytes, *, path: bytes,
         content_atoms: list[ChangedAtom] = []
         contents: dict[str, bytes] = {}
         reviewability = PRIVACY_EXCLUDED
-        blocking_code: str | None = PRIVACY_EXCLUDED_CONTROL
-        blocking_reason: str | None = (
-            "content is privacy-excluded or unavailable; the change is "
-            "recorded as an obligation but its content was reviewed by NOBODY")
+        blocking_code: str | None = None
+        blocking_reason: str | None = None
     elif not diff_body.strip():
         # An empty body for a REPORTED change is malformed input, not a
         # reviewable no-op: git said the file changed and gave us nothing.
@@ -763,12 +762,12 @@ def atomize_file_change(diff_body: bytes, *, path: bytes,
             repository_change_sha256=repository_change_sha256)
         content_atoms, contents = parsed.atoms, parsed.contents
         if parsed.preamble.binary_kind is not None:
+            # FACT only (B1-08 closed): the policy layer decides whether an
+            # unreviewable binary blocks, because that depends on whether
+            # the file is control-bearing.
             reviewability = UNREVIEWABLE_BINARY
-            blocking_code = PRIVACY_EXCLUDED_CONTROL   # B1-08 provisional
-            blocking_reason = (
-                "binary content cannot be line-reviewed; the change is "
-                "recorded as an obligation but its content was reviewed by "
-                "NOBODY")
+            blocking_code = None
+            blocking_reason = None
         elif content_atoms:
             reviewability = REVIEWABLE
             blocking_code = None

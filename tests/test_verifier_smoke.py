@@ -18,8 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from verifier import atoms, gitdiff  # noqa: E402
-from verifier.canon import sha256_hex  # noqa: E402
+from verifier import atoms, gitdiff, identity, rawchange  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,9 +37,14 @@ def _have(sha: str) -> bool:
 
 
 def _smoke(base: str, head: str):
-    """Atomize every changed file in base..head; return per-file results."""
+    """Atomize every changed file in base..head; return per-file results.
+
+    The repository identity is the canonical raw-record identity (B2, 6.7) —
+    never a hash of privacy-filtered patch text."""
     files = gitdiff.changed_files(base, head=head, cwd=ROOT)
-    rsha = sha256_hex(gitdiff.patch_bytes(base, head=head, cwd=ROOT))
+    raw = rawchange.raw_changes(base, head, cwd=ROOT)
+    rawchange.assert_matches_name_status(raw, files)
+    rsha = identity.repository_change_sha256(base, head, raw)
     results = {}
     for entry in files:
         body = gitdiff.file_diff(base, entry, head=head, cwd=ROOT)

@@ -60,31 +60,48 @@ class ChangedFile:
 
 
 def run_git(args: list[str | bytes], *, required: bool = False,
-            cwd: str | os.PathLike[str] | None = None) -> bytes:
+            cwd: str | os.PathLike[str] | None = None,
+            operation: str = "git") -> bytes:
     """Run a git command and return raw stdout BYTES.
 
     `required=True` turns any failure — non-zero exit, timeout, OSError — into
     a blocking DiffError. Output is never decoded here: invalid UTF-8 in a
     diff body or a path must survive to the hashing layer unchanged, and
     `errors="replace"` at this level would corrupt the very bytes whose
-    identity we are about to attest."""
+    identity we are about to attest.
+
+    Errors are SANITIZED (B2): argv contains attacker-influenced path bytes
+    and stderr echoes them back, so neither may appear in an error message.
+    What survives: a repository-owned `operation` label, the failure category,
+    the return code, byte lengths and a sha256 of stderr — enough to
+    correlate with a local reproduction, nothing an attacker wrote."""
     argv = [a if isinstance(a, bytes) else os.fsencode(a) for a in args]
     try:
         proc = subprocess.run(  # noqa: S603 -- fixed git argv from constants; no shell
             argv, capture_output=True, timeout=GIT_TIMEOUT_SECONDS, cwd=cwd)
-    except Exception as exc:                       # timeout, OSError, ...
+    except subprocess.TimeoutExpired as exc:
         if required:
-            raise DiffError(f"git {_argv_head(argv)}: {exc}") from exc
+            raise DiffError(
+                f"category=git_timeout operation={operation} "
+                f"timeout_s={GIT_TIMEOUT_SECONDS}") from exc
+        return b""
+    except Exception as exc:                       # OSError and kin
+        if required:
+            raise DiffError(
+                f"category=git_exec_failure operation={operation} "
+                f"exception_class={type(exc).__name__}") from exc
         return b""
     if required and proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace")[:300]
         raise DiffError(
-            f"git {_argv_head(argv)} exited {proc.returncode}: {err}")
+            f"category=git_nonzero_exit operation={operation} "
+            f"returncode={proc.returncode} stderr_bytes={len(proc.stderr)} "
+            f"stderr_sha256={_sha256_hex(proc.stderr)}")
     return proc.stdout
 
 
-def _argv_head(argv: list[bytes]) -> str:
-    return " ".join(a.decode("utf-8", errors="replace") for a in argv[:4])
+def _sha256_hex(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
 
 
 def base_branch() -> str:
@@ -105,9 +122,11 @@ def merge_base(base_ref: str | None = None, *, cwd=None) -> str:
     fault and must block."""
     ref = base_ref or base_branch()
     out = run_git(["git", "merge-base", f"origin/{ref}", "HEAD"],
-                  required=True, cwd=cwd).decode("ascii", errors="replace").strip()
+                  required=True, cwd=cwd,
+                  operation="merge-base").decode("ascii",
+                                                 errors="replace").strip()
     if not out:
-        raise DiffError(f"empty merge-base for origin/{ref}...HEAD")
+        raise DiffError("category=empty_merge_base operation=merge-base")
     return out
 
 
@@ -162,8 +181,9 @@ def changed_files(mb: str, *, head: str = "HEAD", cwd=None) -> list[ChangedFile]
     Paths are not content: the privacy excludes protect BODIES and are applied
     only when fetching a diff body. Filtering this list would let an
     excluded-only PR report nothing changed."""
-    raw = run_git(["git", "diff", "--name-status", "-z", f"{mb}...{head}"],
-                  required=True, cwd=cwd)
+    raw = run_git(["git", "diff", "--find-renames", "--name-status", "-z",
+                   f"{mb}...{head}"],
+                  required=True, cwd=cwd, operation="changed-files")
     return parse_name_status_z(raw)
 
 
@@ -187,27 +207,41 @@ def file_diff(mb: str, entry: ChangedFile, *, head: str = "HEAD",
     care which way it broke. git reports the names for the very same query,
     NUL separated, so no quoting or escaping is involved in the comparison."""
     spec = literal_pathspec(entry.path)
-    body = run_git(["git", "diff", f"{mb}...{head}", "--", spec, *EXCLUDES],
-                   required=True, cwd=cwd)
+    body = run_git(["git", "diff", "--find-renames", f"{mb}...{head}", "--",
+                    spec, *EXCLUDES],
+                   required=True, cwd=cwd, operation="file-diff-body")
     if not body.strip():
         return b""                                 # privacy-excluded content
     names = run_git(
-        ["git", "diff", "--name-only", "-z", f"{mb}...{head}", "--", spec,
-         *EXCLUDES], required=True, cwd=cwd)
+        ["git", "diff", "--find-renames", "--name-only", "-z",
+         f"{mb}...{head}", "--", spec, *EXCLUDES],
+        required=True, cwd=cwd, operation="file-diff-names")
     got = [p for p in names.split(b"\0") if p]
     if got != [entry.path]:
+        # Identified by count and hash only (B2): both the requested path and
+        # the returned names are attacker-choosable bytes and must not be
+        # echoed into an error message.
+        returned_joined = b"\0".join(got)
         raise DiffError(
-            f"per-file diff for {display_path(entry.path)!r} returned content "
-            f"for {[display_path(g) for g in got]!r} — the body does not belong "
-            "to the path it would be filed under; refusing to present a "
-            "misattributed diff as reviewed")
+            "category=misattributed_file_diff operation=file-diff-names "
+            f"expected_path_sha256={_sha256_hex(entry.path)} "
+            f"returned_count={len(got)} "
+            f"returned_paths_sha256={_sha256_hex(returned_joined)} — the "
+            "body does not belong to the path it would be filed under; "
+            "refusing to present a misattributed diff as reviewed")
     return body
 
 
 def patch_bytes(mb: str, *, head: str = "HEAD", cwd=None) -> bytes:
-    """The whole reviewed patch, used only for the patch identity hash."""
-    return run_git(["git", "diff", f"{mb}...{head}", "--", b".", *EXCLUDES],
-                   required=True, cwd=cwd)
+    """The whole PRIVACY-FILTERED textual patch.
+
+    B2 (mandate 6.7): this is NOT the repository identity — the excludes make
+    it blind to excluded-content changes. The complete repository identity is
+    identity.repository_change_sha256 over the raw-change records; this
+    function remains only for provider-facing presentation needs."""
+    return run_git(["git", "diff", "--find-renames", f"{mb}...{head}", "--",
+                    b".", *EXCLUDES],
+                   required=True, cwd=cwd, operation="patch-bytes")
 
 
 def display_path(path: bytes) -> str:

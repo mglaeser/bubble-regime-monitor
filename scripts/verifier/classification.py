@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import fnmatch
 import os
-from pathlib import Path
+from dataclasses import dataclass
 
-from .gitdiff import ChangedFile, run_git
+from .gitdiff import ChangedFile
 
 # Risk order: lower is reviewed earlier. (Panel finding, PR #23 part 1: the
 # gate itself ranked below tests, so the hash manifest fell out of budget and
@@ -49,15 +49,21 @@ _CODE_SUFFIXES = (
     ".h", ".cc", ".cpp", ".hpp", ".java", ".kt", ".cs", ".php", ".pl", ".lua",
     ".ps1", ".bat", ".cmd", ".tf", ".tfvars", ".nix", ".proto",
     # systemd/init units arm host automation exactly like a script does
-    ".service", ".timer", ".path", ".socket", ".mount", ".target")
+    ".service", ".timer", ".path", ".socket", ".mount", ".target",
+    # git/CI hook payloads (B2: a *.hook file IS the executed script)
+    ".hook")
 
-# Extensionless files are CODE by default (fail-closed): entrypoint scripts,
-# hooks and unit files routinely have no suffix, and misclassifying one hides
-# it from the coverage block. Only these well-known text artefacts are exempt.
-_EXTENSIONLESS_NON_CODE = frozenset({
+# Files that are CODE by default unless positively known otherwise
+# (fail-closed): extensionless entrypoint scripts, hooks and unit files, and
+# DOTFILES — .bashrc/.zshrc/.envrc/.profile are executed by shells and
+# direnv exactly like scripts (B2 fix: the old rule classified every
+# single-dot dotfile as non-code, which hid .bashrc from the coverage
+# block). Only these well-known text artefacts are exempt.
+_KNOWN_NON_CODE = frozenset({
     "LICENSE", "LICENCE", "NOTICE", "AUTHORS", "CONTRIBUTORS", "COPYRIGHT",
     "CHANGELOG", "README", "VERSION", "MANIFEST", ".gitignore",
-    ".gitattributes", ".dockerignore", ".secrets.baseline"})
+    ".gitattributes", ".dockerignore", ".gitkeep", ".mailmap",
+    ".editorconfig"})
 
 _CODE_NAMES = (
     "Makefile", "Dockerfile", "Containerfile", "compose.yml",
@@ -82,8 +88,6 @@ _CONTROL_DATA = ("frozen_methodology.json",
                  "audit/ratchet-baselines.json",
                  ".secrets.baseline")
 
-_CODEOWNERS_PATH = ".github/CODEOWNERS"
-
 # ONE documented exception, carried over rather than silently dropped.
 _CODEOWNERS_EXEMPT = ("audit/03-findings.json",
                       "audit/engagement-status.json",
@@ -105,53 +109,33 @@ def path_risk(path: bytes) -> int:
 
 
 def is_code(path: bytes) -> bool:
+    """Every rule here fails CLOSED: unknown shapes classify as code.
+
+    B2 hardening (mandate 6.5): Dockerfile.prod/Containerfile.ci-style
+    variant names match by case-insensitive prefix (the old exact-name match
+    silently declassified them), and dotfiles default to CODE — .bashrc,
+    .zshrc, .envrc and .profile are executed, and the old rule made every
+    single-dot dotfile non-code."""
     text = as_text(path)
     base = text.rsplit("/", 1)[-1]
+    lowered = base.lower()
     if base in _CODE_NAMES:
         return True
+    if lowered.startswith(("dockerfile", "containerfile")):
+        return True
+    if base in _KNOWN_NON_CODE:
+        return False
     if "." not in base:
-        return base not in _EXTENSIONLESS_NON_CODE
+        return True                                # extensionless: fail closed
     if base.startswith(".") and base.count(".") == 1:
-        return False                               # dotfile, no real suffix
-    return base.lower().endswith(_CODE_SUFFIXES)
+        return True                                # dotfile: fail closed
+    return lowered.endswith(_CODE_SUFFIXES)
 
 
-def _parse_codeowners(raw: str) -> list[str]:
-    out: list[str] = []
-    for line in raw.splitlines():
-        stripped = line.split("#", 1)[0].strip()
-        if not stripped:
-            continue
-        pattern = stripped.split()[0]
-        if pattern:
-            out.append(pattern)
-    return out
-
-
-def _codeowners_at(rev: str | None, *, cwd=None) -> str:
-    if rev is None:
-        try:
-            root = Path(cwd) if cwd else Path.cwd()
-            return (root / _CODEOWNERS_PATH).read_text(errors="replace")
-        except OSError:
-            return ""
-    return run_git(["git", "show", f"{rev}:{_CODEOWNERS_PATH}"],
-                   cwd=cwd).decode("utf-8", errors="replace")
-
-
-def codeowners_patterns(merge_base_rev: str | None, *, cwd=None) -> list[str]:
-    """The UNION of the owner rules at the merge base and at HEAD.
-
-    Reading HEAD alone would let the same change that touches an owner-routed
-    file also DELETE its CODEOWNERS rule, declassifying it in the very diff
-    that needs the protection. Reading the base alone would miss newly
-    protected paths. The union is the safe direction for a coverage gate."""
-    merged: list[str] = []
-    for rev in (merge_base_rev, None):
-        for pattern in _parse_codeowners(_codeowners_at(rev, cwd=cwd)):
-            if pattern not in merged:
-                merged.append(pattern)
-    return merged
+# CODEOWNERS FETCHING lives in verifier.codeowners (B2, mandate 6.4): rules
+# are read from COMMITS via git object queries and unioned base+head. The
+# old working-tree read that lived here is gone — a rules file on disk is
+# not evidence of anything the commits say.
 
 
 def owned_by_codeowners(path: bytes, patterns: list[str]) -> bool:
@@ -180,24 +164,41 @@ def owned_by_codeowners(path: bytes, patterns: list[str]) -> bool:
     return False
 
 
-def is_control_bearing(path: bytes, patterns: list[str]) -> bool:
-    """Files whose UNREVIEWED omission must block, beyond executable code.
+def control_evidence(path: bytes,
+                     patterns: list[str]) -> tuple[bool, list[str], list[str]]:
+    """(control_bearing, reasons, matched_codeowners_rules) for ONE path.
 
-    There is deliberately NO exemption. An earlier revision exempted the
-    oversized operator-supplied mandate text so it could not permanently block
-    the budget; the panel refused that twice, correctly — a hash written by the
-    same change proves bytes, not legitimacy. This package resolves that
-    conflict by SPLITTING oversized files instead of arguing for a carve-out."""
+    There is deliberately NO exemption beyond the documented three. An
+    earlier revision exempted the oversized operator-supplied mandate text so
+    it could not permanently block the budget; the panel refused that twice,
+    correctly — a hash written by the same change proves bytes, not
+    legitimacy. This package resolves that conflict by SPLITTING oversized
+    files instead of arguing for a carve-out."""
     text = as_text(path)
+    reasons: list[str] = []
+    matched: list[str] = []
     if text in _CONTROL_DATA:
-        return True
+        return True, ["control_data"], []
     if text in _CODEOWNERS_EXEMPT:
-        return False
-    return (is_code(path)
-            or text.startswith("governance/")
-            or text.startswith(".github/")
-            or text.rsplit("/", 1)[-1] == "CODEOWNERS"
-            or owned_by_codeowners(path, patterns))
+        return False, ["documented_codeowners_exemption"], []
+    if is_code(path):
+        reasons.append("code")
+    if text.startswith("governance/"):
+        reasons.append("governance_prefix")
+    if text.startswith(".github/"):
+        reasons.append("github_prefix")
+    if text.rsplit("/", 1)[-1] == "CODEOWNERS":
+        reasons.append("codeowners_file_itself")
+    for pattern in patterns:
+        if owned_by_codeowners(path, [pattern]):
+            matched.append(pattern)
+    if matched:
+        reasons.append("codeowners_routed")
+    return bool(reasons), reasons, matched
+
+
+def is_control_bearing(path: bytes, patterns: list[str]) -> bool:
+    return control_evidence(path, patterns)[0]
 
 
 def control_bearing_record(entry: ChangedFile, patterns: list[str]) -> bool:
@@ -215,3 +216,73 @@ def risk_of_record(entry: ChangedFile) -> int:
     if entry.orig_path:
         rank = min(rank, path_risk(entry.orig_path))
     return rank
+
+
+@dataclass(frozen=True)
+class ClassificationRecord:
+    """The classification of one changed record, with its evidence (6.5).
+
+    Both endpoints are classified independently and the EFFECTIVE result is
+    the union / higher-risk side, so a rename can never launder either
+    direction. `reasons` is never empty when `control_bearing` is true —
+    an unexplained control decision cannot be audited."""
+
+    git_status: str
+    new_side: dict
+    old_side: dict | None
+    effective_risk: int
+    control_bearing: bool
+    reasons: tuple[str, ...]
+    matched_codeowners_rules: tuple[str, ...]
+
+    def to_record(self) -> dict:
+        return {
+            "git_status": self.git_status,
+            "new_side": self.new_side,
+            "old_side": self.old_side,
+            "effective_risk": self.effective_risk,
+            "control_bearing": self.control_bearing,
+            "reasons": list(self.reasons),
+            "matched_codeowners_rules": list(self.matched_codeowners_rules),
+        }
+
+
+def _side(path: bytes, patterns: list[str]) -> tuple[dict, bool, list[str], list[str]]:
+    control, reasons, matched = control_evidence(path, patterns)
+    record = {
+        "risk": path_risk(path),
+        "is_code": is_code(path),
+        "control_bearing": control,
+        "reasons": list(reasons),
+        "matched_codeowners_rules": list(matched),
+    }
+    return record, control, reasons, matched
+
+
+def classify_record(entry: ChangedFile,
+                    patterns: list[str]) -> ClassificationRecord:
+    new_rec, new_ctl, new_reasons, new_matched = _side(entry.path, patterns)
+    old_rec = None
+    old_ctl, old_reasons, old_matched = False, [], []
+    if entry.orig_path is not None:
+        old_rec, old_ctl, old_reasons, old_matched = _side(
+            entry.orig_path, patterns)
+    reasons: list[str] = []
+    for source, side_reasons in (("new", new_reasons), ("old", old_reasons)):
+        for reason in side_reasons:
+            tagged = f"{source}:{reason}"
+            if tagged not in reasons:
+                reasons.append(tagged)
+    matched: list[str] = []
+    for rule in (*new_matched, *old_matched):
+        if rule not in matched:
+            matched.append(rule)
+    return ClassificationRecord(
+        git_status=entry.status,
+        new_side=new_rec,
+        old_side=old_rec,
+        effective_risk=risk_of_record(entry),
+        control_bearing=new_ctl or old_ctl,
+        reasons=tuple(reasons),
+        matched_codeowners_rules=tuple(matched),
+    )
