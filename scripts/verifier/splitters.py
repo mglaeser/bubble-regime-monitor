@@ -30,12 +30,22 @@ between units and is presentation only. Changed atoms may never overlap.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from .atoms import SIDE_NEW, ChangedAtom
 
 _MD_HEADING = re.compile(rb"^\s{0,3}#{1,6}\s+\S")
 _PY_TOPLEVEL = re.compile(rb"^(?:@|def\s|class\s|async\s+def\s)")
 _BLANK = re.compile(rb"^\s*$")
+
+# Strategy names recorded on every unit (B3, mandate 6.11) — the preferred
+# order is the mandate's order; the terminal midpoint is always available.
+STRATEGY_MARKDOWN = "markdown_section"
+STRATEGY_PYTHON = "python_symbol"
+STRATEGY_HUNK = "git_hunk"
+STRATEGY_PARAGRAPH = "paragraph"
+STRATEGY_LINE_RUN = "changed_line_run"
+STRATEGY_MIDPOINT = "atom_midpoint"
 
 
 def group_by_hunk(atoms: list[ChangedAtom]) -> list[list[ChangedAtom]]:
@@ -80,10 +90,26 @@ def group_python_symbols(atoms: list[ChangedAtom],
 
     Deliberately a column-0 scan rather than an AST parse: the diff of a
     partially-changed file is not a parseable module, and a parse failure must
-    not disable splitting for the one file that most needs it. Decorators open
-    a group so a decorated definition is not cut from its decorator."""
-    return _group_by_marker(
-        atoms, lambda a: bool(_PY_TOPLEVEL.match(content_of(a))))
+    not disable splitting for the one file that most needs it.
+
+    Decorators stay ATTACHED to the definition they decorate (B3 fix,
+    mandate 6.11): a decorator opens a group only when the previous new-side
+    line was not itself a decorator, so `@retry / @cache / def f` is one
+    group — the old rule opened a group at EVERY marker line, cutting
+    stacked decorators from their definition."""
+    groups: list[list[ChangedAtom]] = []
+    prev_new_was_decorator = False
+    for atom in atoms:
+        line = content_of(atom)
+        is_new = atom.side == SIDE_NEW
+        opens = (is_new and bool(_PY_TOPLEVEL.match(line))
+                 and not prev_new_was_decorator)
+        if opens or not groups:
+            groups.append([])
+        groups[-1].append(atom)
+        if is_new:
+            prev_new_was_decorator = line.startswith(b"@")
+    return [g for g in groups if g]
 
 
 def group_paragraphs(atoms: list[ChangedAtom],
@@ -94,6 +120,32 @@ def group_paragraphs(atoms: list[ChangedAtom],
         groups[-1].append(atom)
         if _BLANK.match(content_of(atom)):
             groups.append([])
+    return [g for g in groups if g]
+
+
+def group_changed_line_runs(atoms: list[ChangedAtom],
+                            ) -> list[list[ChangedAtom]]:
+    """Strategy 5: runs of adjacent changed lines.
+
+    A new group starts when an atom is not line-adjacent to the current run:
+    different hunk, or its side's line number jumps by more than one from
+    the last line seen ON THAT SIDE within the run. A side not yet seen in
+    the run is tolerated, so a paired `-a\\n+b` modification stays one run
+    while two changes separated by untouched context split."""
+    groups: list[list[ChangedAtom]] = []
+    last_line: dict[str, int] = {}
+    last_hunk: str | None = None
+    for atom in atoms:
+        adjacent = (groups
+                    and atom.hunk_id == last_hunk
+                    and (atom.side not in last_line
+                         or atom.line_number <= last_line[atom.side] + 1))
+        if not adjacent:
+            groups.append([])
+            last_line = {}
+        groups[-1].append(atom)
+        last_line[atom.side] = atom.line_number
+        last_hunk = atom.hunk_id
     return [g for g in groups if g]
 
 
@@ -111,6 +163,23 @@ def bisect_atoms(atoms: list[ChangedAtom],
     return atoms[:mid], atoms[mid:]
 
 
+def _strategy_ladder(path: bytes, content_of):
+    """(name, callable) pairs in the mandated preference order for `path`."""
+    lowered = path.lower()
+    ladder: list[tuple[str, object]] = []
+    if lowered.endswith((b".md", b".markdown")):
+        ladder.append((STRATEGY_MARKDOWN,
+                       lambda g: group_markdown_sections(g, content_of)))
+    if lowered.endswith((b".py", b".pyi")):
+        ladder.append((STRATEGY_PYTHON,
+                       lambda g: group_python_symbols(g, content_of)))
+    ladder.append((STRATEGY_HUNK, group_by_hunk))
+    ladder.append((STRATEGY_PARAGRAPH,
+                   lambda g: group_paragraphs(g, content_of)))
+    ladder.append((STRATEGY_LINE_RUN, group_changed_line_runs))
+    return ladder
+
+
 def initial_groups(path: bytes, atoms: list[ChangedAtom],
                    content_of) -> list[list[ChangedAtom]]:
     """The structural first pass: the first strategy that actually divides.
@@ -120,19 +189,63 @@ def initial_groups(path: bytes, atoms: list[ChangedAtom],
     from a hash is not possible by construction."""
     if len(atoms) < 2:
         return [list(atoms)] if atoms else []
-    lowered = path.lower()
-    ordered = []
-    if lowered.endswith((b".md", b".markdown")):
-        ordered.append(lambda: group_markdown_sections(atoms, content_of))
-    if lowered.endswith((b".py", b".pyi")):
-        ordered.append(lambda: group_python_symbols(atoms, content_of))
-    ordered.append(lambda: group_by_hunk(atoms))
-    ordered.append(lambda: group_paragraphs(atoms, content_of))
-    for strategy in ordered:
-        groups = strategy()
+    for _name, strategy in _strategy_ladder(path, content_of):
+        groups = strategy(atoms)
         if len(groups) > 1:
             return groups
     return [list(atoms)]
+
+
+@dataclass(frozen=True)
+class SplitGroup:
+    """One final group with its provenance: which strategies divided it and
+    how deep the recursion went. `oversized_single_atom` marks the one case
+    division cannot help — a single atom over budget — which is recorded,
+    never truncated."""
+
+    atoms: tuple[ChangedAtom, ...]
+    strategies: tuple[str, ...]
+    depth: int
+    oversized_single_atom: bool
+
+
+def split_to_budget(path: bytes, atoms: list[ChangedAtom], content_of,
+                    budget: int) -> list[SplitGroup]:
+    """Recursively divide until every group's changed-content bytes fit.
+
+    Each level re-runs the full strategy ladder on the oversized group and
+    takes the FIRST strategy that actually divides; the deterministic
+    midpoint is the terminal fallback. Every division is partition-checked
+    at the moment it happens. Termination: every division produces >=2
+    non-empty strictly-smaller groups, and a single atom is never divided."""
+    out: list[SplitGroup] = []
+
+    def size_of(group: list[ChangedAtom]) -> int:
+        return sum(len(content_of(a)) for a in group)
+
+    def rec(group: list[ChangedAtom], chain: tuple[str, ...],
+            depth: int) -> None:
+        if size_of(group) <= budget:
+            out.append(SplitGroup(tuple(group), chain, depth, False))
+            return
+        if len(group) == 1:
+            out.append(SplitGroup(tuple(group), chain, depth, True))
+            return
+        for name, strategy in _strategy_ladder(path, content_of):
+            subgroups = strategy(group)
+            if len(subgroups) > 1:
+                assert_partition(group, subgroups)
+                for sub in subgroups:
+                    rec(sub, (*chain, name), depth + 1)
+                return
+        halves = bisect_atoms(group)
+        assert halves is not None                  # len(group) >= 2 here
+        assert_partition(group, list(halves))
+        for half in halves:
+            rec(list(half), (*chain, STRATEGY_MIDPOINT), depth + 1)
+
+    rec(list(atoms), (), 0)
+    return out
 
 
 def assert_partition(original: list[ChangedAtom],

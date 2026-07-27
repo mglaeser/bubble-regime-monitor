@@ -25,6 +25,7 @@ from .errors import (
     DUPLICATE_RANGE_COVERAGE,
     INCOMPLETE_RANGE_COVERAGE,
     OVERLAPPING_RANGE_COVERAGE,
+    UNKNOWN_ATOM_REFERENCE,
     BlockingError,
 )
 
@@ -45,76 +46,95 @@ class CoverageProof:
         }
 
 
-def prove_partition(required_atom_ids: list[str],
-                    unit_atom_id_lists: list[list[str]]) -> None:
-    """Raise BlockingError unless the units exactly partition the atoms.
+def prove_exact_coverage(all_patch_atom_ids: list[str],
+                         required_control_atom_ids: list[str],
+                         unit_atom_id_lists: list[list[str]]) -> None:
+    """Raise BlockingError unless the units cover exactly what they claim.
 
-    Order of checks matters for the error message only; all three are fatal.
-    `required_atom_ids` is the CONTROL-BEARING atom set — non-control files may
-    follow a separate documented policy, but no changed control atom may be
-    absent, and the caller decides that set, not this function."""
-    required = set(required_atom_ids)
-    if len(required) != len(required_atom_ids):
+    Three inputs, three distinct failures (B3, mandate 6.10):
+
+      * a unit id absent from `all_patch_atom_ids` — or a control id absent
+        from it — is UNKNOWN_ATOM_REFERENCE: someone is proving coverage of
+        an atom this patch does not contain;
+      * a control atom in no unit is INCOMPLETE (unreviewed gate content);
+      * any atom in two units, or twice in one, breaks the partition —
+        "every atom reviewed exactly once" was never proven.
+
+    Non-control atoms may legitimately appear in units (a mixed file's unit
+    reviews everything it contains); they are simply not REQUIRED."""
+    universe = set(all_patch_atom_ids)
+    if len(universe) != len(all_patch_atom_ids):
         raise BlockingError(
             DUPLICATE_RANGE_COVERAGE,
-            "the required atom set itself contains duplicate ids — the atom "
-            "identity scheme is broken and coverage cannot be proven")
+            "the patch atom universe itself contains duplicate ids — the "
+            "atom identity scheme is broken and coverage cannot be proven")
+    required = set(required_control_atom_ids)
+    if len(required) != len(required_control_atom_ids):
+        raise BlockingError(
+            DUPLICATE_RANGE_COVERAGE,
+            "the required control atom set contains duplicate ids — the "
+            "atom identity scheme is broken and coverage cannot be proven")
+    ghost_required = required - universe
+    if ghost_required:
+        raise BlockingError(
+            UNKNOWN_ATOM_REFERENCE,
+            f"{len(ghost_required)} required control atom id(s) are not in "
+            "this patch's atom universe — the control set references atoms "
+            "the patch does not contain, so the proof would be over ghosts")
 
     seen: set[str] = set()
     duplicated: set[str] = set()
+    unknown: set[str] = set()
     for ids in unit_atom_id_lists:
         as_set = set(ids)
         if len(as_set) != len(ids):
             raise BlockingError(
                 DUPLICATE_RANGE_COVERAGE,
                 "a review unit lists the same changed atom twice")
-        overlap = seen & as_set
-        if overlap:
-            duplicated |= overlap
+        unknown |= as_set - universe
+        duplicated |= seen & as_set
         seen |= as_set
+    if unknown:
+        raise BlockingError(
+            UNKNOWN_ATOM_REFERENCE,
+            f"{len(unknown)} review-unit atom id(s) are not in this patch's "
+            "atom universe — a unit cannot review something the patch does "
+            "not contain")
     if duplicated:
         raise BlockingError(
             OVERLAPPING_RANGE_COVERAGE,
-            f"{len(duplicated)} changed atom(s) appear in more than one review "
-            f"unit (e.g. {sorted(duplicated)[0][:16]}…) — a duplicated atom "
-            "means the units are not a partition, so 'every atom reviewed once' "
-            "is not what was proven")
+            f"{len(duplicated)} atom(s) appear in more than one review unit "
+            "— a duplicated atom means the units are not a partition, so "
+            "'every atom reviewed once' is not what was proven")
 
     missing = required - seen
     if missing:
         raise BlockingError(
             INCOMPLETE_RANGE_COVERAGE,
             f"{len(missing)} control-bearing changed atom(s) belong to NO "
-            f"review unit (e.g. {sorted(missing)[0][:16]}…) — unreviewed "
-            "control content must never read as reviewed")
-
-    extra = seen - required
-    if extra:
-        # Not fatal for non-control atoms, which callers may legitimately
-        # include; it IS fatal when an id is unknown entirely, because that
-        # means a unit references an atom this patch does not contain.
-        raise BlockingError(
-            DUPLICATE_RANGE_COVERAGE,
-            f"{len(extra)} review-unit atom id(s) are not in this patch's atom "
-            f"set (e.g. {sorted(extra)[0][:16]}…) — a unit cannot review "
-            "something the patch does not contain")
+            "review unit — unreviewed control content must never read as "
+            "reviewed")
 
 
-def coverage_root(base_sha: str, head_sha: str, patch_sha256: str,
-                  capability_policy_sha256: str,
-                  unit_hashes_in_order: list[str]) -> str:
-    """A deterministic root binding the plan to exact repository state.
+def structural_plan_root(base_sha: str, head_sha: str,
+                         repository_change_sha256: str,
+                         reviewable_content_sha256: str,
+                         unit_hashes_in_order: list[str]) -> str:
+    """The Stage-1 deterministic root binding the structural plan.
 
-    A Merkle tree is unnecessary here; a domain-separated digest over the
-    canonically ordered unit hashes is sufficient and much easier to
-    re-derive. Reordering the units changes the root, which is the point: the
-    order is part of what was proven."""
+    Binds BOTH identities (B2, mandate 6.7): the raw-record repository
+    identity so an excluded-content change still invalidates the plan, and
+    the reviewable-content identity so provider-visible drift does too. A
+    Merkle tree is unnecessary; a domain-separated digest over the ordered
+    unit hashes re-derives trivially, and reordering the units changes the
+    root — the order is part of what was proven. The capability-policy hash
+    joins in Cycle 3 under a new label; this label is structural-only."""
     return digest(
-        b"review-plan-v1",
+        b"structural-plan-v1",
         base_sha.encode("ascii"),
         head_sha.encode("ascii"),
-        patch_sha256.encode("ascii"),
-        capability_policy_sha256.encode("ascii"),
+        repository_change_sha256.encode("ascii"),
+        reviewable_content_sha256.encode("ascii"),
         num(len(unit_hashes_in_order)),
         *[h.encode("ascii") for h in unit_hashes_in_order],
     )
