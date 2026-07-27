@@ -25,7 +25,7 @@ from verifier.errors import (  # noqa: E402
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-SECRET = "sk-proj-abcdef123456"
+SECRET = "sk-proj-abcdef123456"  # pragma: allowlist secret
 
 
 def _git(cwd, *args, env_extra=None):

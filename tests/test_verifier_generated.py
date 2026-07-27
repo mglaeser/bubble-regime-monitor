@@ -24,14 +24,14 @@ from verifier.errors import (  # noqa: E402
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-PR23_HEAD = "a9062aa656a5a6f3dbe5991d16ce9c218aad0454"
-PR23_BASE = "92552612af6b274be2196f85aeb2ff78efcfe06e"
+PR23_HEAD = "a9062aa656a5a6f3dbe5991d16ce9c218aad0454"  # pragma: allowlist secret
+PR23_BASE = "92552612af6b274be2196f85aeb2ff78efcfe06e"  # pragma: allowlist secret
 
 # Pinned from the frozen commit (test_verifier_generated is the second
 # independent witness of these constants).
-HEADER_SHA = "4ede45fe4dece3a8d0ae9b6bbcd33d4a30c41f2fa3f85602e3999ea6298f4da1"
-COMBINED_SHA = "66b695183852ae03522713e34e2e78f343e3c93ac3b56437441290cbb73d94e6"
-PART1_SHA = "e649ea7ccb4f1bd495b9a7ab2e0a40476824a63da3507b6e33d529dcf2f90742"
+HEADER_SHA = "4ede45fe4dece3a8d0ae9b6bbcd33d4a30c41f2fa3f85602e3999ea6298f4da1"  # pragma: allowlist secret
+COMBINED_SHA = "66b695183852ae03522713e34e2e78f343e3c93ac3b56437441290cbb73d94e6"  # pragma: allowlist secret
+PART1_SHA = "e649ea7ccb4f1bd495b9a7ab2e0a40476824a63da3507b6e33d529dcf2f90742"  # pragma: allowlist secret
 
 
 def _have(sha):

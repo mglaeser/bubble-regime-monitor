@@ -22,8 +22,8 @@ from verifier import atoms, gitdiff, identity, rawchange  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
-PR25_BASE = "75a093de45f73169072837c7c062fab421caaf8b"
-PR25_HEAD = "b08844a0755710035d62830faa84902d9d85d3fe"
+PR25_BASE = "75a093de45f73169072837c7c062fab421caaf8b"  # pragma: allowlist secret
+PR25_HEAD = "b08844a0755710035d62830faa84902d9d85d3fe"  # pragma: allowlist secret
 PR25_FILES = {
     b".github/workflows/openai-verifier-capability-probe.yml",
     b"docs/VERIFIER_CAPABILITY_PROBE.md",
