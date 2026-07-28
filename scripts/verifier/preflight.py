@@ -24,6 +24,7 @@ evidence so no reader mistakes a pass for a guarantee.
 from __future__ import annotations
 
 import base64
+import json
 import math
 import re
 
@@ -137,14 +138,21 @@ def scan_text(text: str, *, allowlist: frozenset[str] = frozenset(),
     # value: the sweeps below tokenize differently (the base64 sweep excludes
     # '-', so it sees only the tail of "sk-proj-…"), and a substring of a
     # reviewed fixture is still that reviewed fixture.
+    #
+    # Both the literal AND its JSON-escaped rendering are cleared. The text
+    # scanned here is the exact request body, where a reviewed source literal
+    # appears escaped ('"' as '\"'); an operator reviews the literal, and
+    # escaping it for transport does not make it a different string.
     cleared: list[tuple[int, int]] = []
     for entry in allowlist:
         if not entry:
             continue
-        at = text.find(entry)
-        while at != -1:
-            cleared.append((at, at + len(entry)))
-            at = text.find(entry, at + 1)
+        forms = {entry, json.dumps(entry)[1:-1]}
+        for form in forms:
+            at = text.find(form)
+            while at != -1:
+                cleared.append((at, at + len(form)))
+                at = text.find(form, at + 1)
 
     def _covered(start: int) -> bool:
         return any(f["offset"] <= start < f["offset"] + f["length"]
