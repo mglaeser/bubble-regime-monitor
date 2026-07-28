@@ -196,8 +196,8 @@ class TestSecretPreflight:
         "sk-proj-abcdef1234567890abcdef",          # pragma: allowlist secret
         "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",    # pragma: allowlist secret
         "AKIAIOSFODNN7EXAMPLE",                    # pragma: allowlist secret
-        "-----BEGIN RSA PRIVATE KEY-----",
-        "postgres://user:hunter2xyz@db.internal/app",
+        "-----BEGIN RSA PRIVATE KEY-----",   # pragma: allowlist secret
+        "postgres://user:hunter2xyz@db.internal/app",  # pragma: allowlist secret
         "Authorization: Bearer abcdefghijklmnop",  # pragma: allowlist secret
     ])
     def test_planted_secret_blocks_before_any_call(self, planted):
