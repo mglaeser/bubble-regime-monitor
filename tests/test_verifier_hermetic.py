@@ -26,6 +26,8 @@ from verifier.errors import (  # noqa: E402
     BlockingError,
 )
 
+pytestmark = pytest.mark.filterwarnings("ignore")
+
 
 def _git(cwd, *args):
     env = dict(os.environ)
@@ -95,22 +97,47 @@ class TestEnvironmentIsCurated:
         assert env["LC_ALL"] == "C"
 
 
-class TestRepoConfigIsNeutralized:
+class TestUnsafeLocalConfigBlocks:
+    """MC2-F06: .git/config is INSIDE the repository and survives the curated
+    environment, so any local key that can reshape diff output, attributes or
+    object resolution blocks hermetic planning outright."""
+
     @pytest.mark.parametrize("key,value", [
         ("diff.renameLimit", "1"),
         ("diff.renames", "false"),
         ("diff.suppressBlankEmpty", "true"),
-        ("core.bigFileThreshold", "1"),
         ("diff.external", "/bin/false"),
+        ("diff.python.binary", "true"),        # named driver: forces binary
+        ("diff.python.xfuncname", "^X"),       # named driver: hunk headers
+        ("diff.ignoreSubmodules", "all"),
+        ("diff.orderFile", "reorder.txt"),
+        ("diff.noprefix", "true"),
+        ("core.bigFileThreshold", "1"),
+        ("core.abbrev", "16"),
+        ("core.attributesFile", "/tmp/attrs"),
+        ("core.fsmonitor", "/bin/true"),
+        ("include.path", "/tmp/other-config"),
     ])
-    def test_repo_config_cannot_move_the_root(self, repo, key, value):
-        baseline, _ = _root(repo)
+    def test_unsafe_local_key_blocks(self, repo, key, value):
+        _root(repo)                               # clean baseline works
         _git(repo, "config", key, value)
-        attacked, _ = _root(repo)
-        assert attacked == baseline, key
+        with pytest.raises(BlockingError) as e:
+            _root(repo)
+        assert e.value.code == GIT_EXECUTION_UNSAFE
+        # key NAMES are hashed, never echoed (a value can hold a credential)
+        assert key.lower() not in str(e.value)
+        if len(value) >= 8:        # short numerics collide with hex digits
+            assert value not in str(e.value)
+        assert "unsafe_key_names_sha256" in str(e.value)
 
-    def test_rename_survives_rename_limit_one(self, repo):
-        _git(repo, "config", "diff.renameLimit", "1")
+    def test_benign_local_config_does_not_block(self, repo):
+        _git(repo, "config", "user.name", "someone")
+        _git(repo, "config", "commit.gpgsign", "false")
+        root, sk = _root(repo)
+        assert sk["git_execution_policy"]["local_config_policy"][
+            "unsafe_key_count"] == 0
+
+    def test_rename_is_detected_without_unsafe_config(self, repo):
         _git(repo, "mv", "gate.py", "moved.py")
         _git(repo, "commit", "-qm", "rename")
         base, head = _sha(repo, "HEAD~1"), _sha(repo)
@@ -250,3 +277,42 @@ class TestWorktreeParsingIsStrict:
 
     def test_object_format_is_recorded_and_sha1_enforced(self, repo):
         assert repostate.object_format(cwd=repo) == "sha1"
+
+
+class TestExecutableAndShallowProvenance:
+    """MC2-F19/F20: probes never conflate error with absence, the executable
+    is pinned, and a shallow clone cannot support historical planning."""
+
+    def test_git_executable_is_absolute_and_bound(self):
+        path = gitexec.git_executable()
+        assert path.startswith("/")
+        assert len(gitexec.git_executable_sha256()) == 64
+
+    def test_capability_cache_is_keyed_by_executable(self):
+        first = gitexec.detect_capabilities()
+        assert gitexec.detect_capabilities() is first
+        assert gitexec.git_executable() in gitexec._CAPS
+
+    def test_probe_failure_is_never_read_as_absence(self, tmp_path):
+        with pytest.raises(BlockingError) as e:
+            gitexec.local_config_policy(cwd=tmp_path)   # not a repository
+        assert e.value.code == GIT_EXECUTION_UNSAFE
+
+    def test_shallow_repository_blocks(self, repo, tmp_path_factory):
+        _git(repo, "commit", "--allow-empty", "-qm", "extra")
+        shallow = tmp_path_factory.mktemp("shallow") / "clone"
+        subprocess.run(["git", "clone", "-q", "--depth", "1",
+                        f"file://{repo}", str(shallow)],
+                       check=True, capture_output=True)
+        assert gitexec.is_shallow_repository(cwd=shallow) is True
+        with pytest.raises(BlockingError) as e:
+            gitexec.assert_hermetic_possible(cwd=shallow)
+        assert e.value.code == GIT_EXECUTION_UNSAFE
+
+    def test_policy_record_binds_executable_and_local_config(self, repo):
+        _root(repo)
+        _, sk = _root(repo)
+        gp = sk["git_execution_policy"]
+        assert len(gp["git_executable_sha256"]) == 64
+        assert gp["local_config_policy"]["unsafe_key_count"] == 0
+        assert gitexec.policy_digest(gp) == gp["policy_sha256"]

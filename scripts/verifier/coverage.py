@@ -210,6 +210,45 @@ def structural_plan_root(base_sha: str, head_sha: str,
     )
 
 
+def atom_set_digest(label: bytes, atom_ids: list[str]) -> str:
+    """A digest over an ORDER-INDEPENDENT atom set (sorted before hashing)."""
+    return digest(label, num(len(atom_ids)),
+                  *[a.encode("ascii") for a in sorted(atom_ids)])
+
+
+def disposition_root_v2(*, diff_base_sha: str, head_sha: str,
+                        repository_change_sha256: str,
+                        provider_visible_material_sha256: str,
+                        git_execution_policy_sha256: str,
+                        required_control_atom_ids: list[str],
+                        model_unit_hashes_in_order: list[str],
+                        generated_relationship_hashes_in_order: list[str],
+                        blocked_atom_ids: list[str]) -> str:
+    """The COMPLETE structural coverage state (MC2-F16).
+
+    The v1 structural root bound only the model units, so a plan's generated
+    and blocked dispositions — the two ways an atom leaves direct review —
+    were not represented in the field named for structural coverage. This
+    root binds the whole disposition state plus the execution policy that
+    produced it."""
+    return digest(
+        b"disposition-root-v2",
+        diff_base_sha.encode("ascii"),
+        head_sha.encode("ascii"),
+        repository_change_sha256.encode("ascii"),
+        provider_visible_material_sha256.encode("ascii"),
+        git_execution_policy_sha256.encode("ascii"),
+        atom_set_digest(b"required-control-v1",
+                        required_control_atom_ids).encode("ascii"),
+        num(len(model_unit_hashes_in_order)),
+        *[h.encode("ascii") for h in model_unit_hashes_in_order],
+        num(len(generated_relationship_hashes_in_order)),
+        *[h.encode("ascii") for h in generated_relationship_hashes_in_order],
+        atom_set_digest(b"blocked-atoms-v1",
+                        blocked_atom_ids).encode("ascii"),
+    )
+
+
 def unit_hash(unit_record: dict) -> str:
     """Hash a unit record with its own hash fields removed.
 

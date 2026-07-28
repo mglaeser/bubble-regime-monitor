@@ -51,16 +51,22 @@ class TestAcceptedShapes:
         assert [c.status for c in got] == ["A", "D", "T"]
         assert [c.ordinal for c in got] == [0, 1, 2]
 
-    def test_rename_and_copy_keep_both_paths(self):
-        raw = (rec("100644", "100644", O1, O2, "R095", b"old.py", b"new.py")
-               + rec("100644", "100644", O1, O2, "C080", b"src.py", b"dup.py"))
-        got = rawchange.parse_raw_z(raw)
-        r, c = got
-        assert (r.status, r.score, r.orig_path, r.path) == ("R", 95, b"old.py", b"new.py")
-        assert (c.status, c.score, c.orig_path, c.path) == ("C", 80, b"src.py", b"dup.py")
+    def test_rename_keeps_both_paths(self):
+        raw = rec("100644", "100644", O1, O2, "R095", b"old.py", b"new.py")
+        r = rawchange.parse_raw_z(raw)[0]
+        assert (r.status, r.score, r.orig_path, r.path) == (
+            "R", 95, b"old.py", b"new.py")
+
+    def test_copy_status_blocks_while_copy_detection_is_disabled(self):
+        # MC2-F08: the pinned diff flags never request copy detection, so a C
+        # record means the flags in force are not the flags we believe.
+        assert rawchange.COPY_DETECTION_ENABLED is False
+        with pytest.raises(BlockingError):
+            rawchange.parse_raw_z(
+                rec("100644", "100644", O1, O2, "C080", b"src.py", b"dup.py"))
 
     def test_score_bounds_inclusive(self):
-        for s in ("R000", "R100", "C000", "C100"):
+        for s in ("R000", "R100"):
             got = rawchange.parse_raw_z(
                 rec("100644", "100644", O1, O2, s, b"a", b"b"))
             assert 0 <= got[0].score <= 100

@@ -25,32 +25,65 @@ from .rawchange import RawChange
 SCHEMA = 1
 
 
-def repository_change_sha256(base_sha: str, head_sha: str,
-                             changes: list[RawChange]) -> str:
+def repository_change_sha256_from_records(base_sha: str, head_sha: str,
+                                          change_records: list[dict]) -> str:
+    """The identity computed from raw-change RECORDS.
+
+    The strict loader recomputes through this entry point so it never has to
+    reconstruct objects it did not build (MC2-F01)."""
     payload = {
         "schema": SCHEMA,
         "base_sha": base_sha,
         "head_sha": head_sha,
-        "changes": [c.to_record() for c in changes],
+        "changes": change_records,
     }
     return digest(b"repository-change-v1", canonical_json(payload))
 
 
+def repository_change_sha256(base_sha: str, head_sha: str,
+                             changes: list[RawChange]) -> str:
+    return repository_change_sha256_from_records(
+        base_sha, head_sha, [c.to_record() for c in changes])
+
+
+GENERATED_PROOF_POLICY = "generated_proof"
+
+
 def reviewable_file_record(change: RawChange, content_policy: str, *,
                            body_sha256: str | None,
-                           generated_covered: bool = False) -> dict:
+                           generated_covered: bool = False,
+                           generated_relationship_proof_sha256: str | None = None,
+                           ) -> dict:
     """One file's provider-visible record. The body hash is REQUIRED for
     included content and FORBIDDEN otherwise — an included file with no body
     proof and an excluded file with a lingering body hash are both lies.
 
-    `generated_covered` marks a file whose changed content is covered by a
-    validated generated-proof relationship rather than shown for review; it
-    is bound so that flipping a file from direct review to generated proof
-    moves the provider-visible identity (MC1-F07)."""
-    if content_policy == INCLUDED and body_sha256 is None:
-        raise ValueError("included content requires a body hash")
-    if content_policy != INCLUDED and body_sha256 is not None:
-        raise ValueError("withheld content must not carry a body hash")
+    GENERATED-COVERED content (MC2-F09): its bytes are NOT transmitted, so
+    it carries content_policy `generated_proof`, NO body digest, and the
+    relationship's proof hash instead. Binding the proof marker rather than
+    the generated body keeps this digest an honest statement of what a
+    provider would be shown, while the repository-change identity and the
+    generated proof continue to bind the actual bytes locally."""
+    if generated_covered:
+        if content_policy != GENERATED_PROOF_POLICY:
+            raise ValueError(
+                "generated-covered content must use the generated_proof policy")
+        if body_sha256 is not None:
+            raise ValueError("generated-covered content carries no body hash")
+        if generated_relationship_proof_sha256 is None:
+            raise ValueError(
+                "generated-covered content requires a relationship proof hash")
+    else:
+        if content_policy == GENERATED_PROOF_POLICY:
+            raise ValueError(
+                "the generated_proof policy requires generated_covered")
+        if generated_relationship_proof_sha256 is not None:
+            raise ValueError(
+                "only generated-covered content carries a relationship proof")
+        if content_policy == INCLUDED and body_sha256 is None:
+            raise ValueError("included content requires a body hash")
+        if content_policy != INCLUDED and body_sha256 is not None:
+            raise ValueError("withheld content must not carry a body hash")
     record = change.to_record()
     # Object IDs and modes are repository facts, not provider-visible
     # material: an excluded file's oid/mode change must not move THIS
@@ -60,6 +93,8 @@ def reviewable_file_record(change: RawChange, content_policy: str, *,
     record["content_policy"] = content_policy
     record["body_sha256"] = body_sha256
     record["generated_covered"] = generated_covered
+    record["generated_relationship_proof_sha256"] = (
+        generated_relationship_proof_sha256)
     return record
 
 

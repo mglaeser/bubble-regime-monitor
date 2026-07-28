@@ -1,14 +1,20 @@
-"""Stage-1 structural planning: the zero-network ReviewSkeleton (6.13).
+"""Stage-1 structural planning: the zero-network ReviewSkeleton.
 
-The skeleton is a pure function of two commits. It contains the complete
-repository-change inventory, mode-aware classification and content policy per
-change, both patch identities, every changed atom, the exact control-atom
-set, the deterministically split candidate units, the generated-derivative
-proofs, an EXACT three-way disposition partition of every required control
-atom, a self-attesting whole-artifact hash, and a transmission inventory of
-what a future Stage 2 would intend to send — and it declares itself
-non-executable: finalization requires provider token counts that only the
-Cycle-3 online stage may fetch.
+The skeleton is a pure function of two commits under a hermetic Git
+execution policy. It carries the complete repository-change inventory,
+mode-aware classification, content policy, both identities, every changed
+atom, the exact control-atom set, the deterministically split candidate
+units, the generated-derivative relationships with their EXACT eligible atom
+coverage, an exact three-way disposition partition, a canonical artifact
+checksum, and a transmission inventory of what a future Stage 2 would intend
+to send.
+
+It is PRIVATE metadata (`publication_class`): raw path bytes, line numbers,
+ownership patterns and blob ids all live here. `artifact.public_summary()`
+derives the publishable view.
+
+It is never executable: finalization requires provider token counts that
+only the Stage-2 online finalizer may fetch.
 
 STRICTLY ZERO NETWORK. Nothing in this module or below it imports a socket,
 an HTTP client, or reads an API key. Enforced by test.
@@ -31,6 +37,7 @@ from . import (
     gitdiff,
     gitexec,
     identity,
+    policy,
     rawchange,
     repostate,
     units,
@@ -44,40 +51,12 @@ from .errors import (
 )
 from .gitdiff import DiffError, display_path
 
-# Per-unit CHANGED-BYTES heuristic (MC1-F11): a structural, PROVISIONAL byte
-# count, NOT a token limit and NOT the legacy prompt cap. Its numeric value
-# equals the panel's historical 50,000-character DIFF-BODY cap only as a
-# convenient starting magnitude; the unit, content and request envelope all
-# differ, so the artifact records that qualification explicitly. Cycle 3
-# replaces it entirely with exact provider token counts.
-STRUCTURAL_UNIT_CHANGED_BYTES_HEURISTIC = 50_000
+STRUCTURAL_UNIT_CHANGED_BYTES_HEURISTIC = (
+    policy.STRUCTURAL_UNIT_CHANGED_BYTES_HEURISTIC)
+REQUESTED_MODEL_IDS = policy.REQUESTED_MODEL_IDS
+POLICY_PIN_NAMES = policy.POLICY_PIN_NAMES
 
-# Mirrors DEFAULT_PANEL_MODELS in scripts/independent_verify.py (asserted
-# equal by test). Placeholder metadata until the Cycle-3 capability policy.
-REQUESTED_MODEL_IDS: tuple[str, ...] = (
-    "gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini")
-
-# The COMPLETE previously-approved policy-PIN inventory (MC1-F12). Names
-# only — every value is None until the operator pins it; Stage 1 invents
-# nothing.
-POLICY_PIN_NAMES: tuple[str, ...] = (
-    "VERIFIER_MAX_OUTPUT_TOKENS",
-    "VERIFIER_CONTEXT_MARGIN_TOKENS",
-    "VERIFIER_COST_CAP_USD",
-    "VERIFIER_REASONING_EFFORT_BY_MODEL",
-    "VERIFIER_MAX_REVIEW_UNITS",
-    "VERIFIER_MAX_GENERATION_CALLS",
-    "VERIFIER_MAX_COUNT_CALLS",
-    "VERIFIER_COUNT_TIMEOUT_SECONDS",
-    "VERIFIER_COUNT_MAX_RETRIES",
-    "VERIFIER_GENERATION_TIMEOUT_SECONDS",
-    "VERIFIER_GENERATION_MAX_RETRIES",
-    "VERIFIER_TOKEN_DRIFT_TOLERANCE",
-)
-
-# Generated-derivative relationships this verifier knows how to prove. The
-# generated PATH is what gets deduplicated; the SOURCE stays model-reviewed.
-_GENERATED_PATHS = {generated.GENERATED_PATH}
+RELATIONSHIP_ID = "rel-mandate-concatenation-1"
 
 
 def _effective_policy(path_policy: str, result) -> str:
@@ -91,10 +70,11 @@ def _effective_policy(path_policy: str, result) -> str:
 def build_skeleton(target_base_ref: str, head_ref: str, *, cwd,
                    budget: int = STRUCTURAL_UNIT_CHANGED_BYTES_HEURISTIC
                    ) -> dict:
-    gitexec.assert_hermetic_possible(cwd=cwd)
+    facts = gitexec.assert_hermetic_possible(cwd=cwd)
     state = repostate.build_repository_state(target_base_ref, head_ref,
                                              cwd=cwd)
-    mb, head = state.diff_base_sha, state.head_sha
+    target_base, mb, head = (state.target_base_sha, state.diff_base_sha,
+                             state.head_sha)
 
     raw = rawchange.raw_changes(mb, head, cwd=cwd)
     name_status = gitdiff.changed_files(mb, head=head, cwd=cwd)
@@ -102,8 +82,11 @@ def build_skeleton(target_base_ref: str, head_ref: str, *, cwd,
     state = dataclasses.replace(state, changed_file_count=len(raw))
 
     repo_id = identity.repository_change_sha256(mb, head, raw)
-    union = codeowners.union_rules(mb, head, cwd=cwd)
-    effective_base = codeowners.effective_base_rules(mb, cwd=cwd)
+    # GitHub requests reviews from the TARGET BASE branch's CODEOWNERS
+    # (MC2-F07); the protective union additionally covers the branch point
+    # and the change's own proposal.
+    effective_base = codeowners.effective_base_rules(target_base, cwd=cwd)
+    union = codeowners.protective_union(target_base, mb, head, cwd=cwd)
 
     blocking: list[dict] = []
     pending: list[dict] = []
@@ -116,33 +99,27 @@ def build_skeleton(target_base_ref: str, head_ref: str, *, cwd,
             "path_bytes_b64": None,
         })
 
-    # --- generated relationships (proven at both endpoints) ---
-    generated_relationships: list[dict] = []
-    generated_paths_verified: set[bytes] = set()
-    try:
-        endpoints = generated.relationship_at_endpoints(mb, head, cwd=cwd)
-    except BlockingError as exc:
-        blocking.append({"code": exc.code, "reason": str(exc),
-                         "path_bytes_b64": b64(generated.GENERATED_PATH.encode())})
-        endpoints = {"base": {"state": "error"}, "head": {"state": "error"}}
-    head_rel = endpoints["head"]
-    if head_rel.get("status") == "GENERATED_VERIFIED":
-        generated_relationships.append({
-            "relationship_id": "rel-mandate-concatenation-1",
-            "endpoints": endpoints,
-            **head_rel,
-        })
-        generated_paths_verified.add(generated.GENERATED_PATH.encode())
+    # --- generated relationship endpoint states (MC2-F03) ---
+    generated_path_bytes = generated.GENERATED_PATH.encode()
+    endpoints = generated.relationship_at_endpoints(mb, head, cwd=cwd)
+    for side in ("base", "head"):
+        endpoint_state = endpoints[side]["state"]
+        if endpoint_state in (generated.PARTIAL_BROKEN,
+                              generated.PRESENT_INVALID):
+            blocking.append({
+                "code": "GENERATED_DERIVATIVE_MISMATCH",
+                "reason": f"the generated relationship at the {side} endpoint "
+                          f"is {endpoint_state}: a declared relationship that "
+                          "is incomplete or invalid is never benign absence",
+                "path_bytes_b64": b64(generated_path_bytes)})
 
-    files: list[dict] = []
-    reviewable_records: list[dict] = []
-    per_file: list[tuple] = []
+    # --- pass 1: classify, fetch, atomize ---
+    per_file: list[dict] = []
     for change in raw:
         entry = change.as_changed_file()
         cls = classification.classify_record_raw(change, list(union.patterns))
         path_policy, policy_reason = contentpolicy.record_content_policy(
             change.path, change.orig_path)
-        generated_covered = change.path in generated_paths_verified
 
         body = b""
         parse_failure: str | None = None
@@ -193,143 +170,252 @@ def build_skeleton(target_base_ref: str, head_ref: str, *, cwd,
             blocking.append({"code": result.blocking_code,
                              "reason": result.blocking_reason,
                              "path_bytes_b64": b64(change.path)})
+        per_file.append({"change": change, "result": result, "cls": cls,
+                         "policy": effective, "reason": policy_reason,
+                         "body": body})
 
-        body_sha = sha256_hex(body) if effective == contentpolicy.INCLUDED \
-            else None
-        reviewable_records.append(identity.reviewable_file_record(
-            change, effective, body_sha256=body_sha,
-            generated_covered=generated_covered))
+    # --- global patch ordinals ---
+    flat = atoms.assign_patch_ordinals(
+        [a for f in per_file for a in f["result"].atoms])
+    cursor = 0
+    for f in per_file:
+        count = len(f["result"].atoms)
+        f["stamped"] = flat[cursor:cursor + count]
+        cursor += count
 
-        file_record = {
+    # --- pass 2: generated eligibility (MC2-F02/F05/F15) ---
+    generated_relationships: list[dict] = []
+    covered_by_relationship: dict[str, list[str]] = {}
+    for f in per_file:
+        if f["change"].path != generated_path_bytes:
+            continue
+        try:
+            kind, ids = generated.eligible_generated_atoms(
+                f["change"], f["stamped"], endpoints)
+        except BlockingError as exc:
+            # Ineligible shape or unverified endpoint: the file stays in
+            # MODEL_REVIEW and the plan blocks. Byte proof never hides it.
+            blocking.append({"code": exc.code, "reason": str(exc),
+                             "path_bytes_b64": b64(f["change"].path)})
+            continue
+        content_proof = {k: v for k, v in endpoints["head"].items()
+                         if k != "state"}
+        record = generated.relationship_record(
+            RELATIONSHIP_ID, content_proof, endpoints, kind, ids,
+            f["change"].to_record())
+        generated_relationships.append(record)
+        covered_by_relationship[RELATIONSHIP_ID] = ids
+        f["generated_relationship"] = record
+
+    # --- pass 3: dispositions, provider material, units ---
+    required_control: list[str] = []
+    blocked_atoms: list[str] = []
+    generated_proof_atoms: list[str] = []
+    provider_records: list[dict] = []
+    files: list[dict] = []
+    for f in per_file:
+        change, result, cls = f["change"], f["result"], f["cls"]
+        effective, stamped = f["policy"], f["stamped"]
+        is_control = cls.control_bearing
+        if is_control:
+            required_control.extend(a.atom_id for a in stamped)
+
+        relationship = f.get("generated_relationship")
+        if relationship is not None:
+            disposition = "GENERATED_PROOF"
+            generated_proof_atoms.extend(
+                relationship["covered_generated_atom_disposition"])
+        elif ((effective != contentpolicy.INCLUDED and is_control)
+                or result.blocking_code is not None):
+            disposition = "BLOCKED_UNREVIEWABLE"
+            blocked_atoms.extend(a.atom_id for a in stamped)
+        else:
+            disposition = "MODEL_REVIEW"
+        f["disposition"] = disposition
+
+        # provider-visible record: generated-covered content contributes its
+        # PROOF marker, never a body digest (MC2-F09)
+        if relationship is not None:
+            provider_policy = identity.GENERATED_PROOF_POLICY
+            provider_records.append(identity.reviewable_file_record(
+                change, provider_policy, body_sha256=None,
+                generated_covered=True,
+                generated_relationship_proof_sha256=relationship[
+                    "relationship_proof_sha256"]))
+        else:
+            provider_policy = effective
+            body_sha = (sha256_hex(f["body"])
+                        if effective == contentpolicy.INCLUDED else None)
+            provider_records.append(identity.reviewable_file_record(
+                change, provider_policy, body_sha256=body_sha))
+
+        changed_bytes = sum(len(result.contents[a.atom_id])
+                            for a in result.atoms)
+        files.append({
             "ordinal": change.ordinal,
             "path_bytes_b64": b64(change.path),
             "original_path_bytes_b64": (b64(change.orig_path)
                                         if change.orig_path is not None
                                         else None),
-            "git_status": entry.status,
+            "git_status": change.as_changed_file().status,
             "classification": cls.to_record(),
-            "content_policy": effective,
-            "content_policy_reason": policy_reason,
+            "content_policy": provider_policy,
+            "content_policy_reason": f["reason"],
             "reviewability": result.reviewability,
-            "generated_covered": generated_covered,
+            "generated_covered": relationship is not None,
             "atom_count": len(result.atoms),
-            "changed_content_bytes": sum(
-                len(result.contents[a.atom_id]) for a in result.atoms),
+            "changed_content_bytes": changed_bytes,
             "blocking_code": result.blocking_code,
             "unit_count": 0,
-        }
-        files.append(file_record)
-        per_file.append((change, result, file_record, effective,
-                         generated_covered, cls))
+            "disposition": disposition,
+        })
+        f["file_record"] = files[-1]
+        f["changed_bytes"] = changed_bytes
 
-    # Global patch ordinals: git's file order, then each file's atom order.
-    flat = atoms.assign_patch_ordinals(
-        [a for _, result, _, _, _, _ in per_file for a in result.atoms])
-    all_atom_records = [a.to_record() for a in flat]
-    all_atom_ids = [a.atom_id for a in flat]
-    pvm_id = identity.provider_visible_material_sha256(reviewable_records)
+    pvm_id = identity.provider_visible_material_sha256(provider_records)
 
-    required_control: list[str] = []
     model_units: list[dict] = []
-    generated_proof_atoms: list[str] = []
-    blocked_atoms: list[str] = []
-    cursor = 0
-    for change, result, file_record, effective, gen_covered, _cls in per_file:
-        stamped = flat[cursor:cursor + len(result.atoms)]
-        cursor += len(result.atoms)
-        is_control = file_record["classification"]["control_bearing"]
-        if is_control:
-            required_control.extend(a.atom_id for a in stamped)
-        if not stamped:
+    unit_details: list[dict] = []
+    for f in per_file:
+        if f["disposition"] != "MODEL_REVIEW" or not f["stamped"]:
             continue
-        # DISPOSITION (MC1-F07): a generated-covered file's atoms go to
-        # GENERATED_PROOF; an unreviewable-blocked control file's atoms go to
-        # BLOCKED_UNREVIEWABLE; everything else is MODEL_REVIEW.
-        if gen_covered:
-            generated_proof_atoms.extend(a.atom_id for a in stamped)
-            file_record["disposition"] = "GENERATED_PROOF"
-            continue
-        if (effective != contentpolicy.INCLUDED and is_control) \
-                or result.blocking_code is not None:
-            blocked_atoms.extend(a.atom_id for a in stamped)
-            file_record["disposition"] = "BLOCKED_UNREVIEWABLE"
-            continue
-        file_record["disposition"] = "MODEL_REVIEW"
+        change, result = f["change"], f["result"]
         contents = result.contents
         built = units.build_file_units(
             path=change.path, orig_path=change.orig_path,
-            git_status=file_record["git_status"], atoms=list(stamped),
+            git_status=f["file_record"]["git_status"], atoms=list(f["stamped"]),
             content_of=lambda a, _c=contents: _c[a.atom_id], budget=budget)
-        file_record["unit_count"] = len(built)
+        f["file_record"]["unit_count"] = len(built)
         for unit in built:
             if unit.oversized_single_atom:
                 pending.append({
                     "code": OVERSIZED_SINGLE_ATOM,
                     "reason": "a single changed atom exceeds the structural "
-                              "byte heuristic; splitting cannot help and a "
-                              "provider token count is required to decide",
+                              "byte heuristic; splitting cannot help and an "
+                              "exact provider token count is required",
                     "path_bytes_b64": b64(change.path)})
-            model_units.append(units.unit_record(
+            record = units.unit_record(
                 unit, base_sha=mb, head_sha=head,
                 repository_change_sha256=repo_id,
                 provider_visible_material_sha256=pvm_id,
-                classification=file_record["classification"],
-                disposition="MODEL_REVIEW"))
+                classification=f["file_record"]["classification"],
+                disposition="MODEL_REVIEW")
+            model_units.append(record)
+            unit_details.append({
+                "unit_sha256": record["unit_sha256"],
+                "path_sha256": sha256_hex(change.path),
+                "atom_count": len(record["atom_ids"]),
+                "changed_content_bytes": record["changed_content_bytes"],
+                "context_bytes": record["context_facts"]["context_bytes"],
+                "disposition": "MODEL_REVIEW",
+                "intended_model_ids": list(REQUESTED_MODEL_IDS),
+                "secret_preflight_required": True,
+                "request_batch_id": None,
+            })
 
-    # Attach generated atom ids to their relationship record.
-    if generated_relationships and generated_proof_atoms:
-        generated_relationships[0][
-            "covered_generated_atom_disposition"] = list(generated_proof_atoms)
+    order = sorted(range(len(model_units)),
+                   key=lambda i: (model_units[i]["min_patch_ordinal"],
+                                  model_units[i]["max_patch_ordinal"],
+                                  model_units[i]["unit_sha256"]))
+    model_units = [model_units[i] for i in order]
+    unit_details = [unit_details[i] for i in order]
 
-    model_units.sort(key=lambda r: (r["min_patch_ordinal"],
-                                    r["max_patch_ordinal"], r["unit_sha256"]))
-
-    # EXACT disposition proof (fail before any artifact write). This is the
-    # strict superset of the old coverage proof: it guarantees every required
-    # control atom holds exactly one disposition (MODEL_REVIEW in one unit,
-    # GENERATED_PROOF in one relationship, or BLOCKED_UNREVIEWABLE), that no
-    # atom holds two, and that no unit/relationship references an unknown
-    # atom — so a blocked or generated control atom is covered without being
-    # forced into a model unit (MC1-F07).
+    # --- exact disposition partition (fails before any artifact write) ---
+    all_atom_ids = [a.atom_id for a in flat]
+    relationship_atom_lists = [list(r["covered_generated_atom_disposition"])
+                               for r in generated_relationships]
     coverage.prove_exact_dispositions(
         all_atom_ids, required_control,
         [r["atom_ids"] for r in model_units],
-        [generated_proof_atoms] if generated_proof_atoms else [],
-        blocked_atoms)
+        relationship_atom_lists, blocked_atoms)
 
-    root = coverage.structural_plan_root(
-        mb, head, repo_id, pvm_id, [r["unit_sha256"] for r in model_units])
+    unit_hashes = [r["unit_sha256"] for r in model_units]
+    relationship_hashes = [r["relationship_proof_sha256"]
+                           for r in generated_relationships]
+    structural_root = coverage.structural_plan_root(
+        mb, head, repo_id, pvm_id, unit_hashes)
+    git_policy = gitexec.policy_record(
+        attr_source_sha=mb,
+        info_attributes=facts["info_attributes_state"],
+        diff_options=list(gitdiff.DIFF_BODY_RENDER),
+        rename_policy={"threshold": "50%", "rename_limit": "0",
+                       "empty_rename": "excluded",
+                       "copy_detection": "disabled"},
+        local_config=facts["local_config_policy"])
+    disposition_root = coverage.disposition_root_v2(
+        diff_base_sha=mb, head_sha=head,
+        repository_change_sha256=repo_id,
+        provider_visible_material_sha256=pvm_id,
+        git_execution_policy_sha256=git_policy["policy_sha256"],
+        required_control_atom_ids=required_control,
+        model_unit_hashes_in_order=unit_hashes,
+        generated_relationship_hashes_in_order=relationship_hashes,
+        blocked_atom_ids=blocked_atoms)
 
-    # A Stage-1 plan is NEVER executable: it has no provider token counts, no
-    # model resolution and no cost proof. `structurally_clean` records
-    # whether there are zero blocks (what the CLI exit keys off); executability
-    # waits for online finalization (Cycle 3).
-    structurally_clean = not blocking
-    attr_state = gitexec.info_attributes_state(cwd=cwd)
+    file_details = []
+    for f in per_file:
+        record, prov = f["file_record"], provider_records[
+            [x["change"] for x in per_file].index(f["change"])]
+        file_details.append({
+            "path_sha256": sha256_hex(f["change"].path),
+            "content_policy": record["content_policy"],
+            "disposition": record["disposition"],
+            "control_bearing": record["classification"]["control_bearing"],
+            "generated_covered": record["generated_covered"],
+            "body_sha256": prov["body_sha256"],
+            "generated_relationship_proof_sha256": prov[
+                "generated_relationship_proof_sha256"],
+            "intended_changed_bytes": f["changed_bytes"],
+            "secret_preflight_required": True,
+        })
+    intended = [d for d in file_details if d["disposition"] == "MODEL_REVIEW"]
+    inventory = {
+        "provider_transmission_has_occurred": False,
+        "all_text_secret_preflight_required": True,
+        "content_policy_is_not_a_secret_proof": True,
+        "provider_material_records": provider_records,
+        "files": file_details,
+        "units": unit_details,
+        "intended_file_count": len(intended),
+        "intended_unit_count": len(unit_details),
+        "intended_changed_bytes": sum(
+            d["intended_changed_bytes"] for d in intended),
+        "generated_deduplicated_bytes": sum(
+            d["intended_changed_bytes"] for d in file_details
+            if d["disposition"] == "GENERATED_PROOF"),
+        "excluded_file_count": sum(
+            1 for d in file_details
+            if d["content_policy"] not in ("included", "generated_proof")),
+        "excluded_or_unavailable_bytes": sum(
+            d["intended_changed_bytes"] for d in file_details
+            if d["content_policy"] not in ("included", "generated_proof")),
+    }
+
     skeleton = {
         "schema_version": SCHEMA_VERSION,
         "artifact": "review-skeleton",
         "stage": "structural-plan",
-        "review_skeleton_sha256": None,      # filled by finalize_self_hash
+        "review_skeleton_sha256": None,
+        "publication_class": "private",
         "repository_state": state.to_record(),
-        "git_execution_policy": gitexec.policy_record(
-            attr_source_sha=mb, info_attributes=attr_state,
-            diff_options=list(gitdiff.DIFF_BODY_RENDER),
-            rename_policy={"threshold": "50%", "rename_limit": "0",
-                           "empty_rename": "excluded"}),
+        "git_execution_policy": git_policy,
         "github_codeowners": {
             "effective_base_location": effective_base.location,
             "effective_base_blob_oid": effective_base.blob_oid,
+            "effective_base_commit_sha": target_base,
             "patterns": list(effective_base.patterns),
+            "entries": list(effective_base.entries),
             "provenance": list(effective_base.provenance),
         },
         "protective_codeowners_union": {
             "patterns": list(union.patterns),
             "provenance": list(union.provenance),
+            "semantics": "conservative over-match across target base, diff "
+                         "base and head; NOT a reproduction of GitHub matching",
         },
         "changes": [c.to_record() for c in raw],
         "files": files,
-        "atoms": all_atom_records,
+        "atoms": [a.to_record() for a in flat],
         "atom_dispositions": {
             "model_review": sorted(
                 {a for r in model_units for a in r["atom_ids"]}),
@@ -348,7 +434,8 @@ def build_skeleton(target_base_ref: str, head_ref: str, *, cwd,
             "blocked_control_atom_count": len(
                 set(blocked_atoms) & set(required_control)),
             "unit_count": len(model_units),
-            "structural_root": root,
+            "structural_root": structural_root,
+            "disposition_root": disposition_root,
         },
         "identities": {
             "repository_change_sha256": repo_id,
@@ -364,42 +451,16 @@ def build_skeleton(target_base_ref: str, head_ref: str, *, cwd,
             "not_a_token_limit": True,
             "not_equivalent_to_legacy_prompt_cap": True,
         },
-        "transmission_inventory": _transmission_inventory(files, model_units),
+        "transmission_inventory": inventory,
         "blocking_reasons": blocking,
         "pending_requirements": pending,
-        "structurally_clean": structurally_clean,
+        "structurally_clean": not blocking,
         "executable": False,
         "requires_online_finalization": True,
     }
     artifact.finalize_self_hash(skeleton)
-    artifact.validate_and_check_hash(skeleton)
+    artifact.validate_strict(skeleton)
     return skeleton
-
-
-def _transmission_inventory(files: list[dict],
-                            model_units: list[dict]) -> dict:
-    """What a future Stage 2 would INTEND to send (MC1 §23). No transmission
-    has occurred; all-text secret preflight is still required."""
-    intended_files = [f for f in files
-                      if f["content_policy"] == contentpolicy.INCLUDED
-                      and f.get("disposition") == "MODEL_REVIEW"]
-    excluded = [f for f in files
-                if f["content_policy"] != contentpolicy.INCLUDED]
-    gen_dedup = sum(f["changed_content_bytes"] for f in files
-                    if f.get("disposition") == "GENERATED_PROOF")
-    return {
-        "provider_transmission_has_occurred": False,
-        "all_text_secret_preflight_required": True,
-        "content_policy_is_not_a_secret_proof": True,
-        "intended_file_count": len(intended_files),
-        "intended_unit_count": len(model_units),
-        "intended_changed_bytes": sum(
-            f["changed_content_bytes"] for f in intended_files),
-        "generated_deduplicated_bytes": gen_dedup,
-        "excluded_file_count": len(excluded),
-        "excluded_or_unavailable_bytes": sum(
-            f["changed_content_bytes"] for f in excluded),
-    }
 
 
 # ---------------------------------------------------------------- CLI ----
@@ -409,14 +470,14 @@ def _human_table(skeleton: dict) -> str:
     st = skeleton["repository_state"]
     lines = [f"structural plan for {st['diff_base_sha'][:12]}.."
              f"{st['head_sha'][:12]} (target base {st['target_base_sha'][:12]})"]
-    lines.append(f"{'file':52} {'st':>5} {'policy':>14} {'disp':>16} "
+    lines.append(f"{'file':52} {'st':>5} {'policy':>16} {'disp':>16} "
                  f"{'atoms':>6} {'bytes':>8} {'units':>5}")
     largest_file = None
     for f in skeleton["files"]:
         name = display_path(unb64(f["path_bytes_b64"]))
         lines.append(f"{name[:52]:52} {f['git_status']:>5} "
-                     f"{f['content_policy']:>14} "
-                     f"{f.get('disposition', '-'):>16} {f['atom_count']:>6} "
+                     f"{f['content_policy']:>16} {f['disposition']:>16} "
+                     f"{f['atom_count']:>6} "
                      f"{f['changed_content_bytes']:>8} {f['unit_count']:>5}")
         if (largest_file is None or f["changed_content_bytes"]
                 > largest_file["changed_content_bytes"]):
@@ -445,14 +506,20 @@ def _human_table(skeleton: dict) -> str:
         lines.append(f"largest unit: {biggest['changed_content_bytes']} bytes")
         lines.append("split strategies: " + ", ".join(
             f"{k}={v}" for k, v in sorted(hist.items())))
+    for rel in skeleton["generated_relationships"]:
+        lines.append(
+            f"generated proof: {rel['kind']} {rel['eligibility']} "
+            f"base={rel['base_state']} head={rel['head_state']} "
+            f"covered_atoms={len(rel['covered_generated_atom_disposition'])}")
     ti = skeleton["transmission_inventory"]
     lines.append(
         f"transmission-intended: files={ti['intended_file_count']} "
         f"units={ti['intended_unit_count']} "
         f"bytes={ti['intended_changed_bytes']} "
         f"generated_dedup_bytes={ti['generated_deduplicated_bytes']}")
-    lines.append(f"self-hash: {skeleton['review_skeleton_sha256']}")
+    lines.append(f"checksum: {skeleton['review_skeleton_sha256']}")
     lines.append(f"structural root: {cov['structural_root']}")
+    lines.append(f"disposition root: {cov['disposition_root']}")
     lines.append(f"structurally clean: {skeleton['structurally_clean']} | "
                  f"executable: {skeleton['executable']} "
                  "(requires online finalization)")
@@ -474,9 +541,12 @@ def _human_table(skeleton: dict) -> str:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="independent_verify.py --plan")
     parser.add_argument("--plan", action="store_true", required=True)
-    parser.add_argument("--base", required=True)
+    parser.add_argument("--base", required=True,
+                        help="the TARGET BASE branch tip (not the merge base)")
     parser.add_argument("--head", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--public-output",
+                        help="also write the publishable summary")
     parser.add_argument("--write-blocked", action="store_true",
                         help="retain the diagnostic artifact even when blocked")
     args = parser.parse_args(argv)
@@ -488,6 +558,9 @@ def main(argv: list[str]) -> int:
     blocked = bool(skeleton["blocking_reasons"])
     if not blocked or args.write_blocked:
         artifact.write_atomic(skeleton, args.output)
+        if args.public_output:
+            artifact.write_atomic(artifact.public_summary(skeleton),
+                                  args.public_output)
     print(_human_table(skeleton))
     if blocked:
         print("PLAN BLOCKED — see BLOCKS above", file=sys.stderr)

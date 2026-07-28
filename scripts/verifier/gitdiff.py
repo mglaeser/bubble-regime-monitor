@@ -14,6 +14,7 @@ fail-closed merge-base handling, and visible (never silently emptied) output.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -133,8 +134,10 @@ def run_git(args: list[str | bytes], *,
     if not args or args[0] != "git":
         raise DiffError(GIT_COMMAND_FAILED,
                         f"category=malformed_git_argv operation={operation}")
-    hermetic = ["git", *gitexec.global_flags(), *gitexec.CONFIG_PINS,
-                *args[1:]]
+    # The ABSOLUTE executable resolved once (MC2-F20): PATH cannot swap the
+    # binary after capability detection.
+    hermetic = [gitexec.git_executable(), *gitexec.global_flags(),
+                *gitexec.CONFIG_PINS, *args[1:]]
     argv = [a if isinstance(a, bytes) else os.fsencode(a) for a in hermetic]
     env = gitexec.build_env()
     if attr_source is not None:
@@ -170,6 +173,9 @@ def _sha256_hex(data: bytes) -> str:
 # The legacy merge_base()/base_branch() helpers are gone (MC1-F17): the
 # only merge-base path is repostate.merge_base_of over two PROVEN shas.
 
+# The SAME accepted-status policy as the strict raw parser (MC2-F18).
+_NAME_STATUS = re.compile(r"\A(?:[AMDT]|[RC][0-9]{3})\Z")
+
 _TRUNCATED = (
     "git diff --name-status -z ended mid-record (dangling {status!r} entry) — "
     "the changed-file list is incomplete. Returning the short list would drop "
@@ -190,16 +196,32 @@ def parse_name_status_z(raw: bytes) -> list[ChangedFile]:
     Record shape: STATUS NUL PATH NUL, except rename/copy which is
     STATUS NUL OLDPATH NUL NEWPATH NUL. A stream that ends mid-record fails
     closed rather than returning a short list."""
+    if raw == b"":
+        return []
     parts = raw.split(b"\0")
-    if parts and parts[-1] == b"":
-        parts.pop()                                # trailing NUL terminator
+    if parts[-1] != b"":
+        raise DiffError(GIT_COMMAND_FAILED,
+                        "category=unterminated_name_status_stream "
+                        f"tail_bytes={len(parts[-1])}")
+    parts.pop()                                    # trailing NUL terminator
     out: list[ChangedFile] = []
     i = 0
     while i < len(parts):
-        status = parts[i].decode("ascii", errors="replace").strip()
-        if not status:
-            i += 1
-            continue
+        raw_status = parts[i]
+        # STRICT (MC2-F18): the cross-check must not normalize what it is
+        # checking. Exact ASCII, exact grammar, no skipped empty records.
+        try:
+            status = raw_status.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise DiffError(
+                GIT_COMMAND_FAILED,
+                "category=non_ascii_name_status "
+                f"record_index={len(out)}") from exc
+        if not _NAME_STATUS.match(status):
+            raise DiffError(GIT_COMMAND_FAILED,
+                            "category=name_status_grammar "
+                            f"record_index={len(out)} "
+                            f"status_bytes={len(raw_status)}")
         two_path = status[:1] in ("R", "C")
         need = 2 if two_path else 1
         if i + need >= len(parts):

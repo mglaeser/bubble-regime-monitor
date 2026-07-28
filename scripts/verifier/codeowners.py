@@ -43,12 +43,17 @@ class CodeownersRules:
 
 @dataclass(frozen=True)
 class EffectiveBaseRules:
-    """GitHub's ACTUAL behavior: the first existing CODEOWNERS on the base,
-    parsed. Distinct from the conservative protective union (MC1-F13)."""
+    """GitHub's ACTUAL behavior: the first existing CODEOWNERS on the TARGET
+    BASE branch, parsed with owners (MC2-F07/F21).
+
+    GitHub requests reviews using the pull request's target base branch, not
+    the merge base, so a protection added to the target after the feature
+    branch diverged still governs the PR."""
 
     location: str | None            # None when absent everywhere
     blob_oid: str | None
     patterns: tuple[str, ...]
+    entries: tuple[dict, ...]       # pattern + owners + line number
     provenance: tuple[dict, ...]
 
 
@@ -60,24 +65,52 @@ class EffectiveBaseRules:
 _SUPPORTED_PATTERN = re.compile(r"\A/?[A-Za-z0-9._*?/\-]+/?\Z")
 
 
-def _parse_patterns(text: str, *, location: str) -> list[str]:
-    out: list[str] = []
-    for line in text.splitlines():
+# An owner token: @user, @org/team, or an e-mail address (MC2-F21).
+_SUPPORTED_OWNER = re.compile(
+    r"\A(?:@[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?"
+    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\Z")
+
+
+def _parse_entries(text: str, *, location: str) -> list[dict]:
+    """Complete supported entries: pattern, owners, source line (MC2-F21).
+
+    A rule with NO owner routes to nobody — recording it as a protection
+    would be a false claim — and an owner token the matcher cannot represent
+    blocks rather than being approximated away."""
+    out: list[dict] = []
+    for number, line in enumerate(text.splitlines(), start=1):
         stripped = line.split("#", 1)[0].strip()
         if not stripped:
             continue
-        pattern = stripped.split()[0]
-        if not pattern:
-            continue
+        fields = stripped.split()
+        pattern, owners = fields[0], fields[1:]
         if not _SUPPORTED_PATTERN.match(pattern):
-            # '!' negation, '[...]' char classes, '@'/e-mail-only lines and
-            # other syntaxes the matcher cannot represent faithfully.
+            # '!' negation, '[...]' char classes and other syntaxes the
+            # matcher cannot represent faithfully.
             raise BlockingError(
                 CODEOWNERS_UNREADABLE,
                 f"category=unsupported_codeowners_syntax location={location} "
-                f"pattern_bytes={len(pattern)}")
-        out.append(pattern)
+                f"line={number} pattern_bytes={len(pattern)}")
+        if not owners:
+            raise BlockingError(
+                CODEOWNERS_UNREADABLE,
+                f"category=codeowners_rule_without_owner location={location} "
+                f"line={number}")
+        for owner in owners:
+            if not _SUPPORTED_OWNER.match(owner):
+                raise BlockingError(
+                    CODEOWNERS_UNREADABLE,
+                    f"category=unsupported_codeowners_owner "
+                    f"location={location} line={number} "
+                    f"owner_bytes={len(owner)}")
+        out.append({"pattern": pattern, "owners": list(owners),
+                    "line": number, "location": location,
+                    "support": "supported"})
     return out
+
+
+def _parse_patterns(text: str, *, location: str) -> list[str]:
+    return [e["pattern"] for e in _parse_entries(text, location=location)]
 
 
 def _entry_at(commit_sha: str, location: bytes, *, cwd):
@@ -162,21 +195,43 @@ def _blob_at(commit_sha: str, location: bytes, *, cwd):
             f"blob_oid={oid}") from exc
 
 
-def effective_base_rules(base_sha: str, *, cwd=None) -> EffectiveBaseRules:
-    """GitHub's real base behavior: first-match in FIRST_MATCH_ORDER."""
+def effective_base_rules(target_base_sha: str, *, cwd=None) -> EffectiveBaseRules:
+    """GitHub's real behavior: first-match in FIRST_MATCH_ORDER on the TARGET
+    BASE branch tip (MC2-F07) — never the merge base."""
     provenance: list[dict] = []
     for location in FIRST_MATCH_ORDER:
         loc = location.decode("ascii")
-        state, oid, text = _blob_at(base_sha, location, cwd=cwd)
-        provenance.append({"commit_sha": base_sha, "location": loc,
+        state, oid, text = _blob_at(target_base_sha, location, cwd=cwd)
+        provenance.append({"commit_sha": target_base_sha, "location": loc,
                            "state": state, "blob_oid": oid})
         if state == "found":
-            patterns = tuple(_parse_patterns(text, location=loc))
-            return EffectiveBaseRules(location=loc, blob_oid=oid,
-                                      patterns=patterns,
-                                      provenance=tuple(provenance))
+            entries = tuple(_parse_entries(text, location=loc))
+            return EffectiveBaseRules(
+                location=loc, blob_oid=oid,
+                patterns=tuple(e["pattern"] for e in entries),
+                entries=entries, provenance=tuple(provenance))
     return EffectiveBaseRules(location=None, blob_oid=None, patterns=(),
-                              provenance=tuple(provenance))
+                              entries=(), provenance=tuple(provenance))
+
+
+def protective_union(target_base_sha: str, diff_base_sha: str,
+                     head_sha: str, *, cwd=None) -> CodeownersRules:
+    """The CONSERVATIVE union across all three endpoints (MC2-F07).
+
+    Protects policy at the branch point (diff base), policy added to the
+    target after divergence (target base), and policy proposed by the change
+    itself (head). Deliberately broader than GitHub's effective matching —
+    it is a coverage classifier, not a reproduction of GitHub behavior."""
+    merged: list[str] = []
+    provenance: list[dict] = []
+    for sha in dict.fromkeys((diff_base_sha, target_base_sha, head_sha)):
+        patterns, prov = rules_at_commit(sha, cwd=cwd)
+        provenance.extend(prov)
+        for pattern in patterns:
+            if pattern not in merged:
+                merged.append(pattern)
+    return CodeownersRules(patterns=tuple(merged),
+                           provenance=tuple(provenance))
 
 
 def union_rules(base_sha: str, head_sha: str, *, cwd=None) -> CodeownersRules:

@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from verifier import artifact, classification, generated, gitexec, plan  # noqa: E402
-from verifier.canon import canonical_json, sha256_hex  # noqa: E402
+from verifier.canon import sha256_hex  # noqa: E402
 from verifier.errors import ARTIFACT_SCHEMA_INVALID, BlockingError  # noqa: E402
 
 SECRET = "sk-proj-abcdef123456"  # pragma: allowlist secret
@@ -58,14 +58,29 @@ class TestSubmoduleVisibility:
         _git(repo, "commit", "-qm", "bump sub ptr")
         return base, _sha(repo)
 
-    def test_ambient_ignore_submodules_cannot_erase_the_change(self, repo):
+    def test_ambient_ignore_submodules_now_blocks(self, repo):
+        # MC2-F06 supersedes the C0 neutralization for LOCAL config: the
+        # pointer change can no longer be erased because the configuration
+        # that would erase it refuses to run.
         base, head = self._submodule_range(repo)
         baseline = plan.build_skeleton(base, head, cwd=repo)
+        assert baseline["repository_state"]["changed_file_count"] == 1
         _git(repo, "config", "diff.ignoreSubmodules", "all")
-        attacked = plan.build_skeleton(base, head, cwd=repo)
-        assert (attacked["coverage"]["structural_root"]
-                == baseline["coverage"]["structural_root"])
-        assert attacked["repository_state"]["changed_file_count"] == 1
+        with pytest.raises(BlockingError) as e:
+            plan.build_skeleton(base, head, cwd=repo)
+        assert e.value.code == "GIT_EXECUTION_UNSAFE"
+
+    def test_committed_gitmodules_cannot_erase_the_change(self, repo):
+        # The committed variant is NOT ambient config, so the plan must still
+        # see the pointer change (the --ignore-submodules=none pin).
+        base, head = self._submodule_range(repo)
+        (repo / ".gitmodules").write_text(
+            '[submodule "sub"]\n\tpath = sub\n\turl = ./x\n\tignore = all\n')
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "gitmodules ignore=all")
+        sk = plan.build_skeleton(base, _sha(repo), cwd=repo)
+        paths = {f["path_bytes_b64"] for f in sk["files"]}
+        assert plan.b64(b"sub") in paths
 
     def test_submodule_pointer_change_is_control_bearing(self, repo):
         base, head = self._submodule_range(repo)
@@ -166,7 +181,7 @@ class TestGeneratedErrorSanitization:
         with pytest.raises(BlockingError) as e:
             generated.prove_relationship(head, cwd=repo)
         assert SECRET not in str(e.value)
-        assert "part_sha256" in str(e.value)
+        assert "category=" in str(e.value)
 
 
 class TestStrictLoaderAtomCrossRefs:
@@ -191,6 +206,7 @@ class TestStrictLoaderAtomCrossRefs:
             "blocking_reasons": [], "pending_requirements": [],
             "structurally_clean": True, "executable": False,
             "requires_online_finalization": True,
+            "publication_class": "private",
         }
         return sk
 
@@ -199,7 +215,7 @@ class TestStrictLoaderAtomCrossRefs:
         sk["required_control_atom_ids"].append("f" * 64)
         artifact.finalize_self_hash(sk)
         with pytest.raises(BlockingError) as e:
-            artifact.validate(sk)
+            artifact.validate_shape(sk)
         assert e.value.code == ARTIFACT_SCHEMA_INVALID
 
     def test_ghost_in_generated_relationship_coverage_is_rejected(self):
@@ -208,12 +224,17 @@ class TestStrictLoaderAtomCrossRefs:
             {"covered_generated_atom_disposition": ["f" * 64]}]
         artifact.finalize_self_hash(sk)
         with pytest.raises(BlockingError) as e:
-            artifact.validate(sk)
+            artifact.validate_shape(sk)
         assert e.value.code == ARTIFACT_SCHEMA_INVALID
 
-    def test_valid_minimal_skeleton_passes(self):
+    def test_valid_minimal_skeleton_passes_shape_check(self):
+        # A hand-built fixture satisfies the SHAPE contract; the full strict
+        # loader additionally recomputes derived claims, which a fixture with
+        # empty nested records cannot satisfy (that is proven separately in
+        # tests/test_verifier_strict_artifact.py against a real skeleton).
         sk = self._minimal_skeleton()
         artifact.finalize_self_hash(sk)
-        artifact.validate_and_check_hash(sk)
-        # round-trips through the strict parser
-        assert artifact.parse_strict(canonical_json(sk)) == sk
+        artifact.validate_shape(sk)
+        assert artifact.compute_self_hash(sk) == sk[artifact.HASH_FIELD]
+        with pytest.raises(BlockingError):
+            artifact.validate_strict(sk)

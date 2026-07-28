@@ -92,14 +92,29 @@ class TestProviderVisibleMaterialIdentity:
         # the provider-visible digest function must not take base/head
         assert "def provider_visible_material_sha256(file_records" in src
 
-    def test_generated_marker_is_bound(self):
+    def test_generated_covered_carries_a_proof_not_a_body_hash(self):
+        # MC2-F09: generated-covered bytes are NOT transmitted, so the
+        # provider-visible record binds the relationship proof instead.
         plain = identity.reviewable_file_record(ch(), P.INCLUDED,
                                                 body_sha256=sha256_hex(b"1"))
-        gen = identity.reviewable_file_record(ch(), P.INCLUDED,
-                                              body_sha256=sha256_hex(b"1"),
-                                              generated_covered=True)
+        gen = identity.reviewable_file_record(
+            ch(), identity.GENERATED_PROOF_POLICY, body_sha256=None,
+            generated_covered=True,
+            generated_relationship_proof_sha256=sha256_hex(b"proof"))
+        assert gen["body_sha256"] is None
+        assert gen["generated_relationship_proof_sha256"] is not None
         assert (identity.provider_visible_material_sha256([plain])
                 != identity.provider_visible_material_sha256([gen]))
+        for bad in (
+            dict(content_policy=P.INCLUDED, body_sha256=sha256_hex(b"1"),
+                 generated_covered=True,
+                 generated_relationship_proof_sha256=sha256_hex(b"p")),
+            dict(content_policy=identity.GENERATED_PROOF_POLICY,
+                 body_sha256=None, generated_covered=False,
+                 generated_relationship_proof_sha256=None),
+        ):
+            with pytest.raises(ValueError):
+                identity.reviewable_file_record(ch(), **bad)
 
 
 class TestExactDispositions:

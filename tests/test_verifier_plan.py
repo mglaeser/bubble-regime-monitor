@@ -168,7 +168,7 @@ class TestPlanCli:
         from verifier import artifact
         artifact.validate_and_check_hash(data)
         assert "largest file" in proc.stdout
-        assert "self-hash" in proc.stdout
+        assert "checksum" in proc.stdout
 
     def test_cli_blocks_on_unknown_base(self, tmp_path, clean_clone):
         out = tmp_path / "skeleton.json"

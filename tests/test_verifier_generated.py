@@ -52,26 +52,25 @@ class TestFixedHeader:
 class TestProofAtHead:
     def test_head_relationship_is_verified(self):
         rel = generated.prove_relationship(PR23_HEAD, cwd=ROOT)
-        assert rel["status"] == "GENERATED_VERIFIED"
         assert rel["kind"] == "mandate-concatenation-v1"
+        assert rel["generated_mode"] == generated.PINNED_MODE
         assert rel["expected_generated_sha256"] == COMBINED_SHA
         assert rel["actual_generated_sha256"] == COMBINED_SHA
         assert rel["manifest_combined_sha256"] == COMBINED_SHA
         assert rel["fixed_header_sha256"] == HEADER_SHA
         assert rel["source_sha256_values"] == [PART1_SHA]
         assert rel["generated_path"] == "governance/mandate.md"
-        assert len(rel["covered_generated_atom_disposition"]) >= 0
         # the record carries NO raw generated content
         import json
         blob = json.dumps(rel)
         assert "Due-Diligence" not in blob
-        assert "relationship_proof_sha256" in rel
+        assert "relationship_content_proof_sha256" in rel
 
     def test_present_at_head_absent_at_base(self):
         endpoint = generated.relationship_at_endpoints(
             PR23_BASE, PR23_HEAD, cwd=ROOT)
-        assert endpoint["head"]["status"] == "GENERATED_VERIFIED"
-        assert endpoint["base"]["state"] == "absent"
+        assert endpoint["head"]["state"] == generated.PRESENT_VERIFIED
+        assert endpoint["base"]["state"] == generated.WHOLLY_ABSENT
 
 
 class TestTamperDetection:
@@ -123,4 +122,4 @@ class TestTamperDetection:
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path,
                               capture_output=True, text=True).stdout.strip()
         rel = generated.relationship_at_single(head, cwd=tmp_path)
-        assert rel["state"] == "absent"
+        assert rel["state"] == generated.WHOLLY_ABSENT

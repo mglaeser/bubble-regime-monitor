@@ -19,6 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from verifier import atoms as A  # noqa: E402
 from verifier import plan, splitters, units  # noqa: E402
 from verifier.canon import sha256_hex, unb64  # noqa: E402
+from verifier.errors import (  # noqa: E402
+    GIT_EXECUTION_UNSAFE,
+    SPLITTER_PARTITION_FAILED,
+    BlockingError,
+)
 
 
 def _git(cwd, *args):
@@ -67,21 +72,28 @@ class TestConfigIndependence:
                 _git(repo, "config", "--unset", key)
         return roots
 
-    def test_body_rendering_config_cannot_move_the_root(self, repo):
-        baseline, noprefix, abbrev, algo = self._roots(
-            repo, [], [("diff.noprefix", "true")], [("core.abbrev", "16")],
-            [("diff.algorithm", "patience"),
-             ("diff.indentHeuristic", "false")])
-        assert noprefix == baseline
-        assert abbrev == baseline
-        assert algo == baseline
+    @pytest.mark.parametrize("pairs", [
+        [("diff.noprefix", "true")],
+        [("core.abbrev", "16")],
+        [("diff.algorithm", "patience")],
+        [("diff.indentHeuristic", "false")],
+    ])
+    def test_body_rendering_config_now_blocks(self, repo, pairs):
+        # MC2-F06 strengthened C0: rather than neutralizing repository-local
+        # diff configuration, hermetic planning refuses to run under it.
+        self._roots(repo, [])                       # clean baseline works
+        for key, value in pairs:
+            _git(repo, "config", key, value)
+        with pytest.raises(BlockingError) as e:
+            plan.build_skeleton(_sha(repo, "HEAD~1"), _sha(repo), cwd=repo)
+        assert e.value.code == GIT_EXECUTION_UNSAFE
 
     def test_color_config_cannot_break_or_move_the_plan(self, repo):
         baseline, colored = self._roots(
             repo, [], [("color.ui", "always"), ("color.diff", "always")])
         assert colored == baseline
 
-    def test_order_file_config_cannot_reorder_the_universe(self, repo):
+    def test_order_file_config_blocks(self, repo):
         base = _commit_file(repo, "a.py", "x = 1\n", "base")
         (repo / "b.py").write_text("y = 1\n")
         (repo / "a.py").write_text("x = 2\n")
@@ -89,13 +101,12 @@ class TestConfigIndependence:
         _git(repo, "commit", "-qm", "head")
         head = _sha(repo)
         sk1 = plan.build_skeleton(base, head, cwd=repo)
+        assert sk1["changes"]
         (repo / "reorder.txt").write_text("b.py\na.py\n")
         _git(repo, "config", "diff.orderFile", "reorder.txt")
-        sk2 = plan.build_skeleton(base, head, cwd=repo)
-        assert ([c["new_path_bytes_b64"] for c in sk1["changes"]]
-                == [c["new_path_bytes_b64"] for c in sk2["changes"]])
-        assert (sk1["identities"]["repository_change_sha256"]
-                == sk2["identities"]["repository_change_sha256"])
+        with pytest.raises(BlockingError) as e:
+            plan.build_skeleton(base, head, cwd=repo)
+        assert e.value.code == GIT_EXECUTION_UNSAFE
 
 
 class TestRenameFetch:
@@ -266,14 +277,15 @@ class TestSplitterGuards:
 
     def test_empty_group_is_rejected_at_birth(self):
         got, _ = self._atoms()
-        with pytest.raises(AssertionError):
+        with pytest.raises(BlockingError) as e:
             splitters.assert_partition(list(got), [[], list(got)])
+        assert e.value.code == SPLITTER_PARTITION_FAILED
 
     def test_lossy_strategy_is_caught_by_split_to_budget(self, monkeypatch):
         got, content_of = self._atoms()
         monkeypatch.setattr(splitters, "group_by_hunk",
                             lambda atoms: [atoms[:2], atoms[3:]])
-        with pytest.raises(AssertionError):
+        with pytest.raises(BlockingError):
             splitters.split_to_budget(b"x.bin", list(got), content_of,
                                       budget=10)
 
@@ -281,7 +293,7 @@ class TestSplitterGuards:
         got, content_of = self._atoms()
         monkeypatch.setattr(splitters, "group_by_hunk",
                             lambda atoms: [atoms[:3], atoms[2:]])
-        with pytest.raises(AssertionError):
+        with pytest.raises(BlockingError):
             splitters.split_to_budget(b"x.bin", list(got), content_of,
                                       budget=10)
 
@@ -289,7 +301,7 @@ class TestSplitterGuards:
         got, content_of = self._atoms()
         monkeypatch.setattr(splitters, "group_by_hunk",
                             lambda atoms: [[], list(atoms)])
-        with pytest.raises(AssertionError):
+        with pytest.raises(BlockingError):
             splitters.split_to_budget(b"x.bin", list(got), content_of,
                                       budget=10)
 

@@ -33,6 +33,7 @@ import re
 from dataclasses import dataclass
 
 from .atoms import SIDE_NEW, ChangedAtom
+from .errors import SPLITTER_PARTITION_FAILED, BlockingError
 
 _MD_HEADING = re.compile(rb"^\s{0,3}#{1,6}\s+\S")
 _PY_TOPLEVEL = re.compile(rb"^(?:@|def\s|class\s|async\s+def\s)")
@@ -243,7 +244,10 @@ def split_to_budget(path: bytes, atoms: list[ChangedAtom], content_of,
                     rec(sub, (*chain, name), depth + 1)
                 return
         halves = bisect_atoms(group)
-        assert halves is not None                  # len(group) >= 2 here
+        if halves is None:                     # unreachable: len >= 2
+            raise BlockingError(
+                SPLITTER_PARTITION_FAILED,
+                f"category=impossible_bisect group_atoms={len(group)}")
         assert_partition(group, list(halves))
         for half in halves:
             rec(list(half), (*chain, STRATEGY_MIDPOINT), depth + 1)
@@ -263,11 +267,22 @@ def assert_partition(original: list[ChangedAtom],
         # end in RecursionError instead of an attributed failure (attack
         # finding C1), and a persisted empty group would be a vacuous
         # "reviewed" unit.
-        raise AssertionError("splitter produced an empty group")
+        raise BlockingError(
+            SPLITTER_PARTITION_FAILED,
+            f"category=empty_group groups={len(groups)}")
     flat = [a.atom_id for g in groups for a in g]
     if len(flat) != len(set(flat)):
-        raise AssertionError("splitter produced a duplicated atom")
+        raise BlockingError(
+            SPLITTER_PARTITION_FAILED,
+            f"category=duplicated_atom flat={len(flat)} "
+            f"unique={len(set(flat))}")
     if set(flat) != {a.atom_id for a in original}:
-        raise AssertionError("splitter lost or invented an atom")
+        raise BlockingError(
+            SPLITTER_PARTITION_FAILED,
+            f"category=lost_or_invented_atom original={len(original)} "
+            f"produced={len(set(flat))}")
     if len(flat) != len(original):
-        raise AssertionError("splitter changed the atom count")
+        raise BlockingError(
+            SPLITTER_PARTITION_FAILED,
+            f"category=atom_count_changed original={len(original)} "
+            f"produced={len(flat)}")

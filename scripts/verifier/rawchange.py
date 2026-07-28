@@ -64,6 +64,29 @@ class RawChange:
             "new_path_bytes_b64": b64(new_path) if new_path is not None else None,
         }
 
+    @classmethod
+    def from_record(cls, record: dict) -> RawChange:
+        """Rebuild from a persisted record so the strict loader can
+        re-derive classification without trusting the stored decision."""
+        from .canon import unb64
+        status = record["status"]
+        old_b64 = record["old_path_bytes_b64"]
+        new_b64 = record["new_path_bytes_b64"]
+        old_path = unb64(old_b64) if old_b64 is not None else None
+        new_path = unb64(new_b64) if new_b64 is not None else None
+        if status in ("R", "C"):
+            path, orig = new_path, old_path
+        elif status == "D":
+            path, orig = old_path, None
+        else:
+            path, orig = new_path, None
+        if path is None:
+            raise _err("record_without_path", record_index=record["ordinal"])
+        return cls(ordinal=record["ordinal"], status=status,
+                   score=record["score"], old_mode=record["old_mode"],
+                   new_mode=record["new_mode"], old_oid=record["old_oid"],
+                   new_oid=record["new_oid"], path=path, orig_path=orig)
+
     def as_changed_file(self) -> ChangedFile:
         status = (f"{self.status}{self.score:03d}"
                   if self.score is not None else self.status)
@@ -146,30 +169,72 @@ def parse_raw_z(raw: bytes) -> list[RawChange]:
     return out
 
 
+# The complete supported mode set for a SHA-1 repository, by class
+# (MC2-F08). Anything else — a mode git does not emit for a tracked entry —
+# is malformed or forged input.
+ABSENT_MODE = "000000"
+_MODE_CLASS = {
+    ABSENT_MODE: "absent",
+    "100644": "regular",
+    "100755": "regular",
+    "120000": "symlink",
+    "160000": "gitlink",
+}
+
+# Copy detection is NOT requested by the pinned diff flags, so git cannot
+# emit a C record. Accepting one would mean the flags in force are not the
+# flags we believe are in force (MC2-F08).
+COPY_DETECTION_ENABLED = False
+
+
+def _endpoint(index: int, side: str, mode: str, oid: str) -> str:
+    """Validate ONE endpoint and return its mode class.
+
+    mode == 000000 iff oid == ZERO: a zero mode with a live object, or a
+    live mode with a zero object, is an impossible endpoint."""
+    klass = _MODE_CLASS.get(mode)
+    if klass is None:
+        raise _err("unsupported_mode", record_index=index, side=side,
+                   mode=mode)
+    zero_oid = oid == ZERO_OID
+    if (klass == "absent") != zero_oid:
+        raise _err("endpoint_mode_oid_mismatch", record_index=index,
+                   side=side, mode=mode, zero_oid=zero_oid)
+    return klass
+
+
 def _validate_status_semantics(index: int, status: str, old_mode: str,
                                new_mode: str, old_oid: str,
                                new_oid: str) -> None:
-    """Status-specific mode/OID consistency (MC1-F14).
+    """Status-specific mode/OID consistency (MC1-F14, completed by MC2-F08).
 
     Git guarantees these combinations; a record that violates them is
     malformed or forged and must not become a silently-accepted atom."""
-    old_zero = (old_mode == "000000" and old_oid == ZERO_OID)
-    new_zero = (new_mode == "000000" and new_oid == ZERO_OID)
+    old_class = _endpoint(index, "old", old_mode, old_oid)
+    new_class = _endpoint(index, "new", new_mode, new_oid)
     if status == "A":
-        if not old_zero or new_zero:
+        if old_class != "absent" or new_class == "absent":
             raise _err("add_endpoint_invalid", record_index=index)
     elif status == "D":
-        if old_zero or not new_zero:
+        if old_class == "absent" or new_class != "absent":
             raise _err("delete_endpoint_invalid", record_index=index)
     elif status in ("M", "R", "C"):
-        if old_zero or new_zero:
+        if old_class == "absent" or new_class == "absent":
             raise _err("modify_endpoint_invalid", record_index=index,
                        status=status)
+        if old_class != new_class:
+            # a class change is a TYPE change; git reports it as T
+            raise _err("status_hides_type_change", record_index=index,
+                       status=status)
+        if status == "C" and not COPY_DETECTION_ENABLED:
+            raise _err("copy_detection_not_enabled", record_index=index)
     elif status == "T":
-        if old_zero or new_zero:
+        if old_class == "absent" or new_class == "absent":
             raise _err("typechange_endpoint_invalid", record_index=index)
-        if old_mode == new_mode:
-            raise _err("typechange_modes_equal", record_index=index)
+        if old_class == new_class:
+            # 100644 -> 100755 is a MODE change reported as M, never as T
+            raise _err("typechange_without_class_change", record_index=index,
+                       mode_class=old_class)
 
 
 def raw_changes(base_sha: str, head_sha: str, *, cwd=None) -> list[RawChange]:

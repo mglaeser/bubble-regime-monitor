@@ -186,6 +186,7 @@ class RepositoryState:
     diff_base_sha: str
     head_sha: str
     object_format: str
+    is_shallow_repository: bool
     worktree_clean: bool
     staged_count: int
     unstaged_count: int
@@ -200,6 +201,7 @@ class RepositoryState:
             "diff_base_sha": self.diff_base_sha,
             "head_sha": self.head_sha,
             "object_format": self.object_format,
+            "is_shallow_repository": self.is_shallow_repository,
             "worktree_clean": self.worktree_clean,
             "staged_count": self.staged_count,
             "unstaged_count": self.unstaged_count,
@@ -210,6 +212,7 @@ class RepositoryState:
 
 def build_repository_state(target_base_ref: str, head_ref: str, *,
                            cwd=None) -> RepositoryState:
+    from . import gitexec
     fmt = object_format(cwd=cwd)
     target_base = resolve_commit(target_base_ref, cwd=cwd)
     head = resolve_commit(head_ref, cwd=cwd)
@@ -221,6 +224,7 @@ def build_repository_state(target_base_ref: str, head_ref: str, *,
         diff_base_sha=merge_base_of(target_base, head, cwd=cwd),
         head_sha=head,
         object_format=fmt,
+        is_shallow_repository=gitexec.is_shallow_repository(cwd=cwd),
         worktree_clean=wt.clean,
         staged_count=wt.staged,
         unstaged_count=wt.unstaged,
