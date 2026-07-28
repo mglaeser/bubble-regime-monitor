@@ -62,16 +62,41 @@ _HEX_DIGEST = re.compile(r"\A[0-9a-f]{32,64}\Z")
 # appear inside one value — gets its own sweep below.
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{24,}")
 _B64_BLOB = re.compile(r"[A-Za-z0-9+/]{24,}={0,2}")
-# A plain source identifier (CamelCase class, CONSTANT_NAME, snake_case) is
-# long and dense but is not a credential. It is only suspicious when it also
-# looks random: mixed case AND digits AND >= 32 chars.
-_IDENTIFIER = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
-# Hyphen/underscore-joined lowercase WORDS ("documentation-versus-hash") are
-# prose, not credentials. A segment carrying digits (sk-proj-abcdef123456)
-# does not qualify — and those are caught by the explicit patterns anyway.
-_WORDS = re.compile(r"\A[a-z]{2,}(?:[-_][a-z]{2,})+\Z")
+# Ordinary source text — identifiers, dotted names, repository paths — is
+# long and dense but has WORD STRUCTURE: segments joined by '-', '_', '/' or
+# '.', each segment a word, a number, or a word followed by digits
+# ("governance/mandate/manifest", "test_p1_1_is_caught", "versions/0001").
+# A credential has no such structure: its randomness is interleaved, so a
+# segment mixing letters and digits in any other order does not qualify.
+_SEGMENT = re.compile(r"\A(?:[A-Za-z]+[0-9]*|[0-9]+)\Z")
+_SEPARATORS = re.compile(r"[-_/.]")
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_MIN_MEAN_SEGMENT = 3.0
+# A UUID is a repository-owned identifier shape, not a credential.
+_UUID = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}"
+                   r"-[0-9a-f]{12}\Z", re.I)
 
 _ENTROPY_BITS_PER_CHAR = 3.6      # conservative: base64-ish text sits ~4.5
+
+
+def _is_structured_text(value: str) -> bool:
+    """True for word-structured text: a path, a dotted name, an identifier.
+
+    Segments come from separators AND camel-case boundaries, so
+    "TestPanelFindingsRound18" is as structured as "governance/mandate".
+    Three conditions, and all must hold:
+
+      * at least two segments — a single opaque run is never excused;
+      * every segment is a word, a number, or a word followed by digits —
+        the interleaved case-and-digit runs that real keys look like fail;
+      * segments average >= 3 characters — otherwise base64, which shatters
+        into one- and two-character camel fragments, would excuse itself
+        without ever being decoded."""
+    segments = [s for part in _SEPARATORS.split(value)
+                for s in _CAMEL.split(part) if s]
+    if len(segments) < 2 or not all(_SEGMENT.match(s) for s in segments):
+        return False
+    return sum(len(s) for s in segments) / len(segments) >= _MIN_MEAN_SEGMENT
 
 
 def _shannon_bits_per_char(text: str) -> float:
@@ -152,16 +177,10 @@ def scan_text(text: str, *, allowlist: frozenset[str] = frozenset(),
             value = match.group(0)
             if _is_cleared(match.start(), match.end()):
                 continue
-            if _HEX_DIGEST.match(value):
+            if _HEX_DIGEST.match(value) or _UUID.match(value):
                 continue
-            if _WORDS.match(value):
-                continue                   # hyphen/underscore-joined prose
-            if _IDENTIFIER.match(value) and not (
-                    len(value) >= 32
-                    and any(c.isdigit() for c in value)
-                    and any(c.islower() for c in value)
-                    and any(c.isupper() for c in value)):
-                continue                   # ordinary source identifier
+            if _is_structured_text(value):
+                continue                   # path, dotted name, identifier
             if _shannon_bits_per_char(value) < _ENTROPY_BITS_PER_CHAR:
                 continue
             if regex is _B64_BLOB and _decodes_to_clean_text(value, depth):

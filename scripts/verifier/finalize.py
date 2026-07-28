@@ -600,9 +600,14 @@ def main(argv: list[str]) -> int:
         skeleton = artifact.parse_strict(handle.read())
     allowlist: frozenset = frozenset()
     if args.allowlist:
+        # Lines beginning "# " are comments, so the file can explain WHY each
+        # literal was cleared. A literal that itself begins "# " therefore
+        # cannot be allowlisted — a deliberate, stated limit, taken because an
+        # undocumented list of cleared credentials is not reviewable.
         with open(args.allowlist, encoding="utf-8") as handle:
-            allowlist = frozenset(line.rstrip("\n") for line in handle
-                                  if line.strip())
+            allowlist = frozenset(
+                line.rstrip("\n") for line in handle
+                if line.strip() and not line.startswith("# "))
     try:
         plan_record = finalize(skeleton, cwd=None,
                                operator_pins=_pins_from_environment(),
