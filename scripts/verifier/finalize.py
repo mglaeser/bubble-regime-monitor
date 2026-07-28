@@ -380,7 +380,7 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
 
     model_ids = list(skeleton["requested_model_ids"])
     capability_policy = capabilities.policy_record(model_ids)
-    pin_record = pinsmod.pin_record(operator_pins, model_ids)
+    pin_record = pinsmod.test_pin_record(operator_pins, model_ids)
     pin_values = pin_record["pins"]
 
     if len(skeleton["units"]) > pin_values["VERIFIER_MAX_REVIEW_UNITS"]:

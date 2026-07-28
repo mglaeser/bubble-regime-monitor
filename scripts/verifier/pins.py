@@ -12,6 +12,7 @@ Money is INTEGER micro-USD. A float never enters a cost ledger.
 
 from __future__ import annotations
 
+from . import authority
 from .canon import canonical_json, digest
 from .capabilities import capability
 from .errors import UNSET_POLICY_PIN, BlockingError
@@ -79,19 +80,84 @@ def validate_pins(pins: dict, model_ids: list[str]) -> dict:
     return dict(pins)
 
 
-def pin_record(pins: dict, model_ids: list[str]) -> dict:
-    """The validated record plus its digest, bound into the finalized plan."""
+def test_pin_record(pins: dict, model_ids: list[str]) -> dict:
+    """PIN values for LOCAL MOCK planning. Not an operator decision.
+
+    Validation proves the values are internally coherent; it proves nothing
+    about who chose them. A plan built on this record can never be
+    executable — that is the entire distinction from an operator
+    authorization, and it is why the two are different functions rather than
+    one function with a flag."""
     validated = validate_pins(pins, model_ids)
     record = {
+        "schema_version": 1,
         "pins": validated,
         "money_unit": "integer micro-USD",
-        "source": "OPERATOR_AUTHORIZED",
+        "authority_class": authority.TEST_FIXTURE_UNAUTHORIZED,
+        "executable_authority": False,
+        "honest_scope": "values are internally valid; no operator approved "
+                        "them, and no plan built on them may be executable",
     }
-    record["pin_record_sha256"] = digest(b"operator-pins-v1",
-                                         canonical_json(record))
+    record["pin_record_sha256"] = pin_digest(record)
+    return record
+
+
+def operator_pin_authorization(pins: dict, model_ids: list[str], *,
+                               repository_identity: str, target_base_sha: str,
+                               head_sha: str, operator_identity: str,
+                               authorized_at: str, policy_version: str,
+                               external_anchor: dict) -> dict:
+    """An operator's approval of exactly these values for exactly this range.
+
+    Nothing in this package can mint one of these without an external anchor,
+    and the validator refuses a record that claims trusted authority without
+    one. Authority arrives from outside or not at all."""
+    validated = validate_pins(pins, model_ids)
+    record = {
+        "schema_version": 1,
+        "pins": validated,
+        "money_unit": "integer micro-USD",
+        "authority_class": authority.TRUSTED_OPERATOR_AUTHORIZATION,
+        "executable_authority": True,
+        "repository_identity": repository_identity,
+        "target_base_sha": target_base_sha,
+        "head_sha": head_sha,
+        "operator_identity": operator_identity,
+        "authorized_at": authorized_at,
+        "policy_version": policy_version,
+        "external_anchor": external_anchor,
+        "revoked": False,
+    }
+    authority._check_anchor(record, "operator_pin_authorization")
+    record["pin_record_sha256"] = pin_digest(record)
+    return record
+
+
+def validate_pin_authority(record: dict, model_ids: list[str]) -> dict:
+    """Recompute a PIN record's authority rather than reading its label."""
+    if not isinstance(record, dict):
+        _fail("category=pin_record_not_object")
+    for field in ("pins", "authority_class", "executable_authority",
+                  "pin_record_sha256"):
+        if field not in record:
+            _fail(f"category=pin_record_field_missing field={field}")
+    if record["authority_class"] not in authority.AUTHORITY_CLASSES:
+        _fail("category=pin_authority_class_unknown")
+    validate_pins(record["pins"], model_ids)
+    expected_executable = (record["authority_class"]
+                           == authority.TRUSTED_OPERATOR_AUTHORIZATION)
+    if record["executable_authority"] is not expected_executable:
+        _fail("category=pin_executable_authority_not_derived "
+              f"class={record['authority_class']} "
+              f"claimed={record['executable_authority']}")
+    if record.get("revoked"):
+        _fail("category=pin_authorization_revoked")
+    authority._check_anchor(record, "pin_record")
+    if pin_digest(record) != record["pin_record_sha256"]:
+        _fail("category=pin_record_digest_mismatch")
     return record
 
 
 def pin_digest(record: dict) -> str:
     stripped = {k: v for k, v in record.items() if k != "pin_record_sha256"}
-    return digest(b"operator-pins-v1", canonical_json(stripped))
+    return digest(b"verifier-pin-record-v2", canonical_json(stripped))

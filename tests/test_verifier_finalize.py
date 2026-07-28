@@ -138,7 +138,7 @@ class TestOperatorPins:
         assert e.value.code == UNSET_POLICY_PIN
 
     def test_pin_record_is_hashed(self):
-        record = pinsmod.pin_record(good_pins(), MODELS)
+        record = pinsmod.test_pin_record(good_pins(), MODELS)
         assert pinsmod.pin_digest(record) == record["pin_record_sha256"]
 
 
