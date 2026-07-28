@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -105,7 +104,7 @@ class TestGateStillDetects:
         planted = ROOT / "artifacts" / "verifier" / "_planted_probe.json"
         planted.parent.mkdir(parents=True, exist_ok=True)
         planted.write_text(
-            '{"k": "sk-proj-PLANTEDsecretVALUE1234567890abcd"}\n')
+            '{"k": "sk-proj-PLANTEDsecretVALUE1234567890abcd"}\n')  # pragma: allowlist secret
         try:
             assert self._run(planted) == 1, (
                 "a new secret under artifacts/verifier/ must still block")
@@ -122,7 +121,7 @@ class TestGateStillDetects:
         try:
             target.write_bytes(
                 backup.rstrip()
-                + b'\n{"planted": "ghp_PLANTEDtokenABCDEFGH0123456789"}\n')
+                + b'\n{"planted": "ghp_PLANTEDtokenABCDEFGH0123456789"}\n')  # pragma: allowlist secret
             assert self._run(target) == 1
         finally:
             target.write_bytes(backup)

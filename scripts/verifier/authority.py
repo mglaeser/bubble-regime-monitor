@@ -246,3 +246,51 @@ def empty_set(*, repository_identity: str, target_base_sha: str,
         [], repository_identity=repository_identity,
         target_base_sha=target_base_sha, diff_base_sha=diff_base_sha,
         head_sha=head_sha)
+
+
+def propose_local_fixture_authorizations(skeleton: dict, atom_map: dict,
+                                         atom_records: dict, *,
+                                         repository_identity: str
+                                         ) -> LiteralAuthorizationSet:
+    """Propose UNAUTHORIZED clearances for every literal preflight flags.
+
+    This is a convenience for local mock planning and tests. Every record it
+    produces is TEST_FIXTURE_UNAUTHORIZED, so a plan built with them can
+    never be executable — an operator still has to review each one, and the
+    trusted lane still has to re-issue them with an external anchor.
+
+    It exists so the proposal step is reproducible and inspectable rather
+    than a hand-maintained list of secrets in a text file."""
+    from . import preflight  # local: avoids an import cycle
+
+    state = skeleton["repository_state"]
+    seen: set[tuple] = set()
+    records: list[dict] = []
+    for atom_id, text in atom_map.items():
+        record = atom_records.get(atom_id)
+        if record is None:
+            continue
+        for finding in preflight.scan_text(text):
+            literal = text[finding["offset"]:
+                           finding["offset"] + finding["length"]]
+            key = (record["path_bytes_b64"], atom_id, literal)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append(literal_authorization(
+                authority_class=TEST_FIXTURE_UNAUTHORIZED,
+                repository_identity=repository_identity,
+                target_base_sha=state["target_base_sha"],
+                diff_base_sha=state["diff_base_sha"],
+                head_sha=state["head_sha"],
+                path_bytes_b64=record["path_bytes_b64"],
+                atom_id=atom_id, literal=literal,
+                literal_category=finding["category"],
+                reason="literal detected in changed content; NOT reviewed",
+                reviewer_identity="UNREVIEWED_LOCAL_PROPOSAL",
+                authorized_at="1970-01-01T00:00:00Z",
+                authorization_source="LOCAL_PROPOSAL_NOT_AUTHORIZATION"))
+    return LiteralAuthorizationSet(
+        records, repository_identity=repository_identity,
+        target_base_sha=state["target_base_sha"],
+        diff_base_sha=state["diff_base_sha"], head_sha=state["head_sha"])

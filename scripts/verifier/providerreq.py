@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import reviewpolicy, unitpayload
 from .canon import canonical_json, digest
 from .capabilities import capability
 
@@ -31,12 +32,43 @@ TRUNCATION = "disabled"
 VERDICT_SCHEMA_NAME = "verifier_unit_verdicts_v1"
 
 
-def verdict_schema(unit_hashes: list[str]) -> dict:
-    """A strict structured-output schema requiring ONE verdict per unit.
+def verdict_schema(unit_hashes: list[str], *, challenge: str) -> dict:
+    """A strict schema that makes a missing or repeated verdict unexpressible.
 
-    A batch-level green with a missing per-unit verdict is impossible to
-    express: `unit_sha256` is an enum over exactly the batch's units and the
-    array is length-pinned (MC2-F25)."""
+    MC3 used a length-pinned ARRAY with an enum of unit hashes. That is not
+    one-verdict-per-unit: a model could return the same hash twice and omit
+    another, satisfying both minItems/maxItems and the enum while leaving a
+    unit unreviewed. Length plus membership is not a bijection.
+
+    An OBJECT keyed by unit hash is. Every key is required, no additional
+    key is permitted, and a duplicate key cannot exist in an object — so the
+    shape itself carries the guarantee instead of a downstream check.
+
+    The challenge is echoed back so a canned response minted without seeing
+    this request fails on a field it could not have known."""
+    properties = {
+        unit_hash: {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["refuted", "confidence", "reason", "proof_of_check",
+                         "checked_categories"],
+            "properties": {
+                "refuted": {"type": "boolean"},
+                "confidence": {"type": "string",
+                               "enum": list(reviewpolicy.CONFIDENCE_VALUES)},
+                "reason": {"type": "string",
+                           "maxLength": reviewpolicy.REASON_MAX_CHARS},
+                "proof_of_check": {
+                    "type": "string",
+                    "maxLength": reviewpolicy.PROOF_MAX_CHARS},
+                "checked_categories": {
+                    "type": "array",
+                    "maxItems": reviewpolicy.MAX_CHECKED_CATEGORIES,
+                    "items": {"type": "string"}},
+            },
+        }
+        for unit_hash in unit_hashes
+    }
     return {
         "type": "json_schema",
         "name": VERDICT_SCHEMA_NAME,
@@ -44,23 +76,14 @@ def verdict_schema(unit_hashes: list[str]) -> dict:
         "schema": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["verdicts"],
+            "required": ["challenge", "verdicts_by_unit"],
             "properties": {
-                "verdicts": {
-                    "type": "array",
-                    "minItems": len(unit_hashes),
-                    "maxItems": len(unit_hashes),
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["unit_sha256", "refuted", "reason"],
-                        "properties": {
-                            "unit_sha256": {"type": "string",
-                                            "enum": list(unit_hashes)},
-                            "refuted": {"type": "boolean"},
-                            "reason": {"type": "string"},
-                        },
-                    },
+                "challenge": {"type": "string", "const": challenge},
+                "verdicts_by_unit": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": list(unit_hashes),
+                    "properties": properties,
                 },
             },
         },
@@ -156,32 +179,35 @@ class ProviderRequest:
             "utf-8", "surrogateescape")
 
 
-INSTRUCTIONS = (
-    "You are an independent reviewer. For EACH review unit below, decide "
-    "whether the change is refuted (a real defect) and give one concrete "
-    "reason. Return exactly one verdict per unit_sha256. Do not review "
-    "anything outside the supplied units."
-)
+def build_instructions(lens: str, challenge: str) -> str:
+    """Model-specific instructions: the lens, the contract, the challenge."""
+    return (
+        f"{lens}\n\n"
+        "Each unit below lists its CHANGED lines. A line marked OLD was "
+        "removed; a line marked NEW was added; a line marked MET is a "
+        "metadata change. Lines marked CTX are unchanged context, supplied "
+        "only so the change is legible — do not report defects that exist "
+        "solely in CTX lines.\n\n"
+        "Return exactly one verdict for every unit hash, keyed by that hash. "
+        "For each: `refuted` true only if the CHANGED lines introduce a real "
+        "defect; `confidence`; a concrete `reason`; and `proof_of_check` — a "
+        "short statement of what you actually inspected, beginning with the "
+        f"challenge string {challenge!r}. Review nothing outside the units "
+        "given."
+    )
 
 
-def build_unit_section(unit_record: dict, unit_text: str) -> str:
-    """One unit's request section: identity + exact changed content."""
-    return (f"### unit {unit_record['unit_sha256']}\n"
-            f"status: {unit_record['git_status']}\n"
-            f"atoms: {len(unit_record['atom_ids'])}\n"
-            f"changed content:\n{unit_text}\n")
-
-
-def build_request(model_id: str, unit_records: list[dict],
-                  unit_texts: list[str], *, reasoning_effort: str | None,
+def build_request(model_id: str, unit_payloads: list[dict], *,
+                  lens: str, challenge: str, reasoning_effort: str | None,
                   max_output_tokens: int) -> ProviderRequest:
-    sections = [build_unit_section(r, t)
-                for r, t in zip(unit_records, unit_texts, strict=True)]
+    """Assemble one review request from structured unit payloads."""
+    sections = [unitpayload.render_unit(p) for p in unit_payloads]
+    unit_hashes = [p["unit_sha256"] for p in unit_payloads]
     return ProviderRequest(
         model_id=model_id,
-        instructions=INSTRUCTIONS,
-        input_text="\n".join(sections),
+        instructions=build_instructions(lens, challenge),
+        input_text="\n\n".join(sections),
         reasoning_effort=reasoning_effort,
-        text_format=verdict_schema([r["unit_sha256"] for r in unit_records]),
+        text_format=verdict_schema(unit_hashes, challenge=challenge),
         max_output_tokens=max_output_tokens,
     )

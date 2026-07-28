@@ -32,22 +32,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_verifier_finalize import (  # noqa: E402
     PR25_BASE,
     PR25_HEAD,
-    PR25_REVIEWED_ALLOWLIST,
     ROOT,
     _have,
     good_pins,
+    proposed_authorizations,
 )
 from verifier import (  # noqa: E402
     artifact,
     batching,
     capabilities,
     counting,
+    counting2,
     finalize,
     generated,
     plan,
     preflight,
+    unitpayload,
 )
 from verifier.errors import (  # noqa: E402
+    CHUNK_COUNT_EXHAUSTED,
     COST_CAP_EXCEEDED,
     STALE_REVIEW_PLAN,
     TOKEN_COUNT_DRIFT,
@@ -77,7 +80,8 @@ def skeleton(clone):
 def finalized(skeleton, clone):
     return finalize.finalize(skeleton, cwd=clone, operator_pins=good_pins(),
                              transport=counting.MockCountTransport(),
-                             secret_allowlist=PR25_REVIEWED_ALLOWLIST)
+                             authorizations=proposed_authorizations(
+                                 skeleton, clone))
 
 
 # --------------------------------------------------- lens 1: plan tamper ----
@@ -103,6 +107,7 @@ class TestLens1SemanticTamper:
         forged = json.loads(json.dumps(finalized))
         forged["executable"] = True
         forged["pending_requirements"] = []
+        forged["count_evidence"]["evidence_class"] = "TRUSTED_COUNT_EVIDENCE"
         forged["executable_plan_sha256"] = finalize.plan_digest(forged)
         with pytest.raises(BlockingError):
             finalize.validate_plan_strict(forged)
@@ -160,7 +165,8 @@ class TestLens3GitPolicy:
         with pytest.raises(BlockingError):
             finalize.finalize(forged, cwd=clone, operator_pins=good_pins(),
                               transport=counting.MockCountTransport(),
-                              secret_allowlist=PR25_REVIEWED_ALLOWLIST)
+                              authorizations=proposed_authorizations(
+                                  skeleton, clone))
 
 
 # ------------------------------------------------- lens 4: CODEOWNERS -------
@@ -260,38 +266,90 @@ class TestLens7TokenAccounting:
                                         max_retries=0)
         assert e.value.code == TOKEN_COUNT_RESPONSE_INVALID
 
-    def test_split_children_carry_only_their_own_atom_content(self):
-        # ATTACK: a unit whose atoms are MULTI-LINE. If splitting slices the
-        # joined text by line index, each child is handed content belonging to
-        # the other — reviewed under the wrong unit identity, with every hash
-        # still self-consistent.
+    def test_split_children_recompute_every_derived_field(self):
+        # ATTACK: a unit whose atoms are MULTI-LINE. MC3 sliced the joined
+        # text by line index, handing each child its sibling's content; it
+        # also COPIED the parent's derived metadata, so a child certified a
+        # byte count for content it did not contain.
         atom_map = {
             "a" * 64: "alpha line one\nalpha line two\nalpha line three",
             "b" * 64: "beta line one\nbeta line two",
         }
-        unit = _synthetic_unit(list(atom_map))
-        seen: dict[str, str] = {}
-        counter = finalize._Counter(_OnlyOneAtomFits(), good_pins())
-        fitted = finalize._fit_unit(unit, atom_map, MODELS, good_pins(),
-                                    counter, [], seen, frozenset())
-        assert len(fitted) == 2 and len(seen) == 2   # the split really happened
-        for unit_hash, text in seen.items():
-            atom_ids = _atoms_of(unit, unit_hash, atom_map)
-            assert text == "\n".join(atom_map[a] for a in atom_ids)
-        # and no child inherited the other's lines
-        assert set(seen.values()) == set(atom_map.values())
+        records = {
+            "a" * 64: {"atom_id": "a" * 64, "side": "new", "line_number": 10,
+                       "hunk_id": "h1", "path_bytes_b64": ""},
+            "b" * 64: {"atom_id": "b" * 64, "side": "old", "line_number": 20,
+                       "hunk_id": "h2", "path_bytes_b64": ""},
+        }
+        parent = _synthetic_unit(list(atom_map))
+        parent["changed_content_bytes"] = sum(
+            len(v.encode()) for v in atom_map.values())
+        child = finalize.derive_unit_record(parent, ["a" * 64], records,
+                                            atom_map)
+        # every derived field belongs to the CHILD, not the parent
+        assert child["atom_ids"] == ["a" * 64]
+        assert child["changed_content_bytes"] == len(
+            atom_map["a" * 64].encode())
+        assert child["changed_content_bytes"] < parent["changed_content_bytes"]
+        assert child["new_line_range"] == [10, 10]
+        assert child["old_line_range"] is None      # the OLD atom is the sibling's
+        assert child["meta_atom_count"] == 0
+        assert child["split_depth"] == parent["split_depth"] + 1
+        assert child["unit_sha256"] != parent["unit_sha256"]
+        # and its request text is exactly its own atoms
+        payload = unitpayload.structured_unit(child, records, atom_map)
+        assert payload["atoms"][0]["content"] == atom_map["a" * 64]
+        assert len(payload["atoms"]) == 1
 
-    def test_token_drift_tolerance_pin_is_enforced(self, skeleton, clone):
-        # ATTACK: the endpoint under-reports a batch relative to the units it
-        # contains. An unenforced tolerance pin is an unchecked promise.
-        drift = _DriftingTransport()
+    def test_a_batch_may_not_count_below_its_member_floor(self):
+        # MC4-F16: this invariant is DETERMINISTIC, not operator-tunable. A
+        # batch body strictly contains each member unit's section, so
+        # counting fewer tokens than the largest member is impossible. MC3
+        # spent the operator's drift PIN on it; that PIN belongs to the
+        # execution-usage comparison instead.
         with pytest.raises(BlockingError) as e:
-            finalize.finalize(skeleton, cwd=clone,
-                              operator_pins=good_pins(
-                                  VERIFIER_TOKEN_DRIFT_TOLERANCE=0),
-                              transport=drift,
-                              secret_allowlist=PR25_REVIEWED_ALLOWLIST)
+            counting2.assert_batch_not_below_member_floor(
+                measured=10, floor=100, model_id="gpt-5.3-codex",
+                label="batch-0000")
         assert e.value.code == TOKEN_COUNT_DRIFT
+        counting2.assert_batch_not_below_member_floor(
+            measured=100, floor=100, model_id="gpt-5.3-codex",
+            label="batch-0000")
+
+    def test_the_drift_pin_governs_execution_usage(self):
+        # The invariant the PIN was always meant for.
+        counting2.assert_usage_within_tolerance(
+            counted=1000, reported=1040, tolerance=64, where="batch-0000")
+        with pytest.raises(BlockingError) as e:
+            counting2.assert_usage_within_tolerance(
+                counted=1000, reported=1200, tolerance=64, where="batch-0000")
+        assert e.value.code == TOKEN_COUNT_DRIFT
+
+    def test_retries_cannot_push_a_run_past_the_attempt_cap(self):
+        # MC4-F15: MC3 counted LOGICAL requests, while each could make
+        # 1 + max_retries actual attempts — so a run could exceed the
+        # operator's cap threefold and still report itself inside it.
+        pins = good_pins(VERIFIER_MAX_COUNT_CALLS=2,
+                         VERIFIER_COUNT_MAX_RETRIES=2)
+        ledger = counting2.CountLedger(counting.MockCountTransport(), pins)
+        with pytest.raises(BlockingError) as e:
+            ledger.count(_tiny_request(), label="u")
+        # 1 + 2 retries = 3 worst-case attempts against a cap of 2: refused
+        # BEFORE the first attempt, not after the overspend.
+        assert e.value.code == CHUNK_COUNT_EXHAUSTED
+        assert ledger.provider_attempts == 0
+
+    def test_identical_requests_are_counted_once(self):
+        # MC4-F38: greedy probing re-asked byte-identical questions.
+        pins = good_pins()
+        transport = counting.MockCountTransport()
+        ledger = counting2.CountLedger(transport, pins)
+        request = _tiny_request()
+        first = ledger.count(request, label="a")
+        second = ledger.count(request, label="b")
+        assert first.input_tokens == second.input_tokens
+        assert ledger.cache_hits == 1
+        assert transport.calls == 1
 
     def test_counts_are_per_model_and_never_shared(self, finalized):
         for batch in finalized["batches"]:
@@ -340,7 +398,8 @@ class TestLens8BatchingAndCost:
                               operator_pins=good_pins(
                                   VERIFIER_COST_CAP_MICRO_USD=1),
                               transport=counting.MockCountTransport(),
-                              secret_allowlist=PR25_REVIEWED_ALLOWLIST)
+                              authorizations=proposed_authorizations(
+                                  skeleton, clone))
         assert e.value.code == COST_CAP_EXCEEDED
         assert "micro_usd" in str(e.value)
 
@@ -349,11 +408,8 @@ class TestLens8BatchingAndCost:
 
 
 def _tiny_request():
-    unit = {"unit_sha256": "a" * 64, "git_status": "M", "atom_ids": ["b" * 64]}
-    from verifier import providerreq
-    return providerreq.build_request("gpt-5.3-codex", [unit], ["x = 1"],
-                                     reasoning_effort="medium",
-                                     max_output_tokens=8_000)
+    from test_verifier_finalize import _request
+    return _request()
 
 
 def _synthetic_unit(atom_ids):

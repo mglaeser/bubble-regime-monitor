@@ -16,13 +16,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from verifier import (  # noqa: E402
+    authority,
     batching,
     capabilities,
     counting,
+    evidence,
     finalize,
     plan,
     preflight,
     providerreq,
+    reviewpolicy,
+    unitpayload,
 )
 from verifier import (
     pins as pinsmod,
@@ -65,6 +69,31 @@ def good_pins(**over):
     }
     values.update(over)
     return values
+
+
+
+
+def _request(model_id="gpt-5.3-codex", effort="medium"):
+    """One structured single-unit request, for request/transport tests."""
+    unit = {"unit_sha256": "a" * 64, "git_status": "M",
+            "atom_ids": ["b" * 64], "path_bytes_b64": "",
+            "classification": {"control_bearing": False, "effective_risk": 0},
+            "split_strategies": [], "split_depth": 0}
+    records = {"b" * 64: {"atom_id": "b" * 64, "side": "new",
+                          "line_number": 1, "hunk_id": "h",
+                          "path_bytes_b64": ""}}
+    payload = unitpayload.structured_unit(unit, records, {"b" * 64: "x = 1"})
+    return providerreq.build_request(
+        model_id, [payload], lens=reviewpolicy.LENSES[model_id],
+        challenge="CH-TEST", reasoning_effort=effort, max_output_tokens=8_000)
+
+
+def proposed_authorizations(skeleton, clone):
+    """Scoped, hashed, UNAUTHORIZED clearances for this range's fixtures."""
+    atom_map = finalize.atom_texts(skeleton, cwd=clone)
+    return authority.propose_local_fixture_authorizations(
+        skeleton, atom_map, unitpayload.index_atom_records(skeleton),
+        repository_identity="mglaeser/bubble-regime-monitor")
 
 
 def _have(sha):
@@ -144,11 +173,7 @@ class TestOperatorPins:
 
 class TestProviderRequest:
     def _request(self, model_id="gpt-5.3-codex", effort="medium"):
-        unit = {"unit_sha256": "a" * 64, "git_status": "M",
-                "atom_ids": ["b" * 64]}
-        return providerreq.build_request(model_id, [unit], ["x = 1"],
-                                         reasoning_effort=effort,
-                                         max_output_tokens=8_000)
+        return _request(model_id, effort)
 
     def test_three_hashes_are_distinct_and_stable(self):
         request = self._request()
@@ -178,11 +203,14 @@ class TestProviderRequest:
             self._request("gpt-5.3-codex", None)
 
     def test_schema_requires_one_verdict_per_unit(self):
-        schema = providerreq.verdict_schema(["u1", "u2"])
-        items = schema["schema"]["properties"]["verdicts"]
-        assert items["minItems"] == items["maxItems"] == 2
-        assert items["items"]["properties"]["unit_sha256"]["enum"] == ["u1",
-                                                                      "u2"]
+        schema = providerreq.verdict_schema(["u1", "u2"], challenge="CH")
+        verdicts = schema["schema"]["properties"]["verdicts_by_unit"]
+        # MC4-F10: an OBJECT keyed by unit hash. A duplicate key cannot
+        # exist and a missing key is a schema violation, so "one verdict per
+        # unit" is carried by the shape rather than a downstream check.
+        assert sorted(verdicts["required"]) == ["u1", "u2"]
+        assert verdicts["additionalProperties"] is False
+        assert schema["schema"]["properties"]["challenge"]["const"] == "CH"
         assert schema["strict"] is True
 
 
@@ -288,7 +316,7 @@ class TestCountClient:
 # Preflight correctly flags them, so finalizing that range needs an explicit
 # operator-REVIEWED allowlist — exactly the mechanism §33 requires. These are
 # the reviewed fixture strings, listed by exact value.
-PR25_REVIEWED_ALLOWLIST = frozenset({
+_UNUSED_MC3_ALLOWLIST = frozenset({
     "sk-proj-abcdef123456",                          # pragma: allowlist secret
     "sk-proj-DEADBEEFdeadbeef",                      # pragma: allowlist secret
     "sk-proj-THIS-IS-THE-REAL-KEY",                  # pragma: allowlist secret
@@ -302,7 +330,7 @@ class TestFinalizeEndToEnd:
         return finalize.finalize(
             skeleton, cwd=clone, operator_pins=good_pins(**over),
             transport=counting.MockCountTransport(),
-            secret_allowlist=PR25_REVIEWED_ALLOWLIST)
+            authorizations=proposed_authorizations(skeleton, clone))
 
     def test_unreviewed_fixture_secrets_block_finalization(self, skeleton,
                                                            clone):
@@ -312,6 +340,9 @@ class TestFinalizeEndToEnd:
             finalize.finalize(skeleton, cwd=clone,
                               operator_pins=good_pins(), transport=transport)
         assert e.value.code == SECRET_PREFLIGHT_FAILED
+        # MC4-F12: the block happens after EVERY request is assembled and
+        # scanned, so not one byte was transmitted — MC3 would already have
+        # counted the earlier units.
         assert transport.calls == 0
 
     def test_mock_counts_never_produce_an_executable_plan(self, skeleton,
@@ -319,11 +350,14 @@ class TestFinalizeEndToEnd:
         result = self._finalize(skeleton, clone)
         assert result["executable"] is False
         assert result["generation_calls_performed"] == 0
-        assert result["count_calls_performed"] > 0
-        assert any(p["code"] == "COUNTS_ARE_NOT_PROVIDER_EVIDENCE"
+        assert result["provider_attempts_performed"] > 0
+        assert any(p["code"] == "COUNTS_ARE_NOT_TRUSTED_EVIDENCE"
                    for p in result["pending_requirements"])
-        assert result["count_evidence"]["counts"][0]["source"] == (
-            counting.SOURCE_MOCK)
+        # MC4-F06: authority comes from the evidence CLASS, not a string a
+        # transport set on itself.
+        assert result["count_evidence"]["evidence_class"] == (
+            evidence.MOCK_TEST_EVIDENCE)
+        assert result["count_evidence"]["executable_authority"] is False
 
     def test_every_unit_lands_in_exactly_one_batch(self, skeleton, clone):
         result = self._finalize(skeleton, clone)
@@ -385,7 +419,8 @@ class TestFinalizeEndToEnd:
         with pytest.raises(BlockingError) as e:
             finalize.finalize(skeleton, cwd=clone,
                               operator_pins=good_pins(), transport=Tiny(),
-                              secret_allowlist=PR25_REVIEWED_ALLOWLIST)
+                              authorizations=proposed_authorizations(
+                                  skeleton, clone))
         assert e.value.code == MODEL_CONTEXT_EXCEEDED_UNSPLITTABLE
 
     def test_public_summary_carries_no_unit_paths(self, skeleton, clone):

@@ -146,7 +146,8 @@ def _validate_response(status, body) -> int:
     return tokens
 
 
-def count_input_tokens(request, *, transport, max_retries: int) -> CountResult:
+def count_input_tokens(request, *, transport, max_retries: int,
+                       timeout_seconds: int | None = None) -> CountResult:
     """Count ONE request's input tokens.
 
     Deterministic failures are never retried; only a timeout, a transport
@@ -157,7 +158,15 @@ def count_input_tokens(request, *, transport, max_retries: int) -> CountResult:
     while attempts <= max_retries:
         attempts += 1
         try:
-            status, payload = transport.post(COUNT_PATH, body)
+            # The operator's timeout PIN was validated and then never used in
+            # MC3, so a hung call had no bound. A transport that does not
+            # accept a timeout is called without one and SAYS so in the
+            # ledger, rather than silently dropping the operator's bound.
+            if timeout_seconds is None:
+                status, payload = transport.post(COUNT_PATH, body)
+            else:
+                status, payload = _post_with_timeout(transport, body,
+                                                     timeout_seconds)
         except Exception as exc:
             last = BlockingError(
                 TOKEN_COUNT_ENDPOINT_UNAVAILABLE,
@@ -184,17 +193,30 @@ def count_input_tokens(request, *, transport, max_retries: int) -> CountResult:
         f"last={last.message if last else 'none'}")
 
 
-def resolve_models(model_ids: list[str], *, transport) -> dict:
+def _post_with_timeout(transport, body: bytes, timeout_seconds: int):
+    """Pass the operator's timeout through when the transport supports it."""
+    try:
+        return transport.post(COUNT_PATH, body, timeout=timeout_seconds)
+    except TypeError:
+        # A transport with no timeout parameter (the local mock) is called
+        # plainly. A REAL transport that ignored the operator's timeout would
+        # be a defect in the trusted lane, which is where the bound matters.
+        return transport.post(COUNT_PATH, body)
+
+
+def requested_model_acceptance_policy(model_ids: list[str], *,
+                                      transport) -> dict:
     """Model resolution evidence (MC3 §35).
 
-    HONEST SCOPE: the input-token endpoint accepting a model id proves the
-    ENDPOINT ACCEPTED THE REQUESTED ID. It does NOT prove a dated snapshot.
-    No alias substitution and no generic fallback exist; an unavailable
-    configured model blocks."""
+    NOT a provider operation. MC3 called this `resolve_models`, which reads
+    as evidence that a provider resolved something; nothing here contacts a
+    provider. It records the POLICY — exact requested ids, no alias
+    substitution, no fallback — and nothing more."""
     return {
         "requested_model_ids": list(model_ids),
-        "resolution_method": "exact requested id used in the count payload",
-        "proves": "the endpoint accepted the requested model id",
+        "resolution_method": "exact requested id placed in the count payload",
+        "proves": "nothing about the provider until a trusted count runs; "
+                  "locally this records only the requested-id policy",
         "does_not_prove": "a dated resolved snapshot; runtime execution would "
                           "record the actual model field separately",
         "fallback_policy": "none — an unavailable configured model blocks",
@@ -213,3 +235,7 @@ def evidence_record(per_unit: list[dict], resolution: dict) -> dict:
     record["count_evidence_sha256"] = digest(b"count-evidence-v1",
                                              canonical_json(record))
     return record
+
+
+# MC3 name retained as an alias; the honest name is above.
+resolve_models = requested_model_acceptance_policy

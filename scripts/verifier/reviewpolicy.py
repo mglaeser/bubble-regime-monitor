@@ -1,0 +1,207 @@
+"""The versioned ReviewRequestPolicy (MC4 §33) and its output budget (§25).
+
+Macro-Cycle 3 sent every model the same sentence and asked for `refuted` plus
+a free-text `reason`. That is a material regression from the legacy panel,
+which required a named approver, distinct corroborating models, a per-run
+challenge, and a proof that the reviewer actually looked. Those controls exist
+because a model that answers "not refuted" to everything is indistinguishable,
+on those two fields alone, from a model that reviewed carefully.
+
+This module freezes what a review request IS, so the question is part of the
+hashed request rather than a property of whoever assembled it:
+
+  * one lens per model, so three reviews are three perspectives rather than
+    three samples of one;
+  * a per-run challenge the reviewer must echo, minted by the trusted lane
+    and unpredictable to the reviewed branch;
+  * a required approver and a minimum number of distinct corroborators;
+  * bounded reason and proof fields, because unbounded output is how a batch
+    that "fits" silently truncates its last verdicts.
+
+The output budget is the part that is easy to get wrong. Batch packing in MC3
+checked that INPUT fit the context window and assumed the fixed 8,000-token
+output allowance would cover however many verdicts the batch needed. It does
+not: verdicts scale with unit count. `max_units_per_batch()` inverts the
+per-unit output cost so capacity is planned, not hoped for.
+"""
+
+from __future__ import annotations
+
+from .canon import canonical_json, digest
+from .errors import UNSET_POLICY_PIN, BlockingError
+
+POLICY_VERSION = "review-request-policy-v1"
+
+# In-repository copy. Executable evidence requires the trusted lane's copy;
+# this one is for local planning and tests, and says so.
+STATUS_PROVISIONAL = "PROVISIONAL_IN_REPOSITORY"
+
+CONFIDENCE_VALUES = ("low", "medium", "high")
+
+# One lens per model. Distinct perspectives catch failure modes that three
+# runs of the same prompt cannot.
+LENSES: dict[str, str] = {
+    "gpt-5.3-codex": (
+        "Review as an adversarial implementer. Look for logic that is wrong "
+        "on some input, state that is mutated unexpectedly, error paths that "
+        "swallow failures, and operations whose failure mode is silent. For "
+        "each unit decide whether the CHANGED lines introduce a defect."
+    ),
+    "gpt-5.6-sol": (
+        "Review as a security and data-flow analyst. Look for untrusted input "
+        "reaching a sensitive sink, credentials or secrets in code or logs, "
+        "authorization that fails open, injection, and unsafe deserialization. "
+        "For each unit decide whether the CHANGED lines introduce a defect."
+    ),
+    "gpt-4.1-mini": (
+        "Review as an invariant checker. Look for broken fail-closed "
+        "behaviour, coverage that silently shrinks, a check that can be "
+        "bypassed, and a claim in a comment or message that the code does not "
+        "support. For each unit decide whether the CHANGED lines introduce a "
+        "defect."
+    ),
+}
+
+# Output budget, in tokens, measured per verdict. These are policy decisions,
+# not measurements: they bound what a reviewer may return so the batch size
+# can be derived from them.
+REASON_MAX_CHARS = 600
+PROOF_MAX_CHARS = 240
+MAX_CHECKED_CATEGORIES = 6
+MAX_FINDINGS_PER_UNIT = 4
+
+# Conservative characters-per-token for budget arithmetic. Deliberately LOW
+# (pessimistic) so the estimate over-reserves rather than under-reserves.
+_CHARS_PER_TOKEN = 3
+
+# Fixed overhead per response: the challenge echo, the enclosing object, and
+# the JSON scaffolding around the verdict map.
+_RESPONSE_OVERHEAD_TOKENS = 256
+
+
+def _fail(reason: str):
+    raise BlockingError(UNSET_POLICY_PIN, reason)
+
+
+def per_unit_output_tokens() -> int:
+    """Worst-case tokens one unit's verdict may occupy.
+
+    Every bounded field is counted at its maximum, plus the JSON keys and the
+    64-character unit hash that identifies it."""
+    chars = (
+        64                                  # unit_sha256 key
+        + REASON_MAX_CHARS
+        + PROOF_MAX_CHARS
+        + MAX_CHECKED_CATEGORIES * 32
+        + MAX_FINDINGS_PER_UNIT * 96
+        + 160                               # keys, quoting, punctuation
+    )
+    return -(-chars // _CHARS_PER_TOKEN)    # ceil
+
+
+def max_units_per_batch(max_output_tokens: int) -> int:
+    """How many units can actually RETURN a verdict within the output budget.
+
+    MC3 planned input capacity and left output to chance. A batch whose input
+    fits but whose verdicts cannot fit produces a truncated response — which,
+    with a strict schema, is a hard failure late, and without one would be a
+    silently short answer."""
+    usable = max_output_tokens - _RESPONSE_OVERHEAD_TOKENS
+    if usable <= 0:
+        _fail(f"category=output_budget_below_overhead "
+              f"max_output_tokens={max_output_tokens} "
+              f"overhead={_RESPONSE_OVERHEAD_TOKENS}")
+    per_unit = per_unit_output_tokens()
+    units = usable // per_unit
+    if units < 1:
+        _fail(f"category=output_budget_cannot_fit_one_verdict "
+              f"max_output_tokens={max_output_tokens} "
+              f"per_unit_tokens={per_unit}")
+    return units
+
+
+def worst_case_output_tokens(unit_count: int) -> int:
+    return _RESPONSE_OVERHEAD_TOKENS + unit_count * per_unit_output_tokens()
+
+
+def assert_output_capacity(unit_count: int, max_output_tokens: int,
+                           *, where: str) -> int:
+    needed = worst_case_output_tokens(unit_count)
+    if needed > max_output_tokens:
+        _fail(f"category=output_capacity_exceeded where={where} "
+              f"units={unit_count} needed_tokens={needed} "
+              f"max_output_tokens={max_output_tokens} — a batch whose "
+              "verdicts cannot fit must be split, never truncated")
+    return needed
+
+
+def policy_record(model_ids: list[str], *, required_approver: str,
+                  minimum_distinct_corroborators: int,
+                  max_output_tokens: int, status: str = STATUS_PROVISIONAL,
+                  external_anchor: dict | None = None) -> dict:
+    """The complete, hashed review policy bound into every request."""
+    unknown = [m for m in model_ids if m not in LENSES]
+    if unknown:
+        _fail(f"category=model_without_review_lens models={unknown}")
+    if required_approver not in model_ids:
+        _fail(f"category=required_approver_not_in_panel "
+              f"approver={required_approver}")
+    if minimum_distinct_corroborators < 1:
+        _fail("category=minimum_corroborators_below_one")
+    if minimum_distinct_corroborators > len(model_ids):
+        _fail(f"category=minimum_corroborators_above_panel_size "
+              f"required={minimum_distinct_corroborators} "
+              f"panel={len(model_ids)}")
+    record = {
+        "policy_version": POLICY_VERSION,
+        "status": status,
+        "model_ids": list(model_ids),
+        "lenses": {m: LENSES[m] for m in model_ids},
+        "lens_sha256": {m: digest(b"review-lens-v1", LENSES[m].encode())
+                        for m in model_ids},
+        "required_approver": required_approver,
+        "minimum_distinct_corroborators": minimum_distinct_corroborators,
+        "confidence_values": list(CONFIDENCE_VALUES),
+        "reason_max_chars": REASON_MAX_CHARS,
+        "proof_max_chars": PROOF_MAX_CHARS,
+        "max_checked_categories": MAX_CHECKED_CATEGORIES,
+        "max_findings_per_unit": MAX_FINDINGS_PER_UNIT,
+        "max_output_tokens": max_output_tokens,
+        "per_unit_output_tokens": per_unit_output_tokens(),
+        "response_overhead_tokens": _RESPONSE_OVERHEAD_TOKENS,
+        "max_units_per_batch": max_units_per_batch(max_output_tokens),
+        "tools_policy": "no tools, no function calling, no web/file/computer "
+                        "access, no background mode",
+        "truncation": "disabled",
+        "synthesis_policy": "cross-unit synthesis may ADD findings; it may "
+                            "never clear or downgrade a unit refutation",
+    }
+    if external_anchor is not None:
+        record["external_anchor"] = external_anchor
+    record["review_request_policy_sha256"] = policy_digest(record)
+    return record
+
+
+def policy_digest(record: dict) -> str:
+    stripped = {k: v for k, v in record.items()
+                if k != "review_request_policy_sha256"}
+    return digest(b"review-request-policy-v1", canonical_json(stripped))
+
+
+def validate_policy(record: dict, model_ids: list[str]) -> dict:
+    if not isinstance(record, dict):
+        _fail("category=review_policy_not_object")
+    if record.get("policy_version") != POLICY_VERSION:
+        _fail("category=review_policy_version_unknown")
+    if list(record.get("model_ids", [])) != list(model_ids):
+        _fail("category=review_policy_model_set_mismatch")
+    for model_id in model_ids:
+        expected = digest(b"review-lens-v1", LENSES[model_id].encode())
+        if record["lens_sha256"].get(model_id) != expected:
+            _fail(f"category=review_lens_digest_mismatch model={model_id}")
+    if record["max_units_per_batch"] != max_units_per_batch(
+            record["max_output_tokens"]):
+        _fail("category=max_units_per_batch_not_derived")
+    if policy_digest(record) != record["review_request_policy_sha256"]:
+        _fail("category=review_policy_digest_mismatch")
+    return record

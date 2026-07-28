@@ -32,13 +32,17 @@ from . import (
     batching,
     capabilities,
     counting,
+    counting2,
     coverage,
+    evidence,
     gitdiff,
     policy,
     preflight,
     providerreq,
     rawchange,
     repostate,
+    reviewpolicy,
+    unitpayload,
 )
 from . import (
     pins as pinsmod,
@@ -53,8 +57,9 @@ from .errors import (
     EXECUTABLE_PLAN_INVALID,
     MODEL_CONTEXT_EXCEEDED,
     MODEL_CONTEXT_EXCEEDED_UNSPLITTABLE,
+    SECRET_PREFLIGHT_FAILED,
     STALE_REVIEW_PLAN,
-    TOKEN_COUNT_DRIFT,
+    STRUCTURAL_PLAN_BLOCKED,
     BlockingError,
 )
 
@@ -140,8 +145,60 @@ def unit_texts(skeleton: dict, *, cwd) -> dict[str, str]:
             for u in skeleton["units"]}
 
 
+def derive_unit_record(parent: dict, atom_ids: list[str],
+                       atom_records: dict[str, dict],
+                       atom_map: dict[str, str]) -> dict:
+    """Build a child unit from EXACT child atoms, recomputing every field.
+
+    MC3 copied the parent dict and replaced only the atom list, ordinals and
+    hash. Everything else — changed_content_bytes, the old/new line ranges,
+    the metadata-atom count, the context facts — stayed at the PARENT's
+    values, and the child's digest then certified them. A split unit
+    therefore carried a byte count for content it did not contain.
+
+    Nothing is inherited here that can be derived. The parent supplies only
+    structural bindings that are genuinely shared: path, status, modes,
+    classification, and the split lineage."""
+    ordinal_of = dict(zip(parent["atom_ids"], parent["atom_ordinals"],
+                          strict=True))
+    ordinals = [ordinal_of[a] for a in atom_ids]
+    entries = [atom_records[a] for a in atom_ids]
+    contents = [atom_map[a] for a in atom_ids]
+
+    old_lines = [e["line_number"] for e in entries
+                 if e["side"] == unitpayload.SIDE_OLD]
+    new_lines = [e["line_number"] for e in entries
+                 if e["side"] == unitpayload.SIDE_NEW]
+
+    child = {
+        # shared structural bindings
+        "path_bytes_b64": parent["path_bytes_b64"],
+        "original_path_bytes_b64": parent.get("original_path_bytes_b64"),
+        "git_status": parent["git_status"],
+        "old_mode": parent.get("old_mode"),
+        "new_mode": parent.get("new_mode"),
+        "classification": parent["classification"],
+        # recomputed from the child's own atoms
+        "atom_ids": list(atom_ids),
+        "atom_ordinals": ordinals,
+        "min_patch_ordinal": min(ordinals),
+        "max_patch_ordinal": max(ordinals),
+        "changed_content_bytes": sum(
+            len(c.encode("utf-8", "surrogateescape")) for c in contents),
+        "meta_atom_count": sum(1 for e in entries
+                               if e["side"] == unitpayload.SIDE_META),
+        "old_line_range": [min(old_lines), max(old_lines)] if old_lines else None,
+        "new_line_range": [min(new_lines), max(new_lines)] if new_lines else None,
+        # split lineage
+        "split_strategies": [*parent["split_strategies"], "token_bisect"],
+        "split_depth": parent["split_depth"] + 1,
+    }
+    child["unit_sha256"] = coverage.unit_hash(child)
+    return child
+
+
 def _derive_subunit(parent: dict, atom_ids: list[str]) -> dict:
-    """A child unit after an atom-boundary split. Identity is recomputed."""
+    """Deprecated shim retained only for the MC3 split regression test."""
     index = {a: i for i, a in enumerate(parent["atom_ids"])}
     ordinals = [parent["atom_ordinals"][index[a]] for a in atom_ids]
     child = dict(parent)
@@ -156,12 +213,133 @@ def _derive_subunit(parent: dict, atom_ids: list[str]) -> dict:
     return child
 
 
-def _request_for(model_id: str, unit_records: list[dict], texts: list[str],
-                 pin_values: dict):
+def structural_preconditions(skeleton: dict) -> None:
+    """A structurally blocked plan must never reach a provider (MC4 §7).
+
+    MC3 derived `executable` from the count source and the finalizer's own
+    pending list, and never asked whether Stage 1 had said the change could
+    be reviewed at all. A skeleton with blocked, unreviewable atoms could
+    therefore be counted, batched and costed — spending money to prepare a
+    review that was already known to be incomplete."""
+    reasons = []
+    if not skeleton.get("structurally_clean"):
+        reasons.append("structurally_clean=false")
+    if skeleton.get("blocking_reasons"):
+        reasons.append(f"blocking_reasons={len(skeleton['blocking_reasons'])}")
+    blocked = skeleton["atom_dispositions"].get("blocked_unreviewable") or []
+    if blocked:
+        reasons.append(f"blocked_unreviewable_atoms={len(blocked)}")
+    if skeleton["coverage"].get("blocked_control_atom_count"):
+        reasons.append("blocked_control_atoms="
+                       f"{skeleton['coverage']['blocked_control_atom_count']}")
+    if reasons:
+        raise BlockingError(
+            STRUCTURAL_PLAN_BLOCKED,
+            "category=structural_plan_blocked reasons=" + ",".join(reasons)
+            + " — zero count calls and zero generation calls will be made")
+
+
+def _payload_for(unit: dict, atom_records: dict, atom_map: dict) -> dict:
+    return unitpayload.structured_unit(unit, atom_records, atom_map)
+
+
+def _request_for(model_id: str, payloads: list[dict], pin_values: dict,
+                 review_policy: dict, challenge: str):
     effort = pin_values["VERIFIER_REASONING_EFFORT_BY_MODEL"][model_id]
     return providerreq.build_request(
-        model_id, unit_records, texts, reasoning_effort=effort,
+        model_id, payloads, lens=review_policy["lenses"][model_id],
+        challenge=challenge, reasoning_effort=effort,
         max_output_tokens=pin_values["VERIFIER_MAX_OUTPUT_TOKENS"])
+
+
+class PreflightManifest:
+    """Every request assembled BEFORE any is transmitted (MC4 §14/§36).
+
+    MC3 built one request, scanned it, counted it, and moved on. A secret in
+    the last unit therefore blocked only AFTER every earlier unit's content
+    had already been sent to the endpoint — and the run still reported "zero
+    count calls on secret failure", which was true only of the request that
+    happened to contain the secret.
+
+    Both payloads are scanned, separately. The count body and the execution
+    body are not byte-identical (the latter carries max_output_tokens), so
+    scanning one and calling the other the exact bytes was an evidence error
+    as well as a coverage gap."""
+
+    def __init__(self, authorizations, *, atom_records: dict):
+        self.authorizations = authorizations
+        self.atom_records = atom_records
+        self.entries: list[dict] = []
+        self.sealed = False
+
+    def add(self, request, *, label: str, units: list[dict]) -> None:
+        if self.sealed:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=request_added_after_seal label={label}")
+        count_bytes = canonical_json(request.count_payload()).decode(
+            "utf-8", "surrogateescape")
+        exec_bytes = request.transmitted_text()
+        unit_hashes = [u["unit_sha256"] for u in units]
+        cleared = self._cleared_hashes_for(units)
+        count_entry = preflight.preflight_request(
+            count_bytes, label=f"{label}:count", cleared_hashes=cleared)
+        exec_entry = preflight.preflight_request(
+            exec_bytes, label=f"{label}:execution", cleared_hashes=cleared)
+        self.entries.append({
+            "label": label,
+            "model_id": request.model_id,
+            "unit_sha256_in_order": list(unit_hashes),
+            "count_request_sha256": request.count_request_sha256(),
+            "execution_request_sha256": request.execution_request_sha256(),
+            "count_payload_scan": count_entry,
+            "execution_payload_scan": exec_entry,
+        })
+
+    def _cleared_hashes_for(self, units: list[dict]) -> frozenset:
+        """Scoped clearances only — never a global value exemption.
+
+        Scope is resolved from the request's ATOMS, not its unit hash: a
+        recursive split mints a new unit identity for the same atoms in the
+        same file, and a clearance the operator granted for those bytes must
+        survive that. Resolving by unit hash would silently drop every
+        clearance the moment a unit was split."""
+        if self.authorizations is None:
+            return frozenset()
+        atom_ids: set[str] = set()
+        for unit in units:
+            atom_ids.update(unit["atom_ids"])
+        paths = {self.atom_records[a]["path_bytes_b64"]
+                 for a in atom_ids if a in self.atom_records}
+        cleared: set[str] = set()
+        for record in self.authorizations.records:
+            if record["path_bytes_b64"] not in paths:
+                continue
+            if record["atom_id"] is not None and record["atom_id"] not in atom_ids:
+                continue
+            cleared.add(record["literal_sha256"])
+        return frozenset(cleared)
+
+    def seal(self) -> dict:
+        self.sealed = True
+        record = {
+            "schema_version": 1,
+            "request_count": len(self.entries),
+            "scanned_payload_count": 2 * len(self.entries),
+            "entries": self.entries,
+            "authorization_set_sha256": (
+                self.authorizations.digest() if self.authorizations else None),
+            "authorization_authority_class": (
+                self.authorizations.authority_class
+                if self.authorizations else None),
+            "provider_attempt_count_at_seal": 0,
+            "honest_scope": "a denylist plus an entropy heuristic over the "
+                            "exact count and execution bytes; it cannot prove "
+                            "the absence of secrets",
+        }
+        record["preflight_manifest_sha256"] = digest(
+            b"preflight-manifest-v1", canonical_json(record))
+        return record
 
 
 def _fits(model_id: str, input_tokens: int, pin_values: dict) -> tuple[bool, int]:
@@ -172,60 +350,29 @@ def _fits(model_id: str, input_tokens: int, pin_values: dict) -> tuple[bool, int
         cap.context_window_tokens - needed)
 
 
-class _Counter:
-    """Counts through the transport while enforcing the call cap."""
-
-    def __init__(self, transport, pin_values):
-        self.transport = transport
-        self.pins = pin_values
-        self.calls = 0
-        self.records: list[dict] = []
-
-    def count(self, request, *, label: str) -> counting.CountResult:
-        cap = self.pins["VERIFIER_MAX_COUNT_CALLS"]
-        if self.calls >= cap:
-            raise BlockingError(
-                CHUNK_COUNT_EXHAUSTED,
-                f"category=count_call_cap_exceeded cap={cap} label={label}")
-        self.calls += 1
-        result = counting.count_input_tokens(
-            request, transport=self.transport,
-            max_retries=self.pins["VERIFIER_COUNT_MAX_RETRIES"])
-        self.records.append({
-            "label": label,
-            "model_id": request.model_id,
-            "input_tokens": result.input_tokens,
-            "source": result.source,
-            "attempts": result.attempts,
-            **request.hashes(),
-        })
-        return result
-
-
-def _fit_unit(unit: dict, atom_map: dict[str, str], model_ids: list[str],
-              pin_values: dict, counter: _Counter,
-              preflight_entries: list[dict], texts_by_unit: dict[str, str],
-              allowlist: frozenset) -> list[tuple[dict, dict]]:
-    """Return [(unit, counts_by_model)] after recursive exact-token fitting.
-
-    Counts are per MODEL and never reused across models or estimated for a
-    child from a parent (MC3 §36). Each child's text is rebuilt from ITS OWN
-    atoms, so a split can never hand a unit content it does not own."""
-    text = text_for(unit, atom_map)
+def _fit_unit(unit: dict, atom_records: dict, atom_map: dict,
+              model_ids: list[str], pin_values: dict, ledger,
+              manifest: PreflightManifest, payloads_by_unit: dict,
+              review_policy: dict, challenge: str) -> list[tuple[dict, dict]]:
+    """Recursive exact-token fitting. Children are rebuilt, never inherited."""
+    payload = _payload_for(unit, atom_records, atom_map)
     counts: dict[str, int] = {}
     oversize: list[str] = []
+    requests = []
     for model_id in model_ids:
-        request = _request_for(model_id, [unit], [text], pin_values)
-        preflight_entries.append(preflight.preflight_request(
-            request.transmitted_text(),
-            label=f"unit:{unit['unit_sha256'][:16]}:{model_id}",
-            allowlist=allowlist))
-        result = counter.count(request, label=f"unit:{unit['unit_sha256'][:16]}")
+        request = _request_for(model_id, [payload], pin_values, review_policy,
+                               challenge)
+        manifest.add(request, label=f"unit:{unit['unit_sha256'][:16]}",
+                     units=[unit])
+        requests.append((model_id, request))
+    for model_id, request in requests:
+        result = ledger.count(request,
+                              label=f"unit:{unit['unit_sha256'][:16]}")
         counts[model_id] = result.input_tokens
         if not _fits(model_id, result.input_tokens, pin_values)[0]:
             oversize.append(model_id)
     if not oversize:
-        texts_by_unit[unit["unit_sha256"]] = text
+        payloads_by_unit[unit["unit_sha256"]] = payload
         return [(unit, counts)]
 
     atom_ids = unit["atom_ids"]
@@ -237,54 +384,48 @@ def _fit_unit(unit: dict, atom_map: dict[str, str], model_ids: list[str],
     mid = len(atom_ids) // 2
     out: list[tuple[dict, dict]] = []
     for child_ids in (atom_ids[:mid], atom_ids[mid:]):
-        child = _derive_subunit(unit, child_ids)
-        out.extend(_fit_unit(child, atom_map, model_ids, pin_values,
-                             counter, preflight_entries, texts_by_unit,
-                             allowlist))
+        child = derive_unit_record(unit, child_ids, atom_records, atom_map)
+        out.extend(_fit_unit(child, atom_records, atom_map, model_ids,
+                             pin_values, ledger, manifest, payloads_by_unit,
+                             review_policy, challenge))
     return out
 
 
-def _pack_batches(fitted: list[tuple[dict, dict]], texts_by_unit: dict,
-                  model_ids: list[str], pin_values: dict, counter: _Counter,
-                  preflight_entries: list[dict],
-                  allowlist: frozenset) -> list[dict]:
-    """Greedy, order-preserving packing within one review class."""
+def _pack_batches(fitted: list[tuple[dict, dict]], payloads_by_unit: dict,
+                  model_ids: list[str], pin_values: dict, ledger,
+                  manifest: PreflightManifest, review_policy: dict,
+                  challenge: str) -> list[dict]:
+    """Greedy order-preserving packing, bounded by BOTH input and output.
+
+    MC3 bounded input only. A batch whose verdicts cannot fit the output
+    budget was still accepted — the PR #23 plan packed 152 units into a batch
+    whose 8,000-token allowance covers 14."""
     batches: list[dict] = []
     current: list[dict] = []
-    # Each unit's own exact count, measured alone. A batch body strictly
-    # CONTAINS every member unit's section, so a batch may never count fewer
-    # tokens than its largest member — beyond the operator's tolerance. This
-    # is what makes VERIFIER_TOKEN_DRIFT_TOLERANCE an enforced bound rather
-    # than a recorded intention.
-    solo_counts = {u["unit_sha256"]: c for u, c in fitted}
-    tolerance = pin_values["VERIFIER_TOKEN_DRIFT_TOLERANCE"]
-
-    def check_drift(units: list[dict], model_id: str, measured: int,
-                    label: str):
-        floor = max(solo_counts[u["unit_sha256"]][model_id] for u in units)
-        if measured + tolerance < floor:
-            raise BlockingError(
-                TOKEN_COUNT_DRIFT,
-                f"category=batch_count_below_member_floor model={model_id} "
-                f"label={label} measured={measured} member_floor={floor} "
-                f"tolerance={tolerance} — a batch cannot cost less than the "
-                "largest unit it contains")
+    solo = {u["unit_sha256"]: c for u, c in fitted}
+    unit_cap = review_policy["max_units_per_batch"]
 
     def close(units: list[dict]):
         if not units:
             return
+        reviewpolicy.assert_output_capacity(
+            len(units), pin_values["VERIFIER_MAX_OUTPUT_TOKENS"],
+            where=f"batch-{len(batches):04d}")
+        payloads = [payloads_by_unit[u["unit_sha256"]] for u in units]
         counts, headroom, hashes = {}, {}, {}
+        requests = []
         for model_id in model_ids:
-            request = _request_for(
-                model_id, units, [texts_by_unit[u["unit_sha256"]]
-                                  for u in units], pin_values)
-            preflight_entries.append(preflight.preflight_request(
-                request.transmitted_text(),
-                label=f"batch:{len(batches)}:{model_id}",
-                allowlist=allowlist))
-            result = counter.count(request, label=f"batch:{len(batches)}")
-            check_drift(units, model_id, result.input_tokens,
-                        f"batch:{len(batches)}")
+            request = _request_for(model_id, payloads, pin_values,
+                                   review_policy, challenge)
+            manifest.add(request, label=f"batch:{len(batches)}",
+                         units=units)
+            requests.append((model_id, request))
+        for model_id, request in requests:
+            result = ledger.count(request, label=f"batch:{len(batches)}")
+            floor = max(solo[u["unit_sha256"]][model_id] for u in units)
+            counting2.assert_batch_not_below_member_floor(
+                measured=result.input_tokens, floor=floor,
+                model_id=model_id, label=f"batch-{len(batches):04d}")
             fits, room = _fits(model_id, result.input_tokens, pin_values)
             if not fits:
                 raise BlockingError(
@@ -293,29 +434,33 @@ def _pack_batches(fitted: list[tuple[dict, dict]], texts_by_unit: dict,
             counts[model_id] = result.input_tokens
             headroom[model_id] = room
             hashes[model_id] = request.hashes()
-        batches.append(batching.batch_record(
-            f"batch-{len(batches):04d}", units, counts, headroom, hashes))
+        record = batching.batch_record(f"batch-{len(batches):04d}", units,
+                                       counts, headroom, hashes)
+        record["worst_case_output_tokens"] = (
+            reviewpolicy.worst_case_output_tokens(len(units)))
+        record["batch_sha256"] = batching.batch_digest(record)
+        batches.append(record)
 
     for unit, _counts in fitted:
-        if current and (batching.review_class(current[0])
-                        != batching.review_class(unit)):
+        boundary = current and (batching.review_class(current[0])
+                                != batching.review_class(unit))
+        if boundary or len(current) >= unit_cap:
             close(current)
             current = []
         candidate = [*current, unit]
-        ok = True
-        for model_id in model_ids:
-            request = _request_for(
-                model_id, candidate,
-                [texts_by_unit[u["unit_sha256"]] for u in candidate],
-                pin_values)
-            preflight_entries.append(preflight.preflight_request(
-                request.transmitted_text(),
-                label=f"probe:{len(batches)}:{model_id}",
-                allowlist=allowlist))
-            result = counter.count(request, label=f"probe:{len(batches)}")
-            if not _fits(model_id, result.input_tokens, pin_values)[0]:
-                ok = False
-                break
+        ok = len(candidate) <= unit_cap
+        if ok:
+            for model_id in model_ids:
+                request = _request_for(
+                    model_id, [payloads_by_unit[u["unit_sha256"]]
+                               for u in candidate],
+                    pin_values, review_policy, challenge)
+                manifest.add(request, label=f"probe:{len(batches)}",
+                             units=candidate)
+                result = ledger.count(request, label=f"probe:{len(batches)}")
+                if not _fits(model_id, result.input_tokens, pin_values)[0]:
+                    ok = False
+                    break
         if ok:
             current = candidate
         else:
@@ -373,15 +518,26 @@ def _cost_plan(batches: list[dict], model_ids: list[str],
 
 
 def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
-             secret_allowlist: frozenset = frozenset()) -> dict:
-    """Produce a strict, private ExecutableReviewPlan. Zero generation."""
+             authorizations=None, challenge: str = "LOCAL-MOCK-CHALLENGE",
+             required_approver: str | None = None,
+             minimum_distinct_corroborators: int = 2) -> dict:
+    """Produce a strict, PRIVATE mock-finalization report. Zero generation.
+
+    Named for what it does locally. Nothing here can produce provider
+    evidence, so nothing here can produce an executable plan."""
     artifact.validate_strict(skeleton)
     _rebuild_and_compare(skeleton, cwd=cwd)
+    structural_preconditions(skeleton)
 
     model_ids = list(skeleton["requested_model_ids"])
     capability_policy = capabilities.policy_record(model_ids)
     pin_record = pinsmod.test_pin_record(operator_pins, model_ids)
     pin_values = pin_record["pins"]
+    review_policy = reviewpolicy.policy_record(
+        model_ids,
+        required_approver=required_approver or model_ids[0],
+        minimum_distinct_corroborators=minimum_distinct_corroborators,
+        max_output_tokens=pin_values["VERIFIER_MAX_OUTPUT_TOKENS"])
 
     if len(skeleton["units"]) > pin_values["VERIFIER_MAX_REVIEW_UNITS"]:
         raise BlockingError(
@@ -390,18 +546,18 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
             f"cap={pin_values['VERIFIER_MAX_REVIEW_UNITS']}")
 
     atom_map = atom_texts(skeleton, cwd=cwd)
-    counter = _Counter(transport, pin_values)
-    preflight_entries: list[dict] = []
-    texts_by_unit: dict[str, str] = {}
+    atom_records = unitpayload.index_atom_records(skeleton)
+    ledger = counting2.CountLedger(transport, pin_values)
+    manifest = PreflightManifest(authorizations, atom_records=atom_records)
+    payloads_by_unit: dict[str, dict] = {}
 
     fitted: list[tuple[dict, dict]] = []
     for unit in skeleton["units"]:
-        fitted.extend(_fit_unit(unit, atom_map, model_ids, pin_values,
-                                counter, preflight_entries, texts_by_unit,
-                                secret_allowlist))
+        fitted.extend(_fit_unit(unit, atom_records, atom_map, model_ids,
+                                pin_values, ledger, manifest,
+                                payloads_by_unit, review_policy, challenge))
     final_units = [u for u, _ in fitted]
 
-    # the disposition partition must still hold over the FINAL unit set
     coverage.prove_exact_dispositions(
         [a["atom_id"] for a in skeleton["atoms"]],
         skeleton["required_control_atom_ids"],
@@ -410,8 +566,8 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
          for r in skeleton["generated_relationships"]],
         skeleton["atom_dispositions"]["blocked_unreviewable"])
 
-    batches = _pack_batches(fitted, texts_by_unit, model_ids, pin_values,
-                            counter, preflight_entries, secret_allowlist)
+    batches = _pack_batches(fitted, payloads_by_unit, model_ids, pin_values,
+                            ledger, manifest, review_policy, challenge)
     batching.prove_batch_partition(final_units, batches)
 
     cost = _cost_plan(batches, model_ids, pin_values)
@@ -430,23 +586,31 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
             f"{cost['planned_generation_calls']} "
             f"cap={pin_values['VERIFIER_MAX_GENERATION_CALLS']}")
 
-    count_source = counter.records[0]["source"] if counter.records else None
-    provider_counts = count_source == counting.SOURCE_PROVIDER
-    pending: list[dict] = []
-    if not provider_counts:
-        pending.append({
-            "code": "COUNTS_ARE_NOT_PROVIDER_EVIDENCE",
-            "reason": "token counts came from a deterministic local transport "
-                      f"({count_source}); a plan may not be executable on "
-                      "mock counts",
-            "path_bytes_b64": None,
-        })
+    source = counting.transport_source(transport)
+    count_evidence = evidence.candidate_evidence_record(
+        evidence.MOCK_TEST_EVIDENCE if source == counting.SOURCE_MOCK
+        else evidence.UNTRUSTED_LOCAL_EVIDENCE,
+        counts=[{**r, "count_request_sha256": r["count_request_sha256"],
+                 "request_semantics_sha256": r["request_semantics_sha256"]}
+                for r in ledger.records],
+        logical_request_count=ledger.logical_requests,
+        provider_attempt_count=ledger.provider_attempts,
+        endpoint=counting.COUNT_PATH,
+        billing_state=counting.COUNT_BILLING_STATE)
+
+    pending = [{
+        "code": "COUNTS_ARE_NOT_TRUSTED_EVIDENCE",
+        "reason": f"counts came from a {count_evidence['evidence_class']} "
+                  "transport inside the reviewed branch; only the trusted "
+                  "lane can produce evidence that makes a plan executable",
+        "path_bytes_b64": None,
+    }]
 
     state = skeleton["repository_state"]
     executable_plan = {
         "schema_version": skeleton["schema_version"],
-        "artifact": "executable-review-plan",
-        "stage": "finalized-plan",
+        "artifact": "mock-finalization-report",
+        "stage": "mock-finalization",
         "executable_plan_sha256": None,
         "publication_class": "private",
         "review_skeleton_sha256": skeleton["review_skeleton_sha256"],
@@ -457,22 +621,22 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
             "policy_sha256"],
         "capability_policy": capability_policy,
         "operator_pin_record": pin_record,
-        "model_resolution": counting.resolve_models(model_ids,
-                                                    transport=transport),
+        "review_request_policy": review_policy,
+        "requested_model_acceptance_policy":
+            counting.requested_model_acceptance_policy(model_ids,
+                                                       transport=transport),
         "final_units": final_units,
         "batches": batches,
-        "count_evidence": counting.evidence_record(
-            counter.records,
-            counting.resolve_models(model_ids, transport=transport)),
-        "secret_preflight": {
-            **preflight.evidence_record(preflight_entries),
-            "reviewed_allowlist_size": len(secret_allowlist),
-        },
+        "count_evidence": count_evidence,
+        "count_ledger": ledger.record(),
+        "preflight_manifest": manifest.seal(),
         "cost_plan": cost,
-        "count_calls_performed": counter.calls,
+        "logical_count_requests": ledger.logical_requests,
+        "provider_attempts_performed": ledger.provider_attempts,
+        "count_cache_hits": ledger.cache_hits,
         "generation_calls_performed": 0,
         "pending_requirements": pending,
-        "executable": provider_counts and not pending,
+        "executable": evidence.is_executable_authority(count_evidence),
     }
     executable_plan["executable_plan_sha256"] = plan_digest(executable_plan)
     return executable_plan
@@ -488,9 +652,12 @@ _PLAN_KEYS = (
     "schema_version", "artifact", "stage", "executable_plan_sha256",
     "publication_class", "review_skeleton_sha256", "repository_state",
     "identities", "disposition_root", "git_execution_policy_sha256",
-    "capability_policy", "operator_pin_record", "model_resolution",
-    "final_units", "batches", "count_evidence", "secret_preflight",
-    "cost_plan", "count_calls_performed", "generation_calls_performed",
+    "capability_policy", "operator_pin_record",
+    "final_units", "batches", "count_evidence",
+    "cost_plan", "count_ledger", "preflight_manifest",
+    "logical_count_requests", "provider_attempts_performed",
+    "count_cache_hits", "review_request_policy",
+    "requested_model_acceptance_policy", "generation_calls_performed",
     "pending_requirements", "executable",
 )
 
@@ -517,8 +684,16 @@ def validate_plan_strict(record: dict) -> dict:
         extra = sorted(set(record) - set(_PLAN_KEYS))
         if extra:
             _plan_fail(f"category=plan_field_unknown fields={extra}")
-        if record["artifact"] != "executable-review-plan":
-            _plan_fail("category=plan_artifact_tag_wrong")
+        # MC4-F37: the tag names the EVIDENCE class. A plan built on local
+        # mock counts is a mock-finalization-report; the
+        # trusted-executable-review-plan tag is reserved for trusted evidence
+        # and is refused here, because this loader cannot verify an anchor
+        # that only the trusted lane can produce.
+        if record["artifact"] not in ("mock-finalization-report",
+                                      "trusted-executable-review-plan"):
+            _plan_fail(f"category=plan_artifact_tag_wrong "
+                       f"tag={record['artifact']}")
+        trusted_tag = record["artifact"] == "trusted-executable-review-plan"
         if record["publication_class"] != "private":
             _plan_fail("category=plan_publication_class_wrong")
 
@@ -526,14 +701,16 @@ def validate_plan_strict(record: dict) -> dict:
             _plan_fail("category=plan_digest_mismatch")
 
         pin_record = record["operator_pin_record"]
-        if pinsmod.pin_digest(pin_record) != pin_record["pin_record_sha256"]:
-            _plan_fail("category=pin_record_digest_mismatch")
+        model_ids = list(record["requested_model_acceptance_policy"][
+            "requested_model_ids"])
+        pinsmod.validate_pin_authority(pin_record, model_ids)
+        reviewpolicy.validate_policy(record["review_request_policy"],
+                                     model_ids)
         policy = record["capability_policy"]
         if capabilities.policy_digest(policy) != policy[
                 "capability_policy_sha256"]:
             _plan_fail("category=capability_policy_digest_mismatch")
 
-        model_ids = list(record["model_resolution"]["requested_model_ids"])
         pin_values = pinsmod.validate_pins(pin_record["pins"], model_ids)
 
         # the batches must still partition the final units, in order
@@ -555,19 +732,34 @@ def validate_plan_strict(record: dict) -> dict:
         if record["generation_calls_performed"] != 0:
             _plan_fail("category=generation_calls_recorded")
 
-        count_source = record["count_evidence"]["model_resolution"][
-            "count_source"]
-        if count_source != record["model_resolution"]["count_source"]:
-            _plan_fail("category=count_source_disagreement")
-        expected = (count_source == counting.SOURCE_PROVIDER
-                    and not record["pending_requirements"])
-        if record["executable"] is not expected:
+        # MC4-F06/F07: executability is RE-DERIVED from the evidence class
+        # and its external anchor, never read from the record. Flipping the
+        # class and recomputing the digest does not survive this, because a
+        # trusted class must also carry a complete anchor.
+        evidence.validate_count_evidence(record["count_evidence"])
+        derived = evidence.is_executable_authority(record["count_evidence"])
+        if trusted_tag != derived:
+            _plan_fail("category=plan_tag_does_not_match_evidence_class "
+                       f"tag={record['artifact']} derived_trusted={derived}")
+        if record["executable"] is not derived:
             _plan_fail(
-                f"category=executable_claim_not_derived count_source="
-                f"{count_source} pending={len(record['pending_requirements'])} "
-                f"claimed={record['executable']} derived={expected}")
-        if count_source != counting.SOURCE_PROVIDER and record["executable"]:
-            _plan_fail("category=executable_on_non_provider_counts")
+                "category=executable_claim_not_derived evidence_class="
+                f"{record['count_evidence']['evidence_class']} "
+                f"claimed={record['executable']} derived={derived}")
+        if derived and record["pending_requirements"]:
+            _plan_fail("category=executable_with_pending_requirements")
+        # attempt accounting must reconcile with the ledger
+        ledger = record["count_ledger"]
+        if ledger["provider_attempt_count"] != record[
+                "provider_attempts_performed"]:
+            _plan_fail("category=attempt_count_disagreement")
+        if ledger["provider_attempt_count"] > ledger["max_attempts_cap"]:
+            _plan_fail("category=attempt_cap_exceeded_in_loaded_plan")
+        # every batch must have been output-capacity checked
+        for batch in record["batches"]:
+            reviewpolicy.assert_output_capacity(
+                batch["unit_count"], pin_values["VERIFIER_MAX_OUTPUT_TOKENS"],
+                where=batch["batch_id"])
     except BlockingError:
         raise
     except Exception as exc:                    # any failure is a refusal
@@ -623,7 +815,9 @@ def main(argv: list[str]) -> int:
                               args.public_output)
     print(f"units={len(plan_record['final_units'])} "
           f"batches={len(plan_record['batches'])} "
-          f"count_calls={plan_record['count_calls_performed']} "
+          f"logical_requests={plan_record['logical_count_requests']} "
+          f"provider_attempts={plan_record['provider_attempts_performed']} "
+          f"cache_hits={plan_record['count_cache_hits']} "
           f"generation_calls={plan_record['generation_calls_performed']} "
           f"count_source={plan_record['model_resolution']['count_source']} "
           f"executable={plan_record['executable']}")
@@ -665,11 +859,13 @@ def public_plan_summary(executable_plan: dict) -> dict:
         "disposition_root": executable_plan["disposition_root"],
         "final_unit_count": len(executable_plan["final_units"]),
         "batch_count": len(executable_plan["batches"]),
-        "count_calls_performed": executable_plan["count_calls_performed"],
+        "logical_count_requests": executable_plan["logical_count_requests"],
+        "provider_attempts_performed":
+            executable_plan["provider_attempts_performed"],
         "generation_calls_performed": 0,
         "cost_plan": executable_plan["cost_plan"],
-        "count_source": executable_plan["count_evidence"]["model_resolution"][
-            "count_source"],
+        "count_evidence_class":
+            executable_plan["count_evidence"]["evidence_class"],
         "executable": executable_plan["executable"],
         "pending_codes": [p["code"]
                           for p in executable_plan["pending_requirements"]],

@@ -129,9 +129,30 @@ def _decodes_to_clean_text(value: str, depth: int) -> bool:
     return not scan_text(text, depth=depth - 1)
 
 
+def _clearing_hashes(value: str) -> set[str]:
+    """Every form of `value` an operator might have authorized.
+
+    A reviewed literal is hashed from the SOURCE bytes, but preflight scans
+    the assembled request body, where that literal appears JSON-escaped. Both
+    forms hash here so an operator reviews the literal, not its encoding."""
+    forms = {value}
+    try:                                    # '\"' -> '"' etc.
+        forms.add(json.loads(f'"{value}"'))
+    except Exception:                       # not a JSON string fragment
+        forms.add(value)
+    return {sha256_hex(f.encode("utf-8", "surrogateescape")) for f in forms}
+
+
 def scan_text(text: str, *, allowlist: frozenset[str] = frozenset(),
+              cleared_hashes: frozenset[str] = frozenset(),
               depth: int = 2) -> list[dict]:
-    """Return sanitized findings. A finding NEVER contains the secret."""
+    """Return sanitized findings. A finding NEVER contains the secret.
+
+    `cleared_hashes` carries SCOPED reviewed-literal clearances: the caller
+    has already decided which authorizations apply to these exact bytes, so a
+    hash here means "this occurrence, in this scope". A literal cleared for
+    one atom is not cleared for the same bytes in another file, because the
+    caller never puts its hash in this set for that scope."""
     findings: list[dict] = []
 
     # An operator-reviewed string clears its whole SPAN, not merely its exact
@@ -161,6 +182,9 @@ def scan_text(text: str, *, allowlist: frozenset[str] = frozenset(),
     def _is_cleared(start: int, end: int) -> bool:
         return any(lo <= start and end <= hi for lo, hi in cleared)
 
+    def _hash_cleared(value: str) -> bool:
+        return bool(cleared_hashes & _clearing_hashes(value))
+
     def _report(category: str, match: re.Match[str]) -> None:
         value = match.group(0)
         findings.append({
@@ -175,6 +199,12 @@ def scan_text(text: str, *, allowlist: frozenset[str] = frozenset(),
         for match in pattern.finditer(text):
             if _is_cleared(match.start(), match.end()):
                 continue
+            if _hash_cleared(match.group(0)):
+                # Record the span so the generic sweeps cannot re-report a
+                # SUBSTRING of an authorized literal (the base64 sweep
+                # excludes '-', so it sees only the tail of "sk-proj-...").
+                cleared.append((match.start(), match.end()))
+                continue
             _report(name, match)
 
     # Base64 sweeps FIRST: only it sees a blob together with its '=' padding,
@@ -184,6 +214,9 @@ def scan_text(text: str, *, allowlist: frozenset[str] = frozenset(),
         for match in regex.finditer(text):
             value = match.group(0)
             if _is_cleared(match.start(), match.end()):
+                continue
+            if _hash_cleared(value):
+                cleared.append((match.start(), match.end()))
                 continue
             if _HEX_DIGEST.match(value) or _UUID.match(value):
                 continue
@@ -201,10 +234,12 @@ def scan_text(text: str, *, allowlist: frozenset[str] = frozenset(),
 
 
 def preflight_request(text: str, *, label: str,
-                      allowlist: frozenset[str] = frozenset()) -> dict:
+                      allowlist: frozenset[str] = frozenset(),
+                      cleared_hashes: frozenset[str] = frozenset()) -> dict:
     """Scan one assembled request body. Findings BLOCK before any call."""
     try:
-        findings = scan_text(text, allowlist=allowlist)
+        findings = scan_text(text, allowlist=allowlist,
+                             cleared_hashes=cleared_hashes)
     except Exception as exc:                       # a scan failure blocks
         raise BlockingError(
             SECRET_PREFLIGHT_FAILED,
@@ -223,6 +258,7 @@ def preflight_request(text: str, *, label: str,
         "scanned_sha256": sha256_hex(text.encode("utf-8", "surrogateescape")),
         "finding_count": 0,
         "patterns_version": len(_PATTERNS),
+        "cleared_hash_count": len(cleared_hashes),
         "entropy_threshold_bits_per_char": str(_ENTROPY_BITS_PER_CHAR),
     }
 
