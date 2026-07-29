@@ -145,25 +145,85 @@ def structured_unit(unit: dict, atom_records: dict[str, dict],
     return payload
 
 
-def render_unit(payload: dict) -> str:
-    """The exact text a reviewer sees for one unit."""
-    lines = [
-        f"### unit {payload['unit_sha256']}",
-        f"git_status: {payload['git_status']}",
-        f"control_bearing: {payload['classification']['control_bearing']}",
-        f"atoms: {payload['atom_count']}",
-        "",
-        "CHANGED LINES (OLD = removed, NEW = added, MET = metadata):",
-    ]
-    lines.extend(entry["rendered"] for entry in payload["atoms"])
+def line_prefix(side: str, line_number: int) -> str:
+    """The verifier-written part of a rendered line.
+
+    Split out because it is SCAFFOLDING, not repository content. Treating the
+    whole rendered line as atom content let a literal spanning the marker and
+    the source text borrow the source's authorization (C4-F02)."""
+    return f"{_SIDE_MARKER[side]} {line_number:06d} | "
+
+
+def render_sections(payload: dict, *, path_bytes_b64: str | None = None
+                    ) -> list[tuple[str, dict]]:
+    """The unit's exact text, decomposed into labelled origin sections.
+
+    `(text, origin)` pairs whose concatenation IS `render_unit(payload)`. The
+    origin dict is the keyword set for one `origin.Span`, so the assembler
+    writes the bytes and records their provenance in a single pass and the
+    two cannot disagree.
+
+    The decomposition is deliberately fine-grained: only the exact source
+    bytes of a changed atom are `ATOM_CONTENT`. Side markers, line numbers,
+    the `|` delimiter, newlines, headings and the context banner are all
+    scaffolding; unchanged context is its own kind; a metadata descriptor is
+    its own kind, because the verifier wrote it and no review of repository
+    content authorizes it."""
+    from . import origin as originmod
+
+    unit_hash = payload["unit_sha256"]
+    path_sha256 = payload["path_reference"]["private_path_sha256"]
+    sections: list[tuple[str, dict]] = []
+
+    def scaffold(text: str) -> None:
+        sections.append((text, {"kind": originmod.SCAFFOLDING}))
+
+    scaffold(
+        f"### unit {unit_hash}\n"
+        f"git_status: {payload['git_status']}\n"
+        f"control_bearing: {payload['classification']['control_bearing']}\n"
+        f"atoms: {payload['atom_count']}\n"
+        "\n"
+        "CHANGED LINES (OLD = removed, NEW = added, MET = metadata):\n")
+
+    for index, entry in enumerate(payload["atoms"]):
+        scaffold(line_prefix(entry["side"], entry["line_number"]))
+        kind = (originmod.METADATA_CONTENT if entry["side"] == SIDE_META
+                else originmod.ATOM_CONTENT)
+        sections.append((entry["content"], {
+            "kind": kind,
+            "unit_sha256": unit_hash,
+            "atom_id": entry["atom_id"],
+            "path_sha256": path_sha256,
+            "path_bytes_b64": path_bytes_b64,
+            "field_kind": f"atom_content:{entry['side']}",
+        }))
+        if index < len(payload["atoms"]) - 1 or payload["context"]:
+            scaffold("\n")
+
     if payload["context"]:
-        lines.append("")
-        lines.append("UNCHANGED CONTEXT (not part of this change; provided "
-                     "only for legibility, and NOT covered by your verdict):")
-        lines.extend(
-            render_line(SIDE_CONTEXT, entry["line_number"], entry["content"])
-            for entry in payload["context"])
-    return "\n".join(lines)
+        scaffold("\nUNCHANGED CONTEXT (not part of this change; provided "
+                 "only for legibility, and NOT covered by your verdict):\n")
+        for index, entry in enumerate(payload["context"]):
+            scaffold(line_prefix(SIDE_CONTEXT, entry["line_number"]))
+            sections.append((entry["content"], {
+                "kind": originmod.CONTEXT_CONTENT,
+                "unit_sha256": unit_hash,
+                "path_sha256": path_sha256,
+                "field_kind": "context",
+            }))
+            if index < len(payload["context"]) - 1:
+                scaffold("\n")
+    return sections
+
+
+def render_unit(payload: dict) -> str:
+    """The exact text a reviewer sees for one unit.
+
+    Defined as the join of `render_sections`, so there is exactly one
+    definition of the rendering and the origin map can never describe a
+    different document from the one that is sent."""
+    return "".join(text for text, _origin in render_sections(payload))
 
 
 def index_atom_records(skeleton: dict) -> dict[str, dict]:

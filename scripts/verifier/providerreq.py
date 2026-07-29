@@ -21,11 +21,13 @@ socket; this module only BUILDS payloads.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from types import MappingProxyType
 
 from . import reviewpolicy, unitpayload
-from .canon import canonical_json, digest
+from .canon import canonical_json, digest, sha256_hex
 from .capabilities import capability
+from .errors import BlockingError
 
 TRUNCATION = "disabled"
 
@@ -107,12 +109,12 @@ class ProviderRequest:
     text_format: dict
     max_output_tokens: int
     truncation: str = TRUNCATION
-    #: The unit payloads this request was assembled from. PROVENANCE only —
-    #: it is not part of any payload, any hash, or dataclass equality. The
-    #: secret preflight needs to know which transmitted bytes came from which
-    #: atom, and reconstructing that correspondence afterwards would be a
-    #: second assembly that could disagree with the first (A2-F02).
-    unit_payloads: tuple = field(default=(), compare=False, repr=False)
+    #: Digest of the exact provenance this request was assembled from. Unlike
+    #: the mutable, unhashed `unit_payloads` tuple it replaces, this
+    #: PARTICIPATES IN REQUEST SEMANTICS (C4-F03): provenance that disagrees
+    #: with the assembled text produces a different request identity, so the
+    #: preflight cannot be pointed at one document while another is sent.
+    provenance_sha256: str = ""
 
     def __post_init__(self):
         # Validate at CONSTRUCTION: an invalid request must never exist long
@@ -164,6 +166,7 @@ class ProviderRequest:
     def semantics_payload(self) -> dict:
         body = self._common()
         body["schema_name"] = VERDICT_SCHEMA_NAME
+        body["provenance_sha256"] = self.provenance_sha256
         return body
 
     def request_semantics_sha256(self) -> str:
@@ -209,18 +212,207 @@ def build_instructions(lens: str, challenge: str) -> str:
     )
 
 
-def build_request(model_id: str, unit_payloads: list[dict], *,
-                  lens: str, challenge: str, reasoning_effort: str | None,
-                  max_output_tokens: int) -> ProviderRequest:
-    """Assemble one review request from structured unit payloads."""
-    sections = [unitpayload.render_unit(p) for p in unit_payloads]
+#: `canonical_json` sorts keys, and "input" sorts before "instructions",
+#: "max_output_tokens", "model", "reasoning", "text" and "truncation" — so
+#: every payload begins with exactly these ten characters and the input string
+#: starts at offset 10. Asserted at assembly rather than assumed: if a future
+#: field sorts earlier, every span shifts and the assertion says so instead of
+#: the origin map silently describing the wrong bytes.
+_INPUT_FIELD_PREFIX = '{"input":"'
+INPUT_FIELD_OFFSET = len(_INPUT_FIELD_PREFIX)
+
+REQUEST_ASSEMBLY_INVALID = "REQUEST_ASSEMBLY_INVALID"
+
+
+def _freeze(value):
+    """Deep-freeze a payload so provenance cannot be mutated after hashing."""
+    if isinstance(value, dict):
+        return MappingProxyType({k: _freeze(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
+@dataclass(frozen=True)
+class RequestAssembly:
+    """ONE immutable object: the request, its exact bytes, and their origins.
+
+    Before this existed, a request was built, hashed, and then handed a
+    separate mutable tuple of unit payloads as provenance — excluded from
+    every hash, holding live dictionaries, and consulted by the preflight to
+    decide which transmitted bytes came from which atom. Provenance that
+    disagreed with the hashed text was therefore representable, and with two
+    identical rendered lines a swap attributed a transmitted occurrence to the
+    wrong atom and the wrong file (C4-F03).
+
+    Here the text, the count bytes, the execution bytes and both origin maps
+    are produced by one assembler in one pass, the provenance is deep-frozen,
+    and its digest participates in `request_semantics_sha256`."""
+
+    request: ProviderRequest
+    unit_payloads: tuple
+    unit_sha256_in_order: tuple
+    count_payload_bytes: bytes
+    execution_payload_bytes: bytes
+    count_origin_map: object
+    execution_origin_map: object
+
+    @property
+    def model_id(self) -> str:
+        return self.request.model_id
+
+    @property
+    def challenge(self) -> str:
+        return self.request.text_format["schema"]["properties"][
+            "challenge"]["const"]
+
+    def count_text(self) -> str:
+        return self.count_payload_bytes.decode("utf-8", "surrogateescape")
+
+    def execution_text(self) -> str:
+        return self.execution_payload_bytes.decode("utf-8", "surrogateescape")
+
+    def origin_map_for(self, payload_kind: str):
+        return (self.execution_origin_map if payload_kind == "execution"
+                else self.count_origin_map)
+
+    # The request's identity, delegated so an assembly is usable anywhere a
+    # request was. The BYTES are served from the assembly rather than
+    # re-serialized: the exact document that was scanned is the exact
+    # document that is counted and sent.
+    def count_payload(self) -> dict:
+        return self.request.count_payload()
+
+    def execution_payload(self) -> dict:
+        return self.request.execution_payload()
+
+    def request_semantics_sha256(self) -> str:
+        return self.request.request_semantics_sha256()
+
+    def count_request_sha256(self) -> str:
+        return self.request.count_request_sha256()
+
+    def execution_request_sha256(self) -> str:
+        return self.request.execution_request_sha256()
+
+    def transmitted_text(self) -> str:
+        return self.execution_text()
+
+    def hashes(self) -> dict:
+        record = self.request.hashes()
+        record["provenance_sha256"] = self.request.provenance_sha256
+        record["count_origin_map_sha256"] = self.count_origin_map.digest()
+        record["execution_origin_map_sha256"] = (
+            self.execution_origin_map.digest())
+        return record
+
+
+def provenance_digest(unit_payloads, input_text: str, challenge: str,
+                      model_id: str) -> str:
+    """Bind the exact payloads, the exact assembled text, and the request.
+
+    The text is included as well as the payloads: the payloads say what the
+    assembler was given, the text says what it produced, and a mismatch
+    between them is the failure this digest exists to make unrepresentable."""
+    return digest(b"request-provenance-v1", canonical_json({
+        "model_id": model_id,
+        "challenge": challenge,
+        "unit_payload_sha256_in_order": [p["unit_payload_sha256"]
+                                         for p in unit_payloads],
+        "unit_sha256_in_order": [p["unit_sha256"] for p in unit_payloads],
+        "input_text_sha256": sha256_hex(
+            input_text.encode("utf-8", "surrogateescape")),
+        "input_char_count": len(input_text),
+    }))
+
+
+def assemble_request(model_id: str, unit_payloads: list[dict], *,
+                     lens: str, challenge: str, reasoning_effort: str | None,
+                     max_output_tokens: int,
+                     path_bytes_b64_by_unit: dict | None = None
+                     ) -> RequestAssembly:
+    """The ONE authoritative assembler (C4-F03).
+
+    Sections come from `unitpayload.render_sections`, so the bytes and their
+    provenance are the same walk. Nothing here searches the finished document
+    for a section it just wrote."""
+    from . import origin as originmod
+
+    paths = path_bytes_b64_by_unit or {}
+    writer = originmod.SectionWriter("count", INPUT_FIELD_OFFSET)
+    for index, payload in enumerate(unit_payloads):
+        if index:
+            writer.write("\n\n")
+        for text, spec in unitpayload.render_sections(
+                payload, path_bytes_b64=paths.get(payload["unit_sha256"])):
+            writer.write(text, **spec)
+    input_text = writer.text()
+
     unit_hashes = [p["unit_sha256"] for p in unit_payloads]
-    return ProviderRequest(
+    request = ProviderRequest(
         model_id=model_id,
         instructions=build_instructions(lens, challenge),
-        input_text="\n\n".join(sections),
+        input_text=input_text,
         reasoning_effort=reasoning_effort,
         text_format=verdict_schema(unit_hashes, challenge=challenge),
         max_output_tokens=max_output_tokens,
-        unit_payloads=tuple(unit_payloads),
+        provenance_sha256=provenance_digest(unit_payloads, input_text,
+                                            challenge, model_id),
     )
+
+    count_bytes = canonical_json(request.count_payload())
+    execution_bytes = canonical_json(request.execution_payload())
+    for label, payload_bytes in (("count", count_bytes),
+                                 ("execution", execution_bytes)):
+        if not payload_bytes.startswith(_INPUT_FIELD_PREFIX.encode()):
+            raise BlockingError(
+                REQUEST_ASSEMBLY_INVALID,
+                f"category=input_field_not_first payload_kind={label} — the "
+                "origin map's offsets assume the canonical body opens with "
+                "the input string; a field now sorts before it, so every span "
+                "would be misplaced")
+
+    # The map must cover the WHOLE document, not only the input string.
+    # Everything outside it — the opening `{"input":"`, and the instructions,
+    # schema, model and truncation fields that follow — is scaffolding this
+    # code writes. Leaving it unmapped would make a finding there
+    # "unattributable" rather than "in scaffolding", which is the same
+    # refusal but a worse explanation, and it would leave a region of the
+    # transmitted bytes that the origin-map digest does not describe.
+    input_escaped_length = writer.cursor - INPUT_FIELD_OFFSET
+
+    def _full_map(kind: str, payload_bytes: bytes):
+        payload_length = len(payload_bytes.decode("utf-8", "surrogateescape"))
+        full = originmod.OriginMap(kind)
+        full.add(originmod.Span(0, INPUT_FIELD_OFFSET,
+                                originmod.SCAFFOLDING,
+                                field_kind="payload_prefix"))
+        for span in writer.origin_map.spans:
+            full.add(span)
+        full.add(originmod.Span(INPUT_FIELD_OFFSET + input_escaped_length,
+                                payload_length, originmod.SCAFFOLDING,
+                                field_kind="payload_suffix"))
+        return full
+
+    return RequestAssembly(
+        request=request,
+        unit_payloads=tuple(_freeze(p) for p in unit_payloads),
+        unit_sha256_in_order=tuple(unit_hashes),
+        count_payload_bytes=count_bytes,
+        execution_payload_bytes=execution_bytes,
+        count_origin_map=_full_map("count", count_bytes),
+        execution_origin_map=_full_map("execution", execution_bytes),
+    )
+
+
+def build_request(model_id: str, unit_payloads: list[dict], *,
+                  lens: str, challenge: str, reasoning_effort: str | None,
+                  max_output_tokens: int) -> ProviderRequest:
+    """The semantic core only, for callers that do not transmit.
+
+    Anything that will be scanned or sent must go through `assemble_request`,
+    which is the only path that produces origin maps bound to the bytes."""
+    return assemble_request(
+        model_id, unit_payloads, lens=lens, challenge=challenge,
+        reasoning_effort=reasoning_effort,
+        max_output_tokens=max_output_tokens).request

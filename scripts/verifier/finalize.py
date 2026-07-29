@@ -186,12 +186,19 @@ def _payload_for(unit: dict, atom_records: dict, atom_map: dict) -> dict:
 
 
 def _request_for(model_id: str, payloads: list[dict], pin_values: dict,
-                 review_policy: dict, challenge: str):
+                 review_policy: dict, challenge: str,
+                 path_bytes_b64_by_unit: dict | None = None):
+    """One assembled request: semantics, exact bytes, and both origin maps.
+
+    Everything downstream — preflight, counting, execution — consumes the
+    assembly, so the scanned document and the sent document are the same
+    object rather than two builds that agree by convention (C4-F03)."""
     effort = pin_values["VERIFIER_REASONING_EFFORT_BY_MODEL"][model_id]
-    return providerreq.build_request(
+    return providerreq.assemble_request(
         model_id, payloads, lens=review_policy["lenses"][model_id],
         challenge=challenge, reasoning_effort=effort,
-        max_output_tokens=pin_values["VERIFIER_MAX_OUTPUT_TOKENS"])
+        max_output_tokens=pin_values["VERIFIER_MAX_OUTPUT_TOKENS"],
+        path_bytes_b64_by_unit=path_bytes_b64_by_unit)
 
 
 def _fits(model_id: str, input_tokens: int, pin_values: dict) -> tuple[bool, int]:
@@ -257,10 +264,9 @@ class RequestGeneration:
             for label, request, unit_hashes in self._requests)
         binding = [
             {"label": label,
-             "count_request_sha256": request.count_request_sha256(),
-             "execution_request_sha256": request.execution_request_sha256(),
+             **assembly.hashes(),
              "unit_sha256_in_order": list(unit_hashes)}
-            for label, request, unit_hashes in self._sealed_snapshot
+            for label, assembly, unit_hashes in self._sealed_snapshot
         ]
         self._generation_sha256 = digest(b"request-generation-v1",
                                          canonical_json(binding))
@@ -275,10 +281,9 @@ class RequestGeneration:
         # the recomputed binding would not match.
         binding = [
             {"label": label,
-             "count_request_sha256": request.count_request_sha256(),
-             "execution_request_sha256": request.execution_request_sha256(),
+             **assembly.hashes(),
              "unit_sha256_in_order": list(unit_hashes)}
-            for label, request, unit_hashes in self._sealed_snapshot
+            for label, assembly, unit_hashes in self._sealed_snapshot
         ]
         recomputed = digest(b"request-generation-v1", canonical_json(binding))
         if recomputed != self._generation_sha256:
@@ -298,25 +303,18 @@ class RequestGeneration:
 class PreflightGenerationManifest:
     """Scans a whole generation, then permits counting.
 
-    Clearance is OCCURRENCE-scoped and resolved by SPAN, in two steps.
+    Every finding in the exact transmitted bytes must resolve to ONE exact
+    reviewed source occurrence: same atom, same occurrence index, same
+    literal digest, same detection category. `origin.resolve_finding` does
+    the resolution; this class supplies the raw scan of each span's source
+    and aggregates the refusals.
 
-    First, every atom the request carries is scanned on its own — the same
-    bytes a reviewer read, so the occurrence indices are the ones the
-    authorization names. An atom holding a literal no authorization clears
-    blocks the whole generation.
-
-    Second, the assembled body is scanned as the exact bytes that would
-    leave, and every finding must lie wholly inside one fully-cleared atom's
-    span. Findings in the instructions, the response schema, the unit headers
-    or unchanged CTX lines belong to no atom and are never clearable; a
-    finding straddling two atoms belongs to neither.
-
-    The earlier design compared literal HASHES between the per-atom scan and
-    the assembled body, which cannot work across JSON escaping: a source line
-    containing a quote reaches the provider with a backslash inserted, the
-    scanner matches a span one byte longer, and the authorized hash never
-    matches the transmitted one. A correctly authorized secret then blocked
-    with a message claiming it was unauthorized (A2-F02)."""
+    Three earlier designs failed here and are described in `origin.py`. The
+    most recent cleared an ATOM wholly once its raw findings were authorized,
+    which accepted any transmitted finding inside that atom — including one
+    that exists only in the serialized form — and treated an atom with no raw
+    finding as cleared, so a pattern manufactured by escaping or by the
+    verifier's own line prefix passed silently (C4-F01)."""
 
     def __init__(self, authorizations, *, atom_records: dict,
                  atom_map: dict):
@@ -326,49 +324,35 @@ class PreflightGenerationManifest:
         self.entries: list[dict] = []
         self.generations_sealed: list[str] = []
         self._path_b64_cache: frozenset | None = None
+        self._source_scan_cache: dict[str, list] = {}
         # unit hash -> unit record, so a sealed snapshot (which carries only
         # hashes) can recover each unit's atom set for scope resolution.
         self._units_by_hash: dict[str, dict] = {}
 
-    def _cleared_atoms(self, unit_hashes) -> tuple[frozenset, int]:
-        """Which atoms of this request are FULLY cleared, and by how many.
+    def _source_findings(self, span):
+        """The raw scan of ONE span's source text, cached by content digest.
 
-        An atom is fully cleared when every literal the scanner finds in its
-        own bytes is covered by an occurrence-scoped authorization. Partial
-        clearance is not a state: one uncleared literal blocks, so a later
-        span check never has to reason about which half of an atom was
-        reviewed."""
-        cleared: set[str] = set()
-        occurrences = 0
-        seen_atoms: set[str] = set()
-        for unit_hash in unit_hashes:
-            unit = self._units_by_hash.get(unit_hash)
-            if unit is None:
-                continue
+        Keyed by the span's source digest rather than by atom id: the same
+        bytes scan identically wherever they appear, and a cache keyed by
+        identity could otherwise serve one atom's findings for another."""
+        key = span.source_content_sha256 or ""
+        cached = self._source_scan_cache.get(key)
+        if cached is None:
+            cached = list(preflight.occurrence_index_map(span.source_text
+                                                         or ""))
+            self._source_scan_cache[key] = cached
+        return cached
+
+    def path_bytes_b64_by_unit(self, units) -> dict:
+        """Each unit's Base64 path identity, for authorization lookup only."""
+        mapping = {}
+        for unit in units:
             for atom_id in unit["atom_ids"]:
-                if atom_id in seen_atoms:
-                    continue
-                seen_atoms.add(atom_id)
                 record = self.atom_records.get(atom_id)
-                text = self.atom_map.get(atom_id)
-                if record is None or text is None:
-                    continue
-                findings = list(preflight.occurrence_index_map(text))
-                if not findings:
-                    cleared.add(atom_id)
-                    continue
-                if self.authorizations is None:
-                    continue
-                covered = [
-                    self.authorizations.clears_occurrence(
-                        literal_sha256=value_hash,
-                        path_bytes_b64=record["path_bytes_b64"],
-                        atom_id=atom_id, occurrence_index=index)
-                    for index, value_hash, _f in findings]
-                if all(covered):
-                    cleared.add(atom_id)
-                    occurrences += len(covered)
-        return frozenset(cleared), occurrences
+                if record and record.get("path_bytes_b64"):
+                    mapping[unit["unit_sha256"]] = record["path_bytes_b64"]
+                    break
+        return mapping
 
     def _path_identities(self) -> frozenset:
         """Every changed path's Base64 identity."""
@@ -392,19 +376,14 @@ class PreflightGenerationManifest:
         repository. A changed source line that genuinely contains a Base64
         path is content the reviewer is meant to read, and blocking it would
         be an unclearable false positive — this repository has exactly such a
-        line, in the fixture for this check. So the check is scoped to the
-        bytes the verifier synthesizes: the instructions, the response
-        schema, the unit headers, and metadata-atom descriptors."""
+        line, in the fixture for this check. So the check is scoped to spans
+        that are not reviewed atom content."""
         for identity in sorted(self._path_identities()):
             at = text.find(identity)
             while at != -1:
                 span = origin_map.locate(at, len(identity))
-                side = None
-                if span is not None:
-                    side = (self.atom_records.get(span.atom_id) or {}).get(
-                        "side")
-                if span is None or side == unitpayload.SIDE_META:
-                    where = "scaffolding" if span is None else "metadata_atom"
+                if span is None or span.kind != origin.ATOM_CONTENT:
+                    where = "scaffolding" if span is None else span.kind
                     raise BlockingError(
                         SECRET_PREFLIGHT_FAILED,
                         f"category=raw_path_identity_in_payload label={label} "
@@ -414,51 +393,45 @@ class PreflightGenerationManifest:
                         "no source authorization can clear it")
                 at = text.find(identity, at + 1)
 
-    def _scan_payload(self, text: str, *, label: str, unit_count: int,
-                      request, cleared_atoms: frozenset,
-                      authorized_occurrences: int) -> dict:
-        kind = "execution" if label.endswith(":execution") else "count"
-        origin_map = origin.build_for_payload(
-            kind, text, request.unit_payloads, self.atom_records)
+    def _scan_payload(self, assembly, *, payload_kind: str, label: str,
+                      unit_count: int) -> dict:
+        """Scan ONE exact payload and resolve every finding to its source.
+
+        The text and the map both come from the same assembly, so there is no
+        step here that could describe a different document from the one that
+        would be sent."""
+        text = (assembly.execution_text() if payload_kind == "execution"
+                else assembly.count_text())
+        origin_map = assembly.origin_map_for(payload_kind)
         self._assert_no_synthesized_path_identity(text, label=label,
                                                   origin_map=origin_map)
         findings = preflight.distinct_occurrences(preflight.scan_text(text))
-        attributed, orphaned = origin.attribute(findings, origin_map)
-        if orphaned:
-            raise BlockingError(
-                SECRET_PREFLIGHT_FAILED,
-                f"category=secret_outside_reviewed_content label={label} "
-                f"finding_count={len(orphaned)} — a literal was found in "
-                "request scaffolding, in unchanged context, or straddling two "
-                "atoms; no authorization over source content covers bytes "
-                "that are not one atom's reviewed content")
-        uncleared = sorted({span.atom_id for _f, span in attributed
-                            if span.atom_id not in cleared_atoms})
-        if uncleared:
-            raise BlockingError(
-                SECRET_PREFLIGHT_FAILED,
-                f"category=secret_preflight_failed label={label} "
-                f"unauthorized_atom_count={len(uncleared)} — an atom in this "
-                "request carries a literal no reviewed authorization clears; "
-                "an authorization for one atom never clears the same bytes in "
-                "another")
+        resolutions = [
+            origin.resolve_finding(finding, origin_map=origin_map,
+                                   authorizations=self.authorizations,
+                                   source_findings=self._source_findings)
+            for finding in findings
+        ]
+        origin.assert_all_cleared(resolutions, label=label)
+        map_record = origin_map.record()
         return {
             "label": label,
+            "payload_kind": payload_kind,
             "scanned_chars": len(text),
             # A2-F11: the EXACT canonical payload hash is bound into evidence,
             # so a strict loader can prove the scanned bytes were the request
             # bytes.
             "payload_sha256": sha256_hex(text.encode("utf-8",
                                                      "surrogateescape")),
-            # A2-F11 item 10: the span map is bound too, so the attribution
+            # A2-F11/C4-F02: the span map is bound too, so the attribution
             # that cleared these findings is itself evidence rather than an
             # unrecorded step.
-            "origin_map_sha256": origin_map.record()["origin_map_sha256"],
-            "atom_span_count": sum(1 for s in origin_map.spans
-                                   if s.kind == origin.ATOM_CONTENT),
+            "origin_map_sha256": map_record["origin_map_sha256"],
+            "origin_mapping_version": map_record["mapping_version"],
+            "span_count_by_kind": map_record["span_count_by_kind"],
             "finding_count": len(findings),
-            "attributed_finding_count": len(attributed),
-            "authorized_occurrence_count": authorized_occurrences,
+            "cleared_occurrence_count": sum(1 for r in resolutions
+                                            if r["cleared"]),
             "unit_count": unit_count,
         }
 
@@ -470,28 +443,20 @@ class PreflightGenerationManifest:
         generation_sha256 = generation.seal()
         snapshot = generation.sealed_snapshot()
         attempts_before = ledger.provider_attempts
-        for label, request, unit_hashes in snapshot:
-            cleared_atoms, authorized = self._cleared_atoms(unit_hashes)
-            count_bytes = canonical_json(request.count_payload()).decode(
-                "utf-8", "surrogateescape")
-            exec_bytes = request.transmitted_text()
+        for label, assembly, unit_hashes in snapshot:
             count_entry = self._scan_payload(
-                count_bytes, label=f"{label}:count",
-                unit_count=len(unit_hashes), request=request,
-                cleared_atoms=cleared_atoms, authorized_occurrences=authorized)
+                assembly, payload_kind="count", label=f"{label}:count",
+                unit_count=len(unit_hashes))
             exec_entry = self._scan_payload(
-                exec_bytes, label=f"{label}:execution",
-                unit_count=len(unit_hashes), request=request,
-                cleared_atoms=cleared_atoms, authorized_occurrences=authorized)
+                assembly, payload_kind="execution",
+                label=f"{label}:execution", unit_count=len(unit_hashes))
             self.entries.append({
                 "generation": generation.name,
                 "generation_sha256": generation_sha256,
                 "label": label,
-                "model_id": request.model_id,
+                "model_id": assembly.model_id,
                 "unit_sha256_in_order": list(unit_hashes),
-                "request_semantics_sha256": request.request_semantics_sha256(),
-                "count_request_sha256": request.count_request_sha256(),
-                "execution_request_sha256": request.execution_request_sha256(),
+                **assembly.hashes(),
                 "count_payload_scan": count_entry,
                 "execution_payload_scan": exec_entry,
             })
@@ -503,14 +468,13 @@ class PreflightGenerationManifest:
         self.generations_sealed.append(generation.name)
         return generation_sha256
 
-
     def count_generation(self, generation, ledger) -> dict:
         """Count a SEALED generation snapshot. Refuses an unsealed one."""
         snapshot = generation.sealed_snapshot()      # re-verifies the digest
         results: dict[tuple[str, str], int] = {}
-        for label, request, _unit_hashes in snapshot:
-            result = ledger.count(request, label=label)
-            results[(label, request.model_id)] = result.input_tokens
+        for label, assembly, _unit_hashes in snapshot:
+            result = ledger.count(assembly, label=label)
+            results[(label, assembly.model_id)] = result.input_tokens
         return results
 
     def record(self) -> dict:
@@ -555,8 +519,9 @@ def _fit_generation(units: list[dict], atom_records: dict, atom_map: dict,
         payload = _payload_for(unit, atom_records, atom_map)
         payloads[unit["unit_sha256"]] = payload
         for model_id in model_ids:
-            request = _request_for(model_id, [payload], pin_values,
-                                   review_policy, challenge)
+            request = _request_for(
+                model_id, [payload], pin_values, review_policy, challenge,
+                manifest.path_bytes_b64_by_unit([unit]))
             generation.add(request,
                            label=f"unit:{unit['unit_sha256'][:16]}:{model_id}",
                            units=[unit], registry=manifest._units_by_hash)
@@ -656,8 +621,9 @@ def _pack_batches(fitted: list[tuple[dict, dict]], payloads_by_unit: dict,
                 where=f"group-{index}")
             payloads = [payloads_by_unit[u["unit_sha256"]] for u in units]
             for model_id in model_ids:
-                request = _request_for(model_id, payloads, pin_values,
-                                       review_policy, challenge)
+                request = _request_for(
+                    model_id, payloads, pin_values, review_policy, challenge,
+                    manifest.path_bytes_b64_by_unit(units))
                 generation.add(request, label=f"group:{index}:{model_id}",
                                units=units, registry=manifest._units_by_hash)
         manifest.seal(generation, ledger)
@@ -683,7 +649,8 @@ def _pack_batches(fitted: list[tuple[dict, dict]], payloads_by_unit: dict,
                     request = _request_for(
                         model_id,
                         [payloads_by_unit[u["unit_sha256"]] for u in units],
-                        pin_values, review_policy, challenge)
+                        pin_values, review_policy, challenge,
+                        manifest.path_bytes_b64_by_unit(units))
                     hashes[model_id] = request.hashes()
                 record = batching.batch_record(
                     f"batch-{len(batches) + len(keep):04d}", units, per_model,

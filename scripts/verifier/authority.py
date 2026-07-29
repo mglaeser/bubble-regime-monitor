@@ -356,19 +356,31 @@ class LiteralAuthorizationSet:
         return False
 
     def clears_occurrence(self, *, literal_sha256: str, path_bytes_b64: str,
-                          atom_id: str | None, occurrence_index: int) -> bool:
-        """Is THIS occurrence, at THIS place, cleared?
+                          atom_id: str | None, occurrence_index: int,
+                          literal_category: str | None = None) -> bool:
+        """Is THIS occurrence, at THIS place, of THIS category, cleared?
 
         Checked most specific first. A record with occurrence_index=None
         covers any occurrence in its atom; a record with a file-wide null
-        atom covers any atom in that file. Neither ever crosses a file."""
+        atom covers any atom in that file. Neither ever crosses a file.
+
+        The CATEGORY is part of the match (C4-F01). An operator reviews "this
+        literal, detected as an OpenAI project key, at this position" — a
+        record cleared under one category does not clear the same bytes
+        detected as something else, because the second detection is a
+        different statement about what those bytes are."""
         for key in (
             (path_bytes_b64, atom_id, occurrence_index, literal_sha256),
             (path_bytes_b64, atom_id, None, literal_sha256),
             (path_bytes_b64, None, None, literal_sha256),
         ):
-            if key in self._index:
-                return True
+            record = self._index.get(key)
+            if record is None:
+                continue
+            if (literal_category is not None
+                    and record["literal_category"] != literal_category):
+                continue
+            return True
         return False
 
     def record(self) -> dict:

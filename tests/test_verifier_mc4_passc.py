@@ -59,46 +59,70 @@ MAIN = "b08844a0755710035d62830faa84902d9d85d3fe"  # pragma: allowlist secret
 
 
 class TestCrossBoundaryOccurrence:
-    """A finding that is not wholly inside ONE atom is never clearable.
+    """A finding that is not wholly inside ONE atom span is never clearable.
 
     The renderer makes a natural straddle hard to produce — every atom is
-    prefixed with `NEW 000123 | `, and neither the token alphabet nor the
-    Base64 one contains a space or a pipe, so a token match cannot cross the
-    seam. That is a property of today's renderer, not of the clearance rule,
-    so both are asserted: the seam is checked to be unmatchable, and the
-    attribution rule is driven directly with a straddling span to prove it
+    preceded by `NEW 000123 | `, which is now its own SCAFFOLDING span, and
+    neither the token alphabet nor the Base64 one contains a space or a pipe.
+    That is a property of today's renderer, not of the clearance rule, so
+    both are asserted: the seam is checked to be unmatchable, and the
+    resolution rule is driven directly with a straddling span to prove it
     refuses regardless."""
 
     def _spans(self):
         origin_map = origin.OriginMap("execution")
         origin_map.add(origin.Span(0, 20, origin.ATOM_CONTENT,
                                    unit_sha256="u" * 64, atom_id="a" * 64,
-                                   path_bytes_b64="cA=="))
+                                   path_bytes_b64="cA==",
+                                   source_text="x" * 20))
         origin_map.add(origin.Span(20, 40, origin.ATOM_CONTENT,
                                    unit_sha256="u" * 64, atom_id="b" * 64,
-                                   path_bytes_b64="cA=="))
+                                   path_bytes_b64="cA==",
+                                   source_text="y" * 20))
         return origin_map
 
-    def test_a_finding_spanning_two_atoms_is_unattributable(self):
-        origin_map = self._spans()
-        straddling = {"offset": 15, "length": 10, "value_sha256": "c" * 64,
-                      "category": "high_entropy_token"}
-        attributed, orphaned = origin.attribute([straddling], origin_map)
-        assert attributed == []
-        assert orphaned == [straddling]
+    def _resolve(self, origin_map, finding, source_findings=lambda s: []):
+        return origin.resolve_finding(finding, origin_map=origin_map,
+                                      authorizations=None,
+                                      source_findings=source_findings)
 
-    def test_a_finding_inside_one_atom_is_attributed_to_that_atom(self):
-        origin_map = self._spans()
-        inside = {"offset": 22, "length": 10, "value_sha256": "c" * 64,
-                  "category": "high_entropy_token"}
-        attributed, orphaned = origin.attribute([inside], origin_map)
-        assert orphaned == []
-        assert attributed[0][1].atom_id == "b" * 64
+    def test_a_finding_spanning_two_atoms_is_unattributable(self):
+        resolution = self._resolve(
+            self._spans(),
+            {"offset": 15, "length": 10, "value_sha256": "c" * 64,
+             "category": "high_entropy_token"})
+        assert resolution["cleared"] is False
+        assert resolution["refusal"] == origin.OUTSIDE_ANY_SPAN
+
+    def test_a_finding_inside_one_atom_resolves_to_that_atom(self):
+        resolution = self._resolve(
+            self._spans(),
+            {"offset": 22, "length": 10, "value_sha256": "c" * 64,
+             "category": "high_entropy_token"})
+        assert resolution["span"].atom_id == "b" * 64
+
+    def test_a_finding_in_context_is_refused_by_kind(self):
+        origin_map = origin.OriginMap("execution")
+        origin_map.add(origin.Span(0, 20, origin.CONTEXT_CONTENT,
+                                   source_text="z" * 20))
+        resolution = self._resolve(
+            origin_map, {"offset": 2, "length": 8, "value_sha256": "c" * 64,
+                         "category": "high_entropy_token"})
+        assert resolution["refusal"] == origin.IN_CONTEXT
+
+    def test_a_finding_in_a_metadata_descriptor_is_refused_by_kind(self):
+        origin_map = origin.OriginMap("execution")
+        origin_map.add(origin.Span(0, 20, origin.METADATA_CONTENT,
+                                   source_text="z" * 20))
+        resolution = self._resolve(
+            origin_map, {"offset": 2, "length": 8, "value_sha256": "c" * 64,
+                         "category": "high_entropy_token"})
+        assert resolution["refusal"] == origin.IN_METADATA
 
     def test_the_rendered_seam_between_atoms_is_not_token_matchable(self):
         # The bytes the renderer puts between two atoms' content. If a future
         # renderer drops them, a token could span two atoms and this fails.
-        seam = "\n" + unitpayload.render_line("new", 2, "")
+        seam = "\n" + unitpayload.line_prefix("new", 2)
         assert " " in seam and "|" in seam
         assert not preflight.scan_text("A" * 40 + seam + "B" * 40)
 
@@ -176,8 +200,7 @@ class TestPathIdentitiesNeverReachThePayload:
 
     Fixing the metadata descriptor removed the only known way for the
     verifier to synthesize one, which is exactly when a guard quietly becomes
-    decorative — so it is driven directly, in each of the three positions
-    that matter.
+    decorative — so it is driven directly, in each position that matters.
 
     The scope took a correction. A first version searched the whole payload,
     which blocked the precursor range: a test fixture in this repository
@@ -206,23 +229,21 @@ class TestPathIdentitiesNeverReachThePayload:
                              "path_bytes_b64": self._path_b64()},
         }
 
-    def _manifest(self, atom_map):
-        return finalize.PreflightGenerationManifest(
-            None, atom_records=self._records(), atom_map=atom_map)
-
-    def _scan(self, atom_ids, atom_map, *, lens="review this"):
-        manifest = self._manifest(atom_map)
+    def _scan(self, atom_ids, atom_map, *, lens="review this",
+              authorizations=None):
+        manifest = finalize.PreflightGenerationManifest(
+            authorizations, atom_records=self._records(), atom_map=atom_map)
         unit = {"unit_sha256": self.UNIT, "atom_ids": list(atom_ids),
                 "git_status": "M", "path_bytes_b64": self._path_b64()}
         manifest._units_by_hash[self.UNIT] = unit
         payload = unitpayload.structured_unit(unit, self._records(), atom_map)
-        request = providerreq.build_request(
+        assembly = providerreq.assemble_request(
             "gpt-5.3-codex", [payload], lens=lens, challenge="CH-PATH",
-            reasoning_effort="medium", max_output_tokens=8_000)
+            reasoning_effort="medium", max_output_tokens=8_000,
+            path_bytes_b64_by_unit={self.UNIT: self._path_b64()})
         return manifest._scan_payload(
-            request.transmitted_text(), label="unit:x:execution",
-            unit_count=1, request=request,
-            cleared_atoms=frozenset(atom_ids), authorized_occurrences=0)
+            assembly, payload_kind="execution", label="unit:x:execution",
+            unit_count=1)
 
     def test_a_path_identity_in_a_metadata_atom_blocks(self):
         # The A2-F21 leak itself: the verifier's own descriptor carrying the
@@ -233,7 +254,7 @@ class TestPathIdentitiesNeverReachThePayload:
                                         f'"path_bytes_b64":'
                                         f'"{self._path_b64()}"}}'})
         assert "raw_path_identity_in_payload" in str(e.value)
-        assert "origin=metadata_atom" in str(e.value)
+        assert f"origin={origin.METADATA_CONTENT}" in str(e.value)
 
     def test_a_path_identity_in_scaffolding_blocks(self):
         with pytest.raises(BlockingError) as e:
@@ -245,10 +266,27 @@ class TestPathIdentitiesNeverReachThePayload:
     def test_a_path_identity_in_reviewed_source_content_is_allowed(self):
         # A changed source line that genuinely contains a Base64 path is
         # content the reviewer is meant to read. This repository has one.
-        entry = self._scan(
-            [self.ATOM_CONTENT],
-            {self.ATOM_CONTENT: f'PATH_B64 = "{self._path_b64()}"'})
-        assert entry["atom_span_count"] == 1
+        # It still needs an authorization like any other detected literal —
+        # what it must NOT do is trip the synthesized-path guard.
+        line = f'PATH_B64 = "{self._path_b64()}"'
+        findings = preflight.distinct_occurrences(preflight.scan_text(line))
+        claims = [authority.literal_claim(
+            repository_identity="mglaeser/bubble-regime-monitor",
+            target_base_sha="b" * 40, diff_base_sha="c" * 40,
+            head_sha="d" * 40, path_bytes_b64=self._path_b64(),
+            atom_id=self.ATOM_CONTENT, occurrence_index=index,
+            literal=line[f["offset"]:f["offset"] + f["length"]],
+            literal_category=f["category"], reason="reviewed fixture",
+            reviewer_identity="op", authorized_at="t",
+            authorization_source="s", test_fixture=True)
+            for index, f in enumerate(findings)]
+        aset = authority.LiteralAuthorizationSet(
+            claims, repository_identity="mglaeser/bubble-regime-monitor",
+            target_base_sha="b" * 40, diff_base_sha="c" * 40,
+            head_sha="d" * 40)
+        entry = self._scan([self.ATOM_CONTENT],
+                           {self.ATOM_CONTENT: line}, authorizations=aset)
+        assert entry["span_count_by_kind"][origin.ATOM_CONTENT] == 1
 
     def test_every_metadata_descriptor_kind_is_path_free(self):
         from verifier import atoms as A
@@ -502,7 +540,12 @@ class TestReportStatesItsOwnProvenance:
                          entry["execution_payload_scan"]):
                 assert len(scan["payload_sha256"]) == 64
                 assert len(scan["origin_map_sha256"]) == 64
-                assert scan["atom_span_count"] >= 1
+                assert scan["origin_mapping_version"] == (
+                    origin.MAPPING_VERSION)
+                # Scaffolding is mapped too, so the digest describes the
+                # WHOLE document rather than only the reviewable part.
+                assert scan["span_count_by_kind"][origin.SCAFFOLDING] >= 2
+                assert scan["span_count_by_kind"][origin.ATOM_CONTENT] >= 1
 
 
 # --------------------------------------------------------- the baseline ------

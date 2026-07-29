@@ -47,10 +47,23 @@ MOCK_COUNT_ALGORITHM = "ceil(canonical_count_payload_bytes / 4)"
 MOCK_BYTES_PER_TOKEN = 4
 
 
+def count_body(request) -> bytes:
+    """The EXACT bytes of this request's count payload.
+
+    An assembled request already carries them, serialized once by the
+    assembler in the same pass that produced its origin map. Re-serializing
+    here would introduce a second build that could, in principle, differ from
+    the one that was scanned — the whole point of the assembly is that it
+    cannot (C4-F03)."""
+    prebuilt = getattr(request, "count_payload_bytes", None)
+    if prebuilt is not None:
+        return prebuilt
+    return canonical_json(request.count_payload())
+
+
 def mock_count_for(request) -> int:
     """Recompute what MockCountTransport WOULD return for this request."""
-    body = canonical_json(request.count_payload())
-    return -(-len(body) // MOCK_BYTES_PER_TOKEN)
+    return -(-len(count_body(request)) // MOCK_BYTES_PER_TOKEN)
 
 _RETRYABLE_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
@@ -200,7 +213,7 @@ def count_input_tokens(request, *, transport, max_retries: int,
     Deterministic failures are never retried; only a timeout, a transport
     error, or a retryable status is. Retry exhaustion blocks."""
     assert_timeout_protocol(transport)
-    body = canonical_json(request.count_payload())
+    body = count_body(request)
     attempts = 0
     last: BlockingError | None = None
     while attempts <= max_retries:

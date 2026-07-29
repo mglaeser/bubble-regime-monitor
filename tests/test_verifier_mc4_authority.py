@@ -127,113 +127,188 @@ class TestShapedAnchorConfersNothing:
 
 
 class TestOccurrenceScopedClearance:
-    """Clearance is resolved by SPAN inside the real assembled request.
+    """Clearance is EXACT-OCCURRENCE, resolved inside the real assembled body.
 
-    These drive `providerreq.build_request` rather than a hand-written
-    stand-in string, because the thing that has to hold is a property of the
-    transmitted bytes. A stand-in also cannot exhibit the defect that made
-    this rewrite necessary: JSON escaping shifts a literal's extent, so
-    comparing literal hashes between the per-atom scan and the assembled body
-    fails for any source line containing a quote (A2-F02)."""
+    These drive `providerreq.assemble_request`, because every property here
+    is a property of the transmitted bytes. A hand-written stand-in also
+    cannot exhibit the two defects that forced this design: JSON escaping
+    shifts a literal's extent (A2-F02), and clearing a whole atom accepts
+    transmitted findings that no source occurrence corresponds to (C4-F01).
+    """
 
     ATOM_A, ATOM_B = "a" * 64, "b" * 64
     UNIT_A, UNIT_B = "u" * 64, "v" * 64
+    PATH_B64 = "cA=="
 
-    def _atom_map(self):
+    ATOM_TEXTS = {
         # Atom A's literal sits inside a quoted string, so its transmitted
         # bytes carry backslashes the reviewed bytes do not.
-        return {self.ATOM_A: f'key = "{SECRET}"',
-                self.ATOM_B: f'other = "{SECRET}"'}
+        ATOM_A: f'key = "{SECRET}"',
+        ATOM_B: f'other = "{SECRET}"',
+    }
+
+    def _atom_map(self, **over):
+        return {**self.ATOM_TEXTS, **over}
 
     def _atom_records(self):
         return {
             self.ATOM_A: {"atom_id": self.ATOM_A, "side": "new",
                           "line_number": 1, "hunk_id": "h",
-                          "path_bytes_b64": "cA=="},
+                          "path_bytes_b64": self.PATH_B64},
             self.ATOM_B: {"atom_id": self.ATOM_B, "side": "new",
                           "line_number": 2, "hunk_id": "h",
-                          "path_bytes_b64": "cA=="},
+                          "path_bytes_b64": self.PATH_B64},
         }
 
-    def _manifest(self, records):
+    def _manifest(self, records, atom_map=None):
         aset = authority.LiteralAuthorizationSet(records, **RANGE)
-        atom_map, atom_records = self._atom_map(), self._atom_records()
-        manifest = finalize.PreflightGenerationManifest(
-            aset, atom_records=atom_records, atom_map=atom_map)
-        return manifest, atom_map, atom_records
+        return finalize.PreflightGenerationManifest(
+            aset, atom_records=self._atom_records(),
+            atom_map=atom_map or self._atom_map())
 
     def _unit(self, unit_hash, atom_id):
         return {"unit_sha256": unit_hash, "atom_ids": [atom_id],
-                "git_status": "M", "path_bytes_b64": "cA=="}
+                "git_status": "M", "path_bytes_b64": self.PATH_B64}
 
     def _scan(self, manifest, units, *, lens="review this"):
-        atom_map, atom_records = self._atom_map(), self._atom_records()
+        atom_records = self._atom_records()
         for unit in units:
             manifest._units_by_hash[unit["unit_sha256"]] = unit
-        payloads = [unitpayload.structured_unit(u, atom_records, atom_map)
+        payloads = [unitpayload.structured_unit(u, atom_records,
+                                                manifest.atom_map)
                     for u in units]
-        request = providerreq.build_request(
+        assembly = providerreq.assemble_request(
             "gpt-5.3-codex", payloads, lens=lens, challenge="CH-TEST",
-            reasoning_effort="medium", max_output_tokens=8_000)
-        cleared, authorized = manifest._cleared_atoms(
-            [u["unit_sha256"] for u in units])
+            reasoning_effort="medium", max_output_tokens=8_000,
+            path_bytes_b64_by_unit=manifest.path_bytes_b64_by_unit(units))
         return manifest._scan_payload(
-            request.transmitted_text(), label="batch:0:execution",
-            unit_count=len(units), request=request, cleared_atoms=cleared,
-            authorized_occurrences=authorized)
+            assembly, payload_kind="execution", label="batch:0:execution",
+            unit_count=len(units))
 
-    def test_an_authorized_atom_alone_is_cleared(self):
-        manifest, _, _ = self._manifest([_claim(self.ATOM_A)])
+    def test_an_authorized_occurrence_is_cleared(self):
+        manifest = self._manifest([_claim(self.ATOM_A)])
         entry = self._scan(manifest, [self._unit(self.UNIT_A, self.ATOM_A)])
-        # The literal WAS found in the transmitted bytes and WAS attributed to
-        # the reviewed atom — not merely absent from the scan.
+        # The literal WAS found in the transmitted bytes and WAS resolved to
+        # the reviewed occurrence — not merely absent from the scan.
         assert entry["finding_count"] >= 1
-        assert entry["attributed_finding_count"] == entry["finding_count"]
-        assert entry["atom_span_count"] == 1
+        assert entry["cleared_occurrence_count"] == entry["finding_count"]
 
-    def test_an_escaped_literal_is_still_matched_to_its_reviewed_atom(self):
+    def test_an_escaped_literal_is_still_matched_to_its_source_occurrence(self):
         # The regression that forced span resolution: the reviewed bytes are
         # `key = "sk-proj-…"`, the transmitted bytes are `key = \"sk-proj-…\"`.
-        # A hash-of-literal comparison sees two different literals and blocks a
-        # correctly authorized atom.
-        manifest, atom_map, _ = self._manifest([_claim(self.ATOM_A)])
-        assert '"' in atom_map[self.ATOM_A]
+        # A hash-of-literal comparison sees two different literals and blocks
+        # a correctly authorized occurrence.
+        manifest = self._manifest([_claim(self.ATOM_A)])
+        assert '"' in manifest.atom_map[self.ATOM_A]
         entry = self._scan(manifest, [self._unit(self.UNIT_A, self.ATOM_A)])
-        assert entry["attributed_finding_count"] >= 1
+        assert entry["cleared_occurrence_count"] >= 1
 
     def test_the_same_literal_in_an_unauthorized_atom_still_blocks(self):
         # ATTACK: atom A is reviewed. Atom B carries the same bytes and is
         # not. Pack both into one batch. MC4's first attempt reduced the
         # authorizations to a set of literal hashes for the whole request,
         # so B's occurrence was cleared by A's review.
-        manifest, _, _ = self._manifest([_claim(self.ATOM_A)])
+        manifest = self._manifest([_claim(self.ATOM_A)])
         with pytest.raises(BlockingError) as e:
             self._scan(manifest, [self._unit(self.UNIT_A, self.ATOM_A),
                                   self._unit(self.UNIT_B, self.ATOM_B)])
-        assert "unauthorized_atom_count" in str(e.value)
+        assert origin.UNAUTHORIZED_OCCURRENCE in str(e.value)
 
     def test_a_literal_injected_into_scaffolding_is_never_cleared(self):
         # A source-atom authorization must not clear the instructions. The
         # secret is injected through the model's LENS, which is real
         # scaffolding assembled into every request.
-        manifest, _, _ = self._manifest([_claim(self.ATOM_A)])
+        manifest = self._manifest([_claim(self.ATOM_A)])
         with pytest.raises(BlockingError) as e:
             self._scan(manifest, [self._unit(self.UNIT_A, self.ATOM_A)],
                        lens=f"review this {SECRET} carefully")
-        assert "secret_outside_reviewed_content" in str(e.value)
+        assert origin.IN_SCAFFOLDING in str(e.value)
 
-    def test_an_atom_the_map_cannot_locate_blocks_rather_than_passing(self):
-        # If the span map and the assembled bytes disagree, every finding
-        # would silently become unattributable — or, worse, a region would go
-        # unmapped. Fail closed instead.
-        manifest, _, atom_records = self._manifest([_claim(self.ATOM_A)])
-        unit = self._unit(self.UNIT_A, self.ATOM_A)
-        payload = unitpayload.structured_unit(unit, atom_records,
-                                              self._atom_map())
+    def test_a_transmitted_finding_with_no_source_occurrence_is_refused(self):
+        # C4-F01, driven at the resolution rule itself: the previous design
+        # put an atom with zero raw findings straight into `cleared_atoms`,
+        # so anything appearing inside it in the serialized form was
+        # accepted. Here the span's source has no finding at the mapped
+        # range, and the resolver refuses rather than defaulting to the
+        # atom's status.
+        origin_map = origin.OriginMap("execution")
+        origin_map.add(origin.Span(
+            0, 20, origin.ATOM_CONTENT, unit_sha256=self.UNIT_A,
+            atom_id=self.ATOM_A, path_bytes_b64=self.PATH_B64,
+            source_text="a harmless changed line"))
+        resolution = origin.resolve_finding(
+            {"offset": 2, "length": 8, "value_sha256": "f" * 64,
+             "category": "high_entropy_token"},
+            origin_map=origin_map,
+            authorizations=authority.LiteralAuthorizationSet(
+                [_claim(self.ATOM_A)], **RANGE),
+            source_findings=lambda span: [])
+        assert resolution["cleared"] is False
+        assert resolution["refusal"] == origin.NO_SOURCE_OCCURRENCE
+
+    def test_a_finding_starting_inside_an_escape_has_no_source_preimage(self):
+        # The serializer turns one source character into two transmitted
+        # ones. A match beginning at the backslash describes bytes the
+        # repository does not contain, so there is no occurrence anyone could
+        # have reviewed.
+        raw = 'a"bc'
+        assert origin.json_escaped(raw) == 'a\\"bc'
+        # offset 1 is the backslash: a real raw boundary, so it maps.
+        assert origin.raw_preimage(raw, 1, 3) == (1, 2)
+        # offset 2 is the quote INSIDE the escape: no raw boundary.
+        assert origin.raw_preimage(raw, 2, 3) is None
+
+    def test_escaping_cannot_manufacture_a_token_finding(self):
+        # Why the rule above is defence in depth rather than a live path with
+        # today's patterns: every escape sequence begins with a backslash,
+        # which is in none of the scanner's alphabets, so serialization can
+        # shorten or displace a match but never join two runs into one.
+        joined = "A" * 20 + "\n" + "B" * 20
+        assert not preflight.scan_text(joined)
+        assert not preflight.scan_text(origin.json_escaped(joined))
+        assert "\\" in origin.json_escaped(joined)
+
+    def test_a_different_transmitted_literal_in_a_reviewed_atom_blocks(self):
+        # Authorize occurrence 0; the atom carries a SECOND, different
+        # literal. Clearing the atom wholly would have accepted both.
+        second = "ghp_" + "z" * 36
+        manifest = self._manifest(
+            [_claim(self.ATOM_A)],
+            atom_map=self._atom_map(**{
+                self.ATOM_A: f'key = "{SECRET}" spare = "{second}"'}))
         with pytest.raises(BlockingError) as e:
-            origin.build_for_payload("execution", "unrelated payload text",
-                                     [payload], atom_records)
-        assert "origin_span_unlocatable" in str(e.value)
+            self._scan(manifest, [self._unit(self.UNIT_A, self.ATOM_A)])
+        assert origin.UNAUTHORIZED_OCCURRENCE in str(e.value)
+
+    def test_a_category_mismatch_blocks(self):
+        # Same bytes, same atom, same occurrence — reviewed under a category
+        # that is not what the scanner detected. An operator cleared a
+        # different statement about those bytes.
+        manifest = self._manifest(
+            [_claim(self.ATOM_A, literal_category="not_the_detected_category")])
+        with pytest.raises(BlockingError) as e:
+            self._scan(manifest, [self._unit(self.UNIT_A, self.ATOM_A)])
+        assert origin.UNAUTHORIZED_OCCURRENCE in str(e.value)
+
+    def test_the_verifier_line_prefix_is_not_atom_content(self):
+        # C4-F02: `NEW 000001 | ` is written by this code, not by the
+        # repository, so it must be scaffolding. If it were inside the atom
+        # span, a literal straddling the marker and the source could borrow
+        # the source's authorization.
+        manifest = self._manifest([_claim(self.ATOM_A)])
+        units = [self._unit(self.UNIT_A, self.ATOM_A)]
+        payloads = [unitpayload.structured_unit(u, self._atom_records(),
+                                                manifest.atom_map)
+                    for u in units]
+        assembly = providerreq.assemble_request(
+            "gpt-5.3-codex", payloads, lens="review", challenge="CH-TEST",
+            reasoning_effort="medium", max_output_tokens=8_000,
+            path_bytes_b64_by_unit=manifest.path_bytes_b64_by_unit(units))
+        spans = assembly.execution_origin_map.spans
+        atom_spans = [s for s in spans if s.kind == origin.ATOM_CONTENT]
+        assert len(atom_spans) == 1
+        # The span holds the source bytes EXACTLY — no marker, no delimiter.
+        assert atom_spans[0].source_text == manifest.atom_map[self.ATOM_A]
 
     def test_one_pattern_hit_is_one_occurrence(self):
         # "sk-proj-…" matches openai_key AND openai_project_key. Counting
