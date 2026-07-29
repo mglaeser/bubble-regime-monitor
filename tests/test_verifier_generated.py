@@ -123,3 +123,133 @@ class TestTamperDetection:
                               capture_output=True, text=True).stdout.strip()
         rel = generated.relationship_at_single(head, cwd=tmp_path)
         assert rel["state"] == generated.WHOLLY_ABSENT
+
+
+class TestAddedFileMetadataAtomIsExact:
+    """An addition may carry ONE metadata atom, and it must be the right one.
+
+    The byte proof states the generated file's CONTENT and its mode. It states
+    nothing about a type change, a binary change or a rename — but the check
+    was a COUNT, so any single metadata descriptor rode along on it (A2-F21).
+    """
+
+    class _Atom:
+        def __init__(self, atom_id, side, path=b"governance/mandate.md"):
+            self.atom_id = atom_id
+            self.side = side
+            self.path = path
+
+    class _Change:
+        status = "A"
+        orig_path = None
+        path = b"governance/mandate.md"
+        new_mode = generated.PINNED_MODE
+        old_mode = None
+
+    ENDPOINTS = {"head": {"state": generated.PRESENT_VERIFIED},
+                 "base": {"state": generated.WHOLLY_ABSENT}}
+
+    def _atoms(self):
+        return [self._Atom("c" * 64, "new"), self._Atom("m" * 64, "meta")]
+
+    def _descriptor(self, kind, **extra):
+        import json
+        return {"m" * 64: json.dumps(
+            {"schema_version": 2, "kind": kind, "git_status": "A",
+             "path_sha256": "0" * 64, "original_path_sha256": None,
+             **extra}).encode()}
+
+    def test_the_new_file_mode_descriptor_is_eligible(self):
+        kind, ids = generated.eligible_generated_atoms(
+            self._Change(), self._atoms(), self.ENDPOINTS,
+            self._descriptor("new_file_mode", mode=generated.PINNED_MODE))
+        assert kind == generated.ELIGIBLE_ADDED
+        assert len(ids) == 2
+
+    @pytest.mark.parametrize("kind", ["type_change", "binary_change",
+                                      "rename", "copy", "hunkless_change"])
+    def test_any_other_single_metadata_descriptor_blocks(self, kind):
+        with pytest.raises(BlockingError) as e:
+            generated.eligible_generated_atoms(
+                self._Change(), self._atoms(), self.ENDPOINTS,
+                self._descriptor(kind))
+        assert e.value.code == GENERATED_DERIVATIVE_MISMATCH
+        assert "unproved_metadata_atom_kind" in str(e.value)
+
+    def test_a_new_file_mode_with_an_unpinned_mode_blocks(self):
+        with pytest.raises(BlockingError) as e:
+            generated.eligible_generated_atoms(
+                self._Change(), self._atoms(), self.ENDPOINTS,
+                self._descriptor("new_file_mode", mode="100755"))
+        assert "metadata_descriptor_mode_not_pinned" in str(e.value)
+
+    def test_missing_descriptor_bytes_block_rather_than_pass(self):
+        with pytest.raises(BlockingError) as e:
+            generated.eligible_generated_atoms(
+                self._Change(), self._atoms(), self.ENDPOINTS, {})
+        assert "metadata_descriptor_missing" in str(e.value)
+
+
+class TestBothEndpointsAreBoundIntoTheRecord:
+    """`base_state: PRESENT_VERIFIED` was a bare string next to head's proof.
+
+    Nothing tied the claim about base to the verification that produced it, so
+    a record naming a base proof for a different commit — or none at all — was
+    equally well-formed (A2-F21).
+    """
+
+    def _endpoints(self, base_state):
+        base = {"state": base_state, "endpoint_commit_sha": PR23_BASE}
+        if base_state == generated.PRESENT_VERIFIED:
+            base["relationship_content_proof_sha256"] = "b" * 64
+            base["actual_generated_sha256"] = COMBINED_SHA
+        return {"base": base,
+                "head": {"state": generated.PRESENT_VERIFIED,
+                         "endpoint_commit_sha": PR23_HEAD}}
+
+    def _content_proof(self):
+        return {"endpoint_commit_sha": PR23_HEAD,
+                "relationship_content_proof_sha256": "h" * 64,
+                "actual_generated_sha256": COMBINED_SHA}
+
+    def test_a_modified_relationship_binds_the_base_proof(self):
+        record = generated.relationship_record(
+            "rel-1", self._content_proof(),
+            self._endpoints(generated.PRESENT_VERIFIED),
+            generated.ELIGIBLE_MODIFIED, ["a" * 64], {})
+        assert record["base_relationship_content_proof_sha256"] == "b" * 64
+        assert record["base_endpoint_commit_sha"] == PR23_BASE
+        # And the binding is inside the digest, not alongside it.
+        tampered = dict(record)
+        tampered["base_relationship_content_proof_sha256"] = "c" * 64
+        assert generated.relationship_digest(tampered) != record[
+            "relationship_proof_sha256"]
+
+    def test_a_modified_relationship_without_a_base_proof_blocks(self):
+        endpoints = self._endpoints(generated.PRESENT_VERIFIED)
+        del endpoints["base"]["relationship_content_proof_sha256"]
+        with pytest.raises(BlockingError) as e:
+            generated.relationship_record(
+                "rel-1", self._content_proof(), endpoints,
+                generated.ELIGIBLE_MODIFIED, ["a" * 64], {})
+        assert "modified_generated_file_without_base_proof" in str(e.value)
+
+    def test_an_added_relationship_states_the_absence_as_null(self):
+        record = generated.relationship_record(
+            "rel-1", self._content_proof(),
+            self._endpoints(generated.WHOLLY_ABSENT),
+            generated.ELIGIBLE_ADDED, ["a" * 64], {})
+        assert record["base_state"] == generated.WHOLLY_ABSENT
+        # Present and null, not absent: an omitted field reads as "not
+        # recorded", which is the state this is meant to distinguish.
+        assert "base_relationship_content_proof_sha256" in record
+        assert record["base_relationship_content_proof_sha256"] is None
+
+    def test_an_added_relationship_carrying_a_base_proof_blocks(self):
+        endpoints = self._endpoints(generated.WHOLLY_ABSENT)
+        endpoints["base"]["relationship_content_proof_sha256"] = "b" * 64
+        with pytest.raises(BlockingError) as e:
+            generated.relationship_record(
+                "rel-1", self._content_proof(), endpoints,
+                generated.ELIGIBLE_ADDED, ["a" * 64], {})
+        assert "added_generated_file_with_base_proof" in str(e.value)

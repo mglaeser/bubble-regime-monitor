@@ -52,7 +52,7 @@ from verifier.errors import (  # noqa: E402
 )
 
 SECRET = "sk-proj-abcdef1234567890abcdef"          # pragma: allowlist secret
-MAIN = "b08844a0755710035d62830faa84902d9d85d3fe"
+MAIN = "b08844a0755710035d62830faa84902d9d85d3fe"  # pragma: allowlist secret
 
 
 # ------------------------------------------- clearance cannot be borrowed ----

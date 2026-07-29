@@ -333,7 +333,7 @@ ELIGIBLE_MODIFIED = "eligible_modified"
 ELIGIBLE_ADDED = "eligible_added"
 
 
-def eligible_generated_atoms(change, atoms, endpoints):
+def eligible_generated_atoms(change, atoms, endpoints, contents=None):
     """(eligibility_kind, covered_atom_ids) or raise.
 
     A byte proof of the generated file's CONTENT authorizes exactly two
@@ -347,7 +347,13 @@ def eligible_generated_atoms(change, atoms, endpoints):
     Everything else (R, C, T, D, a mode flip, a symlink/submodule mode, an
     old path that is not the generated path, a metadata atom the proof
     cannot state, or a partial/invalid endpoint) is a hard block. Byte
-    equality must never hide rename, type or mode semantics."""
+    equality must never hide rename, type or mode semantics.
+
+    `contents` maps atom_id to its descriptor bytes. It is what lets the one
+    metadata atom an addition may carry be checked for what it IS, rather
+    than only counted (A2-F21): a count of one admitted a `type_change` or a
+    `binary_change` descriptor just as readily as the `new_file_mode` the
+    proof actually states."""
     head_state = endpoints["head"]["state"]
     base_state = endpoints["base"]["state"]
     if head_state != PRESENT_VERIFIED:
@@ -391,14 +397,42 @@ def eligible_generated_atoms(change, atoms, endpoints):
                    state=base_state)
     if len(meta) > 1:
         raise _err(category="unproved_metadata_atom", count=len(meta))
+    for atom in meta:
+        _assert_new_file_mode_descriptor(atom, contents)
     return ELIGIBLE_ADDED, [a.atom_id for a in atoms]
+
+
+def _assert_new_file_mode_descriptor(atom, contents) -> None:
+    """The single metadata atom of an ADDED generated file, checked exactly.
+
+    A byte proof states the generated file's CONTENT and its mode. It states
+    nothing about a type change, a binary change or a rename, so those
+    descriptors must not ride along on the count of one."""
+    if contents is None:
+        raise _err(category="metadata_descriptor_unavailable")
+    raw = contents.get(atom.atom_id)
+    if raw is None:
+        raise _err(category="metadata_descriptor_missing")
+    try:
+        descriptor = json.loads(raw)
+    except Exception as exc:
+        raise _err(category="metadata_descriptor_unparseable",
+                   exception_class=type(exc).__name__) from exc
+    if not isinstance(descriptor, dict):
+        raise _err(category="metadata_descriptor_not_object")
+    if descriptor.get("kind") != "new_file_mode":
+        raise _err(category="unproved_metadata_atom_kind",
+                   kind=str(descriptor.get("kind")))
+    if descriptor.get("mode") != PINNED_MODE:
+        raise _err(category="metadata_descriptor_mode_not_pinned",
+                   mode=str(descriptor.get("mode")))
 
 
 def relationship_digest(record: dict) -> str:
     """Digest over the final relationship record minus its own hash."""
     stripped = {k: v for k, v in record.items()
                 if k != "relationship_proof_sha256"}
-    return digest(b"generated-relationship-v2", canonical_json(stripped))
+    return digest(b"generated-relationship-v3", canonical_json(stripped))
 
 
 def relationship_record(relationship_id: str, content_proof: dict,
@@ -410,16 +444,37 @@ def relationship_record(relationship_id: str, content_proof: dict,
 
     The content proof binds the blobs; this record binds the content proof
     PLUS the disposition claim, so a stored proof hash can never certify a
-    coverage list that was attached afterwards."""
+    coverage list that was attached afterwards.
+
+    BOTH endpoints are bound, not just head (A2-F21). The record carried
+    `base_state: PRESENT_VERIFIED` as a bare string while the only proof
+    digest in it was head's, so nothing tied the claim about base to the
+    verification that produced it — a base proof for a different commit, or
+    none at all, left the record equally well-formed. An eligible MODIFIED
+    change now binds base's own content-proof digest and commit; an eligible
+    ADDED change has no base proof to bind, and says so with null rather than
+    by omitting the fields."""
+    base = endpoints["base"]
     record = {
         "relationship_id": relationship_id,
         "kind": KIND,
         "eligibility": eligibility,
-        "base_state": endpoints["base"]["state"],
+        "base_state": base["state"],
         "head_state": endpoints["head"]["state"],
+        "base_endpoint_commit_sha": base.get("endpoint_commit_sha"),
+        "base_relationship_content_proof_sha256": base.get(
+            "relationship_content_proof_sha256"),
+        "base_generated_sha256": base.get("actual_generated_sha256"),
         "generated_change": generated_change_record,
         "covered_generated_atom_disposition": list(covered_atom_ids),
         **{k: v for k, v in content_proof.items() if k != "kind"},
     }
+    if eligibility == ELIGIBLE_MODIFIED and not record[
+            "base_relationship_content_proof_sha256"]:
+        raise _err(category="modified_generated_file_without_base_proof",
+                   state=base["state"])
+    if eligibility == ELIGIBLE_ADDED and record[
+            "base_relationship_content_proof_sha256"]:
+        raise _err(category="added_generated_file_with_base_proof")
     record["relationship_proof_sha256"] = relationship_digest(record)
     return record

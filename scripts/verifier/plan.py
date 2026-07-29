@@ -191,7 +191,8 @@ def build_skeleton(target_base_ref: str, head_ref: str, *, cwd,
             continue
         try:
             kind, ids = generated.eligible_generated_atoms(
-                f["change"], f["stamped"], endpoints)
+                f["change"], f["stamped"], endpoints,
+                f["result"].contents)
         except BlockingError as exc:
             # Ineligible shape or unverified endpoint: the file stays in
             # MODEL_REVIEW and the plan blocks. Byte proof never hides it.
