@@ -27,9 +27,10 @@ The integrity gates are the legacy panel's, restored and made exact:
 
 from __future__ import annotations
 
-from . import counting, evidence, finalize, verdicts
+from . import counting, evidence, finalize, unitpayload, verdicts
 from .canon import canonical_json, digest
 from .errors import (
+    CHUNK_COUNT_EXHAUSTED,
     INSUFFICIENT_CORROBORATION,
     PROVIDER_RESPONSE_INVALID,
     REQUIRED_APPROVER_MISSING,
@@ -135,14 +136,72 @@ def _validate_response_envelope(status, body, *, model_id: str):
     return parsed
 
 
+class GenerationLedger:
+    """Attempts, retries and usage for Stage 3 (§6 executor ledger).
+
+    Counts an attempt BEFORE it is made, for the same reason the count ledger
+    does: a request that failed still spent a call, and a ledger that only
+    records successes understates exactly the number that matters."""
+
+    def __init__(self, pin_values: dict):
+        self.pins = pin_values
+        self.logical_requests = 0
+        self.attempts = 0
+        self.records: list[dict] = []
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    @property
+    def max_calls(self) -> int:
+        return self.pins["VERIFIER_MAX_GENERATION_CALLS"]
+
+    def attempt(self, model_id: str, batch_id: str) -> None:
+        if self.attempts >= self.max_calls:
+            raise BlockingError(
+                CHUNK_COUNT_EXHAUSTED,
+                f"category=generation_attempt_cap_reached "
+                f"attempts={self.attempts} cap={self.max_calls}")
+        self.attempts += 1
+        self.logical_requests += 1
+        self.records.append({"model_id": model_id, "batch_id": batch_id,
+                             "attempt_number": self.attempts,
+                             "result_category": "pending"})
+
+    def settle(self, category: str, *, input_tokens: int = 0,
+               output_tokens: int = 0) -> None:
+        if self.records:
+            self.records[-1]["result_category"] = category
+            self.records[-1]["input_tokens"] = input_tokens
+            self.records[-1]["output_tokens"] = output_tokens
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+
+    def record(self) -> dict:
+        record = {
+            "logical_generation_requests": self.logical_requests,
+            "generation_attempts": self.attempts,
+            "retries": max(0, self.attempts - self.logical_requests),
+            "max_generation_calls_cap": self.max_calls,
+            "timeout_seconds": self.pins["VERIFIER_GENERATION_TIMEOUT_SECONDS"],
+            "total_input_tokens": self.input_tokens,
+            "total_output_tokens": self.output_tokens,
+            "attempts": self.records,
+            "honest_scope": "mock arithmetic from a local transport; not "
+                            "provider usage and not a spend estimate",
+        }
+        record["generation_ledger_sha256"] = digest(
+            b"generation-ledger-v1", canonical_json(record))
+        return record
+
+
 def execute_batch(batch: dict, review_policy: dict, *, transport,
                   pin_values: dict, challenge: str,
-                  counted_by_model: dict) -> dict:
+                  counted_by_model: dict,
+                  payloads_by_unit: dict | None = None,
+                  ledger=None) -> dict:
     """Run one batch through the panel and decide each unit.
 
     Returns a per-unit decision record. Blocks on any integrity failure."""
-    import json
-
     unit_hashes = list(batch["unit_sha256_in_order"])
     model_ids = list(review_policy["model_ids"])
     approver = review_policy["required_approver"]
@@ -151,13 +210,27 @@ def execute_batch(batch: dict, review_policy: dict, *, transport,
     # model_id -> {unit_hash -> verdict}
     by_model: dict[str, dict] = {}
     for model_id in model_ids:
-        request_body = _execution_body(batch, model_id, review_policy,
-                                       challenge, unit_hashes)
-        status, body = transport.post("/v1/responses",
-                                      json.dumps(request_body).encode(),
+        if payloads_by_unit is not None:
+            request = _execution_request(batch, model_id, review_policy,
+                                         pin_values, challenge,
+                                         payloads_by_unit)
+            # The execution payload is preflighted again immediately before
+            # it would be sent (§6 step 5): the bytes that leave are the
+            # bytes that were scanned.
+            request_bytes = canonical_json(request.execution_payload())
+        else:
+            request_bytes = _minimal_body(batch, model_id, review_policy,
+                                          challenge, unit_hashes)
+        if ledger is not None:
+            ledger.attempt(model_id, batch["batch_id"])
+        status, body = transport.post("/v1/responses", request_bytes,
                                       timeout=pin_values[
                                           "VERIFIER_GENERATION_TIMEOUT_SECONDS"])
         parsed = _validate_response_envelope(status, body, model_id=model_id)
+        if ledger is not None:
+            ledger.settle("ok",
+                          input_tokens=parsed["usage"]["input_tokens"],
+                          output_tokens=parsed["usage"].get("output_tokens", 0))
         model_verdicts = verdicts.validate_verdicts(
             parsed["output_parsed"], unit_hashes=unit_hashes,
             challenge=challenge, review_policy=review_policy)
@@ -264,50 +337,89 @@ def synthesize(batch_results: list[dict]) -> dict:
     return record
 
 
-def _execution_body(batch: dict, model_id: str, review_policy: dict,
-                    challenge: str, unit_hashes: list[str]) -> dict:
-    """The exact /v1/responses body a batch would send for one model.
+def _minimal_body(batch: dict, model_id: str, review_policy: dict,
+                  challenge: str, unit_hashes: list[str]) -> bytes:
+    """A schema-bearing stand-in for unit tests that carry no skeleton.
 
-    Rebuilt from the batch's recorded request hashes' inputs is not possible
-    here (the batch stores hashes, not payloads), so the mock executor builds
-    a minimal, schema-bearing body carrying the challenge and unit set. A
-    trusted executor would reconstruct the exact stored payload; this is the
-    candidate mock path."""
+    Never used when payloads are available: a stand-in cannot support the
+    usage-drift check, so `counted_by_model` is expected to be empty here."""
     from . import providerreq
     schema = providerreq.verdict_schema(unit_hashes, challenge=challenge)
-    return {
+    return canonical_json({
         "model": model_id,
-        "instructions": "mock execution",
+        "instructions": "mock execution (no skeleton)",
         "input": f"batch {batch['batch_id']} challenge {challenge}",
         "text": {"format": schema},
         "truncation": "disabled",
         "max_output_tokens": review_policy["max_output_tokens"],
+    })
+
+
+def rebuild_payloads(skeleton: dict, plan_record: dict, *, cwd) -> dict:
+    """Rebuild each final unit's EXACT structured payload from the commits.
+
+    The report stores request HASHES, not bodies — deliberately, so it carries
+    no source content. The executor therefore earns the payloads again the
+    same way the finalizer did, which also re-proves that every unit's atoms
+    still exist in the range the report claims."""
+    atom_map = finalize.atom_texts(skeleton, cwd=cwd)
+    atom_records = unitpayload.index_atom_records(skeleton)
+    return {
+        unit["unit_sha256"]: unitpayload.structured_unit(
+            unit, atom_records, atom_map)
+        for unit in plan_record["final_units"]
     }
 
 
-def execute_mock(plan_record: dict, *, transport, challenge: str) -> dict:
+def _execution_request(batch: dict, model_id: str, review_policy: dict,
+                       pin_values: dict, challenge: str,
+                       payloads_by_unit: dict):
+    """The EXACT request the plan was costed against, rebuilt.
+
+    Building a simplified stand-in here would make the usage-drift check
+    meaningless: it would compare the count of one body against the usage of
+    a different one, and the mismatch would look like provider drift rather
+    than an executor defect. (It did, the first time — the check caught it.)"""
+    payloads = [payloads_by_unit[h] for h in batch["unit_sha256_in_order"]]
+    return finalize._request_for(model_id, payloads, pin_values,
+                                 review_policy, challenge)
+
+
+def execute_mock(plan_record: dict, *, transport, challenge: str,
+                 skeleton: dict | None = None, cwd=None) -> dict:
     """Run a whole mock-finalization report through the mock panel.
+
+    When a skeleton is supplied the EXACT execution payloads are rebuilt from
+    the commits, so the usage-drift check compares like with like. Without one
+    (unit tests), a schema-bearing stand-in is used and drift is not checked —
+    stated rather than silently skipped.
 
     Produces a mock-execution-report: MOCK_TEST_EVIDENCE, non-executable,
     zero real generation calls."""
     review_policy = plan_record["review_request_policy"]
     pin_values = plan_record["operator_pin_record"]["pins"]
+    payloads_by_unit = (rebuild_payloads(skeleton, plan_record, cwd=cwd)
+                        if skeleton is not None else None)
+    ledger = GenerationLedger(pin_values)
 
     batch_results = []
-    generation_calls = 0
     for batch in plan_record["batches"]:
-        counted_by_model = dict(batch["input_tokens_by_model"])
+        counted_by_model = (dict(batch["input_tokens_by_model"])
+                            if payloads_by_unit is not None
+                            else {m: None for m in review_policy["model_ids"]})
         result = execute_batch(batch, review_policy, transport=transport,
                                pin_values=pin_values, challenge=challenge,
-                               counted_by_model=counted_by_model)
-        generation_calls += len(review_policy["model_ids"])
+                               counted_by_model=counted_by_model,
+                               payloads_by_unit=payloads_by_unit,
+                               ledger=ledger)
         batch_results.append(result)
+    generation_calls = ledger.attempts
 
     synthesis = synthesize(batch_results)
     execution_evidence = evidence.candidate_evidence_record(
         evidence.MOCK_TEST_EVIDENCE, counts=[],
-        logical_request_count=generation_calls,
-        provider_attempt_count=generation_calls,
+        logical_request_count=ledger.logical_requests,
+        provider_attempt_count=ledger.attempts,
         endpoint="/v1/responses",
         billing_state=counting.COUNT_BILLING_STATE)
 
@@ -321,6 +433,8 @@ def execute_mock(plan_record: dict, *, transport, challenge: str) -> dict:
         "batch_results": batch_results,
         "synthesis": synthesis,
         "execution_evidence": execution_evidence,
+        "generation_ledger": ledger.record(),
+        "usage_drift_checked": payloads_by_unit is not None,
         "generation_attempts_performed": generation_calls,
         "executable_authority": False,
         "evidence_class": evidence.MOCK_TEST_EVIDENCE,

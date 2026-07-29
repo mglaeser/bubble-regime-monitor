@@ -171,11 +171,13 @@ class TestChangesWithoutHunks:
         assert len(meta) == 1 and meta[0].side == "meta"
         import json as _json
 
-        from verifier.canon import unb64
+        from verifier.canon import sha256_hex
         d = _json.loads(contents[meta[0].atom_id])
         assert d["kind"] == "rename"
-        assert unb64(d["original_path_bytes_b64"]) == b"scripts/gate.py"
-        assert unb64(d["path_bytes_b64"]) == b"docs/notes.txt"
+        # Both endpoints of the rename are stated, as hashes: the descriptor
+        # is transmitted content, so it never carries the path bytes (A2-F21).
+        assert d["original_path_sha256"] == sha256_hex(b"scripts/gate.py")
+        assert d["path_sha256"] == sha256_hex(b"docs/notes.txt")
 
     def test_mode_only_change_yields_a_metadata_atom(self):
         body = (b"diff --git a/deploy.sh b/deploy.sh\n"

@@ -25,9 +25,11 @@ something an operator cleared by reviewing a test fixture.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from .canon import canonical_json, digest
+from .errors import SECRET_PREFLIGHT_FAILED, BlockingError
 
 #: Span kinds. Only ATOM_CONTENT can ever be cleared by an authorization.
 ATOM_CONTENT = "atom_content"
@@ -128,6 +130,79 @@ def build_from_sections(payload_kind: str, sections: list[tuple[str, dict]]
         else:
             origin_map.add(Span(start, cursor, SCAFFOLDING))
     return "".join(parts), origin_map
+
+
+def json_escaped(text: str) -> str:
+    """A string's exact bytes INSIDE a canonical-JSON document.
+
+    `canonical_json` serialises through `json.dumps(..., ensure_ascii=False)`,
+    so stripping the surrounding quotes from the same call gives the exact
+    escaped form the payload carries. This is why a raw-text literal and the
+    transmitted one are not the same bytes: a source line containing a quote
+    reaches the provider with a backslash in front of it, the scanner matches
+    a span one byte longer, and the two hashes disagree. Comparing literal
+    HASHES across that boundary cannot work, which is what the span map here
+    exists to replace."""
+    return json.dumps(text, ensure_ascii=False)[1:-1]
+
+
+def build_for_payload(payload_kind: str, payload_text: str,
+                      unit_payloads, atom_records: dict) -> OriginMap:
+    """Map every atom's transmitted bytes inside one assembled payload.
+
+    Each atom reaches the provider as one rendered line inside the request's
+    `input` string, so the map is built by locating each atom's escaped
+    rendering, in payload order, from a forward cursor — identical lines in
+    different units therefore bind to the right atom rather than the first
+    match. A line that cannot be located is an assembly/mapping disagreement
+    and blocks: an origin map that silently omits a span would hand back
+    'unattributable' for content that is in fact reviewable, or worse, leave a
+    transmitted region unmapped.
+
+    Everything not covered by a span — instructions, the response schema, the
+    unit headers, unchanged CTX lines — is scaffolding no source
+    authorization can clear."""
+    origin_map = OriginMap(payload_kind)
+    cursor = 0
+    for payload in unit_payloads:
+        unit_hash = payload["unit_sha256"]
+        for entry in payload["atoms"]:
+            escaped = json_escaped(entry["rendered"])
+            at = payload_text.find(escaped, cursor)
+            if at < 0:
+                raise BlockingError(
+                    SECRET_PREFLIGHT_FAILED,
+                    "category=origin_span_unlocatable "
+                    f"payload_kind={payload_kind} unit={unit_hash[:16]} "
+                    f"atom={entry['atom_id'][:16]} — the assembled payload "
+                    "does not contain this atom's rendered line where the "
+                    "assembly order says it must; the map and the bytes "
+                    "disagree, so nothing is clearable")
+            record = atom_records.get(entry["atom_id"]) or {}
+            origin_map.add(Span(
+                at, at + len(escaped), ATOM_CONTENT,
+                unit_sha256=unit_hash, atom_id=entry["atom_id"],
+                path_bytes_b64=record.get("path_bytes_b64")))
+            cursor = at + len(escaped)
+    return origin_map
+
+
+def attribute(findings: list[dict], origin_map: OriginMap
+              ) -> tuple[list[tuple[dict, Span]], list[dict]]:
+    """Split payload findings into (attributed to one atom, unattributable).
+
+    A finding is attributed only when it lies WHOLLY inside a single atom's
+    span. One that straddles two adjacent atoms, or reaches from an atom into
+    the scaffolding around it, is unattributable — which is exactly how a
+    crafted literal would try to borrow its neighbour's clearance."""
+    attributed, orphaned = [], []
+    for finding in findings:
+        span = origin_map.locate(finding["offset"], finding["length"])
+        if span is None:
+            orphaned.append(finding)
+        else:
+            attributed.append((finding, span))
+    return attributed, orphaned
 
 
 def clearable_findings(findings: list[dict], *, text: str,

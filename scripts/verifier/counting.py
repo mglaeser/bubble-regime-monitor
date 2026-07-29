@@ -40,6 +40,18 @@ COUNT_BILLING_STATE = "UNKNOWN_PENDING_OPERATOR_VERIFICATION"
 SOURCE_PROVIDER = "PROVIDER"
 SOURCE_MOCK = "MOCK_NOT_PROVIDER"
 
+# The mock's arithmetic, NAMED so a strict loader can recompute a mock report
+# rather than trusting its numbers. It is not an estimate of any provider's
+# tokenizer and must never be reported as one.
+MOCK_COUNT_ALGORITHM = "ceil(canonical_count_payload_bytes / 4)"
+MOCK_BYTES_PER_TOKEN = 4
+
+
+def mock_count_for(request) -> int:
+    """Recompute what MockCountTransport WOULD return for this request."""
+    body = canonical_json(request.count_payload())
+    return -(-len(body) // MOCK_BYTES_PER_TOKEN)
+
 _RETRYABLE_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
 _DECLARED_SOURCES = frozenset({SOURCE_PROVIDER, SOURCE_MOCK})

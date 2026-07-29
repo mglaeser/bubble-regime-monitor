@@ -171,6 +171,10 @@ class CountLedger:
             "attempts_per_request_worst_case": self._attempts_per_request,
             "timeout_seconds": self.pins["VERIFIER_COUNT_TIMEOUT_SECONDS"],
             "billing_state": counting.COUNT_BILLING_STATE,
+            "mock_count_algorithm": (
+                counting.MOCK_COUNT_ALGORITHM
+                if counting.transport_source(self.transport)
+                == counting.SOURCE_MOCK else None),
             "counts": self.records,
             "attempts": self.attempt_records,
             "failed_attempt_count": sum(

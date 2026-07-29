@@ -21,7 +21,7 @@ socket; this module only BUILDS payloads.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import reviewpolicy, unitpayload
 from .canon import canonical_json, digest
@@ -107,6 +107,12 @@ class ProviderRequest:
     text_format: dict
     max_output_tokens: int
     truncation: str = TRUNCATION
+    #: The unit payloads this request was assembled from. PROVENANCE only —
+    #: it is not part of any payload, any hash, or dataclass equality. The
+    #: secret preflight needs to know which transmitted bytes came from which
+    #: atom, and reconstructing that correspondence afterwards would be a
+    #: second assembly that could disagree with the first (A2-F02).
+    unit_payloads: tuple = field(default=(), compare=False, repr=False)
 
     def __post_init__(self):
         # Validate at CONSTRUCTION: an invalid request must never exist long
@@ -216,4 +222,5 @@ def build_request(model_id: str, unit_payloads: list[dict], *,
         reasoning_effort=reasoning_effort,
         text_format=verdict_schema(unit_hashes, challenge=challenge),
         max_output_tokens=max_output_tokens,
+        unit_payloads=tuple(unit_payloads),
     )

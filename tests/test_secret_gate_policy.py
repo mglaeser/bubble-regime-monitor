@@ -163,20 +163,45 @@ def _tracked(pattern: str) -> list[Path]:
 
 
 class TestPublicArtifactsCarryNoFreeText:
-    """The dedicated validator that justifies the exact baseline entries.
+    """The dedicated validator that would justify exact baseline entries.
 
-    Each entry says "this high-entropy string is one of our own digests". That
-    claim is only as good as the guarantee that a public summary contains
-    nothing BUT digests, counts and enums — so it is checked, not asserted.
+    Absence is the CURRENT intended state: MC4 removed the stale MC3 summaries
+    and their ~900 baseline entries, and nothing under artifacts/ is tracked
+    today. A2-F12: that is asserted, not skipped — a skip quietly weakens the
+    count and would keep passing if a summary reappeared unreviewed.
+
+    The walker below stays because it is the validator a future tracked
+    summary must satisfy before any baseline entry is added for it.
     """
 
     ALLOWED_LONG_STRINGS = ("integer micro-USD",)
 
-    def test_every_public_summary_is_digests_counts_and_enums(self):
-        files = _tracked("artifacts/verifier/**/*public*.json")
-        if not files:
-            pytest.skip("no public summaries tracked")
-        for path in files:
+    def test_no_artifact_summaries_are_tracked_today(self):
+        # The intended state after MC4 stale-evidence removal. If a summary is
+        # ever committed again, this fails and forces the reviewer to run the
+        # validator below and add exact baseline entries deliberately.
+        assert _tracked("artifacts/verifier/**/*.json") == [], (
+            "an artifact summary was committed; run the free-text validator "
+            "and add exact reviewed baseline entries before tracking it")
+
+    def test_the_validator_accepts_a_digests_only_summary(self):
+        # The validator itself is exercised on a representative record, so it
+        # cannot rot while no summary is tracked.
+        good = {"artifact": "untrusted-local-summary",
+                "publication_class": "local-only",
+                "review_skeleton_sha256": "a" * 64,
+                "final_unit_count": 3,
+                "money_unit": "integer micro-USD"}
+        self._walk(good, "fixture")
+
+    def test_the_validator_rejects_free_text(self):
+        bad = {"artifact": "untrusted-local-summary",
+               "leaked": "x" * 200}
+        with pytest.raises(AssertionError):
+            self._walk(bad, "fixture")
+
+    def test_every_tracked_summary_is_digests_counts_and_enums(self):
+        for path in _tracked("artifacts/verifier/**/*public*.json"):
             record = json.loads(path.read_text())
             self._walk(record, path.name)
 

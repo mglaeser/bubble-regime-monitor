@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from verifier import atoms as A  # noqa: E402
 from verifier import errors as E  # noqa: E402
-from verifier.canon import sha256_hex, unb64  # noqa: E402
+from verifier.canon import b64, sha256_hex  # noqa: E402
 
 RSHA = sha256_hex(b"fixture-repository-change")
 
@@ -233,17 +233,31 @@ class TestEveryChangedFileProducesAnObligation:
         d = descriptor_of(result, atom)
         assert d["diff_metadata_sha256"] == sha256_hex(body)
 
-    def test_descriptor_paths_are_base64_not_delimited(self):
+    def test_descriptor_carries_path_hashes_never_path_bytes(self):
+        # A metadata descriptor IS transmitted content, so it states each path
+        # as the one canonical private identity — sha256 of the raw bytes.
+        # Schema 1 carried `path_bytes_b64`, which shipped the full path of
+        # every added or renamed file to the provider while the unit payload
+        # around it was carefully hashing the same path (A2-F21).
+        #
         # Valid paths can contain ':' and '=', so identity must never be built
-        # by concatenating raw paths with delimiters.
+        # by concatenating raw paths with delimiters either: a rename still
+        # reads as a rename because the two HASHES differ.
         weird_new = b"we:ird=path.py"
         weird_old = b"al:so=weird.py"
         body = b"similarity index 100%\nrename from x\nrename to y\n"
         result = atomize(body, path=weird_new, orig=weird_old, status="R100")
         atom = next(a for a in result.atoms if a.side == A.SIDE_META)
         d = descriptor_of(result, atom)
-        assert unb64(d["path_bytes_b64"]) == weird_new
-        assert unb64(d["original_path_bytes_b64"]) == weird_old
+        assert d["path_sha256"] == sha256_hex(weird_new)
+        assert d["original_path_sha256"] == sha256_hex(weird_old)
+        assert d["path_sha256"] != d["original_path_sha256"]
+
+        raw = result.contents[atom.atom_id]
+        assert b"path_bytes_b64" not in raw
+        for path in (weird_new, weird_old):
+            assert b64(path).encode() not in raw
+            assert path not in raw
 
     def test_zero_atoms_and_no_block_raises(self):
         # The invariant itself, driven through the production check: a result

@@ -617,16 +617,27 @@ def _metadata_atoms(diff_body: bytes, *, path: bytes,
 
 def _descriptor(kind: str, path: bytes, original_path: bytes | None,
                 git_status: str, extra: dict) -> bytes:
-    """Canonical JSON with raw byte paths as Base64. Identities are NEVER
-    built by concatenating raw paths with delimiters (':', '='), because
-    valid paths can contain those very bytes."""
+    """The metadata atom's REVIEWABLE CONTENT, which is also transmitted.
+
+    Paths appear as the one canonical private identity — sha256 of the raw
+    path bytes — never as the bytes themselves. Schema 1 carried
+    `path_bytes_b64`, so every metadata atom shipped its file's full path to
+    the provider inside the atom content, while `unitpayload.structured_unit`
+    was busy hashing the same path on the grounds that a path can itself be
+    sensitive. The descriptor bypassed that policy entirely (A2-F21).
+
+    Nothing is lost. Atom identity already binds the raw path through
+    `path_key` and `_hunk_id`, and a rename still reads as a rename because
+    the two hashes differ. Identities are NEVER built by concatenating raw
+    paths with delimiters (':', '='), because valid paths can contain those
+    very bytes."""
     return canonical_json({
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": kind,
         "git_status": git_status,
-        "path_bytes_b64": b64(path),
-        "original_path_bytes_b64": (
-            b64(original_path) if original_path is not None else None),
+        "path_sha256": sha256_hex(path),
+        "original_path_sha256": (
+            sha256_hex(original_path) if original_path is not None else None),
         **extra,
     })
 

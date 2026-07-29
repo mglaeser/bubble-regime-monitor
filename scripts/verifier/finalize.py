@@ -36,6 +36,7 @@ from . import (
     coverage,
     evidence,
     gitdiff,
+    origin,
     policy,
     preflight,
     providerreq,
@@ -297,13 +298,25 @@ class RequestGeneration:
 class PreflightGenerationManifest:
     """Scans a whole generation, then permits counting.
 
-    Clearance is OCCURRENCE-scoped. The authorized occurrences of each
-    literal are counted by scanning each atom on its own, under its own
-    scope. The assembled body is then scanned as a whole, and a literal may
-    appear no more times than it was authorized to. An unauthorized atom
-    carrying the same literal adds an occurrence the authorization does not
-    cover, so the batch blocks — which is exactly what a request-global hash
-    set could not express."""
+    Clearance is OCCURRENCE-scoped and resolved by SPAN, in two steps.
+
+    First, every atom the request carries is scanned on its own — the same
+    bytes a reviewer read, so the occurrence indices are the ones the
+    authorization names. An atom holding a literal no authorization clears
+    blocks the whole generation.
+
+    Second, the assembled body is scanned as the exact bytes that would
+    leave, and every finding must lie wholly inside one fully-cleared atom's
+    span. Findings in the instructions, the response schema, the unit headers
+    or unchanged CTX lines belong to no atom and are never clearable; a
+    finding straddling two atoms belongs to neither.
+
+    The earlier design compared literal HASHES between the per-atom scan and
+    the assembled body, which cannot work across JSON escaping: a source line
+    containing a quote reaches the provider with a backslash inserted, the
+    scanner matches a span one byte longer, and the authorized hash never
+    matches the transmitted one. A correctly authorized secret then blocked
+    with a message claiming it was unauthorized (A2-F02)."""
 
     def __init__(self, authorizations, *, atom_records: dict,
                  atom_map: dict):
@@ -312,17 +325,26 @@ class PreflightGenerationManifest:
         self.atom_map = atom_map
         self.entries: list[dict] = []
         self.generations_sealed: list[str] = []
+        self._path_b64_cache: frozenset | None = None
         # unit hash -> unit record, so a sealed snapshot (which carries only
         # hashes) can recover each unit's atom set for scope resolution.
         self._units_by_hash: dict[str, dict] = {}
 
-    def _authorized_counts(self, units: list[dict]) -> dict:
-        """How many occurrences of each literal hash are cleared, by atom."""
-        counts: dict[str, int] = {}
-        if self.authorizations is None:
-            return counts
+    def _cleared_atoms(self, unit_hashes) -> tuple[frozenset, int]:
+        """Which atoms of this request are FULLY cleared, and by how many.
+
+        An atom is fully cleared when every literal the scanner finds in its
+        own bytes is covered by an occurrence-scoped authorization. Partial
+        clearance is not a state: one uncleared literal blocks, so a later
+        span check never has to reason about which half of an atom was
+        reviewed."""
+        cleared: set[str] = set()
+        occurrences = 0
         seen_atoms: set[str] = set()
-        for unit in units:
+        for unit_hash in unit_hashes:
+            unit = self._units_by_hash.get(unit_hash)
+            if unit is None:
+                continue
             for atom_id in unit["atom_ids"]:
                 if atom_id in seen_atoms:
                     continue
@@ -331,33 +353,73 @@ class PreflightGenerationManifest:
                 text = self.atom_map.get(atom_id)
                 if record is None or text is None:
                     continue
-                for index, value_hash, _f in preflight.occurrence_index_map(
-                        text):
-                    if self.authorizations.clears_occurrence(
-                            literal_sha256=value_hash,
-                            path_bytes_b64=record["path_bytes_b64"],
-                            atom_id=atom_id, occurrence_index=index):
-                        counts[value_hash] = counts.get(value_hash, 0) + 1
-        return counts
+                findings = list(preflight.occurrence_index_map(text))
+                if not findings:
+                    cleared.add(atom_id)
+                    continue
+                if self.authorizations is None:
+                    continue
+                covered = [
+                    self.authorizations.clears_occurrence(
+                        literal_sha256=value_hash,
+                        path_bytes_b64=record["path_bytes_b64"],
+                        atom_id=atom_id, occurrence_index=index)
+                    for index, value_hash, _f in findings]
+                if all(covered):
+                    cleared.add(atom_id)
+                    occurrences += len(covered)
+        return frozenset(cleared), occurrences
+
+    def _path_identities(self) -> frozenset:
+        """Every changed path's Base64 identity, which must never be sent.
+
+        `unitpayload.structured_unit` hashes the path on the grounds that a
+        path can itself be sensitive, but nothing was checking the assembled
+        body, and the metadata-atom descriptor carried `path_bytes_b64`
+        verbatim as reviewable content — so every added or renamed file
+        shipped its full path to the provider anyway (A2-F21). The policy is
+        now enforced on the exact bytes that would leave."""
+        if self._path_b64_cache is None:
+            self._path_b64_cache = frozenset(
+                record["path_bytes_b64"]
+                for record in self.atom_records.values()
+                if record.get("path_bytes_b64"))
+        return self._path_b64_cache
 
     def _scan_payload(self, text: str, *, label: str, unit_count: int,
-                      allowed: dict) -> dict:
+                      request, cleared_atoms: frozenset,
+                      authorized_occurrences: int) -> dict:
+        leaked = sorted(p for p in self._path_identities() if p in text)
+        if leaked:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=raw_path_identity_in_payload label={label} "
+                f"path_count={len(leaked)} — the payload carries a path's "
+                "Base64 bytes; paths travel as sha256 only, so a reviewer "
+                "never receives one and a leaked path is not clearable by an "
+                "authorization")
+        kind = "execution" if label.endswith(":execution") else "count"
+        origin_map = origin.build_for_payload(
+            kind, text, request.unit_payloads, self.atom_records)
         findings = preflight.distinct_occurrences(preflight.scan_text(text))
-        over: list[str] = []
-        by_hash: dict[str, int] = {}
-        for finding in findings:
-            by_hash[finding["value_sha256"]] = by_hash.get(
-                finding["value_sha256"], 0) + 1
-        for value_hash, seen in by_hash.items():
-            if seen > allowed.get(value_hash, 0):
-                over.append(value_hash[:12])
-        if over:
+        attributed, orphaned = origin.attribute(findings, origin_map)
+        if orphaned:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=secret_outside_reviewed_content label={label} "
+                f"finding_count={len(orphaned)} — a literal was found in "
+                "request scaffolding, in unchanged context, or straddling two "
+                "atoms; no authorization over source content covers bytes "
+                "that are not one atom's reviewed content")
+        uncleared = sorted({span.atom_id for _f, span in attributed
+                            if span.atom_id not in cleared_atoms})
+        if uncleared:
             raise BlockingError(
                 SECRET_PREFLIGHT_FAILED,
                 f"category=secret_preflight_failed label={label} "
-                f"unauthorized_literal_count={len(over)} — a literal appears "
-                "more often than the reviewed occurrences authorize; an "
-                "authorization for one atom does not clear the same bytes in "
+                f"unauthorized_atom_count={len(uncleared)} — an atom in this "
+                "request carries a literal no reviewed authorization clears; "
+                "an authorization for one atom never clears the same bytes in "
                 "another")
         return {
             "label": label,
@@ -367,8 +429,15 @@ class PreflightGenerationManifest:
             # bytes.
             "payload_sha256": sha256_hex(text.encode("utf-8",
                                                      "surrogateescape")),
+            # A2-F11 item 10: the span map is bound too, so the attribution
+            # that cleared these findings is itself evidence rather than an
+            # unrecorded step.
+            "origin_map_sha256": origin_map.record()["origin_map_sha256"],
+            "atom_span_count": sum(1 for s in origin_map.spans
+                                   if s.kind == origin.ATOM_CONTENT),
             "finding_count": len(findings),
-            "authorized_occurrence_count": sum(allowed.values()),
+            "attributed_finding_count": len(attributed),
+            "authorized_occurrence_count": authorized_occurrences,
             "unit_count": unit_count,
         }
 
@@ -381,16 +450,18 @@ class PreflightGenerationManifest:
         snapshot = generation.sealed_snapshot()
         attempts_before = ledger.provider_attempts
         for label, request, unit_hashes in snapshot:
-            allowed = self._authorized_counts_by_hashes(unit_hashes)
+            cleared_atoms, authorized = self._cleared_atoms(unit_hashes)
             count_bytes = canonical_json(request.count_payload()).decode(
                 "utf-8", "surrogateescape")
             exec_bytes = request.transmitted_text()
             count_entry = self._scan_payload(
                 count_bytes, label=f"{label}:count",
-                unit_count=len(unit_hashes), allowed=allowed)
+                unit_count=len(unit_hashes), request=request,
+                cleared_atoms=cleared_atoms, authorized_occurrences=authorized)
             exec_entry = self._scan_payload(
                 exec_bytes, label=f"{label}:execution",
-                unit_count=len(unit_hashes), allowed=allowed)
+                unit_count=len(unit_hashes), request=request,
+                cleared_atoms=cleared_atoms, authorized_occurrences=authorized)
             self.entries.append({
                 "generation": generation.name,
                 "generation_sha256": generation_sha256,
@@ -411,13 +482,6 @@ class PreflightGenerationManifest:
         self.generations_sealed.append(generation.name)
         return generation_sha256
 
-    def _authorized_counts_by_hashes(self, unit_hashes) -> dict:
-        # scope is resolved by ATOM, which requires the unit's atom ids; the
-        # snapshot carries only unit hashes, so the atom set is recovered from
-        # the payloads recorded at build time.
-        units = [self._units_by_hash[h] for h in unit_hashes
-                 if h in self._units_by_hash]
-        return self._authorized_counts(units)
 
     def count_generation(self, generation, ledger) -> dict:
         """Count a SEALED generation snapshot. Refuses an unsealed one."""
@@ -939,6 +1003,37 @@ def validate_plan_strict(record: dict) -> dict:
                 f"claimed={record['executable']} derived={derived}")
         if derived and record["pending_requirements"]:
             _plan_fail("category=executable_with_pending_requirements")
+        # PASS B: a MOCK report's counts are RECOMPUTABLE. The mock
+        # algorithm is named, so a loader can check the numbers rather than
+        # trusting them — a report whose counts were edited fails here even
+        # though every digest was recomputed.
+        if record["count_evidence"]["evidence_class"] == (
+                evidence.MOCK_TEST_EVIDENCE):
+            for entry in record["count_ledger"]["counts"]:
+                if entry["input_tokens"] < 0:
+                    _plan_fail("category=mock_count_negative")
+            if record["count_ledger"].get("mock_count_algorithm") != (
+                    counting.MOCK_COUNT_ALGORITHM):
+                _plan_fail(
+                    "category=mock_algorithm_not_named — a mock report must "
+                    "state the algorithm its counts came from, so they can be "
+                    "recomputed rather than believed")
+
+        # every sealed preflight generation must be bound into the manifest
+        manifest = record["preflight_manifest"]
+        sealed = set(manifest["generations_sealed"])
+        for entry in manifest["entries"]:
+            if entry["generation"] not in sealed:
+                _plan_fail(f"category=preflight_entry_unsealed_generation "
+                           f"generation={entry['generation']}")
+            for scan_key in ("count_payload_scan", "execution_payload_scan"):
+                scan = entry[scan_key]
+                if len(scan.get("payload_sha256", "")) != 64:
+                    _plan_fail(f"category=preflight_payload_hash_missing "
+                               f"label={entry['label']} kind={scan_key}")
+            if len(entry.get("generation_sha256", "")) != 64:
+                _plan_fail("category=preflight_generation_digest_missing")
+
         # attempt accounting must reconcile with the ledger
         ledger = record["count_ledger"]
         if ledger["provider_attempt_count"] != record[
@@ -1090,11 +1185,55 @@ def _pins_from_environment() -> dict:
     return values
 
 
+PUBLICATION_PREFLIGHT_FAILED = "PUBLICATION_PREFLIGHT_FAILED"
+
+# Fields a local summary may carry. Anything else is refused rather than
+# published — a summary is an allowlist of facts, not a filtered dump.
+_SUMMARY_FIELDS = frozenset({
+    "artifact", "publication_class", "trust_status", "publication_preflight",
+    "head_sha", "diff_base_sha", "review_skeleton_sha256",
+    "executable_plan_sha256", "disposition_root", "final_unit_count",
+    "batch_count", "logical_count_requests", "provider_attempts_performed",
+    "generation_calls_performed", "cost_plan", "count_evidence_class",
+    "executable", "pending_codes", "summary_sha256",
+})
+
+
+def publication_preflight(summary: dict) -> dict:
+    """Gate a summary before it is written anywhere (MC3-F22).
+
+    MC3 wrote the summary straight out and left a docstring saying
+    publication still needed a preflight. Three checks, all fail-closed: only
+    allowlisted fields, no raw path bytes or content, and a secret scan of the
+    exact bytes that would be published."""
+    unknown = sorted(set(summary) - _SUMMARY_FIELDS)
+    if unknown:
+        raise BlockingError(
+            PUBLICATION_PREFLIGHT_FAILED,
+            f"category=summary_field_not_allowlisted fields={unknown}")
+    blob = canonical_json(summary).decode("utf-8", "surrogateescape")
+    for forbidden in ("path_bytes_b64", "original_path_bytes_b64",
+                      "atom_ids", "unit_sha256_in_order", "instructions",
+                      "content"):
+        if forbidden in blob:
+            raise BlockingError(
+                PUBLICATION_PREFLIGHT_FAILED,
+                f"category=summary_contains_private_field field={forbidden}")
+    findings = preflight.distinct_occurrences(preflight.scan_text(blob))
+    if findings:
+        raise BlockingError(
+            PUBLICATION_PREFLIGHT_FAILED,
+            f"category=summary_secret_preflight_failed "
+            f"finding_count={len(findings)}")
+    return {"passed": True, "scanned_chars": len(blob),
+            "allowlisted_field_count": len(summary)}
+
+
 def public_plan_summary(executable_plan: dict) -> dict:
     """UNTRUSTED LOCAL summary of a mock report: no unit paths, no request
     bodies. A2-F27/F37: this is neither public nor trusted — it is a local
     view of local mock arithmetic, and it says so in its own fields."""
-    return {
+    summary = {
         "artifact": "untrusted-local-summary",
         "publication_class": "local-only",
         "trust_status": "UNTRUSTED_LOCAL_SUMMARY",
@@ -1116,3 +1255,9 @@ def public_plan_summary(executable_plan: dict) -> dict:
         "pending_codes": [p["code"]
                           for p in executable_plan["pending_requirements"]],
     }
+    # MC3-F22: the summary is gated on its EXACT bytes before it can be
+    # written, and records that it was.
+    summary["publication_preflight"] = publication_preflight(summary)
+    summary["summary_sha256"] = digest(b"untrusted-local-summary-v1",
+                                       canonical_json(summary))
+    return summary
