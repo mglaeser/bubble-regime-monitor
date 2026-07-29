@@ -102,23 +102,29 @@ def test_pin_record(pins: dict, model_ids: list[str]) -> dict:
     return record
 
 
-def operator_pin_authorization(pins: dict, model_ids: list[str], *,
-                               repository_identity: str, target_base_sha: str,
-                               head_sha: str, operator_identity: str,
-                               authorized_at: str, policy_version: str,
-                               external_anchor: dict) -> dict:
-    """An operator's approval of exactly these values for exactly this range.
+def operator_pin_claim(pins: dict, model_ids: list[str], *,
+                       repository_identity: str, target_base_sha: str,
+                       head_sha: str, operator_identity: str,
+                       authorized_at: str, policy_version: str,
+                       external_anchor: dict) -> dict:
+    """An UNVERIFIED claim that an operator approved exactly these values.
 
-    Nothing in this package can mint one of these without an external anchor,
-    and the validator refuses a record that claims trusted authority without
-    one. Authority arrives from outside or not at all."""
+    MC4's first attempt called this `operator_pin_authorization` and returned
+    executable_authority=True whenever the supplied anchor had the right
+    shape. Any caller could pass a well-formed dictionary, so the "authority"
+    was a spelling test run by the code under review.
+
+    This builds a claim. Promotion to
+    VERIFIED_OPERATOR_PIN_AUTHORIZATION happens in
+    `promote_pin_authorization`, which asks an external verifier — and the
+    verifier that ships in this package refuses."""
     validated = validate_pins(pins, model_ids)
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pins": validated,
         "money_unit": "integer micro-USD",
-        "authority_class": authority.TRUSTED_OPERATOR_AUTHORIZATION,
-        "executable_authority": True,
+        "authority_class": authority.UNVERIFIED_EXTERNAL_CLAIM,
+        "executable_authority": False,
         "repository_identity": repository_identity,
         "target_base_sha": target_base_sha,
         "head_sha": head_sha,
@@ -128,9 +134,24 @@ def operator_pin_authorization(pins: dict, model_ids: list[str], *,
         "external_anchor": external_anchor,
         "revoked": False,
     }
-    authority._check_anchor(record, "operator_pin_authorization")
+    record["anchor_status"] = authority.describe_anchor(record)
     record["pin_record_sha256"] = pin_digest(record)
     return record
+
+
+def promote_pin_authorization(record: dict, model_ids: list[str], *,
+                              verifier: authority.TrustedVerifier | None = None
+                              ) -> dict:
+    """Ask an external verifier to promote a PIN claim. Default: refused."""
+    verifier = verifier or authority.DEFAULT_VERIFIER
+    validate_pin_authority(record, model_ids)
+    result = verifier.verify_pin_authorization(record)
+    if result is None:
+        _fail("category=verifier_declined kind=pin_authorization")
+    if result.get("authority_class") != (
+            authority.VERIFIED_OPERATOR_PIN_AUTHORIZATION):
+        _fail("category=verifier_returned_unverified_class")
+    return result
 
 
 def validate_pin_authority(record: dict, model_ids: list[str]) -> dict:
@@ -145,14 +166,16 @@ def validate_pin_authority(record: dict, model_ids: list[str]) -> dict:
         _fail("category=pin_authority_class_unknown")
     validate_pins(record["pins"], model_ids)
     expected_executable = (record["authority_class"]
-                           == authority.TRUSTED_OPERATOR_AUTHORIZATION)
+                           == authority.VERIFIED_OPERATOR_PIN_AUTHORIZATION)
     if record["executable_authority"] is not expected_executable:
         _fail("category=pin_executable_authority_not_derived "
               f"class={record['authority_class']} "
               f"claimed={record['executable_authority']}")
     if record.get("revoked"):
         _fail("category=pin_authorization_revoked")
-    authority._check_anchor(record, "pin_record")
+    # An anchor is described, never authenticated, on this side.
+    if record.get("external_anchor") is not None:
+        authority.describe_anchor(record)
     if pin_digest(record) != record["pin_record_sha256"]:
         _fail("category=pin_record_digest_mismatch")
     return record

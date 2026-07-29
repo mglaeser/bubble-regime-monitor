@@ -71,7 +71,14 @@ MAX_CHECKED_CATEGORIES = 6
 MAX_FINDINGS_PER_UNIT = 4
 
 # Conservative characters-per-token for budget arithmetic. Deliberately LOW
-# (pessimistic) so the estimate over-reserves rather than under-reserves.
+# (pessimistic) so the projection over-reserves rather than under-reserves.
+#
+# HONEST SCOPE: this is a POLICY PROJECTION, not a measurement. No provider
+# has been asked how many tokens a verdict costs. Every number this module
+# produces — including max_units_per_batch — follows from the bounded field
+# sizes above and this constant, so it is a structural capacity bound under
+# provisional review-policy v1 and nothing more. It must be validated against
+# actual usage.output_tokens once trusted execution evidence exists.
 _CHARS_PER_TOKEN = 3
 
 # Fixed overhead per response: the challenge echo, the enclosing object, and
@@ -170,6 +177,12 @@ def policy_record(model_ids: list[str], *, required_approver: str,
         "per_unit_output_tokens": per_unit_output_tokens(),
         "response_overhead_tokens": _RESPONSE_OVERHEAD_TOKENS,
         "max_units_per_batch": max_units_per_batch(max_output_tokens),
+        "capacity_basis": "POLICY_PROJECTION_NOT_PROVIDER_MEASUREMENT",
+        "capacity_honest_scope": "derived from the bounded field sizes in "
+                                 "this policy and a conservative 3 "
+                                 "characters-per-token model; no provider was "
+                                 "consulted, and it is unvalidated against "
+                                 "actual output usage",
         "tools_policy": "no tools, no function calling, no web/file/computer "
                         "access, no background mode",
         "truncation": "disabled",

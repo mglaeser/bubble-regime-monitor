@@ -252,96 +252,6 @@ def _request_for(model_id: str, payloads: list[dict], pin_values: dict,
         max_output_tokens=pin_values["VERIFIER_MAX_OUTPUT_TOKENS"])
 
 
-class PreflightManifest:
-    """Every request assembled BEFORE any is transmitted (MC4 §14/§36).
-
-    MC3 built one request, scanned it, counted it, and moved on. A secret in
-    the last unit therefore blocked only AFTER every earlier unit's content
-    had already been sent to the endpoint — and the run still reported "zero
-    count calls on secret failure", which was true only of the request that
-    happened to contain the secret.
-
-    Both payloads are scanned, separately. The count body and the execution
-    body are not byte-identical (the latter carries max_output_tokens), so
-    scanning one and calling the other the exact bytes was an evidence error
-    as well as a coverage gap."""
-
-    def __init__(self, authorizations, *, atom_records: dict):
-        self.authorizations = authorizations
-        self.atom_records = atom_records
-        self.entries: list[dict] = []
-        self.sealed = False
-
-    def add(self, request, *, label: str, units: list[dict]) -> None:
-        if self.sealed:
-            raise BlockingError(
-                SECRET_PREFLIGHT_FAILED,
-                f"category=request_added_after_seal label={label}")
-        count_bytes = canonical_json(request.count_payload()).decode(
-            "utf-8", "surrogateescape")
-        exec_bytes = request.transmitted_text()
-        unit_hashes = [u["unit_sha256"] for u in units]
-        cleared = self._cleared_hashes_for(units)
-        count_entry = preflight.preflight_request(
-            count_bytes, label=f"{label}:count", cleared_hashes=cleared)
-        exec_entry = preflight.preflight_request(
-            exec_bytes, label=f"{label}:execution", cleared_hashes=cleared)
-        self.entries.append({
-            "label": label,
-            "model_id": request.model_id,
-            "unit_sha256_in_order": list(unit_hashes),
-            "count_request_sha256": request.count_request_sha256(),
-            "execution_request_sha256": request.execution_request_sha256(),
-            "count_payload_scan": count_entry,
-            "execution_payload_scan": exec_entry,
-        })
-
-    def _cleared_hashes_for(self, units: list[dict]) -> frozenset:
-        """Scoped clearances only — never a global value exemption.
-
-        Scope is resolved from the request's ATOMS, not its unit hash: a
-        recursive split mints a new unit identity for the same atoms in the
-        same file, and a clearance the operator granted for those bytes must
-        survive that. Resolving by unit hash would silently drop every
-        clearance the moment a unit was split."""
-        if self.authorizations is None:
-            return frozenset()
-        atom_ids: set[str] = set()
-        for unit in units:
-            atom_ids.update(unit["atom_ids"])
-        paths = {self.atom_records[a]["path_bytes_b64"]
-                 for a in atom_ids if a in self.atom_records}
-        cleared: set[str] = set()
-        for record in self.authorizations.records:
-            if record["path_bytes_b64"] not in paths:
-                continue
-            if record["atom_id"] is not None and record["atom_id"] not in atom_ids:
-                continue
-            cleared.add(record["literal_sha256"])
-        return frozenset(cleared)
-
-    def seal(self) -> dict:
-        self.sealed = True
-        record = {
-            "schema_version": 1,
-            "request_count": len(self.entries),
-            "scanned_payload_count": 2 * len(self.entries),
-            "entries": self.entries,
-            "authorization_set_sha256": (
-                self.authorizations.digest() if self.authorizations else None),
-            "authorization_authority_class": (
-                self.authorizations.authority_class
-                if self.authorizations else None),
-            "provider_attempt_count_at_seal": 0,
-            "honest_scope": "a denylist plus an entropy heuristic over the "
-                            "exact count and execution bytes; it cannot prove "
-                            "the absence of secrets",
-        }
-        record["preflight_manifest_sha256"] = digest(
-            b"preflight-manifest-v1", canonical_json(record))
-        return record
-
-
 def _fits(model_id: str, input_tokens: int, pin_values: dict) -> tuple[bool, int]:
     cap = capabilities.capability(model_id)
     needed = (input_tokens + pin_values["VERIFIER_MAX_OUTPUT_TOKENS"]
@@ -350,124 +260,352 @@ def _fits(model_id: str, input_tokens: int, pin_values: dict) -> tuple[bool, int
         cap.context_window_tokens - needed)
 
 
-def _fit_unit(unit: dict, atom_records: dict, atom_map: dict,
-              model_ids: list[str], pin_values: dict, ledger,
-              manifest: PreflightManifest, payloads_by_unit: dict,
-              review_policy: dict, challenge: str) -> list[tuple[dict, dict]]:
-    """Recursive exact-token fitting. Children are rebuilt, never inherited."""
-    payload = _payload_for(unit, atom_records, atom_map)
-    counts: dict[str, int] = {}
-    oversize: list[str] = []
-    requests = []
-    for model_id in model_ids:
-        request = _request_for(model_id, [payload], pin_values, review_policy,
-                               challenge)
-        manifest.add(request, label=f"unit:{unit['unit_sha256'][:16]}",
-                     units=[unit])
-        requests.append((model_id, request))
-    for model_id, request in requests:
-        result = ledger.count(request,
-                              label=f"unit:{unit['unit_sha256'][:16]}")
-        counts[model_id] = result.input_tokens
-        if not _fits(model_id, result.input_tokens, pin_values)[0]:
-            oversize.append(model_id)
-    if not oversize:
-        payloads_by_unit[unit["unit_sha256"]] = payload
-        return [(unit, counts)]
+class RequestGeneration:
+    """Every request that must be assembled before ANY of them is sent.
 
-    atom_ids = unit["atom_ids"]
-    if len(atom_ids) == 1:
-        raise BlockingError(
-            MODEL_CONTEXT_EXCEEDED_UNSPLITTABLE,
-            f"category=single_atom_exceeds_context models={sorted(oversize)} "
-            f"unit={unit['unit_sha256'][:16]} — splitting cannot help")
-    mid = len(atom_ids) // 2
-    out: list[tuple[dict, dict]] = []
-    for child_ids in (atom_ids[:mid], atom_ids[mid:]):
-        child = derive_unit_record(unit, child_ids, atom_records, atom_map)
-        out.extend(_fit_unit(child, atom_records, atom_map, model_ids,
-                             pin_values, ledger, manifest, payloads_by_unit,
-                             review_policy, challenge))
-    return out
+    MC4's first attempt built, scanned and counted one request at a time. A
+    secret in the last unit therefore blocked only after every earlier unit
+    had already been transmitted, and the "zero calls" claim was true only of
+    the request that happened to contain the secret. A generation makes the
+    property structural: `count()` is unreachable until `seal()` has scanned
+    the whole set."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.requests: list[tuple[str, object, list[dict]]] = []
+        self.sealed = False
+
+    def add(self, request, *, label: str, units: list[dict]) -> None:
+        if self.sealed:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=request_added_after_seal generation={self.name} "
+                f"label={label}")
+        self.requests.append((label, request, units))
+
+    def __len__(self) -> int:
+        return len(self.requests)
+
+
+class PreflightGenerationManifest:
+    """Scans a whole generation, then permits counting.
+
+    Clearance is OCCURRENCE-scoped. The authorized occurrences of each
+    literal are counted by scanning each atom on its own, under its own
+    scope. The assembled body is then scanned as a whole, and a literal may
+    appear no more times than it was authorized to. An unauthorized atom
+    carrying the same literal adds an occurrence the authorization does not
+    cover, so the batch blocks — which is exactly what a request-global hash
+    set could not express."""
+
+    def __init__(self, authorizations, *, atom_records: dict,
+                 atom_map: dict):
+        self.authorizations = authorizations
+        self.atom_records = atom_records
+        self.atom_map = atom_map
+        self.entries: list[dict] = []
+        self.generations_sealed: list[str] = []
+
+    def _authorized_counts(self, units: list[dict]) -> dict:
+        """How many occurrences of each literal hash are cleared, by atom."""
+        counts: dict[str, int] = {}
+        if self.authorizations is None:
+            return counts
+        seen_atoms: set[str] = set()
+        for unit in units:
+            for atom_id in unit["atom_ids"]:
+                if atom_id in seen_atoms:
+                    continue
+                seen_atoms.add(atom_id)
+                record = self.atom_records.get(atom_id)
+                text = self.atom_map.get(atom_id)
+                if record is None or text is None:
+                    continue
+                for index, value_hash, _f in preflight.occurrence_index_map(
+                        text):
+                    if self.authorizations.clears_occurrence(
+                            literal_sha256=value_hash,
+                            path_bytes_b64=record["path_bytes_b64"],
+                            atom_id=atom_id, occurrence_index=index):
+                        counts[value_hash] = counts.get(value_hash, 0) + 1
+        return counts
+
+    def _scan_payload(self, text: str, *, label: str, units: list[dict],
+                      allowed: dict) -> dict:
+        findings = preflight.distinct_occurrences(preflight.scan_text(text))
+        over: list[str] = []
+        by_hash: dict[str, int] = {}
+        for finding in findings:
+            by_hash[finding["value_sha256"]] = by_hash.get(
+                finding["value_sha256"], 0) + 1
+        for value_hash, seen in by_hash.items():
+            if seen > allowed.get(value_hash, 0):
+                over.append(value_hash[:12])
+        if over:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=secret_preflight_failed label={label} "
+                f"unauthorized_literal_count={len(over)} — a literal appears "
+                "more often than the reviewed occurrences authorize; an "
+                "authorization for one atom does not clear the same bytes in "
+                "another")
+        return {
+            "label": label,
+            "scanned_chars": len(text),
+            "finding_count": len(findings),
+            "authorized_occurrence_count": sum(allowed.values()),
+            "unit_count": len(units),
+        }
+
+    def seal(self, generation: RequestGeneration, ledger) -> None:
+        """Scan EVERY request in the generation. Only then may counting run."""
+        attempts_before = ledger.provider_attempts
+        for label, request, units in generation.requests:
+            allowed = self._authorized_counts(units)
+            count_bytes = canonical_json(request.count_payload()).decode(
+                "utf-8", "surrogateescape")
+            exec_bytes = request.transmitted_text()
+            count_entry = self._scan_payload(
+                count_bytes, label=f"{label}:count", units=units,
+                allowed=allowed)
+            exec_entry = self._scan_payload(
+                exec_bytes, label=f"{label}:execution", units=units,
+                allowed=allowed)
+            self.entries.append({
+                "generation": generation.name,
+                "label": label,
+                "model_id": request.model_id,
+                "unit_sha256_in_order": [u["unit_sha256"] for u in units],
+                "count_request_sha256": request.count_request_sha256(),
+                "execution_request_sha256": request.execution_request_sha256(),
+                "count_payload_scan": count_entry,
+                "execution_payload_scan": exec_entry,
+            })
+        if ledger.provider_attempts != attempts_before:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=attempt_during_preflight generation="
+                f"{generation.name}")
+        generation.sealed = True
+        self.generations_sealed.append(generation.name)
+
+    def count_generation(self, generation: RequestGeneration, ledger) -> dict:
+        """Count a SEALED generation. Refuses an unsealed one."""
+        if not generation.sealed:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=count_before_seal generation={generation.name} — "
+                "every request in a generation is scanned before any is sent")
+        results: dict[tuple[str, str], int] = {}
+        for label, request, _units in generation.requests:
+            result = ledger.count(request, label=label)
+            results[(label, request.model_id)] = result.input_tokens
+        return results
+
+    def record(self) -> dict:
+        record = {
+            "schema_version": 2,
+            "generations_sealed": list(self.generations_sealed),
+            "request_count": len(self.entries),
+            "scanned_payload_count": 2 * len(self.entries),
+            "entries": self.entries,
+            "authorization_set_sha256": (
+                self.authorizations.digest() if self.authorizations else None),
+            "authorization_authority_class": (
+                self.authorizations.authority_class
+                if self.authorizations else None),
+            "confers_real_call_authority": (
+                self.authorizations.confers_real_call_authority
+                if self.authorizations else False),
+            "honest_scope": "a denylist plus an entropy heuristic over the "
+                            "exact count and execution bytes of every request "
+                            "in each generation, scanned before any is sent; "
+                            "it cannot prove the absence of secrets",
+        }
+        record["preflight_manifest_sha256"] = digest(
+            b"preflight-generation-manifest-v2", canonical_json(record))
+        return record
+
+
+def _fit_generation(units: list[dict], atom_records: dict, atom_map: dict,
+                    model_ids: list[str], pin_values: dict, ledger,
+                    manifest: PreflightGenerationManifest,
+                    payloads_by_unit: dict, review_policy: dict,
+                    challenge: str, generation_index: int
+                    ) -> tuple[list[tuple[dict, dict]], list[dict]]:
+    """One generation: build ALL, preflight ALL, seal, then count.
+
+    Returns (fitted, oversized). Nothing is transmitted until every request
+    in the generation has been scanned, so a secret in the last unit stops
+    the first unit from being sent."""
+    generation = RequestGeneration(f"solo-{generation_index}")
+    payloads: dict[str, dict] = {}
+    for unit in units:
+        payload = _payload_for(unit, atom_records, atom_map)
+        payloads[unit["unit_sha256"]] = payload
+        for model_id in model_ids:
+            request = _request_for(model_id, [payload], pin_values,
+                                   review_policy, challenge)
+            generation.add(request,
+                           label=f"unit:{unit['unit_sha256'][:16]}:{model_id}",
+                           units=[unit])
+
+    manifest.seal(generation, ledger)          # scans everything
+    counts = manifest.count_generation(generation, ledger)
+
+    fitted: list[tuple[dict, dict]] = []
+    oversized: list[dict] = []
+    for unit in units:
+        per_model = {m: counts[(f"unit:{unit['unit_sha256'][:16]}:{m}", m)]
+                     for m in model_ids}
+        too_big = [m for m in model_ids
+                   if not _fits(m, per_model[m], pin_values)[0]]
+        if not too_big:
+            payloads_by_unit[unit["unit_sha256"]] = payloads[
+                unit["unit_sha256"]]
+            fitted.append((unit, per_model))
+            continue
+        if len(unit["atom_ids"]) == 1:
+            raise BlockingError(
+                MODEL_CONTEXT_EXCEEDED_UNSPLITTABLE,
+                f"category=single_atom_exceeds_context "
+                f"models={sorted(too_big)} "
+                f"unit={unit['unit_sha256'][:16]} — splitting cannot help")
+        oversized.append(unit)
+    return fitted, oversized
+
+
+def _fit_all(units: list[dict], atom_records: dict, atom_map: dict,
+             model_ids: list[str], pin_values: dict, ledger,
+             manifest: PreflightGenerationManifest, payloads_by_unit: dict,
+             review_policy: dict, challenge: str) -> list[tuple[dict, dict]]:
+    """Fit every unit, one whole generation of splits at a time."""
+    fitted: list[tuple[dict, dict]] = []
+    pending = list(units)
+    generation_index = 0
+    while pending:
+        done, oversized = _fit_generation(
+            pending, atom_records, atom_map, model_ids, pin_values, ledger,
+            manifest, payloads_by_unit, review_policy, challenge,
+            generation_index)
+        fitted.extend(done)
+        # Derive EVERY child for the next generation before counting any of
+        # them, so a secret in the last child blocks the first child's call.
+        children: list[dict] = []
+        for unit in oversized:
+            atom_ids = unit["atom_ids"]
+            mid = len(atom_ids) // 2
+            for child_ids in (atom_ids[:mid], atom_ids[mid:]):
+                children.append(derive_unit_record(unit, child_ids,
+                                                   atom_records, atom_map))
+        pending = children
+        generation_index += 1
+    # Restore the skeleton's global order: generations complete out of order.
+    order = {u["unit_sha256"]: i for i, (u, _c) in enumerate(fitted)}
+    fitted.sort(key=lambda pair: (pair[0]["min_patch_ordinal"],
+                                  order[pair[0]["unit_sha256"]]))
+    return fitted
 
 
 def _pack_batches(fitted: list[tuple[dict, dict]], payloads_by_unit: dict,
                   model_ids: list[str], pin_values: dict, ledger,
-                  manifest: PreflightManifest, review_policy: dict,
+                  manifest: PreflightGenerationManifest, review_policy: dict,
                   challenge: str) -> list[dict]:
-    """Greedy order-preserving packing, bounded by BOTH input and output.
+    """Deterministic packing, bounded by input context AND output capacity.
 
-    MC3 bounded input only. A batch whose verdicts cannot fit the output
-    budget was still accepted — the PR #23 plan packed 152 units into a batch
-    whose 8,000-token allowance covers 14."""
-    batches: list[dict] = []
-    current: list[dict] = []
-    solo = {u["unit_sha256"]: c for u, c in fitted}
+    Batch candidates are proposed for a whole packing step, preflighted
+    together, and only then counted — the same generation discipline as unit
+    fitting, for the same reason."""
     unit_cap = review_policy["max_units_per_batch"]
+    solo = {u["unit_sha256"]: c for u, c in fitted}
 
-    def close(units: list[dict]):
-        if not units:
-            return
-        reviewpolicy.assert_output_capacity(
-            len(units), pin_values["VERIFIER_MAX_OUTPUT_TOKENS"],
-            where=f"batch-{len(batches):04d}")
-        payloads = [payloads_by_unit[u["unit_sha256"]] for u in units]
-        counts, headroom, hashes = {}, {}, {}
-        requests = []
-        for model_id in model_ids:
-            request = _request_for(model_id, payloads, pin_values,
-                                   review_policy, challenge)
-            manifest.add(request, label=f"batch:{len(batches)}",
-                         units=units)
-            requests.append((model_id, request))
-        for model_id, request in requests:
-            result = ledger.count(request, label=f"batch:{len(batches)}")
-            floor = max(solo[u["unit_sha256"]][model_id] for u in units)
-            counting2.assert_batch_not_below_member_floor(
-                measured=result.input_tokens, floor=floor,
-                model_id=model_id, label=f"batch-{len(batches):04d}")
-            fits, room = _fits(model_id, result.input_tokens, pin_values)
-            if not fits:
+    # Deterministic grouping first: review class, then the output-capacity
+    # bound. No counting is needed to decide either.
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    for unit, _counts in fitted:
+        if current and (batching.review_class(current[0])
+                        != batching.review_class(unit)):
+            groups.append(current)
+            current = []
+        if len(current) >= unit_cap:
+            groups.append(current)
+            current = []
+        current.append(unit)
+    if current:
+        groups.append(current)
+
+    batches: list[dict] = []
+    step = 0
+    while groups:
+        generation = RequestGeneration(f"batch-{step}")
+        for index, units in enumerate(groups):
+            reviewpolicy.assert_output_capacity(
+                len(units), pin_values["VERIFIER_MAX_OUTPUT_TOKENS"],
+                where=f"group-{index}")
+            payloads = [payloads_by_unit[u["unit_sha256"]] for u in units]
+            for model_id in model_ids:
+                request = _request_for(model_id, payloads, pin_values,
+                                       review_policy, challenge)
+                generation.add(request, label=f"group:{index}:{model_id}",
+                               units=units)
+        manifest.seal(generation, ledger)
+        counts = manifest.count_generation(generation, ledger)
+
+        keep: list[list[dict]] = []
+        for index, units in enumerate(groups):
+            per_model = {m: counts[(f"group:{index}:{m}", m)]
+                         for m in model_ids}
+            fits = True
+            for model_id in model_ids:
+                floor = max(solo[u["unit_sha256"]][model_id] for u in units)
+                counting2.assert_batch_not_below_member_floor(
+                    measured=per_model[model_id], floor=floor,
+                    model_id=model_id, label=f"group-{index}")
+                if not _fits(model_id, per_model[model_id], pin_values)[0]:
+                    fits = False
+            if fits:
+                headroom = {m: _fits(m, per_model[m], pin_values)[1]
+                            for m in model_ids}
+                hashes = {}
+                for model_id in model_ids:
+                    request = _request_for(
+                        model_id,
+                        [payloads_by_unit[u["unit_sha256"]] for u in units],
+                        pin_values, review_policy, challenge)
+                    hashes[model_id] = request.hashes()
+                record = batching.batch_record(
+                    f"batch-{len(batches) + len(keep):04d}", units, per_model,
+                    headroom, hashes)
+                record["worst_case_output_tokens"] = (
+                    reviewpolicy.worst_case_output_tokens(len(units)))
+                record["batch_sha256"] = batching.batch_digest(record)
+                batches.append(record)
+            elif len(units) == 1:
                 raise BlockingError(
                     MODEL_CONTEXT_EXCEEDED,
-                    f"category=batch_exceeds_context model={model_id}")
-            counts[model_id] = result.input_tokens
-            headroom[model_id] = room
-            hashes[model_id] = request.hashes()
-        record = batching.batch_record(f"batch-{len(batches):04d}", units,
-                                       counts, headroom, hashes)
-        record["worst_case_output_tokens"] = (
-            reviewpolicy.worst_case_output_tokens(len(units)))
+                    "category=single_unit_batch_exceeds_context")
+            else:
+                half = len(units) // 2
+                keep.append(units[:half])
+                keep.append(units[half:])
+        groups = keep
+        step += 1
+    # Batches complete out of order because oversized groups split and go
+    # round again. The partition proof requires the GLOBAL unit order, so
+    # batches are re-sorted by where their first unit sits in `fitted` and
+    # re-identified accordingly.
+    position = {u["unit_sha256"]: i for i, (u, _c) in enumerate(fitted)}
+    ordered = []
+    for i, record in enumerate(sorted(
+            batches,
+            key=lambda b: position[b["unit_sha256_in_order"][0]])):
+        record = dict(record)
+        record["batch_id"] = f"batch-{i:04d}"
+        record.pop("batch_sha256", None)
         record["batch_sha256"] = batching.batch_digest(record)
-        batches.append(record)
-
-    for unit, _counts in fitted:
-        boundary = current and (batching.review_class(current[0])
-                                != batching.review_class(unit))
-        if boundary or len(current) >= unit_cap:
-            close(current)
-            current = []
-        candidate = [*current, unit]
-        ok = len(candidate) <= unit_cap
-        if ok:
-            for model_id in model_ids:
-                request = _request_for(
-                    model_id, [payloads_by_unit[u["unit_sha256"]]
-                               for u in candidate],
-                    pin_values, review_policy, challenge)
-                manifest.add(request, label=f"probe:{len(batches)}",
-                             units=candidate)
-                result = ledger.count(request, label=f"probe:{len(batches)}")
-                if not _fits(model_id, result.input_tokens, pin_values)[0]:
-                    ok = False
-                    break
-        if ok:
-            current = candidate
-        else:
-            close(current)
-            current = [unit]
-    close(current)
-    return batches
+        ordered.append(record)
+    return ordered
 
 
 def _cost_plan(batches: list[dict], model_ids: list[str],
@@ -548,14 +686,13 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
     atom_map = atom_texts(skeleton, cwd=cwd)
     atom_records = unitpayload.index_atom_records(skeleton)
     ledger = counting2.CountLedger(transport, pin_values)
-    manifest = PreflightManifest(authorizations, atom_records=atom_records)
+    manifest = PreflightGenerationManifest(
+        authorizations, atom_records=atom_records, atom_map=atom_map)
     payloads_by_unit: dict[str, dict] = {}
 
-    fitted: list[tuple[dict, dict]] = []
-    for unit in skeleton["units"]:
-        fitted.extend(_fit_unit(unit, atom_records, atom_map, model_ids,
-                                pin_values, ledger, manifest,
-                                payloads_by_unit, review_policy, challenge))
+    fitted = _fit_all(skeleton["units"], atom_records, atom_map, model_ids,
+                      pin_values, ledger, manifest, payloads_by_unit,
+                      review_policy, challenge)
     final_units = [u for u, _ in fitted]
 
     coverage.prove_exact_dispositions(
@@ -629,7 +766,7 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
         "batches": batches,
         "count_evidence": count_evidence,
         "count_ledger": ledger.record(),
-        "preflight_manifest": manifest.seal(),
+        "preflight_manifest": manifest.record(),
         "cost_plan": cost,
         "logical_count_requests": ledger.logical_requests,
         "provider_attempts_performed": ledger.provider_attempts,

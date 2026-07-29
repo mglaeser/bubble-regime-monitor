@@ -248,7 +248,7 @@ class _UnlabelledTransport:
     def __init__(self):
         self.calls = 0
 
-    def post(self, path, body):
+    def post(self, path, body, *, timeout=None):
         self.calls += 1
         return 200, json.dumps({"object": counting.EXPECTED_OBJECT,
                                 "input_tokens": 10}).encode()
@@ -263,7 +263,7 @@ class TestLens7TokenAccounting:
         with pytest.raises(BlockingError) as e:
             counting.count_input_tokens(request,
                                         transport=_UnlabelledTransport(),
-                                        max_retries=0)
+                                        max_retries=0, timeout_seconds=30)
         assert e.value.code == TOKEN_COUNT_RESPONSE_INVALID
 
     def test_split_children_recompute_every_derived_field(self):
@@ -455,7 +455,7 @@ class _OnlyOneAtomFits:
     def __init__(self):
         self.calls = 0
 
-    def post(self, path, body):
+    def post(self, path, body, *, timeout=None):
         self.calls += 1
         text = body.decode("utf-8", "replace")
         both = "alpha line one" in text and "beta line one" in text
@@ -475,7 +475,7 @@ class _DriftingTransport(counting.MockCountTransport):
         super().__init__()
         self.seen: dict[str, int] = {}
 
-    def post(self, path, body):
+    def post(self, path, body, *, timeout=None):
         self.calls += 1
         key = str(len(body)) + body[:64].decode("utf-8", "replace")
         times = self.seen.get(key, 0) + 1

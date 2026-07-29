@@ -96,9 +96,11 @@ class MockCountTransport:
     def __init__(self, bytes_per_token: int = 4):
         self.bytes_per_token = bytes_per_token
         self.calls = 0
+        self.last_timeout: int | None = None
 
-    def post(self, path: str, body: bytes):
+    def post(self, path: str, body: bytes, *, timeout: int | None = None):
         self.calls += 1
+        self.last_timeout = timeout
         tokens = -(-len(body) // self.bytes_per_token)   # ceil
         payload = json.dumps({"object": EXPECTED_OBJECT,
                               "input_tokens": tokens}).encode()
@@ -147,26 +149,28 @@ def _validate_response(status, body) -> int:
 
 
 def count_input_tokens(request, *, transport, max_retries: int,
-                       timeout_seconds: int | None = None) -> CountResult:
+                       timeout_seconds: int, on_attempt=None) -> CountResult:
     """Count ONE request's input tokens.
+
+    `on_attempt` is called BEFORE every transport call, so the ledger records
+    an attempt that is about to happen rather than one that already
+    succeeded. MC4's first attempt incremented only on success, which meant a
+    request that retried three times and then failed reported zero spend and
+    zero rate-limit exposure — precisely the case where the number matters.
 
     Deterministic failures are never retried; only a timeout, a transport
     error, or a retryable status is. Retry exhaustion blocks."""
+    assert_timeout_protocol(transport)
     body = canonical_json(request.count_payload())
     attempts = 0
     last: BlockingError | None = None
     while attempts <= max_retries:
         attempts += 1
+        if on_attempt is not None:
+            on_attempt(attempts)
         try:
-            # The operator's timeout PIN was validated and then never used in
-            # MC3, so a hung call had no bound. A transport that does not
-            # accept a timeout is called without one and SAYS so in the
-            # ledger, rather than silently dropping the operator's bound.
-            if timeout_seconds is None:
-                status, payload = transport.post(COUNT_PATH, body)
-            else:
-                status, payload = _post_with_timeout(transport, body,
-                                                     timeout_seconds)
+            status, payload = transport.post(COUNT_PATH, body,
+                                             timeout=timeout_seconds)
         except Exception as exc:
             last = BlockingError(
                 TOKEN_COUNT_ENDPOINT_UNAVAILABLE,
@@ -193,15 +197,28 @@ def count_input_tokens(request, *, transport, max_retries: int,
         f"last={last.message if last else 'none'}")
 
 
-def _post_with_timeout(transport, body: bytes, timeout_seconds: int):
-    """Pass the operator's timeout through when the transport supports it."""
+def assert_timeout_protocol(transport) -> None:
+    """A transport MUST accept the operator's timeout.
+
+    MC4's first attempt caught TypeError and retried without a timeout, so a
+    real transport with the wrong signature silently discarded the operator's
+    bound and nothing said so. Falling back to "no timeout" is the one
+    behaviour a timeout PIN exists to prevent, so a mismatched signature is
+    refused before any attempt."""
+    import inspect
     try:
-        return transport.post(COUNT_PATH, body, timeout=timeout_seconds)
-    except TypeError:
-        # A transport with no timeout parameter (the local mock) is called
-        # plainly. A REAL transport that ignored the operator's timeout would
-        # be a defect in the trusted lane, which is where the bound matters.
-        return transport.post(COUNT_PATH, body)
+        sig = inspect.signature(transport.post)
+    except (TypeError, ValueError):
+        raise BlockingError(
+            TOKEN_COUNT_RESPONSE_INVALID,
+            "category=transport_signature_unreadable") from None
+    param = sig.parameters.get("timeout")
+    if param is None or param.kind is not inspect.Parameter.KEYWORD_ONLY:
+        raise BlockingError(
+            TOKEN_COUNT_RESPONSE_INVALID,
+            "category=transport_missing_timeout_protocol — post() must accept "
+            "a keyword-only `timeout`; a transport that cannot be bounded "
+            "must not be called at all")
 
 
 def requested_model_acceptance_policy(model_ids: list[str], *,

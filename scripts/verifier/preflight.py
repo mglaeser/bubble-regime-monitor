@@ -275,3 +275,34 @@ def evidence_record(entries: list[dict]) -> dict:
     record["preflight_evidence_sha256"] = digest(
         b"secret-preflight-v1", canonical_json(record))
     return record
+
+
+def distinct_occurrences(findings: list[dict]) -> list[dict]:
+    """Collapse findings that describe the SAME bytes at the same place.
+
+    One literal often matches several patterns — "sk-proj-…" is both an
+    openai_key and an openai_project_key — and the generic sweep can flag it
+    again. Those are one occurrence of one secret, not three. Counting them
+    separately made an authorization for "occurrence 0" fail to cover a
+    literal that had been reviewed exactly once.
+
+    Ordered by offset, so an occurrence index is what a reviewer reading the
+    atom top to bottom would count."""
+    by_span: dict[tuple[int, str], dict] = {}
+    for finding in findings:
+        key = (finding["offset"], finding["value_sha256"])
+        if key not in by_span:
+            by_span[key] = finding
+    return [by_span[k] for k in sorted(by_span)]
+
+
+def occurrence_index_map(text: str) -> list[tuple[int, str, dict]]:
+    """(occurrence_index_within_this_literal, value_sha256, finding) per hit."""
+    out = []
+    seen: dict[str, int] = {}
+    for finding in distinct_occurrences(scan_text(text)):
+        value_hash = finding["value_sha256"]
+        index = seen.get(value_hash, 0)
+        seen[value_hash] = index + 1
+        out.append((index, value_hash, finding))
+    return out

@@ -79,16 +79,37 @@ class TestBaselineShape:
             f"a directory-wide exemption for {prefix}/ turns off detection "
             "for every file ever written there; use exact reviewed entries")
 
-    def test_artifact_entries_are_exact_not_wildcarded(self):
+    def test_the_baseline_carries_no_stale_artifact_entries(self):
+        # MC4's first attempt baselined ~900 high-entropy strings from MC3
+        # public summaries that the same report called stale. A baseline is
+        # not a place to park evidence you have already disowned: those
+        # artifacts are removed, and so are their entries.
         results = _baseline()["results"]
-        artifact_files = [f for f in results if f.startswith("artifacts/")]
-        assert artifact_files, "public artifacts must be scanned, not excluded"
-        for path in artifact_files:
-            for entry in results[path]:
-                # An exact entry pins the specific string; anything NEW in the
-                # same file still fails.
-                assert entry.get("hashed_secret")
-                assert entry.get("line_number") is not None
+        stale = [f for f in results if f.startswith("artifacts/")]
+        assert not stale, (
+            f"baseline entries for untracked/stale artifacts: {stale}")
+
+    def test_every_baseline_entry_maps_to_a_tracked_file(self):
+        results = _baseline()["results"]
+        tracked = set(subprocess.run(["git", "ls-files"], cwd=ROOT,
+                                     capture_output=True,
+                                     text=True).stdout.split())
+        for path in results:
+            assert path in tracked, f"baseline entry for untracked {path}"
+
+    def test_the_baseline_has_not_grown_against_main(self):
+        # An unbounded baseline is a slow-motion wildcard exclusion.
+        main = subprocess.run(
+            ["git", "show",
+             "b08844a0755710035d62830faa84902d9d85d3fe:.secrets.baseline"],
+            cwd=ROOT, capture_output=True, text=True)
+        if main.returncode != 0:
+            pytest.skip("main baseline unavailable")
+        base = json.loads(main.stdout)
+        now = _baseline()
+        grew = sum(len(v) for v in now["results"].values()) - sum(
+            len(v) for v in base["results"].values())
+        assert grew <= 0, f"baseline grew by {grew} entries"
 
 
 @pytest.mark.skipif(not HOOK.exists(), reason="detect-secrets not installed")
@@ -110,21 +131,6 @@ class TestGateStillDetects:
                 "a new secret under artifacts/verifier/ must still block")
         finally:
             planted.unlink()
-
-    def test_a_planted_secret_in_a_public_summary_still_fails(self):
-        # An exact baseline entry clears ONE known string; it must not clear
-        # the file.
-        target = ROOT / "artifacts" / "verifier" / "mc3" / "A-pr25-public.json"
-        if not target.exists():
-            pytest.skip("public summary absent")
-        backup = target.read_bytes()
-        try:
-            target.write_bytes(
-                backup.rstrip()
-                + b'\n{"planted": "ghp_PLANTEDtokenABCDEFGH0123456789"}\n')  # pragma: allowlist secret
-            assert self._run(target) == 1
-        finally:
-            target.write_bytes(backup)
 
     def test_the_exact_ci_command_exits_zero(self):
         if shutil.which("git") is None:

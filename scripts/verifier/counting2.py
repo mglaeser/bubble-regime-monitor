@@ -51,6 +51,7 @@ class CountLedger:
         self.provider_attempts = 0
         self.cache_hits = 0
         self.records: list[dict] = []
+        self.attempt_records: list[dict] = []
         self._cache: dict[tuple[str, str], int] = {}
 
     @property
@@ -77,6 +78,39 @@ class CountLedger:
                 "retry budget is reserved before the first attempt, so a "
                 "retry can never push the run past the operator's cap")
 
+    def _on_attempt(self, label: str, model_id: str):
+        """Called BEFORE each transport call, so a failed attempt counts.
+
+        MC4's first attempt added `result.attempts` only after a successful
+        CountResult. A request that retried three times and then failed
+        therefore reported zero attempts — the run had spent real calls and
+        real rate limit, and the ledger said it had not."""
+        def hook(attempt_number: int):
+            if self.provider_attempts >= self.max_attempts:
+                raise BlockingError(
+                    CHUNK_COUNT_EXHAUSTED,
+                    f"category=count_attempt_cap_reached label={label} "
+                    f"attempts={self.provider_attempts} "
+                    f"cap={self.max_attempts}")
+            self.provider_attempts += 1
+            self.attempt_records.append({
+                "label": label,
+                "model_id": model_id,
+                "attempt_number": attempt_number,
+                "result_category": "pending",
+            })
+        return hook
+
+    def _settle(self, category: str, *, first_index: int):
+        """Settle EVERY attempt made for this logical request.
+
+        Marking only the last one would report two of three failed attempts
+        as still pending, which understates exactly the number the ledger
+        exists to state."""
+        for record in self.attempt_records[first_index:]:
+            if record["result_category"] == "pending":
+                record["result_category"] = category
+
     def count(self, request, *, label: str) -> counting.CountResult:
         key = (request.count_request_sha256(), request.model_id)
         if key in self._cache:
@@ -87,11 +121,23 @@ class CountLedger:
                                         attempts=0)
         self._reserve(label)
         self.logical_requests += 1
-        result = counting.count_input_tokens(
-            request, transport=self.transport,
-            max_retries=self.pins["VERIFIER_COUNT_MAX_RETRIES"],
-            timeout_seconds=self.pins["VERIFIER_COUNT_TIMEOUT_SECONDS"])
-        self.provider_attempts += result.attempts
+        first_index = len(self.attempt_records)
+        hook = self._on_attempt(label, request.model_id)
+        try:
+            result = counting.count_input_tokens(
+                request, transport=self.transport,
+                max_retries=self.pins["VERIFIER_COUNT_MAX_RETRIES"],
+                timeout_seconds=self.pins["VERIFIER_COUNT_TIMEOUT_SECONDS"],
+                on_attempt=hook)
+        except BlockingError as exc:
+            # The attempts already happened. They stay in the ledger with a
+            # sanitized category and no provider text.
+            self._settle(f"failed:{exc.code}", first_index=first_index)
+            raise
+        # Earlier attempts of a request that eventually succeeded were still
+        # retries: they are recorded as such, not folded into the success.
+        self._settle("retried", first_index=first_index)
+        self.attempt_records[-1]["result_category"] = "ok"
         self._cache[key] = result.input_tokens
         self.records.append({
             "label": label,
@@ -126,6 +172,10 @@ class CountLedger:
             "timeout_seconds": self.pins["VERIFIER_COUNT_TIMEOUT_SECONDS"],
             "billing_state": counting.COUNT_BILLING_STATE,
             "counts": self.records,
+            "attempts": self.attempt_records,
+            "failed_attempt_count": sum(
+                1 for a in self.attempt_records
+                if a["result_category"].startswith("failed")),
         }
         record["count_ledger_sha256"] = digest(b"count-ledger-v1",
                                                canonical_json(record))

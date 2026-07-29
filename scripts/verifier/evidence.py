@@ -125,15 +125,17 @@ def validate_count_evidence(record: dict, *, expected_class: str | None = None,
         _fail(f"category=evidence_class_mismatch where={where} "
               f"expected={expected_class} found={record['evidence_class']}")
 
-    trusted = record["evidence_class"] in TRUSTED_CLASSES
-    if trusted:
+    # A record may CLAIM a trusted class. Claiming it does not make it so:
+    # only a verifier running outside the reviewed branch can confirm one,
+    # and `is_executable_authority` asks that verifier rather than this
+    # record's own fields.
+    trusted = False
+    if record["evidence_class"] in TRUSTED_CLASSES:
         missing = [f for f in _ENVELOPE_FIELDS if f not in record]
         if missing:
             _fail(f"category=trusted_envelope_incomplete where={where} "
                   f"fields={missing}")
-        authority._check_anchor(
-            {"authority_class": authority.TRUSTED_OPERATOR_AUTHORIZATION,
-             "external_anchor": record.get("external_anchor")}, where)
+        authority.describe_anchor(record)
     if record["executable_authority"] is not trusted:
         _fail(f"category=executable_authority_not_derived where={where} "
               f"class={record['evidence_class']} "
@@ -164,13 +166,26 @@ def validate_count_evidence(record: dict, *, expected_class: str | None = None,
     return record
 
 
-def is_executable_authority(record: dict) -> bool:
+def is_executable_authority(record: dict, *,
+                            verifier: authority.TrustedVerifier | None = None
+                            ) -> bool:
     """The single question the whole plan hangs on.
 
-    True requires a trusted class AND a complete external anchor. A locally
-    produced record cannot reach it by any combination of field values."""
+    It is answered by an external verifier, not by the record. A record that
+    names a trusted class, fills every envelope field and carries a
+    perfectly-shaped anchor still returns False here, because the default
+    verifier — the one candidate code always gets — refuses to promote
+    anything. There is no combination of field values that reaches True from
+    inside the reviewed branch."""
     try:
         validate_count_evidence(record)
     except BlockingError:
         return False
-    return record["evidence_class"] in TRUSTED_CLASSES
+    if record["evidence_class"] not in TRUSTED_CLASSES:
+        return False
+    verifier = verifier or authority.DEFAULT_VERIFIER
+    try:
+        promoted = verifier.verify_count_evidence(record)
+    except BlockingError:
+        return False
+    return bool(promoted) and promoted.get("evidence_class") in TRUSTED_CLASSES

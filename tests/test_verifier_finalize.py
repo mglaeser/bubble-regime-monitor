@@ -242,7 +242,7 @@ class TestCountClient:
     def test_mock_counts_are_labelled_not_provider(self):
         request = TestProviderRequest()._request()
         result = counting.count_input_tokens(
-            request, transport=counting.MockCountTransport(), max_retries=0)
+            request, transport=counting.MockCountTransport(), max_retries=0, timeout_seconds=30)
         assert result.source == counting.SOURCE_MOCK
         assert result.input_tokens > 0
 
@@ -258,11 +258,11 @@ class TestCountClient:
         class T:
             source = counting.SOURCE_PROVIDER
 
-            def post(self, path, payload):
+            def post(self, path, payload, *, timeout=None):
                 return 200, body
         with pytest.raises(BlockingError) as e:
             counting.count_input_tokens(TestProviderRequest()._request(),
-                                        transport=T(), max_retries=0)
+                                        transport=T(), max_retries=0, timeout_seconds=30)
         assert e.value.code in (TOKEN_COUNT_RESPONSE_INVALID,
                                 "TOKEN_COUNT_ENDPOINT_UNAVAILABLE")
 
@@ -270,36 +270,37 @@ class TestCountClient:
         class T:
             source = counting.SOURCE_PROVIDER
 
-            def post(self, path, payload):
+            def post(self, path, payload, *, timeout=None):
                 return 503, b""
         with pytest.raises(BlockingError) as e:
             counting.count_input_tokens(TestProviderRequest()._request(),
-                                        transport=T(), max_retries=2)
+                                        transport=T(), max_retries=2, timeout_seconds=30)
         assert e.value.code == TOKEN_COUNT_RETRY_EXHAUSTED
 
     def test_local_failure_sentinel_cannot_be_forged_by_json(self):
         class T:
             source = counting.SOURCE_PROVIDER
 
-            def post(self, path, payload):
+            def post(self, path, payload, *, timeout=None):
                 # a provider CANNOT produce a LocalFailure instance
                 return 200, b'{"object":"response.input_tokens",' \
                             b'"input_tokens":{"category":"timeout"}}'
         with pytest.raises(BlockingError):
             counting.count_input_tokens(TestProviderRequest()._request(),
-                                        transport=T(), max_retries=0)
+                                        transport=T(), max_retries=0, timeout_seconds=30)
 
     def test_deterministic_failure_is_not_retried(self):
         class T:
             source = counting.SOURCE_PROVIDER
             calls = 0
 
-            def post(self, path, payload):
+            def post(self, path, payload, *, timeout=None):
                 T.calls += 1
                 return 400, b""
         with pytest.raises(BlockingError):
             counting.count_input_tokens(TestProviderRequest()._request(),
-                                        transport=T(), max_retries=3)
+                                        transport=T(), max_retries=3,
+                                        timeout_seconds=30)
         assert T.calls == 1
 
     def test_no_transport_ids_are_recorded(self):
@@ -410,7 +411,7 @@ class TestFinalizeEndToEnd:
         # A tiny context forces recursive splitting down to single atoms and
         # then an explicit unsplittable block — never a truncation.
         class Tiny(counting.MockCountTransport):
-            def post(self, path, body):
+            def post(self, path, body, *, timeout=None):
                 self.calls += 1
                 import json
                 return 200, json.dumps(
