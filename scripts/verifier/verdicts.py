@@ -15,8 +15,9 @@ object semantics would otherwise silently keep the last.
 from __future__ import annotations
 
 import json
+import re
 
-from .canon import digest
+from .canon import digest, sha256_hex
 from .errors import PROVIDER_RESPONSE_INVALID, BlockingError
 
 
@@ -126,16 +127,120 @@ def _validate_one(unit_hash: str, verdict: dict, challenge: str,
             _fail(f"category=checked_category_out_of_policy {where}")
 
 
-def verdict_evidence(verdicts: dict, *, model_id: str, batch_id: str) -> dict:
+# ------------------------------------------------ anti-canned reasoning ------
+
+_WHITESPACE = re.compile(r"\s+")
+_NON_WORD = re.compile(r"[^a-z0-9 ]+")
+
+
+def normalize_reason(text: str, *, challenge: str) -> str:
+    """Reduce a reason to what it actually SAYS.
+
+    The challenge is stripped first: every model is required to echo it, so
+    leaving it in makes two otherwise identical sentences look different by
+    exactly the part they were told to copy."""
+    stripped = text.replace(challenge, " ")
+    lowered = _NON_WORD.sub(" ", stripped.lower())
+    return _WHITESPACE.sub(" ", lowered).strip()
+
+
+def assert_distinct_reasoning(by_model: dict, *, unit_hash: str,
+                              approver: str, challenge: str,
+                              corroborators: list[str]) -> dict:
+    """Independent review must LOOK independent, per unit (C4-F12).
+
+    The legacy panel required substantive, mutually distinct green reasons.
+    That gate was lost: each reason was length-checked in isolation, so every
+    model returning the same canned sentence — with the challenge dutifully
+    echoed — passed all of them. Echoing a challenge proves the response was
+    minted for this request; it proves nothing about two models having
+    reviewed independently.
+
+    Applied only to APPROVALS. A refutation is a finding, and two models
+    independently describing the same real defect in the same words is
+    agreement, not collusion — blocking that would penalise the case the
+    panel exists to catch."""
+    approver_verdict = by_model[approver][unit_hash]
+    approver_reason = normalize_reason(approver_verdict["reason"],
+                                       challenge=challenge)
+    if not approver_reason:
+        _fail(f"category=approver_reason_is_only_the_challenge "
+              f"unit={unit_hash[:16]} approver={approver}")
+
+    distinct = []
+    for model_id in corroborators:
+        verdict = by_model[model_id][unit_hash]
+        if verdict["refuted"]:
+            continue
+        reason = normalize_reason(verdict["reason"], challenge=challenge)
+        if not reason:
+            _fail(f"category=corroborator_reason_is_only_the_challenge "
+                  f"unit={unit_hash[:16]} model={model_id}")
+        if reason == approver_reason:
+            _fail(f"category=canned_identical_approval unit={unit_hash[:16]} "
+                  f"model={model_id} approver={approver} — two approvals "
+                  "whose reasons say the same thing are one review reported "
+                  "twice; independent corroboration is the property this "
+                  "panel exists to provide")
+        proof = normalize_reason(verdict["proof_of_check"],
+                                 challenge=challenge)
+        approver_proof = normalize_reason(approver_verdict["proof_of_check"],
+                                          challenge=challenge)
+        if proof and proof == approver_proof:
+            _fail(f"category=canned_identical_proof unit={unit_hash[:16]} "
+                  f"model={model_id} — the same statement of what was "
+                  "inspected, from two models, is one inspection")
+        distinct.append(model_id)
+    return {"unit_sha256": unit_hash,
+            "distinct_reasoning_models": sorted(distinct),
+            "distinct_reasoning_count": len(distinct)}
+
+
+def verdict_evidence(verdicts: dict, *, model_id: str, batch_id: str,
+                     challenge: str | None = None,
+                     request_semantics_sha256: str | None = None,
+                     usage: dict | None = None,
+                     attempt: dict | None = None) -> dict:
+    """The FULL validated verdict, retained (C4-F11).
+
+    The earlier record kept a count and a list of refuted hashes and dropped
+    the confidence, the reason, the proof and the categories — every model
+    had explained itself, the validation had checked the explanation, and
+    then the evidence threw it away. A reviewer of the final evidence could
+    see THAT Sol approved and never see WHY, which is the one thing an
+    approval record is for.
+
+    This record is PRIVATE. Reasons and proofs are provider-controlled text;
+    a public summary carries digests and counts only (C4-F22)."""
     refuted = sorted(h for h, v in verdicts.items() if v["refuted"])
     record = {
         "model_id": model_id,
         "batch_id": batch_id,
+        "challenge": challenge,
+        "request_semantics_sha256": request_semantics_sha256,
         "unit_count": len(verdicts),
         "refuted_unit_sha256": refuted,
         "refuted_count": len(refuted),
+        "verdicts_by_unit": {
+            unit_hash: {
+                "refuted": verdict["refuted"],
+                "confidence": verdict["confidence"],
+                "reason": verdict["reason"],
+                "proof_of_check": verdict["proof_of_check"],
+                "checked_categories": list(verdict["checked_categories"]),
+                "reason_sha256": sha256_hex(
+                    verdict["reason"].encode("utf-8", "surrogateescape")),
+                "proof_sha256": sha256_hex(
+                    verdict["proof_of_check"].encode("utf-8",
+                                                     "surrogateescape")),
+            }
+            for unit_hash, verdict in sorted(verdicts.items())
+        },
+        "usage": dict(usage or {}),
+        "attempt": dict(attempt or {}),
+        "publication_class": "private",
     }
-    record["verdict_evidence_sha256"] = digest(b"verdict-evidence-v1",
+    record["verdict_evidence_sha256"] = digest(b"verdict-evidence-v2",
                                                _canonical(record))
     return record
 

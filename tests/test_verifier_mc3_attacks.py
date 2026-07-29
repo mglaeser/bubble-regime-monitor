@@ -108,16 +108,18 @@ class TestLens1SemanticTamper:
         forged["executable"] = True
         forged["pending_requirements"] = []
         forged["count_evidence"]["evidence_class"] = "TRUSTED_COUNT_EVIDENCE"
-        forged["executable_plan_sha256"] = finalize.plan_digest(forged)
+        forged["mock_finalization_report_sha256"] = (
+            finalize.mock_report_digest(forged))
         with pytest.raises(BlockingError):
-            finalize.validate_plan_strict(forged)
+            finalize.validate_report_shape(forged)
 
     def test_executable_plan_cost_tamper_is_recomputed(self, finalized):
         forged = json.loads(json.dumps(finalized))
         forged["cost_plan"]["worst_case_total_micro_usd"] = 1
-        forged["executable_plan_sha256"] = finalize.plan_digest(forged)
+        forged["mock_finalization_report_sha256"] = (
+            finalize.mock_report_digest(forged))
         with pytest.raises(BlockingError):
-            finalize.validate_plan_strict(forged)
+            finalize.validate_report_shape(forged)
 
     def test_executable_plan_batch_tamper_is_recomputed(self, finalized):
         # Dropping a batch drops units from review while every remaining
@@ -126,12 +128,13 @@ class TestLens1SemanticTamper:
             pytest.skip("needs at least two batches")
         forged = json.loads(json.dumps(finalized))
         forged["batches"] = forged["batches"][:-1]
-        forged["executable_plan_sha256"] = finalize.plan_digest(forged)
+        forged["mock_finalization_report_sha256"] = (
+            finalize.mock_report_digest(forged))
         with pytest.raises(BlockingError):
-            finalize.validate_plan_strict(forged)
+            finalize.validate_report_shape(forged)
 
     def test_untampered_plan_loads(self, finalized):
-        assert finalize.validate_plan_strict(finalized) is not None
+        assert finalize.validate_report_shape(finalized) is not None
 
 
 # ----------------------------------------------- lens 2: generated proof ----

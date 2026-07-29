@@ -687,14 +687,21 @@ def _pack_batches(fitted: list[tuple[dict, dict]], payloads_by_unit: dict,
 
 
 def _cost_plan(batches: list[dict], model_ids: list[str],
-               pin_values: dict) -> dict:
-    """Integer micro-USD cost exposure. No float ever enters this ledger."""
+               pin_values: dict, *, mock: bool = True) -> dict:
+    """Integer micro-USD cost PROJECTION. No float ever enters this ledger.
+
+    When the counts behind it came from the mock transport, every number here
+    is arithmetic over a local stand-in — not provider token evidence and not
+    a spend estimate. The record says so in its own fields rather than
+    leaving the reader to infer it from the evidence class elsewhere
+    (C4-F19)."""
     per_model = {}
     total_input, total_output = 0, 0
     for model_id in model_ids:
         cap = capabilities.capability(model_id)
         input_micros = 0
         output_micros = 0
+        surcharged: list[str] = []
         for batch in batches:
             tokens = batch["input_tokens_by_model"][model_id]
             rate = cap.input_micro_usd_per_million
@@ -704,17 +711,21 @@ def _cost_plan(batches: list[dict], model_ids: list[str],
                 rate = rate * cap.above_threshold_input_multiplier_bp // 10_000
                 out_rate = (out_rate
                             * cap.above_threshold_output_multiplier_bp // 10_000)
+                surcharged.append(batch["batch_id"])
             input_micros += -(-tokens * rate // MICRO_PER_MILLION)
             output_micros += -(-pin_values["VERIFIER_MAX_OUTPUT_TOKENS"]
                                * out_rate // MICRO_PER_MILLION)
         retries = pin_values["VERIFIER_GENERATION_MAX_RETRIES"]
         per_model[model_id] = {
-            "planned_input_micro_usd": input_micros,
+            "input_projection_micro_usd": input_micros,
             "worst_case_output_micro_usd": output_micros,
             "worst_case_total_micro_usd":
                 (input_micros + output_micros) * (1 + retries),
-            "long_context_surcharge_applies":
-                cap.long_context_threshold_input_tokens is not None,
+            # C4-F20: whether a batch CROSSED the threshold, not whether the
+            # model has one. The old field was true for every batch of a
+            # model with any threshold, which said nothing about this plan.
+            "long_context_surcharge_batch_ids": surcharged,
+            "long_context_surcharge_applied_to_any_batch": bool(surcharged),
         }
         total_input += input_micros
         total_output += output_micros
@@ -725,11 +736,21 @@ def _cost_plan(batches: list[dict], model_ids: list[str],
         "planned_generation_calls": len(batches) * len(model_ids),
         "worst_case_generation_calls":
             len(batches) * len(model_ids) * (1 + retries),
-        "planned_input_micro_usd": total_input,
+        "input_projection_micro_usd": total_input,
         "worst_case_output_micro_usd": total_output,
         "worst_case_total_micro_usd": worst_case,
         "count_call_billing_state": counting.COUNT_BILLING_STATE,
         "money_unit": "integer micro-USD",
+        "basis": ("MOCK_ARITHMETIC_NOT_PROVIDER_TOKEN_EVIDENCE" if mock
+                  else "TRUSTED_PROVIDER_COUNT_EVIDENCE"),
+        "not_provider_token_evidence": mock,
+        "not_spend_estimate": mock,
+        "honest_scope": (
+            "arithmetic over a local stand-in's byte count and the pinned "
+            "price table; no provider counted these tokens and no billing "
+            "was observed" if mock else
+            "arithmetic over trusted provider counts and the pinned price "
+            "table; observed billing is a separate record"),
     }
 
 
@@ -854,7 +875,7 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
         "schema_version": skeleton["schema_version"],
         "artifact": "mock-finalization-report",
         "stage": "mock-finalization",
-        "executable_plan_sha256": None,
+        "mock_finalization_report_sha256": None,
         "publication_class": "private",
         "review_skeleton_sha256": skeleton["review_skeleton_sha256"],
         "repository_state": state,
@@ -875,30 +896,58 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
         "preflight_manifest": manifest.record(),
         "cost_plan": cost,
         "logical_count_requests": ledger.logical_requests,
-        "provider_attempts_performed": ledger.provider_attempts,
+        # C4-F19: a MOCK report never contacted a provider. The field is
+        # named for what it counts — attempts against the local stand-in.
+        "mock_transport_attempts": ledger.provider_attempts,
         "count_cache_hits": ledger.cache_hits,
         "generation_calls_performed": 0,
+        # C4-F13: the challenge the executor MUST use, bound into the report
+        # and therefore into its digest. It was previously a caller argument
+        # at execution time, so a caller could execute a request the plan had
+        # never described.
+        "execution_challenge": challenge,
+        "execution_challenge_sha256": sha256_hex(challenge.encode()),
+        "challenge_provenance": "LOCAL_MOCK_CONSTANT_NOT_UNPREDICTABLE",
         "pending_requirements": pending,
         "executable": evidence.is_executable_authority(count_evidence),
     }
-    executable_plan["executable_plan_sha256"] = plan_digest(executable_plan)
+    executable_plan["mock_finalization_report_sha256"] = mock_report_digest(
+        executable_plan)
     return executable_plan
 
 
-def plan_digest(record: dict) -> str:
+def mock_report_digest(record: dict) -> str:
+    """The digest of a MOCK report, under a mock-specific label.
+
+    `executable-review-plan-v1` is reserved for trusted evidence (C4-F19). A
+    label is a claim about what a record is, and a locally-produced report
+    built on a stand-in transport is not an executable review plan under any
+    reading."""
     stripped = {k: v for k, v in record.items()
-                if k != "executable_plan_sha256"}
-    return digest(b"executable-review-plan-v1", canonical_json(stripped))
+                if k != "mock_finalization_report_sha256"}
+    return digest(b"mock-finalization-report-v1", canonical_json(stripped))
+
+
+#: MC3 name, retained so an older caller fails loudly rather than silently
+#: hashing a mock report under a trusted label.
+def plan_digest(record: dict) -> str:
+    raise BlockingError(
+        EXECUTABLE_PLAN_INVALID,
+        "category=reserved_trusted_digest_label — executable-review-plan-v1 "
+        "names TRUSTED evidence; a mock report is hashed by "
+        "mock_report_digest under mock-finalization-report-v1")
 
 
 _PLAN_KEYS = (
-    "schema_version", "artifact", "stage", "executable_plan_sha256",
+    "schema_version", "artifact", "stage",
+    "mock_finalization_report_sha256", "execution_challenge",
+    "execution_challenge_sha256", "challenge_provenance",
     "publication_class", "review_skeleton_sha256", "repository_state",
     "identities", "disposition_root", "git_execution_policy_sha256",
     "capability_policy", "operator_pin_record",
     "final_units", "batches", "count_evidence",
     "cost_plan", "count_ledger", "preflight_manifest",
-    "logical_count_requests", "provider_attempts_performed",
+    "logical_count_requests", "mock_transport_attempts",
     "count_cache_hits", "review_request_policy",
     "requested_model_acceptance_policy", "generation_calls_performed",
     "pending_requirements", "executable",
@@ -909,8 +958,64 @@ def _plan_fail(reason: str):
     raise BlockingError(EXECUTABLE_PLAN_INVALID, reason)
 
 
-def validate_plan_strict(record: dict) -> dict:
-    """Load a finalized plan by RECOMPUTING every derived claim.
+def validate_mock_finalization_strict(record: dict, *, skeleton: dict,
+                                      cwd, operator_pins: dict,
+                                      transport=None,
+                                      authorizations=None,
+                                      expected_mock_algorithm: str = (
+                                          counting.MOCK_COUNT_ALGORITHM)
+                                      ) -> dict:
+    """RECONSTRUCT the report from the commits and compare it, whole.
+
+    `validate_report_shape` below recomputes what the record already
+    contains. That is not verification of a private report whose CONTENT is
+    deliberately absent: every load-bearing number — the counts, the request
+    hashes, the origin maps, the child unit records, the headroom, the cost —
+    is derived from source the record does not carry, so an edited claim plus
+    a recomputed digest survived it (C4-F04).
+
+    This runs the finalizer again against the same skeleton, commits, PINs
+    and authorizations, and requires the canonical bytes to be identical. A
+    validator with no repository context cannot make this claim, which is why
+    `skeleton` and `cwd` are required rather than optional."""
+    shape = validate_report_shape(record)
+    if record["count_evidence"]["evidence_class"] != evidence.MOCK_TEST_EVIDENCE:
+        _plan_fail("category=not_a_mock_report_evidence_class "
+                   f"class={record['count_evidence']['evidence_class']}")
+    if record["count_ledger"].get("mock_count_algorithm") != (
+            expected_mock_algorithm):
+        _plan_fail("category=mock_algorithm_mismatch")
+
+    rebuilt = finalize(
+        skeleton, cwd=cwd, operator_pins=operator_pins,
+        transport=transport or counting.MockCountTransport(),
+        authorizations=authorizations,
+        challenge=record["execution_challenge"],
+        required_approver=record["review_request_policy"][
+            "required_approver"],
+        minimum_other_approvers=record["review_request_policy"][
+            "minimum_other_approvers"])
+    if canonical_json(rebuilt) != canonical_json(record):
+        differing = sorted(
+            key for key in set(rebuilt) | set(record)
+            if canonical_json(rebuilt.get(key)) != canonical_json(
+                record.get(key)))
+        _plan_fail("category=mock_report_not_reproducible "
+                   f"differing_fields={differing} — the report does not match "
+                   "a rebuild from its own skeleton, commits, PINs and "
+                   "authorizations")
+    return {**shape, "reconstructed": True,
+            "reconstruction_scope": "full canonical-byte equality against a "
+                                    "rebuild from the recorded commits"}
+
+
+def validate_report_shape(record: dict) -> dict:
+    """Recompute every claim the record itself carries.
+
+    Honestly named: this proves internal consistency and re-derives what can
+    be re-derived from the record alone. It CANNOT prove the record describes
+    the commits it names — for that, `validate_mock_finalization_strict`
+    rebuilds from source.
 
     A digest alone proves only that a file is internally consistent — and an
     attacker who edits a claim can recompute the digest. So nothing derived is
@@ -940,8 +1045,12 @@ def validate_plan_strict(record: dict) -> dict:
         if record["publication_class"] != "private":
             _plan_fail("category=plan_publication_class_wrong")
 
-        if plan_digest(record) != record["executable_plan_sha256"]:
+        if mock_report_digest(record) != record[
+                "mock_finalization_report_sha256"]:
             _plan_fail("category=plan_digest_mismatch")
+        if record["execution_challenge_sha256"] != sha256_hex(
+                record["execution_challenge"].encode()):
+            _plan_fail("category=challenge_digest_mismatch")
 
         pin_record = record["operator_pin_record"]
         model_ids = list(record["requested_model_acceptance_policy"][
@@ -964,7 +1073,10 @@ def validate_plan_strict(record: dict) -> dict:
                 _plan_fail(f"category=batch_digest_mismatch "
                            f"batch={batch['batch_id']}")
 
-        recomputed_cost = _cost_plan(record["batches"], model_ids, pin_values)
+        recomputed_cost = _cost_plan(
+            record["batches"], model_ids, pin_values,
+            mock=record["count_evidence"]["evidence_class"]
+            == evidence.MOCK_TEST_EVIDENCE)
         if canonical_json(recomputed_cost) != canonical_json(
                 record["cost_plan"]):
             _plan_fail("category=cost_plan_not_reproducible")
@@ -1025,7 +1137,7 @@ def validate_plan_strict(record: dict) -> dict:
         # attempt accounting must reconcile with the ledger
         ledger = record["count_ledger"]
         if ledger["provider_attempt_count"] != record[
-                "provider_attempts_performed"]:
+                "mock_transport_attempts"]:
             _plan_fail("category=attempt_count_disagreement")
         if ledger["provider_attempt_count"] > ledger["max_attempts_cap"]:
             _plan_fail("category=attempt_cap_exceeded_in_loaded_plan")
@@ -1125,7 +1237,7 @@ def main(argv: list[str]) -> int:
                                operator_pins=_pins_from_environment(),
                                transport=counting.MockCountTransport(),
                                authorizations=authorizations)
-        validate_plan_strict(plan_record)
+        validate_report_shape(plan_record)
         artifact.write_atomic(plan_record, args.output)
         if args.local_summary:
             artifact.write_atomic(public_plan_summary(plan_record),
@@ -1137,7 +1249,7 @@ def main(argv: list[str]) -> int:
           f"units={len(plan_record['final_units'])} "
           f"batches={len(plan_record['batches'])} "
           f"logical_requests={plan_record['logical_count_requests']} "
-          f"transport_attempts={plan_record['provider_attempts_performed']} "
+          f"transport_attempts={plan_record['mock_transport_attempts']} "
           f"cache_hits={plan_record['count_cache_hits']} "
           f"generation_calls={plan_record['generation_calls_performed']} "
           f"evidence_class={plan_record['count_evidence']['evidence_class']} "
@@ -1173,6 +1285,22 @@ def _pins_from_environment() -> dict:
     return values
 
 
+def validate_plan_strict(record: dict) -> dict:
+    """Retired (C4-F04). Say which check you mean.
+
+    The old name promised strict loading and delivered internal consistency.
+    Callers must now choose: `validate_report_shape` for what the record can
+    prove about itself, or `validate_mock_finalization_strict` — which needs
+    the skeleton and the checkout — for whether it describes the commits it
+    names."""
+    raise BlockingError(
+        EXECUTABLE_PLAN_INVALID,
+        "category=ambiguous_validator — validate_plan_strict promised more "
+        "than it checked; use validate_report_shape for self-consistency or "
+        "validate_mock_finalization_strict(record, skeleton=..., cwd=..., "
+        "operator_pins=...) for reconstruction from the commits")
+
+
 PUBLICATION_PREFLIGHT_FAILED = "PUBLICATION_PREFLIGHT_FAILED"
 
 # Fields a local summary may carry. Anything else is refused rather than
@@ -1180,8 +1308,8 @@ PUBLICATION_PREFLIGHT_FAILED = "PUBLICATION_PREFLIGHT_FAILED"
 _SUMMARY_FIELDS = frozenset({
     "artifact", "publication_class", "trust_status", "publication_preflight",
     "head_sha", "diff_base_sha", "review_skeleton_sha256",
-    "executable_plan_sha256", "disposition_root", "final_unit_count",
-    "batch_count", "logical_count_requests", "provider_attempts_performed",
+    "mock_finalization_report_sha256", "disposition_root", "final_unit_count",
+    "batch_count", "logical_count_requests", "mock_transport_attempts",
     "generation_calls_performed", "cost_plan", "count_evidence_class",
     "executable", "pending_codes", "summary_sha256",
 })
@@ -1228,13 +1356,14 @@ def public_plan_summary(executable_plan: dict) -> dict:
         "head_sha": executable_plan["repository_state"]["head_sha"],
         "diff_base_sha": executable_plan["repository_state"]["diff_base_sha"],
         "review_skeleton_sha256": executable_plan["review_skeleton_sha256"],
-        "executable_plan_sha256": executable_plan["executable_plan_sha256"],
+        "mock_finalization_report_sha256":
+            executable_plan["mock_finalization_report_sha256"],
         "disposition_root": executable_plan["disposition_root"],
         "final_unit_count": len(executable_plan["final_units"]),
         "batch_count": len(executable_plan["batches"]),
         "logical_count_requests": executable_plan["logical_count_requests"],
-        "provider_attempts_performed":
-            executable_plan["provider_attempts_performed"],
+        "mock_transport_attempts":
+            executable_plan["mock_transport_attempts"],
         "generation_calls_performed": 0,
         "cost_plan": executable_plan["cost_plan"],
         "count_evidence_class":

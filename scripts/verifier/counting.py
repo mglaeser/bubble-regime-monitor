@@ -175,13 +175,16 @@ def _validate_response(status, body) -> int:
     if not isinstance(parsed, dict):
         raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
                             "category=body_not_object")
-    # A2-F26: exact supported field set — an unknown field is a response we
-    # do not understand, not one to read past.
-    unknown = set(parsed) - {"object", "input_tokens"}
-    if unknown:
-        raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
-                            f"category=unknown_response_field "
-                            f"count={len(unknown)}")
+    # C4-F14: EXACT key set, not merely "no unknown keys". The old check
+    # accepted a response that omitted `input_tokens` entirely and then
+    # relied on a later `.get()` returning None to catch it — which it did,
+    # but as "not an integer" rather than "the response is not a count".
+    if set(parsed) != {"object", "input_tokens"}:
+        raise BlockingError(
+            TOKEN_COUNT_RESPONSE_INVALID,
+            f"category=count_response_key_set "
+            f"missing={sorted({'object', 'input_tokens'} - set(parsed))} "
+            f"unexpected={len(set(parsed) - {'object', 'input_tokens'})}")
     if parsed.get("object") != EXPECTED_OBJECT:
         raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
                             "category=unexpected_object_tag")

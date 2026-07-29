@@ -384,52 +384,41 @@ class TestOutputCapacityRecord:
 
 
 class TestGenerationAttemptAccounting:
-    def _plan(self, **pins):
-        return {
-            "review_skeleton_sha256": "f" * 64,
-            "executable_plan_sha256": "e" * 64,
-            "review_request_policy": reviewpolicy.policy_record(
-                ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"],
-                required_approver="gpt-5.6-sol", minimum_other_approvers=1,
-                max_output_tokens=8_000),
-            "operator_pin_record": {"pins": good_pins(**pins)},
-            "batches": [{"batch_id": "batch-0000",
-                         "unit_sha256_in_order": ["a" * 64],
-                         "input_tokens_by_model": {}}],
-        }
+    """The executor's ledger, exercised through the real end-to-end path.
 
-    def test_the_cap_blocks_before_the_attempt_that_would_exceed_it(self):
-        transport = executor.MockGenerationTransport()
+    These used a hand-written `plan_record` and a caller-supplied challenge.
+    After C4-F05/F06/F13 neither is possible: the executor strict-loads the
+    report, hash-matches every request, and reads the challenge from the
+    plan. The equivalent assertions now live in
+    tests/test_verifier_executor.py, which has the fixtures for it; what
+    stays here is the part that needs no plan at all."""
+
+    def test_the_retry_budget_is_reserved_before_the_first_attempt(self):
+        pins = good_pins(VERIFIER_MAX_GENERATION_CALLS=2,
+                         VERIFIER_GENERATION_MAX_RETRIES=2)
+        ledger = executor.GenerationLedger(pins)
         with pytest.raises(BlockingError) as e:
-            executor.execute_mock(self._plan(VERIFIER_MAX_GENERATION_CALLS=2),
-                                  transport=transport, challenge="CH-CAP")
+            ledger.open_request("gpt-5.3-codex", "b0")
         assert e.value.code == CHUNK_COUNT_EXHAUSTED
-        # Two attempts were permitted and made; the third was refused BEFORE
-        # the transport saw it.
-        assert transport.calls == 2
-
-    def test_every_attempt_is_recorded_with_its_settlement(self):
-        report = executor.execute_mock(
-            self._plan(), transport=executor.MockGenerationTransport(),
-            challenge="CH-LEDGER")
-        ledger = report["generation_ledger"]
-        assert ledger["generation_attempts"] == 3
-        assert len(ledger["attempts"]) == 3
-        assert all(a["result_category"] == "ok" for a in ledger["attempts"])
-        assert [a["attempt_number"] for a in ledger["attempts"]] == [1, 2, 3]
+        assert ledger.attempts == 0
 
     def test_the_ledger_states_it_is_not_provider_usage(self):
-        report = executor.execute_mock(
-            self._plan(), transport=executor.MockGenerationTransport(),
-            challenge="CH-SCOPE")
-        assert "not provider usage" in (
-            report["generation_ledger"]["honest_scope"])
+        ledger = executor.GenerationLedger(good_pins())
+        record = ledger.record()
+        assert "not provider usage" in record["honest_scope"]
+        assert record["retries"] == 0
+        assert record["max_retries_per_request"] == good_pins()[
+            "VERIFIER_GENERATION_MAX_RETRIES"]
 
-    def test_without_a_skeleton_drift_is_declared_unchecked_not_skipped(self):
-        report = executor.execute_mock(
-            self._plan(), transport=executor.MockGenerationTransport(),
-            challenge="CH-DRIFT")
-        assert report["usage_drift_checked"] is False
+    def test_the_cap_refuses_the_attempt_that_would_exceed_it(self):
+        ledger = executor.GenerationLedger(
+            good_pins(VERIFIER_MAX_GENERATION_CALLS=1,
+                      VERIFIER_GENERATION_MAX_RETRIES=0))
+        ledger.open_request("gpt-5.3-codex", "b0")
+        ledger.attempt("gpt-5.3-codex", "b0")
+        with pytest.raises(BlockingError) as e:
+            ledger.attempt("gpt-5.3-codex", "b0")
+        assert e.value.code == CHUNK_COUNT_EXHAUSTED
 
 
 # --------------------------------------------- mock evidence stays mock ------
@@ -448,32 +437,46 @@ class TestMockCannotBeResealedTrusted:
         report["count_evidence"]["evidence_class"] = (
             evidence.TRUSTED_COUNT_EVIDENCE)
         with pytest.raises(BlockingError):
-            finalize.validate_plan_strict(report)
+            finalize.validate_report_shape(report)
 
     def test_relabelling_executable_fails_the_strict_loader(self, skeleton,
                                                             clone):
         report = self._report(skeleton, clone)
         report["executable"] = True
         with pytest.raises(BlockingError):
-            finalize.validate_plan_strict(report)
+            finalize.validate_report_shape(report)
 
-    def test_a_mock_execution_report_declares_no_authority(self):
-        report = executor.execute_mock(
-            {"review_skeleton_sha256": "f" * 64,
-             "executable_plan_sha256": "e" * 64,
-             "review_request_policy": reviewpolicy.policy_record(
-                 ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"],
-                 required_approver="gpt-5.6-sol", minimum_other_approvers=1,
-                 max_output_tokens=8_000),
-             "operator_pin_record": {"pins": good_pins()},
-             "batches": [{"batch_id": "b0",
-                          "unit_sha256_in_order": ["a" * 64],
-                          "input_tokens_by_model": {}}]},
-            transport=executor.MockGenerationTransport(), challenge="CH-M")
-        assert report["evidence_class"] == evidence.MOCK_TEST_EVIDENCE
-        assert report["executable_authority"] is False
-        assert evidence.is_executable_authority(
-            report["execution_evidence"]) is False
+    def test_an_edited_count_does_not_survive_reconstruction(self, skeleton,
+                                                             clone):
+        # C4-F04: shape validation recomputes what the record contains.
+        # Reconstruction asks whether the record describes its own commits.
+        import copy
+        report = self._report(skeleton, clone)
+        tampered = copy.deepcopy(report)
+        tampered["count_ledger"]["counts"][0]["input_tokens"] += 1
+        tampered["mock_finalization_report_sha256"] = (
+            finalize.mock_report_digest(tampered))
+        # Self-consistent: the weaker check passes.
+        finalize.validate_report_shape(tampered)
+        # Not reproducible from the commits: the strict loader refuses.
+        with pytest.raises(BlockingError) as e:
+            finalize.validate_mock_finalization_strict(
+                tampered, skeleton=skeleton, cwd=clone,
+                operator_pins=good_pins(),
+                authorizations=proposed_authorizations(skeleton, clone))
+        assert "not_reproducible" in str(e.value)
+
+    def test_a_faithful_report_reconstructs(self, skeleton, clone):
+        report = self._report(skeleton, clone)
+        result = finalize.validate_mock_finalization_strict(
+            report, skeleton=skeleton, cwd=clone, operator_pins=good_pins(),
+            authorizations=proposed_authorizations(skeleton, clone))
+        assert result["reconstructed"] is True
+
+    def test_the_ambiguous_validator_name_is_retired(self):
+        with pytest.raises(BlockingError) as e:
+            finalize.validate_plan_strict({})
+        assert "ambiguous_validator" in str(e.value)
 
 
 # ------------------------------------------------ no deprecated machinery ----

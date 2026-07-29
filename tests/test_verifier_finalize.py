@@ -31,6 +31,7 @@ from verifier import (  # noqa: E402
 from verifier import (
     pins as pinsmod,
 )
+from verifier.canon import sha256_hex  # noqa: E402
 from verifier.errors import (  # noqa: E402
     COST_CAP_EXCEEDED,
     MODEL_CONTEXT_EXCEEDED_UNSPLITTABLE,
@@ -351,7 +352,13 @@ class TestFinalizeEndToEnd:
         result = self._finalize(skeleton, clone)
         assert result["executable"] is False
         assert result["generation_calls_performed"] == 0
-        assert result["provider_attempts_performed"] > 0
+        assert result["mock_transport_attempts"] > 0
+        # C4-F19: the field is named for what it counts. A mock report has no
+        # "provider attempts" to report, and calling them that invites the
+        # number to be read as spend.
+        assert "provider_attempts_performed" not in result
+        assert result["cost_plan"]["not_provider_token_evidence"] is True
+        assert result["cost_plan"]["not_spend_estimate"] is True
         assert any(p["code"] == "COUNTS_ARE_NOT_TRUSTED_EVIDENCE"
                    for p in result["pending_requirements"])
         # MC4-F06: authority comes from the evidence CLASS, not a string a
@@ -371,10 +378,30 @@ class TestFinalizeEndToEnd:
 
     def test_plan_digest_binds_the_record(self, skeleton, clone):
         result = self._finalize(skeleton, clone)
-        assert finalize.plan_digest(result) == result["executable_plan_sha256"]
+        assert finalize.mock_report_digest(result) == result[
+            "mock_finalization_report_sha256"]
         tampered = dict(result)
         tampered["generation_calls_performed"] = 1
-        assert finalize.plan_digest(tampered) != result["executable_plan_sha256"]
+        assert finalize.mock_report_digest(tampered) != result[
+            "mock_finalization_report_sha256"]
+
+    def test_the_trusted_digest_label_is_refused_for_a_mock_report(self):
+        # C4-F19: `executable-review-plan-v1` names trusted evidence. The old
+        # entry point does not quietly keep working under a new name.
+        with pytest.raises(BlockingError) as e:
+            finalize.plan_digest({"artifact": "mock-finalization-report"})
+        assert "reserved_trusted_digest_label" in str(e.value)
+
+    def test_the_challenge_is_bound_into_the_report(self, skeleton, clone):
+        # C4-F13: the executor must not be free to choose it.
+        result = self._finalize(skeleton, clone)
+        assert result["execution_challenge"]
+        assert result["execution_challenge_sha256"] == sha256_hex(
+            result["execution_challenge"].encode())
+        tampered = dict(result)
+        tampered["execution_challenge"] = "OTHER"
+        assert finalize.mock_report_digest(tampered) != result[
+            "mock_finalization_report_sha256"]
 
     def test_cost_plan_is_integer_micros(self, skeleton, clone):
         cost = self._finalize(skeleton, clone)["cost_plan"]

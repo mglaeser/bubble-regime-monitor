@@ -80,7 +80,16 @@ PROOF_MAX_CHARS = 240
 MIN_CHECKED_CATEGORIES = 1
 MAX_CHECKED_CATEGORIES = 6
 CATEGORY_MAX_CHARS = 48
-MAX_FINDINGS_PER_UNIT = 4
+# C4-F18: there is deliberately no per-unit findings budget.
+#
+# The output projection used to reserve MAX_FINDINGS_PER_UNIT * 96 characters
+# for a structured findings list. The verdict schema has no findings field, so
+# the model was never permitted to return one — the reservation shrank every
+# batch to make room for output that could not exist. Budgeting an output
+# field the schema forbids is a disagreement between two policies, not
+# conservatism, so the reservation is gone rather than the field added: a new
+# wire field is a change to what reviewers must produce and belongs to a
+# governed policy version, not to a capacity calculation.
 
 # Conservative characters-per-token for budget arithmetic. Deliberately LOW
 # (pessimistic) so the projection over-reserves rather than under-reserves.
@@ -112,7 +121,6 @@ def per_unit_output_tokens() -> int:
         + REASON_MAX_CHARS
         + PROOF_MAX_CHARS
         + MAX_CHECKED_CATEGORIES * 32
-        + MAX_FINDINGS_PER_UNIT * 96
         + 160                               # keys, quoting, punctuation
     )
     return -(-chars // _CHARS_PER_TOKEN)    # ceil
@@ -165,6 +173,16 @@ def policy_record(model_ids: list[str], *, required_approver: str,
     without stating whether the required approver counted toward it (A2-F08),
     so "2" was ambiguous. The name now says exactly what it means: with a
     required approver plus one other approver, total approvals are two."""
+    # C4-F17: the panel is an ORDERED SET. A repeated model id produces a
+    # duplicate request, collapses in every by-model dict, and inflates the
+    # panel size the corroborator arithmetic is computed against — so "two
+    # distinct other approvers" could be one model counted twice.
+    if len(model_ids) != len(set(model_ids)):
+        duplicated = sorted({m for m in model_ids
+                             if model_ids.count(m) > 1})
+        _fail(f"category=duplicate_model_in_panel models={duplicated} — a "
+              "panel is a set of distinct reviewers; a repeated id is one "
+              "reviewer counted twice")
     unknown = [m for m in model_ids if m not in LENSES]
     if unknown:
         _fail(f"category=model_without_review_lens models={unknown}")
@@ -195,7 +213,7 @@ def policy_record(model_ids: list[str], *, required_approver: str,
         "min_checked_categories": MIN_CHECKED_CATEGORIES,
         "max_checked_categories": MAX_CHECKED_CATEGORIES,
         "category_max_chars": CATEGORY_MAX_CHARS,
-        "max_findings_per_unit": MAX_FINDINGS_PER_UNIT,
+        "findings_field_in_schema": False,
         "max_output_tokens": max_output_tokens,
         "per_unit_output_tokens": per_unit_output_tokens(),
         "response_overhead_tokens": _RESPONSE_OVERHEAD_TOKENS,

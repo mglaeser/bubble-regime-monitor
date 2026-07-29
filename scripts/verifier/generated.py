@@ -223,6 +223,41 @@ def relationship_paths() -> tuple[str, ...]:
             *[p["path"] for p in V1_EXPECTED_PARTS if p["present"]])
 
 
+#: Paths v1 asserts are NOT in the repository. The fixed header states as
+#: fact that Part 2's text is absent, and the manifest carries a null entry
+#: for it — but nothing looked (C4-F15). A tracked `part2.md` under v1 means
+#: the generated file is no longer the concatenation the header describes,
+#: while every byte check still passes, because the proof only concatenates
+#: the parts the manifest declares PRESENT.
+V1_ABSENT_PATHS = tuple(
+    f"{SOURCE_ROOT}{p['name']}.md"
+    for p in V1_EXPECTED_PARTS if not p["present"])
+
+
+def prove_absent_paths(commit_sha: str, *, cwd=None) -> dict:
+    """Prove v1's declared-absent paths really are absent, at one commit.
+
+    Absence is a load-bearing claim here, not a default. Recorded as evidence
+    with the exact path digests, so the record states what was checked rather
+    than that something was."""
+    checked = []
+    for path in V1_ABSENT_PATHS:
+        state, _oid, _mode = _blob_entry(commit_sha, path, cwd=cwd)
+        if state != "absent":
+            raise _err(category="v1_declared_absent_path_present",
+                       path_sha256=sha256_hex(path.encode()),
+                       commit=commit_sha)
+        checked.append(sha256_hex(path.encode()))
+    return {
+        "absent_path_sha256_in_order": checked,
+        "absent_path_count": len(checked),
+        "endpoint_commit_sha": commit_sha,
+        "semantics": "v1's fixed header states Part 2's text is not in the "
+                     "repository; a tracked file at that path would make the "
+                     "header false while every byte check still passed",
+    }
+
+
 def prove_relationship(commit_sha: str, *, cwd=None) -> dict:
     """Prove the relationship AT one commit, or raise.
 
@@ -289,8 +324,11 @@ def prove_relationship(commit_sha: str, *, cwd=None) -> dict:
         "actual_generated_sha256": actual_sha,
         "manifest_combined_sha256": manifest["combined_mandate_sha256"],
     }
+    # C4-F15: v1 asserts Part 2 is absent. Prove it, at this commit, and
+    # bind the proof into the content digest.
+    content["absence_proof"] = prove_absent_paths(commit_sha, cwd=cwd)
     content["relationship_content_proof_sha256"] = digest(
-        b"generated-content-proof-v1", canonical_json(content))
+        b"generated-content-proof-v2", canonical_json(content))
     return content
 
 
