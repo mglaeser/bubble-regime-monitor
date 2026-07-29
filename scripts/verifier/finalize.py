@@ -371,14 +371,7 @@ class PreflightGenerationManifest:
         return frozenset(cleared), occurrences
 
     def _path_identities(self) -> frozenset:
-        """Every changed path's Base64 identity, which must never be sent.
-
-        `unitpayload.structured_unit` hashes the path on the grounds that a
-        path can itself be sensitive, but nothing was checking the assembled
-        body, and the metadata-atom descriptor carried `path_bytes_b64`
-        verbatim as reviewable content — so every added or renamed file
-        shipped its full path to the provider anyway (A2-F21). The policy is
-        now enforced on the exact bytes that would leave."""
+        """Every changed path's Base64 identity."""
         if self._path_b64_cache is None:
             self._path_b64_cache = frozenset(
                 record["path_bytes_b64"]
@@ -386,21 +379,49 @@ class PreflightGenerationManifest:
                 if record.get("path_bytes_b64"))
         return self._path_b64_cache
 
+    def _assert_no_synthesized_path_identity(self, text: str, *, label: str,
+                                             origin_map) -> None:
+        """A path identity may only reach a provider as REVIEWED CONTENT.
+
+        `unitpayload.structured_unit` hashes the path on the grounds that a
+        path can itself be sensitive, but nothing checked the assembled body,
+        and the metadata-atom descriptor carried `path_bytes_b64` verbatim —
+        so every added or renamed file shipped its full path anyway (A2-F21).
+
+        The rule is about what the VERIFIER adds, not about censoring the
+        repository. A changed source line that genuinely contains a Base64
+        path is content the reviewer is meant to read, and blocking it would
+        be an unclearable false positive — this repository has exactly such a
+        line, in the fixture for this check. So the check is scoped to the
+        bytes the verifier synthesizes: the instructions, the response
+        schema, the unit headers, and metadata-atom descriptors."""
+        for identity in sorted(self._path_identities()):
+            at = text.find(identity)
+            while at != -1:
+                span = origin_map.locate(at, len(identity))
+                side = None
+                if span is not None:
+                    side = (self.atom_records.get(span.atom_id) or {}).get(
+                        "side")
+                if span is None or side == unitpayload.SIDE_META:
+                    where = "scaffolding" if span is None else "metadata_atom"
+                    raise BlockingError(
+                        SECRET_PREFLIGHT_FAILED,
+                        f"category=raw_path_identity_in_payload label={label} "
+                        f"origin={where} — the verifier put a path's Base64 "
+                        "bytes into the request; paths travel as sha256 only, "
+                        "and a synthesized path is not reviewed content, so "
+                        "no source authorization can clear it")
+                at = text.find(identity, at + 1)
+
     def _scan_payload(self, text: str, *, label: str, unit_count: int,
                       request, cleared_atoms: frozenset,
                       authorized_occurrences: int) -> dict:
-        leaked = sorted(p for p in self._path_identities() if p in text)
-        if leaked:
-            raise BlockingError(
-                SECRET_PREFLIGHT_FAILED,
-                f"category=raw_path_identity_in_payload label={label} "
-                f"path_count={len(leaked)} — the payload carries a path's "
-                "Base64 bytes; paths travel as sha256 only, so a reviewer "
-                "never receives one and a leaked path is not clearable by an "
-                "authorization")
         kind = "execution" if label.endswith(":execution") else "count"
         origin_map = origin.build_for_payload(
             kind, text, request.unit_payloads, self.atom_records)
+        self._assert_no_synthesized_path_identity(text, label=label,
+                                                  origin_map=origin_map)
         findings = preflight.distinct_occurrences(preflight.scan_text(text))
         attributed, orphaned = origin.attribute(findings, origin_map)
         if orphaned:

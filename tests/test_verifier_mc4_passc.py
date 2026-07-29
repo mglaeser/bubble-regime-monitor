@@ -172,45 +172,83 @@ class TestZeroTransmissionBeforeBlocking:
 
 
 class TestPathIdentitiesNeverReachThePayload:
-    """The guard that catches a path leaking into transmitted content.
+    """A path identity may reach a provider only as REVIEWED CONTENT.
 
-    Fixing the metadata descriptor removed the only known way to produce this
-    today, which is exactly when a guard quietly becomes decorative. So the
-    guard is driven directly with a payload that DOES carry a path identity,
-    proving it still fires — and the descriptor is checked separately for the
-    property that made the guard unreachable."""
+    Fixing the metadata descriptor removed the only known way for the
+    verifier to synthesize one, which is exactly when a guard quietly becomes
+    decorative — so it is driven directly, in each of the three positions
+    that matter.
 
-    ATOM = "a" * 64
-    PATH_B64 = "c2NyaXB0cy92ZXJpZmllci9hdG9tcy5weQ=="   # scripts/verifier/atoms.py
+    The scope took a correction. A first version searched the whole payload,
+    which blocked the precursor range: a test fixture in this repository
+    genuinely contains the Base64 of a changed path, as reviewable source
+    content. Blocking that is an unclearable false positive — the rule is
+    about what the verifier ADDS, not about censoring the repository."""
 
-    def _manifest(self):
+    ATOM_CONTENT, ATOM_META = "a" * 64, "b" * 64
+    UNIT = "u" * 64
+    # Computed, never written out: a literal here would itself be a Base64
+    # path in this file's changed content, which is the exact false positive
+    # the scoping correction was about.
+    PATH = b"scripts/verifier/atoms.py"
+
+    def _path_b64(self):
+        from verifier.canon import b64
+        return b64(self.PATH)
+
+    def _records(self):
+        return {
+            self.ATOM_CONTENT: {"atom_id": self.ATOM_CONTENT, "side": "new",
+                                "line_number": 1, "hunk_id": "h",
+                                "path_bytes_b64": self._path_b64()},
+            self.ATOM_META: {"atom_id": self.ATOM_META, "side": "meta",
+                             "line_number": 0, "hunk_id": "h",
+                             "path_bytes_b64": self._path_b64()},
+        }
+
+    def _manifest(self, atom_map):
         return finalize.PreflightGenerationManifest(
-            None,
-            atom_records={self.ATOM: {"atom_id": self.ATOM, "side": "new",
-                                      "line_number": 1, "hunk_id": "h",
-                                      "path_bytes_b64": self.PATH_B64}},
-            atom_map={self.ATOM: "harmless line"})
+            None, atom_records=self._records(), atom_map=atom_map)
 
-    def test_a_payload_carrying_a_path_identity_blocks(self):
-        manifest = self._manifest()
+    def _scan(self, atom_ids, atom_map, *, lens="review this"):
+        manifest = self._manifest(atom_map)
+        unit = {"unit_sha256": self.UNIT, "atom_ids": list(atom_ids),
+                "git_status": "M", "path_bytes_b64": self._path_b64()}
+        manifest._units_by_hash[self.UNIT] = unit
+        payload = unitpayload.structured_unit(unit, self._records(), atom_map)
+        request = providerreq.build_request(
+            "gpt-5.3-codex", [payload], lens=lens, challenge="CH-PATH",
+            reasoning_effort="medium", max_output_tokens=8_000)
+        return manifest._scan_payload(
+            request.transmitted_text(), label="unit:x:execution",
+            unit_count=1, request=request,
+            cleared_atoms=frozenset(atom_ids), authorized_occurrences=0)
+
+    def test_a_path_identity_in_a_metadata_atom_blocks(self):
+        # The A2-F21 leak itself: the verifier's own descriptor carrying the
+        # path it is describing.
         with pytest.raises(BlockingError) as e:
-            manifest._scan_payload(
-                f'{{"input":"MET 000000 | {self.PATH_B64}"}}',
-                label="unit:x:execution", unit_count=1, request=_request(),
-                cleared_atoms=frozenset(), authorized_occurrences=0)
+            self._scan([self.ATOM_META],
+                       {self.ATOM_META: f'{{"kind":"new_file_mode",'
+                                        f'"path_bytes_b64":'
+                                        f'"{self._path_b64()}"}}'})
         assert "raw_path_identity_in_payload" in str(e.value)
+        assert "origin=metadata_atom" in str(e.value)
 
-    def test_the_guard_does_not_fire_on_an_ordinary_payload(self):
-        manifest = self._manifest()
-        # No exception: the check is specific to the path identity, not a
-        # blanket refusal that would make the positive case meaningless.
-        manifest._scan_payload(
-            '{"input":"MET 000000 | new file mode 100644"}',
-            label="unit:x:execution", unit_count=1,
-            request=providerreq.ProviderRequest(
-                model_id="gpt-4.1-mini", instructions="i", input_text="t",
-                reasoning_effort=None, text_format={}, max_output_tokens=1024),
-            cleared_atoms=frozenset(), authorized_occurrences=0)
+    def test_a_path_identity_in_scaffolding_blocks(self):
+        with pytest.raises(BlockingError) as e:
+            self._scan([self.ATOM_CONTENT],
+                       {self.ATOM_CONTENT: "harmless line"},
+                       lens=f"review this {self._path_b64()} carefully")
+        assert "origin=scaffolding" in str(e.value)
+
+    def test_a_path_identity_in_reviewed_source_content_is_allowed(self):
+        # A changed source line that genuinely contains a Base64 path is
+        # content the reviewer is meant to read. This repository has one.
+        entry = self._scan(
+            [self.ATOM_CONTENT],
+            {self.ATOM_CONTENT: f'PATH_B64 = "{self._path_b64()}"'})
+        assert entry["atom_span_count"] == 1
 
     def test_every_metadata_descriptor_kind_is_path_free(self):
         from verifier import atoms as A
