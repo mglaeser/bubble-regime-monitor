@@ -137,7 +137,9 @@ _REPOSITORY_STATE = {
 _GIT_POLICY = {
     "policy_version": _int,
     "git_version": _str,
-    "git_executable_sha256": _hex64,
+    "git_executable_path_sha256": _hex64,
+    "git_binary_sha256": _null_or(_hex64),
+    "runner_image_digest": _null_or(_hex64),
     "attr_source_sha": _sha1,
     "info_attributes_state": _enum("absent", "empty"),
     "environment_policy": _dict,

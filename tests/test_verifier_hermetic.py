@@ -286,7 +286,7 @@ class TestExecutableAndShallowProvenance:
     def test_git_executable_is_absolute_and_bound(self):
         path = gitexec.git_executable()
         assert path.startswith("/")
-        assert len(gitexec.git_executable_sha256()) == 64
+        assert len(gitexec.git_executable_path_sha256()) == 64
 
     def test_capability_cache_is_keyed_by_executable(self):
         first = gitexec.detect_capabilities()
@@ -313,6 +313,6 @@ class TestExecutableAndShallowProvenance:
         _root(repo)
         _, sk = _root(repo)
         gp = sk["git_execution_policy"]
-        assert len(gp["git_executable_sha256"]) == 64
+        assert len(gp["git_executable_path_sha256"]) == 64
         assert gp["local_config_policy"]["unsafe_key_count"] == 0
         assert gitexec.policy_digest(gp) == gp["policy_sha256"]

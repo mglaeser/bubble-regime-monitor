@@ -165,12 +165,16 @@ def validate_pin_authority(record: dict, model_ids: list[str]) -> dict:
     if record["authority_class"] not in authority.AUTHORITY_CLASSES:
         _fail("category=pin_authority_class_unknown")
     validate_pins(record["pins"], model_ids)
-    expected_executable = (record["authority_class"]
-                           == authority.VERIFIED_OPERATOR_PIN_AUTHORIZATION)
-    if record["executable_authority"] is not expected_executable:
-        _fail("category=pin_executable_authority_not_derived "
-              f"class={record['authority_class']} "
-              f"claimed={record['executable_authority']}")
+    # A2-F01: candidate code never derives executable authority from a PIN
+    # record's own label. A record LABELLED verified is accepted as inert
+    # input for the external verifier, but candidate-side its executable
+    # authority is always False — a positive value here would be the record
+    # authenticating itself.
+    if record["executable_authority"] is not False:
+        _fail("category=pin_executable_authority_claimed_candidate_side "
+              f"class={record['authority_class']} — candidate code cannot "
+              "derive executable authority from a record's own field; that "
+              "is the trusted verifier's decision")
     if record.get("revoked"):
         _fail("category=pin_authorization_revoked")
     # An anchor is described, never authenticated, on this side.

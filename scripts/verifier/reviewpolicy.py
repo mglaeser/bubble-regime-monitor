@@ -38,6 +38,14 @@ STATUS_PROVISIONAL = "PROVISIONAL_IN_REPOSITORY"
 
 CONFIDENCE_VALUES = ("low", "medium", "high")
 
+# The governed required approver, carried over from the legacy panel. Sol is
+# the security/data-flow lens; a change that ships without its approval ships
+# without the review that would have caught an authorization or injection
+# defect. There is NO finalizer default: MC4's first attempt defaulted to
+# model_ids[0], which is gpt-5.3-codex, so the wrong model silently became the
+# approver (A2-F08).
+GOVERNED_REQUIRED_APPROVER = "gpt-5.6-sol"
+
 # One lens per model. Distinct perspectives catch failure modes that three
 # runs of the same prompt cannot.
 LENSES: dict[str, str] = {
@@ -65,9 +73,13 @@ LENSES: dict[str, str] = {
 # Output budget, in tokens, measured per verdict. These are policy decisions,
 # not measurements: they bound what a reviewer may return so the batch size
 # can be derived from them.
+REASON_MIN_CHARS = 24
 REASON_MAX_CHARS = 600
+PROOF_MIN_CHARS = 16
 PROOF_MAX_CHARS = 240
+MIN_CHECKED_CATEGORIES = 1
 MAX_CHECKED_CATEGORIES = 6
+CATEGORY_MAX_CHARS = 48
 MAX_FINDINGS_PER_UNIT = 4
 
 # Conservative characters-per-token for budget arithmetic. Deliberately LOW
@@ -143,22 +155,28 @@ def assert_output_capacity(unit_count: int, max_output_tokens: int,
 
 
 def policy_record(model_ids: list[str], *, required_approver: str,
-                  minimum_distinct_corroborators: int,
+                  minimum_other_approvers: int,
                   max_output_tokens: int, status: str = STATUS_PROVISIONAL,
                   external_anchor: dict | None = None) -> dict:
-    """The complete, hashed review policy bound into every request."""
+    """The complete, hashed review policy bound into every request.
+
+    `minimum_other_approvers` counts approvals from models OTHER than the
+    required approver. MC4's first attempt used `minimum_distinct_corroborators`
+    without stating whether the required approver counted toward it (A2-F08),
+    so "2" was ambiguous. The name now says exactly what it means: with a
+    required approver plus one other approver, total approvals are two."""
     unknown = [m for m in model_ids if m not in LENSES]
     if unknown:
         _fail(f"category=model_without_review_lens models={unknown}")
     if required_approver not in model_ids:
         _fail(f"category=required_approver_not_in_panel "
               f"approver={required_approver}")
-    if minimum_distinct_corroborators < 1:
-        _fail("category=minimum_corroborators_below_one")
-    if minimum_distinct_corroborators > len(model_ids):
-        _fail(f"category=minimum_corroborators_above_panel_size "
-              f"required={minimum_distinct_corroborators} "
-              f"panel={len(model_ids)}")
+    if minimum_other_approvers < 1:
+        _fail("category=minimum_other_approvers_below_one")
+    if minimum_other_approvers > len(model_ids) - 1:
+        _fail(f"category=minimum_other_approvers_above_panel_size "
+              f"required={minimum_other_approvers} "
+              f"other_models={len(model_ids) - 1}")
     record = {
         "policy_version": POLICY_VERSION,
         "status": status,
@@ -167,11 +185,16 @@ def policy_record(model_ids: list[str], *, required_approver: str,
         "lens_sha256": {m: digest(b"review-lens-v1", LENSES[m].encode())
                         for m in model_ids},
         "required_approver": required_approver,
-        "minimum_distinct_corroborators": minimum_distinct_corroborators,
+        "minimum_other_approvers": minimum_other_approvers,
+        "minimum_total_approvals": minimum_other_approvers + 1,
         "confidence_values": list(CONFIDENCE_VALUES),
+        "reason_min_chars": REASON_MIN_CHARS,
         "reason_max_chars": REASON_MAX_CHARS,
+        "proof_min_chars": PROOF_MIN_CHARS,
         "proof_max_chars": PROOF_MAX_CHARS,
+        "min_checked_categories": MIN_CHECKED_CATEGORIES,
         "max_checked_categories": MAX_CHECKED_CATEGORIES,
+        "category_max_chars": CATEGORY_MAX_CHARS,
         "max_findings_per_unit": MAX_FINDINGS_PER_UNIT,
         "max_output_tokens": max_output_tokens,
         "per_unit_output_tokens": per_unit_output_tokens(),

@@ -122,11 +122,14 @@ def git_executable() -> str:
     return _GIT_PATH
 
 
-def git_executable_sha256() -> str:
-    """Digest of the resolved absolute path.
+def git_executable_path_sha256() -> str:
+    """Digest of the resolved absolute PATH (A2-F31).
 
-    Honest scope: this identifies the PATH the plan ran, not the bytes of
-    the binary; binding binary contents needs a trusted image attestation."""
+    Honest scope stated in the NAME as well as the docstring: this identifies
+    the path the plan ran, NOT the bytes of the binary. MC4 called it
+    `git_executable_sha256`, which reads as a binary identity it is not.
+    Binding binary contents needs a trusted image digest, which only the
+    trusted lane can supply (`git_binary_sha256` / `runner_image_digest`)."""
     return sha256_hex(git_executable().encode("utf-8", "surrogateescape"))
 
 
@@ -299,7 +302,9 @@ def policy_record(*, attr_source_sha: str, info_attributes: str,
     record = {
         "policy_version": POLICY_VERSION,
         "git_version": caps.version_text,
-        "git_executable_sha256": git_executable_sha256(),
+        "git_executable_path_sha256": git_executable_path_sha256(),
+        "git_binary_sha256": None,        # trusted-lane only
+        "runner_image_digest": None,      # trusted-lane only
         "local_config_policy": local_config,
         "attr_source_sha": attr_source_sha,
         "info_attributes_state": info_attributes,

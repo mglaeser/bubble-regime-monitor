@@ -643,12 +643,11 @@ def main() -> int:
         from verifier import plan as _plan
         return _plan.main(sys.argv[1:])
 
-    if "--finalize" in sys.argv:
-        # Stage-2 finalization. Dispatched here for the same reason as
-        # --plan: it must never inherit key or endpoint state. It performs
-        # ZERO generation calls, and it counts only through the transport it
-        # is given — which, absent operator-authorized provider credentials,
-        # is the labelled local mock.
+    if "--finalize-mock" in sys.argv:
+        # Stage-2 MOCK finalization. Dispatched here for the same reason as
+        # --plan: it must never inherit key or endpoint state. Local-only by
+        # construction — mock transport, zero provider and zero generation
+        # calls, a non-executable report (MC4 A2-F07).
         from verifier import finalize as _finalize
         return _finalize.main(sys.argv[1:])
 

@@ -57,14 +57,20 @@ def verdict_schema(unit_hashes: list[str], *, challenge: str) -> dict:
                 "confidence": {"type": "string",
                                "enum": list(reviewpolicy.CONFIDENCE_VALUES)},
                 "reason": {"type": "string",
+                           "minLength": reviewpolicy.REASON_MIN_CHARS,
                            "maxLength": reviewpolicy.REASON_MAX_CHARS},
                 "proof_of_check": {
                     "type": "string",
+                    "minLength": reviewpolicy.PROOF_MIN_CHARS,
                     "maxLength": reviewpolicy.PROOF_MAX_CHARS},
                 "checked_categories": {
                     "type": "array",
+                    "minItems": reviewpolicy.MIN_CHECKED_CATEGORIES,
                     "maxItems": reviewpolicy.MAX_CHECKED_CATEGORIES,
-                    "items": {"type": "string"}},
+                    "uniqueItems": True,
+                    "items": {"type": "string",
+                              "minLength": 1,
+                              "maxLength": reviewpolicy.CATEGORY_MAX_CHARS}},
             },
         }
         for unit_hash in unit_hashes

@@ -415,17 +415,28 @@ def _tiny_request():
 def _synthetic_unit(atom_ids):
     from verifier import coverage
     unit = {
+        "path_bytes_b64": "",
+        "original_path_bytes_b64": None,
+        "git_status": "M",
         "atom_ids": list(atom_ids),
         "atom_ordinals": list(range(len(atom_ids))),
         "min_patch_ordinal": 0,
         "max_patch_ordinal": len(atom_ids) - 1,
-        "git_status": "M",
-        "classification": {"control_bearing": False, "effective_risk": 0},
-        "changed_content_bytes": 0,
+        "old_line_range": None,
+        "new_line_range": None,
+        "meta_atom_count": 0,
+        "context_facts": {"context_kind": "none", "context_bytes": 0,
+                          "context_sha256": "0" * 64},
         "split_strategies": [],
         "split_depth": 0,
-        "path_bytes_b64": "",
-        "original_path_bytes_b64": None,
+        "changed_content_bytes": 0,
+        "oversized_single_atom": False,
+        "disposition": "MODEL_REVIEW",
+        "base_sha": "b" * 40,
+        "head_sha": "d" * 40,
+        "repository_change_sha256": "e" * 64,
+        "provider_visible_material_sha256": "f" * 64,
+        "classification": {"control_bearing": False, "effective_risk": 0},
     }
     unit["unit_sha256"] = coverage.unit_hash(unit)
     return unit

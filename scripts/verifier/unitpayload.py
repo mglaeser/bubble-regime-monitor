@@ -36,7 +36,7 @@ contain — a unit carrying them blocks.
 
 from __future__ import annotations
 
-from .canon import canonical_json, digest, sha256_hex
+from .canon import canonical_json, digest, sha256_hex, unb64
 from .errors import BlockingError
 
 SIDE_OLD = "old"
@@ -116,9 +116,12 @@ def structured_unit(unit: dict, atom_records: dict[str, dict],
     payload = {
         "schema_version": 1,
         "unit_sha256": unit["unit_sha256"],
+        # ONE canonical private path identity: sha256 of the RAW path
+        # bytes, matching every Stage-1 record. Hashing the Base64 TEXT of
+        # the same path minted a second identity for one file (A2-F10).
         "path_reference": {
             "private_path_sha256": sha256_hex(
-                str(unit.get("path_bytes_b64", "")).encode("utf-8")),
+                unb64(str(unit.get("path_bytes_b64", "")))),
             "approved_display_label": None,
         },
         "git_status": unit["git_status"],

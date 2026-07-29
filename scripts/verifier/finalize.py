@@ -50,7 +50,7 @@ from . import (
 from . import (
     plan as planmod,
 )
-from .canon import canonical_json, digest
+from .canon import canonical_json, digest, sha256_hex
 from .errors import (
     CHUNK_COUNT_EXHAUSTED,
     COST_CAP_EXCEEDED,
@@ -146,81 +146,22 @@ def unit_texts(skeleton: dict, *, cwd) -> dict[str, str]:
 
 
 def derive_unit_record(parent: dict, atom_ids: list[str],
-                       atom_records: dict[str, dict],
-                       atom_map: dict[str, str]) -> dict:
-    """Build a child unit from EXACT child atoms, recomputing every field.
-
-    MC3 copied the parent dict and replaced only the atom list, ordinals and
-    hash. Everything else — changed_content_bytes, the old/new line ranges,
-    the metadata-atom count, the context facts — stayed at the PARENT's
-    values, and the child's digest then certified them. A split unit
-    therefore carried a byte count for content it did not contain.
-
-    Nothing is inherited here that can be derived. The parent supplies only
-    structural bindings that are genuinely shared: path, status, modes,
-    classification, and the split lineage."""
-    ordinal_of = dict(zip(parent["atom_ids"], parent["atom_ordinals"],
-                          strict=True))
-    ordinals = [ordinal_of[a] for a in atom_ids]
-    entries = [atom_records[a] for a in atom_ids]
-    contents = [atom_map[a] for a in atom_ids]
-
-    old_lines = [e["line_number"] for e in entries
-                 if e["side"] == unitpayload.SIDE_OLD]
-    new_lines = [e["line_number"] for e in entries
-                 if e["side"] == unitpayload.SIDE_NEW]
-
-    child = {
-        # shared structural bindings
-        "path_bytes_b64": parent["path_bytes_b64"],
-        "original_path_bytes_b64": parent.get("original_path_bytes_b64"),
-        "git_status": parent["git_status"],
-        "old_mode": parent.get("old_mode"),
-        "new_mode": parent.get("new_mode"),
-        "classification": parent["classification"],
-        # recomputed from the child's own atoms
-        "atom_ids": list(atom_ids),
-        "atom_ordinals": ordinals,
-        "min_patch_ordinal": min(ordinals),
-        "max_patch_ordinal": max(ordinals),
-        "changed_content_bytes": sum(
-            len(c.encode("utf-8", "surrogateescape")) for c in contents),
-        "meta_atom_count": sum(1 for e in entries
-                               if e["side"] == unitpayload.SIDE_META),
-        "old_line_range": [min(old_lines), max(old_lines)] if old_lines else None,
-        "new_line_range": [min(new_lines), max(new_lines)] if new_lines else None,
-        # split lineage
-        "split_strategies": [*parent["split_strategies"], "token_bisect"],
-        "split_depth": parent["split_depth"] + 1,
-    }
-    child["unit_sha256"] = coverage.unit_hash(child)
-    return child
-
-
-def _derive_subunit(parent: dict, atom_ids: list[str]) -> dict:
-    """Deprecated shim retained only for the MC3 split regression test."""
-    index = {a: i for i, a in enumerate(parent["atom_ids"])}
-    ordinals = [parent["atom_ordinals"][index[a]] for a in atom_ids]
-    child = dict(parent)
-    child["atom_ids"] = list(atom_ids)
-    child["atom_ordinals"] = ordinals
-    child["min_patch_ordinal"] = min(ordinals)
-    child["max_patch_ordinal"] = max(ordinals)
-    child["split_strategies"] = [*parent["split_strategies"], "token_bisect"]
-    child["split_depth"] = parent["split_depth"] + 1
-    child.pop("unit_sha256", None)
-    child["unit_sha256"] = coverage.unit_hash(child)
-    return child
+                       atom_records: dict, atom_map: dict) -> dict:
+    """Recursive splitting goes through the Stage-1 constructor (A2-F06)."""
+    from . import units
+    return units.child_unit_record(
+        parent, atom_ids, atom_records, atom_map,
+        budget=policy.STRUCTURAL_UNIT_CHANGED_BYTES_HEURISTIC)
 
 
 def structural_preconditions(skeleton: dict) -> None:
-    """A structurally blocked plan must never reach a provider (MC4 §7).
+    """A structurally blocked plan must never reach a transport (MC4 §7).
 
     MC3 derived `executable` from the count source and the finalizer's own
     pending list, and never asked whether Stage 1 had said the change could
     be reviewed at all. A skeleton with blocked, unreviewable atoms could
-    therefore be counted, batched and costed — spending money to prepare a
-    review that was already known to be incomplete."""
+    therefore be counted, batched and costed — spending calls to prepare a
+    review already known to be incomplete."""
     reasons = []
     if not skeleton.get("structurally_clean"):
         reasons.append("structurally_clean=false")
@@ -272,19 +213,85 @@ class RequestGeneration:
 
     def __init__(self, name: str):
         self.name = name
-        self.requests: list[tuple[str, object, list[dict]]] = []
-        self.sealed = False
+        self._requests: list[tuple[str, object, tuple]] = []
+        self._sealed_snapshot: tuple | None = None
+        self._generation_sha256: str | None = None
 
-    def add(self, request, *, label: str, units: list[dict]) -> None:
+    @property
+    def sealed(self) -> bool:
+        return self._sealed_snapshot is not None
+
+    def add(self, request, *, label: str, units: list[dict],
+            registry: dict | None = None) -> None:
         if self.sealed:
             raise BlockingError(
                 SECRET_PREFLIGHT_FAILED,
                 f"category=request_added_after_seal generation={self.name} "
                 f"label={label}")
-        self.requests.append((label, request, units))
+        # units are frozen into a tuple of hashes: a later mutation of the
+        # caller's list cannot change what was scanned. The full records are
+        # registered separately so scope resolution can recover atom sets.
+        if registry is not None:
+            for unit in units:
+                registry[unit["unit_sha256"]] = unit
+        self._requests.append(
+            (label, request, tuple(u["unit_sha256"] for u in units)))
+
+    def entries(self):
+        """The requests, whether sealed or not. Read-only view."""
+        return tuple(self._requests)
+
+    def seal(self) -> str:
+        """Freeze to an immutable snapshot and bind its digest (A2-F03).
+
+        MC4's first attempt left `requests` a public mutable list, so a
+        caller could append after sealing and `count_generation` would count
+        a request that was never scanned. The snapshot is a tuple, the
+        digest is over the ordered (label, count-request-hash, unit-hashes),
+        and counting re-verifies the digest before it runs."""
+        if self.sealed:
+            return self._generation_sha256
+        self._sealed_snapshot = tuple(
+            (label, request, unit_hashes)
+            for label, request, unit_hashes in self._requests)
+        binding = [
+            {"label": label,
+             "count_request_sha256": request.count_request_sha256(),
+             "execution_request_sha256": request.execution_request_sha256(),
+             "unit_sha256_in_order": list(unit_hashes)}
+            for label, request, unit_hashes in self._sealed_snapshot
+        ]
+        self._generation_sha256 = digest(b"request-generation-v1",
+                                         canonical_json(binding))
+        return self._generation_sha256
+
+    def sealed_snapshot(self) -> tuple:
+        if not self.sealed:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=snapshot_before_seal generation={self.name}")
+        # Re-verify the digest: if anything were swapped between seal and use,
+        # the recomputed binding would not match.
+        binding = [
+            {"label": label,
+             "count_request_sha256": request.count_request_sha256(),
+             "execution_request_sha256": request.execution_request_sha256(),
+             "unit_sha256_in_order": list(unit_hashes)}
+            for label, request, unit_hashes in self._sealed_snapshot
+        ]
+        recomputed = digest(b"request-generation-v1", canonical_json(binding))
+        if recomputed != self._generation_sha256:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=generation_digest_changed generation={self.name}")
+        return self._sealed_snapshot
+
+    @property
+    def generation_sha256(self) -> str | None:
+        return self._generation_sha256
 
     def __len__(self) -> int:
-        return len(self.requests)
+        return len(self._requests)
 
 
 class PreflightGenerationManifest:
@@ -305,6 +312,9 @@ class PreflightGenerationManifest:
         self.atom_map = atom_map
         self.entries: list[dict] = []
         self.generations_sealed: list[str] = []
+        # unit hash -> unit record, so a sealed snapshot (which carries only
+        # hashes) can recover each unit's atom set for scope resolution.
+        self._units_by_hash: dict[str, dict] = {}
 
     def _authorized_counts(self, units: list[dict]) -> dict:
         """How many occurrences of each literal hash are cleared, by atom."""
@@ -330,7 +340,7 @@ class PreflightGenerationManifest:
                         counts[value_hash] = counts.get(value_hash, 0) + 1
         return counts
 
-    def _scan_payload(self, text: str, *, label: str, units: list[dict],
+    def _scan_payload(self, text: str, *, label: str, unit_count: int,
                       allowed: dict) -> dict:
         findings = preflight.distinct_occurrences(preflight.scan_text(text))
         over: list[str] = []
@@ -352,30 +362,42 @@ class PreflightGenerationManifest:
         return {
             "label": label,
             "scanned_chars": len(text),
+            # A2-F11: the EXACT canonical payload hash is bound into evidence,
+            # so a strict loader can prove the scanned bytes were the request
+            # bytes.
+            "payload_sha256": sha256_hex(text.encode("utf-8",
+                                                     "surrogateescape")),
             "finding_count": len(findings),
             "authorized_occurrence_count": sum(allowed.values()),
-            "unit_count": len(units),
+            "unit_count": unit_count,
         }
 
-    def seal(self, generation: RequestGeneration, ledger) -> None:
-        """Scan EVERY request in the generation. Only then may counting run."""
+    def seal(self, generation, ledger) -> str:
+        """Scan every request in a SEALED snapshot. Only then may counting run.
+
+        The generation is frozen first, so the set scanned here is exactly the
+        set counted later — nothing can be inserted between (A2-F03)."""
+        generation_sha256 = generation.seal()
+        snapshot = generation.sealed_snapshot()
         attempts_before = ledger.provider_attempts
-        for label, request, units in generation.requests:
-            allowed = self._authorized_counts(units)
+        for label, request, unit_hashes in snapshot:
+            allowed = self._authorized_counts_by_hashes(unit_hashes)
             count_bytes = canonical_json(request.count_payload()).decode(
                 "utf-8", "surrogateescape")
             exec_bytes = request.transmitted_text()
             count_entry = self._scan_payload(
-                count_bytes, label=f"{label}:count", units=units,
-                allowed=allowed)
+                count_bytes, label=f"{label}:count",
+                unit_count=len(unit_hashes), allowed=allowed)
             exec_entry = self._scan_payload(
-                exec_bytes, label=f"{label}:execution", units=units,
-                allowed=allowed)
+                exec_bytes, label=f"{label}:execution",
+                unit_count=len(unit_hashes), allowed=allowed)
             self.entries.append({
                 "generation": generation.name,
+                "generation_sha256": generation_sha256,
                 "label": label,
                 "model_id": request.model_id,
-                "unit_sha256_in_order": [u["unit_sha256"] for u in units],
+                "unit_sha256_in_order": list(unit_hashes),
+                "request_semantics_sha256": request.request_semantics_sha256(),
                 "count_request_sha256": request.count_request_sha256(),
                 "execution_request_sha256": request.execution_request_sha256(),
                 "count_payload_scan": count_entry,
@@ -386,18 +408,22 @@ class PreflightGenerationManifest:
                 SECRET_PREFLIGHT_FAILED,
                 f"category=attempt_during_preflight generation="
                 f"{generation.name}")
-        generation.sealed = True
         self.generations_sealed.append(generation.name)
+        return generation_sha256
 
-    def count_generation(self, generation: RequestGeneration, ledger) -> dict:
-        """Count a SEALED generation. Refuses an unsealed one."""
-        if not generation.sealed:
-            raise BlockingError(
-                SECRET_PREFLIGHT_FAILED,
-                f"category=count_before_seal generation={generation.name} — "
-                "every request in a generation is scanned before any is sent")
+    def _authorized_counts_by_hashes(self, unit_hashes) -> dict:
+        # scope is resolved by ATOM, which requires the unit's atom ids; the
+        # snapshot carries only unit hashes, so the atom set is recovered from
+        # the payloads recorded at build time.
+        units = [self._units_by_hash[h] for h in unit_hashes
+                 if h in self._units_by_hash]
+        return self._authorized_counts(units)
+
+    def count_generation(self, generation, ledger) -> dict:
+        """Count a SEALED generation snapshot. Refuses an unsealed one."""
+        snapshot = generation.sealed_snapshot()      # re-verifies the digest
         results: dict[tuple[str, str], int] = {}
-        for label, request, _units in generation.requests:
+        for label, request, _unit_hashes in snapshot:
             result = ledger.count(request, label=label)
             results[(label, request.model_id)] = result.input_tokens
         return results
@@ -448,7 +474,7 @@ def _fit_generation(units: list[dict], atom_records: dict, atom_map: dict,
                                    review_policy, challenge)
             generation.add(request,
                            label=f"unit:{unit['unit_sha256'][:16]}:{model_id}",
-                           units=[unit])
+                           units=[unit], registry=manifest._units_by_hash)
 
     manifest.seal(generation, ledger)          # scans everything
     counts = manifest.count_generation(generation, ledger)
@@ -548,7 +574,7 @@ def _pack_batches(fitted: list[tuple[dict, dict]], payloads_by_unit: dict,
                 request = _request_for(model_id, payloads, pin_values,
                                        review_policy, challenge)
                 generation.add(request, label=f"group:{index}:{model_id}",
-                               units=units)
+                               units=units, registry=manifest._units_by_hash)
         manifest.seal(generation, ledger)
         counts = manifest.count_generation(generation, ledger)
 
@@ -655,14 +681,42 @@ def _cost_plan(batches: list[dict], model_ids: list[str],
     }
 
 
+def _assert_mock_transport(transport) -> None:
+    """A2-F04: candidate finalization refuses any non-mock transport.
+
+    Evidence authority and TRANSMISSION authority are different questions. A
+    transport whose evidence would be untrusted can still open a socket and
+    send content. Candidate finalization is local-only by construction, so it
+    accepts a transport ONLY if it declares MOCK and carries no real network
+    method — checked BEFORE any request is assembled, so a rejected transport
+    never sees a byte."""
+    source = getattr(transport, "source", None)
+    if source != counting.SOURCE_MOCK:
+        raise BlockingError(
+            SECRET_PREFLIGHT_FAILED,
+            f"category=candidate_finalization_requires_mock_transport "
+            f"source={source!r} — candidate-side finalization is local-only; "
+            "a real transport belongs to the trusted lane and is refused here "
+            "before any request is built")
+    for forbidden in ("connect", "sendall", "getaddrinfo", "urlopen",
+                      "request", "session"):
+        if callable(getattr(transport, forbidden, None)):
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=candidate_transport_has_network_method "
+                f"method={forbidden} — a mock transport must not carry a "
+                "network method; refused before any request is built")
+
+
 def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
              authorizations=None, challenge: str = "LOCAL-MOCK-CHALLENGE",
-             required_approver: str | None = None,
-             minimum_distinct_corroborators: int = 2) -> dict:
+             required_approver: str = reviewpolicy.GOVERNED_REQUIRED_APPROVER,
+             minimum_other_approvers: int = 1) -> dict:
     """Produce a strict, PRIVATE mock-finalization report. Zero generation.
 
     Named for what it does locally. Nothing here can produce provider
     evidence, so nothing here can produce an executable plan."""
+    _assert_mock_transport(transport)          # before ANY request is built
     artifact.validate_strict(skeleton)
     _rebuild_and_compare(skeleton, cwd=cwd)
     structural_preconditions(skeleton)
@@ -673,8 +727,8 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
     pin_values = pin_record["pins"]
     review_policy = reviewpolicy.policy_record(
         model_ids,
-        required_approver=required_approver or model_ids[0],
-        minimum_distinct_corroborators=minimum_distinct_corroborators,
+        required_approver=required_approver,
+        minimum_other_approvers=minimum_other_approvers,
         max_output_tokens=pin_values["VERIFIER_MAX_OUTPUT_TOKENS"])
 
     if len(skeleton["units"]) > pin_values["VERIFIER_MAX_REVIEW_UNITS"]:
@@ -907,61 +961,113 @@ def validate_plan_strict(record: dict) -> dict:
     return record
 
 
-def main(argv: list[str]) -> int:
-    """`--finalize`: skeleton in, finalized plan out. Zero generation calls.
+CLI_INPUT_INVALID = "CLI_INPUT_INVALID"
 
-    Without an operator-authorized provider transport this runs on the
-    LABELLED local mock, and the resulting plan is necessarily
-    non-executable. That is the honest outcome, not a degraded one."""
+
+def _read_json_file(path: str, *, what: str) -> object:
+    """Read and parse a JSON input, with a TYPED, sanitized failure (A2-F07).
+
+    MC4's first CLI let a file-open or a parse error escape as a bare Python
+    traceback. A CLI that transmits nothing should still fail like the rest of
+    the package: one typed BlockingError, no stack, no path leakage beyond the
+    argument the operator themselves supplied."""
+    import json
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        raise BlockingError(
+            CLI_INPUT_INVALID,
+            f"category=cannot_read_{what} errno={exc.errno}") from None
+    try:
+        return json.loads(raw)
+    except Exception as exc:
+        raise BlockingError(
+            CLI_INPUT_INVALID,
+            f"category=unparseable_{what} "
+            f"exception_class={type(exc).__name__}") from None
+
+
+def _authorizations_from_json(skeleton: dict, path: str | None):
+    """Load occurrence-scoped fixture authorization claims from JSON.
+
+    There is deliberately no plaintext-literal option: MC4's `--allowlist`
+    listed credential-shaped strings verbatim, which is the exact thing the
+    authorization record exists to avoid. Claims carry the literal SHA-256 and
+    the scope, never the value."""
+    from . import authority
+    if path is None:
+        return None
+    records = _read_json_file(path, what="authorizations")
+    if not isinstance(records, list):
+        raise BlockingError(CLI_INPUT_INVALID,
+                            "category=authorizations_not_a_list")
+    state = skeleton["repository_state"]
+    return authority.LiteralAuthorizationSet(
+        records, repository_identity=skeleton.get("repository_identity",
+                                                  "unknown"),
+        target_base_sha=state["target_base_sha"],
+        diff_base_sha=state["diff_base_sha"], head_sha=state["head_sha"])
+
+
+def main(argv: list[str]) -> int:
+    """`--finalize-mock`: skeleton in, MOCK finalization report out.
+
+    Local-only by construction: it runs on the labelled mock transport, makes
+    zero provider and zero generation calls, and its report is necessarily
+    non-executable. The name says so — MC4's `--finalize` overstated what a
+    local run produces (A2-F07)."""
     import argparse
 
-    parser = argparse.ArgumentParser(prog="independent_verify.py --finalize")
-    parser.add_argument("--finalize", action="store_true", required=True)
+    parser = argparse.ArgumentParser(
+        prog="independent_verify.py --finalize-mock")
+    parser.add_argument("--finalize-mock", dest="finalize_mock",
+                        action="store_true", required=True)
     parser.add_argument("--skeleton", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--public-output")
-    parser.add_argument("--allowlist",
-                        help="newline-delimited operator-REVIEWED literals "
-                             "that preflight may clear")
+    parser.add_argument("--output", required=True,
+                        help="private mock-finalization-report path")
+    parser.add_argument("--authorizations",
+                        help="JSON list of occurrence-scoped reviewed-literal "
+                             "CLAIMS (hashes and scope, never plaintext)")
+    parser.add_argument("--local-summary",
+                        help="also write an UNTRUSTED_LOCAL_SUMMARY")
     args = parser.parse_args(argv)
 
-    with open(args.skeleton, "rb") as handle:
-        skeleton = artifact.parse_strict(handle.read())
-    allowlist: frozenset = frozenset()
-    if args.allowlist:
-        # Lines beginning "# " are comments, so the file can explain WHY each
-        # literal was cleared. A literal that itself begins "# " therefore
-        # cannot be allowlisted — a deliberate, stated limit, taken because an
-        # undocumented list of cleared credentials is not reviewable.
-        with open(args.allowlist, encoding="utf-8") as handle:
-            allowlist = frozenset(
-                line.rstrip("\n") for line in handle
-                if line.strip() and not line.startswith("# "))
     try:
+        skeleton = artifact.parse_strict(
+            _json_bytes(_read_json_file(args.skeleton, what="skeleton")))
+        authorizations = _authorizations_from_json(skeleton,
+                                                    args.authorizations)
         plan_record = finalize(skeleton, cwd=None,
                                operator_pins=_pins_from_environment(),
                                transport=counting.MockCountTransport(),
-                               secret_allowlist=allowlist)
+                               authorizations=authorizations)
+        validate_plan_strict(plan_record)
+        artifact.write_atomic(plan_record, args.output)
+        if args.local_summary:
+            artifact.write_atomic(public_plan_summary(plan_record),
+                                  args.local_summary)
     except BlockingError as exc:
-        print(f"FINALIZE BLOCKED: {exc}", file=sys.stderr)
+        print(f"FINALIZE-MOCK BLOCKED: {exc}", file=sys.stderr)
         return 2
-    validate_plan_strict(plan_record)
-    artifact.write_atomic(plan_record, args.output)
-    if args.public_output:
-        artifact.write_atomic(public_plan_summary(plan_record),
-                              args.public_output)
-    print(f"units={len(plan_record['final_units'])} "
+    print(f"artifact={plan_record['artifact']} "
+          f"units={len(plan_record['final_units'])} "
           f"batches={len(plan_record['batches'])} "
           f"logical_requests={plan_record['logical_count_requests']} "
-          f"provider_attempts={plan_record['provider_attempts_performed']} "
+          f"transport_attempts={plan_record['provider_attempts_performed']} "
           f"cache_hits={plan_record['count_cache_hits']} "
           f"generation_calls={plan_record['generation_calls_performed']} "
-          f"count_source={plan_record['model_resolution']['count_source']} "
+          f"evidence_class={plan_record['count_evidence']['evidence_class']} "
           f"executable={plan_record['executable']}")
     for item in plan_record["pending_requirements"]:
         print(f"PENDING {item['code']}: {item['reason']}")
     print(f"wrote {args.output}")
     return 0
+
+
+def _json_bytes(obj) -> bytes:
+    import json
+    return json.dumps(obj).encode("utf-8")
 
 
 def _pins_from_environment() -> dict:
@@ -985,10 +1091,13 @@ def _pins_from_environment() -> dict:
 
 
 def public_plan_summary(executable_plan: dict) -> dict:
-    """Publishable finalized-plan view: no unit paths, no request bodies."""
+    """UNTRUSTED LOCAL summary of a mock report: no unit paths, no request
+    bodies. A2-F27/F37: this is neither public nor trusted — it is a local
+    view of local mock arithmetic, and it says so in its own fields."""
     return {
-        "artifact": "public-finalized-plan-summary",
-        "publication_class": "public",
+        "artifact": "untrusted-local-summary",
+        "publication_class": "local-only",
+        "trust_status": "UNTRUSTED_LOCAL_SUMMARY",
         "head_sha": executable_plan["repository_state"]["head_sha"],
         "diff_base_sha": executable_plan["repository_state"]["diff_base_sha"],
         "review_skeleton_sha256": executable_plan["review_skeleton_sha256"],

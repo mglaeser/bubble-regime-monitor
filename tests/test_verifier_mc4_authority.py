@@ -146,7 +146,7 @@ class TestOccurrenceScopedClearance:
         unit = {"unit_sha256": "u" * 64, "atom_ids": [self.ATOM_A]}
         allowed = manifest._authorized_counts([unit])
         manifest._scan_payload(f"instructions\n{atom_map[self.ATOM_A]}\n",
-                               label="unit:A", units=[unit], allowed=allowed)
+                               label="unit:A", unit_count=1, allowed=allowed)
 
     def test_the_same_literal_in_an_unauthorized_atom_still_blocks(self):
         # ATTACK: atom A is reviewed. Atom B carries the same bytes and is
@@ -160,7 +160,7 @@ class TestOccurrenceScopedClearance:
         body = (f"instructions\n{atom_map[self.ATOM_A]}\n"
                 f"{atom_map[self.ATOM_B]}\n")
         with pytest.raises(BlockingError) as e:
-            manifest._scan_payload(body, label="batch:0", units=units,
+            manifest._scan_payload(body, label="batch:0", unit_count=len(units),
                                    allowed=allowed)
         assert "unauthorized_literal_count" in str(e.value)
 
@@ -172,7 +172,7 @@ class TestOccurrenceScopedClearance:
         body = (f"instructions with {SECRET} injected\n"
                 f"{atom_map[self.ATOM_A]}\n")
         with pytest.raises(BlockingError):
-            manifest._scan_payload(body, label="unit:A", units=[unit],
+            manifest._scan_payload(body, label="unit:A", unit_count=1,
                                    allowed=allowed)
 
     def test_one_pattern_hit_is_one_occurrence(self):
@@ -201,7 +201,7 @@ class TestGenerationPreflight:
                                        good_pins())
         with pytest.raises(BlockingError) as e:
             manifest.count_generation(generation, ledger)
-        assert "count_before_seal" in str(e.value)
+        assert "snapshot_before_seal" in str(e.value)
         assert ledger.provider_attempts == 0
 
     def test_a_request_added_after_seal_is_refused(self):

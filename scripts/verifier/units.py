@@ -158,3 +158,78 @@ def unit_record(unit: CandidateUnit, *, base_sha: str, head_sha: str,
     }
     record["unit_sha256"] = unit_hash(record)
     return record
+
+
+class _AtomView:
+    """Adapter giving Stage-2 atom RECORDS the shape _context_facts and
+    _line_range expect from Stage-1 ChangedAtom objects, so a child unit is
+    derived by the exact same helpers as its parent — not a re-implementation
+    that can drift."""
+
+    __slots__ = ("atom_id", "side", "line_number", "patch_ordinal")
+
+    def __init__(self, atom_id, side, line_number, patch_ordinal):
+        self.atom_id = atom_id
+        self.side = side
+        self.line_number = line_number
+        self.patch_ordinal = patch_ordinal
+
+
+def child_unit_record(parent: dict, child_atom_ids: list[str],
+                      atom_records: dict, atom_content: dict,
+                      *, budget: int) -> dict:
+    """The ONE constructor recursive splitting uses (MC4 A2-F06).
+
+    Two earlier attempts derived children by hand. MC3 copied the parent dict
+    wholesale, so a child certified its parent's byte counts. MC4's first fix
+    rebuilt SOME fields and silently dropped the rest — base/head, both
+    repository identities, disposition, context_facts, oversized_single_atom
+    — so a child could not even pass the strict unit schema its parent
+    passed. The lesson both times was the same: a second builder drifts.
+
+    This one produces the complete Stage-1 `unit_record` schema, computing
+    every derived field from the child's own atoms with the same helpers
+    Stage 1 uses, and inheriting only the bindings that are genuinely shared
+    with the parent: path, status, classification, range identities, and
+    disposition."""
+    ordinal_of = dict(zip(parent["atom_ids"], parent["atom_ordinals"],
+                          strict=True))
+    views = tuple(
+        _AtomView(atom_id, atom_records[atom_id]["side"],
+                  atom_records[atom_id]["line_number"], ordinal_of[atom_id])
+        for atom_id in child_atom_ids)
+
+    def content_of(view) -> bytes:
+        return atom_content[view.atom_id].encode("utf-8", "surrogateescape")
+
+    ordinals = tuple(v.patch_ordinal for v in views)
+    changed_bytes = sum(len(content_of(v)) for v in views)
+    old_range = _line_range(views, SIDE_OLD)
+    new_range = _line_range(views, SIDE_NEW)
+    record = {
+        "path_bytes_b64": parent["path_bytes_b64"],
+        "original_path_bytes_b64": parent.get("original_path_bytes_b64"),
+        "git_status": parent["git_status"],
+        "atom_ids": list(child_atom_ids),
+        "atom_ordinals": list(ordinals),
+        "min_patch_ordinal": min(ordinals),
+        "max_patch_ordinal": max(ordinals),
+        "old_line_range": list(old_range) if old_range else None,
+        "new_line_range": list(new_range) if new_range else None,
+        "meta_atom_count": sum(1 for v in views if v.side == SIDE_META),
+        "context_facts": _context_facts(views, content_of),
+        "split_strategies": [*parent["split_strategies"], "token_bisect"],
+        "split_depth": parent["split_depth"] + 1,
+        "changed_content_bytes": changed_bytes,
+        "oversized_single_atom": (len(child_atom_ids) == 1
+                                  and changed_bytes > budget),
+        "disposition": parent["disposition"],
+        "base_sha": parent["base_sha"],
+        "head_sha": parent["head_sha"],
+        "repository_change_sha256": parent["repository_change_sha256"],
+        "provider_visible_material_sha256":
+            parent["provider_visible_material_sha256"],
+        "classification": parent["classification"],
+    }
+    record["unit_sha256"] = unit_hash(record)
+    return record

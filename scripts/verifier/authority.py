@@ -233,7 +233,15 @@ def literal_authorization_digest(record: dict) -> str:
 
 
 def validate_literal_authorization(record: dict, where: str = "") -> dict:
-    """Check a claim's SHAPE. This never promotes and never confers trust."""
+    """Check a claim's SHAPE. This never promotes and never confers trust.
+
+    A candidate-parsed record that LABELS itself with a verified class is not
+    an error — a trusted wire record must be representable as inert input for
+    the external verifier. But candidate code refuses to READ that label as
+    authority: the class is checked for membership only, and every consumer
+    below treats a verified-labelled record exactly as an unverified claim
+    (A2-F01). Authority is conferred by the external verifier's RETURN VALUE,
+    never by a field on the input."""
     _require(isinstance(record, dict),
              f"category=authorization_not_object where={where}")
     missing = [f for f in _LITERAL_FIELDS if f not in record]
@@ -326,21 +334,26 @@ class LiteralAuthorizationSet:
 
     @property
     def authority_class(self) -> str:
-        """The WEAKEST class present. Authority does not average."""
+        """The candidate-side class, which is NEVER a verified class.
+
+        A record may LABEL itself verified; candidate code parsing it does
+        not get to agree. A set built here is a fixture set or an unverified
+        claim set — a positive trust conclusion can only come from the
+        external verifier, and this property never returns one (A2-F01)."""
         classes = {r["authority_class"] for r in self.records}
         if TEST_FIXTURE_UNAUTHORIZED in classes:
             return TEST_FIXTURE_UNAUTHORIZED
-        if UNVERIFIED_EXTERNAL_CLAIM in classes:
-            return UNVERIFIED_EXTERNAL_CLAIM
-        if not classes:
+        if not self.records:
             return TEST_FIXTURE_UNAUTHORIZED
-        return VERIFIED_LITERAL_AUTHORIZATION
+        return UNVERIFIED_EXTERNAL_CLAIM
 
     @property
     def confers_real_call_authority(self) -> bool:
-        """True only when every clearance was promoted by a verifier."""
-        return bool(self.records) and self.authority_class == (
-            VERIFIED_LITERAL_AUTHORIZATION)
+        """Always False candidate-side. There is no field, class, or record
+        a caller can construct here that makes this True — real-call
+        authority is a property of the trusted lane's output, which this
+        object is not (A2-F01)."""
+        return False
 
     def clears_occurrence(self, *, literal_sha256: str, path_bytes_b64: str,
                           atom_id: str | None, occurrence_index: int) -> bool:

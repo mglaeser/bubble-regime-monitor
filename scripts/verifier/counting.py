@@ -31,6 +31,9 @@ from .errors import (
 COUNT_PATH = "/v1/responses/input_tokens"
 EXPECTED_OBJECT = "response.input_tokens"
 MAX_RESPONSE_BYTES = 64 * 1024
+# No provider model exceeds ~1.05M input tokens; a count above a generous
+# ceiling is treated as an invalid response, not a real number (A2-F26).
+MAX_SANE_INPUT_TOKENS = 4_000_000
 COUNT_BILLING_STATE = "UNKNOWN_PENDING_OPERATOR_VERIFICATION"
 
 # Source labels. A mock count may NEVER be represented as a provider count.
@@ -125,8 +128,20 @@ def _validate_response(status, body) -> int:
     if len(body) > MAX_RESPONSE_BYTES:
         raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
                             f"category=oversized_body bytes={len(body)}")
+    def _no_dupes(pairs):
+        # A2-F26: a duplicate key means the body is not a single well-formed
+        # response; JSON would otherwise silently keep the last value.
+        seen = {}
+        for key, value in pairs:
+            if key in seen:
+                raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
+                                    "category=duplicate_response_key")
+            seen[key] = value
+        return seen
     try:
-        parsed = json.loads(body)
+        parsed = json.loads(body, object_pairs_hook=_no_dupes)
+    except BlockingError:
+        raise
     except Exception as exc:
         raise BlockingError(
             TOKEN_COUNT_RESPONSE_INVALID,
@@ -135,6 +150,13 @@ def _validate_response(status, body) -> int:
     if not isinstance(parsed, dict):
         raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
                             "category=body_not_object")
+    # A2-F26: exact supported field set — an unknown field is a response we
+    # do not understand, not one to read past.
+    unknown = set(parsed) - {"object", "input_tokens"}
+    if unknown:
+        raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
+                            f"category=unknown_response_field "
+                            f"count={len(unknown)}")
     if parsed.get("object") != EXPECTED_OBJECT:
         raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
                             "category=unexpected_object_tag")
@@ -145,6 +167,11 @@ def _validate_response(status, body) -> int:
     if tokens < 0:
         raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
                             "category=input_tokens_negative")
+    # A2-F26: an operator-authorized sanity bound. A count larger than any
+    # model's context window is not a count worth trusting.
+    if tokens > MAX_SANE_INPUT_TOKENS:
+        raise BlockingError(TOKEN_COUNT_RESPONSE_INVALID,
+                            f"category=input_tokens_implausible tokens={tokens}")
     return tokens
 
 
