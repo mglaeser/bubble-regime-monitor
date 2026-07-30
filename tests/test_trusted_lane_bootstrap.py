@@ -1736,10 +1736,33 @@ def test_review_the_deployed_copy_is_compared_to_its_source(tmp_path):
         workflowfile.assert_deployed_copy_matches_source(root=str(tmp_path))
 
 
-def test_review_an_undeployed_d0_says_so_rather_than_passing_silently():
-    record = workflowfile.assert_deployed_copy_matches_source(root=str(ROOT))
+def test_review_an_undeployed_d0_says_so_rather_than_passing_silently(tmp_path):
+    """"Nothing to compare" must not read the same as "compared and matched".
+
+    This used to assert against the real repository, because D0 was not yet
+    deployed. It is now, so the undeployed case gets its own empty tree — the
+    property is about the function's behaviour, not about a passing state of
+    this repository at one moment."""
+    (tmp_path / workflowfile.WORKFLOW_DIR).mkdir(parents=True)
+    shutil.copy(ROOT / workflowfile.WORKFLOW_DIR / D0,
+                tmp_path / workflowfile.WORKFLOW_DIR / D0)
+    (tmp_path / workflowfile.LIVE_WORKFLOW_DIR).mkdir(parents=True)
+    record = workflowfile.assert_deployed_copy_matches_source(root=str(tmp_path))
     assert record["d0_deployed"] is False
     assert "not deployed yet" in record["honest_scope"]
+
+
+def test_review_the_real_deployed_d0_is_byte_identical_to_its_source():
+    """The other half, and the one that is now load-bearing: the copy GitHub
+    schedules is the copy that was reviewed. Byte identity, not equivalence —
+    a re-serialised YAML that parses the same is still a file nobody read."""
+    record = workflowfile.assert_deployed_copy_matches_source(root=str(ROOT))
+    assert record["d0_deployed"] is True
+    assert record["deployed_policy_ok"] is True
+    source = (ROOT / workflowfile.WORKFLOW_DIR / D0).read_bytes()
+    live = (ROOT / workflowfile.LIVE_WORKFLOW_DIR / D0).read_bytes()
+    assert source == live
+    assert record["deployed_sha256"] == hashlib.sha256(live).hexdigest()
 
 
 def test_review_the_d0_push_filter_names_the_file_it_will_be_deployed_as():
