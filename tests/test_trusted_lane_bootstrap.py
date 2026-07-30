@@ -46,6 +46,7 @@ from trustedlane import (  # noqa: E402
     adapter,
     candidatefetch,
     closure,
+    enginebuild,
     enginepolicy,
     errors,
     identity,
@@ -2688,3 +2689,162 @@ def test_f04_the_d0_push_filter_covers_the_suite_it_runs():
     assert "tests/test_trusted_lane_bootstrap.py" in paths
     assert "scripts/trustedlane/**" in paths
     assert f"{workflowfile.LIVE_WORKFLOW_DIR}/{D0}" in paths
+
+
+# --------------------------------------------------------------------------
+# §5.4 — the engine identity CANDIDATE package.
+#
+# Five of the thirteen identity fields are facts about source, derivable by
+# anyone holding the tree. The other eight are facts about a build that has not
+# happened and an approval that has not been given. Filling those in from this
+# branch would be inventing them, so they are empty and the package says why.
+# --------------------------------------------------------------------------
+
+
+def _candidate_package():
+    return enginebuild.candidate_package(
+        source_commit=SHA_A, code_cutoff_sha=SHA_A, root=str(ROOT))
+
+
+def test_engine_candidate_fills_only_what_it_can_honestly_compute():
+    package = _candidate_package()
+    assert package["state"] == enginebuild.CANDIDATE_STATE
+    for field in enginebuild.COMPUTABLE_FIELDS:
+        assert package[field], field
+    for field in enginebuild.UNAVAILABLE_FIELDS:
+        assert package[field] is None, field
+    assert enginebuild.assert_is_only_a_candidate(package)["unlocks_d1"] is False
+
+
+def test_engine_candidate_explains_each_gap_rather_than_only_having_it():
+    package = _candidate_package()
+    for field, why in package["unavailable_because"].items():
+        assert package[field] is None
+        assert len(why) > 20, field
+    assert "protected build" in package["unavailable_because"]["artifact_sha256"]
+
+
+def test_engine_candidate_still_cannot_unlock_d1():
+    """The whole point. It is a thing to approve, not an approval."""
+    package = _candidate_package()
+    with _refusal("engine_not_approved_in_D0"):
+        enginepolicy.assert_engine_approved(package)
+
+
+def test_a_candidate_package_with_a_forged_signature_is_refused():
+    """The realistic failure is drift, not forgery: someone fills in a
+    plausible-looking `signature` on a later pass and the package stops
+    announcing what it is."""
+    package = _candidate_package()
+    package["signature"] = "MEUCIQ" + "x" * 40
+    with _refusal("engine_candidate_claims_unavailable_fields"):
+        enginebuild.assert_is_only_a_candidate(package)
+
+
+def test_a_candidate_package_that_renames_its_own_state_is_refused():
+    package = _candidate_package()
+    package["state"] = "APPROVED_ENGINE_IDENTITY"
+    with _refusal("engine_candidate_state_changed"):
+        enginebuild.assert_is_only_a_candidate(package)
+
+
+def test_the_engine_tree_digest_binds_paths_as_well_as_contents(tmp_path):
+    """A pure RENAME must move the digest.
+
+    The first version of this test swapped two files' contents, which also
+    swaps their position in the sorted walk — so a digest that ignored paths
+    entirely still changed, and the mutation sweep reported STILL_GREEN when
+    path binding was removed. The test proved the digest noticed *something*,
+    not that it noticed the path.
+
+    The case that isolates it: rename a file without changing its content and
+    without changing its sort position. `z.py` -> `y.py` alongside `m.py` leaves
+    the content sequence byte-identical in the same order, so a content-only
+    digest is unchanged — while the file that runs is a different file."""
+    root = tmp_path / "scripts" / "trustedlane"
+    root.mkdir(parents=True)
+    (root / "m.py").write_text("import json\n", encoding="utf-8")
+    (root / "z.py").write_text("import os\n", encoding="utf-8")
+    before = enginebuild.source_tree_digest(root=str(tmp_path))
+
+    (root / "z.py").rename(root / "y.py")
+    after = enginebuild.source_tree_digest(root=str(tmp_path))
+
+    # Same count, same contents, same order — only the name moved.
+    assert before["file_count"] == after["file_count"] == 2
+    assert sorted(before["files"].values()) == sorted(after["files"].values())
+    assert list(before["files"])[0].endswith("m.py")
+    assert list(after["files"])[0].endswith("m.py")
+    assert before["source_tree_sha256"] != after["source_tree_sha256"]
+
+
+def test_the_engine_tree_digest_notices_an_untracked_file(tmp_path):
+    """Walked from disk rather than asked of git, because `git ls-files` would
+    silently omit an untracked file sitting in the engine directory — exactly
+    the file worth noticing."""
+    root = tmp_path / "scripts" / "trustedlane"
+    root.mkdir(parents=True)
+    (root / "real.py").write_text("x\n", encoding="utf-8")
+    before = enginebuild.source_tree_digest(root=str(tmp_path))
+    (root / "planted.py").write_text("y\n", encoding="utf-8")
+    after = enginebuild.source_tree_digest(root=str(tmp_path))
+    assert after["file_count"] == before["file_count"] + 1
+    assert after["source_tree_sha256"] != before["source_tree_sha256"]
+
+
+def test_an_empty_engine_tree_is_refused_not_digested(tmp_path):
+    """A digest over nothing matches any engine."""
+    (tmp_path / "scripts" / "trustedlane").mkdir(parents=True)
+    with _refusal("engine_source_empty"):
+        enginebuild.source_tree_digest(root=str(tmp_path))
+
+
+def test_the_sbom_confirms_the_engine_pulls_in_no_http_client():
+    """The suite already bans transport imports by name. This reaches the same
+    conclusion from the other direction — an enumeration of what the engine
+    actually imports — so the claim does not rest on one denylist."""
+    bill = enginebuild.sbom(root=str(ROOT))
+    assert bill["third_party"] == ["yaml"]
+    for forbidden in ("requests", "httpx", "urllib3", "aiohttp", "http",
+                      "socket", "openai", "anthropic"):
+        assert forbidden not in bill["components"], forbidden
+
+
+def test_the_sbom_refuses_rather_than_skipping_a_file_it_cannot_parse(tmp_path):
+    """An SBOM that skips the file it could not read has a hole exactly where
+    the interesting thing would be."""
+    root = tmp_path / "scripts" / "trustedlane"
+    root.mkdir(parents=True)
+    (root / "ok.py").write_text("import json\n", encoding="utf-8")
+    (root / "broken.py").write_text("def (:\n", encoding="utf-8")
+    with _refusal("engine_source_unparsable"):
+        enginebuild.sbom(root=str(tmp_path))
+
+
+def test_the_dependency_lock_does_not_claim_to_be_reproducible():
+    """It records the names the workflows install. Claiming a reproducible lock
+    while installing unpinned names would be the overclaim this programme keeps
+    finding."""
+    lock = enginebuild.dependency_lock(root=str(ROOT))
+    assert lock["pinned_to_versions"] is False
+    assert lock["pinned_to_hashes"] is False
+    assert "open item" in lock["honest_scope"]
+
+
+def test_the_package_digest_moves_when_the_engine_source_moves(tmp_path):
+    """A binding digest that ignores the tree binds nothing about it."""
+    root = tmp_path / "scripts" / "trustedlane"
+    root.mkdir(parents=True)
+    (root / "e.py").write_text("import json\n", encoding="utf-8")
+    first = enginebuild.candidate_package(
+        source_commit=SHA_A, code_cutoff_sha=SHA_A, root=str(tmp_path))
+    (root / "e.py").write_text("import json, os\n", encoding="utf-8")
+    second = enginebuild.candidate_package(
+        source_commit=SHA_A, code_cutoff_sha=SHA_A, root=str(tmp_path))
+    assert first["candidate_package_sha256"] != second["candidate_package_sha256"]
+
+
+def test_a_malformed_commit_sha_is_refused_before_anything_is_digested():
+    with _refusal("commit_sha_malformed"):
+        enginebuild.candidate_package(source_commit="HEAD",
+                                      code_cutoff_sha=SHA_A, root=str(ROOT))
