@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 
 import yaml
 
@@ -89,10 +90,6 @@ SOURCE_SELECTING_INPUTS = ("repository", "remote", "remote_url", "url",
 CALLER_CONTROLLED_PREFIXES = ("inputs.", "github.event.",
                               "github.head_ref", "needs.")
 
-# Named for the *reference* form, not the value: ruff S105 flags
-# constants whose name contains "secret", and suppressing that check in a
-# credential-handling module is the wrong trade.
-_CREDENTIAL_REF_MARKER = "secrets."
 _CHECKOUT_MARKER = "actions/checkout"
 
 
@@ -121,8 +118,35 @@ def _strings(node):
             yield from _strings(item)
 
 
+#: A GitHub Actions expression, and the `secrets` context as a bare identifier
+#: inside one.
+#:
+#: Substring-matching `secrets.` was the bug. GitHub documents index syntax —
+#: `secrets['NAME']` — and `toJSON(secrets)`, which dumps EVERY secret into one
+#: value. Neither contains `secrets.`, so both were invisible: a D0 job could
+#: name a secret, and worse, a D1/D2 job could reach one without being
+#: recognised as credential-bearing at all — escaping the environment gate and
+#: the containment gate together. Found by the bootstrap PR review.
+#:
+#: Matching the identifier inside `${{ … }}` covers dot, index, function-call
+#: and any future syntax, because they all have to name the context.
+_EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+_SECRETS_CONTEXT = re.compile(r"(?<![A-Za-z0-9_.])secrets(?![A-Za-z0-9_])")
+
+
+def _secret_references(node) -> list:
+    """Every string in `node` that reads the `secrets` context, by any syntax."""
+    found = []
+    for text in _strings(node):
+        for expression in _EXPRESSION.findall(text):
+            if _SECRETS_CONTEXT.search(expression):
+                found.append(text)
+                break
+    return found
+
+
 def _references_secret(node) -> bool:
-    return any(_CREDENTIAL_REF_MARKER in text for text in _strings(node))
+    return bool(_secret_references(node))
 
 
 def load_workflow(name: str = D0_FILE, *, root: str = ".") -> dict:
@@ -379,8 +403,7 @@ def assert_phase_secret_policy(document: dict, *, name: str,
     Not "may not use one" — may not NAME one. A workflow that references
     `secrets.X` is one approval away from receiving it; a workflow that has no
     such reference has nothing to widen."""
-    references = sorted(t for t in _strings(document)
-                        if _CREDENTIAL_REF_MARKER in t)
+    references = sorted(set(_secret_references(document)))
     environments = sorted(
         job_name for job_name, job in (document.get("jobs") or {}).items()
         if (job or {}).get("environment"))

