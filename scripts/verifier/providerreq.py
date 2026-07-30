@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from . import reviewpolicy, unitpayload
-from .canon import canonical_json, digest, sha256_hex
+from .canon import canonical_json, digest, sha256_hex, unb64
 from .capabilities import capability
 from .errors import BlockingError
 
@@ -308,18 +308,30 @@ class RequestAssembly:
 
 
 def provenance_digest(unit_payloads, input_text: str, challenge: str,
-                      model_id: str) -> str:
+                      model_id: str, path_scope: dict | None = None) -> str:
     """Bind the exact payloads, the exact assembled text, and the request.
 
     The text is included as well as the payloads: the payloads say what the
     assembler was given, the text says what it produced, and a mismatch
-    between them is the failure this digest exists to make unrepresentable."""
-    return digest(b"request-provenance-v1", canonical_json({
+    between them is the failure this digest exists to make unrepresentable.
+
+    The AUTHORIZATION SCOPE is included too, as path digests. It decides
+    which clearances apply to the transmitted bytes, and it was previously
+    outside every hash — so swapping it changed which secrets were released
+    while leaving the request identity untouched (PASS E, family A). Paths
+    enter as sha256 of the raw bytes, never as the Base64 identity, so a
+    digest input cannot become a path leak."""
+    scope = path_scope or {}
+    return digest(b"request-provenance-v2", canonical_json({
         "model_id": model_id,
         "challenge": challenge,
         "unit_payload_sha256_in_order": [p["unit_payload_sha256"]
                                          for p in unit_payloads],
         "unit_sha256_in_order": [p["unit_sha256"] for p in unit_payloads],
+        "authorization_scope_path_sha256_by_unit": {
+            unit_hash: sha256_hex(unb64(value))
+            for unit_hash, value in sorted(scope.items()) if value
+        },
         "input_text_sha256": sha256_hex(
             input_text.encode("utf-8", "surrogateescape")),
         "input_char_count": len(input_text),
@@ -338,7 +350,13 @@ def assemble_request(model_id: str, unit_payloads: list[dict], *,
     for a section it just wrote."""
     from . import origin as originmod
 
-    paths = path_bytes_b64_by_unit or {}
+    # Restricted to THIS request's units before it is hashed: a caller may
+    # legitimately hold the scope map for a whole plan, and binding entries
+    # for units this request does not carry would make otherwise identical
+    # requests hash differently depending on what else the caller knew.
+    unit_order = [p["unit_sha256"] for p in unit_payloads]
+    paths = {h: (path_bytes_b64_by_unit or {}).get(h) for h in unit_order}
+    paths = {h: v for h, v in paths.items() if v}
     writer = originmod.SectionWriter("count", INPUT_FIELD_OFFSET)
     for index, payload in enumerate(unit_payloads):
         if index:
@@ -357,7 +375,7 @@ def assemble_request(model_id: str, unit_payloads: list[dict], *,
         text_format=verdict_schema(unit_hashes, challenge=challenge),
         max_output_tokens=max_output_tokens,
         provenance_sha256=provenance_digest(unit_payloads, input_text,
-                                            challenge, model_id),
+                                            challenge, model_id, paths),
     )
 
     count_bytes = canonical_json(request.count_payload())

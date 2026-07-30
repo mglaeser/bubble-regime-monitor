@@ -167,30 +167,43 @@ def assert_distinct_reasoning(by_model: dict, *, unit_hash: str,
         _fail(f"category=approver_reason_is_only_the_challenge "
               f"unit={unit_hash[:16]} approver={approver}")
 
-    distinct = []
-    for model_id in corroborators:
+    # EVERY approving model is compared with EVERY other, not just with the
+    # approver. Comparing corroborators only against the approver let N models
+    # return one byte-identical canned sentence among themselves, differ from
+    # the approver alone, and each be counted as an independent review — so
+    # with minimum_other_approvers >= 2 the whole corroboration requirement
+    # was satisfied by one sentence repeated (PASS E, family D).
+    approving = [approver] + [m for m in corroborators
+                              if not by_model[m][unit_hash]["refuted"]]
+    seen_reasons: dict[str, str] = {}
+    seen_proofs: dict[str, str] = {}
+    for model_id in approving:
         verdict = by_model[model_id][unit_hash]
-        if verdict["refuted"]:
-            continue
         reason = normalize_reason(verdict["reason"], challenge=challenge)
         if not reason:
-            _fail(f"category=corroborator_reason_is_only_the_challenge "
+            _fail(f"category=approval_reason_is_only_the_challenge "
                   f"unit={unit_hash[:16]} model={model_id}")
-        if reason == approver_reason:
+        first = seen_reasons.get(reason)
+        if first is not None:
             _fail(f"category=canned_identical_approval unit={unit_hash[:16]} "
-                  f"model={model_id} approver={approver} — two approvals "
-                  "whose reasons say the same thing are one review reported "
-                  "twice; independent corroboration is the property this "
-                  "panel exists to provide")
+                  f"model={model_id} matches={first} — two approvals whose "
+                  "reasons say the same thing are one review reported twice; "
+                  "independent corroboration is the property this panel "
+                  "exists to provide")
+        seen_reasons[reason] = model_id
+
         proof = normalize_reason(verdict["proof_of_check"],
                                  challenge=challenge)
-        approver_proof = normalize_reason(approver_verdict["proof_of_check"],
-                                          challenge=challenge)
-        if proof and proof == approver_proof:
-            _fail(f"category=canned_identical_proof unit={unit_hash[:16]} "
-                  f"model={model_id} — the same statement of what was "
-                  "inspected, from two models, is one inspection")
-        distinct.append(model_id)
+        if proof:
+            first_proof = seen_proofs.get(proof)
+            if first_proof is not None:
+                _fail(f"category=canned_identical_proof "
+                      f"unit={unit_hash[:16]} model={model_id} "
+                      f"matches={first_proof} — the same statement of what "
+                      "was inspected, from two models, is one inspection")
+            seen_proofs[proof] = model_id
+
+    distinct = [m for m in approving if m != approver]
     return {"unit_sha256": unit_hash,
             "distinct_reasoning_models": sorted(distinct),
             "distinct_reasoning_count": len(distinct)}

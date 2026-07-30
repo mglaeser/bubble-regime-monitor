@@ -664,6 +664,31 @@ def synthesize(batch_results: list[dict]) -> dict:
 
 OUTPUT_PRIVACY_FAILED = "OUTPUT_PRIVACY_FAILED"
 
+#: EVERY provider-controlled text field in a verdict. Derived from the verdict
+#: schema rather than listed by hand, so a field added there cannot be
+#: forgotten here — which is exactly what happened to `checked_categories`
+#: (PASS E, family C): six free-form 48-character strings per unit, validated
+#: for length and uniqueness only, copied verbatim into the persisted evidence,
+#: and scanned by nothing.
+PROVIDER_TEXT_FIELDS = frozenset({"reason", "proof_of_check",
+                                  "checked_categories"})
+
+
+def _provider_text_fields(verdict: dict):
+    """(field_name, text) for every provider-written string in a verdict.
+
+    A list field yields one entry per element: scanning the joined list would
+    let a secret hide across an element boundary, and scanning `str(list)`
+    would scan Python's repr rather than the value."""
+    for field in sorted(PROVIDER_TEXT_FIELDS):
+        value = verdict.get(field)
+        if isinstance(value, str):
+            yield field, value
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                if isinstance(item, str):
+                    yield f"{field}[{index}]", item
+
 
 def assert_output_carries_no_secret(evidence_records: list[dict], *,
                                     path_identities: frozenset) -> dict:
@@ -674,11 +699,11 @@ def assert_output_carries_no_secret(evidence_records: list[dict], *,
     text stays PRIVATE, and it is refused outright if it carries a literal or
     a path identity — a secret that leaves in a request and comes back in a
     verdict has still left twice."""
-    findings = 0
+    scanned = 0
     for record in evidence_records:
         for unit_hash, verdict in record["verdicts_by_unit"].items():
-            for field in ("reason", "proof_of_check"):
-                text = verdict[field]
+            for field, text in _provider_text_fields(verdict):
+                scanned += 1
                 hits = preflight.distinct_occurrences(
                     preflight.scan_text(text))
                 if hits:
@@ -692,13 +717,12 @@ def assert_output_carries_no_secret(evidence_records: list[dict], *,
                         raise BlockingError(
                             OUTPUT_PRIVACY_FAILED,
                             f"category=path_identity_in_provider_output "
-                            f"model={record['model_id']} field={field}")
-                findings += 0
-    return {"scanned_field_count": sum(
-        2 * len(r["verdicts_by_unit"]) for r in evidence_records),
-        "findings": findings,
-        "retention": "full verdict text is PRIVATE; public summaries carry "
-                     "digests and counts only"}
+                            f"model={record['model_id']} unit={unit_hash[:16]} "
+                            f"field={field}")
+    return {"scanned_field_count": scanned,
+            "scanned_fields": sorted(PROVIDER_TEXT_FIELDS),
+            "retention": "full verdict text is PRIVATE; public summaries "
+                         "carry digests and counts only"}
 
 
 # ------------------------------------------------------------ entry point ---

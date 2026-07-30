@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from .canon import canonical_json, digest, sha256_hex
+from .canon import canonical_json, digest, sha256_hex, unb64
 from .errors import SECRET_PREFLIGHT_FAILED, BlockingError
 
 #: Span kinds.
@@ -133,6 +133,35 @@ class Span:
     # lookup needs it — but it is the very thing that must not reach a
     # provider or an evidence record, so it never enters `to_record()`.
     path_bytes_b64: str | None = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self):
+        """The lookup path and the recorded path must be the SAME path.
+
+        `path_bytes_b64` decides which authorizations apply; `path_sha256` is
+        what the evidence record carries. The first is excluded from every
+        digest for privacy, so until these were compared, two assemblies that
+        authorized against DIFFERENT FILES produced byte-identical payloads,
+        identical request hashes and an identical origin-map record — and one
+        of them cleared a secret on a clearance scoped to a file the secret
+        does not live in (PASS E, family A). Excluding a field from a digest
+        is only safe when something else binds it; this is that binding, and
+        it mirrors how `source_text` is bound by `source_content_sha256`."""
+        if self.path_bytes_b64 is None or self.path_sha256 is None:
+            return
+        try:
+            decoded = unb64(self.path_bytes_b64)
+        except Exception as exc:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                "category=span_path_scope_undecodable — the authorization "
+                "scope path is not canonical Base64") from exc
+        if sha256_hex(decoded) != self.path_sha256:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                "category=span_path_scope_mismatch — the path this span "
+                "resolves authorizations against is not the path its evidence "
+                "records; a clearance scoped to one file would be applied to "
+                "content from another")
 
     def contains(self, offset: int, length: int) -> bool:
         return self.start <= offset and offset + length <= self.end

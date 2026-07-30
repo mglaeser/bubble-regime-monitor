@@ -43,6 +43,7 @@ from verifier import (  # noqa: E402
     providerreq,
     reviewpolicy,
     unitpayload,
+    verdicts,
 )
 from verifier.errors import (  # noqa: E402
     CHUNK_COUNT_EXHAUSTED,
@@ -597,3 +598,235 @@ def test_strict_response_validation_refuses_a_forged_local_failure():
     with pytest.raises(BlockingError) as e:
         counting._validate_response({"category": "timeout"}, b"{}")
     assert e.value.code == TOKEN_COUNT_RESPONSE_INVALID
+
+
+# ================================================================ PASS E =====
+#
+# The three findings that survived adversarial verification in the MC4 PASS E
+# attack pass. Each is written as the attack, so a regression restores the
+# attack rather than merely reddening an assertion.
+
+
+class TestPassEAuthorizationScopeIsBound:
+    """PASS E family A (P1) — the scope path was outside every hash.
+
+    `Span.path_bytes_b64` decides which authorizations apply to a transmitted
+    finding. It is excluded from the origin-map record for privacy, and it was
+    excluded from provenance too — so two assemblies scoped to DIFFERENT FILES
+    produced byte-identical payloads, identical request hashes and an
+    identical origin-map record, and one of them cleared a secret on a
+    clearance belonging to a file the secret does not live in.
+    """
+
+    SECRET = "sk-" + "AAAABBBBCCCCDDDDEEEEFFFF"   # pragma: allowlist secret
+    VICTIM = b"app/victim.py"
+    REVIEWED = b"app/reviewed_fixture.py"
+    ATOM, UNIT = "a" * 64, "u" * 64
+    RANGE = dict(repository_identity="r", target_base_sha="b" * 40,
+                 diff_base_sha="c" * 40, head_sha="d" * 40)
+
+    def _fixture(self):
+        from verifier.canon import b64
+        atom_map = {self.ATOM: f'TOKEN = "{self.SECRET}"'}
+        atom_records = {self.ATOM: {"atom_id": self.ATOM, "side": "new",
+                                    "line_number": 1, "hunk_id": "h",
+                                    "path_bytes_b64": b64(self.VICTIM)}}
+        unit = {"unit_sha256": self.UNIT, "atom_ids": [self.ATOM],
+                "git_status": "M", "path_bytes_b64": b64(self.VICTIM)}
+        # An operator reviewed this literal in a DIFFERENT file, file-wide.
+        claim = authority.literal_claim(
+            path_bytes_b64=b64(self.REVIEWED), atom_id=None,
+            occurrence_index=None, literal=self.SECRET,
+            literal_category="openai_key", reason="reviewed elsewhere",
+            reviewer_identity="op", authorized_at="t",
+            authorization_source="s", test_fixture=True, **self.RANGE)
+        aset = authority.LiteralAuthorizationSet([claim], **self.RANGE)
+        return atom_map, atom_records, unit, aset
+
+    def _assemble(self, unit, atom_records, atom_map, scope_path):
+        from verifier.canon import b64
+        payload = unitpayload.structured_unit(unit, atom_records, atom_map)
+        return providerreq.assemble_request(
+            "gpt-5.3-codex", [payload], lens="review", challenge="CH",
+            reasoning_effort="medium", max_output_tokens=8_000,
+            path_bytes_b64_by_unit={self.UNIT: b64(scope_path)})
+
+    def test_the_truthful_scope_blocks_an_unreviewed_secret(self):
+        atom_map, atom_records, unit, aset = self._fixture()
+        manifest = finalize.PreflightGenerationManifest(
+            aset, atom_records=atom_records, atom_map=atom_map)
+        manifest._units_by_hash[self.UNIT] = unit
+        assembly = self._assemble(unit, atom_records, atom_map, self.VICTIM)
+        with pytest.raises(BlockingError) as e:
+            manifest._scan_payload(assembly, payload_kind="execution",
+                                   label="x:execution", unit_count=1)
+        assert origin.UNAUTHORIZED_OCCURRENCE in str(e.value)
+
+    def test_a_swapped_scope_cannot_be_assembled_at_all(self):
+        # THE ATTACK: point the scope at the reviewed file so the clearance
+        # matches. The span now refuses, because the path it resolves
+        # authorizations against is not the path its evidence records.
+        atom_map, atom_records, unit, _ = self._fixture()
+        with pytest.raises(BlockingError) as e:
+            self._assemble(unit, atom_records, atom_map, self.REVIEWED)
+        assert "span_path_scope_mismatch" in str(e.value)
+
+    def test_the_scope_now_participates_in_request_identity(self):
+        # Defence in depth: even without the span check, a swapped scope is a
+        # different request. Driven at provenance_digest, which the span
+        # check would otherwise prevent us from reaching.
+        from verifier.canon import b64
+        payloads = [unitpayload.structured_unit(
+            *self._fixture()[2:3], self._fixture()[1], self._fixture()[0])]
+        truthful = providerreq.provenance_digest(
+            payloads, "text", "CH", "gpt-5.3-codex",
+            {self.UNIT: b64(self.VICTIM)})
+        swapped = providerreq.provenance_digest(
+            payloads, "text", "CH", "gpt-5.3-codex",
+            {self.UNIT: b64(self.REVIEWED)})
+        assert truthful != swapped
+
+    def test_provenance_binds_only_this_requests_units(self):
+        # A caller may hold the scope map for a whole plan. Binding entries
+        # for units this request does not carry would make identical requests
+        # hash differently depending on what else the caller knew.
+        from verifier.canon import b64
+        atom_map, atom_records, unit, _ = self._fixture()
+        payload = unitpayload.structured_unit(unit, atom_records, atom_map)
+        narrow = providerreq.assemble_request(
+            "gpt-5.3-codex", [payload], lens="review", challenge="CH",
+            reasoning_effort="medium", max_output_tokens=8_000,
+            path_bytes_b64_by_unit={self.UNIT: b64(self.VICTIM)})
+        wide = providerreq.assemble_request(
+            "gpt-5.3-codex", [payload], lens="review", challenge="CH",
+            reasoning_effort="medium", max_output_tokens=8_000,
+            path_bytes_b64_by_unit={self.UNIT: b64(self.VICTIM),
+                                    "z" * 64: b64(b"other/file.py")})
+        assert narrow.hashes() == wide.hashes()
+
+    def test_an_undecodable_scope_blocks(self):
+        with pytest.raises(BlockingError) as e:
+            origin.Span(0, 5, origin.ATOM_CONTENT, path_sha256="a" * 64,
+                        path_bytes_b64="not!base64")
+        assert "span_path_scope_undecodable" in str(e.value)
+
+
+class TestPassEEveryProviderTextFieldIsScanned:
+    """PASS E family C (P2) — `checked_categories` was never scanned.
+
+    Six free-form 48-character strings per unit, validated for length and
+    uniqueness only, copied verbatim into the persisted evidence, and scanned
+    by nothing — while the same string in `reason` was refused.
+    """
+
+    def _record(self, **verdict):
+        base = {"reason": "clean", "proof_of_check": "read it",
+                "checked_categories": ["logic"]}
+        base.update(verdict)
+        return {"model_id": "gpt-5.3-codex",
+                "verdicts_by_unit": {"a" * 64: base}}
+
+    def test_the_scanned_field_set_is_every_provider_written_field(self):
+        # Derived from the verdict schema's own text fields, so a new one
+        # cannot be added there and forgotten here.
+        assert executor.PROVIDER_TEXT_FIELDS == {
+            "reason", "proof_of_check", "checked_categories"}
+
+    def test_a_secret_in_checked_categories_blocks(self):
+        leaked = "sk-proj-" + "AbCd1234EfGh5678IjKl9012"  # pragma: allowlist secret
+        with pytest.raises(BlockingError) as e:
+            executor.assert_output_carries_no_secret(
+                [self._record(checked_categories=["logic", leaked])],
+                path_identities=frozenset())
+        assert "secret_in_provider_output" in str(e.value)
+        assert "checked_categories[1]" in str(e.value)
+
+    def test_a_path_identity_in_checked_categories_blocks(self):
+        with pytest.raises(BlockingError) as e:
+            executor.assert_output_carries_no_secret(
+                [self._record(checked_categories=["cA=="])],
+                path_identities=frozenset({"cA=="}))
+        assert "path_identity_in_provider_output" in str(e.value)
+
+    def test_list_elements_are_scanned_individually(self):
+        # Joining the list would let a literal hide across an element
+        # boundary; scanning str(list) would scan Python's repr.
+        result = executor.assert_output_carries_no_secret(
+            [self._record(checked_categories=["logic", "state", "io"])],
+            path_identities=frozenset())
+        assert result["scanned_field_count"] == 5   # 2 strings + 3 elements
+
+
+class TestPassECorroboratorsAreComparedToEachOther:
+    """PASS E family D (P2) — the anti-canned gate had a blind spot.
+
+    Each corroborator was compared only with the APPROVER. So N models could
+    return one byte-identical canned approval among themselves, differ from
+    the approver alone, and each be counted as an independent review — which
+    satisfies `minimum_other_approvers >= 2` with one sentence repeated.
+    """
+
+    CHALLENGE = "CH-1"
+
+    def _verdict(self, reason, proof, refuted=False):
+        return {"refuted": refuted,
+                "reason": f"{self.CHALLENGE} {reason}",
+                "proof_of_check": f"{self.CHALLENGE} {proof}"}
+
+    def test_two_corroborators_with_one_canned_sentence_block(self):
+        by_model = {
+            "gpt-5.6-sol": {"u": self._verdict("sol looked closely",
+                                               "sol read the diff")},
+            "gpt-5.3-codex": {"u": self._verdict("looks fine to me",
+                                                 "skimmed it")},
+            "gpt-4.1-mini": {"u": self._verdict("looks fine to me",
+                                                "skimmed it")},
+        }
+        with pytest.raises(BlockingError) as e:
+            verdicts.assert_distinct_reasoning(
+                by_model, unit_hash="u", approver="gpt-5.6-sol",
+                challenge=self.CHALLENGE,
+                corroborators=["gpt-5.3-codex", "gpt-4.1-mini"])
+        assert "canned_identical_approval" in str(e.value)
+
+    def test_two_corroborators_with_one_canned_proof_block(self):
+        by_model = {
+            "gpt-5.6-sol": {"u": self._verdict("sol looked", "sol read it")},
+            "gpt-5.3-codex": {"u": self._verdict("codex says a", "same proof")},
+            "gpt-4.1-mini": {"u": self._verdict("mini says b", "same proof")},
+        }
+        with pytest.raises(BlockingError) as e:
+            verdicts.assert_distinct_reasoning(
+                by_model, unit_hash="u", approver="gpt-5.6-sol",
+                challenge=self.CHALLENGE,
+                corroborators=["gpt-5.3-codex", "gpt-4.1-mini"])
+        assert "canned_identical_proof" in str(e.value)
+
+    def test_three_genuinely_distinct_approvals_pass(self):
+        by_model = {
+            "gpt-5.6-sol": {"u": self._verdict("no data flow change",
+                                               "traced the writes")},
+            "gpt-5.3-codex": {"u": self._verdict("the guard still holds",
+                                                 "read the branch")},
+            "gpt-4.1-mini": {"u": self._verdict("invariants unchanged",
+                                                "checked the loop bound")},
+        }
+        result = verdicts.assert_distinct_reasoning(
+            by_model, unit_hash="u", approver="gpt-5.6-sol",
+            challenge=self.CHALLENGE,
+            corroborators=["gpt-5.3-codex", "gpt-4.1-mini"])
+        assert result["distinct_reasoning_count"] == 2
+
+    def test_refuting_models_are_still_exempt(self):
+        # Two models describing the same real defect identically is
+        # agreement. The gate applies to approvals.
+        same = "the null check was removed"
+        by_model = {
+            "gpt-5.6-sol": {"u": self._verdict("sol approves", "sol read")},
+            "gpt-5.3-codex": {"u": self._verdict(same, same, refuted=True)},
+            "gpt-4.1-mini": {"u": self._verdict(same, same, refuted=True)},
+        }
+        verdicts.assert_distinct_reasoning(
+            by_model, unit_hash="u", approver="gpt-5.6-sol",
+            challenge=self.CHALLENGE,
+            corroborators=["gpt-5.3-codex", "gpt-4.1-mini"])
