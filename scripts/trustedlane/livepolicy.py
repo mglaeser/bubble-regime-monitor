@@ -72,6 +72,52 @@ PROVIDER_SECRET_HINTS = ("API_KEY", "TOKEN", "SECRET", "VENDOR", "OPENAI",
                          "ANTHROPIC")
 
 
+#: The ONLY steps in the live directory permitted to survive their own failure,
+#: as `workflow filename -> step names`. Everything else that declares
+#: `continue-on-error` is refused.
+#:
+#: An allowlist rather than a denylist, and recorded in code rather than
+#: inferred from a step name containing the word "advisory". Naming a step
+#: "Type-check (ADVISORY)" is a comment; this is the check. Adding a genuinely
+#: advisory step means adding it here, in a diff a reviewer sees, which is the
+#: point — the failure mode being prevented is `continue-on-error` arriving on
+#: the pytest step, where it turns a red suite into a green check and nothing
+#: else in the repository would notice.
+ADVISORY_STEPS = {
+    "ci.yml": frozenset({
+        "Type-check (ADVISORY — 43 tracked errors, A-13; not a gate yet)",
+    }),
+}
+
+
+def assert_only_allowlisted_steps_survive_failure(document: dict, *,
+                                                  name: str = "") -> dict:
+    """`continue-on-error` turns a failing gate into a passing check.
+
+    Job-level too: `continue-on-error` on the job makes every step in it
+    advisory at once, which is the same defect with a wider blast radius and is
+    easier to miss because it sits nowhere near the step it disarms."""
+    permitted = ADVISORY_STEPS.get(name, frozenset())
+    offenders = []
+    for job_name, job in (document.get("jobs") or {}).items():
+        job = job or {}
+        if job.get("continue-on-error"):
+            offenders.append(f"{job_name}: job-level")
+        for index, step in enumerate(job.get("steps") or []):
+            step = step or {}
+            if not step.get("continue-on-error"):
+                continue
+            step_name = str(step.get("name") or f"steps[{index}]")
+            if step_name not in permitted:
+                offenders.append(f"{job_name}.{step_name}")
+    if offenders:
+        refuse(f"category=unallowlisted_continue_on_error name={name} "
+               f"found={offenders} — a step that survives its own failure is "
+               "not a gate; if it is genuinely advisory, add it to "
+               "livepolicy.ADVISORY_STEPS so the exemption is reviewable")
+    return {"advisory_steps": sorted(permitted)}
+
+
 def live_workflow_paths(*, root: str = ".") -> list:
     """Every file GitHub will schedule, by extension — not by name.
 
@@ -174,6 +220,8 @@ def validate_live_workflows(*, root: str = ".") -> dict:
         results[name] = {
             "triggers": trigger_names(document),
             **assert_no_secret_in_pr_controlled_workflow(document, name=name),
+            **assert_only_allowlisted_steps_survive_failure(document,
+                                                            name=name),
             **pinning,
         }
     return {

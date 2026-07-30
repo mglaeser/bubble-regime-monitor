@@ -2224,3 +2224,56 @@ def test_the_packet_does_not_claim_attestations_are_verified():
     verifiable = [item for item in prerequisites.OPERATOR_PREREQUISITES
                   if item.verifiable_by_code]
     assert [item.key for item in verifiable] == ["verify_run_404"]
+
+
+# ---- the blocking steps must actually block -------------------------------
+
+
+def test_vtrust_the_live_directory_has_no_unallowlisted_survivable_step():
+    record = livepolicy.validate_live_workflows(root=str(ROOT))
+    assert record["workflows"]["ci.yml"]["advisory_steps"] == [
+        "Type-check (ADVISORY — 43 tracked errors, A-13; not a gate yet)"]
+
+
+@pytest.mark.parametrize("step_name", [
+    "Tests (BLOCKING)",
+    "Lint (ruff, BLOCKING — E,F,I,W,UP,B,S)",
+    "Security — secret scan over tracked files (BLOCKING)",
+    "Security — dependency audit (BLOCKING)",
+])
+def test_vtrust_continue_on_error_on_a_blocking_ci_step_is_refused(step_name):
+    """The failure this exists for: `continue-on-error` on the pytest step
+    turns a red suite into a green check, and nothing else in the repository
+    would notice. Naming a step "BLOCKING" is a comment, not a check."""
+    document = livepolicy._read(
+        os.path.join(str(ROOT), workflowfile.LIVE_WORKFLOW_DIR, "ci.yml"))
+    steps = document["jobs"]["test"]["steps"]
+    target = [s for s in steps if s.get("name") == step_name]
+    assert target, f"ci.yml no longer has a step named {step_name!r}"
+    target[0]["continue-on-error"] = True
+    with _refusal("unallowlisted_continue_on_error"):
+        livepolicy.assert_only_allowlisted_steps_survive_failure(
+            document, name="ci.yml")
+
+
+def test_vtrust_a_job_level_continue_on_error_is_refused():
+    """Wider blast radius, easier to miss: it sits nowhere near the step it
+    disarms and makes every step in the job advisory at once."""
+    document = {"name": "X", True: {"push": None},
+                "jobs": {"test": {"continue-on-error": True, "steps": []}}}
+    with _refusal("unallowlisted_continue_on_error"):
+        livepolicy.assert_only_allowlisted_steps_survive_failure(
+            document, name="ci.yml")
+
+
+def test_vtrust_the_allowlisted_advisory_step_is_still_permitted():
+    """The exemption is real and must keep working — mypy has 43 tracked errors
+    and is declared advisory rather than disguised as a gate."""
+    document = livepolicy._read(
+        os.path.join(str(ROOT), workflowfile.LIVE_WORKFLOW_DIR, "ci.yml"))
+    advisory = [s for s in document["jobs"]["test"]["steps"]
+                if s.get("continue-on-error")]
+    assert len(advisory) == 1
+    assert advisory[0]["run"].strip() == "mypy app"
+    livepolicy.assert_only_allowlisted_steps_survive_failure(
+        document, name="ci.yml")
