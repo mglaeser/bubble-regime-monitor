@@ -262,23 +262,39 @@ def declared_uses(document: dict) -> list:
 
 
 def validate_live_workflows(*, root: str = ".") -> dict:
-    """Run every live-directory rule over every file GitHub will schedule."""
+    """Run every live-directory rule over every file GitHub will schedule.
+
+    Checks run MOST SERIOUS FIRST, and the ordering is deliberate. A refusal
+    stops the walk, so whichever check fires is the one the operator reads —
+    and only that one. The first draft computed `pinning` above the dict
+    literal, so a workflow that both reached a provider secret and used a moving
+    tag was reported as "action not pinned". Found by running PR #23's workflow
+    blob through it: the reintroduced SECOND_VENDOR_API_KEY and OPENAI_API_KEY
+    were the reason to reject that file, and the message named the tag.
+
+    Both refusals are correct. Only one of them tells the operator they are
+    about to hand a pull request two provider credentials.
+    """
     results = {}
     for path in live_workflow_paths(root=root):
         name = os.path.basename(path)
         document = _read(path)
-        uses = declared_uses(document)
-        pinning = (assert_actions_pinned(document, name=name) if uses
-                   else {"pinned_actions": [], "declares_no_actions": True})
-        results[name] = {
+        record = {
             "triggers": trigger_names(document),
+            # 1. credential reach — the only one that leaks a key
             **assert_no_secret_in_pr_controlled_workflow(document, name=name),
+            # 2. candidate code running with the base repo's permissions
             **assert_pull_request_target_checks_out_nothing(document,
                                                             name=name),
+            # 3. a gate whose failure is survivable
             **assert_only_allowlisted_steps_survive_failure(document,
                                                             name=name),
-            **pinning,
         }
+        # 4. supply chain, last: bad, but it does not by itself hand anything out
+        uses = declared_uses(document)
+        record.update(assert_actions_pinned(document, name=name) if uses
+                      else {"pinned_actions": [], "declares_no_actions": True})
+        results[name] = record
     return {
         "workflows": results,
         "count": len(results),

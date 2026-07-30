@@ -3215,3 +3215,30 @@ def test_protected_a_non_default_ref_is_refused_first():
     with _refusal("ref_not_allowed_default"):
         protectedstate.assert_ready_for_credential(
             **_protected_observation(observed_ref="refs/heads/feature"))
+
+
+def test_the_live_policy_reports_credential_reach_before_supply_chain():
+    """A refusal stops the walk, so whichever check fires is the only one the
+    operator reads.
+
+    Found by running PR #23's actual workflow blob through the validator. That
+    file both reintroduces SECOND_VENDOR_API_KEY/OPENAI_API_KEY into a
+    pull_request job AND uses `actions/checkout@v4`. The first draft computed
+    the pinning result above the dict literal, so it reported "action not
+    pinned" — true, and not the reason to reject the file."""
+    document = {
+        "name": "X", True: {"pull_request": None},
+        "jobs": {"j": {"runs-on": "ubuntu-latest", "steps": [
+            {"uses": "actions/checkout@v4"},
+            {"env": {"K": "${{ secrets.OPENAI_API_KEY }}"}, "run": "echo"}]}},
+    }
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        live = os.path.join(tmp, workflowfile.LIVE_WORKFLOW_DIR)
+        os.makedirs(live)
+        with open(os.path.join(live, "both.yml"), "w", encoding="utf-8") as fh:
+            yaml.safe_dump(document, fh)
+        with pytest.raises(errors.LaneRefusal) as excinfo:
+            livepolicy.validate_live_workflows(root=tmp)
+    assert "pr_controlled_workflow_reaches_a_secret" in excinfo.value.reason
+    assert "action_not_pinned" not in excinfo.value.reason
