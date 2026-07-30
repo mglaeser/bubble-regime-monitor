@@ -370,10 +370,63 @@ def test_candidate_single_module_reachable_refuses(tmp_path):
             modules={}, search_path=[str(tmp_path)])
 
 
-def test_this_process_is_itself_candidate_isolated():
-    """The ambient check the workflow step runs. Protected main has no
-    candidate package, so this must pass with no arguments."""
-    assert enginepolicy.assert_no_candidate_import()["candidate_isolated"]
+def test_d0_asserts_candidate_isolation_at_runtime_not_just_in_a_test():
+    """Where the ambient check belongs, and why it is not asserted here.
+
+    This used to call `assert_no_candidate_import()` on whatever process pytest
+    happened to be, justified as "protected main has no candidate package". True
+    of main — and false of the candidate branch, which is *supposed* to contain
+    `scripts/verifier/`. Once that branch takes main, its CI would have gone
+    permanently red on a property it is not required to have, and the precursor
+    could never merge. The test asserted something about the machine running it
+    rather than about the boundary.
+
+    The boundary is enforced in two places that do not misfire:
+
+    * D0 runs `assert_no_candidate_import()` as a job step, on the real ref,
+      every time it runs — externally verified, not asserted by the thing under
+      test. This test pins that step so it cannot be quietly removed.
+    * D0 cannot execute from a candidate branch at all: its triggers are
+      `workflow_dispatch` and a `push` filter on main, and `assert_protected_ref`
+      refuses any other ref. So the tree where a candidate package legitimately
+      lives is a tree D0 will not run in.
+
+    The refusal itself stays covered by the deterministic tests above, which
+    build the hazard instead of hoping the ambient interpreter has it."""
+    document = _document(D0)
+    steps = [s for job in document["jobs"].values()
+             for s in (job.get("steps") or [])]
+    isolation = [s for s in steps
+                 if "assert_no_candidate_import" in str(s.get("run") or "")]
+    assert len(isolation) == 1, "D0 must prove candidate isolation at runtime"
+
+    block = document.get(True) or document.get("on")
+    assert sorted(block) == ["push", "workflow_dispatch"]
+    assert block["push"]["branches"] == ["main"]
+    # And the ref gate that makes a workflow_dispatch from elsewhere refuse.
+    with _refusal("ref_not_protected"):
+        identity.assert_protected_ref("refs/heads/fix/verifier-intra-file-review-plan")
+
+
+def test_a_candidate_branch_does_not_make_the_lane_suite_fail(tmp_path,
+                                                              monkeypatch):
+    """The regression this replaced, kept as a test rather than a memory.
+
+    A tree containing `scripts/verifier/` is the normal state of the candidate
+    branch. The lane's suite must still pass there — otherwise the branch the
+    lane exists to review can never go green, and the lane has blocked the
+    thing it was built to unblock."""
+    candidate = tmp_path / "scripts" / "verifier"
+    candidate.mkdir(parents=True)
+    (candidate / "executor.py").write_text("", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    # The ambient interpreter now has a reachable candidate package...
+    with _refusal("candidate_package_reachable"):
+        enginepolicy.assert_no_candidate_import(
+            modules={}, search_path=[str(tmp_path / "scripts")])
+    # ...and that is a fact about this tree, not a failure of the lane.
+    assert enginepolicy.assert_no_candidate_import(
+        modules={}, search_path=[])["candidate_isolated"] is True
 
 
 def test_engine_identity_shape_is_not_authentication():
