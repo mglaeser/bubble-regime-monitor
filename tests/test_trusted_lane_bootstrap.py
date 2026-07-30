@@ -2342,3 +2342,35 @@ def test_vtrust_a_plain_pull_request_workflow_may_name_a_ref():
                                           "with": {"ref": "x"}}]}}}
     assert livepolicy.assert_pull_request_target_checks_out_nothing(
         document, name="x.yml")["pull_request_target"] is False
+
+
+def test_d0_would_pass_the_live_directory_policy_once_deployed(tmp_path):
+    """A pre-flight for the deployment step, run before the deployment.
+
+    Deploying D0 means copying it into `.github/workflows/`, where the
+    live-directory policy applies to it for the first time. Finding out then
+    that it fails its own repository's rules would mean either reverting a
+    protected-branch commit or weakening the rule to fit — so the deployment is
+    simulated here, against the real files, every CI run."""
+    shutil.copytree(ROOT / workflowfile.WORKFLOW_DIR,
+                    tmp_path / workflowfile.WORKFLOW_DIR)
+    shutil.copytree(ROOT / workflowfile.LIVE_WORKFLOW_DIR,
+                    tmp_path / workflowfile.LIVE_WORKFLOW_DIR)
+    shutil.copy(tmp_path / workflowfile.WORKFLOW_DIR / D0,
+                tmp_path / workflowfile.LIVE_WORKFLOW_DIR / D0)
+
+    deployed = workflowfile.assert_deployed_copy_matches_source(
+        root=str(tmp_path))
+    assert deployed["d0_deployed"] is True
+    assert deployed["deployed_policy_ok"] is True
+
+    live = livepolicy.validate_live_workflows(root=str(tmp_path))
+    d0 = live["workflows"][D0]
+    # The property that makes D0 deployable while all sixteen operator items
+    # are outstanding: it is not PR-controlled and holds nothing.
+    assert d0["pr_controlled"] is False
+    assert d0["secrets_reachable"] == 0
+    assert sorted(d0["triggers"]) == ["push", "workflow_dispatch"]
+
+    # And the templates stay inert — deploying D0 must not activate D1 or D2.
+    workflowfile.assert_no_template_is_live(root=str(tmp_path))
