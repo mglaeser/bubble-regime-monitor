@@ -45,7 +45,7 @@ defaults:
 
 jobs:
   # Containment runs first and everything credential-bearing is gated behind it.
-  d0-containment:
+  d1-containment-gate:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -69,12 +69,12 @@ jobs:
           sys.path.insert(0, "scripts")
           from trustedlane import enginepolicy, identity
           identity.assert_repository_numeric_id(int(os.environ["EVENT_REPOSITORY_ID"]))
-          identity.assert_protected_ref(os.environ["OBSERVED_REF"])
+          identity.assert_allowed_default_ref(os.environ["OBSERVED_REF"])
           enginepolicy.assert_no_candidate_import()
           PROBE
 
-  d1-trusted-count:
-    needs: d0-containment
+  trusted-verifier-count:
+    needs: d1-containment-gate
     runs-on: ubuntu-latest
     # `environment:` is what makes the key reachable, and the environment's own
     # deployment-branch policy is what keeps an unprotected ref out. There is

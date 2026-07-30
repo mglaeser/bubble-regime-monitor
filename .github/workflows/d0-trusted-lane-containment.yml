@@ -29,7 +29,7 @@ name: trusted-lane-d0-containment
 # workflow_dispatch takes NO ref-selecting input: if the caller picks the ref,
 # the caller picks the code. The GitHub-level ref a dispatch runs from is
 # constrained by branch/environment rulesets and re-checked at runtime by
-# identity.assert_protected_ref.
+# identity.assert_allowed_default_ref.
 #
 # Deliberately absent: pull_request_target (runs the base definition with
 # secrets against a head the PR controls), issue_comment and workflow_run (the
@@ -42,6 +42,7 @@ on:
       - main
     paths:
       - 'scripts/trustedlane/**'
+      - 'tests/test_trusted_lane_bootstrap.py'
       - '.github/workflows/d0-trusted-lane-containment.yml'
 
 permissions:
@@ -64,7 +65,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           # No `ref:` — the tree is exactly the ref this run was dispatched
-          # from, which assert_protected_ref then re-verifies. A `ref:` taken
+          # from, which assert_allowed_default_ref then re-verifies. A `ref:` taken
           # from an input would let the dispatcher swap the code.
           persist-credentials: false
           fetch-depth: 0
@@ -87,7 +88,7 @@ jobs:
           sys.path.insert(0, "scripts")
           from trustedlane import identity, phases
           identity.assert_repository_numeric_id(int(os.environ["EVENT_REPOSITORY_ID"]))
-          identity.assert_protected_ref(os.environ["OBSERVED_REF"])
+          identity.assert_allowed_default_ref(os.environ["OBSERVED_REF"])
           print(json.dumps({
               "repository_id_verified": True,
               "ref": os.environ["OBSERVED_REF"],

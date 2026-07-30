@@ -52,6 +52,7 @@ from trustedlane import (  # noqa: E402
     livepolicy,
     phases,
     prerequisites,
+    statusnames,
     workflowfile,
     workflowpolicy,
 )
@@ -228,7 +229,7 @@ def test_malformed_commit_sha_refuses(value):
 
 
 def test_only_a_protected_ref_may_run_with_a_credential():
-    assert identity.assert_protected_ref("refs/heads/main") == "refs/heads/main"
+    assert identity.assert_allowed_default_ref("refs/heads/main") == "refs/heads/main"
 
 
 @pytest.mark.parametrize("ref", [
@@ -240,8 +241,8 @@ def test_only_a_protected_ref_may_run_with_a_credential():
     "main",
 ])
 def test_unprotected_ref_refuses(ref):
-    with _refusal("ref_not_protected"):
-        identity.assert_protected_ref(ref)
+    with _refusal("ref_not_allowed_default"):
+        identity.assert_allowed_default_ref(ref)
 
 
 def test_protected_environment_accepts_a_protected_declaration():
@@ -387,7 +388,7 @@ def test_d0_asserts_candidate_isolation_at_runtime_not_just_in_a_test():
       every time it runs — externally verified, not asserted by the thing under
       test. This test pins that step so it cannot be quietly removed.
     * D0 cannot execute from a candidate branch at all: its triggers are
-      `workflow_dispatch` and a `push` filter on main, and `assert_protected_ref`
+      `workflow_dispatch` and a `push` filter on main, and `assert_allowed_default_ref`
       refuses any other ref. So the tree where a candidate package legitimately
       lives is a tree D0 will not run in.
 
@@ -404,8 +405,8 @@ def test_d0_asserts_candidate_isolation_at_runtime_not_just_in_a_test():
     assert sorted(block) == ["push", "workflow_dispatch"]
     assert block["push"]["branches"] == ["main"]
     # And the ref gate that makes a workflow_dispatch from elsewhere refuse.
-    with _refusal("ref_not_protected"):
-        identity.assert_protected_ref("refs/heads/fix/verifier-intra-file-review-plan")
+    with _refusal("ref_not_allowed_default"):
+        identity.assert_allowed_default_ref("refs/heads/fix/verifier-intra-file-review-plan")
 
 
 def test_a_candidate_branch_does_not_make_the_lane_suite_fail(tmp_path,
@@ -549,6 +550,24 @@ def _document(name=D0):
     return workflowfile.load_workflow(name, root=str(ROOT))["document"]
 
 
+#: Job ids per phase, derived from the policy rather than hardcoded. The Exchange-3
+#: rename (d1-trusted-count -> trusted-verifier-count, and the per-phase containment
+#: gates) broke fourteen tests that addressed jobs by a literal name — which is
+#: itself the signal that they were coupled to a string instead of to a role.
+CREDENTIAL_JOB = {D1: "trusted-verifier-count", D2: "trusted-cross-vendor-review"}
+
+
+def _containment_job(document_or_name):
+    """The containment job THIS document gates behind, resolved from the document.
+
+    Takes the document, not the phase name: a test that builds a D1 document and
+    then asks for D0's containment job is asking the wrong question, and the
+    first version of this helper let it."""
+    document = (_document(document_or_name)
+                if isinstance(document_or_name, str) else document_or_name)
+    return workflowfile.containment_job_for(document)
+
+
 def test_all_three_phase_workflows_satisfy_their_own_policy():
     record = workflowfile.validate_all_workflows(root=str(ROOT))
     assert sorted(record["workflows"]) == sorted([D0, D1, D2])
@@ -589,20 +608,21 @@ def test_the_d0_workflow_names_no_secret_and_declares_no_environment():
 def test_each_credential_phase_is_environment_and_containment_gated(name):
     record = workflowfile.validate_workflow_file(name, root=str(ROOT))
     assert record["credential_bearing_jobs"], name
-    assert record["containment_job"] == workflowfile.CONTAINMENT_JOB
+    assert record["containment_job"] == workflowfile.CONTAINMENT_JOBS[
+        {D1: "D1", D2: "D2"}[name]]
     assert record["environment_jobs"] == record["credential_bearing_jobs"]
 
 
 def test_d1_and_d2_use_separate_environments():
     """Approving counting must not, by environment reuse, approve generating."""
-    d1 = _document(D1)["jobs"]["d1-trusted-count"]["environment"]
-    d2 = _document(D2)["jobs"]["d2-trusted-generation"]["environment"]
+    d1 = _document(D1)["jobs"][CREDENTIAL_JOB[D1]]["environment"]
+    d2 = _document(D2)["jobs"][CREDENTIAL_JOB[D2]]["environment"]
     assert d1 != d2, (d1, d2)
 
 
 def test_giving_the_d0_workflow_a_secret_reference_reddens():
     document = _document(D0)
-    document["jobs"]["d0-containment"]["steps"][0]["env"] = {
+    document["jobs"][_containment_job(D0)]["steps"][0]["env"] = {
         "SNEAK": "${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}"}
     with _refusal("phase_must_not_name_a_secret"):
         workflowfile.assert_phase_secret_policy(
@@ -611,7 +631,7 @@ def test_giving_the_d0_workflow_a_secret_reference_reddens():
 
 def test_giving_the_d0_workflow_an_environment_reddens():
     document = _document(D0)
-    document["jobs"]["d0-containment"]["environment"] = "trusted-verifier"
+    document["jobs"][_containment_job(D0)]["environment"] = "trusted-verifier"
     with _refusal("phase_must_not_declare_an_environment"):
         workflowfile.assert_phase_secret_policy(
             document, name=D0, policy=workflowfile.TRUSTED_WORKFLOWS[D0])
@@ -710,7 +730,7 @@ def test_d1_accepts_the_candidate_range_only_as_two_shas():
 
 def test_a_checkout_of_another_repository_reddens():
     document = _document(D1)
-    document["jobs"]["d1-trusted-count"]["steps"][0]["with"]["repository"] = \
+    document["jobs"][CREDENTIAL_JOB[D1]]["steps"][0]["with"]["repository"] = \
         "attacker/fork"
     with _refusal("checkout_selects_repository"):
         workflowfile.assert_no_source_selection(document, name=D1)
@@ -724,7 +744,7 @@ def test_a_checkout_of_another_repository_reddens():
 ])
 def test_a_step_that_executes_candidate_content_reddens(script):
     document = _document(D0)
-    document["jobs"]["d0-containment"]["steps"].append({"run": script})
+    document["jobs"][_containment_job(D0)]["steps"].append({"run": script})
     with _refusal("workflow_executes_candidate_content"):
         workflowfile.assert_no_candidate_execution(document, name=D0)
 
@@ -770,9 +790,8 @@ def test_an_unset_workflow_permissions_block_reddens():
         workflowfile.assert_permissions_read_only(document)
 
 
-@pytest.mark.parametrize("name,job", [(D0, "d0-containment"),
-                                      (D1, "d1-trusted-count"),
-                                      (D2, "d2-trusted-generation")])
+@pytest.mark.parametrize("name,job", [(D1, "trusted-verifier-count"),
+                                      (D2, "trusted-cross-vendor-review")])
 def test_a_checkout_that_persists_credentials_reddens(name, job):
     document = _document(name)
     step = document["jobs"][job]["steps"][0]
@@ -796,22 +815,22 @@ def test_a_caller_controlled_checkout_ref_reddens(expression):
     the prefix list this test was written against, which the review defeated
     with `env.` and `steps.`."""
     document = _document(D1)
-    document["jobs"]["d1-trusted-count"]["steps"][0]["with"]["ref"] = expression
+    document["jobs"][CREDENTIAL_JOB[D1]]["steps"][0]["with"]["ref"] = expression
     with _refusal("checkout_ref_is_an_expression"):
         workflowfile.assert_checkouts_are_safe(document)
 
 
 def test_giving_the_containment_job_an_environment_reddens():
     document = _document(D1)
-    document["jobs"]["d0-containment"]["environment"] = "trusted-verifier"
+    document["jobs"][_containment_job(document)]["environment"] = "trusted-verifier"
     with _refusal("containment_job_has_environment"):
         workflowfile.assert_secret_containment(document)
 
 
 def test_a_secret_reference_in_the_containment_job_reddens():
     document = _document(D1)
-    document["jobs"]["d0-containment"]["steps"][0].setdefault("env", {})
-    document["jobs"]["d0-containment"]["steps"][0]["env"]["SNEAK"] = \
+    document["jobs"][_containment_job(document)]["steps"][0].setdefault("env", {})
+    document["jobs"][_containment_job(document)]["steps"][0]["env"]["SNEAK"] = \
         "${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}"
     with _refusal("containment_job_references_secret"):
         workflowfile.assert_secret_containment(document)
@@ -819,21 +838,21 @@ def test_a_secret_reference_in_the_containment_job_reddens():
 
 def test_a_credential_job_without_an_environment_reddens():
     document = _document(D1)
-    document["jobs"]["d1-trusted-count"].pop("environment")
+    document["jobs"][CREDENTIAL_JOB[D1]].pop("environment")
     with _refusal("secret_job_not_environment_gated"):
         workflowfile.assert_secret_containment(document)
 
 
 def test_a_credential_job_not_gated_behind_containment_reddens():
     document = _document(D1)
-    document["jobs"]["d1-trusted-count"].pop("needs")
+    document["jobs"][CREDENTIAL_JOB[D1]].pop("needs")
     with _refusal("secret_job_not_gated_behind_containment"):
         workflowfile.assert_secret_containment(document)
 
 
 def test_a_needs_cycle_reddens_rather_than_recursing_forever():
     document = _document(D1)
-    document["jobs"]["d1-trusted-count"]["needs"] = ["d1-trusted-count"]
+    document["jobs"][CREDENTIAL_JOB[D1]]["needs"] = [CREDENTIAL_JOB[D1]]
     with _refusal("workflow_needs_cycle"):
         workflowfile.assert_secret_containment(document)
 
@@ -1470,9 +1489,9 @@ def test_a_protected_ref_name_is_not_a_protection_check():
 
     Every document in this programme calls `main` "protected/default main". At
     the time this was written the GitHub API reported it
-    `"protected": false`. `assert_protected_ref` passes on the NAME and would
+    `"protected": false`. `assert_allowed_default_ref` passes on the NAME and would
     have said nothing."""
-    assert identity.assert_protected_ref("refs/heads/main") == "refs/heads/main"
+    assert identity.assert_allowed_default_ref("refs/heads/main") == "refs/heads/main"
     with _refusal("branch_not_protected"):
         identity.assert_branch_protection_observed(
             {"name": "main", "protected": False})
@@ -1610,8 +1629,8 @@ SECRET_SYNTAXES = [
 @pytest.mark.parametrize("expression", SECRET_SYNTAXES)
 def test_review_d0_may_not_name_a_secret_in_any_syntax(expression):
     document = _document(D0)
-    document["jobs"]["d0-containment"]["steps"][0].setdefault("env", {})
-    document["jobs"]["d0-containment"]["steps"][0]["env"]["LEAK"] = expression
+    document["jobs"][_containment_job(D0)]["steps"][0].setdefault("env", {})
+    document["jobs"][_containment_job(D0)]["steps"][0]["env"]["LEAK"] = expression
     with _refusal("phase_must_not_name_a_secret"):
         workflowfile.assert_phase_secret_policy(
             document, name=D0, policy=workflowfile.TRUSTED_WORKFLOWS[D0])
@@ -1700,14 +1719,14 @@ def test_review_a_neutralised_containment_gate_is_refused(condition):
     The job still declares the dependency, so `gated_on` was satisfied — and
     then ran anyway when containment failed."""
     document = _document(D1)
-    document["jobs"]["d1-trusted-count"]["if"] = condition
+    document["jobs"][CREDENTIAL_JOB[D1]]["if"] = condition
     with _refusal("containment_gate_neutralised"):
         workflowfile.assert_gating_is_not_neutralised(document, name=D1)
 
 
 def test_review_an_ordinary_condition_on_a_credential_job_is_permitted():
     document = _document(D1)
-    document["jobs"]["d1-trusted-count"]["if"] = "inputs.phase == 'D1'"
+    document["jobs"][CREDENTIAL_JOB[D1]]["if"] = "inputs.phase == 'D1'"
     assert workflowfile.assert_gating_is_not_neutralised(
         document, name=D1)["neutralised_gates"] == 0
 
@@ -1724,7 +1743,7 @@ def test_review_any_expression_in_a_checkout_ref_is_refused(expression):
     not on the list, and either can carry an input-derived value. There is no
     legitimate dynamic ref in this lane."""
     document = _document(D1)
-    document["jobs"]["d1-trusted-count"]["steps"][0]["with"]["ref"] = expression
+    document["jobs"][CREDENTIAL_JOB[D1]]["steps"][0]["with"]["ref"] = expression
     with _refusal("checkout_ref_is_an_expression"):
         workflowfile.assert_checkouts_are_safe(document)
 
@@ -1915,7 +1934,7 @@ def test_third_b_continue_on_error_on_a_containment_job_is_refused(mutate):
     holds no credential, which is precisely why it was invisible to the check,
     and precisely why its failure has to be fatal."""
     document = _document(D0)
-    mutate(document["jobs"]["d0-containment"])
+    mutate(document["jobs"][_containment_job(D0)])
     with _refusal("containment_gate_neutralised"):
         workflowfile.assert_gating_is_not_neutralised(document, name=D0)
 
@@ -1950,11 +1969,11 @@ def test_third_c_a_job_scoped_secret_env_is_reported_not_refused():
     """Job-scoped is a different question — reported so the phase policy and
     the containment gate can rule on it, not refused here."""
     document = _document(D1)
-    job = document["jobs"]["d1-trusted-count"]
+    job = document["jobs"][CREDENTIAL_JOB[D1]]
     job["env"] = {"K": "${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}"}
     record = workflowfile.assert_no_workflow_level_secret(document, name=D1)
     assert record["workflow_level_secrets"] == 0
-    assert record["job_level_secret_env"] == ["d1-trusted-count"]
+    assert record["job_level_secret_env"] == [CREDENTIAL_JOB[D1]]
 
 
 def test_third_c_the_real_workflows_declare_no_workflow_level_secret():
@@ -2450,3 +2469,222 @@ def test_d0_would_pass_the_live_directory_policy_once_deployed(tmp_path):
 
     # And the templates stay inert — deploying D0 must not activate D1 or D2.
     workflowfile.assert_no_template_is_live(root=str(tmp_path))
+
+
+# --------------------------------------------------------------------------
+# EX2-F02 — check-status naming. Which green means what.
+#
+# The repository shipped a job called `cross-vendor` whose step is named
+# "Cross-vendor review panel (inactive — no provider credential here)". It
+# reports success in seconds having cast zero votes, because V-TRUST removed its
+# provider secrets. Marking `cross-vendor` a required status — a reasonable
+# thing to do given the name, and something the programme's own older documents
+# recommend — would have made the required cross-vendor review permanently
+# satisfied by a job that reviews nothing.
+#
+# A branch-protection rule requires a status by NAME. The name is the whole
+# interface between "this ran" and "this is authoritative".
+# --------------------------------------------------------------------------
+
+
+def test_f02_inactive_and_trusted_status_names_can_never_be_equal():
+    """The regression the contract asks for, stated as an assertion.
+
+    Separate from general disjointness because this is the pair that is never
+    harmless: an inactive no-vote job satisfying a trusted review requirement is
+    the fail-open the rename exists to prevent."""
+    record = statusnames.assert_inactive_and_trusted_never_collide()
+    assert record["collisions"] == 0
+    assert set(record["inactive"]).isdisjoint(record["trusted"])
+
+
+def test_f02_a_collision_is_actually_refused(monkeypatch):
+    """The check above passes on today's constants; this proves it would fail
+    on tomorrow's bad ones, which is the only reason to keep it."""
+    monkeypatch.setattr(statusnames, "INACTIVE_STATUSES",
+                        ("trusted-verifier-count",))
+    with _refusal("inactive_status_is_also_trusted"):
+        statusnames.assert_inactive_and_trusted_never_collide()
+
+
+def test_f02_case_only_differences_are_also_refused(monkeypatch):
+    """`Trusted-Verifier-Count` is a different string and the same intent."""
+    monkeypatch.setattr(statusnames, "INACTIVE_STATUSES",
+                        ("Trusted-Verifier-Count",))
+    with _refusal("inactive_status_matches_trusted_case_insensitively"):
+        statusnames.assert_inactive_and_trusted_never_collide()
+
+
+def test_f02_every_status_belongs_to_exactly_one_class(monkeypatch):
+    assert statusnames.assert_classes_are_disjoint()["statuses"] == len(
+        statusnames.all_statuses())
+    monkeypatch.setitem(statusnames.STATUS_CLASSES, "ORDINARY",
+                        ("test (3.12)", "independent-verify-inactive"))
+    with _refusal("status_name_in_two_classes"):
+        statusnames.assert_classes_are_disjoint()
+
+
+def test_f02_requiring_the_inactive_status_is_refused():
+    """The exact operator mistake this whole section exists to stop."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        statusnames.assert_no_inactive_status_is_required(
+            ["test (3.12)", "independent-verify-inactive"])
+    assert "inactive_status_is_required" in excinfo.value.reason
+    # And the refusal names what to require instead, rather than only objecting.
+    assert "trusted-verifier-count" in excinfo.value.reason
+
+
+def test_f02_requiring_a_dispatch_only_diagnostic_is_refused():
+    """Different failure, different message: an inactive check passes when it
+    should not; a dispatch-only diagnostic never reports at all, so requiring it
+    leaves every PR pending forever."""
+    with _refusal("diagnostic_status_is_required"):
+        statusnames.assert_no_inactive_status_is_required(
+            ["test (3.12)", "probe"])
+
+
+def test_f02_the_old_name_is_no_longer_a_known_status():
+    """`cross-vendor` must not resolve to anything. If an operator has it
+    configured from before, the check refuses rather than silently accepting a
+    name nothing publishes any more."""
+    assert statusnames.class_of("cross-vendor") is None
+    with _refusal("required_status_not_in_registry"):
+        statusnames.assert_no_inactive_status_is_required(["cross-vendor"])
+
+
+def test_f02_an_unobserved_required_list_is_refused_not_assumed_clean():
+    with _refusal("required_status_list_not_observed"):
+        statusnames.assert_no_inactive_status_is_required(None)
+
+
+def test_f02_the_live_inactive_workflow_publishes_the_inactive_name():
+    """End to end on the real file: the job GitHub will publish is the renamed
+    one, and it is classified INACTIVE."""
+    document = livepolicy._read(
+        os.path.join(str(ROOT), workflowfile.LIVE_WORKFLOW_DIR,
+                     "independent-verify.yml"))
+    published = statusnames.check_names(document)
+    assert published == ["independent-verify-inactive"]
+    assert statusnames.class_of(published[0]) == "INACTIVE"
+    # and it still holds no credential
+    assert livepolicy.assert_no_secret_in_pr_controlled_workflow(
+        document, name="independent-verify.yml")["secrets_reachable"] == 0
+
+
+def test_f02_matrix_jobs_publish_the_name_an_operator_must_type():
+    """A matrix job does not publish its job id. `jobs.test` with
+    `matrix.python-version: ["3.12"]` publishes `test (3.12)`.
+
+    Found by this policy refusing `test` as unregistered on its first run: the
+    job id was a proxy for the published name, and for matrix jobs the two
+    differ. An operator who requires `test` requires something that never
+    reports."""
+    document = livepolicy._read(
+        os.path.join(str(ROOT), workflowfile.LIVE_WORKFLOW_DIR, "ci.yml"))
+    assert statusnames.check_names(document) == ["test (3.12)", "image"]
+
+
+def test_f02_an_unresolvable_matrix_is_refused_rather_than_guessed():
+    """`include`/`exclude` change the published names in ways that depend on
+    expansion order. A wrong name here is a required status that matches
+    nothing, so it is refused instead of approximated."""
+    document = {"jobs": {"t": {"strategy": {"matrix": {
+        "python-version": ["3.12"], "include": [{"python-version": "3.13"}]}}}}}
+    with _refusal("matrix_include_exclude_unresolved"):
+        statusnames.check_names(document)
+
+
+def test_f02_a_job_renaming_itself_into_a_reserved_name_is_visible():
+    """GitHub names a check after the job's `name:` when present, so reading
+    only the id would miss a job that renames itself into a trusted string."""
+    document = {"jobs": {"harmless-looking": {
+        "name": "trusted-cross-vendor-review", "steps": []}}}
+    assert statusnames.check_names(document) == ["trusted-cross-vendor-review"]
+
+
+def test_f02_two_workflows_may_not_publish_the_same_check_name():
+    """A required status is one string. D1 and D2 used to embed a job called
+    `d0-containment` — the same name the deployed D0 workflow publishes — so an
+    operator requiring `d0-containment` would get whichever workflow GitHub
+    matched, possibly the one that did not run."""
+    with _refusal("duplicate_check_name_across_workflows"):
+        statusnames.assert_no_duplicate_check_names({
+            "a.yml": {"jobs": {"d0-containment": {}}},
+            "b.yml": {"jobs": {"d0-containment": {}}},
+        })
+
+
+def test_f02_the_real_workflows_publish_nine_distinct_registered_names():
+    """Live directory plus both templates: every published name classified, no
+    two workflows publishing the same one."""
+    record = statusnames.validate_status_policy(root=str(ROOT))
+    assert record["check_names"] == 9
+    owners = record["owners"]
+    assert owners["independent-verify-inactive"] == "independent-verify.yml"
+    assert owners["d0-containment"] == "d0-trusted-lane-containment.yml"
+    assert owners["trusted-verifier-count"] == workflowfile.D1_FILE
+    assert owners["trusted-cross-vendor-review"] == workflowfile.D2_FILE
+    assert "cross-vendor" not in owners
+
+
+def test_f02_the_operator_instructions_are_literals_from_the_policy():
+    """A description ("require the cross-vendor review") is what produced this
+    defect. The instruction is generated from the same constants the code
+    asserts on, so it cannot drift from the policy."""
+    ins = statusnames.branch_protection_instructions()
+    assert ins["never_require"] == list(statusnames.INACTIVE_STATUSES)
+    assert statusnames.TRUSTED_STATUSES[0] in ins["require_after_d1"]
+    assert statusnames.TRUSTED_STATUSES[1] in ins["require_after_d2"]
+    # Nothing non-requirable leaks into a require_* list.
+    requirable = {n for c in statusnames.REQUIRABLE_CLASSES
+                  for n in statusnames.STATUS_CLASSES[c]}
+    for key in ("require_now", "require_after_d1", "require_after_d2"):
+        assert set(ins[key]) <= requirable, key
+
+
+def test_f02_no_class_is_silently_left_out_of_the_requirable_split():
+    """NEVER_REQUIRABLE_CLASSES is derived, so adding a class cannot forget it
+    — the failure mode being a new inactive-like class that nothing refuses."""
+    assert (set(statusnames.REQUIRABLE_CLASSES)
+            | set(statusnames.NEVER_REQUIRABLE_CLASSES)) == set(
+                statusnames.STATUS_CLASSES)
+    assert set(statusnames.REQUIRABLE_CLASSES).isdisjoint(
+        statusnames.NEVER_REQUIRABLE_CLASSES)
+
+
+# ---- EX2-F03: a ref name is not a protection --------------------------------
+
+
+def test_f03_the_ref_check_is_named_for_what_it_actually_proves():
+    """It compares `github.ref` to `refs/heads/main`. That is allowed-ref
+    identity, not branch protection — and the operator packet separately records
+    main as `"protected": false`. The name now says which one it is."""
+    assert hasattr(identity, "assert_allowed_default_ref")
+    assert not hasattr(identity, "assert_protected_ref")
+    assert identity.assert_allowed_default_ref("refs/heads/main") == \
+        "refs/heads/main"
+    with _refusal("ref_not_allowed_default"):
+        identity.assert_allowed_default_ref("refs/heads/attacker")
+
+
+def test_f03_protection_remains_a_separate_api_observed_question():
+    """Renaming the weaker check must not have removed the stronger one."""
+    with _refusal("branch_protection_not_observed"):
+        identity.assert_branch_protection_observed(None)
+    with _refusal("branch_not_protected"):
+        identity.assert_branch_protection_observed(
+            {"name": "main", "protected": False})
+    assert identity.assert_branch_protection_observed(
+        {"name": "main", "protected": True})["protected"] is True
+
+
+def test_f04_the_d0_push_filter_covers_the_suite_it_runs():
+    """D0's step 8 runs tests/test_trusted_lane_bootstrap.py, so a change to
+    that file changes what D0 proves. The filter covered the lane source and the
+    workflow but not the suite — which is why PR #28 (a test-only change) did
+    not re-trigger D0 on main."""
+    block = _document(D0).get(True) or _document(D0).get("on")
+    paths = block["push"]["paths"]
+    assert "tests/test_trusted_lane_bootstrap.py" in paths
+    assert "scripts/trustedlane/**" in paths
+    assert f"{workflowfile.LIVE_WORKFLOW_DIR}/{D0}" in paths
