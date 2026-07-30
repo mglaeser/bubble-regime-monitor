@@ -36,6 +36,15 @@ GENERATED_PATH = "governance/mandate.md"
 MANIFEST_PATH = "governance/mandate/manifest.json"
 SOURCE_ROOT = "governance/mandate/"
 
+# MC4 PASS E-COMPLETE (family B4): git paths are arbitrary BYTES, and
+# `decode("utf-8", "replace")` maps many distinct byte strings onto one Python
+# string. Comparing a decoded path against this constant compares things that
+# are not the paths. It happens to be safe against the pinned ASCII value —
+# U+FFFD equals no ASCII character — but "safe because the constant contains no
+# non-ASCII" is a property of the constant, not of the check, and it evaporates
+# the moment the governed path is renamed. So the comparison is done in bytes.
+GENERATED_PATH_BYTES = GENERATED_PATH.encode("utf-8")
+
 # MC2-F14: governance text is not executable. Every participating blob must
 # be a plain regular file; 100755 is a mode change with its own semantics.
 PINNED_MODE = "100644"
@@ -423,7 +432,7 @@ def eligible_generated_atoms(change, atoms, endpoints, contents=None):
         raise _err(category="ineligible_change_status", status=status)
     if change.orig_path is not None:
         raise _err(category="generated_path_moved")
-    if change.path.decode("utf-8", "replace") != GENERATED_PATH:
+    if change.path != GENERATED_PATH_BYTES:
         raise _err(category="generated_path_mismatch")
     if change.new_mode != PINNED_MODE:
         raise _err(category="generated_new_mode_not_pinned",
@@ -434,7 +443,7 @@ def eligible_generated_atoms(change, atoms, endpoints, contents=None):
     if not content:
         raise _err(category="generated_change_without_content_atoms")
     for atom in atoms:
-        if atom.path.decode("utf-8", "replace") != GENERATED_PATH:
+        if atom.path != GENERATED_PATH_BYTES:
             raise _err(category="atom_outside_generated_path")
 
     if status == "M":
