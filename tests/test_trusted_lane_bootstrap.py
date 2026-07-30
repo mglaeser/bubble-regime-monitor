@@ -35,7 +35,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from trustedlane import (  # noqa: E402
+    CANONICAL_REMOTE_URL,
+    CANONICAL_REPOSITORY,
     REPOSITORY_NUMERIC_ID,
+    actionpolicy,
     adapter,
     candidatefetch,
     closure,
@@ -479,49 +482,215 @@ def test_d0_job_with_no_secret_is_accepted():
     assert record["secrets_declared"] == 0
 
 
-def test_the_deployed_workflow_file_satisfies_every_policy():
-    record = workflowfile.validate_workflow_file(root=str(ROOT))
-    assert record["triggers"] == ["workflow_dispatch"]
-    assert record["dispatch_inputs"] == ["operator_authorization_sha256",
-                                         "phase"]
-    assert record["credential_bearing_jobs"] == ["d1-trusted-count",
-                                                 "d2-trusted-generation"]
-    assert record["literal_credential_assignments"] == 0
-    assert record["live_location"] is False
+D0 = workflowfile.D0_FILE
+D1 = workflowfile.D1_FILE
+D2 = workflowfile.D2_FILE
 
 
-def test_the_workflow_interface_is_not_installed_in_dot_github_workflows():
-    """A workflow file in `.github/workflows/` on this branch would be live."""
-    live = ROOT / ".github" / "workflows" / "trusted-verifier-lane.yml"
-    assert not live.exists()
+def _document(name=D0):
+    return workflowfile.load_workflow(name, root=str(ROOT))["document"]
 
 
-def _workflow_document():
-    return workflowfile.load_workflow(root=str(ROOT))["document"]
+def test_all_three_phase_workflows_satisfy_their_own_policy():
+    record = workflowfile.validate_all_workflows(root=str(ROOT))
+    assert sorted(record["workflows"]) == sorted([D0, D1, D2])
+    assert record["undeployable_phases_live"] == 0
+    for name, one in record["workflows"].items():
+        assert one["literal_credential_assignments"] == 0, name
+
+
+def test_the_phases_are_three_files_not_one_file_with_a_phase_input():
+    """One file with a `phase:` input is one edit from activating D2.
+
+    The split is the containment, so it is asserted rather than assumed: D0 is
+    a deployable `.yml`, D1 and D2 are not deployable at all."""
+    assert workflowfile.TRUSTED_WORKFLOWS[D0]["deployable_now"] is True
+    assert workflowfile.TRUSTED_WORKFLOWS[D1]["deployable_now"] is False
+    assert workflowfile.TRUSTED_WORKFLOWS[D2]["deployable_now"] is False
+    assert D1.endswith(".yml.template") and D2.endswith(".yml.template")
+    # And the D0 file offers no phase selector at all.
+    block = _document(D0).get(True) or _document(D0).get("on")
+    dispatch = block.get("workflow_dispatch") or {}
+    assert not (dispatch or {}).get("inputs"), dispatch
+
+
+def test_the_d0_workflow_names_no_secret_and_declares_no_environment():
+    """The load-bearing difference between D0 and the rest.
+
+    Not "uses no secret" — NAMES none. A workflow with no `secrets.` reference
+    has nothing for a later edit to widen."""
+    record = workflowfile.validate_workflow_file(D0, root=str(ROOT))
+    assert record["secret_references"] == 0
+    assert record["environment_jobs"] == []
+    raw = (ROOT / workflowfile.WORKFLOW_DIR / D0).read_text(encoding="utf-8")
+    for line in raw.splitlines():
+        assert "secrets." not in line or line.strip().startswith("#"), line
+
+
+@pytest.mark.parametrize("name", [D1, D2])
+def test_each_credential_phase_is_environment_and_containment_gated(name):
+    record = workflowfile.validate_workflow_file(name, root=str(ROOT))
+    assert record["credential_bearing_jobs"], name
+    assert record["containment_job"] == workflowfile.CONTAINMENT_JOB
+    assert record["environment_jobs"] == record["credential_bearing_jobs"]
+
+
+def test_d1_and_d2_use_separate_environments():
+    """Approving counting must not, by environment reuse, approve generating."""
+    d1 = _document(D1)["jobs"]["d1-trusted-count"]["environment"]
+    d2 = _document(D2)["jobs"]["d2-trusted-generation"]["environment"]
+    assert d1 != d2, (d1, d2)
+
+
+def test_giving_the_d0_workflow_a_secret_reference_reddens():
+    document = _document(D0)
+    document["jobs"]["d0-containment"]["steps"][0]["env"] = {
+        "SNEAK": "${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}"}
+    with _refusal("phase_must_not_name_a_secret"):
+        workflowfile.assert_phase_secret_policy(
+            document, name=D0, policy=workflowfile.TRUSTED_WORKFLOWS[D0])
+
+
+def test_giving_the_d0_workflow_an_environment_reddens():
+    document = _document(D0)
+    document["jobs"]["d0-containment"]["environment"] = "trusted-verifier"
+    with _refusal("phase_must_not_declare_an_environment"):
+        workflowfile.assert_phase_secret_policy(
+            document, name=D0, policy=workflowfile.TRUSTED_WORKFLOWS[D0])
+
+
+# ---- action pinning -------------------------------------------------------
+
+
+def test_every_action_in_every_phase_is_pinned_to_an_approved_commit():
+    for name in (D0, D1, D2):
+        pins = workflowfile.assert_actions_pinned(_document(name), name=name)
+        assert pins["pinned_actions"], name
+        for pin in pins["pinned_actions"]:
+            assert len(pin["sha"]) == 40
+            assert pin["release"].startswith("v")
+
+
+def test_the_pin_mapping_records_how_it_was_verified_and_what_it_does_not_prove():
+    record = actionpolicy.pin_record()
+    assert record["pins"]["actions/checkout"] == {
+        "11d5960a326750d5838078e36cf38b85af677262": "v4.4.0"}  # pragma: allowlist secret
+    assert record["pins"]["actions/setup-python"] == {
+        "a26af69be951a213d495a4c3e4e4022e16d87065": "v5.6.0"}  # pragma: allowlist secret
+    assert "ls-remote" in record["verification_method"]
+    assert "operator act" in record["honest_scope"]
+
+
+@pytest.mark.parametrize("uses", [
+    "actions/checkout@v4",
+    "actions/checkout@main",
+    "actions/checkout@v4.4.0",
+    "actions/setup-python@v5",
+])
+def test_a_moving_tag_is_refused(uses):
+    """A tag is whatever its owner points it at, including after review."""
+    with _refusal("action_not_pinned_to_sha"):
+        actionpolicy.assert_pinned(uses, where="probe")
+
+
+def test_an_unknown_action_is_refused_even_when_sha_pinned():
+    with _refusal("action_not_in_policy"):
+        actionpolicy.assert_pinned("someone/exfiltrate@" + "d" * 40,
+                                   where="probe")
+
+
+def test_a_known_action_at_an_unapproved_sha_is_refused():
+    with _refusal("action_sha_not_approved"):
+        actionpolicy.assert_pinned("actions/checkout@" + "e" * 40,
+                                   where="probe")
+
+
+@pytest.mark.parametrize("uses", ["./.github/actions/local",
+                                  "docker://alpine:latest"])
+def test_a_local_or_docker_action_is_refused(uses):
+    """A local composite could be added by the same change that references it."""
+    with _refusal("action_uses_not_a_pinned_repository"):
+        actionpolicy.assert_pinned(uses, where="probe")
+
+
+def test_an_unpinned_uses_without_an_at_sign_is_refused():
+    with _refusal("action_uses_unpinned"):
+        actionpolicy.assert_pinned("actions/checkout", where="probe")
+
+
+def test_the_pin_check_refuses_a_workflow_with_no_actions_at_all():
+    """Otherwise the check passes by covering nothing."""
+    with _refusal("workflow_uses_no_actions"):
+        workflowfile.assert_actions_pinned({"jobs": {"x": {"steps": []}}},
+                                           name="probe")
+
+
+# ---- the candidate source is not a parameter ------------------------------
+
+
+@pytest.mark.parametrize("field", workflowfile.SOURCE_SELECTING_INPUTS)
+def test_an_input_that_selects_the_candidate_source_reddens(field):
+    """A SHA is inert data. A repository name is a redirection — and it
+    silently invalidates the numeric-id check, which would then be verifying
+    whatever server the caller chose."""
+    document = _document(D1)
+    block = document.get(True) or document.get("on")
+    block["workflow_dispatch"]["inputs"][field] = {"type": "string"}
+    with _refusal("workflow_input_selects_source"):
+        workflowfile.assert_no_source_selection(document, name=D1)
+
+
+def test_d1_accepts_the_candidate_range_only_as_two_shas():
+    document = _document(D1)
+    block = document.get(True) or document.get("on")
+    inputs = sorted(block["workflow_dispatch"]["inputs"])
+    assert inputs == ["candidate_head_sha", "operator_authorization_sha256",
+                      "target_base_sha"]
+    assert workflowfile.assert_no_source_selection(
+        document, name=D1)["source_selection"] is False
+
+
+def test_a_checkout_of_another_repository_reddens():
+    document = _document(D1)
+    document["jobs"]["d1-trusted-count"]["steps"][0]["with"]["repository"] = \
+        "attacker/fork"
+    with _refusal("checkout_selects_repository"):
+        workflowfile.assert_no_source_selection(document, name=D1)
+
+
+@pytest.mark.parametrize("script", [
+    "python scripts/verifier/finalize.py",
+    "pip install -e .",
+    "python -m verifier.plan",
+    "bash candidate/build.sh",
+])
+def test_a_step_that_executes_candidate_content_reddens(script):
+    document = _document(D0)
+    document["jobs"]["d0-containment"]["steps"].append({"run": script})
+    with _refusal("workflow_executes_candidate_content"):
+        workflowfile.assert_no_candidate_execution(document, name=D0)
+
+
+# ---- shared structural rules ----------------------------------------------
 
 
 def test_yaml_folds_the_on_key_to_true_and_the_loader_handles_it():
     """If this ever changes, `assert_triggers` must not silently pass."""
-    document = _workflow_document()
+    document = _document(D0)
     assert ("on" in document) or (True in document)
     assert workflowfile.assert_triggers(document)["triggers"]
 
 
-def _mutated(**changes):
-    document = _workflow_document()
-    document.update(changes)
-    return document
-
-
-def test_a_reintroduced_pull_request_target_trigger_reddens():
-    block = dict(_workflow_document().get(True) or {})
+@pytest.mark.parametrize("name", [D0, D1, D2])
+def test_a_reintroduced_pull_request_target_trigger_reddens(name):
+    block = dict(_document(name).get(True) or {})
     block["pull_request_target"] = {"types": ["opened"]}
     with _refusal("forbidden_workflow_trigger"):
         workflowfile.assert_triggers({True: block})
 
 
 def test_a_reintroduced_ref_input_reddens():
-    block = dict(_workflow_document().get(True) or {})
+    block = dict(_document(D1).get(True) or {})
     dispatch = dict(block["workflow_dispatch"])
     dispatch["inputs"] = {**dispatch["inputs"], "ref": {"type": "string"}}
     with _refusal("workflow_input_selects_ref"):
@@ -530,21 +699,25 @@ def test_a_reintroduced_ref_input_reddens():
 
 
 def test_a_write_permission_reddens():
+    document = _document(D0)
+    document["permissions"] = {"contents": "write"}
     with _refusal("workflow_permissions_grant_write"):
-        workflowfile.assert_permissions_read_only(
-            _mutated(permissions={"contents": "write"}))
+        workflowfile.assert_permissions_read_only(document)
 
 
 def test_an_unset_workflow_permissions_block_reddens():
-    document = _workflow_document()
+    document = _document(D0)
     document.pop("permissions", None)
     with _refusal("workflow_permissions_unset"):
         workflowfile.assert_permissions_read_only(document)
 
 
-def test_a_checkout_that_persists_credentials_reddens():
-    document = _workflow_document()
-    step = document["jobs"]["d1-trusted-count"]["steps"][0]
+@pytest.mark.parametrize("name,job", [(D0, "d0-containment"),
+                                      (D1, "d1-trusted-count"),
+                                      (D2, "d2-trusted-generation")])
+def test_a_checkout_that_persists_credentials_reddens(name, job):
+    document = _document(name)
+    step = document["jobs"][job]["steps"][0]
     step["with"] = {k: v for k, v in step["with"].items()
                     if k != "persist-credentials"}
     with _refusal("checkout_persists_credentials"):
@@ -552,59 +725,53 @@ def test_a_checkout_that_persists_credentials_reddens():
 
 
 @pytest.mark.parametrize("expression", [
-    "${{ inputs.ref }}",
+    "${{ inputs.candidate_head_sha }}",
     "${{ github.event.pull_request.head.sha }}",
     "${{ github.head_ref }}",
     "${{ needs.d0-containment.outputs.head }}",
 ])
 def test_a_caller_controlled_checkout_ref_reddens(expression):
-    document = _workflow_document()
+    """Even the candidate SHA input: it is data for the FETCH, never a ref the
+    trusted engine checks itself out at."""
+    document = _document(D1)
     document["jobs"]["d1-trusted-count"]["steps"][0]["with"]["ref"] = expression
     with _refusal("checkout_ref_caller_controlled"):
         workflowfile.assert_checkouts_are_safe(document)
 
 
-def test_a_checkout_of_another_repository_reddens():
-    document = _workflow_document()
-    document["jobs"]["d1-trusted-count"]["steps"][0]["with"]["repository"] = \
-        "attacker/fork"
-    with _refusal("checkout_selects_repository"):
-        workflowfile.assert_checkouts_are_safe(document)
-
-
 def test_giving_the_containment_job_an_environment_reddens():
-    """`environment:` is precisely what makes an environment secret reachable."""
-    document = _workflow_document()
+    document = _document(D1)
     document["jobs"]["d0-containment"]["environment"] = "trusted-verifier"
     with _refusal("containment_job_has_environment"):
         workflowfile.assert_secret_containment(document)
 
 
 def test_a_secret_reference_in_the_containment_job_reddens():
-    document = _workflow_document()
-    document["jobs"]["d0-containment"]["steps"][1]["env"]["SNEAK"] = \
+    document = _document(D1)
+    document["jobs"]["d0-containment"]["steps"][0].setdefault("env", {})
+    document["jobs"]["d0-containment"]["steps"][0]["env"]["SNEAK"] = \
         "${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}"
     with _refusal("containment_job_references_secret"):
         workflowfile.assert_secret_containment(document)
 
 
 def test_a_credential_job_without_an_environment_reddens():
-    document = _workflow_document()
+    document = _document(D1)
     document["jobs"]["d1-trusted-count"].pop("environment")
     with _refusal("secret_job_not_environment_gated"):
         workflowfile.assert_secret_containment(document)
 
 
 def test_a_credential_job_not_gated_behind_containment_reddens():
-    document = _workflow_document()
+    document = _document(D1)
     document["jobs"]["d1-trusted-count"].pop("needs")
     with _refusal("secret_job_not_gated_behind_containment"):
         workflowfile.assert_secret_containment(document)
 
 
 def test_a_needs_cycle_reddens_rather_than_recursing_forever():
-    document = _workflow_document()
-    document["jobs"]["d1-trusted-count"]["needs"] = ["d2-trusted-generation"]
+    document = _document(D1)
+    document["jobs"]["d1-trusted-count"]["needs"] = ["d1-trusted-count"]
     with _refusal("workflow_needs_cycle"):
         workflowfile.assert_secret_containment(document)
 
@@ -625,48 +792,65 @@ def test_a_secret_reference_is_not_a_literal_credential():
         "literal_credential_assignments"] == 0
 
 
-def test_a_live_workflow_location_refuses(tmp_path):
+# ---- deployment containment ------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [D1, D2])
+def test_renaming_a_template_into_the_live_directory_reddens(tmp_path, name):
+    """The one step that must stay deliberate: `.yml.template` -> `.yml`."""
     live = tmp_path / ".github" / "workflows"
     live.mkdir(parents=True)
-    (live / "trusted-verifier-lane.yml").write_text("name: x\n",
-                                                    encoding="utf-8")
-    with _refusal("trusted_lane_workflow_is_live"):
-        workflowfile.load_workflow(root=str(tmp_path))
+    (live / name[:-len(".template")]).write_text("name: x\n", encoding="utf-8")
+    with _refusal("undeployable_phase_is_live"):
+        workflowfile.assert_no_template_is_live(root=str(tmp_path))
+
+
+def test_d0_in_the_live_directory_is_permitted():
+    """D0 is the deployment target, so this must NOT be a blanket ban."""
+    assert workflowfile.assert_no_template_is_live(
+        root=str(ROOT))["undeployable_phases_live"] == 0
+
+
+def test_d1_and_d2_are_absent_from_the_live_directory_right_now():
+    live = ROOT / ".github" / "workflows"
+    for name in (D1, D2):
+        assert not (live / name[:-len(".template")]).exists()
+
+
+def test_an_unknown_workflow_name_refuses():
+    with _refusal("unknown_trusted_workflow"):
+        workflowfile.load_workflow("d3-world-domination.yml", root=str(ROOT))
 
 
 def test_a_missing_workflow_file_refuses(tmp_path):
     with _refusal("trusted_lane_workflow_missing"):
-        workflowfile.load_workflow(root=str(tmp_path))
+        workflowfile.load_workflow(D0, root=str(tmp_path))
 
 
 def test_an_unparseable_workflow_file_refuses(tmp_path):
-    target = tmp_path / workflowfile.WORKFLOW_PATH
+    target = tmp_path / workflowfile.WORKFLOW_DIR / D0
     target.parent.mkdir(parents=True)
     target.write_text("jobs: [unclosed\n", encoding="utf-8")
     with _refusal("trusted_lane_workflow_unparseable"):
-        workflowfile.load_workflow(root=str(tmp_path))
+        workflowfile.load_workflow(D0, root=str(tmp_path))
 
 
 def test_a_non_mapping_workflow_file_refuses(tmp_path):
-    target = tmp_path / workflowfile.WORKFLOW_PATH
+    target = tmp_path / workflowfile.WORKFLOW_DIR / D0
     target.parent.mkdir(parents=True)
     target.write_text("- just\n- a\n- list\n", encoding="utf-8")
     with _refusal("trusted_lane_workflow_not_mapping"):
-        workflowfile.load_workflow(root=str(tmp_path))
+        workflowfile.load_workflow(D0, root=str(tmp_path))
 
 
-def test_the_workflow_never_names_a_secret_outside_a_credential_job():
-    """A whole-file scan, independent of the structural walk above."""
-    raw = (ROOT / workflowfile.WORKFLOW_PATH).read_text(encoding="utf-8")
-    document = _workflow_document()
-    credential_jobs = set(
-        workflowfile.assert_secret_containment(document)[
-            "credential_bearing_jobs"])
-    assert credential_jobs == {"d1-trusted-count", "d2-trusted-generation"}
-    # Every `secrets.` occurrence must be a `${{ secrets.NAME }}` reference.
-    for line in raw.splitlines():
-        if "secrets." in line and not line.strip().startswith("#"):
-            assert "${{ secrets." in line and "}}" in line, line
+def test_every_secrets_occurrence_anywhere_is_a_reference_not_a_value():
+    """A whole-file scan of all three, independent of the structural walk."""
+    for name in (D0, D1, D2):
+        raw = (ROOT / workflowfile.WORKFLOW_DIR / name).read_text(
+            encoding="utf-8")
+        for line in raw.splitlines():
+            if "secrets." in line and not line.strip().startswith("#"):
+                assert "${{ secrets." in line and "}}" in line, (name, line)
 
 
 # --------------------------------------------------------------------------
@@ -789,19 +973,41 @@ def test_a_shallow_clone_refuses(candidate_origin, tmp_path):
             target_base_sha=candidate_origin["head"])
 
 
-@pytest.mark.parametrize("remote_url", [
-    "git@github.com:owner/repo.git",
-    "ssh://git@github.com/owner/repo.git",
-    "file:///tmp/clone",
-    "/tmp/clone",
-    "http://example.invalid/x.git",
-    "HTTPS://example.invalid/x.git",
-    "",
-    None,
-])
-def test_fetch_candidate_refuses_a_non_https_remote(remote_url):
-    with _refusal("remote_url_not_https"):
-        candidatefetch.assert_remote_url(remote_url)
+@pytest.mark.parametrize("field", ["remote_url", "repository", "remote",
+                                   "origin"])
+def test_the_candidate_source_is_not_a_parameter(field, tmp_path):
+    """The old signature took `remote_url=`. That was the hole.
+
+    It was only ever going to be this repository — right up until something
+    upstream computed it. Then whoever controls that computation controls whose
+    commits get reviewed, and the numeric-id check downstream is verifying the
+    id of the attacker's server. Removing the parameter makes the id check
+    compare two things the caller could not both have chosen.
+
+    Refused loudly rather than ignored: a caller still passing it believes it
+    is choosing the source, and dropping the argument on the floor would leave
+    that belief intact and the call site unaudited."""
+    with _refusal("candidate_source_is_not_a_parameter"):
+        candidatefetch.fetch_candidate(
+            destination=str(tmp_path / "c"), head_sha=SHA_B,
+            target_base_sha=SHA_A, **{field: "https://evil.invalid/x.git"})
+
+
+def test_an_unknown_fetch_argument_is_refused(tmp_path):
+    with _refusal("unknown_fetch_argument"):
+        candidatefetch.fetch_candidate(
+            destination=str(tmp_path / "c"), head_sha=SHA_B,
+            target_base_sha=SHA_A, depth=1)
+
+
+def test_the_canonical_remote_is_https_and_fixed_in_policy():
+    url = candidatefetch.canonical_remote_url()
+    assert url.startswith("https://")
+    assert url == CANONICAL_REMOTE_URL
+    assert CANONICAL_REPOSITORY == "mglaeser/bubble-regime-monitor"
+    # ssh/file/bare-path can never be reached: there is no input to reach them
+    # with, so the check is that the constant itself is https.
+    assert "@" not in url and not url.startswith("file:")
 
 
 def test_fetch_candidate_refuses_a_malformed_sha_before_cloning(tmp_path):
@@ -809,7 +1015,6 @@ def test_fetch_candidate_refuses_a_malformed_sha_before_cloning(tmp_path):
     destination = tmp_path / "c"
     with _refusal("commit_sha_malformed"):
         candidatefetch.fetch_candidate(
-            remote_url="https://example.invalid/x.git",
             destination=str(destination), head_sha="nope",
             target_base_sha=SHA_A)
     assert not destination.exists()

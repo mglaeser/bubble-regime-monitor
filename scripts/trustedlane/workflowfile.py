@@ -7,9 +7,12 @@ or lets the no-secret job reach a secret fails a test rather than a code review.
 
 Two properties are worth naming because they are easy to lose:
 
-* **The workflow lives outside `.github/workflows/`.** A workflow file in that
-  directory on an unmerged branch is live. This module asserts the inert
-  location, so "we'll move it later" cannot happen by accident.
+* **The phases are three files, not one file with a `phase` input.** One file
+  is one edit away from activating the phase it was not approved for. D0 is a
+  real `.yml` and is the deployment target; D1 and D2 are `.yml.template`, and
+  the extension is the containment — GitHub reads only `.yml`/`.yaml` under
+  `.github/workflows/`, so copying the directory there activates the no-secret
+  job and nothing else.
 * **`on` is a YAML 1.1 boolean.** `yaml.safe_load` turns the `on:` key into
   `True`. A validator that looks only for the string key silently validates
   nothing, which is the failure mode where the test passes and the policy is
@@ -23,21 +26,64 @@ import os
 
 import yaml
 
+from . import actionpolicy
 from .errors import refuse
 from .workflowpolicy import (
     assert_no_ref_selection,
     assert_trigger_permitted,
 )
 
-#: Where the inert interface lives, relative to the repository root.
-WORKFLOW_PATH = os.path.join("scripts", "trustedlane", "workflow",
-                             "trusted-verifier-lane.yml")
+#: Where the lane's workflow definitions live, relative to the repository root.
+WORKFLOW_DIR = os.path.join("scripts", "trustedlane", "workflow")
 
-#: Directory that makes a workflow live. The interface must not be here yet.
+#: Directory that makes a workflow live.
 LIVE_WORKFLOW_DIR = os.path.join(".github", "workflows")
+
+#: The three phases, split into three files, because one file with a `phase`
+#: input is one edit away from activating the phase it was not approved for.
+#:
+#: D0 is a real `.yml` and is the deployment target. D1 and D2 are
+#: `.yml.template`, and the extension IS the containment: GitHub reads only
+#: `.yml`/`.yaml` under `.github/workflows/`, so copying this directory there
+#: activates the no-secret job and nothing else. Renaming a template is then a
+#: deliberate, reviewable act rather than a side effect.
+D0_FILE = "d0-trusted-lane-containment.yml"
+D1_FILE = "d1-trusted-count.yml.template"
+D2_FILE = "d2-trusted-generation.yml.template"
+
+#: filename -> policy for that file.
+#:
+#: `secrets_permitted=False` is the whole difference between D0 and the rest:
+#: the containment workflow may not so much as name a secret, so there is
+#: nothing for a future edit to widen.
+TRUSTED_WORKFLOWS = {
+    D0_FILE: {
+        "phase": "D0",
+        "deployable_now": True,
+        "secrets_permitted": False,
+        "environments_permitted": False,
+    },
+    D1_FILE: {
+        "phase": "D1",
+        "deployable_now": False,
+        "secrets_permitted": True,
+        "environments_permitted": True,
+    },
+    D2_FILE: {
+        "phase": "D2",
+        "deployable_now": False,
+        "secrets_permitted": True,
+        "environments_permitted": True,
+    },
+}
 
 #: The job that must gate every credential-bearing job.
 CONTAINMENT_JOB = "d0-containment"
+
+#: Workflow inputs that would let a caller choose the candidate SOURCE rather
+#: than merely name a commit in it. The source is fixed in trusted policy.
+SOURCE_SELECTING_INPUTS = ("repository", "remote", "remote_url", "url",
+                           "owner", "org", "fork", "source_repository")
 
 #: Expressions that let a caller choose which code runs.
 CALLER_CONTROLLED_PREFIXES = ("inputs.", "github.event.",
@@ -79,29 +125,111 @@ def _references_secret(node) -> bool:
     return any(_CREDENTIAL_REF_MARKER in text for text in _strings(node))
 
 
-def load_workflow(*, root: str = ".") -> dict:
-    """Read and parse the inert workflow, refusing a live location."""
-    live = os.path.join(root, LIVE_WORKFLOW_DIR,
-                        os.path.basename(WORKFLOW_PATH))
-    if os.path.exists(live):
-        refuse("category=trusted_lane_workflow_is_live path="
-               f"{LIVE_WORKFLOW_DIR} — a workflow in this directory runs on "
-               "pushes to an unprotected branch; the D0 interface must stay "
-               "inert until it is deployed from a protected default branch")
-    path = os.path.join(root, WORKFLOW_PATH)
+def load_workflow(name: str = D0_FILE, *, root: str = ".") -> dict:
+    """Read and parse one trusted-lane workflow definition."""
+    if name not in TRUSTED_WORKFLOWS:
+        refuse(f"category=unknown_trusted_workflow name={name!r}")
+    path = os.path.join(root, WORKFLOW_DIR, name)
     if not os.path.exists(path):
-        refuse(f"category=trusted_lane_workflow_missing path={WORKFLOW_PATH}")
+        refuse(f"category=trusted_lane_workflow_missing name={name}")
     with open(path, "rb") as handle:
         raw = handle.read()
     try:
         document = yaml.safe_load(raw.decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
-        refuse(f"category=trusted_lane_workflow_unparseable "
+        refuse(f"category=trusted_lane_workflow_unparseable name={name} "
                f"exception_class={type(exc).__name__}")
     if not isinstance(document, dict):
-        refuse("category=trusted_lane_workflow_not_mapping")
-    return {"document": document, "raw": raw,
+        refuse(f"category=trusted_lane_workflow_not_mapping name={name}")
+    return {"name": name, "document": document, "raw": raw,
+            "policy": dict(TRUSTED_WORKFLOWS[name]),
             "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def assert_no_template_is_live(*, root: str = ".") -> dict:
+    """D1 and D2 must never appear in the live workflows directory.
+
+    Checked by the *deployable* name, not the template name: the hazard is
+    someone renaming `d1-trusted-count.yml.template` to `.yml` and dropping it
+    in, which is precisely the step that must stay deliberate. D0 is allowed
+    there — it is the deployment target — so this is not a blanket ban on the
+    directory."""
+    live_dir = os.path.join(root, LIVE_WORKFLOW_DIR)
+    live = []
+    for name, policy in TRUSTED_WORKFLOWS.items():
+        if policy["deployable_now"]:
+            continue
+        deployed_name = name[:-len(".template")]
+        if os.path.exists(os.path.join(live_dir, deployed_name)):
+            live.append(deployed_name)
+    if live:
+        refuse(f"category=undeployable_phase_is_live files={live} — D1/D2 "
+               "activation is a separate approval (operator prerequisites and "
+               "a protected environment), not a file rename")
+    return {"undeployable_phases_live": 0}
+
+
+def assert_actions_pinned(document: dict, *, name: str = "") -> dict:
+    """Every `uses:` must be an approved immutable commit pin."""
+    pinned = []
+    for job_name, job in (document.get("jobs") or {}).items():
+        for index, step in enumerate((job or {}).get("steps") or []):
+            uses = (step or {}).get("uses")
+            if uses is None:
+                continue
+            pinned.append(actionpolicy.assert_pinned(
+                str(uses), where=f"{name}:{job_name}.steps[{index}]"))
+    if not pinned:
+        refuse(f"category=workflow_uses_no_actions name={name} — a workflow "
+               "with no `uses:` cannot have been checked for pinning; this is "
+               "a guard against the check silently covering nothing")
+    return {"pinned_actions": pinned}
+
+
+def assert_no_source_selection(document: dict, *, name: str = "") -> dict:
+    """A caller may name a COMMIT, never a repository.
+
+    The distinction is the whole point. A SHA is inert data the lane verifies
+    against what it actually fetched; a repository name is a redirection, and
+    it silently invalidates the numeric-id check downstream — that check would
+    then be verifying the id of whatever server the caller chose."""
+    block = _on_block(document)
+    dispatch = block.get("workflow_dispatch") or {}
+    inputs = (dispatch.get("inputs") or {}) if isinstance(dispatch, dict) else {}
+    selecting = sorted(k for k in inputs if k in SOURCE_SELECTING_INPUTS)
+    if selecting:
+        refuse(f"category=workflow_input_selects_source name={name} "
+               f"inputs={selecting} — the candidate repository is fixed in "
+               "trusted policy; a caller that can name it can redirect the "
+               "review")
+    for job_name, job in (document.get("jobs") or {}).items():
+        for index, step in enumerate((job or {}).get("steps") or []):
+            with_block = (step or {}).get("with") or {}
+            if "repository" in with_block:
+                refuse(f"category=checkout_selects_repository name={name} "
+                       f"where={job_name}.steps[{index}]")
+    return {"source_selection": False}
+
+
+def assert_no_candidate_execution(document: dict, *, name: str = "") -> dict:
+    """No step may run something out of the candidate package.
+
+    The lane fetches the candidate as inert data. A `run:` that invokes
+    `scripts/verifier/...`, or pip-installs the checked-out tree, turns that
+    data back into code — with whatever credential the job holds."""
+    markers = ("scripts/verifier", "pip install -e", "pip install .",
+               "setup.py", "python -m verifier", "candidate/")
+    offenders = []
+    for job_name, job in (document.get("jobs") or {}).items():
+        for index, step in enumerate((job or {}).get("steps") or []):
+            script = str((step or {}).get("run") or "")
+            hits = [m for m in markers if m in script]
+            if hits:
+                offenders.append(f"{job_name}.steps[{index}]:{hits}")
+    if offenders:
+        refuse(f"category=workflow_executes_candidate_content name={name} "
+               f"steps={offenders}")
+    return {"candidate_execution": False}
 
 
 def assert_triggers(document: dict) -> dict:
@@ -244,20 +372,60 @@ def assert_no_literal_credential(raw: bytes) -> dict:
     return {"literal_credential_assignments": 0}
 
 
-def validate_workflow_file(*, root: str = ".") -> dict:
-    """Every file-level check, as one record."""
-    loaded = load_workflow(root=root)
-    document = loaded["document"]
+def assert_phase_secret_policy(document: dict, *, name: str,
+                               policy: dict) -> dict:
+    """D0 may not name a secret or declare an environment. At all.
+
+    Not "may not use one" — may not NAME one. A workflow that references
+    `secrets.X` is one approval away from receiving it; a workflow that has no
+    such reference has nothing to widen."""
+    references = sorted(t for t in _strings(document)
+                        if _CREDENTIAL_REF_MARKER in t)
+    environments = sorted(
+        job_name for job_name, job in (document.get("jobs") or {}).items()
+        if (job or {}).get("environment"))
+    if not policy["secrets_permitted"] and references:
+        refuse(f"category=phase_must_not_name_a_secret name={name} "
+               f"phase={policy['phase']} count={len(references)}")
+    if not policy["environments_permitted"] and environments:
+        refuse(f"category=phase_must_not_declare_an_environment name={name} "
+               f"phase={policy['phase']} jobs={environments}")
+    return {"secret_references": len(references),
+            "environment_jobs": environments}
+
+
+def validate_workflow_file(name: str = D0_FILE, *, root: str = ".") -> dict:
+    """Every file-level check for ONE workflow, as one record."""
+    loaded = load_workflow(name, root=root)
+    document, policy = loaded["document"], loaded["policy"]
     record = {
-        "path": WORKFLOW_PATH,
+        "name": name,
+        "phase": policy["phase"],
+        "deployable_now": policy["deployable_now"],
+        "path": os.path.join(WORKFLOW_DIR, name),
         "workflow_sha256": loaded["sha256"],
-        "live_location": False,
         **assert_triggers(document),
         **assert_permissions_read_only(document),
         **assert_checkouts_are_safe(document),
-        **assert_secret_containment(document),
+        **assert_actions_pinned(document, name=name),
+        **assert_no_source_selection(document, name=name),
+        **assert_no_candidate_execution(document, name=name),
+        **assert_phase_secret_policy(document, name=name, policy=policy),
         **assert_no_literal_credential(loaded["raw"]),
         "honest_scope": "the deployed shape is validated; a validated shape is "
-                        "not a run, and no run of this workflow exists",
+                        "not a run",
     }
+    if policy["secrets_permitted"]:
+        record.update(assert_secret_containment(document))
     return record
+
+
+def validate_all_workflows(*, root: str = ".") -> dict:
+    """Every trusted-lane workflow, plus the cross-file containment rule."""
+    records = {name: validate_workflow_file(name, root=root)
+               for name in sorted(TRUSTED_WORKFLOWS)}
+    return {
+        "workflows": records,
+        **assert_no_template_is_live(root=root),
+        "action_pin_policy": actionpolicy.pin_record(),
+    }

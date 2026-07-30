@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 
+from . import CANONICAL_REMOTE_URL
 from .errors import refuse
 from .identity import assert_commit_sha
 
@@ -84,13 +85,33 @@ def git(args, *, cwd=None, operation: str) -> bytes:
     return result.stdout
 
 
-def assert_remote_url(remote_url) -> str:
-    """https only. `ssh://` and `git@` carry an agent identity; `file://` and a
-    bare path let a local directory stand in for the authorized repository."""
-    if not isinstance(remote_url, str) or not remote_url.startswith("https://"):
-        scheme = str(remote_url).split(":")[0] if remote_url else ""
-        refuse(f"category=remote_url_not_https scheme_len={len(scheme)}")
-    return remote_url
+def canonical_remote_url() -> str:
+    """The candidate source, taken from trusted policy — never from a caller.
+
+    There is deliberately no parameter. `ssh://` and `git@` carry an agent
+    identity, `file://` and a bare path let a local directory stand in for the
+    authorized repository, and an https URL from an argument lets whoever
+    computes that argument choose whose commits get reviewed. Removing the
+    parameter removes all three at once, and makes the numeric-id check
+    downstream meaningful: it then compares two things the caller could not
+    both have chosen."""
+    if not CANONICAL_REMOTE_URL.startswith("https://"):
+        refuse("category=canonical_remote_not_https")
+    return CANONICAL_REMOTE_URL
+
+
+def assert_no_caller_supplied_remote(**kwargs) -> None:
+    """Refuse the old signature loudly instead of silently ignoring it.
+
+    A caller that still passes `remote_url=` believes it is choosing the
+    source. Dropping the argument on the floor would leave that belief intact
+    and the call site unaudited."""
+    offered = sorted(k for k in kwargs
+                     if k in ("remote_url", "repository", "remote", "origin"))
+    if offered:
+        refuse(f"category=candidate_source_is_not_a_parameter fields={offered} "
+               "— the candidate repository is fixed in trusted policy; a caller "
+               "that can name it can redirect the review")
 
 
 def verify_clone(*, destination: str, head_sha: str,
@@ -127,19 +148,26 @@ def verify_clone(*, destination: str, head_sha: str,
     }
 
 
-def fetch_candidate(*, remote_url: str, destination: str,
-                    head_sha: str, target_base_sha: str) -> dict:
-    """Clone with FULL history and verify the exact commits exist.
+def fetch_candidate(*, destination: str, head_sha: str,
+                    target_base_sha: str, **caller_supplied) -> dict:
+    """Clone the canonical repository with FULL history; verify exact commits.
+
+    The candidate range arrives as two SHAs — inert data the lane verifies
+    against what it actually fetched. The *source* is not a parameter at all
+    (see `canonical_remote_url`).
 
     Full history because the generated-derivative proof and the mandatory
     historical tests both need it, and a shallow clone makes their absence
     look like a pass. `--no-checkout` because a working tree is the thing that
     turns fetched commits into runnable files."""
+    assert_no_caller_supplied_remote(**caller_supplied)
+    if caller_supplied:
+        refuse(f"category=unknown_fetch_argument "
+               f"fields={sorted(caller_supplied)}")
     assert_commit_sha(head_sha, field="head_sha")
     assert_commit_sha(target_base_sha, field="target_base_sha")
-    assert_remote_url(remote_url)
-    git(["clone", "--no-checkout", "--no-tags", remote_url, destination],
-        operation="clone")
+    git(["clone", "--no-checkout", "--no-tags", canonical_remote_url(),
+         destination], operation="clone")
     return verify_clone(destination=destination, head_sha=head_sha,
                         target_base_sha=target_base_sha)
 

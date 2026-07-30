@@ -50,22 +50,56 @@ candidate too.
 `workflowfile.py` applies the same rules to the actual YAML that would be
 deployed — so the refusal is a test rather than a review convention.
 
-## Where the workflow lives, and why not `.github/workflows/`
+## Three phases, three files
 
-The proposed protected workflow is `workflow/trusted-verifier-lane.yml`, in this
-directory. A workflow file under `.github/workflows/` on an unmerged branch is
-**live**: `on: push` fires for pushes to that branch and the run receives a
-`GITHUB_TOKEN` even when it declares no secrets of its own. So the interface is
-committed as inert data, validated only by tests, and
-`workflowfile.load_workflow` refuses if a copy ever appears in the live
-directory. Installing it there is a deployment decision for the protected
-default branch.
+`workflow/` holds one file per phase, and the split is the containment:
 
-Its three jobs mirror the phase table below. `d0-containment` has no
-`environment:` and names no secret; `d1`/`d2` are environment-gated, gated
-behind `d0-containment`, and reference the credential **by name only** — no
-value lives in the file, and `assert_no_literal_credential` reddens if one ever
-does.
+| file | phase | deployable now |
+|---|---|---|
+| `d0-trusted-lane-containment.yml` | D0 | **yes** — this is the deployment target |
+| `d1-trusted-count.yml.template` | D1 | no |
+| `d2-trusted-generation.yml.template` | D2 | no |
+
+One file with a `phase:` input is one edit away from activating the phase it
+was not approved for. Three files, and the `.yml.template` extension, make that
+edit deliberate: GitHub reads only `.yml`/`.yaml` under `.github/workflows/`, so
+copying this directory there activates the no-secret job and nothing else.
+`workflowfile.assert_no_template_is_live` refuses if a template is ever renamed
+into place.
+
+**D0 names no secret at all.** Not "uses none" — names none, so there is nothing
+for a later edit to widen. It declares no `environment:`, which is the thing
+that makes an environment secret reachable. D1 and D2 are environment-gated,
+`needs:`-gated behind containment, use *separate* environments from each other
+(approving counting must not, by reuse, approve generating), and reference the
+credential **by name only**.
+
+## Actions are pinned to immutable commits
+
+`uses: actions/checkout@v4` is not a version — it is whatever the tag points at
+when the runner resolves it, and the tag's owner is not this repository's owner.
+`actionpolicy.py` holds the approved mapping and `assert_pinned` refuses a tag,
+an unknown action, or an unapproved SHA:
+
+| action | SHA | release |
+|---|---|---|
+| `actions/checkout` | `11d5960a…` | v4.4.0 |
+| `actions/setup-python` | `a26af69b…` | v5.6.0 |
+
+Verified with `git ls-remote` against upstream; each SHA carried both the moving
+tag and a concrete release tag when resolved. That is weaker than it sounds — it
+does not mean the release was reviewed, and the module says so.
+
+## The candidate source is not a parameter
+
+`fetch_candidate` used to take `remote_url=`. It was only ever going to be this
+repository, right up until something upstream computed it — and then whoever
+controls that computation controls whose commits get reviewed, while the
+numeric-id check downstream dutifully verifies the id of the attacker's server.
+The source is now fixed in `CANONICAL_REPOSITORY`; the candidate range arrives
+as two SHAs, inert data verified against what was actually fetched. Passing
+`remote_url=` is refused loudly rather than ignored, because a caller that still
+passes it believes it is choosing the source.
 
 ## Response normalization is trusted-lane code
 
