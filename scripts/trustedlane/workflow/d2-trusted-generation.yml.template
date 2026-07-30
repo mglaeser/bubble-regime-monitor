@@ -1,0 +1,101 @@
+# D2 — trusted generation lane. INERT TEMPLATE. NOT DEPLOYABLE AS WRITTEN.
+#
+# Same containment as D1: `.yml.template` is not a workflow. Activation is
+# RELEASE_EXECUTION_CONTRACT_v1 §13 Phase C and requires operator prerequisite
+# 16 — generation approved as its own decision, after trusted counting exists
+# and its cost is known. An approval to count has never been an approval to
+# generate.
+#
+# D2 uses a SEPARATE protected environment from D1 so that approving counting
+# does not, by environment reuse, approve generating.
+#
+# Action pins (immutable SHAs, release mapping in actionpolicy.py):
+#   actions/checkout        11d5960a326750d5838078e36cf38b85af677262  (v4.4.0)
+#   actions/setup-python    a26af69be951a213d495a4c3e4e4022e16d87065  (v5.6.0)
+
+name: trusted-lane-d2-generation
+
+on:
+  workflow_dispatch:
+    inputs:
+      trusted_plan_sha256:
+        description: Digest of the trusted executable review plan produced by D1
+        required: true
+        type: string
+      generation_authorization_sha256:
+        description: Digest of the separate operator generation approval
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  d0-containment:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted engine from the protected ref only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Containment invariants
+        env:
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          OBSERVED_REF: ${{ github.ref }}
+        run: |
+          python - <<'PROBE'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import enginepolicy, identity
+          identity.assert_repository_numeric_id(int(os.environ["EVENT_REPOSITORY_ID"]))
+          identity.assert_protected_ref(os.environ["OBSERVED_REF"])
+          enginepolicy.assert_no_candidate_import()
+          PROBE
+
+  d2-trusted-generation:
+    needs: d0-containment
+    runs-on: ubuntu-latest
+    environment: trusted-verifier-generation
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted engine from the protected ref only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Verify and load the approved engine artifact
+        env:
+          TRUSTED_ENGINE_DIGEST: ${{ vars.TRUSTED_ENGINE_ARTIFACT_SHA256 }}
+        run: |
+          echo "engine verification is implemented in the D2 activation PR"
+          exit 1
+
+      - name: Trusted generation
+        env:
+          TRUSTED_VERIFIER_OPENAI_KEY: ${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}
+          TRUSTED_PLAN_SHA256: ${{ inputs.trusted_plan_sha256 }}
+        run: |
+          python - <<'PROBE'
+          import sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import phases
+          phases.assert_phase_permitted(phases.D2)
+          PROBE
