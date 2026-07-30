@@ -26,6 +26,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2186,3 +2187,40 @@ def test_vtrust_declares_no_actions_is_recorded_not_skipped():
     # The lane's own files still refuse a no-actions document.
     with _refusal("workflow_uses_no_actions"):
         workflowfile.assert_actions_pinned({"jobs": {}}, name="lane.yml")
+
+
+# --------------------------------------------------------------------------
+# The operator action packet must not drift from the gate it describes.
+# --------------------------------------------------------------------------
+
+OPERATOR_DOC = ROOT / "docs" / "TRUSTED_LANE_OPERATOR_ACTIONS.md"
+
+
+def test_the_operator_packet_names_every_prerequisite_key():
+    """A packet listing fifteen of sixteen actions is a packet that unblocks
+    nothing, and the missing one is invisible without this test."""
+    text = OPERATOR_DOC.read_text(encoding="utf-8")
+    for item in prerequisites.OPERATOR_PREREQUISITES:
+        assert f"`{item.key}`" in text, item.key
+
+
+def test_the_operator_packet_lists_exactly_sixteen_and_no_more():
+    """Also catches the other direction: a key deleted from the code while the
+    doc still promises it, which reads as a gate that no longer exists."""
+    text = OPERATOR_DOC.read_text(encoding="utf-8")
+    keys = {item.key for item in prerequisites.OPERATOR_PREREQUISITES}
+    assert len(keys) == 16
+    quoted = set(re.findall(r"`([a-z_]{8,})`", text))
+    stray = {k for k in quoted if k.endswith(("_key", "_run", "_pins"))} - keys
+    assert not stray, f"doc names prerequisite-shaped keys the code lacks: {stray}"
+
+
+def test_the_packet_does_not_claim_attestations_are_verified():
+    """The distinction the whole packet rests on. Fifteen of the sixteen are
+    assertions that someone did something in a console this repository cannot
+    see; only the 404 is a fact about a server."""
+    text = OPERATOR_DOC.read_text(encoding="utf-8")
+    assert "Recording is not verification" in text
+    verifiable = [item for item in prerequisites.OPERATOR_PREREQUISITES
+                  if item.verifiable_by_code]
+    assert [item.key for item in verifiable] == ["verify_run_404"]
