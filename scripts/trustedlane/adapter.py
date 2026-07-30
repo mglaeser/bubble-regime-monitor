@@ -111,8 +111,24 @@ def assert_adapter_is_trusted(identity: dict) -> dict:
 
 
 def assert_no_forbidden_transform(applied) -> tuple:
-    """An adapter declares what it did; declaring a bypass is a refusal."""
-    names = tuple(applied or ())
+    """An adapter declares what it did; declaring a bypass is a refusal.
+
+    A bare string is refused rather than iterated. `tuple("DROP_UNKNOWN_FIELD")`
+    is twenty single characters, none of which is a forbidden transform name —
+    so the most natural way to declare exactly one bypass used to sail straight
+    through this gate. Found by the external review panel on the bootstrap PR."""
+    if applied is None:
+        return ()
+    if isinstance(applied, (str, bytes)):
+        refuse("category=adapter_transforms_not_a_sequence — a bare string "
+               "iterates as characters, so a single declared transform would "
+               "be checked one letter at a time and never match; pass a list")
+    try:
+        names = tuple(applied)
+    except TypeError:
+        refuse("category=adapter_transforms_not_iterable")
+    if any(not isinstance(n, str) for n in names):
+        refuse("category=adapter_transform_not_a_string")
     forbidden = [n for n in names if n in FORBIDDEN_TRANSFORMS]
     if forbidden:
         refuse(f"category=adapter_forbidden_transform transforms={forbidden} "

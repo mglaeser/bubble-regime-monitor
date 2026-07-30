@@ -63,15 +63,25 @@ def evidence_only_delta(paths) -> dict:
 
     A closure may only claim "evidence-only" when every changed path is an
     evidence or workflow path. A source change after the cutoff means the
-    evidence describes code that is no longer what shipped."""
+    evidence describes code that is no longer what shipped.
+
+    `paths` is materialised once, first. It used to be walked three times, and
+    a generator is exhausted by the first walk — so a caller passing one got a
+    correct `source_changed_paths` alongside a `changed_path_count` of 0 and a
+    `delta_sha256` that was the digest of the EMPTY list. The closure binding
+    would have been a digest of nothing while the record looked populated.
+    Found by the external review panel on the bootstrap PR."""
+    materialised = list(paths)
+    if any(not isinstance(p, str) for p in materialised):
+        refuse("category=closure_delta_path_not_a_string")
     evidence_prefixes = ("audit/", "artifacts/", "governance/",
                          ".github/workflows/", "docs/")
-    source = sorted(p for p in paths
+    source = sorted(p for p in materialised
                     if not any(p.startswith(prefix)
                                for prefix in evidence_prefixes))
-    blob = json.dumps(sorted(paths), separators=(",", ":")).encode()
+    blob = json.dumps(sorted(materialised), separators=(",", ":")).encode()
     return {
-        "changed_path_count": len(list(paths)),
+        "changed_path_count": len(materialised),
         "source_changed_paths": source,
         "evidence_only": not source,
         "delta_sha256": hashlib.sha256(blob).hexdigest(),

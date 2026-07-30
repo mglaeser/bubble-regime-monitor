@@ -134,17 +134,37 @@ def verify_clone(*, destination: str, head_sha: str,
         refuse("category=candidate_clone_is_shallow — full history is required; "
                "a shallow clone makes a missing historical object look like a "
                "passing test")
-    worktree = git(["rev-parse", "--is-bare-repository"], cwd=destination,
-                   operation="bare-check").strip()
+    bare = git(["rev-parse", "--is-bare-repository"], cwd=destination,
+               operation="bare-check").strip() == b"true"
+
+    # `checked_out` used to be the literal False — an attestation about the one
+    # property that matters here (a working tree is what turns fetched commits
+    # into runnable files) that nothing had checked. An ordinary `git clone`
+    # has a full worktree and this record certified it inert. Found by the
+    # external review panel on the bootstrap PR.
+    #
+    # Asked of git rather than of the filesystem: `ls` would be fooled by an
+    # empty checkout, and `git status` is the question "what is in the worktree",
+    # which errors outright when there isn't one.
+    tracked = git(["ls-files", "-z"], cwd=destination,
+                  operation="worktree-check") if not bare else b""
+    checked_out = bool(tracked)
+    if checked_out:
+        refuse(f"category=candidate_clone_has_a_working_tree "
+               f"tracked_entries={len(tracked.split(b'0')) if tracked else 0} — "
+               "the candidate is fetched as inert data; a working tree is "
+               "exactly what turns fetched commits into runnable files, so it "
+               "is refused rather than recorded")
     return {
         "destination": destination,
         "head_sha": head_sha,
         "target_base_sha": target_base_sha,
         "full_history": True,
-        "checked_out": False,
-        "bare": worktree == b"true",
-        "honest_scope": "commits are present as data; nothing from the "
-                        "candidate was executed",
+        "checked_out": False,   # verified above, not assumed
+        "checked_out_verified_by": "git ls-files in the clone reported nothing",
+        "bare": bare,
+        "honest_scope": "commits are present as data, no working tree exists, "
+                        "and nothing from the candidate was executed",
     }
 
 

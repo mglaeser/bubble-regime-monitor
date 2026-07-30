@@ -1385,3 +1385,131 @@ def test_every_lane_refusal_names_a_category():
                 text = head.value if isinstance(head, ast.Constant) else ""
             assert text is None or text.startswith("category="), \
                 f"{path.name}:{node.lineno}"
+
+
+# --------------------------------------------------------------------------
+# A ref NAME is not branch protection. Observed, not assumed.
+# --------------------------------------------------------------------------
+
+
+def test_a_protected_ref_name_is_not_a_protection_check():
+    """The two must stay separate, because the world disagreed with the docs.
+
+    Every document in this programme calls `main` "protected/default main". At
+    the time this was written the GitHub API reported it
+    `"protected": false`. `assert_protected_ref` passes on the NAME and would
+    have said nothing."""
+    assert identity.assert_protected_ref("refs/heads/main") == "refs/heads/main"
+    with _refusal("branch_not_protected"):
+        identity.assert_branch_protection_observed(
+            {"name": "main", "protected": False})
+
+
+def test_an_unobserved_branch_protection_is_refused_separately():
+    """"Nobody looked" and "looked, and it is off" are different failures with
+    different fixes, so they get different refusals."""
+    with _refusal("branch_protection_not_observed"):
+        identity.assert_branch_protection_observed(None)
+
+
+def test_a_protected_branch_record_is_accepted_with_an_honest_scope():
+    record = identity.assert_branch_protection_observed(
+        {"name": "main", "protected": True})
+    assert record["protected"] is True
+    assert "separate question" in record["honest_scope"]
+
+
+@pytest.mark.parametrize("observed", [
+    {"name": "fix/verifier-trusted-lane-bootstrap", "protected": True},
+    {"name": "claude/bubblegauge-build-spec-fzthju", "protected": True},
+])
+def test_a_protected_branch_that_is_not_the_protected_ref_is_refused(observed):
+    """Protecting some other branch does not make it the trusted ref."""
+    with _refusal("branch_record_is_not_the_protected_ref"):
+        identity.assert_branch_protection_observed(observed)
+
+
+def test_a_non_object_branch_record_is_refused():
+    with _refusal("branch_record_not_object"):
+        identity.assert_branch_protection_observed("main")
+
+
+# --------------------------------------------------------------------------
+# Findings from the external review panel on the bootstrap PR (#26).
+#
+# All three were reported by the required approver (gpt-5.6-sol), reproduced
+# here first, then fixed. Each test is the reproduction.
+# --------------------------------------------------------------------------
+
+
+def test_panel_f1_a_forbidden_transform_declared_as_a_bare_string_is_refused():
+    """`tuple("DROP_UNKNOWN_FIELD")` is twenty characters, none of them a
+    transform name — so the most natural way to declare exactly one bypass
+    passed the gate untouched."""
+    with _refusal("adapter_transforms_not_a_sequence"):
+        adapter.assert_no_forbidden_transform("DROP_UNKNOWN_FIELD")
+
+
+@pytest.mark.parametrize("transform", sorted(adapter.FORBIDDEN_TRANSFORMS))
+def test_panel_f1_every_forbidden_transform_is_still_caught_in_a_list(transform):
+    with _refusal("adapter_forbidden_transform"):
+        adapter.assert_no_forbidden_transform([transform])
+
+
+def test_panel_f1_a_non_string_transform_is_refused():
+    with _refusal("adapter_transform_not_a_string"):
+        adapter.assert_no_forbidden_transform([object()])
+
+
+def test_panel_f1_none_and_empty_remain_permitted():
+    assert adapter.assert_no_forbidden_transform(None) == ()
+    assert adapter.assert_no_forbidden_transform([]) == ()
+
+
+def test_panel_f2_a_clone_with_a_working_tree_is_refused(candidate_origin,
+                                                         tmp_path):
+    """The record used to say `checked_out: False` without checking.
+
+    An ordinary `git clone` has a full worktree, and that record certified it
+    inert — an attestation about the one property that decides whether fetched
+    commits are data or code."""
+    destination = str(tmp_path / "checked-out")
+    subprocess.run(["git", "clone", "--quiet", candidate_origin["path"],
+                    destination], capture_output=True, check=True)
+    assert (Path(destination) / "a.txt").exists(), "fixture needs a worktree"
+    with _refusal("candidate_clone_has_a_working_tree"):
+        candidatefetch.verify_clone(
+            destination=destination, head_sha=candidate_origin["head"],
+            target_base_sha=candidate_origin["base"])
+
+
+def test_panel_f2_the_no_checkout_clone_records_how_it_verified(
+        candidate_origin, tmp_path):
+    destination = _plain_clone(candidate_origin["path"], str(tmp_path / "c"))
+    record = candidatefetch.verify_clone(
+        destination=destination, head_sha=candidate_origin["head"],
+        target_base_sha=candidate_origin["base"])
+    assert record["checked_out"] is False
+    assert "ls-files" in record["checked_out_verified_by"]
+    assert "no working tree exists" in record["honest_scope"]
+
+
+def test_panel_f3_evidence_only_delta_accepts_a_generator(tmp_path):
+    """`paths` was walked three times; a generator is exhausted by the first.
+
+    The caller got a correct source list beside a count of 0 and a digest of
+    the EMPTY list — a closure binding that was a digest of nothing while the
+    record looked populated."""
+    supplied = ["audit/a.md", "scripts/verifier/x.py", "docs/b.md"]
+    from_generator = closure.evidence_only_delta(p for p in supplied)
+    from_list = closure.evidence_only_delta(supplied)
+    assert from_generator == from_list
+    assert from_generator["changed_path_count"] == 3
+    assert from_generator["source_changed_paths"] == ["scripts/verifier/x.py"]
+    assert from_generator["delta_sha256"] != closure.evidence_only_delta(
+        [])["delta_sha256"]
+
+
+def test_panel_f3_a_non_string_path_is_refused():
+    with _refusal("closure_delta_path_not_a_string"):
+        closure.evidence_only_delta(["audit/a.md", None])
