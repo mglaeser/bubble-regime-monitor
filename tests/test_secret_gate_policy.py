@@ -38,7 +38,22 @@ PROTECTED_PREFIXES = ("artifacts", "verifier", "governance", "audit")
 REQUIRED_EXCLUSIONS = (".venv/", "__pycache__/", ".git/", ".mypy_cache/",
                        ".pytest_cache/", ".ruff_cache/")
 
-HOOK = ROOT / ".venv" / "bin" / "detect-secrets-hook"
+def _hook() -> Path | None:
+    """The gate binary: PATH first, then the local virtualenv.
+
+    A `.venv`-only lookup made `TestGateStillDetects` skip on every hosted run —
+    CI installs detect-secrets globally — so the two tests that prove the gate
+    still catches a planted secret, and that the exact CI command exits zero,
+    were silently absent from the one place they matter. Found by adding `-rs`
+    to the workflow: the run said "5 skipped" and could not say which five."""
+    found = shutil.which("detect-secrets-hook")
+    if found:
+        return Path(found)
+    local = ROOT / ".venv" / "bin" / "detect-secrets-hook"
+    return local if local.exists() else None
+
+
+HOOK = _hook()
 
 
 def _baseline() -> dict:
@@ -112,8 +127,17 @@ class TestBaselineShape:
         assert grew <= 0, f"baseline grew by {grew} entries"
 
 
-@pytest.mark.skipif(not HOOK.exists(), reason="detect-secrets not installed")
 class TestGateStillDetects:
+    """No skipif. The gate binary is a hard requirement for these two tests.
+
+    Skipping them is worse than failing: the run reports success for the only
+    checks that prove the gate still bites."""
+
+    def setup_method(self):
+        assert HOOK is not None, (
+            "detect-secrets-hook is required: these tests are the proof that "
+            "the secret gate still detects a planted secret")
+
     def _run(self, *paths):
         return subprocess.run(
             [str(HOOK), "--baseline", str(BASELINE), *map(str, paths)],

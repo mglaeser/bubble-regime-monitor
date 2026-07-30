@@ -74,6 +74,9 @@ from verifier.errors import (  # noqa: E402
 
 MODELS = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
 APPROVER = reviewpolicy.GOVERNED_REQUIRED_APPROVER
+# PR #23's frozen head. A public git identity, not a credential — the secret
+# gate flags every 40-hex literal, so the pragma says which it is.
+PR23_HEAD = "a9062aa656a5a6f3dbe5991d16ce9c218aad0454"  # pragma: allowlist secret
 RANGE = dict(repository_identity="r", target_base_sha="b" * 40,
              diff_base_sha="c" * 40, head_sha="d" * 40)
 
@@ -1143,7 +1146,24 @@ class TestFamilyFHostedAndProcess:
         "no unit in this range carries a detected literal",
         "main baseline unavailable",
         "git supports --no-lazy-fetch; promisor is defended",
+        # MODULE-WIDE, and therefore the highest blast radius in the suite:
+        # `pytestmark` in test_verifier_generated.py silences all 17
+        # generated-derivative tests when PR #23's head object is absent.
+        # `actions/checkout@v4` with fetch-depth 0 fetches every branch, so it
+        # does not fire in CI — asserted below rather than assumed.
+        "PR23 objects absent",
+        "git absent",
     })
+
+    def test_f3c_the_module_wide_skip_guard_does_not_fire_here(self):
+        """A module-level skipif is the one that can hide a whole subsystem."""
+        probe = subprocess.run(
+            [gitexec.git_executable(), "cat-file", "-e",
+             f"{PR23_HEAD}^{{commit}}"],
+            cwd=ROOT, capture_output=True, env=gitexec.build_env())
+        assert probe.returncode == 0, (
+            "PR #23's head object is absent, so the 17 generated-derivative "
+            f"tests are silently skipped (probe target {PR23_HEAD[:12]}…)")
 
     def test_f3b_every_skip_in_the_verifier_suite_is_a_declared_precondition(
             self):
@@ -1155,23 +1175,34 @@ class TestFamilyFHostedAndProcess:
         a set of missing objects rather than a fixed condition."""
         import ast
         literal, dynamic = set(), 0
-        for path in sorted((ROOT / "tests").glob("test_verifier_*.py")):
+        # The secret-gate file is in scope too, and deliberately: a skipif there
+        # hid the only two tests that prove the gate bites, on every hosted run.
+        paths = sorted((ROOT / "tests").glob("test_verifier_*.py"))
+        paths.append(ROOT / "tests" / "test_secret_gate_policy.py")
+        for path in paths:
             tree = ast.parse(path.read_text(encoding="utf-8"),
                              filename=str(path))
             for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
+                # `pytest.skip(...)` and `@pytest.mark.skipif(..., reason=...)`
+                # are the same hazard reached two ways.
+                func = getattr(node, "func", None)
+                if not isinstance(node, ast.Call) or func is None:
                     continue
-                func = node.func
-                if not (isinstance(func, ast.Attribute)
-                        and func.attr == "skip"
-                        and getattr(func.value, "id", None) == "pytest"):
-                    continue
-                if not node.args:
-                    dynamic += 1
-                elif isinstance(node.args[0], ast.Constant):
-                    literal.add(node.args[0].value)
-                else:
-                    dynamic += 1
+                attr = getattr(func, "attr", None)
+                if attr == "skip":
+                    if not node.args:
+                        dynamic += 1
+                    elif isinstance(node.args[0], ast.Constant):
+                        literal.add(node.args[0].value)
+                    else:
+                        dynamic += 1
+                elif attr == "skipif":
+                    reason = next((kw.value for kw in node.keywords
+                                   if kw.arg == "reason"), None)
+                    if isinstance(reason, ast.Constant):
+                        literal.add(reason.value)
+                    else:
+                        dynamic += 1
         undeclared = sorted(literal - self.ALLOWED_SKIP_REASONS)
         assert undeclared == [], undeclared
         # One computed reason exists (the optional-history guard). More than
