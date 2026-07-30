@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1029,6 +1031,21 @@ class TestFamilyFHostedAndProcess:
 
     CI = ROOT / ".github" / "workflows" / "ci.yml"
 
+    @staticmethod
+    def _hook():
+        """The gate binary, wherever it lives.
+
+        PATH first, then the local virtualenv. The hosted runner pip-installs
+        detect-secrets globally, so a `.venv`-only lookup skipped the two tests
+        that matter most in CI — the gate is exactly what CI is for. A skip
+        there is worse than a failure: it reports success for a check nobody
+        ran."""
+        found = shutil.which("detect-secrets-hook")
+        if found:
+            return pathlib.Path(found)
+        local = ROOT / ".venv" / "bin" / "detect-secrets-hook"
+        return local if local.exists() else None
+
     # F1 — untracked test secret.
     def test_f1_an_untracked_secret_is_invisible_to_the_gate(self, tmp_path):
         """Demonstrated empirically, and stated as a LIMIT rather than a pass.
@@ -1042,9 +1059,8 @@ class TestFamilyFHostedAndProcess:
         file is invisible before `git add` and caught after it. So a gate result
         is only evidence about a tree whose relevant files are tracked, which is
         why the recorded procedure commits first and scans second."""
-        hook = ROOT / ".venv" / "bin" / "detect-secrets-hook"
-        if not hook.exists():
-            pytest.skip("detect-secrets-hook not installed in this environment")
+        hook = self._hook()
+        assert hook is not None, "detect-secrets-hook is required to prove this"
         repo = tmp_path / "gate"
         repo.mkdir()
         env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e",
@@ -1127,7 +1143,6 @@ class TestFamilyFHostedAndProcess:
         "no unit in this range carries a detected literal",
         "main baseline unavailable",
         "git supports --no-lazy-fetch; promisor is defended",
-        "detect-secrets-hook not installed in this environment",
     })
 
     def test_f3b_every_skip_in_the_verifier_suite_is_a_declared_precondition(
@@ -1197,9 +1212,8 @@ class TestFamilyFHostedAndProcess:
             [gitexec.git_executable(), "ls-files", "-z"], cwd=ROOT,
             capture_output=True, env=gitexec.build_env())
         assert listing.returncode == 0
-        hook = ROOT / ".venv" / "bin" / "detect-secrets-hook"
-        if not hook.exists():
-            pytest.skip("detect-secrets-hook not installed in this environment")
+        hook = self._hook()
+        assert hook is not None, "detect-secrets-hook is required to prove this"
         proc = subprocess.run(
             [str(hook), "--baseline", ".secrets.baseline",
              *[p for p in listing.stdout.decode().split("\0") if p]],

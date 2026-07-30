@@ -54,7 +54,10 @@ jobs:
         # (This distinction was caught by adversarial verification.)
         run: git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
       - name: Tests (BLOCKING)
-        run: pytest -q
+        # -rs prints the reason for every skip. Without it a hosted run reports
+        # "N passed, 5 skipped" and nobody can tell whether the five are
+        # structural preconditions or coverage that quietly stopped running.
+        run: pytest -q -rs
 
   image:
     runs-on: ubuntu-latest
