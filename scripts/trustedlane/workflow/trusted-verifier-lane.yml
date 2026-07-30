@@ -1,0 +1,162 @@
+# PROPOSED protected workflow for the trusted verifier lane.
+#
+# This file is DELIBERATELY NOT in .github/workflows/.
+#
+# A workflow file placed in .github/workflows/ on an unmerged branch is live:
+# `on: push` fires for pushes to that branch, and the run receives a GITHUB_TOKEN
+# even when it declares no secrets of its own. The whole point of the D0
+# bootstrap is that nothing credential-bearing executes while this code sits on
+# an unprotected branch, so the workflow lives here as INERT DATA and is
+# validated by scripts/trustedlane/workflowfile.py plus its tests.
+#
+# Moving it to .github/workflows/ is a deployment decision that belongs to the
+# protected default branch, after the operator prerequisites in
+# scripts/trustedlane/prerequisites.py are actually satisfied. Until then the
+# only thing that reads this file is a test.
+#
+# The three jobs mirror the phase model in scripts/trustedlane/phases.py:
+#   d0-containment  no credential at all; proves the containment invariants.
+#   d1-trusted-count  environment-gated; real /v1/responses/input_tokens only.
+#   d2-trusted-generation  environment-gated; separately approved generation.
+#
+# d1 and d2 are the INTERFACE. The steps they would run are not implemented on
+# this branch; each ends in the lane's explicit refusal, so a premature
+# deployment fails loudly instead of proceeding with a key.
+
+name: trusted-verifier-lane
+
+# No pull_request_target: it runs the base workflow definition with write
+# permissions and secrets available against a head the pull request controls.
+# No issue_comment or workflow_run: same exposure, reached by a different door.
+# workflow_dispatch takes NO ref-selecting input — if the caller picks the ref,
+# the caller picks the code that gets the key. The GitHub-level ref a dispatch
+# runs from is constrained by branch/environment rulesets and re-checked at
+# runtime by identity.assert_protected_ref.
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Lane phase to run (D0_NO_SECRET_BOOTSTRAP only, today)
+        required: true
+        type: choice
+        options:
+          - D0_NO_SECRET_BOOTSTRAP
+          - D1_TRUSTED_COUNT
+          - D2_TRUSTED_GENERATION
+      operator_authorization_sha256:
+        description: Digest of the operator authorization record held outside this repository
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------- D0
+  # Zero secrets. No `environment:`, so no environment secret is reachable.
+  d0-containment:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted lane from the protected ref only
+        uses: actions/checkout@v4
+        with:
+          # No `ref:` — the checked-out tree is exactly the ref this run was
+          # dispatched from, which assert_protected_ref then re-verifies. A
+          # `ref:` taken from an input would let the dispatcher swap the code.
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify repository, ref and phase
+        run: |
+          python -c '
+          import json, os, sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import identity, phases
+          identity.assert_repository_numeric_id(
+              int(json.loads(os.environ["EVENT_REPOSITORY_ID"])))
+          identity.assert_protected_ref(os.environ["GITHUB_REF"])
+          print(json.dumps(phases.assert_phase_permitted(
+              os.environ["LANE_PHASE"]), sort_keys=True))
+          '
+        env:
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          GITHUB_REF: ${{ github.ref }}
+          LANE_PHASE: ${{ inputs.phase }}
+
+      - name: Prove candidate isolation
+        run: |
+          python -c '
+          import json, sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import enginepolicy
+          print(json.dumps(enginepolicy.assert_no_candidate_import(),
+                           sort_keys=True))
+          '
+
+      - name: Run the trusted-lane bootstrap tests
+        run: python -m pytest tests/test_trusted_lane_bootstrap.py -q
+
+  # ---------------------------------------------------------------- D1
+  # Environment-gated. `environment:` is what makes the key reachable, and the
+  # environment's own protection rules are what keep an unprotected ref out.
+  # The candidate is NOT checked out here; candidatefetch.py clones it
+  # --no-checkout as inert data.
+  d1-trusted-count:
+    needs: d0-containment
+    if: ${{ inputs.phase == 'D1_TRUSTED_COUNT' || inputs.phase == 'D2_TRUSTED_GENERATION' }}
+    runs-on: ubuntu-latest
+    environment: trusted-verifier
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted engine from the protected ref only
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Refuse until deployed as a protected trusted lane
+        env:
+          # The secret is referenced BY NAME. No value lives in this file, and
+          # the name resolves to nothing outside the protected environment.
+          TRUSTED_VERIFIER_OPENAI_KEY: ${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}
+        run: |
+          python -c '
+          import sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import phases
+          phases.assert_phase_permitted("D1_TRUSTED_COUNT")
+          '
+
+  # ---------------------------------------------------------------- D2
+  # Generation is approved as its own decision, never implied by D1.
+  d2-trusted-generation:
+    needs: d1-trusted-count
+    if: ${{ inputs.phase == 'D2_TRUSTED_GENERATION' }}
+    runs-on: ubuntu-latest
+    environment: trusted-verifier-generation
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted engine from the protected ref only
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Refuse until generation is separately approved
+        env:
+          TRUSTED_VERIFIER_OPENAI_KEY: ${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}
+        run: |
+          python -c '
+          import sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import phases
+          phases.assert_phase_permitted("D2_TRUSTED_GENERATION")
+          '
