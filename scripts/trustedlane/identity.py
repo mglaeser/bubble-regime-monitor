@@ -53,10 +53,10 @@ def assert_range(*, target_base_sha: str, diff_base_sha: str, head_sha: str,
 
 #: Refs a credential-bearing run may execute from. A candidate branch is not
 #: one of them, whatever it is called.
-PROTECTED_REFS = ("refs/heads/main",)
+ALLOWED_DEFAULT_REFS = ("refs/heads/main",)
 
 
-def assert_protected_ref(ref: str) -> str:
+def assert_allowed_default_ref(ref: str) -> str:
     """The ref is one we would accept — which is NOT the same as protected.
 
     This compares a NAME. `refs/heads/main` is the ref a trusted run is supposed
@@ -68,9 +68,9 @@ def assert_protected_ref(ref: str) -> str:
     actually reported. Splitting them is deliberate — conflating "named main"
     with "protected" is exactly how a lane ends up deploying a credential to a
     branch that is not defended."""
-    if ref not in PROTECTED_REFS:
-        refuse(f"category=ref_not_protected ref={ref!r} allowed="
-               f"{list(PROTECTED_REFS)} — a credential-bearing run executes "
+    if ref not in ALLOWED_DEFAULT_REFS:
+        refuse(f"category=ref_not_allowed_default ref={ref!r} allowed="
+               f"{list(ALLOWED_DEFAULT_REFS)} — a credential-bearing run executes "
                "only from a protected ref; a branch that merely holds trusted "
                "code is still a branch anyone can push to")
     return ref
@@ -95,7 +95,7 @@ def assert_branch_protection_observed(observed) -> dict:
     if not isinstance(observed, dict):
         refuse("category=branch_record_not_object")
     name = observed.get("name")
-    if f"refs/heads/{name}" not in PROTECTED_REFS:
+    if f"refs/heads/{name}" not in ALLOWED_DEFAULT_REFS:
         refuse(f"category=branch_record_is_not_the_protected_ref name={name!r}")
     if observed.get("protected") is not True:
         refuse(f"category=branch_not_protected name={name!r} "
@@ -120,7 +120,7 @@ def assert_environment_protected(environment: dict) -> dict:
     allowed = environment["allowed_refs"]
     if not isinstance(allowed, (list, tuple)) or not allowed:
         refuse("category=environment_allows_no_ref")
-    outside = [r for r in allowed if r not in PROTECTED_REFS]
+    outside = [r for r in allowed if r not in ALLOWED_DEFAULT_REFS]
     if outside:
         refuse(f"category=environment_allows_unprotected_ref count="
                f"{len(outside)}")

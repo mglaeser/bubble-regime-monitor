@@ -55,6 +55,43 @@ documents this in its own header and deliberately omits a
 |---|-----|--------|------------------------|--------|
 | 7 | `protect_trusted_environment` | Protect the trusted environment **and** the default ref. | No | D1 |
 
+### Required status checks — the exact strings
+
+Configure these literally. A description ("require the cross-vendor review") is
+what produced the defect below; these strings are generated from the same
+constants `scripts/trustedlane/statusnames.py` asserts on, so the instruction
+cannot drift from the policy. `statusnames.branch_protection_instructions()`
+prints them.
+
+| when | require exactly |
+|---|---|
+| now | `test (3.12)`, `image`, `d0-containment` |
+| after D1 is deployed and approved | add `trusted-verifier-count`, `d1-containment-gate` |
+| after D2 is separately approved | add `trusted-cross-vendor-review`, `d2-containment-gate` |
+
+**Never require `independent-verify-inactive`.** That job runs, reports a
+documented residual, and casts **zero votes** — it holds no provider credential
+since V-TRUST was closed. Requiring it would make a no-review success
+permanently satisfy a review requirement.
+
+It was called `cross-vendor` until Exchange 3, which is exactly the hazard: the
+name sounded like the authoritative cross-vendor review, and the programme's own
+older documents recommended requiring it. If you have `cross-vendor` configured
+from before, remove it — nothing publishes that name any more, and a required
+status nothing publishes blocks every PR forever.
+
+**Never require `probe`.** It runs only on `workflow_dispatch`, so it never
+reports on a pull request; requiring it leaves every PR pending on a check that
+cannot start.
+
+`test (3.12)` is the string to configure, not `test` — a matrix job publishes
+its check name with the matrix values appended.
+
+Pass the list you actually configured to
+`statusnames.assert_no_inactive_status_is_required(...)` to have it checked. The
+lane holds no credential and cannot read or set branch protection itself, so
+that is a check over an observed value, not an enforcement.
+
 **This one is currently false, and it was verified, not assumed.**
 `GET /repos/mglaeser/bubble-regime-monitor/branches` reports `main` with
 `"protected": false`, while the programme's documents describe a

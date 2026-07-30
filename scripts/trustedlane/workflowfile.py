@@ -79,7 +79,35 @@ TRUSTED_WORKFLOWS = {
 }
 
 #: The job that must gate every credential-bearing job.
-CONTAINMENT_JOB = "d0-containment"
+#: The containment job each phase gates its credential job behind. Per phase,
+#: not one shared name: two live workflows publishing the same check name make a
+#: required-status setting ambiguous — the operator configures one string and
+#: gets whichever workflow GitHub matched. See statusnames.py.
+CONTAINMENT_JOBS = {
+    "D0": "d0-containment",
+    "D1": "d1-containment-gate",
+    "D2": "d2-containment-gate",
+}
+CONTAINMENT_JOB = CONTAINMENT_JOBS["D0"]
+
+
+def containment_job_for(document: dict) -> str:
+    """Which containment job THIS document is required to have.
+
+    Resolved from the jobs the document actually declares rather than from its
+    filename — the same rule the deployed-copy check learned the hard way. A
+    document declaring none of them is refused, not defaulted: defaulting would
+    silently check a workflow against a job it never had."""
+    jobs = document.get("jobs") or {}
+    present = [name for name in CONTAINMENT_JOBS.values() if name in jobs]
+    if len(present) > 1:
+        refuse(f"category=multiple_containment_jobs jobs={present} — a workflow "
+               "with two containment gates has two answers to which one gates "
+               "the credential")
+    if not present:
+        refuse(f"category=containment_job_missing "
+               f"expected_one_of={sorted(CONTAINMENT_JOBS.values())}")
+    return present[0]
 
 #: Workflow inputs that would let a caller choose the candidate SOURCE rather
 #: than merely name a commit in it. The source is fixed in trusted policy.
@@ -267,7 +295,7 @@ def assert_gating_is_not_neutralised(document: dict, *, name: str = "") -> dict:
 
     `continue-on-error: true` is subtler and worse: a containment STEP that
     fails no longer fails its job, so `assert_repository_numeric_id`,
-    `assert_protected_ref` and `assert_no_candidate_import` can all refuse and
+    `assert_allowed_default_ref` and `assert_no_candidate_import` can all refuse and
     the job still reports success. The gate produces its refusal and nobody
     hears it. Found by the bootstrap PR review, which is also why this now
     covers every job and step rather than only credential-bearing jobs: the
@@ -441,7 +469,7 @@ def assert_checkouts_are_safe(document: dict) -> dict:
                 # refused instead, because this lane has no legitimate dynamic
                 # ref — the trusted engine checks out the ref it was
                 # dispatched from, which the environment's branch policy and
-                # assert_protected_ref already constrain.
+                # assert_allowed_default_ref already constrain.
                 refuse(f"category=checkout_ref_is_an_expression where={where} "
                        f"ref={str(ref)[:60]!r} — a computed ref lets whoever "
                        "computes it choose the code that runs with the secret; "
@@ -455,17 +483,16 @@ def assert_checkouts_are_safe(document: dict) -> dict:
 def assert_secret_containment(document: dict) -> dict:
     """Only environment-gated jobs that are gated behind D0 may name a secret."""
     jobs = document.get("jobs") or {}
-    if CONTAINMENT_JOB not in jobs:
-        refuse(f"category=containment_job_missing job={CONTAINMENT_JOB}")
-    containment = jobs[CONTAINMENT_JOB] or {}
+    containment_job = containment_job_for(document)
+    containment = jobs[containment_job] or {}
     if "environment" in containment:
         refuse(f"category=containment_job_has_environment job="
-               f"{CONTAINMENT_JOB} — an `environment:` is what makes an "
+               f"{containment_job} — an `environment:` is what makes an "
                "environment secret reachable; the no-secret job must not have "
                "one")
     if _references_secret(containment):
         refuse(f"category=containment_job_references_secret "
-               f"job={CONTAINMENT_JOB}")
+               f"job={containment_job}")
 
     def gated_on(name, seen=()):
         """True when `name` transitively needs the containment job."""
@@ -474,7 +501,7 @@ def assert_secret_containment(document: dict) -> dict:
         needs = (jobs.get(name) or {}).get("needs") or []
         if isinstance(needs, str):
             needs = [needs]
-        if CONTAINMENT_JOB in needs:
+        if containment_job in needs:
             return True
         return any(gated_on(parent, (*seen, name)) for parent in needs)
 
@@ -489,10 +516,10 @@ def assert_secret_containment(document: dict) -> dict:
                    "repository- or organization-level fallback")
         if not gated_on(name):
             refuse(f"category=secret_job_not_gated_behind_containment "
-                   f"job={name} needs_job={CONTAINMENT_JOB}")
+                   f"job={name} needs_job={containment_job}")
         credential_jobs.append(name)
     return {"credential_bearing_jobs": sorted(credential_jobs),
-            "containment_job": CONTAINMENT_JOB}
+            "containment_job": containment_job}
 
 
 def assert_no_literal_credential(raw: bytes) -> dict:
