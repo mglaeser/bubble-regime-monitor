@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -47,6 +48,7 @@ from trustedlane import (  # noqa: E402
     enginepolicy,
     errors,
     identity,
+    livepolicy,
     phases,
     prerequisites,
     workflowfile,
@@ -2000,3 +2002,187 @@ def test_third_a_the_reachability_refusal_names_the_paths(tmp_path):
         enginepolicy.assert_no_candidate_import(
             modules={}, search_path=[str(tmp_path)])
     assert str(tmp_path / "verifier") in excinfo.value.reason
+
+
+# --------------------------------------------------------------------------
+# V-TRUST: the live workflow directory.
+#
+# The lane's own three phase files were reviewed to death while the workflow
+# that actually held provider credentials sat in `.github/workflows/` and was
+# covered by none of it. `independent-verify.yml` ran `on: pull_request`,
+# checked out the PR merge ref, injected SECOND_VENDOR_API_KEY and
+# OPENAI_API_KEY, and executed `python scripts/independent_verify.py` from that
+# checkout — so a pull request editing that script ran its own code with both
+# keys. Opening the PR was the whole attack.
+#
+# The first test below runs the new check against the PRE-FIX file as it stood
+# on main, so the defect is demonstrated rather than described.
+# --------------------------------------------------------------------------
+
+#: The workflow as it stood on main before this change, byte-for-byte in the
+#: parts that matter. Kept as a literal rather than read from git history so
+#: the test still means something after the history is rewritten or squashed.
+PRE_FIX_INDEPENDENT_VERIFY = """
+name: Independent-Verify
+on:
+  pull_request:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  cross-vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cross-vendor review panel (required approver + corroboration)
+        env:
+          SECOND_VENDOR_API_KEY: ${{ secrets.SECOND_VENDOR_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python scripts/independent_verify.py
+"""
+
+
+def test_vtrust_the_pre_fix_workflow_is_refused():
+    """The defect, reproduced. This is the shape that shipped."""
+    document = yaml.safe_load(PRE_FIX_INDEPENDENT_VERIFY)
+    assert livepolicy.is_pr_controlled(document) is True
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        livepolicy.assert_no_secret_in_pr_controlled_workflow(
+            document, name="independent-verify.yml")
+    reason = excinfo.value.reason
+    assert "pr_controlled_workflow_reaches_a_secret" in reason
+    assert "PROVIDER_CLASS" in reason
+
+
+def test_vtrust_the_live_directory_passes_now():
+    """The fix, on the real files GitHub will schedule — not on a fixture."""
+    record = livepolicy.validate_live_workflows(root=str(ROOT))
+    assert record["count"] >= 3
+    for name, one in record["workflows"].items():
+        assert one["secrets_reachable"] == 0, name
+
+
+def test_vtrust_no_live_workflow_holds_a_provider_secret_under_pr_control():
+    """The ratchet, stated as the property rather than as a filename.
+
+    Keyed on the trigger and the secret, so the next credential-bearing PR
+    workflow is caught whatever it is called — the third review round found
+    exactly this filename-vs-property mistake in the D0 deployment check."""
+    for path in livepolicy.live_workflow_paths(root=str(ROOT)):
+        document = livepolicy._read(path)
+        livepolicy.assert_no_secret_in_pr_controlled_workflow(
+            document, name=os.path.basename(path))
+
+
+#: Written out rather than taken from `livepolicy.PR_CONTROLLED_TRIGGERS`.
+#: Parametrizing over the constant under test made the suite unable to notice
+#: that constant SHRINKING — deleting `pull_request_target` from it just
+#: deleted the test cases, and the mutation sweep reported STILL_GREEN. A test
+#: that derives its cases from the thing it is testing tests nothing about it.
+PR_TRIGGERS_THAT_MUST_BE_COVERED = ("pull_request", "pull_request_target")
+
+
+def test_vtrust_both_pr_triggers_are_in_the_policy_constant():
+    """The half the parametrized test cannot check: that nothing was removed."""
+    for trigger in PR_TRIGGERS_THAT_MUST_BE_COVERED:
+        assert trigger in livepolicy.PR_CONTROLLED_TRIGGERS
+
+
+@pytest.mark.parametrize("trigger", PR_TRIGGERS_THAT_MUST_BE_COVERED)
+@pytest.mark.parametrize("expression", SECRET_SYNTAXES)
+def test_vtrust_every_pr_trigger_and_secret_syntax_is_caught(trigger,
+                                                             expression):
+    """`pull_request_target` is the worse of the two — it runs with the base
+    repository's full secret scope — and both are refused identically, because
+    the difference only decides how bad it is."""
+    document = {"name": "X", True: {trigger: None},
+                "jobs": {"j": {"runs-on": "ubuntu-latest",
+                               "steps": [{"env": {"K": expression},
+                                          "run": "echo"}]}}}
+    with _refusal("pr_controlled_workflow_reaches_a_secret"):
+        livepolicy.assert_no_secret_in_pr_controlled_workflow(document,
+                                                              name="x.yml")
+
+
+def test_vtrust_a_non_pr_workflow_may_hold_a_secret():
+    """The probe workflow is the real case: `workflow_dispatch` only, gated by
+    an environment deployment-branch policy, holding an environment secret.
+    That is the correct shape and must not be collateral damage."""
+    document = {"name": "X", True: {"workflow_dispatch": None},
+                "jobs": {"j": {"runs-on": "ubuntu-latest",
+                               "environment": "verifier-probe",
+                               "steps": [{"env": {"K": "${{ secrets.PROBE }}"},
+                                          "run": "echo"}]}}}
+    record = livepolicy.assert_no_secret_in_pr_controlled_workflow(
+        document, name="probe.yml")
+    assert record["pr_controlled"] is False
+
+
+def test_vtrust_the_trigger_reader_survives_the_yaml_on_boolean():
+    """Unquoted `on:` is a YAML 1.1 boolean, so the key is `True`. A reader
+    that looks up "on" finds nothing on every real workflow file and reports
+    every one of them as untriggered — which passes everything."""
+    parsed = yaml.safe_load("on:\n  pull_request:\njobs: {}\n")
+    assert True in parsed and "on" not in parsed
+    assert livepolicy.trigger_names(parsed) == ["pull_request"]
+    assert livepolicy.is_pr_controlled(parsed) is True
+    # And the list and string spellings, which are equally legal.
+    assert livepolicy.trigger_names(
+        yaml.safe_load("on: [pull_request, push]\njobs: {}\n")) == [
+            "pull_request", "push"]
+    assert livepolicy.trigger_names(
+        yaml.safe_load("on: push\njobs: {}\n")) == ["push"]
+
+
+def test_vtrust_an_unreadable_live_workflow_is_refused_not_skipped(tmp_path):
+    """"Could not parse it, so it passed" is how a check reports success for
+    the one file it understood least."""
+    live = tmp_path / workflowfile.LIVE_WORKFLOW_DIR
+    live.mkdir(parents=True)
+    (live / "broken.yml").write_text("{{{ not yaml", encoding="utf-8")
+    with _refusal("live_workflow_unreadable"):
+        livepolicy.validate_live_workflows(root=str(tmp_path))
+
+
+def test_vtrust_a_yml_template_is_not_a_live_workflow(tmp_path):
+    """The containment the whole D1/D2 split rests on: GitHub reads `.yml` and
+    `.yaml` and nothing else, so a credential-bearing template is inert on
+    disk. Asserted here because the live scanner must agree with that rule."""
+    live = tmp_path / workflowfile.LIVE_WORKFLOW_DIR
+    live.mkdir(parents=True)
+    (live / "d1.yml.template").write_text(
+        "name: D1\non:\n  pull_request:\njobs:\n  j:\n    steps:\n"
+        "      - env:\n          K: ${{ secrets.X }}\n", encoding="utf-8")
+    assert livepolicy.live_workflow_paths(root=str(tmp_path)) == []
+    assert livepolicy.validate_live_workflows(root=str(tmp_path))["count"] == 0
+
+
+def test_vtrust_every_live_action_is_an_approved_immutable_pin():
+    """A moving tag is a supply-chain decision made by someone else at a time
+    of their choosing."""
+    record = livepolicy.validate_live_workflows(root=str(ROOT))
+    seen = 0
+    for name, one in record["workflows"].items():
+        for pin in one["pinned_actions"]:
+            assert len(pin["sha"]) == 40, (name, pin)
+            assert pin["release"], (name, pin)
+            seen += 1
+    assert seen >= 5, "the pinning assertion must actually cover something"
+
+
+def test_vtrust_declares_no_actions_is_recorded_not_skipped():
+    """A workflow that uses no actions is a fact worth recording. A silent skip
+    reads as coverage; `assert_actions_pinned`'s own zero-coverage guard exists
+    for the same reason and stays in force for the lane's three files."""
+    record = livepolicy.validate_live_workflows(root=str(ROOT))
+    probe = record["workflows"]["openai-verifier-capability-probe.yml"]
+    assert probe["declares_no_actions"] is True
+    assert probe["pinned_actions"] == []
+    # The lane's own files still refuse a no-actions document.
+    with _refusal("workflow_uses_no_actions"):
+        workflowfile.assert_actions_pinned({"jobs": {}}, name="lane.yml")
