@@ -815,6 +815,53 @@ def test_fetch_candidate_refuses_a_malformed_sha_before_cloning(tmp_path):
     assert not destination.exists()
 
 
+def test_no_credential_reaches_the_git_child_process(monkeypatch):
+    """§18 E9 — a secret must not be available to a candidate-facing process.
+
+    `HERMETIC_GIT_ENV` is a whitelist, not a filter. Filtering an inherited
+    environment is the version that fails: a name nobody thought of survives.
+    Checked empirically against two planted variables — one with the obvious
+    name, one with a name no filter would predict."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-planted-must-never-appear")
+    monkeypatch.setenv("ZZ_UNEXPECTED_CREDENTIAL", "also-planted")
+    passed = {}
+
+    def capture(command, **kwargs):
+        passed.update(kwargs.get("env") or {})
+
+        class Result:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+        return Result()
+
+    monkeypatch.setattr(candidatefetch.subprocess, "run", capture)
+    candidatefetch.git(["rev-parse", "HEAD"], operation="env-probe")
+    assert passed == dict(candidatefetch.HERMETIC_GIT_ENV)
+    assert "OPENAI_API_KEY" not in passed
+    assert "ZZ_UNEXPECTED_CREDENTIAL" not in passed
+    assert "planted" not in json.dumps(passed)
+    for name in passed:
+        assert not any(marker in name.upper()
+                       for marker in CREDENTIAL_ENV_MARKERS), name
+
+
+def test_the_child_environment_really_is_what_the_child_sees(candidate_origin,
+                                                             monkeypatch):
+    """Not only the dict — the process.
+
+    `git var -l` reports its own environment, so a leaked GIT_AUTHOR_NAME would
+    appear in its output. Asserting the dict alone would pass even if `git()`
+    stopped passing `env` at all."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "leaked-author")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "leaked@example.invalid")
+    out = subprocess.run(
+        ["git", "var", "-l"], cwd=candidate_origin["path"],
+        capture_output=True, env=dict(candidatefetch.HERMETIC_GIT_ENV))
+    assert b"leaked-author" not in out.stdout
+    assert b"leaked@example.invalid" not in out.stdout
+
+
 def test_oversized_git_output_refuses(candidate_origin, monkeypatch):
     monkeypatch.setattr(candidatefetch, "MAX_OUTPUT_BYTES", 1)
     with _refusal("git_output_oversized"):
