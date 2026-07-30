@@ -176,6 +176,20 @@ def assert_no_secret_in_pr_controlled_workflow(document: dict, *,
     if not is_pr_controlled(document):
         return {"pr_controlled": False, "secrets_reachable": 0}
     found = _secret_references(document)
+    # `secrets: inherit` contains no `${{ }}` expression, so the expression
+    # scanner never sees it — and it is the single most powerful secret-reaching
+    # syntax GitHub has, handing the called workflow EVERY secret in the
+    # repository in one word. Found by probing this function rather than by
+    # reasoning about it, which is the only reason it is here: the expression
+    # scanner looked complete and was not.
+    #
+    # Any job-level `secrets:` key counts, whatever its value. A mapping is
+    # caught by the scanner anyway; the bare string is the one that got through,
+    # and enumerating which values are dangerous is the mistake this file exists
+    # to stop making.
+    for job_name, job in (document.get("jobs") or {}).items():
+        if "secrets" in (job or {}):
+            found.append(f"jobs.{job_name}.secrets={(job or {})['secrets']!r}")
     if found:
         classes = sorted({_classify(r) for r in found})
         refuse(f"category=pr_controlled_workflow_reaches_a_secret name={name} "
@@ -185,6 +199,45 @@ def assert_no_secret_in_pr_controlled_workflow(document: dict, *,
                "pull request can read. Move it to a workflow_run job that "
                "checks out trusted code and takes the candidate as data")
     return {"pr_controlled": True, "secrets_reachable": 0}
+
+
+def assert_pull_request_target_checks_out_nothing(document: dict, *,
+                                                  name: str = "") -> dict:
+    """`pull_request_target` + a checkout of the PR head is the canonical hole.
+
+    The trigger exists so a workflow can run with the BASE repository's
+    permissions — including a write-scoped `GITHUB_TOKEN` — on a pull request
+    from anywhere. Its default checkout is the base, which is the whole safety
+    property. Naming a `ref:` opts out of it and runs the pull request author's
+    code with those permissions.
+
+    Refused on the presence of `ref:` at all, not on whether the ref looks
+    dynamic. `${{ github.event.pull_request.head.sha }}` and a literal
+    `refs/pull/N/merge` are the same code from the same author; a check that
+    only caught the expression would be asking whether the hazard was spelled in
+    the obvious way.
+
+    A `pull_request_target` workflow that never checks out — a labeller, a
+    commenter — is untouched, which is the legitimate use."""
+    if "pull_request_target" not in trigger_names(document):
+        return {"pull_request_target": False}
+    offenders = []
+    for job_name, job in (document.get("jobs") or {}).items():
+        for index, step in enumerate((job or {}).get("steps") or []):
+            step = step or {}
+            uses = str(step.get("uses") or "")
+            if not uses.startswith("actions/checkout"):
+                continue
+            ref = (step.get("with") or {}).get("ref")
+            if ref is not None:
+                offenders.append(f"{job_name}.steps[{index}] ref={ref!r}")
+    if offenders:
+        refuse(f"category=pull_request_target_checks_out_candidate_code "
+               f"name={name} found={offenders} — this trigger runs with the "
+               "base repository's permissions including a write-scoped token; "
+               "its default checkout is the base, and naming a ref opts out of "
+               "the only thing that makes it safe")
+    return {"pull_request_target": True, "candidate_checkouts": 0}
 
 
 def declared_uses(document: dict) -> list:
@@ -220,6 +273,8 @@ def validate_live_workflows(*, root: str = ".") -> dict:
         results[name] = {
             "triggers": trigger_names(document),
             **assert_no_secret_in_pr_controlled_workflow(document, name=name),
+            **assert_pull_request_target_checks_out_nothing(document,
+                                                            name=name),
             **assert_only_allowlisted_steps_survive_failure(document,
                                                             name=name),
             **pinning,

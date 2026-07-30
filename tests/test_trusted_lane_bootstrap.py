@@ -2277,3 +2277,68 @@ def test_vtrust_the_allowlisted_advisory_step_is_still_permitted():
     assert advisory[0]["run"].strip() == "mypy app"
     livepolicy.assert_only_allowlisted_steps_survive_failure(
         document, name="ci.yml")
+
+
+# ---- two holes found by probing the new check, not by reading it ----------
+
+
+@pytest.mark.parametrize("value", ["inherit", None, {"K": "x"}])
+def test_vtrust_a_job_level_secrets_key_is_a_secret_reach(value):
+    """`secrets: inherit` carries no `${{ }}`, so the expression scanner never
+    saw it — and it is the most powerful secret-reaching syntax GitHub has,
+    handing the called workflow every secret in the repository in one word.
+
+    The scanner looked complete. It was found incomplete by running attacks
+    against it, which is the only reason this test exists."""
+    document = {"name": "X", True: {"pull_request": None},
+                "jobs": {"j": {"uses": "./.github/workflows/r.yml",
+                               "secrets": value}}}
+    with _refusal("pr_controlled_workflow_reaches_a_secret"):
+        livepolicy.assert_no_secret_in_pr_controlled_workflow(document,
+                                                              name="x.yml")
+
+
+@pytest.mark.parametrize("ref", [
+    "${{ github.event.pull_request.head.sha }}",
+    "${{ github.head_ref }}",
+    "refs/pull/7/merge",
+])
+def test_vtrust_pull_request_target_may_not_check_out_candidate_code(ref):
+    """The canonical GitHub hole. `pull_request_target` runs with the base
+    repository's permissions including a write-scoped token; its default
+    checkout is the base, and naming a ref opts out of the only thing that
+    makes it safe.
+
+    The literal `refs/pull/N/merge` case is why this refuses on the presence of
+    `ref:` rather than on whether it looks dynamic — a check that only caught
+    the expression would be asking whether the hazard was spelled the obvious
+    way."""
+    document = {"name": "X", True: {"pull_request_target": None},
+                "jobs": {"j": {"steps": [{"uses": "actions/checkout@v4",
+                                          "with": {"ref": ref}}]}}}
+    with _refusal("pull_request_target_checks_out_candidate_code"):
+        livepolicy.assert_pull_request_target_checks_out_nothing(
+            document, name="x.yml")
+
+
+@pytest.mark.parametrize("steps,label", [
+    ([{"run": "gh pr edit --add-label triage"}], "labeller, never checks out"),
+    ([{"uses": "actions/checkout@v4"}], "default checkout is the base"),
+])
+def test_vtrust_legitimate_pull_request_target_uses_are_untouched(steps, label):
+    """A check that refuses the safe shape too is a check that gets deleted."""
+    document = {"name": "X", True: {"pull_request_target": None},
+                "jobs": {"j": {"steps": steps}}}
+    record = livepolicy.assert_pull_request_target_checks_out_nothing(
+        document, name="x.yml")
+    assert record["candidate_checkouts"] == 0, label
+
+
+def test_vtrust_a_plain_pull_request_workflow_may_name_a_ref():
+    """`pull_request` already runs candidate code by design and holds no
+    secret; the ref rule is specific to `pull_request_target`'s permissions."""
+    document = {"name": "X", True: {"pull_request": None},
+                "jobs": {"j": {"steps": [{"uses": "actions/checkout@v4",
+                                          "with": {"ref": "x"}}]}}}
+    assert livepolicy.assert_pull_request_target_checks_out_nothing(
+        document, name="x.yml")["pull_request_target"] is False
