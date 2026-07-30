@@ -49,10 +49,13 @@ from trustedlane import (  # noqa: E402
     enginebuild,
     enginepolicy,
     errors,
+    evidencewire,
     identity,
     livepolicy,
+    operatorrecord,
     phases,
     prerequisites,
+    protectedstate,
     statusnames,
     workflowfile,
     workflowpolicy,
@@ -2848,3 +2851,367 @@ def test_a_malformed_commit_sha_is_refused_before_anything_is_digested():
     with _refusal("commit_sha_malformed"):
         enginebuild.candidate_package(source_commit="HEAD",
                                       code_cutoff_sha=SHA_A, root=str(ROOT))
+
+
+# --------------------------------------------------------------------------
+# §5.3 — the three interfaces D1/D2 need before a credential is reachable:
+# operator-record verification, protected-state checks, and the signed-evidence
+# wire format. None of them holds a credential; all of them refuse to conclude
+# more than they checked.
+# --------------------------------------------------------------------------
+
+_WIRE_ARGS = dict(
+    produced_by="local-test", repository_numeric_id=REPOSITORY_NUMERIC_ID,
+    workflow_run_id=1, workflow_run_attempt=1, ref="refs/heads/main",
+    target_base_sha=SHA_A, candidate_head_sha=SHA_B,
+    produced_at="2026-07-30T21:00:00Z")
+
+
+def _envelope(evidence_class="MOCK_TEST_EVIDENCE", payload=None):
+    return evidencewire.envelope(evidence_class=evidence_class,
+                                 payload=payload or {"n": 1}, **_WIRE_ARGS)
+
+
+@pytest.mark.parametrize("evidence_class", evidencewire.TRUSTED_CLASSES)
+def test_wire_a_candidate_branch_may_not_emit_any_trusted_class(evidence_class):
+    """Enumerated rather than spot-checked: the refusal covers the whole trusted
+    set, not the one name someone remembered."""
+    with _refusal("candidate_emitted_trusted_class"):
+        _envelope(evidence_class)
+
+
+@pytest.mark.parametrize("evidence_class", evidencewire.CANDIDATE_CLASSES)
+def test_wire_every_candidate_class_is_emittable(evidence_class):
+    record = _envelope(evidence_class)
+    assert evidencewire.validate_envelope(record)["trusted_class"] is False
+    assert record["signature"] is None
+
+
+def test_wire_a_trusted_class_without_a_signature_is_refused_not_downgraded():
+    """The friendly move is to relabel it as weaker evidence. That is exactly
+    wrong: it is a record making a claim it cannot support, and downgrading lets
+    it flow onward looking merely modest."""
+    record = _envelope()
+    record["evidence_class"] = "TRUSTED_EXECUTION_EVIDENCE"
+    record["envelope_sha256"] = evidencewire.envelope_digest(record)
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        evidencewire.validate_envelope(record)
+    assert "trusted_class_without_signature" in excinfo.value.reason
+    assert "rather than downgraded" in excinfo.value.reason
+
+
+def test_wire_d0_containment_is_run_anchored_but_the_anchor_is_required():
+    """The one narrow exception. D0 holds no key, so its evidence is anchored by
+    the protected run — which makes the run id the anchor, not a waiver."""
+    record = _envelope()
+    record["evidence_class"] = "HOSTED_D0_CONTAINMENT_EVIDENCE"
+    record["envelope_sha256"] = evidencewire.envelope_digest(record)
+    assert evidencewire.validate_envelope(record)["trusted_class"] is True
+
+    record["workflow_run_id"] = None
+    record["envelope_sha256"] = evidencewire.envelope_digest(record)
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        evidencewire.validate_envelope(record)
+    assert ("run_anchored_evidence_without_a_run" in excinfo.value.reason
+            or "envelope_incomplete" in excinfo.value.reason)
+
+
+def test_wire_a_candidate_class_carrying_a_signature_is_refused():
+    """A signature on a candidate-class record invites a reader to treat it as
+    trusted. The class is what a reader keys on."""
+    record = _envelope()
+    record["signature"] = "MEUCIQDsignature"
+    with _refusal("candidate_class_carries_a_signature"):
+        evidencewire.validate_envelope(record)
+
+
+def test_wire_editing_the_envelope_after_digesting_is_refused():
+    record = _envelope()
+    record["candidate_head_sha"] = SHA_C
+    with _refusal("evidence_envelope_digest_mismatch"):
+        evidencewire.validate_envelope(record)
+
+
+def test_wire_the_reader_can_check_the_payload_it_actually_holds():
+    """Without this an envelope is a well-formed statement about a payload
+    nobody compared it to."""
+    record = _envelope(payload={"units": 12})
+    assert evidencewire.assert_payload_matches(
+        record, {"units": 12})["payload_bound"] is True
+    with _refusal("evidence_payload_digest_mismatch"):
+        evidencewire.assert_payload_matches(record, {"units": 13})
+
+
+def test_wire_formatting_does_not_change_the_payload_digest():
+    """A signature over a formatting choice binds the formatting, not the
+    content — so producer and reader canonicalise identically."""
+    a = evidencewire.canonical_payload_digest({"b": 1, "a": [1, 2]})
+    b = evidencewire.canonical_payload_digest({"a": [1, 2], "b": 1})
+    assert a == b
+
+
+def test_wire_signing_and_verifying_both_refuse_and_say_which_key():
+    record = _envelope()
+    with pytest.raises(errors.LaneRefusal) as sign_exc:
+        evidencewire.sign(record)
+    assert "signing key" in sign_exc.value.reason
+    with pytest.raises(errors.LaneRefusal) as verify_exc:
+        evidencewire.verify(record)
+    assert "PUBLIC key" in verify_exc.value.reason
+
+
+# ---- operator records: a branch-local file is not authority -----------------
+
+
+def _operator_record(**overrides):
+    record = {
+        "prerequisite_key": "approve_count_spending",
+        "operator_identity": "mglaeser",
+        "authorized_at": "2026-07-30T20:00:00Z",
+        "scope": f"{CANONICAL_REPOSITORY}@{SHA_A}",
+        "exact_values": {"max_usd": 25},
+        "reason": "Exchange 3 trusted counts",
+        "expires_at": "2026-08-30T00:00:00Z",
+        "anchor": {"kind": "SIGNED_BY_TRUSTED_KEY", "reference": "sig-1",
+                   "anchored_digest": ""},
+    }
+    record.update(overrides)
+    record["anchor"] = dict(record["anchor"])
+    record["anchor"]["anchored_digest"] = operatorrecord.record_digest(record)
+    return record
+
+
+def test_operator_a_well_formed_record_parses_but_is_not_verified():
+    parsed = operatorrecord.parse_operator_record(_operator_record())
+    assert parsed["state"] == "PARSED_AND_ADMISSIBLE_NOT_VERIFIED"
+    assert parsed["anchor_verified"] is False
+    assert "NOT checked" in parsed["honest_scope"]
+
+
+@pytest.mark.parametrize("kind", sorted(operatorrecord.REFUSED_ANCHOR_KINDS))
+def test_operator_a_branch_writable_anchor_is_refused_by_name(kind):
+    """Refused by name rather than by a generic shape failure, because each one
+    is a plausible thing someone will try and "malformed" would not explain why
+    it can never work."""
+    record = _operator_record()
+    record["anchor"] = dict(record["anchor"], kind=kind)
+    record["anchor"]["anchored_digest"] = operatorrecord.record_digest(record)
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        operatorrecord.parse_operator_record(record)
+    assert "operator_anchor_is_branch_writable" in excinfo.value.reason
+    assert "branch-local file is not authority" in excinfo.value.reason
+
+
+def test_operator_editing_the_values_after_anchoring_breaks_the_binding():
+    record = _operator_record()
+    record["exact_values"] = {"max_usd": 9999}
+    with _refusal("operator_anchor_digest_mismatch"):
+        operatorrecord.parse_operator_record(record)
+
+
+@pytest.mark.parametrize("key", operatorrecord.EXPIRY_REQUIRED_KEYS)
+def test_operator_spending_and_generation_approvals_need_an_expiry(key):
+    """Standing permission is the failure mode: an approval given once for one
+    range must not silently cover every future one."""
+    record = _operator_record(prerequisite_key=key)
+    del record["expires_at"]
+    record["anchor"]["anchored_digest"] = operatorrecord.record_digest(record)
+    with _refusal("operator_authorization_has_no_expiry"):
+        operatorrecord.parse_operator_record(record)
+
+
+def test_operator_an_expired_authorization_is_refused_against_a_supplied_clock():
+    """The clock is a parameter: a lane that reads its own clock can be run on a
+    machine whose clock says whatever is convenient."""
+    parsed = operatorrecord.parse_operator_record(_operator_record())
+    assert operatorrecord.assert_not_expired(
+        parsed, observed_now="2026-07-30T21:00:00Z")["expiry_checked"] is True
+    with _refusal("operator_authorization_expired"):
+        operatorrecord.assert_not_expired(parsed,
+                                          observed_now="2026-09-01T00:00:00Z")
+
+
+def test_operator_a_revoked_record_is_refused():
+    record = _operator_record()
+    record["revoked_at"] = "2026-07-30T20:30:00Z"
+    record["anchor"]["anchored_digest"] = operatorrecord.record_digest(record)
+    with _refusal("operator_record_revoked"):
+        operatorrecord.parse_operator_record(record)
+
+
+def test_operator_an_authorization_for_a_non_prerequisite_is_refused():
+    """It authorizes nothing, and hides that it authorized nothing."""
+    record = _operator_record(prerequisite_key="approve_everything")
+    with _refusal("operator_record_unknown_prerequisite"):
+        operatorrecord.parse_operator_record(record)
+
+
+def test_operator_verify_records_reports_coverage_never_authorization():
+    result = operatorrecord.verify_records([_operator_record()],
+                                           observed_now="2026-07-30T21:00:00Z")
+    assert result["authorized"] is False
+    assert result["covered"] == ["approve_count_spending"]
+    assert len(result["outstanding"]) == 15
+    assert "coverage, not authorization" in result["honest_scope"]
+
+
+def test_operator_full_coverage_still_does_not_authorize_real_calls():
+    """The point of the whole module. Even sixteen well-formed, admissibly
+    anchored records do not unlock anything, because none was verified against
+    a trusted key."""
+    records = [_operator_record(prerequisite_key=p.key,
+                               expires_at="2026-08-30T00:00:00Z")
+               for p in prerequisites.OPERATOR_PREREQUISITES]
+    result = operatorrecord.verify_records(records,
+                                           observed_now="2026-07-30T21:00:00Z")
+    assert result["outstanding"] == []
+    assert result["authorized"] is False
+    with pytest.raises(errors.LaneRefusal):
+        prerequisites.assert_real_calls_authorized(
+            prerequisites.prerequisite_status())
+
+
+def test_operator_two_records_for_one_prerequisite_are_refused():
+    """One of them is stale and nothing here says which."""
+    with _refusal("operator_record_duplicated"):
+        operatorrecord.verify_records([_operator_record(), _operator_record()],
+                                      observed_now="2026-07-30T21:00:00Z")
+
+
+# ---- protected state: the conjunction, before the credential ---------------
+
+
+def _protected_observation(**overrides):
+    base = dict(
+        observed_ref="refs/heads/main",
+        branch_record={"name": "main", "protected": True},
+        branch_rules={"required_pull_request_reviews": True,
+                      "block_force_pushes": True, "block_deletions": True,
+                      "bypass_actors": []},
+        environment_record={"name": "trusted-verifier",
+                            "deployment_branch_policy": {
+                                "custom_branch_policies": True},
+                            "allowed_branches": ["main"]},
+        environment_name="trusted-verifier",
+        # The NAME of a secret, not a value — this is precisely what the
+        # shadowing check compares across the repository and organization
+        # inventories. Flagged by the `secret_name=` keyword heuristic.
+        secret_name="TRUSTED_VERIFIER_OPENAI_KEY",  # pragma: allowlist secret
+        repository_secret_names=[], organization_secret_names=[])
+    base.update(overrides)
+    return base
+
+
+def test_protected_a_fully_configured_repository_passes():
+    record = protectedstate.assert_ready_for_credential(
+        **_protected_observation())
+    assert record["credential_may_be_reachable"] is True
+    assert record["shadowed"] is False
+
+
+def test_protected_todays_actual_state_blocks_before_any_credential():
+    """`GET /repos/.../branches` reports main `"protected": false` right now.
+    That is operator item 7, and this is the check that would stop D1 from
+    starting."""
+    with _refusal("branch_not_protected"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(
+                branch_record={"name": "main", "protected": False}))
+
+
+def test_protected_not_observed_is_a_different_failure_from_observed_false():
+    """Different failures, different operator fixes — so different refusals."""
+    with _refusal("branch_protection_not_observed"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(branch_record=None))
+    with _refusal("branch_rules_not_observed"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(branch_rules=None))
+    with _refusal("environment_not_observed"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(environment_record=None))
+
+
+@pytest.mark.parametrize("rule", protectedstate.REQUIRED_BRANCH_RULES)
+def test_protected_each_named_rule_must_be_enforced(rule):
+    """`protected: true` alone is not enough — a branch can be protected by a
+    ruleset that requires nothing."""
+    rules = dict(_protected_observation()["branch_rules"])
+    rules[rule] = False
+    with _refusal("branch_rule_not_enforced"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(branch_rules=rules))
+    del rules[rule]
+    with _refusal("branch_rule_not_observed"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(branch_rules=rules))
+
+
+def test_protected_a_bypass_actor_defeats_the_rules_that_protect_the_workflow():
+    rules = dict(_protected_observation()["branch_rules"],
+                 bypass_actors=["some-admin"])
+    with _refusal("branch_rules_have_bypass_actors"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(branch_rules=rules))
+
+
+def test_protected_a_repository_level_secret_shadows_the_environment_secret():
+    """Operator prerequisite 6, and the subtlest of them. A repository-level
+    secret is readable from ANY ref, so one under the same name makes the
+    deployment-branch policy decoration — every other check here passes while
+    the credential is reachable from a ref the policy excluded."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(
+                repository_secret_names=["TRUSTED_VERIFIER_OPENAI_KEY"]))
+    assert "environment_secret_is_shadowed" in excinfo.value.reason
+    assert "readable from any ref" in excinfo.value.reason
+
+
+def test_protected_an_organization_level_shadow_is_caught_too():
+    with _refusal("environment_secret_is_shadowed"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(
+                organization_secret_names=["TRUSTED_VERIFIER_OPENAI_KEY"]))
+
+
+@pytest.mark.parametrize("field", ["repository_secret_names",
+                                   "organization_secret_names"])
+def test_protected_an_unlisted_secret_inventory_is_refused(field):
+    """An unasked question is not an answer."""
+    with _refusal("secret_inventory_not_observed"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(**{field: None}))
+
+
+def test_protected_the_environment_must_admit_only_the_default_branch():
+    environment = dict(_protected_observation()["environment_record"],
+                       allowed_branches=["main", "develop"])
+    with _refusal("environment_admits_unprotected_branch"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(environment_record=environment))
+
+
+def test_protected_protected_branches_true_is_not_specific_enough():
+    """`protected_branches: true` admits every protected branch, not only the
+    default one."""
+    environment = dict(_protected_observation()["environment_record"],
+                       deployment_branch_policy={"custom_branch_policies": False,
+                                                 "protected_branches": True})
+    with _refusal("environment_policy_not_custom"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(environment_record=environment))
+
+
+def test_protected_checking_a_different_environment_proves_nothing():
+    environment = dict(_protected_observation()["environment_record"],
+                       name="some-other-environment")
+    with _refusal("environment_name_mismatch"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(environment_record=environment))
+
+
+def test_protected_a_non_default_ref_is_refused_first():
+    with _refusal("ref_not_allowed_default"):
+        protectedstate.assert_ready_for_credential(
+            **_protected_observation(observed_ref="refs/heads/feature"))
