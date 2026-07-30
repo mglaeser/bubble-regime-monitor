@@ -74,8 +74,12 @@ def evidence_only_delta(paths) -> dict:
     materialised = list(paths)
     if any(not isinstance(p, str) for p in materialised):
         refuse("category=closure_delta_path_not_a_string")
-    evidence_prefixes = ("audit/", "artifacts/", "governance/",
-                         ".github/workflows/", "docs/")
+    # `.github/workflows/` is deliberately NOT here. A workflow is executable
+    # code with credential reach — counting one as "evidence" would let a
+    # credential-bearing lane be added after the code cutoff while the closure
+    # still claimed the delta changed nothing that runs. Found by the bootstrap
+    # PR review.
+    evidence_prefixes = ("audit/", "artifacts/", "governance/", "docs/")
     source = sorted(p for p in materialised
                     if not any(p.startswith(prefix)
                                for prefix in evidence_prefixes))

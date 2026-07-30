@@ -42,7 +42,7 @@ on:
       - main
     paths:
       - 'scripts/trustedlane/**'
-      - '.github/workflows/trusted-lane-d0-containment.yml'
+      - '.github/workflows/d0-trusted-lane-containment.yml'
 
 permissions:
   contents: read

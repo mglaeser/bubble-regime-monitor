@@ -25,6 +25,7 @@ import ast
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -732,10 +733,14 @@ def test_a_checkout_that_persists_credentials_reddens(name, job):
 ])
 def test_a_caller_controlled_checkout_ref_reddens(expression):
     """Even the candidate SHA input: it is data for the FETCH, never a ref the
-    trusted engine checks itself out at."""
+    trusted engine checks itself out at.
+
+    The refusal is now `checkout_ref_is_an_expression` — strictly stronger than
+    the prefix list this test was written against, which the review defeated
+    with `env.` and `steps.`."""
     document = _document(D1)
     document["jobs"]["d1-trusted-count"]["steps"][0]["with"]["ref"] = expression
-    with _refusal("checkout_ref_caller_controlled"):
+    with _refusal("checkout_ref_is_an_expression"):
         workflowfile.assert_checkouts_are_safe(document)
 
 
@@ -798,9 +803,16 @@ def test_a_secret_reference_is_not_a_literal_credential():
 @pytest.mark.parametrize("name", [D1, D2])
 def test_renaming_a_template_into_the_live_directory_reddens(tmp_path, name):
     """The one step that must stay deliberate: `.yml.template` -> `.yml`."""
+    source = tmp_path / workflowfile.WORKFLOW_DIR
+    source.mkdir(parents=True)
+    for each in (D0, D1, D2):
+        shutil.copy(ROOT / workflowfile.WORKFLOW_DIR / each, source / each)
     live = tmp_path / ".github" / "workflows"
     live.mkdir(parents=True)
-    (live / name[:-len(".template")]).write_text("name: x\n", encoding="utf-8")
+    # Real content, because detection is by the workflow's declared `name:`
+    # rather than its filename — a stub named correctly is not the hazard.
+    shutil.copy(ROOT / workflowfile.WORKFLOW_DIR / name,
+                live / name[:-len(".template")])
     with _refusal("undeployable_phase_is_live"):
         workflowfile.assert_no_template_is_live(root=str(tmp_path))
 
@@ -1148,10 +1160,14 @@ def test_a_complete_looking_closure_still_cannot_be_signed_in_d0():
 
 def test_evidence_only_delta_accepts_evidence_paths():
     record = closure.evidence_only_delta(
-        ["audit/14-report.md", "artifacts/plan.json",
-         ".github/workflows/ci.yml", "docs/x.md", "governance/y.md"])
+        ["audit/14-report.md", "artifacts/plan.json", "docs/x.md",
+         "governance/y.md"])
     assert record["evidence_only"] is True
     assert record["source_changed_paths"] == []
+    # A workflow is executable code with credential reach, so it is NOT
+    # evidence — see test_review_a_credential_workflow_added_after_the_cutoff.
+    assert closure.evidence_only_delta(
+        [".github/workflows/ci.yml"])["evidence_only"] is False
 
 
 @pytest.mark.parametrize("path", [
@@ -1584,3 +1600,149 @@ def test_review_the_detector_finds_the_context_by_identifier_not_by_substring():
         {"a": "${{ toJSON(secrets) }}"}) == ["${{ toJSON(secrets) }}"]
     # `foo.secrets` is not the secrets context.
     assert workflowfile._secret_references({"a": "${{ foo.secrets }}"}) == []
+
+
+# --------------------------------------------------------------------------
+# Bootstrap PR review, second batch: the validator enumerated hazards instead
+# of refusing by default, so every check had an edge it did not cover.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key,value", [
+    ("uses", "attacker/repo/.github/workflows/x.yml@main"),
+    ("secrets", "inherit"),
+    ("container", "attacker/image:latest"),
+    ("services", {"db": {"image": "attacker/pg:latest"}}),
+])
+def test_review_forbidden_job_keys_are_refused(key, value):
+    """Four job-level surfaces nothing else inspected.
+
+    `assert_actions_pinned` only ever walked `steps[].uses`, so a job-level
+    reusable-workflow call — a whole file of someone else's steps — was never
+    pin-checked. `secrets: inherit` hands the callee every secret in one word.
+    `container:`/`services:` run every step inside an unpinned image."""
+    document = _document(D1)
+    document["jobs"]["pwn"] = {"runs-on": "ubuntu-latest", key: value}
+    with _refusal("forbidden_job_key"):
+        workflowfile.assert_forbidden_job_keys_absent(document, name=D1)
+
+
+def test_review_the_real_workflows_declare_no_forbidden_job_key():
+    for name in (D0, D1, D2):
+        assert workflowfile.assert_forbidden_job_keys_absent(
+            _document(name), name=name)["forbidden_job_keys"] == 0
+
+
+@pytest.mark.parametrize("condition", [
+    "always()", "!cancelled()", "success() || failure()",
+    "${{ always() }}",
+])
+def test_review_a_neutralised_containment_gate_is_refused(condition):
+    """`needs:` plus `if: always()` is not gating.
+
+    The job still declares the dependency, so `gated_on` was satisfied — and
+    then ran anyway when containment failed."""
+    document = _document(D1)
+    document["jobs"]["d1-trusted-count"]["if"] = condition
+    with _refusal("containment_gate_neutralised"):
+        workflowfile.assert_gating_is_not_neutralised(document, name=D1)
+
+
+def test_review_an_ordinary_condition_on_a_credential_job_is_permitted():
+    document = _document(D1)
+    document["jobs"]["d1-trusted-count"]["if"] = "inputs.phase == 'D1'"
+    assert workflowfile.assert_gating_is_not_neutralised(
+        document, name=D1)["neutralised_gates"] == 0
+
+
+@pytest.mark.parametrize("expression", [
+    "${{ env.LAUNDERED }}",
+    "${{ steps.pick.outputs.ref }}",
+    "${{ inputs.candidate_head_sha }}",
+    "${{ github.head_ref }}",
+    "${{ vars.REF }}",
+])
+def test_review_any_expression_in_a_checkout_ref_is_refused(expression):
+    """Enumerating hazardous prefixes was the bug — `env.` and `steps.` were
+    not on the list, and either can carry an input-derived value. There is no
+    legitimate dynamic ref in this lane."""
+    document = _document(D1)
+    document["jobs"]["d1-trusted-count"]["steps"][0]["with"]["ref"] = expression
+    with _refusal("checkout_ref_is_an_expression"):
+        workflowfile.assert_checkouts_are_safe(document)
+
+
+def test_review_a_template_deployed_under_any_filename_is_detected(tmp_path):
+    """Filename matching was the bug: two exact basenames, so `.yaml` — or any
+    other name — activated the credential phase undetected. GitHub does not
+    care what the file is called; it cares what is in it."""
+    source = tmp_path / workflowfile.WORKFLOW_DIR
+    source.mkdir(parents=True)
+    for name in (D0, D1, D2):
+        shutil.copy(ROOT / workflowfile.WORKFLOW_DIR / name, source / name)
+    live = tmp_path / workflowfile.LIVE_WORKFLOW_DIR
+    live.mkdir(parents=True)
+    shutil.copy(ROOT / workflowfile.WORKFLOW_DIR / D1,
+                live / "totally-innocuous.yaml")
+    with _refusal("undeployable_phase_is_live"):
+        workflowfile.assert_no_template_is_live(root=str(tmp_path))
+
+
+def test_review_a_credential_workflow_added_after_the_cutoff_is_not_evidence():
+    """`.github/workflows/` used to count as an evidence path, so a
+    credential-bearing lane could be added after the code cutoff while the
+    closure still claimed the delta changed nothing that runs."""
+    record = closure.evidence_only_delta(
+        [".github/workflows/d1-trusted-count.yml"])
+    assert record["evidence_only"] is False
+    assert record["source_changed_paths"] == [
+        ".github/workflows/d1-trusted-count.yml"]
+
+
+def test_review_genuine_evidence_paths_still_classify_as_evidence_only():
+    record = closure.evidence_only_delta(
+        ["audit/14.md", "artifacts/plan.json", "governance/x.md", "docs/y.md"])
+    assert record["evidence_only"] is True
+
+
+# ---- the copy that runs is the copy that was reviewed ---------------------
+
+
+def test_review_the_deployed_copy_is_compared_to_its_source(tmp_path):
+    """Every other check reads `scripts/…`; GitHub reads `.github/workflows/…`.
+
+    Nothing compared them, so once D0 is deployed the two could diverge with no
+    test noticing — and the copy nobody validates is the copy that executes."""
+    source = tmp_path / workflowfile.WORKFLOW_DIR
+    source.mkdir(parents=True)
+    for name in (D0, D1, D2):
+        shutil.copy(ROOT / workflowfile.WORKFLOW_DIR / name, source / name)
+    live = tmp_path / workflowfile.LIVE_WORKFLOW_DIR
+    live.mkdir(parents=True)
+
+    # Identical -> accepted.
+    shutil.copy(source / D0, live / D0)
+    assert workflowfile.assert_deployed_copy_matches_source(
+        root=str(tmp_path))["d0_deployed"] is True
+
+    # One byte different -> refused.
+    (live / D0).write_text((source / D0).read_text(encoding="utf-8") + "\n",
+                           encoding="utf-8")
+    with _refusal("deployed_workflow_differs_from_source"):
+        workflowfile.assert_deployed_copy_matches_source(root=str(tmp_path))
+
+
+def test_review_an_undeployed_d0_says_so_rather_than_passing_silently():
+    record = workflowfile.assert_deployed_copy_matches_source(root=str(ROOT))
+    assert record["d0_deployed"] is False
+    assert "not deployed yet" in record["honest_scope"]
+
+
+def test_review_the_d0_push_filter_names_the_file_it_will_be_deployed_as():
+    """The filter named `trusted-lane-d0-containment.yml`; the file deploys as
+    `d0-trusted-lane-containment.yml`. Editing the live workflow would not have
+    triggered it."""
+    block = _document(D0).get(True) or _document(D0).get("on")
+    paths = block["push"]["paths"]
+    expected = f"{workflowfile.LIVE_WORKFLOW_DIR}/{D0}"
+    assert expected in paths, (expected, paths)

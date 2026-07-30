@@ -87,8 +87,26 @@ SOURCE_SELECTING_INPUTS = ("repository", "remote", "remote_url", "url",
                            "owner", "org", "fork", "source_repository")
 
 #: Expressions that let a caller choose which code runs.
-CALLER_CONTROLLED_PREFIXES = ("inputs.", "github.event.",
-                              "github.head_ref", "needs.")
+#:
+#: Kept for the error message, but no longer the actual rule. Enumerating
+#: hazardous prefixes is a losing game: the review defeated it with `env.` and
+#: `steps.`, either of which can carry a value derived from an input. A checkout
+#: `ref:` in this lane is now refused if it contains an expression AT ALL —
+#: there is no legitimate dynamic ref here, because the trusted engine checks
+#: out the ref it was dispatched from and nothing else.
+CALLER_CONTROLLED_PREFIXES = ("inputs.", "github.event.", "github.head_ref",
+                              "needs.", "env.", "steps.", "vars.", "jobs.")
+
+#: Job keys that open an execution surface this lane has no use for, and which
+#: nothing else here inspects.
+#:
+#: `uses:` at JOB level calls a reusable workflow — a whole file of someone
+#: else's steps, which `assert_actions_pinned` never walked because it only
+#: looked at `steps[].uses`. `secrets: inherit` hands the callee every secret in
+#: one word. `container:`/`services:` run every step of the job inside an image
+#: that nothing pins. Each was a complete bypass; all four are refused outright
+#: rather than validated, because the lane does not need any of them.
+FORBIDDEN_JOB_KEYS = ("uses", "secrets", "container", "services")
 
 _CHECKOUT_MARKER = "actions/checkout"
 
@@ -170,27 +188,95 @@ def load_workflow(name: str = D0_FILE, *, root: str = ".") -> dict:
             "sha256": hashlib.sha256(raw).hexdigest()}
 
 
-def assert_no_template_is_live(*, root: str = ".") -> dict:
-    """D1 and D2 must never appear in the live workflows directory.
+def _workflow_name_of(path: str):
+    """The `name:` a workflow file declares, or None if it is not one."""
+    try:
+        with open(path, "rb") as handle:
+            document = yaml.safe_load(handle.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    return document.get("name") if isinstance(document, dict) else None
 
-    Checked by the *deployable* name, not the template name: the hazard is
-    someone renaming `d1-trusted-count.yml.template` to `.yml` and dropping it
-    in, which is precisely the step that must stay deliberate. D0 is allowed
-    there — it is the deployment target — so this is not a blanket ban on the
-    directory."""
+
+def assert_no_template_is_live(*, root: str = ".") -> dict:
+    """D1 and D2 must never be active in the live workflows directory.
+
+    Matched by the workflow's declared `name:`, not by filename. Filename
+    matching was the bug: the check compared two exact basenames, so deploying
+    `d1-trusted-count.yaml` — or any other name — activated the credential
+    phase undetected. GitHub does not care what the file is called; it cares
+    what is in it. Found by the bootstrap PR review.
+
+    D0 is allowed there — it is the deployment target — so this is not a
+    blanket ban on the directory."""
     live_dir = os.path.join(root, LIVE_WORKFLOW_DIR)
+    undeployable_names = {
+        _workflow_name_of(os.path.join(root, WORKFLOW_DIR, name))
+        for name, policy in TRUSTED_WORKFLOWS.items()
+        if not policy["deployable_now"]
+    } - {None}
     live = []
-    for name, policy in TRUSTED_WORKFLOWS.items():
-        if policy["deployable_now"]:
-            continue
-        deployed_name = name[:-len(".template")]
-        if os.path.exists(os.path.join(live_dir, deployed_name)):
-            live.append(deployed_name)
+    if os.path.isdir(live_dir):
+        for entry in sorted(os.listdir(live_dir)):
+            if not entry.endswith((".yml", ".yaml")):
+                continue
+            declared = _workflow_name_of(os.path.join(live_dir, entry))
+            if declared in undeployable_names:
+                live.append(f"{entry} declares {declared!r}")
     if live:
         refuse(f"category=undeployable_phase_is_live files={live} — D1/D2 "
                "activation is a separate approval (operator prerequisites and "
                "a protected environment), not a file rename")
-    return {"undeployable_phases_live": 0}
+    return {"undeployable_phases_live": 0,
+            "undeployable_workflow_names": sorted(undeployable_names)}
+
+
+def assert_forbidden_job_keys_absent(document: dict, *, name: str = "") -> dict:
+    """Refuse the four job-level surfaces nothing else inspects.
+
+    Each was a complete bypass, and all four share a shape: a key that pulls in
+    code or credentials the rest of this module never walks. Refusing them
+    outright beats validating them, because the lane has no use for any of
+    them and a validated bypass surface is still a bypass surface."""
+    offenders = []
+    for job_name, job in (document.get("jobs") or {}).items():
+        for key in FORBIDDEN_JOB_KEYS:
+            if key in (job or {}):
+                offenders.append(f"{job_name}.{key}={(job or {})[key]!r}"[:120])
+    if offenders:
+        refuse(f"category=forbidden_job_key name={name} found={offenders} — "
+               "job-level `uses:` calls a whole reusable workflow that step "
+               "pinning never sees, `secrets: inherit` hands over every secret "
+               "in one word, and `container:`/`services:` run every step inside "
+               "an unpinned image")
+    return {"forbidden_job_keys": 0}
+
+
+#: `if:` expressions that make a job run even when the job it `needs:` failed,
+#: which turns the containment gate into a suggestion.
+_NEUTRALISING_CONDITIONS = ("always(", "cancelled(", "failure(")
+
+
+def assert_gating_is_not_neutralised(document: dict, *, name: str = "") -> dict:
+    """`needs:` plus `if: always()` is not gating.
+
+    `gated_on` reads `needs:` and stops there, so a credential job could
+    declare the containment job as a dependency and then run regardless of
+    whether containment passed. Found by the bootstrap PR review."""
+    offenders = []
+    for job_name, job in (document.get("jobs") or {}).items():
+        job = job or {}
+        if not _references_secret(job):
+            continue
+        condition = str(job.get("if") or "")
+        hits = [c for c in _NEUTRALISING_CONDITIONS if c in condition]
+        if hits:
+            offenders.append(f"{job_name}: if={condition!r} {hits}")
+    if offenders:
+        refuse(f"category=containment_gate_neutralised name={name} "
+               f"jobs={offenders} — a credential job that runs even when "
+               "containment failed is not gated by it")
+    return {"neutralised_gates": 0}
 
 
 def assert_actions_pinned(document: dict, *, name: str = "") -> dict:
@@ -312,14 +398,18 @@ def assert_checkouts_are_safe(document: dict) -> dict:
                        "repository only; the candidate is fetched as inert "
                        "data by candidatefetch.py")
             ref = with_block.get("ref")
-            if ref is not None:
-                text = str(ref)
-                bad = [p for p in CALLER_CONTROLLED_PREFIXES if p in text]
-                if bad:
-                    refuse(f"category=checkout_ref_caller_controlled "
-                           f"where={where} expressions={bad} — if the caller "
-                           "chooses the ref, the caller chooses the code that "
-                           "runs with the secret")
+            if ref is not None and "${{" in str(ref):
+                # Enumerating hazardous prefixes was the bug: the review
+                # laundered a ref through `env.` and `steps.`, either of which
+                # can carry an input-derived value. Any expression at all is
+                # refused instead, because this lane has no legitimate dynamic
+                # ref — the trusted engine checks out the ref it was
+                # dispatched from, which the environment's branch policy and
+                # assert_protected_ref already constrain.
+                refuse(f"category=checkout_ref_is_an_expression where={where} "
+                       f"ref={str(ref)[:60]!r} — a computed ref lets whoever "
+                       "computes it choose the code that runs with the secret; "
+                       "the trusted lane checks out no ref but its own")
             checked.append(where)
     if not checked:
         refuse("category=workflow_has_no_checkout_step")
@@ -433,6 +523,8 @@ def validate_workflow_file(name: str = D0_FILE, *, root: str = ".") -> dict:
         **assert_actions_pinned(document, name=name),
         **assert_no_source_selection(document, name=name),
         **assert_no_candidate_execution(document, name=name),
+        **assert_forbidden_job_keys_absent(document, name=name),
+        **assert_gating_is_not_neutralised(document, name=name),
         **assert_phase_secret_policy(document, name=name, policy=policy),
         **assert_no_literal_credential(loaded["raw"]),
         "honest_scope": "the deployed shape is validated; a validated shape is "
@@ -443,12 +535,48 @@ def validate_workflow_file(name: str = D0_FILE, *, root: str = ".") -> dict:
     return record
 
 
+def assert_deployed_copy_matches_source(*, root: str = ".") -> dict:
+    """The file that RUNS must be the file that was reviewed.
+
+    Every other check in this module reads
+    `scripts/trustedlane/workflow/…`. GitHub reads `.github/workflows/…`.
+    Nothing compared them, so once D0 is deployed the two could diverge without
+    a single test noticing — and the copy nobody validates is the copy that
+    executes. Found by the bootstrap PR review, before deployment rather than
+    after, which is the only reason it is cheap to fix.
+
+    Byte-identity, not equivalence: a re-serialised YAML that parses the same
+    is still a file nobody reviewed."""
+    source = os.path.join(root, WORKFLOW_DIR, D0_FILE)
+    deployed = os.path.join(root, LIVE_WORKFLOW_DIR, D0_FILE)
+    if not os.path.exists(deployed):
+        return {"d0_deployed": False,
+                "honest_scope": "D0 is not deployed yet, so there is no "
+                                "running copy to compare; this check becomes "
+                                "load-bearing the moment it is"}
+    with open(source, "rb") as handle:
+        want = handle.read()
+    with open(deployed, "rb") as handle:
+        got = handle.read()
+    if want != got:
+        refuse(f"category=deployed_workflow_differs_from_source "
+               f"source_sha256={hashlib.sha256(want).hexdigest()[:16]} "
+               f"deployed_sha256={hashlib.sha256(got).hexdigest()[:16]} — the "
+               "copy that runs is not the copy that was reviewed")
+    # And the running copy must satisfy the same policy, read from where it runs.
+    validated = validate_workflow_file(D0_FILE, root=root)
+    return {"d0_deployed": True,
+            "deployed_sha256": hashlib.sha256(got).hexdigest(),
+            "deployed_policy_ok": bool(validated)}
+
+
 def validate_all_workflows(*, root: str = ".") -> dict:
-    """Every trusted-lane workflow, plus the cross-file containment rule."""
+    """Every trusted-lane workflow, plus the cross-file containment rules."""
     records = {name: validate_workflow_file(name, root=root)
                for name in sorted(TRUSTED_WORKFLOWS)}
     return {
         "workflows": records,
         **assert_no_template_is_live(root=root),
+        **assert_deployed_copy_matches_source(root=root),
         "action_pin_policy": actionpolicy.pin_record(),
     }
