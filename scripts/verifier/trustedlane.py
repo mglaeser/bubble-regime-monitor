@@ -147,6 +147,15 @@ OPERATOR_PREREQUISITES = (
     Prerequisite("approve_bootstrap_branch",
                  "the trusted-lane bootstrap branch or service is approved",
                  False),
+    # PASS E-COMPLETE: this list was fifteen items and the mandate names
+    # sixteen. The missing one is the one that matters most to state
+    # separately: counting and generating are different decisions with
+    # different costs, and an approval to count has never been an approval to
+    # generate. Leaving it implicit is how "we approved the trusted lane"
+    # becomes "so it may call the model".
+    Prerequisite("approve_generation_separately",
+                 "real model generation is approved as its own decision, "
+                 "after trusted counting exists and its cost is known", False),
 )
 
 

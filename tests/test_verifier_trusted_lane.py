@@ -126,8 +126,24 @@ class TestPrerequisitesDefaultToUnauthorized:
                          "approve_review_request_policy",
                          "approve_artifact_retention",
                          "approve_engine_identity",
-                         "approve_bootstrap_branch"):
+                         "approve_bootstrap_branch",
+                         "approve_generation_separately"):
             assert required in keys, required
+        assert len(keys) == 16, sorted(keys)
+
+    def test_generation_approval_is_its_own_prerequisite(self):
+        """Counting and generating are different decisions with different
+        costs. An approval to count has never been an approval to generate,
+        and leaving that implicit is how the second one gets assumed."""
+        generation = [p for p in trustedlane.OPERATOR_PREREQUISITES
+                      if p.key == "approve_generation_separately"]
+        assert len(generation) == 1
+        assert generation[0].verifiable_by_code is False
+        status = trustedlane.prerequisite_status(
+            {p.key for p in trustedlane.OPERATOR_PREREQUISITES
+             if p.key != "approve_generation_separately"})
+        assert status["all_satisfied"] is False
+        assert status["outstanding"] == ["approve_generation_separately"]
 
 
 class TestTrustedRecordShapeIsNecessaryNotSufficient:
