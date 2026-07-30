@@ -342,12 +342,33 @@ def relationship_at_single(commit_sha: str, *, cwd=None) -> dict:
     for path in relationship_paths():
         state, _oid, _mode = _blob_entry(commit_sha, path, cwd=cwd)
         presence[path] = state == "found"
+    # MC4-R06: occupancy must consider the WHOLE path universe the version
+    # governs, including the paths it declares absent. Deciding WHOLLY_ABSENT
+    # from `relationship_paths()` alone meant a commit holding nothing but a
+    # stray part2.md looked like a commit holding nothing at all — so an
+    # ADDED v1 relationship could satisfy its base-absence requirement over a
+    # base that already contained Part 2's text, which v1's own header says
+    # does not exist.
+    stray = {}
+    for path in V1_ABSENT_PATHS:
+        state, _oid, _mode = _blob_entry(commit_sha, path, cwd=cwd)
+        stray[path] = state == "found"
     if not any(presence.values()):
+        if any(stray.values()):
+            return {"state": PARTIAL_BROKEN,
+                    "endpoint_commit_sha": commit_sha,
+                    "present_count": 0,
+                    "expected_count": len(presence),
+                    "declared_absent_paths_present": sum(
+                        1 for v in stray.values() if v),
+                    "reason_category": "declared_absent_path_present_alone"}
         return {"state": WHOLLY_ABSENT, "endpoint_commit_sha": commit_sha}
-    if not all(presence.values()):
+    if not all(presence.values()) or any(stray.values()):
         return {"state": PARTIAL_BROKEN, "endpoint_commit_sha": commit_sha,
                 "present_count": sum(1 for v in presence.values() if v),
-                "expected_count": len(presence)}
+                "expected_count": len(presence),
+                "declared_absent_paths_present": sum(
+                    1 for v in stray.values() if v)}
     try:
         proof = prove_relationship(commit_sha, cwd=cwd)
     except BlockingError as exc:

@@ -30,7 +30,84 @@ from __future__ import annotations
 from .canon import canonical_json, digest
 from .errors import UNSET_POLICY_PIN, BlockingError
 
-POLICY_VERSION = "review-request-policy-v1"
+POLICY_VERSION = "review-request-policy-v2"
+
+# ------------------------------------------------------------- lenses v2 -----
+#
+# MC4-R08: a lens is only real if the EVIDENCE can distinguish it.
+#
+# v1 gave each model a different instruction string and accepted
+# `checked_categories` as arbitrary bounded text. Every model could return
+# ["logic", "state"] — the mock did — so nothing in the evidence showed that
+# Sol performed a security/data-flow review or that Mini checked invariants.
+# Different instructions are an input; lens diversity is a claim about output,
+# and it needs the output to carry it.
+#
+# v2 gives each model a lens_id and a CLOSED category vocabulary, requires at
+# least one category from that model's own required group, and generates the
+# response schema per model so the enum is enforced by the structured-output
+# contract rather than checked afterwards.
+
+LENS_IDS: dict[str, str] = {
+    "gpt-5.3-codex": "adversarial-implementer-v2",
+    "gpt-5.6-sol": "security-data-flow-v2",
+    "gpt-4.1-mini": "invariant-fail-closed-v2",
+}
+
+#: Canonical identifiers, not free text. A category is a claim about what was
+#: inspected, so it has to mean the same thing in every verdict.
+LENS_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "gpt-5.3-codex": (
+        "logic", "state_transition", "error_path", "operability",
+        "algorithm", "interface_contract",
+    ),
+    "gpt-5.6-sol": (
+        "authentication", "authorization", "data_flow", "secret_handling",
+        "injection", "deserialization", "privacy", "trust_boundary",
+    ),
+    "gpt-4.1-mini": (
+        "fail_closed", "coverage_denominator", "provenance",
+        "bypass_resistance", "claim_consistency", "test_load_bearing",
+    ),
+}
+
+#: At least one of these must appear, so a model cannot satisfy its own enum
+#: with only its most peripheral category.
+LENS_REQUIRED_GROUPS: dict[str, tuple[str, ...]] = {
+    "gpt-5.3-codex": ("logic", "state_transition", "error_path"),
+    "gpt-5.6-sol": ("data_flow", "secret_handling", "authorization",
+                    "trust_boundary"),
+    "gpt-4.1-mini": ("fail_closed", "coverage_denominator",
+                     "bypass_resistance"),
+}
+
+
+def lens_id(model_id: str) -> str:
+    if model_id not in LENS_IDS:
+        _fail(f"category=model_without_lens_id model={model_id}")
+    return LENS_IDS[model_id]
+
+
+def lens_categories(model_id: str) -> tuple[str, ...]:
+    if model_id not in LENS_CATEGORIES:
+        _fail(f"category=model_without_category_enum model={model_id}")
+    return LENS_CATEGORIES[model_id]
+
+
+def lens_required_group(model_id: str) -> tuple[str, ...]:
+    if model_id not in LENS_REQUIRED_GROUPS:
+        _fail(f"category=model_without_required_group model={model_id}")
+    return LENS_REQUIRED_GROUPS[model_id]
+
+
+def lens_record(model_id: str) -> dict:
+    """The lens as hashable policy, not as a prose string."""
+    return {
+        "lens_id": lens_id(model_id),
+        "lens_sha256": digest(b"review-lens-v2", LENSES[model_id].encode()),
+        "allowed_categories": list(lens_categories(model_id)),
+        "required_category_group": list(lens_required_group(model_id)),
+    }
 
 # In-repository copy. Executable evidence requires the trusted lane's copy;
 # this one is for local planning and tests, and says so.
@@ -165,7 +242,8 @@ def assert_output_capacity(unit_count: int, max_output_tokens: int,
 def policy_record(model_ids: list[str], *, required_approver: str,
                   minimum_other_approvers: int,
                   max_output_tokens: int, status: str = STATUS_PROVISIONAL,
-                  external_anchor: dict | None = None) -> dict:
+                  external_anchor: dict | None = None,
+                  similarity_threshold_bp: int = 8500) -> dict:
     """The complete, hashed review policy bound into every request.
 
     `minimum_other_approvers` counts approvals from models OTHER than the
@@ -202,6 +280,8 @@ def policy_record(model_ids: list[str], *, required_approver: str,
         "lenses": {m: LENSES[m] for m in model_ids},
         "lens_sha256": {m: digest(b"review-lens-v1", LENSES[m].encode())
                         for m in model_ids},
+        "lens_ids": {m: lens_id(m) for m in model_ids},
+        "lenses_v2": {m: lens_record(m) for m in model_ids},
         "required_approver": required_approver,
         "minimum_other_approvers": minimum_other_approvers,
         "minimum_total_approvals": minimum_other_approvers + 1,
@@ -227,6 +307,10 @@ def policy_record(model_ids: list[str], *, required_approver: str,
         "tools_policy": "no tools, no function calling, no web/file/computer "
                         "access, no background mode",
         "truncation": "disabled",
+        "reason_charset_policy": "ASCII_PRINTABLE_ONLY_POLICY_V2",
+        "anti_canned_gate_semantics":
+            "ANTI_COPY_TRIPWIRE_NOT_PROOF_OF_INDEPENDENT_REASONING",
+        "anti_canned_similarity_threshold_bp": similarity_threshold_bp,
         "synthesis_policy": "cross-unit synthesis may ADD findings; it may "
                             "never clear or downgrade a unit refutation",
     }

@@ -269,13 +269,35 @@ class TestGlobalExecutionPreflight:
 
 
 class TestRequiredApprover:
-    def test_a_sol_refutation_of_any_confidence_vetoes(self, plan_record,
-                                                       skeleton, clone):
+    def test_a_sol_refutation_produces_evidence_THEN_blocks(
+            self, plan_record, skeleton, clone):
+        # MC4-R07: the finding is the point. It must exist as a durable
+        # artifact — with Sol's full verdict, request hash, usage and attempt
+        # — before the process refuses. Raising first destroyed it.
         units = set(plan_record["batches"][0]["unit_sha256_in_order"])
         transport = executor.MockGenerationTransport(
             refute={"gpt-5.6-sol": units})
+        report = _run(plan_record, skeleton, clone, transport=transport)
+
+        assert report["review_status"] == "BLOCKED"
+        assert REQUIRED_APPROVER_REFUTED in report["block_codes"]
+        assert report["synthesis"]["overall_approved"] is False
+        blocked_unit = next(iter(units))
+        # Sol's own refuting verdict survives, in full.
+        sol = next(r for r in report["batch_results"][0][
+            "per_model_verdict_evidence"] if r["model_id"] == "gpt-5.6-sol")
+        verdict = sol["verdicts_by_unit"][blocked_unit]
+        assert verdict["refuted"] is True
+        assert verdict["reason"] and verdict["proof_of_check"]
+        assert verdict["checked_categories"]
+        assert sol["challenge"] == plan_record["execution_challenge"]
+        assert len(sol["request_semantics_sha256"]) == 64
+        assert sol["usage"]["input_tokens"] >= 0
+        assert sol["attempt"]["result_category"] == "ok"
+
+        # The process exit is a SEPARATE step, taken after the artifact.
         with pytest.raises(BlockingError) as e:
-            _run(plan_record, skeleton, clone, transport=transport)
+            executor.assert_review_clean(report)
         assert e.value.code == REQUIRED_APPROVER_REFUTED
 
     def test_a_missing_approver_blocks(self):
@@ -290,13 +312,20 @@ class TestRequiredApprover:
 
 
 class TestCorroboration:
-    def test_too_few_distinct_others_blocks(self, plan_record, skeleton,
-                                            clone):
+    def test_too_few_distinct_others_blocks_with_evidence_retained(
+            self, plan_record, skeleton, clone):
         units = set(plan_record["batches"][0]["unit_sha256_in_order"])
         transport = executor.MockGenerationTransport(
             refute={"gpt-5.3-codex": units, "gpt-4.1-mini": units})
+        report = _run(plan_record, skeleton, clone, transport=transport)
+        assert INSUFFICIENT_CORROBORATION in report["block_codes"]
+        # Both corroborator refutations are retained, not just the block.
+        for model_id in ("gpt-5.3-codex", "gpt-4.1-mini"):
+            record = next(r for r in report["batch_results"][0][
+                "per_model_verdict_evidence"] if r["model_id"] == model_id)
+            assert record["refuted_count"] == len(units)
         with pytest.raises(BlockingError) as e:
-            _run(plan_record, skeleton, clone, transport=transport)
+            executor.assert_review_clean(report)
         assert e.value.code == INSUFFICIENT_CORROBORATION
 
     def test_one_distinct_other_approver_is_enough(self, plan_record,
@@ -317,9 +346,19 @@ class TestAntiCannedReasoning:
     def test_identical_approval_reasons_from_two_models_block(
             self, plan_record, skeleton, clone):
         transport = executor.MockGenerationTransport(identical_reasons=True)
-        with pytest.raises(BlockingError) as e:
-            _run(plan_record, skeleton, clone, transport=transport)
-        assert "canned_identical" in str(e.value)
+        report = _run(plan_record, skeleton, clone, transport=transport)
+        assert report["review_status"] == "BLOCKED"
+        assert any("canned_identical" in b["reason"]
+                   for b in report["unit_blocks"])
+        with pytest.raises(BlockingError):
+            executor.assert_review_clean(report)
+
+    def test_a_clean_review_is_not_blocked(self, plan_record, skeleton,
+                                          clone):
+        report = _run(plan_record, skeleton, clone)
+        assert report["review_status"] == "CLEAN"
+        assert report["unit_blocks"] == []
+        assert executor.assert_review_clean(report) is report
 
     def test_distinct_reasons_pass(self, plan_record, skeleton, clone):
         report = _run(plan_record, skeleton, clone)

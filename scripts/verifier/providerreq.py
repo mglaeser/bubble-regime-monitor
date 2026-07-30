@@ -34,7 +34,8 @@ TRUNCATION = "disabled"
 VERDICT_SCHEMA_NAME = "verifier_unit_verdicts_v1"
 
 
-def verdict_schema(unit_hashes: list[str], *, challenge: str) -> dict:
+def verdict_schema(unit_hashes: list[str], *, challenge: str,
+                   model_id: str | None = None) -> dict:
     """A strict schema that makes a missing or repeated verdict unexpressible.
 
     MC3 used a length-pinned ARRAY with an enum of unit hashes. That is not
@@ -48,6 +49,28 @@ def verdict_schema(unit_hashes: list[str], *, challenge: str) -> dict:
 
     The challenge is echoed back so a canned response minted without seeing
     this request fails on a field it could not have known."""
+    # MC4-R08: the category vocabulary is CLOSED and per model, enforced by
+    # the structured-output contract rather than checked afterwards. Free text
+    # here meant every model could return ["logic", "state"] and the evidence
+    # could not distinguish a security review from an invariant review.
+    if model_id is not None:
+        categories_schema = {
+            "type": "array",
+            "minItems": reviewpolicy.MIN_CHECKED_CATEGORIES,
+            "maxItems": reviewpolicy.MAX_CHECKED_CATEGORIES,
+            "uniqueItems": True,
+            "items": {"type": "string",
+                      "enum": list(reviewpolicy.lens_categories(model_id))},
+        }
+    else:
+        categories_schema = {
+            "type": "array",
+            "minItems": reviewpolicy.MIN_CHECKED_CATEGORIES,
+            "maxItems": reviewpolicy.MAX_CHECKED_CATEGORIES,
+            "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1,
+                      "maxLength": reviewpolicy.CATEGORY_MAX_CHARS},
+        }
     properties = {
         unit_hash: {
             "type": "object",
@@ -65,18 +88,26 @@ def verdict_schema(unit_hashes: list[str], *, challenge: str) -> dict:
                     "type": "string",
                     "minLength": reviewpolicy.PROOF_MIN_CHARS,
                     "maxLength": reviewpolicy.PROOF_MAX_CHARS},
-                "checked_categories": {
-                    "type": "array",
-                    "minItems": reviewpolicy.MIN_CHECKED_CATEGORIES,
-                    "maxItems": reviewpolicy.MAX_CHECKED_CATEGORIES,
-                    "uniqueItems": True,
-                    "items": {"type": "string",
-                              "minLength": 1,
-                              "maxLength": reviewpolicy.CATEGORY_MAX_CHARS}},
+                "checked_categories": categories_schema,
             },
         }
         for unit_hash in unit_hashes
     }
+    top_required = ["challenge", "verdicts_by_unit"]
+    top_properties = {
+        "challenge": {"type": "string", "const": challenge},
+        "verdicts_by_unit": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(unit_hashes),
+            "properties": properties,
+        },
+    }
+    if model_id is not None:
+        # The lens the reviewer answered under, as a const it cannot vary.
+        top_required.insert(0, "lens_id")
+        top_properties["lens_id"] = {
+            "type": "string", "const": reviewpolicy.lens_id(model_id)}
     return {
         "type": "json_schema",
         "name": VERDICT_SCHEMA_NAME,
@@ -84,16 +115,8 @@ def verdict_schema(unit_hashes: list[str], *, challenge: str) -> dict:
         "schema": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["challenge", "verdicts_by_unit"],
-            "properties": {
-                "challenge": {"type": "string", "const": challenge},
-                "verdicts_by_unit": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": list(unit_hashes),
-                    "properties": properties,
-                },
-            },
+            "required": top_required,
+            "properties": top_properties,
         },
     }
 
@@ -372,7 +395,8 @@ def assemble_request(model_id: str, unit_payloads: list[dict], *,
         instructions=build_instructions(lens, challenge),
         input_text=input_text,
         reasoning_effort=reasoning_effort,
-        text_format=verdict_schema(unit_hashes, challenge=challenge),
+        text_format=verdict_schema(unit_hashes, challenge=challenge,
+                                   model_id=model_id),
         max_output_tokens=max_output_tokens,
         provenance_sha256=provenance_digest(unit_payloads, input_text,
                                             challenge, model_id, paths),
@@ -412,14 +436,23 @@ def assemble_request(model_id: str, unit_payloads: list[dict], *,
                                 field_kind="payload_suffix"))
         return full
 
+    count_map = _full_map("count", count_bytes)
+    execution_map = _full_map("execution", execution_bytes)
+    # MC4-R04: prove the partition BEFORE the assembly exists, so no caller
+    # can ever hold a map that does not describe its own payload.
+    count_map.validate(count_bytes.decode("utf-8", "surrogateescape"),
+                       request_hash=request.count_request_sha256())
+    execution_map.validate(
+        execution_bytes.decode("utf-8", "surrogateescape"),
+        request_hash=request.execution_request_sha256())
     return RequestAssembly(
         request=request,
         unit_payloads=tuple(_freeze(p) for p in unit_payloads),
         unit_sha256_in_order=tuple(unit_hashes),
         count_payload_bytes=count_bytes,
         execution_payload_bytes=execution_bytes,
-        count_origin_map=_full_map("count", count_bytes),
-        execution_origin_map=_full_map("execution", execution_bytes),
+        count_origin_map=count_map,
+        execution_origin_map=execution_map,
     )
 
 

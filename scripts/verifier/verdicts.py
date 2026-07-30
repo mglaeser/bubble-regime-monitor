@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 
 from .canon import digest, sha256_hex
 from .errors import PROVIDER_RESPONSE_INVALID, BlockingError
@@ -47,15 +48,26 @@ def parse_strict(body: bytes) -> dict:
 
 
 def validate_verdicts(parsed: dict, *, unit_hashes: list[str],
-                      challenge: str, review_policy: dict) -> dict:
+                      challenge: str, review_policy: dict,
+                      model_id: str | None = None) -> dict:
     """Every unit answered exactly once, within policy, echoing the challenge.
 
     Returns the verdicts_by_unit map on success; blocks otherwise. This is
     the check that does not trust the schema to have been enforced."""
     if not isinstance(parsed, dict):
         _fail("category=response_not_object")
-    if set(parsed) != {"challenge", "verdicts_by_unit"}:
+    expected_top = {"challenge", "verdicts_by_unit"}
+    if model_id is not None:
+        expected_top.add("lens_id")
+    if set(parsed) != expected_top:
         _fail(f"category=response_top_level_keys keys={sorted(parsed)}")
+    if model_id is not None:
+        from . import reviewpolicy
+        expected_lens = reviewpolicy.lens_id(model_id)
+        if parsed.get("lens_id") != expected_lens:
+            _fail(f"category=response_lens_id_mismatch "
+                  f"expected={expected_lens} got={parsed.get('lens_id')!r} — "
+                  "the reviewer did not answer under the lens it was assigned")
     if parsed["challenge"] != challenge:
         _fail("category=response_challenge_mismatch — the reviewer did not "
               "echo the challenge this request minted; a canned response "
@@ -73,12 +85,13 @@ def validate_verdicts(parsed: dict, *, unit_hashes: list[str],
     confidences = set(review_policy["confidence_values"])
     for unit_hash, verdict in verdicts.items():
         _validate_one(unit_hash, verdict, challenge, review_policy,
-                      confidences)
+                      confidences, model_id=model_id)
     return verdicts
 
 
 def _validate_one(unit_hash: str, verdict: dict, challenge: str,
-                  review_policy: dict, confidences: set) -> None:
+                  review_policy: dict, confidences: set,
+                  model_id: str | None = None) -> None:
     where = f"unit={unit_hash[:16]}"
     if not isinstance(verdict, dict):
         _fail(f"category=verdict_not_object {where}")
@@ -125,86 +138,179 @@ def _validate_one(unit_hash: str, verdict: dict, challenge: str,
         if not isinstance(entry, str) or not (
                 1 <= len(entry) <= review_policy["category_max_chars"]):
             _fail(f"category=checked_category_out_of_policy {where}")
+    # MC4-R08: the categories must come from THIS model's closed vocabulary,
+    # and at least one from its required group. Free text meant every model
+    # could return the same two words and the evidence could not show that a
+    # security lens had been applied.
+    if model_id is not None:
+        from . import reviewpolicy
+        allowed = set(reviewpolicy.lens_categories(model_id))
+        outside = sorted(set(categories) - allowed)
+        if outside:
+            _fail(f"category=checked_category_outside_lens_vocabulary "
+                  f"{where} model={model_id} outside={outside}")
+        required = set(reviewpolicy.lens_required_group(model_id))
+        if not (set(categories) & required):
+            _fail(f"category=no_required_lens_category {where} "
+                  f"model={model_id} required_any_of={sorted(required)} — the "
+                  "verdict does not show the lens this model was assigned was "
+                  "actually applied")
 
 
 # ------------------------------------------------ anti-canned reasoning ------
 
 _WHITESPACE = re.compile(r"\s+")
 _NON_WORD = re.compile(r"[^a-z0-9 ]+")
+_NON_ASCII = re.compile(r"[^\x20-\x7e]")
+
+#: Unicode categories that carry no visible content. A zero-width joiner or a
+#: bidi mark changes the bytes and nothing a reader sees, so leaving them in
+#: makes two identical sentences compare unequal (MC4-R09).
+_IGNORABLE_CATEGORIES = frozenset({"Cf", "Cc", "Mn"})
+
+#: What this gate IS. Naming it honestly matters: prose cannot be checked for
+#: independent thought, and a name that claimed otherwise would license
+#: treating a pass as assurance it is not.
+GATE_SEMANTICS = "ANTI_COPY_TRIPWIRE_NOT_PROOF_OF_INDEPENDENT_REASONING"
+
+#: Governed near-copy threshold, on token-set overlap of two normalized
+#: approvals. Exact equality alone is defeated by a single reordered word.
+#: Carried in the policy record so it is an operator decision, not a constant
+#: buried here.
+DEFAULT_SIMILARITY_THRESHOLD_BP = 8500       # 0.85 Jaccard, in basis points
+
+#: Output for reason/proof is restricted to ASCII printable under policy v2.
+#: The alternative — a UTS #39 confusable skeleton — needs a pinned
+#: implementation and an approval record; until one exists, refusing the
+#: character classes that make homoglyph attacks possible is the honest
+#: fail-closed choice, and it is enforced rather than assumed.
+REASON_CHARSET_POLICY = "ASCII_PRINTABLE_ONLY_POLICY_V2"
 
 
-def normalize_reason(text: str, *, challenge: str) -> str:
+def assert_reason_charset(text: str, *, where: str) -> None:
+    """Refuse non-ASCII in a field the distinctness gate compares.
+
+    A Cyrillic 'а' reads as a Latin 'a' and hashes differently, so one
+    substitution turns a canned sentence into a "distinct" one. Under policy
+    v2 these fields are ASCII printable; anything else blocks rather than
+    being silently folded, because folding needs a pinned confusable table
+    this package does not have."""
+    if _NON_ASCII.search(text):
+        _fail(f"category=reason_charset_outside_policy {where} "
+              f"policy={REASON_CHARSET_POLICY} — reason and proof are ASCII "
+              "printable under review policy v2; a confusable character makes "
+              "two identical sentences compare as distinct")
+
+
+def normalize_reason(text: str, *, challenge: str,
+                     model_ids=(), lens_ids=()) -> str:
     """Reduce a reason to what it actually SAYS.
 
-    The challenge is stripped first: every model is required to echo it, so
-    leaving it in makes two otherwise identical sentences look different by
-    exactly the part they were told to copy."""
-    stripped = text.replace(challenge, " ")
-    lowered = _NON_WORD.sub(" ", stripped.lower())
+    Removed, in order: Unicode compatibility differences (NFKC), invisible
+    format and combining marks, the challenge every model is required to
+    echo, the model and lens identifiers a template can interpolate, then
+    case and punctuation. Each removal closes a way to make one canned
+    sentence look like several (MC4-R09): the mock's own reasons differed
+    only by an interpolated model id, which is exactly the bypass."""
+    folded = unicodedata.normalize("NFKC", text)
+    folded = "".join(c for c in folded
+                     if unicodedata.category(c) not in _IGNORABLE_CATEGORIES)
+    folded = folded.replace(challenge, " ")
+    for token in sorted({*model_ids, *lens_ids}, key=len, reverse=True):
+        if token:
+            folded = folded.replace(token, " ")
+    lowered = _NON_WORD.sub(" ", folded.casefold())
     return _WHITESPACE.sub(" ", lowered).strip()
+
+
+def similarity_bp(left: str, right: str) -> int:
+    """Token-set overlap of two normalized strings, in basis points.
+
+    Jaccard over word sets: order-insensitive, so a reordered canned sentence
+    scores 10000 rather than 0. Deterministic, with no external dependency."""
+    a, b = set(left.split()), set(right.split())
+    if not a and not b:
+        return 10_000
+    if not a or not b:
+        return 0
+    return (len(a & b) * 10_000) // len(a | b)
 
 
 def assert_distinct_reasoning(by_model: dict, *, unit_hash: str,
                               approver: str, challenge: str,
-                              corroborators: list[str]) -> dict:
-    """Independent review must LOOK independent, per unit (C4-F12).
+                              corroborators: list[str],
+                              model_ids=(), lens_ids=(),
+                              similarity_threshold_bp: int = (
+                                  DEFAULT_SIMILARITY_THRESHOLD_BP)) -> dict:
+    """An ANTI-COPY TRIPWIRE on approvals, per unit (C4-F12, MC4-R09).
 
-    The legacy panel required substantive, mutually distinct green reasons.
-    That gate was lost: each reason was length-checked in isolation, so every
-    model returning the same canned sentence — with the challenge dutifully
-    echoed — passed all of them. Echoing a challenge proves the response was
-    minted for this request; it proves nothing about two models having
-    reviewed independently.
+    Named for what it is. The legacy panel required substantive, mutually
+    distinct green reasons, and that gate was lost — each reason was
+    length-checked in isolation, so every model returning the same canned
+    sentence passed. Restoring it catches copies. It does NOT prove
+    independent reasoning: prose cannot be checked for thought, and the
+    earlier docstring's implication that it could would license reading a
+    pass as assurance it is not. Structural lens evidence — the per-model
+    category vocabulary — is the stronger signal, and semantic independence
+    remains a trust assumption.
+
+    Four bypasses are closed here. Normalization folds Unicode compatibility
+    forms and drops invisible characters, so a Cyrillic homoglyph or a
+    zero-width joiner no longer makes one sentence into two — and the charset
+    policy refuses non-ASCII in these fields outright rather than relying on
+    the fold. Model and lens identifiers are removed, because a template that
+    interpolates them turns one sentence into N (the mock did exactly that).
+    Every approving model is compared with every other, not only with the
+    approver. And exact equality is backed by a governed token-set similarity
+    threshold, so a reordered or lightly paraphrased copy still trips.
 
     Applied only to APPROVALS. A refutation is a finding, and two models
     independently describing the same real defect in the same words is
     agreement, not collusion — blocking that would penalise the case the
     panel exists to catch."""
-    approver_verdict = by_model[approver][unit_hash]
-    approver_reason = normalize_reason(approver_verdict["reason"],
-                                       challenge=challenge)
-    if not approver_reason:
-        _fail(f"category=approver_reason_is_only_the_challenge "
-              f"unit={unit_hash[:16]} approver={approver}")
-
-    # EVERY approving model is compared with EVERY other, not just with the
-    # approver. Comparing corroborators only against the approver let N models
-    # return one byte-identical canned sentence among themselves, differ from
-    # the approver alone, and each be counted as an independent review — so
-    # with minimum_other_approvers >= 2 the whole corroboration requirement
-    # was satisfied by one sentence repeated (PASS E, family D).
     approving = [approver] + [m for m in corroborators
                               if not by_model[m][unit_hash]["refuted"]]
-    seen_reasons: dict[str, str] = {}
-    seen_proofs: dict[str, str] = {}
+    normalized: list[tuple[str, str, str]] = []
     for model_id in approving:
         verdict = by_model[model_id][unit_hash]
-        reason = normalize_reason(verdict["reason"], challenge=challenge)
+        where = f"unit={unit_hash[:16]} model={model_id}"
+        assert_reason_charset(verdict["reason"], where=where)
+        assert_reason_charset(verdict["proof_of_check"], where=where)
+        reason = normalize_reason(verdict["reason"], challenge=challenge,
+                                  model_ids=model_ids, lens_ids=lens_ids)
         if not reason:
-            _fail(f"category=approval_reason_is_only_the_challenge "
-                  f"unit={unit_hash[:16]} model={model_id}")
-        first = seen_reasons.get(reason)
-        if first is not None:
-            _fail(f"category=canned_identical_approval unit={unit_hash[:16]} "
-                  f"model={model_id} matches={first} — two approvals whose "
-                  "reasons say the same thing are one review reported twice; "
-                  "independent corroboration is the property this panel "
-                  "exists to provide")
-        seen_reasons[reason] = model_id
-
+            _fail(f"category=approval_reason_is_only_the_challenge {where} — "
+                  "what remains after removing the challenge, the model id "
+                  "and the lens name is nothing")
         proof = normalize_reason(verdict["proof_of_check"],
-                                 challenge=challenge)
-        if proof:
-            first_proof = seen_proofs.get(proof)
-            if first_proof is not None:
-                _fail(f"category=canned_identical_proof "
+                                 challenge=challenge, model_ids=model_ids,
+                                 lens_ids=lens_ids)
+        normalized.append((model_id, reason, proof))
+
+    for index, (model_id, reason, proof) in enumerate(normalized):
+        for other_id, other_reason, other_proof in normalized[:index]:
+            score = similarity_bp(reason, other_reason)
+            if score >= similarity_threshold_bp:
+                _fail(f"category=canned_identical_approval "
                       f"unit={unit_hash[:16]} model={model_id} "
-                      f"matches={first_proof} — the same statement of what "
-                      "was inspected, from two models, is one inspection")
-            seen_proofs[proof] = model_id
+                      f"matches={other_id} similarity_bp={score} "
+                      f"threshold_bp={similarity_threshold_bp} — two "
+                      "approvals that say the same thing are one review "
+                      "reported twice; independent corroboration is the "
+                      "property this panel exists to provide")
+            if proof and other_proof:
+                proof_score = similarity_bp(proof, other_proof)
+                if proof_score >= similarity_threshold_bp:
+                    _fail(f"category=canned_identical_proof "
+                          f"unit={unit_hash[:16]} model={model_id} "
+                          f"matches={other_id} similarity_bp={proof_score} — "
+                          "the same statement of what was inspected, from two "
+                          "models, is one inspection")
 
     distinct = [m for m in approving if m != approver]
     return {"unit_sha256": unit_hash,
+            "gate_semantics": GATE_SEMANTICS,
+            "similarity_threshold_bp": similarity_threshold_bp,
             "distinct_reasoning_models": sorted(distinct),
             "distinct_reasoning_count": len(distinct)}
 

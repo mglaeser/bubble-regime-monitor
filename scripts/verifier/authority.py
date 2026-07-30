@@ -46,12 +46,25 @@ from .errors import UNSET_POLICY_PIN, BlockingError
 TEST_FIXTURE_UNAUTHORIZED = "TEST_FIXTURE_UNAUTHORIZED"
 UNVERIFIED_EXTERNAL_CLAIM = "UNVERIFIED_EXTERNAL_CLAIM"
 
+#: Broad scopes, kept for LOCAL TEST TOOLING and given their own classes
+#: (MC4-R05). A record covering every occurrence in an atom, or every atom in
+#: a file, is a convenience for driving the planner over a whole range — it is
+#: not what an operator reviews before a real call, and calling it the same
+#: thing as an exact clearance let the trusted-lane claim of "exact
+#: occurrence-scoped authorization" be satisfied by a fallback.
+TEST_ATOM_WIDE_CLEARANCE = "TEST_ATOM_WIDE_CLEARANCE"
+TEST_FILE_WIDE_CLEARANCE = "TEST_FILE_WIDE_CLEARANCE"
+
 VERIFIED_LITERAL_AUTHORIZATION = "VERIFIED_LITERAL_AUTHORIZATION"
 VERIFIED_OPERATOR_PIN_AUTHORIZATION = "VERIFIED_OPERATOR_PIN_AUTHORIZATION"
 
+#: Never confer real-call authority, whatever else is true of them.
+TEST_ONLY_CLASSES = frozenset({TEST_FIXTURE_UNAUTHORIZED,
+                               TEST_ATOM_WIDE_CLEARANCE,
+                               TEST_FILE_WIDE_CLEARANCE})
+
 #: Everything this package is allowed to build. Note what is absent.
-CANDIDATE_CONSTRUCTIBLE = frozenset({TEST_FIXTURE_UNAUTHORIZED,
-                                     UNVERIFIED_EXTERNAL_CLAIM})
+CANDIDATE_CONSTRUCTIBLE = TEST_ONLY_CLASSES | {UNVERIFIED_EXTERNAL_CLAIM}
 
 #: Classes that confer authority. Only a TrustedVerifier can return one.
 VERIFIED_CLASSES = frozenset({VERIFIED_LITERAL_AUTHORIZATION,
@@ -169,17 +182,30 @@ _LITERAL_FIELDS = (
     "schema_version", "authority_class", "repository_identity",
     "target_base_sha", "diff_base_sha", "head_sha", "path_bytes_b64",
     "atom_id", "occurrence_index", "literal_sha256", "literal_length",
-    "literal_category", "reason", "reviewer_identity", "authorized_at",
+    "literal_categories", "literal_category_set_sha256",
+    "scanner_policy_sha256", "reason", "reviewer_identity", "authorized_at",
     "authorization_source", "revoked",
 )
+
+#: Fields a VERIFIED record must carry, non-null, to be usable for a real
+#: provider request (MC4-R05). There is no fallback: a trusted request is
+#: assembled from exact clearances or it is not assembled.
+REAL_CALL_REQUIRED_EXACT = ("path_bytes_b64", "atom_id", "occurrence_index",
+                            "literal_sha256", "literal_categories",
+                            "literal_category_set_sha256",
+                            "scanner_policy_sha256", "target_base_sha",
+                            "diff_base_sha", "head_sha", "expires_at")
 
 
 def literal_claim(*, repository_identity: str, target_base_sha: str,
                   diff_base_sha: str, head_sha: str, path_bytes_b64: str,
                   atom_id: str | None, occurrence_index: int | None,
-                  literal: str, literal_category: str, reason: str,
+                  literal: str, reason: str,
                   reviewer_identity: str, authorized_at: str,
                   authorization_source: str,
+                  literal_categories=None,
+                  literal_category: str | None = None,
+                  scanner_policy_sha256: str | None = None,
                   external_anchor: dict | None = None,
                   test_fixture: bool = False) -> dict:
     """Build ONE scoped reviewed-literal CLAIM.
@@ -196,8 +222,25 @@ def literal_claim(*, repository_identity: str, target_base_sha: str,
     if test_fixture and external_anchor is not None:
         _fail("category=fixture_with_anchor — a test fixture has no anchor to "
               "verify; supplying one confuses a local convenience with a claim")
-    authority_class = (TEST_FIXTURE_UNAUTHORIZED if test_fixture
-                       else UNVERIFIED_EXTERNAL_CLAIM)
+    from . import preflight
+    categories = sorted(set(literal_categories if literal_categories
+                            is not None else
+                            ([literal_category] if literal_category else [])))
+    _require(bool(categories),
+             "category=literal_categories_missing — a clearance must say what "
+             "the scanner detected; an unclassified clearance cannot be "
+             "matched against a transmitted finding")
+    # MC4-R05: the CLASS records how broad the scope is, so no downstream
+    # reader has to infer it from null fields.
+    if test_fixture:
+        if atom_id is None:
+            authority_class = TEST_FILE_WIDE_CLEARANCE
+        elif occurrence_index is None:
+            authority_class = TEST_ATOM_WIDE_CLEARANCE
+        else:
+            authority_class = TEST_FIXTURE_UNAUTHORIZED
+    else:
+        authority_class = UNVERIFIED_EXTERNAL_CLAIM
     record = {
         "schema_version": 2,
         "authority_class": authority_class,
@@ -211,7 +254,11 @@ def literal_claim(*, repository_identity: str, target_base_sha: str,
         "literal_sha256": sha256_hex(literal.encode("utf-8",
                                                     "surrogateescape")),
         "literal_length": len(literal),
-        "literal_category": literal_category,
+        "literal_categories": categories,
+        "literal_category_set_sha256": preflight.category_set_sha256(
+            categories),
+        "scanner_policy_sha256": (scanner_policy_sha256
+                                  or preflight.scanner_policy_sha256()),
         "reason": reason,
         "reviewer_identity": reviewer_identity,
         "authorized_at": authorized_at,
@@ -276,9 +323,43 @@ def validate_literal_authorization(record: dict, where: str = "") -> dict:
                     "literal_sha256"]:
                 _fail(f"category=authorization_contains_plaintext "
                       f"where={where} field={key}")
+    from . import preflight
+    categories = record["literal_categories"]
+    _require(isinstance(categories, list) and categories
+             and all(isinstance(c, str) and c for c in categories)
+             and categories == sorted(set(categories)),
+             f"category=literal_categories_not_sorted_unique where={where}")
+    _require(preflight.category_set_sha256(categories)
+             == record["literal_category_set_sha256"],
+             f"category=literal_category_set_digest_mismatch where={where}")
     _require(literal_authorization_digest(record)
              == record["authorization_sha256"],
              f"category=authorization_digest_mismatch where={where}")
+    return record
+
+
+def assert_usable_for_real_call(record: dict, *, where: str = "") -> dict:
+    """The gate a TRUSTED request assembler applies to each clearance.
+
+    Exact scope only, with no fallback (MC4-R05). Every field below must be
+    present and non-null; a record covering "any occurrence in this atom" or
+    "any atom in this file" is refused however it is labelled, and a test-only
+    class is refused outright. Candidate code can call this — it will simply
+    never have a record that passes, because it cannot produce a verified
+    class."""
+    validate_literal_authorization(record, where=where)
+    if record["authority_class"] != VERIFIED_LITERAL_AUTHORIZATION:
+        _fail(f"category=real_call_requires_verified_class where={where} "
+              f"class={record['authority_class']} — a test-only or unverified "
+              "clearance never authorizes a provider request")
+    missing = [f for f in REAL_CALL_REQUIRED_EXACT
+               if record.get(f) in (None, "", [])]
+    if missing:
+        _fail(f"category=real_call_scope_not_exact where={where} "
+              f"null_or_missing={missing} — a trusted request is assembled "
+              "from exact (path, atom, occurrence, category-set) clearances "
+              "or it is not assembled; there is no atom-wide or file-wide "
+              "fallback")
     return record
 
 
@@ -357,18 +438,23 @@ class LiteralAuthorizationSet:
 
     def clears_occurrence(self, *, literal_sha256: str, path_bytes_b64: str,
                           atom_id: str | None, occurrence_index: int,
-                          literal_category: str | None = None) -> bool:
-        """Is THIS occurrence, at THIS place, of THIS category, cleared?
+                          literal_categories=None) -> bool:
+        """Is THIS occurrence, at THIS place, of THIS category set, cleared?
 
         Checked most specific first. A record with occurrence_index=None
         covers any occurrence in its atom; a record with a file-wide null
-        atom covers any atom in that file. Neither ever crosses a file.
+        atom covers any atom in that file. Neither ever crosses a file, and
+        NEITHER confers real-call authority — those broader shapes carry
+        their own test-only authority classes (MC4-R05).
 
-        The CATEGORY is part of the match (C4-F01). An operator reviews "this
-        literal, detected as an OpenAI project key, at this position" — a
-        record cleared under one category does not clear the same bytes
-        detected as something else, because the second detection is a
-        different statement about what those bytes are."""
+        The CATEGORY SET is part of the match (C4-F01, widened by MC4-R02).
+        An operator reviews "this literal, detected as these things, at this
+        position". A record cleared under one classification does not clear
+        the same bytes detected as another, and a set comparison — rather
+        than a single category — removes the dependence on which pattern
+        happened to be declared first."""
+        wanted = (sorted(set(literal_categories))
+                  if literal_categories is not None else None)
         for key in (
             (path_bytes_b64, atom_id, occurrence_index, literal_sha256),
             (path_bytes_b64, atom_id, None, literal_sha256),
@@ -377,8 +463,7 @@ class LiteralAuthorizationSet:
             record = self._index.get(key)
             if record is None:
                 continue
-            if (literal_category is not None
-                    and record["literal_category"] != literal_category):
+            if wanted is not None and record["literal_categories"] != wanted:
                 continue
             return True
         return False
@@ -433,7 +518,8 @@ def propose_local_fixture_authorizations(skeleton: dict, atom_map: dict,
                 head_sha=state["head_sha"],
                 path_bytes_b64=record["path_bytes_b64"],
                 atom_id=atom_id, occurrence_index=index, literal=literal,
-                literal_category=finding["category"],
+                literal_categories=finding.get("categories")
+                or [finding["category"]],
                 reason="literal detected in changed content; NOT reviewed",
                 reviewer_identity="UNREVIEWED_LOCAL_PROPOSAL",
                 authorized_at="1970-01-01T00:00:00Z",

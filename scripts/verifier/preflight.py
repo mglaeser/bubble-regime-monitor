@@ -79,6 +79,10 @@ _UUID = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}"
 
 _ENTROPY_BITS_PER_CHAR = 3.6      # conservative: base64-ish text sits ~4.5
 
+#: Categories the generic sweeps assign. Named so the policy digest covers the
+#: whole vocabulary rather than only the declared patterns.
+GENERIC_CATEGORIES = frozenset({"high_entropy_token"})
+
 
 def _is_structured_text(value: str) -> bool:
     """True for word-structured text: a path, a dotted name, an identifier.
@@ -277,6 +281,32 @@ def evidence_record(entries: list[dict]) -> dict:
     return record
 
 
+#: Version of the category vocabulary and pattern set. An authorization binds
+#: it, so changing which patterns exist — or what they are called — invalidates
+#: every clearance rather than silently reinterpreting it (MC4-R02).
+SCANNER_POLICY_VERSION = "secret-scanner-policy-v2"
+
+
+def scanner_policy_sha256() -> str:
+    """Digest of the exact pattern set and category vocabulary in force."""
+    return digest(b"secret-scanner-policy-v2", canonical_json({
+        "version": SCANNER_POLICY_VERSION,
+        "patterns": [{"category": name, "pattern": pattern.pattern}
+                     for name, pattern in _PATTERNS],
+        "generic_categories": sorted(GENERIC_CATEGORIES),
+        "token_pattern": _TOKEN.pattern,
+        "b64_pattern": _B64_BLOB.pattern,
+        "min_mean_segment": _MIN_MEAN_SEGMENT,
+        "entropy_bits_per_char": _ENTROPY_BITS_PER_CHAR,
+    }))
+
+
+def category_set_sha256(categories) -> str:
+    """Digest of a SORTED UNIQUE category set, bound into authorizations."""
+    return digest(b"literal-category-set-v1",
+                  canonical_json(sorted(set(categories))))
+
+
 def distinct_occurrences(findings: list[dict]) -> list[dict]:
     """Collapse findings that describe the SAME bytes at the same place.
 
@@ -286,13 +316,34 @@ def distinct_occurrences(findings: list[dict]) -> list[dict]:
     separately made an authorization for "occurrence 0" fail to cover a
     literal that had been reviewed exactly once.
 
+    The collapsed finding carries the FULL SET of categories that matched,
+    not the first one seen (MC4-R02). Keeping only the first made the
+    surviving category depend on pattern declaration order, and let an
+    authorization approved under one category clear a transmitted finding
+    classified as another — the same bytes, but a different statement about
+    what they are.
+
     Ordered by offset, so an occurrence index is what a reviewer reading the
     atom top to bottom would count."""
     by_span: dict[tuple[int, str], dict] = {}
     for finding in findings:
         key = (finding["offset"], finding["value_sha256"])
-        if key not in by_span:
-            by_span[key] = finding
+        existing = by_span.get(key)
+        if existing is None:
+            merged = dict(finding)
+            merged["categories"] = sorted({finding["category"]})
+            # The longest matching span wins as the representative extent: a
+            # sub-match of the same value at the same offset describes fewer
+            # bytes than the scanner actually objects to.
+            by_span[key] = merged
+            continue
+        existing["categories"] = sorted(
+            set(existing["categories"]) | {finding["category"]})
+        if finding["length"] > existing["length"]:
+            existing["length"] = finding["length"]
+    for merged in by_span.values():
+        merged["category_set_sha256"] = category_set_sha256(
+            merged["categories"])
     return [by_span[k] for k in sorted(by_span)]
 
 

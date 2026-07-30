@@ -42,6 +42,7 @@ from . import (
     origin,
     preflight,
     providerreq,
+    reviewpolicy,
     unitpayload,
     verdicts,
 )
@@ -69,6 +70,27 @@ RESPONSE_ENVELOPE_VERSION = "internal-generation-envelope-v1"
 ENVELOPE_KEYS = ("object", "model", "usage", "output_parsed")
 USAGE_KEYS = ("input_tokens", "output_tokens")
 EXPECTED_OBJECT = "response"
+
+#: Wording the mock uses per lens. Deliberately NOT derived from the model id:
+#: the normalizer strips model and lens identifiers, so a mock that
+#: distinguished itself that way would look canned — which was the point of
+#: MC4-R09. These read like three reviewers describing three different things.
+_MOCK_PHRASING = {
+    "gpt-5.3-codex": {
+        "reason": "the changed branch preserves its precondition",
+        "proof": "walked each altered statement and its error path",
+    },
+    "gpt-5.6-sol": {
+        "reason": "no untrusted value reaches a sensitive sink here",
+        "proof": "traced every write and boundary crossing",
+    },
+    "gpt-4.1-mini": {
+        "reason": "the denominator and fail-closed default are unchanged",
+        "proof": "recomputed the coverage arithmetic against the guard",
+    },
+}
+_MOCK_CANNED_REASON = "looks fine, no issues found in this unit"
+_MOCK_CANNED_PROOF = "read the diff"
 
 
 # ------------------------------------------------------------- transport ----
@@ -100,6 +122,27 @@ class MockGenerationTransport:
         self.calls = 0
         self.last_timeout: int | None = None
 
+    def configuration(self) -> dict:
+        """The exact behaviour this stand-in was configured with (MC4-R15).
+
+        Reconstruction re-runs the executor against a DEFAULT mock. Without
+        this in the report, a result produced by a differently configured
+        stand-in could be "reproduced" by a run that behaved differently —
+        the digests would match because the report never said what the mock
+        had been told to do."""
+        record = {
+            "transport_class": type(self).__name__,
+            "source": self.source,
+            "generation_transport_class": self.generation_transport_class,
+            "refute": {model: sorted(units)
+                       for model, units in sorted(self.refute.items())},
+            "usage_input_tokens": self.usage_input_tokens,
+            "identical_reasons": self.identical_reasons,
+        }
+        record["mock_transport_configuration_sha256"] = digest(
+            b"mock-generation-transport-config-v1", canonical_json(record))
+        return record
+
     def post(self, path, body, *, timeout=None):
         self.calls += 1
         self.last_timeout = timeout
@@ -108,16 +151,25 @@ class MockGenerationTransport:
         challenge = _challenge_of(payload)
         unit_hashes = _unit_hashes_of(payload)
         refuted = self.refute.get(model_id, set())
-        lens = "" if self.identical_reasons else f"as {model_id}, "
+        # MC4-R08: model-specific categories from the model's own lens
+        # vocabulary. Returning ["logic","state"] for every model was what
+        # made the lens claim unfalsifiable from the evidence.
+        categories = list(reviewpolicy.lens_required_group(model_id))[:2]
+        # MC4-R09: distinctness must NOT come from interpolating the model id,
+        # which the normalizer now strips. Each lens gets its own wording.
+        phrasing = _MOCK_PHRASING[model_id]
         verdicts_by_unit = {
             unit_hash: {
                 "refuted": unit_hash in refuted,
                 "confidence": "high",
-                "reason": f"{challenge} mock review {lens}of unit "
-                          f"{unit_hash[:8]}: no behaviour change observed",
-                "proof_of_check": f"{challenge} {lens}inspected every "
-                                  "changed line",
-                "checked_categories": ["logic", "state"],
+                "reason": (f"{challenge} {_MOCK_CANNED_REASON}"
+                           if self.identical_reasons
+                           else f"{challenge} {phrasing['reason']} for unit "
+                                f"{unit_hash[:8]}"),
+                "proof_of_check": (f"{challenge} {_MOCK_CANNED_PROOF}"
+                                   if self.identical_reasons
+                                   else f"{challenge} {phrasing['proof']}"),
+                "checked_categories": categories,
             }
             for unit_hash in unit_hashes
         }
@@ -128,7 +180,8 @@ class MockGenerationTransport:
             "object": EXPECTED_OBJECT,
             "model": model_id,
             "usage": {"input_tokens": usage, "output_tokens": 128},
-            "output_parsed": {"challenge": challenge,
+            "output_parsed": {"lens_id": reviewpolicy.lens_id(model_id),
+                              "challenge": challenge,
                               "verdicts_by_unit": verdicts_by_unit},
         }
         return 200, json.dumps(response).encode()
@@ -545,7 +598,8 @@ def execute_batch(batch: dict, review_policy: dict, *, transport,
             timeout=pin_values["VERIFIER_GENERATION_TIMEOUT_SECONDS"])
         model_verdicts = verdicts.validate_verdicts(
             parsed["output_parsed"], unit_hashes=unit_hashes,
-            challenge=challenge, review_policy=review_policy)
+            challenge=challenge, review_policy=review_policy,
+            model_id=model_id)
         counted = counted_by_model.get(model_id)
         if counted is not None:
             counting2.assert_usage_within_tolerance(
@@ -561,14 +615,25 @@ def execute_batch(batch: dict, review_policy: dict, *, transport,
             usage=dict(parsed["usage"]),
             attempt=dict(ledger.records[-1]) if ledger.records else {}))
 
+    # MC4-R07: decide every unit and COLLECT the blocks. Raising on the first
+    # required-approver refutation lost the finding: the exception escaped
+    # before this function returned its validated verdict evidence and before
+    # `execute_mock` built a report, so the most load-bearing result the panel
+    # can produce — Sol saying no, and why — left no durable artifact.
     decisions = {}
+    blocks: list[dict] = []
     for unit_hash in unit_hashes:
-        decisions[unit_hash] = _decide_unit(
+        decision, block = decide_unit_or_block(
             unit_hash, by_model, approver=approver, model_ids=model_ids,
-            min_others=min_others, challenge=challenge)
+            min_others=min_others, challenge=challenge,
+            review_policy=review_policy)
+        decisions[unit_hash] = decision
+        if block is not None:
+            blocks.append(block)
     return {
         "batch_id": batch["batch_id"],
         "unit_decisions": decisions,
+        "unit_blocks": blocks,
         "per_model_verdict_evidence": evidence_records,
         "per_model_refuted": {m: sorted(h for h, v in by_model[m].items()
                                         if v["refuted"])
@@ -576,9 +641,46 @@ def execute_batch(batch: dict, review_policy: dict, *, transport,
     }
 
 
+def decide_unit_or_block(unit_hash: str, by_model: dict, *, approver: str,
+                         model_ids: list[str], min_others: int,
+                         challenge: str | None = None,
+                         review_policy: dict | None = None):
+    """(decision, block_or_None). Never raises for a VALIDATED verdict.
+
+    A malformed response still aborts — there is nothing to retain. But a
+    well-formed refutation is a finding, and a finding must survive as
+    evidence before it stops the process."""
+    try:
+        return _decide_unit(unit_hash, by_model, approver=approver,
+                            model_ids=model_ids, min_others=min_others,
+                            challenge=challenge,
+                            review_policy=review_policy), None
+    except BlockingError as exc:
+        approver_verdict = (by_model.get(approver) or {}).get(unit_hash) or {}
+        any_refuted = sorted(m for m in model_ids
+                             if (by_model.get(m) or {}).get(unit_hash, {})
+                             .get("refuted"))
+        decision = {
+            "unit_sha256": unit_hash,
+            "approved": False,
+            "approver_confidence": approver_verdict.get("confidence"),
+            "refuted_by": any_refuted,
+            "distinct_other_approvers": len(
+                [m for m in model_ids
+                 if m != approver
+                 and not (by_model.get(m) or {}).get(unit_hash, {})
+                 .get("refuted", True)]),
+            "distinct_reasoning": None,
+            "block_code": exc.code,
+        }
+        return decision, {"unit_sha256": unit_hash, "code": exc.code,
+                          "reason": exc.message}
+
+
 def _decide_unit(unit_hash: str, by_model: dict, *, approver: str,
                  model_ids: list[str], min_others: int,
-                 challenge: str | None = None) -> dict:
+                 challenge: str | None = None,
+                 review_policy: dict | None = None) -> dict:
     """Apply the role gates to one unit. Fail-closed."""
     if approver not in by_model:
         raise BlockingError(
@@ -608,10 +710,16 @@ def _decide_unit(unit_hash: str, by_model: dict, *, approver: str,
     # sentence. Applied to approvals only.
     distinct = None
     if challenge is not None:
+        policy = review_policy or {}
         distinct = verdicts.assert_distinct_reasoning(
             by_model, unit_hash=unit_hash, approver=approver,
             challenge=challenge,
-            corroborators=[m for m in model_ids if m != approver])
+            corroborators=[m for m in model_ids if m != approver],
+            model_ids=model_ids,
+            lens_ids=list((policy.get("lens_ids") or {}).values()),
+            similarity_threshold_bp=policy.get(
+                "anti_canned_similarity_threshold_bp",
+                verdicts.DEFAULT_SIMILARITY_THRESHOLD_BP))
 
     any_refuted = [m for m in model_ids if by_model[m][unit_hash]["refuted"]]
     return {
@@ -783,6 +891,9 @@ def execute_mock(plan_record: dict, *, transport, skeleton: dict, cwd,
     privacy = assert_output_carries_no_secret(
         all_evidence, path_identities=frozenset(paths.values()))
 
+    # MC4-R07: the artifact exists whatever the outcome. A blocked review is
+    # a RESULT, not an absence of one.
+    all_blocks = [b for r in batch_results for b in r["unit_blocks"]]
     synthesis = synthesize(batch_results)
     execution_evidence = evidence.candidate_evidence_record(
         evidence.MOCK_TEST_EVIDENCE, counts=[],
@@ -807,13 +918,50 @@ def execute_mock(plan_record: dict, *, transport, skeleton: dict, cwd,
         "execution_preflight_manifest": preflight_manifest.record(),
         "generation_ledger": ledger.record(),
         "output_privacy_scan": privacy,
+        "mock_transport_configuration": _transport_configuration(transport),
         "usage_drift_checked": True,
         "mock_generation_attempts": ledger.attempts,
+        "unit_blocks": all_blocks,
+        "block_codes": sorted({b["code"] for b in all_blocks}),
+        "review_status": ("BLOCKED" if all_blocks
+                          or not synthesis["overall_approved"] else "CLEAN"),
         "executable_authority": False,
         "evidence_class": evidence.MOCK_TEST_EVIDENCE,
     }
     report["mock_execution_report_sha256"] = mock_execution_digest(report)
     return report
+
+
+def assert_review_clean(report: dict) -> dict:
+    """Turn a BLOCKED report into a process failure — after it exists.
+
+    Separating evidence production from process exit is the whole point of
+    MC4-R07: the caller gets the artifact first, then this raises. A runner
+    that skips this call still has the blocked report; it just does not stop,
+    which is why every entry point calls it."""
+    if report.get("review_status") != "BLOCKED":
+        return report
+    codes = report.get("block_codes") or []
+    primary = codes[0] if codes else SYNTHESIS_REFUTED
+    raise BlockingError(
+        primary,
+        f"category=review_blocked status=BLOCKED block_codes={codes} "
+        f"refuted_units={report['synthesis']['refuted_unit_count']} "
+        f"report_sha256={report['mock_execution_report_sha256'][:16]} — the "
+        "full private verdict evidence for this block is retained in the "
+        "report; this refusal is the process exit, not the finding")
+
+
+def _transport_configuration(transport) -> dict:
+    """The stand-in's configuration, or an explicit refusal to guess."""
+    if hasattr(transport, "configuration"):
+        return transport.configuration()
+    return {"transport_class": type(transport).__name__,
+            "source": getattr(transport, "source", None),
+            "configuration_declared": False,
+            "honest_scope": "this transport does not describe its own "
+                            "behaviour, so the report cannot state what it "
+                            "was configured to do"}
 
 
 def mock_execution_digest(record: dict) -> str:

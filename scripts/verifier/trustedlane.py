@@ -303,6 +303,89 @@ def validate_trusted_evidence_shape(record: dict, *, where: str = "") -> dict:
     }
 
 
+# ------------------------------------------------- engine identity (R10) ----
+
+#: What must be true of the code that HOLDS the credential, before it holds it.
+#: Passing local tests is not one of them: the candidate head is the artifact
+#: under review, and approving it as its own verifier would close the loop the
+#: trust boundary exists to keep open (MC4-R10).
+ENGINE_IDENTITY_FIELDS = (
+    "source_commit",
+    "code_cutoff_sha",
+    "source_tree_sha256",
+    "artifact_sha256",
+    "dependency_lock_sha256",
+    "sbom_sha256",
+    "runner_image_digest",
+    "build_workflow_run_id",
+    "build_workflow_run_attempt",
+    "signer_identity",
+    "signature",
+    "provenance",
+    "independent_approval_record",
+)
+
+#: Distribution shapes, in the order the mandate prefers them.
+ENGINE_DISTRIBUTION_PREFERRED = "SEPARATE_PROTECTED_VERIFIER_REPOSITORY"
+ENGINE_DISTRIBUTION_ACCEPTABLE = "PROTECTED_MAIN_WORKFLOW_SIGNED_ARTIFACT"
+ENGINE_DISTRIBUTION_REFUSED = "IMPORT_FROM_CANDIDATE_CHECKOUT"
+
+
+def engine_identity_template() -> dict:
+    """Every field, all None. The current state, as data."""
+    record = {field: None for field in ENGINE_IDENTITY_FIELDS}
+    record["distribution"] = None
+    record["approval_state"] = "NOT_APPROVED"
+    return record
+
+
+def validate_engine_identity_shape(record: dict, *, where: str = "") -> dict:
+    """SHAPE only, and it says so — same discipline as the evidence schema."""
+    if not isinstance(record, dict):
+        _fail(f"category=engine_identity_not_object where={where}")
+    missing = [f for f in ENGINE_IDENTITY_FIELDS
+               if record.get(f) in (None, "")]
+    if missing:
+        _fail(f"category=engine_identity_incomplete where={where} "
+              f"missing={missing}")
+    return {
+        "shape_valid": True,
+        "authenticated": False,
+        "verification_status": "SHAPE_ONLY_NOT_AUTHENTICATED",
+        "honest_scope": "the record names every required field; no signature "
+                        "was checked, no build run was confirmed, and no "
+                        "approval record was fetched",
+    }
+
+
+def assert_engine_approved(record: dict) -> None:
+    """The gate a credential-bearing runner applies before loading an engine.
+
+    It always refuses here, for the same reason `assert_real_calls_authorized`
+    does: approval is an act outside this process, and a record asserting it
+    is candidate-writable. Verifying a signature needs a trusted public key,
+    and a key shipped in the reviewed branch is a key the branch can swap."""
+    _fail(
+        "category=engine_not_approved_from_candidate_code — an engine is "
+        "approved by an operator against a signature and a build provenance "
+        "record, verified with a key this branch does not hold; the candidate "
+        "head is the artifact under review and is never its own verifier")
+
+
+def assert_engine_is_not_candidate_checkout(engine_path: str) -> None:
+    """Refuse an engine that IS the code under review.
+
+    Named separately because it is the specific mistake most likely to be
+    made under time pressure: the precursor checkout is right there, it
+    passes its tests, and importing it is one line."""
+    _fail(
+        f"category=engine_from_candidate_checkout distribution="
+        f"{ENGINE_DISTRIBUTION_REFUSED} path_len={len(engine_path)} — a "
+        "credential-bearing process must not import verifier code from the "
+        f"candidate checkout; use {ENGINE_DISTRIBUTION_PREFERRED} or "
+        f"{ENGINE_DISTRIBUTION_ACCEPTABLE}")
+
+
 # ------------------------------------------------- code-cutoff closure ------
 
 
@@ -357,6 +440,10 @@ def contract_record() -> dict:
         "trusted_evidence_fields": list(TRUSTED_EVIDENCE_FIELDS),
         "trusted_anchor_fields": list(TRUSTED_ANCHOR_FIELDS),
         "normalization": normalization_record(),
+        "engine_identity_fields": list(ENGINE_IDENTITY_FIELDS),
+        "engine_identity": engine_identity_template(),
+        "engine_distribution_preferred": ENGINE_DISTRIBUTION_PREFERRED,
+        "engine_distribution_refused": ENGINE_DISTRIBUTION_REFUSED,
         "closure": closure_record_template(),
         "implemented_here": False,
         "honest_scope": "candidate-side contract and negative tests only; no "

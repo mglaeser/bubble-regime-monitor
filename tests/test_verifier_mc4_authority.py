@@ -47,14 +47,35 @@ RANGE = dict(repository_identity="mglaeser/bubble-regime-monitor",
              head_sha="d" * 40)
 
 
+#: The categories the scanner ACTUALLY assigns to SECRET. Derived rather than
+#: guessed: MC4-R02 makes the clearance match a category SET, so a fixture
+#: that names one category no longer covers a literal detected as two.
+DETECTED_CATEGORIES = sorted({
+    f["category"] for f in preflight.scan_text(SECRET)})
+
+
 def _claim(atom_id, occurrence_index=0, **over):
     kwargs = dict(path_bytes_b64="cA==", atom_id=atom_id,
                   occurrence_index=occurrence_index, literal=SECRET,
-                  literal_category="openai_key", reason="reviewed",
+                  literal_categories=DETECTED_CATEGORIES, reason="reviewed",
                   reviewer_identity="op", authorized_at="t",
                   authorization_source="s", test_fixture=True, **RANGE)
     kwargs.update(over)
     return authority.literal_claim(**kwargs)
+
+
+def _span(start, end, kind, *, source_text=None, **fields):
+    """A Span with its source digest computed, for tests.
+
+    MC4-R03 requires a content span to bind sha256(source_text). Computing it
+    here keeps every test honest about the invariant without making each one
+    restate the hash."""
+    from verifier.canon import sha256_hex
+    if source_text is not None:
+        fields.setdefault("source_content_sha256", sha256_hex(
+            source_text.encode("utf-8", "surrogateescape")))
+    return origin.Span(start, end, kind,
+                       source_text=source_text, **fields)
 
 
 # ------------------------------------ F03/F04/F06: trust is not a shape ------
@@ -232,7 +253,7 @@ class TestOccurrenceScopedClearance:
         # range, and the resolver refuses rather than defaulting to the
         # atom's status.
         origin_map = origin.OriginMap("execution")
-        origin_map.add(origin.Span(
+        origin_map.add(_span(
             0, 20, origin.ATOM_CONTENT, unit_sha256=self.UNIT_A,
             atom_id=self.ATOM_A, path_bytes_b64=self.PATH_B64,
             source_text="a harmless changed line"))
@@ -282,10 +303,11 @@ class TestOccurrenceScopedClearance:
 
     def test_a_category_mismatch_blocks(self):
         # Same bytes, same atom, same occurrence — reviewed under a category
-        # that is not what the scanner detected. An operator cleared a
+        # set that is not what the scanner detected. An operator cleared a
         # different statement about those bytes.
         manifest = self._manifest(
-            [_claim(self.ATOM_A, literal_category="not_the_detected_category")])
+            [_claim(self.ATOM_A,
+                    literal_categories=["not_the_detected_category"])])
         with pytest.raises(BlockingError) as e:
             self._scan(manifest, [self._unit(self.UNIT_A, self.ATOM_A)])
         assert origin.UNAUTHORIZED_OCCURRENCE in str(e.value)

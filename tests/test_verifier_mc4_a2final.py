@@ -23,6 +23,7 @@ from verifier import (  # noqa: E402
     authority,
     counting,
     finalize,
+    preflight,
     providerreq,
     reviewpolicy,
     verdicts,
@@ -55,7 +56,11 @@ class TestCandidateNeverDerivesTrust:
             "head_sha": RANGE["head_sha"],
             "path_bytes_b64": "cA==", "atom_id": "a" * 64,
             "occurrence_index": 0, "literal_sha256": "e" * 64,
-            "literal_length": 20, "literal_category": "openai_key",
+            "literal_length": 20,
+            "literal_categories": ["openai_key"],
+            "literal_category_set_sha256": preflight.category_set_sha256(
+                ["openai_key"]),
+            "scanner_policy_sha256": preflight.scanner_policy_sha256(),
             "reason": "hand-built", "reviewer_identity": "attacker",
             "authorized_at": "t", "authorization_source": "s",
             "revoked": False,
@@ -71,6 +76,19 @@ class TestCandidateNeverDerivesTrust:
                                                  **RANGE)
         assert aset.authority_class == authority.UNVERIFIED_EXTERNAL_CLAIM
         assert aset.confers_real_call_authority is False
+
+    def test_a_hand_labelled_verified_record_is_still_refused_for_a_real_call(
+            self):
+        # MC4-R05: the real-call gate checks the class AND exact scope. A
+        # hand-written label passes neither the trust boundary nor, if it
+        # somehow did, an exact-scope requirement it does not satisfy.
+        record = self._verified_literal()
+        record["occurrence_index"] = None
+        record["authorization_sha256"] = (
+            authority.literal_authorization_digest(record))
+        with pytest.raises(BlockingError) as e:
+            authority.assert_usable_for_real_call(record)
+        assert "real_call_scope_not_exact" in str(e.value)
 
     def test_a_verified_labelled_pin_record_is_refused(self):
         record = {

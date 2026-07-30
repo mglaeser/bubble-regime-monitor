@@ -58,7 +58,30 @@ AUTHORIZABLE_KINDS = frozenset({ATOM_CONTENT})
 
 #: Bumped whenever the span decomposition changes, so a stored origin-map
 #: digest cannot be reinterpreted under different rules.
-MAPPING_VERSION = "origin-span-v2"
+MAPPING_VERSION = "origin-span-v3"
+
+#: Kinds that MUST carry the source text they serialize. A finding inside one
+#: has to be mappable back to a raw occurrence, which is impossible without it.
+_SOURCE_BEARING_KINDS = frozenset({ATOM_CONTENT, CONTEXT_CONTENT,
+                                   METADATA_CONTENT})
+
+#: Fields each kind may bind. Scaffolding is this code's own prose and must
+#: carry no source-authorization identity; context is not part of the change,
+#: so it must not carry an atom identity a clearance could key on (MC4-R04).
+_REQUIRED_FIELDS_BY_KIND = {
+    ATOM_CONTENT: ("unit_sha256", "atom_id", "path_sha256",
+                   "source_content_sha256"),
+    METADATA_CONTENT: ("unit_sha256", "atom_id", "path_sha256",
+                       "source_content_sha256"),
+    CONTEXT_CONTENT: ("source_content_sha256",),
+    SCAFFOLDING: (),
+}
+_FORBIDDEN_FIELDS_BY_KIND = {
+    ATOM_CONTENT: (),
+    METADATA_CONTENT: (),
+    CONTEXT_CONTENT: ("atom_id",),
+    SCAFFOLDING: ("unit_sha256", "atom_id", "path_sha256"),
+}
 
 _ESCAPE_CACHE: dict[str, int] = {}
 
@@ -146,6 +169,31 @@ class Span:
         does not live in (PASS E, family A). Excluding a field from a digest
         is only safe when something else binds it; this is that binding, and
         it mirrors how `source_text` is bound by `source_content_sha256`."""
+        # MC4-R03: source_text is excluded from the record for the same
+        # privacy reason as path_bytes_b64, and excluding a field is only safe
+        # when something else binds it. Without this, an origin map could
+        # resolve findings against text its own evidence does not describe.
+        if self.source_text is not None:
+            if self.source_content_sha256 is None:
+                raise BlockingError(
+                    SECRET_PREFLIGHT_FAILED,
+                    "category=span_source_digest_missing — a span carrying "
+                    "source text must bind its digest; the text itself never "
+                    "enters the evidence record")
+            actual = sha256_hex(self.source_text.encode("utf-8",
+                                                        "surrogateescape"))
+            if actual != self.source_content_sha256:
+                raise BlockingError(
+                    SECRET_PREFLIGHT_FAILED,
+                    "category=span_source_digest_mismatch — the text this "
+                    "span resolves findings against is not the text its "
+                    "evidence records")
+        elif self.kind in _SOURCE_BEARING_KINDS:
+            raise BlockingError(
+                SECRET_PREFLIGHT_FAILED,
+                f"category=span_source_text_missing kind={self.kind} — a "
+                "content span must carry the source it serializes, or no "
+                "finding inside it can be mapped back to an occurrence")
         if self.path_bytes_b64 is None or self.path_sha256 is None:
             return
         try:
@@ -203,6 +251,64 @@ class OriginMap:
             if span.contains(offset, length):
                 return span
         return None
+
+    def validate(self, payload_text: str, *,
+                 request_hash: str | None = None) -> dict:
+        """Prove the spans are ONE EXACT PARTITION of the payload (MC4-R04).
+
+        `add` appends. Nothing proved the result was ordered, gap-free,
+        overlap-free, or that it covered the document — so a map could omit a
+        transmitted region entirely, and every finding in that region would
+        resolve as "outside any span" rather than being attributed. That is
+        the same refusal for two very different situations: a literal in the
+        instructions, and a literal in a stretch of payload nobody mapped.
+
+        Also checks the per-kind field policy, because a span's kind is what
+        decides whether an authorization can reach it: scaffolding must carry
+        no source-authorization identity, and context must carry no atom
+        identity a clearance could key on."""
+        length = len(payload_text)
+        if not self.spans:
+            self._fail("category=origin_map_empty")
+        cursor = 0
+        for index, span in enumerate(self.spans):
+            if span.kind not in _REQUIRED_FIELDS_BY_KIND:
+                self._fail(f"category=origin_span_kind_unknown index={index} "
+                           f"kind={span.kind}")
+            if span.start != cursor:
+                self._fail(
+                    f"category=origin_map_not_contiguous index={index} "
+                    f"expected_start={cursor} got={span.start} — a gap means "
+                    "transmitted bytes nobody mapped; an overlap means one "
+                    "byte with two origins")
+            if span.end <= span.start:
+                self._fail(f"category=origin_span_empty_or_inverted "
+                           f"index={index} start={span.start} end={span.end}")
+            for required in _REQUIRED_FIELDS_BY_KIND[span.kind]:
+                if getattr(span, required) in (None, ""):
+                    self._fail(f"category=origin_span_field_missing "
+                               f"index={index} kind={span.kind} "
+                               f"field={required}")
+            for forbidden in _FORBIDDEN_FIELDS_BY_KIND[span.kind]:
+                if getattr(span, forbidden) not in (None, ""):
+                    self._fail(f"category=origin_span_field_forbidden "
+                               f"index={index} kind={span.kind} "
+                               f"field={forbidden}")
+            cursor = span.end
+        if cursor != length:
+            self._fail(f"category=origin_map_does_not_cover_payload "
+                       f"covered={cursor} payload_chars={length}")
+        return {
+            "partition_proved": True,
+            "payload_chars": length,
+            "span_count": len(self.spans),
+            "payload_sha256": sha256_hex(
+                payload_text.encode("utf-8", "surrogateescape")),
+            "request_hash": request_hash,
+        }
+
+    def _fail(self, reason: str):
+        raise BlockingError(SECRET_PREFLIGHT_FAILED, reason)
 
     def record(self) -> dict:
         record = {
@@ -264,6 +370,7 @@ IN_CONTEXT = "in_unchanged_context"
 IN_METADATA = "in_verifier_metadata"
 SERIALIZATION_ARTEFACT = "created_by_serialization"
 NO_SOURCE_OCCURRENCE = "no_exact_source_occurrence"
+CATEGORY_SET_MISMATCH = "transmitted_category_set_differs_from_source"
 UNAUTHORIZED_OCCURRENCE = "occurrence_not_authorized"
 
 _KIND_REFUSALS = {
@@ -299,22 +406,37 @@ def resolve_finding(finding: dict, *, origin_map: OriginMap, authorizations,
                 "span": span}
     raw_start, raw_end = preimage
 
+    transmitted_categories = sorted(set(finding.get("categories")
+                                        or [finding["category"]]))
     for index, value_sha256, source in source_findings(span):
         if (source["offset"] != raw_start
                 or source["offset"] + source["length"] != raw_end):
             continue
+        source_categories = sorted(set(source.get("categories")
+                                       or [source["category"]]))
+        # MC4-R02: the transmitted classification must be the SOURCE
+        # classification. Passing only the source category into the lookup
+        # meant a finding classified as Y could be cleared by an
+        # authorization for X whenever both matched the same raw bytes —
+        # same bytes, different statement about what they are.
+        if transmitted_categories != source_categories:
+            return {"cleared": False, "refusal": CATEGORY_SET_MISMATCH,
+                    "span": span, "occurrence_index": index,
+                    "value_sha256": value_sha256,
+                    "transmitted_categories": transmitted_categories,
+                    "source_categories": source_categories}
         cleared = authorizations is not None and (
             authorizations.clears_occurrence(
                 literal_sha256=value_sha256,
                 path_bytes_b64=span.path_bytes_b64,
                 atom_id=span.atom_id,
                 occurrence_index=index,
-                literal_category=source["category"]))
+                literal_categories=source_categories))
         return {"cleared": bool(cleared),
                 "refusal": None if cleared else UNAUTHORIZED_OCCURRENCE,
                 "span": span, "occurrence_index": index,
                 "value_sha256": value_sha256,
-                "category": source["category"]}
+                "categories": source_categories}
     return {"cleared": False, "refusal": NO_SOURCE_OCCURRENCE, "span": span}
 
 

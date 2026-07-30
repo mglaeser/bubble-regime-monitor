@@ -56,6 +56,20 @@ SECRET = "sk-proj-abcdef1234567890abcdef"          # pragma: allowlist secret
 MAIN = "b08844a0755710035d62830faa84902d9d85d3fe"  # pragma: allowlist secret
 
 
+def _span(start, end, kind, *, source_text=None, **fields):
+    """A Span with its source digest computed, for tests.
+
+    MC4-R03 requires a content span to bind sha256(source_text). Computing it
+    here keeps every test honest about the invariant without making each one
+    restate the hash."""
+    from verifier.canon import sha256_hex
+    if source_text is not None:
+        fields.setdefault("source_content_sha256", sha256_hex(
+            source_text.encode("utf-8", "surrogateescape")))
+    return origin.Span(start, end, kind,
+                       source_text=source_text, **fields)
+
+
 # ------------------------------------------- clearance cannot be borrowed ----
 
 
@@ -72,11 +86,11 @@ class TestCrossBoundaryOccurrence:
 
     def _spans(self):
         origin_map = origin.OriginMap("execution")
-        origin_map.add(origin.Span(0, 20, origin.ATOM_CONTENT,
+        origin_map.add(_span(0, 20, origin.ATOM_CONTENT,
                                    unit_sha256="u" * 64, atom_id="a" * 64,
                                    path_bytes_b64="cA==",
                                    source_text="x" * 20))
-        origin_map.add(origin.Span(20, 40, origin.ATOM_CONTENT,
+        origin_map.add(_span(20, 40, origin.ATOM_CONTENT,
                                    unit_sha256="u" * 64, atom_id="b" * 64,
                                    path_bytes_b64="cA==",
                                    source_text="y" * 20))
@@ -104,7 +118,7 @@ class TestCrossBoundaryOccurrence:
 
     def test_a_finding_in_context_is_refused_by_kind(self):
         origin_map = origin.OriginMap("execution")
-        origin_map.add(origin.Span(0, 20, origin.CONTEXT_CONTENT,
+        origin_map.add(_span(0, 20, origin.CONTEXT_CONTENT,
                                    source_text="z" * 20))
         resolution = self._resolve(
             origin_map, {"offset": 2, "length": 8, "value_sha256": "c" * 64,
@@ -113,7 +127,7 @@ class TestCrossBoundaryOccurrence:
 
     def test_a_finding_in_a_metadata_descriptor_is_refused_by_kind(self):
         origin_map = origin.OriginMap("execution")
-        origin_map.add(origin.Span(0, 20, origin.METADATA_CONTENT,
+        origin_map.add(_span(0, 20, origin.METADATA_CONTENT,
                                    source_text="z" * 20))
         resolution = self._resolve(
             origin_map, {"offset": 2, "length": 8, "value_sha256": "c" * 64,
@@ -706,8 +720,9 @@ class TestPassEAuthorizationScopeIsBound:
 
     def test_an_undecodable_scope_blocks(self):
         with pytest.raises(BlockingError) as e:
-            origin.Span(0, 5, origin.ATOM_CONTENT, path_sha256="a" * 64,
-                        path_bytes_b64="not!base64")
+            _span(0, 5, origin.ATOM_CONTENT, source_text="hello",
+                  unit_sha256="u" * 64, atom_id="a" * 64,
+                  path_sha256="a" * 64, path_bytes_b64="not!base64")
         assert "span_path_scope_undecodable" in str(e.value)
 
 
