@@ -258,25 +258,61 @@ _NEUTRALISING_CONDITIONS = ("always(", "cancelled(", "failure(")
 
 
 def assert_gating_is_not_neutralised(document: dict, *, name: str = "") -> dict:
-    """`needs:` plus `if: always()` is not gating.
+    """`needs:` plus anything that makes failure survivable is not gating.
 
-    `gated_on` reads `needs:` and stops there, so a credential job could
-    declare the containment job as a dependency and then run regardless of
-    whether containment passed. Found by the bootstrap PR review."""
+    Two ways to defeat it, and the first version of this check only saw one.
+
+    `if: always()` on a credential job satisfies `gated_on` — the dependency is
+    declared — and then runs anyway when containment fails.
+
+    `continue-on-error: true` is subtler and worse: a containment STEP that
+    fails no longer fails its job, so `assert_repository_numeric_id`,
+    `assert_protected_ref` and `assert_no_candidate_import` can all refuse and
+    the job still reports success. The gate produces its refusal and nobody
+    hears it. Found by the bootstrap PR review, which is also why this now
+    covers every job and step rather than only credential-bearing jobs: the
+    containment job is not itself credential-bearing, and it is the one whose
+    failure has to be fatal."""
     offenders = []
     for job_name, job in (document.get("jobs") or {}).items():
         job = job or {}
-        if not _references_secret(job):
-            continue
-        condition = str(job.get("if") or "")
-        hits = [c for c in _NEUTRALISING_CONDITIONS if c in condition]
-        if hits:
-            offenders.append(f"{job_name}: if={condition!r} {hits}")
+        if _references_secret(job):
+            condition = str(job.get("if") or "")
+            hits = [c for c in _NEUTRALISING_CONDITIONS if c in condition]
+            if hits:
+                offenders.append(f"{job_name}: if={condition!r} {hits}")
+        if job.get("continue-on-error"):
+            offenders.append(f"{job_name}: continue-on-error")
+        for index, step in enumerate(job.get("steps") or []):
+            if (step or {}).get("continue-on-error"):
+                offenders.append(f"{job_name}.steps[{index}]: continue-on-error")
     if offenders:
         refuse(f"category=containment_gate_neutralised name={name} "
-               f"jobs={offenders} — a credential job that runs even when "
-               "containment failed is not gated by it")
+               f"found={offenders} — a gate whose failure is survivable is not "
+               "a gate; it still produces its refusal, and nobody hears it")
     return {"neutralised_gates": 0}
+
+
+def assert_no_workflow_level_secret(document: dict, *, name: str = "") -> dict:
+    """A secret in the workflow-level `env:` is a secret in EVERY job.
+
+    `assert_secret_containment` walks jobs, so a workflow-level `env:` was
+    invisible to it — and workflow-level env is inherited by every job,
+    including the containment job that deliberately has no `environment:` and
+    is therefore covered by no deployment-branch policy at all.
+
+    Secrets are scoped to the step that needs them, or they are not scoped."""
+    top_level = _secret_references(document.get("env") or {})
+    if top_level:
+        refuse(f"category=workflow_level_secret name={name} "
+               f"count={len(top_level)} — workflow-level `env:` is inherited by "
+               "every job including the no-environment containment job; scope a "
+               "secret to the step that needs it")
+    job_level = []
+    for job_name, job in (document.get("jobs") or {}).items():
+        if _secret_references((job or {}).get("env") or {}):
+            job_level.append(job_name)
+    return {"workflow_level_secrets": 0, "job_level_secret_env": job_level}
 
 
 def assert_actions_pinned(document: dict, *, name: str = "") -> dict:
@@ -525,6 +561,7 @@ def validate_workflow_file(name: str = D0_FILE, *, root: str = ".") -> dict:
         **assert_no_candidate_execution(document, name=name),
         **assert_forbidden_job_keys_absent(document, name=name),
         **assert_gating_is_not_neutralised(document, name=name),
+        **assert_no_workflow_level_secret(document, name=name),
         **assert_phase_secret_policy(document, name=name, policy=policy),
         **assert_no_literal_credential(loaded["raw"]),
         "honest_scope": "the deployed shape is validated; a validated shape is "
@@ -548,7 +585,25 @@ def assert_deployed_copy_matches_source(*, root: str = ".") -> dict:
     Byte-identity, not equivalence: a re-serialised YAML that parses the same
     is still a file nobody reviewed."""
     source = os.path.join(root, WORKFLOW_DIR, D0_FILE)
-    deployed = os.path.join(root, LIVE_WORKFLOW_DIR, D0_FILE)
+    # Located by declared `name:`, not filename. Keying on one basename meant a
+    # tampered D0 deployed as anything else was never compared to anything —
+    # the same filename-vs-content mistake as the template check.
+    d0_name = _workflow_name_of(source)
+    live_dir = os.path.join(root, LIVE_WORKFLOW_DIR)
+    matches = []
+    if os.path.isdir(live_dir):
+        for entry in sorted(os.listdir(live_dir)):
+            if entry.endswith((".yml", ".yaml")) and _workflow_name_of(
+                    os.path.join(live_dir, entry)) == d0_name:
+                matches.append(entry)
+    if len(matches) > 1:
+        refuse(f"category=d0_deployed_more_than_once files={matches} — two "
+               "live workflows declare the containment workflow's name")
+    if matches and matches[0] != D0_FILE:
+        refuse(f"category=d0_deployed_under_unexpected_filename "
+               f"file={matches[0]} expected={D0_FILE} — the deployed name is "
+               "what the push path filter and this comparison both key on")
+    deployed = os.path.join(live_dir, D0_FILE)
     if not os.path.exists(deployed):
         return {"d0_deployed": False,
                 "honest_scope": "D0 is not deployed yet, so there is no "

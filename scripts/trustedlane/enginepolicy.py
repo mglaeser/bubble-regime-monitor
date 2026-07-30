@@ -84,7 +84,12 @@ def _reachable_candidate_packages(search_path) -> list:
         base = os.path.normpath(entry or ".")
         for name in CANDIDATE_PACKAGE_NAMES:
             package = os.path.join(base, name)
-            if (os.path.isfile(os.path.join(package, "__init__.py"))
+            # A BARE DIRECTORY is enough. Requiring `__init__.py` was the bug:
+            # PEP 420 namespace packages have none, and `import verifier.executor`
+            # resolves from a plain directory just fine — which the review
+            # demonstrated by importing it. Checking for the marker file asked
+            # the wrong question; the right one is "would an import find this".
+            if (os.path.isdir(package)
                     or os.path.isfile(package + ".py")):
                 hits.append(package)
     return hits
@@ -121,9 +126,15 @@ def assert_no_candidate_import(*, modules=None, search_path=None) -> dict:
                "reach it")
     reachable = _reachable_candidate_packages(search_path)
     if reachable:
-        refuse(f"category=candidate_package_reachable count={len(reachable)} — "
-               "a parent directory of the candidate package is on sys.path, so "
-               "`import verifier` would load the artifact under review")
+        # The paths are named. They are the lane's own filesystem, not candidate
+        # content, and an unnamed count is undiagnosable: the first real hit was
+        # an EMPTY `scripts/verifier/` left behind by a branch switch — git
+        # neither tracks nor removes empty directories — which is still a
+        # namespace-package root that `import verifier` resolves to.
+        refuse(f"category=candidate_package_reachable count={len(reachable)} "
+               f"paths={sorted(reachable)} — a parent directory of the "
+               "candidate package is on sys.path, so `import verifier` would "
+               "load the artifact under review")
     return {"candidate_isolated": True,
             "checked": ["sys.modules", "sys.path", "package_reachability"]}
 

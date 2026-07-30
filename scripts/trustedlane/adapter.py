@@ -190,7 +190,11 @@ def normalization_record(*, raw_binding: dict, adapter_identity: dict,
     order produces the same record, and a provider that returns *different*
     answers cannot hide behind reordering."""
     assert_adapter_is_trusted(adapter_identity)
-    assert_no_forbidden_transform(applied_transforms)
+    # Materialised ONCE, from the checked call. Re-iterating the caller's
+    # argument below exhausted a generator, so `applied_transforms` recorded []
+    # while the transforms had in fact been applied — the record disagreeing
+    # with the thing it records. Same class as the closure-delta bug.
+    transforms = assert_no_forbidden_transform(applied_transforms)
     assert_single_output(raw_output_count)
     missing = [f for f in RAW_BINDING_FIELDS if raw_binding.get(f) is None]
     if missing:
@@ -211,7 +215,7 @@ def normalization_record(*, raw_binding: dict, adapter_identity: dict,
         "model_id": raw_binding["model_id"],
         "request_semantics_sha256": raw_binding["request_semantics_sha256"],
         "attempt": raw_binding["attempt"],
-        "applied_transforms": sorted(applied_transforms or ()),
+        "applied_transforms": sorted(transforms),
         "verdicts": [
             {k: (sorted(v[k]) if k == "checked_categories" else v[k])
              for k in sorted(NORMALIZED_VERDICT_FIELDS)}

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -1746,3 +1747,256 @@ def test_review_the_d0_push_filter_names_the_file_it_will_be_deployed_as():
     paths = block["push"]["paths"]
     expected = f"{workflowfile.LIVE_WORKFLOW_DIR}/{D0}"
     assert expected in paths, (expected, paths)
+
+
+# --------------------------------------------------------------------------
+# Bootstrap PR review, third batch.
+#
+# Five more, and the pattern in all five is the same one the second batch was
+# supposed to have ended: a check that asked a proxy question instead of the
+# real one. `__init__.py` instead of "is this importable". `if:` instead of
+# "can this failure be survived". Jobs instead of the workflow. A filename
+# instead of the workflow's identity. The caller's argument instead of the
+# checked one.
+#
+# Two of these were REFUTED by an adversarial verification pass and found open
+# anyway by testing the refutation. That is recorded here because it is the
+# reason the tests below construct the bypass and run it, rather than reasoning
+# about whether it would work.
+# --------------------------------------------------------------------------
+
+
+def test_third_a_namespace_candidate_package_is_reachable_without_init(
+        tmp_path):
+    """PEP 420: a bare directory is importable, `__init__.py` optional.
+
+    The check required `__init__.py`, so a candidate package without one was
+    reported unreachable — while `import verifier.executor` succeeded from the
+    same path. Demonstrated below rather than argued: the import is actually
+    performed."""
+    package = tmp_path / "verifier"
+    package.mkdir()
+    (package / "executor.py").write_text("VALUE = 'candidate code ran'\n",
+                                         encoding="utf-8")
+    assert not (package / "__init__.py").exists()
+
+    # It really is importable — this is the fact the old check disagreed with.
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import verifier.executor as m; print(m.VALUE)"],
+        cwd=str(tmp_path), capture_output=True, text=True, check=False,
+        env={**os.environ, "PYTHONPATH": str(tmp_path),
+             "PYTHONDONTWRITEBYTECODE": "1"})
+    assert probe.returncode == 0, probe.stderr
+    assert "candidate code ran" in probe.stdout
+
+    assert enginepolicy._reachable_candidate_packages([str(tmp_path)]) == [
+        str(package)]
+    with _refusal("candidate_package_reachable"):
+        enginepolicy.assert_no_candidate_import(
+            modules={}, search_path=[str(tmp_path)])
+
+
+def test_third_a_regular_package_and_a_module_are_still_reachable(tmp_path):
+    """Widening the check must not have narrowed it anywhere."""
+    (tmp_path / "regular").mkdir()
+    regular = tmp_path / "regular" / "verifier"
+    regular.mkdir()
+    (regular / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "module").mkdir()
+    (tmp_path / "module" / "verifier.py").write_text("", encoding="utf-8")
+    for entry in ("regular", "module"):
+        with _refusal("candidate_package_reachable"):
+            enginepolicy.assert_no_candidate_import(
+                modules={}, search_path=[str(tmp_path / entry)])
+
+
+def test_third_a_path_with_no_candidate_package_is_still_accepted(tmp_path):
+    (tmp_path / "unrelated").mkdir()
+    record = enginepolicy.assert_no_candidate_import(
+        modules={}, search_path=[str(tmp_path)])
+    assert record["candidate_isolated"] is True
+
+
+@pytest.mark.parametrize("mutate", [
+    pytest.param(lambda job: job.update({"continue-on-error": True}),
+                 id="job-level"),
+    pytest.param(lambda job: job["steps"][0].update(
+        {"continue-on-error": True}), id="step-level"),
+])
+def test_third_b_continue_on_error_on_a_containment_job_is_refused(mutate):
+    """A refusal nobody hears is not a refusal.
+
+    `continue-on-error` on the containment job — or on any one of its steps —
+    means `assert_repository_numeric_id` can refuse, the step goes red, and the
+    job still reports success. Every downstream `needs:` is then satisfied by a
+    gate that failed.
+
+    The old check only looked at credential-bearing jobs. The containment job
+    holds no credential, which is precisely why it was invisible to the check,
+    and precisely why its failure has to be fatal."""
+    document = _document(D0)
+    mutate(document["jobs"]["d0-containment"])
+    with _refusal("containment_gate_neutralised"):
+        workflowfile.assert_gating_is_not_neutralised(document, name=D0)
+
+
+def test_third_b_the_real_workflows_survive_the_widened_gate_check():
+    for name in (D0, D1, D2):
+        assert workflowfile.assert_gating_is_not_neutralised(
+            _document(name), name=name)["neutralised_gates"] == 0
+
+
+@pytest.mark.parametrize("expression", SECRET_SYNTAXES)
+def test_third_c_a_workflow_level_env_secret_is_refused(expression):
+    """Workflow-level `env:` is inherited by every job.
+
+    `assert_secret_containment` walks `jobs`, so it never saw the workflow-level
+    mapping — and the job that inherits it includes the containment job, which
+    deliberately declares no `environment:` and is therefore behind no
+    deployment-branch policy whatsoever."""
+    document = _document(D1)
+    document["env"] = {"OPENAI_API_KEY": expression}
+    with _refusal("workflow_level_secret"):
+        workflowfile.assert_no_workflow_level_secret(document, name=D1)
+
+
+def test_third_c_the_workflow_level_check_reaches_the_full_validator():
+    """A check nothing calls is documentation. This one is wired in."""
+    source = inspect.getsource(workflowfile.validate_workflow_file)
+    assert "assert_no_workflow_level_secret" in source
+
+
+def test_third_c_a_job_scoped_secret_env_is_reported_not_refused():
+    """Job-scoped is a different question — reported so the phase policy and
+    the containment gate can rule on it, not refused here."""
+    document = _document(D1)
+    job = document["jobs"]["d1-trusted-count"]
+    job["env"] = {"K": "${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}"}
+    record = workflowfile.assert_no_workflow_level_secret(document, name=D1)
+    assert record["workflow_level_secrets"] == 0
+    assert record["job_level_secret_env"] == ["d1-trusted-count"]
+
+
+def test_third_c_the_real_workflows_declare_no_workflow_level_secret():
+    for name in (D0, D1, D2):
+        assert workflowfile.assert_no_workflow_level_secret(
+            _document(name), name=name)["workflow_level_secrets"] == 0
+
+
+def _stage_source(tmp_path):
+    source = tmp_path / workflowfile.WORKFLOW_DIR
+    source.mkdir(parents=True)
+    for name in (D0, D1, D2):
+        shutil.copy(ROOT / workflowfile.WORKFLOW_DIR / name, source / name)
+    live = tmp_path / workflowfile.LIVE_WORKFLOW_DIR
+    live.mkdir(parents=True)
+    return source, live
+
+
+def test_third_d_d0_deployed_under_another_filename_is_refused(tmp_path):
+    """The comparison keyed on one basename, so a D0 deployed as anything else
+    was compared to nothing and reported `d0_deployed: False` — "not deployed"
+    for a workflow that is live and running. The push path filter keys on the
+    same name, so the divergent copy would also never re-trigger validation."""
+    source, live = _stage_source(tmp_path)
+    shutil.copy(source / D0, live / "containment.yml")
+    with _refusal("d0_deployed_under_unexpected_filename"):
+        workflowfile.assert_deployed_copy_matches_source(root=str(tmp_path))
+
+
+def test_third_d_two_live_copies_of_d0_are_refused(tmp_path):
+    """Two files declaring the containment workflow's name means one of them is
+    the reviewed copy and the other is whatever it is."""
+    source, live = _stage_source(tmp_path)
+    shutil.copy(source / D0, live / D0)
+    shutil.copy(source / D0, live / "d0-copy.yml")
+    with _refusal("d0_deployed_more_than_once"):
+        workflowfile.assert_deployed_copy_matches_source(root=str(tmp_path))
+
+
+def test_third_d_an_unrelated_live_workflow_does_not_confuse_the_match(
+        tmp_path):
+    source, live = _stage_source(tmp_path)
+    (live / "ci.yml").write_text("name: CI\non: push\njobs: {}\n",
+                                 encoding="utf-8")
+    shutil.copy(source / D0, live / D0)
+    assert workflowfile.assert_deployed_copy_matches_source(
+        root=str(tmp_path))["d0_deployed"] is True
+
+
+def test_third_e_declared_transforms_are_recorded_from_a_generator():
+    """`applied_transforms` was recorded from the caller's argument after the
+    check had already consumed it, so a generator produced an empty list in the
+    record while the transforms had in fact been applied. The record disagreed
+    with the thing it records — the closure-delta bug, in a second place."""
+    record = adapter.normalization_record(
+        raw_binding=_raw_binding(),
+        adapter_identity=_adapter_identity(),
+        normalized_verdicts=[_verdict()],
+        applied_transforms=(t for t in ("RENAME_FIELD", "VALIDATE_ENUM")),
+    )
+    assert record["applied_transforms"] == ["RENAME_FIELD", "VALIDATE_ENUM"]
+
+
+def test_third_e_a_forbidden_transform_in_a_generator_is_still_refused():
+    with _refusal("adapter_forbidden_transform"):
+        adapter.normalization_record(
+            raw_binding=_raw_binding(),
+            adapter_identity=_adapter_identity(),
+            normalized_verdicts=[_verdict()],
+            applied_transforms=(t for t in ("RENAME_FIELD",
+                                            "DROP_UNKNOWN_FIELD")),
+        )
+
+
+def test_third_e_the_recorded_transforms_change_the_digest():
+    """If the record's transforms were cosmetic, the digest would not move —
+    and a digest that ignores what the adapter did binds nothing about it."""
+    def _record(transforms):
+        return adapter.normalization_record(
+            raw_binding=_raw_binding(), adapter_identity=_adapter_identity(),
+            normalized_verdicts=[_verdict()],
+            applied_transforms=transforms)["normalized_verdicts_sha256"]
+
+    assert _record([]) != _record(["RENAME_FIELD"])
+    assert _record(t for t in ["RENAME_FIELD"]) == _record(["RENAME_FIELD"])
+
+
+def test_third_a_an_empty_candidate_directory_is_still_reachable(tmp_path):
+    """"Empty" is not "safe", and this was found the hard way.
+
+    The widened check's first real hit was an EMPTY `scripts/verifier/` left
+    behind by a branch switch — git neither tracks nor removes empty
+    directories, so `git status` was clean and the directory was there anyway.
+
+    It is still a namespace-package root: `import verifier` resolves to it and
+    `__path__` points at it, so any file that later lands in it is importable
+    candidate code. Refusing "empty" rather than reasoning about whether it is
+    currently harmless is the same refuse-by-default rule as everywhere else."""
+    package = tmp_path / "verifier"
+    package.mkdir()
+    assert not any(package.iterdir())
+
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import verifier; print(list(verifier.__path__)[0])"],
+        cwd=str(tmp_path), capture_output=True, text=True, check=False,
+        env={**os.environ, "PYTHONPATH": str(tmp_path),
+             "PYTHONDONTWRITEBYTECODE": "1"})
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == str(package)
+
+    with _refusal("candidate_package_reachable"):
+        enginepolicy.assert_no_candidate_import(
+            modules={}, search_path=[str(tmp_path)])
+
+
+def test_third_a_the_reachability_refusal_names_the_paths(tmp_path):
+    """An unnamed count is undiagnosable. The paths are the lane's own
+    filesystem, not candidate content, so naming them leaks nothing."""
+    (tmp_path / "verifier").mkdir()
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        enginepolicy.assert_no_candidate_import(
+            modules={}, search_path=[str(tmp_path)])
+    assert str(tmp_path / "verifier") in excinfo.value.reason
