@@ -53,6 +53,7 @@ from trustedlane import (  # noqa: E402
     challenge,
     closure,
     countledger,
+    counttransport,
     d1cli,
     d1runtime,
     d2cli,
@@ -7880,3 +7881,323 @@ def test_the_bridge_is_the_only_lane_entry_into_the_verifier_package():
             if name == "verifier" or name.startswith("verifier."):
                 offenders.append(f"{path.name}:{name}")
     assert offenders == [], offenders
+
+
+# --------------------------------------------------------------------------
+# SLICE 2 — the lane counts through the ENGINE, not through a second engine.
+#
+# The lane used to build its own count requests, send them, and keep its own
+# ledger. That was a parallel, weaker implementation of what
+# `verifier.counting2` already does properly, and a parallel implementation is
+# how a "preflight" that only checked a budget got as far as it did.
+#
+# So `prepare_review_plan_core` does the review semantics and the lane supplies
+# only what the engine cannot have: an authenticated PIN record, a verified
+# literal set, a real transport, and an unpredictable challenge. These tests
+# run that whole path against a fake server, in D0, with no credential.
+# --------------------------------------------------------------------------
+
+PR25_BASE = "75a093de45f73169072837c7c062fab421caaf8b"  # pragma: allowlist secret
+
+
+def _counting_opener(calls, *, tokens_per_4_bytes=True):
+    """A fake provider that answers the count endpoint and records every call.
+
+    Deliberately arithmetic rather than constant: a constant reply would make
+    "the challenge reached the bytes" untestable, because every request would
+    count the same."""
+    def opener(method, url, headers, body):
+        calls.append({"method": method, "url": url, "bytes": len(body),
+                      "has_credential": "authorization" in
+                      {k.lower() for k in headers}})
+        tokens = -(-len(body) // 4) if tokens_per_4_bytes else 10
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": tokens}).encode()
+    return opener
+
+
+@pytest.fixture(scope="module")
+def engine_clone(tmp_path_factory):
+    for sha in (PR25_BASE, SHA_A):
+        if subprocess.run(["git", "cat-file", "-e", sha],  # noqa: S603
+                          cwd=str(ROOT), capture_output=True).returncode:
+            pytest.skip(f"object {sha[:12]} absent in this checkout")
+    destination = tmp_path_factory.mktemp("engine-clone") / "candidate"
+    subprocess.run(["git", "clone", "-q", "--no-local", str(ROOT),  # noqa: S603
+                    str(destination)], check=True, capture_output=True)
+    return str(destination)
+
+
+@pytest.fixture(scope="module")
+def real_skeleton(engine_clone):
+    """A skeleton built by the REAL planner, through the bridge."""
+    return enginebridge.build_skeleton(
+        _engine(), target_base_sha=PR25_BASE, candidate_head_sha=SHA_A,
+        repository_path=engine_clone)
+
+
+def _trusted_pins():
+    """Twelve PINs with headroom for the whole PR25 range."""
+    return {**_valid_pins(), "VERIFIER_MAX_REVIEW_UNITS": 200,
+            "VERIFIER_MAX_GENERATION_CALLS": 200,
+            "VERIFIER_MAX_COUNT_CALLS": 2000,
+            "VERIFIER_COST_CAP_MICRO_USD": 50_000_000}
+
+
+def _authenticated_for_the_real_range(engine_clone, *, ceiling=10 ** 9):
+    """A record set minted for the range the skeleton actually covers."""
+    occurrence = {"repository_identity": CANONICAL_REPOSITORY,
+                  "target_base_sha": PR25_BASE, "diff_base_sha": PR25_BASE,
+                  "head_sha": SHA_A,
+                  "repository_numeric_id": REPOSITORY_NUMERIC_ID}
+    envelope = _pin_envelope(occurrence=occurrence, pins=_trusted_pins())
+    count = _mint("approve_count_spending", occurrence=occurrence,
+                  typed_payload=_typed_payload(
+                      "approve_count_spending", max_input_tokens=ceiling,
+                      authorized_target_base_sha=PR25_BASE,
+                      authorized_diff_base_sha=PR25_BASE,
+                      authorized_head_sha=SHA_A))
+    verifier = _verifier(occurrence=occurrence)
+    return (verifier.verify_pin_authorization(envelope),
+            verifier.authenticate_typed(
+                count, prerequisite_key="approve_count_spending"))
+
+
+def _run_challenge(seed=b"\x01" * 32, unit=0):
+    """A challenge of the shape the lane actually mints.
+
+    Not a hand-picked literal. The first version of these tests used
+    "TRUSTED-CHALLENGE-0123456789abcdef" and the engine's global preflight
+    refused every request: that trailing run is exactly the interleaved
+    letter-and-digit shape a real key has, and a literal in verifier-written
+    scaffolding has no reviewed source occurrence, so it can never be
+    cleared."""
+    return challenge.token_for_unit(
+        seed=seed, unit_sha256=f"{unit:064x}", candidate_head_sha=SHA_A,
+        trusted_run_id=55, trusted_run_attempt=1)
+
+
+def _core_through_the_lane(engine_clone, skeleton, *, calls,
+                           challenge=None,
+                           ceiling=10 ** 9, authorizations=None):
+    challenge = challenge if challenge is not None else _run_challenge()
+    pin_envelope, count_envelope = _authenticated_for_the_real_range(
+        engine_clone, ceiling=ceiling)
+    transport = counttransport.bind(
+        _engine(), opener=_counting_opener(calls), credential=FAKE_CREDENTIAL,
+        phase=phases.D1,
+        authorized_input_tokens=count_envelope.require_typed(
+            "max_input_tokens"))
+    core = enginebridge.prepare_review_plan_core(
+        _engine(), skeleton=skeleton, repository_path=engine_clone,
+        pin_record=pin_envelope.promoted, transport=transport,
+        authorizations=authorizations, challenge=challenge)
+    return core, transport
+
+
+class TestTheLaneCountsThroughTheEngine:
+    def test_the_engine_core_runs_end_to_end_through_the_lane_transport(
+            self, engine_clone, real_skeleton):
+        """The acceptance condition for Slice 2: a real skeleton, the real
+        core, the lane's transport, a fake server — and the PIN record the core
+        used is the one `promote_pin_authorization` returned."""
+        calls = []
+        core, transport = _core_through_the_lane(
+            engine_clone, real_skeleton, calls=calls,
+            authorizations=_unverified_local_authorizations(engine_clone,
+                                                            real_skeleton))
+        assert core["core_version"] == "prepare-review-plan-core-v1"
+        assert core["final_units"] and core["batches"]
+        assert core["generation_calls_performed"] == 0
+        assert core["transport_source"] == "PROVIDER"
+        assert core["operator_pin_record"]["authority_class"] == (
+            "VERIFIED_OPERATOR_PIN_AUTHORIZATION")
+        # Every socket went to the count endpoint, and every one carried the
+        # credential — joined inside `exchange`, never in the request record.
+        assert calls and len(calls) == transport.calls
+        assert {c["url"] for c in calls} == {
+            f"{transport_module_base()}/responses/input_tokens"}
+        assert all(c["has_credential"] for c in calls)
+
+    def test_the_lane_does_not_carry_a_second_implementation(self):
+        """The rule this slice exists to enforce. The lane's own counting
+        module may hold accounting and endpoint policy; it must not hold
+        request assembly, preflight, batching or splitting — those are the
+        engine's, and a second copy is how the two versions end up disagreeing
+        about what was reviewed.
+
+        By AST, not by substring. The first version of this test grepped for
+        "instructions" and reddened on the docstring sentence explaining that
+        this module takes no instructions — asking whether a string appears
+        rather than whether an implementation exists, which is the same proxy
+        defect this suite keeps finding elsewhere."""
+        tree = ast.parse((LANE_DIR / "counttransport.py").read_text(
+            encoding="utf-8"))
+        defined = {n.name for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef))}
+        for forbidden in ("assemble_request", "scan_text", "pack_batches",
+                          "split_unit", "build_units", "count_input_tokens",
+                          "PreflightGenerationManifest", "CountLedger"):
+            assert forbidden not in defined, forbidden
+        # And it builds no request payload of its own: the engine hands over
+        # exact bytes it has already assembled, scanned and hashed.
+        assert "json" not in {n.names[0].name for n in ast.walk(tree)
+                              if isinstance(n, ast.Import)}
+        keys = {n.value for n in ast.walk(tree)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        for payload_field in ("instructions", "input", "model", "truncation"):
+            assert payload_field not in keys, payload_field
+
+    def test_the_transport_refuses_any_path_but_the_count_endpoint(self):
+        """Refused before the URL is built, so a caller that got the path wrong
+        never reaches the code where a credential is in scope."""
+        calls = []
+        transport = counttransport.bind(
+            _engine(), opener=_counting_opener(calls),
+            credential=FAKE_CREDENTIAL, phase=phases.D1,
+            authorized_input_tokens=1000)
+        with _refusal("count_transport_path_not_permitted"):
+            transport.post("/v1/responses", b"{}")
+        assert calls == []
+
+    def test_a_transport_built_without_an_authorized_ceiling_is_refused(self):
+        for ceiling in (0, -1, None, True, "1000"):
+            with _refusal("count_transport_ceiling_not_a_positive_integer"):
+                counttransport.bind(
+                    _engine(), opener=lambda *a: None,
+                    credential=FAKE_CREDENTIAL, phase=phases.D1,
+                    authorized_input_tokens=ceiling)
+
+    def test_the_operator_ceiling_is_applied_to_what_was_actually_counted(
+            self, engine_clone, real_skeleton):
+        """The engine's caps are on ATTEMPTS and cost. This is the input-token
+        total the operator wrote, and nothing else in the run compares against
+        it."""
+        calls = []
+        _core, transport = _core_through_the_lane(
+            engine_clone, real_skeleton, calls=calls,
+            authorizations=_unverified_local_authorizations(engine_clone,
+                                                            real_skeleton))
+        assert transport.assert_within_authorized_tokens(1000)["headroom"] > 0
+        with _refusal("authorized_input_tokens_would_be_exceeded"):
+            transport.assert_within_authorized_tokens(
+                transport.authorized_input_tokens + 1)
+        assert transport.assert_zero_generation()["generation_calls"] == 0
+
+    def test_the_challenge_reaches_the_bytes_that_were_counted(
+            self, engine_clone, real_skeleton):
+        """A challenge the lane passes and the engine never transmits would be
+        a parameter, not a challenge. The fake server counts BYTES, so two runs
+        differing only in the challenge must produce different request
+        hashes."""
+        authorizations = _unverified_local_authorizations(engine_clone,
+                                                          real_skeleton)
+        first, _ = _core_through_the_lane(
+            engine_clone, real_skeleton, calls=[],
+            challenge=_run_challenge(seed=b"\x01" * 32),
+            authorizations=authorizations)
+        second, _ = _core_through_the_lane(
+            engine_clone, real_skeleton, calls=[],
+            challenge=_run_challenge(seed=b"\x02" * 32),
+            authorizations=authorizations)
+        assert [b["unit_sha256_in_order"] for b in first["batches"]] == [
+            b["unit_sha256_in_order"] for b in second["batches"]]
+        assert [b["request_hashes_by_model"] for b in first["batches"]] != [
+            b["request_hashes_by_model"] for b in second["batches"]]
+
+    def test_a_guessable_challenge_is_refused_at_the_seam(self, engine_clone,
+                                                          real_skeleton):
+        """`finalize_mock` defaults the challenge to a constant, which is
+        correct for a mock report and fatal for a trusted one. The bridge
+        refuses a short one rather than passing it through."""
+        for guessable in ("", "short", "LOCAL-MOCK-CHALLENGE"[:15], None):
+            with _refusal("trusted_challenge_too_short"):
+                enginebridge.prepare_review_plan_core(
+                    _engine(), skeleton=real_skeleton,
+                    repository_path=engine_clone, pin_record={},
+                    transport=None, authorizations=None, challenge=guessable)
+
+    def test_the_bridge_refuses_a_core_that_decided_evidence(self):
+        """Checked on the RESULT, not trusted from a docstring. If a future
+        edit made the core emit `executable` or an evidence class, this lane
+        would be signing a trust conclusion drawn inside the artifact under
+        review."""
+        engine = _engine()
+        version = engine["modules"]["verifier.finalize"].PREPARE_CORE_VERSION
+        neutral = {"core_version": version, "generation_calls_performed": 0}
+        assert enginebridge.assert_core_is_evidence_neutral(
+            neutral, engine=engine) is neutral
+        for field in enginebridge.FORBIDDEN_CORE_FIELDS:
+            with _refusal("engine_core_decided_evidence"):
+                enginebridge.assert_core_is_evidence_neutral(
+                    {**neutral, field: "anything"}, engine=engine)
+        with _refusal("engine_core_version_mismatch"):
+            enginebridge.assert_core_is_evidence_neutral(
+                {**neutral, "core_version": "prepare-review-plan-core-v0"},
+                engine=engine)
+        with _refusal("engine_core_made_a_generation_call"):
+            enginebridge.assert_core_is_evidence_neutral(
+                {**neutral, "generation_calls_performed": 1}, engine=engine)
+
+    def test_the_minted_challenge_never_trips_the_engine_scanner(self):
+        """Found by this slice, and it would have been fatal in production.
+
+        The challenge is transmitted inside verifier-written SCAFFOLDING, and
+        the engine clears a literal only when it maps to an exact reviewed
+        SOURCE occurrence — scaffolding has none, by design. So a challenge the
+        scanner classifies as a secret makes global preflight refuse every
+        request in the run, and no earlier test would show it: the lane's own
+        suite never runs the engine's preflight, and the engine's suite never
+        sees the lane's token.
+
+        The real 32-hex token passes. This asserts it keeps passing, over
+        enough distinct tokens that a format change is caught rather than
+        sampled around."""
+        preflight = _module("verifier.preflight")
+        flagged = []
+        for index in range(200):
+            token = challenge.token_for_unit(
+                seed=bytes([index % 256]) * 32, unit_sha256=f"{index:064x}",
+                candidate_head_sha=SHA_A, trusted_run_id=55,
+                trusted_run_attempt=1)
+            if preflight.scan_text(challenge.instruction_line(token)):
+                flagged.append(token)
+        assert flagged == [], (
+            f"{len(flagged)}/200 minted challenges would make the engine "
+            "refuse every request in the run")
+
+    def test_a_source_rename_in_the_engine_is_a_named_refusal(self):
+        """The engine treats an UNDECLARED transport as not-the-provider, which
+        is fail-closed but undiagnosable. This says which spelling
+        disagreed."""
+        class Renamed:
+            source = "PROVIDER_V2"
+
+        with _refusal("count_transport_source_disagrees_with_engine"):
+            counttransport.assert_source_agrees_with_engine(Renamed(),
+                                                            engine=_engine())
+
+
+def transport_module_base():
+    return transport.BASE_URL
+
+
+def _unverified_local_authorizations(engine_clone, skeleton):
+    """The candidate's own fixture clearances, for the paths that carry test
+    literals in this range.
+
+    Used ONLY to get past preflight in these transport tests. They are
+    TEST_FIXTURE_UNAUTHORIZED and `confers_real_call_authority` is False, so
+    nothing here can be mistaken for the trusted set — that is
+    `VerifiedLiteralAuthorizationSet`, and a separate test proves the trusted
+    path requires it."""
+    engine = _engine()
+    authority = engine["modules"]["verifier.authority"]
+    finalize = engine["modules"]["verifier.finalize"]
+    import verifier.unitpayload
+
+    atom_map = finalize.atom_texts(skeleton, cwd=engine_clone)
+    return authority.propose_local_fixture_authorizations(
+        skeleton, atom_map, verifier.unitpayload.index_atom_records(skeleton),
+        repository_identity=CANONICAL_REPOSITORY)

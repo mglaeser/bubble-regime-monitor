@@ -81,7 +81,22 @@ REQUIRED_ENGINE_SYMBOLS = {
     "verifier.origin": ("OriginMap", "resolve_finding"),
     "verifier.executor": ("execute_batch", "validate_response_envelope"),
     "verifier.verdicts": ("validate_verdicts", "assert_distinct_reasoning"),
+    # Slice 2. `prepare_review_plan_core` is the evidence-NEUTRAL half of
+    # `finalize`: everything both lanes do, and nothing either does alone. The
+    # lane calls it instead of carrying a second copy of unit derivation,
+    # preflight, counting, packing and the cost gates — which is where the
+    # single-model review and the budget-only "preflight" came from.
+    "verifier.finalize": ("prepare_review_plan_core", "finalize_mock",
+                          "PREPARE_CORE_VERSION"),
+    "verifier.counting": ("SOURCE_PROVIDER", "SOURCE_MOCK", "COUNT_PATH"),
 }
+
+#: What the lane refuses to find in a core result. `prepare_review_plan_core`
+#: must decide nothing about evidence; if a future edit made it emit any of
+#: these, the lane would be labelling evidence produced by candidate code.
+FORBIDDEN_CORE_FIELDS = ("count_evidence", "evidence_class", "executable",
+                         "publication_class", "signature", "signed_by",
+                         "authority_class")
 
 
 def _resolved(path: str) -> str:
@@ -231,6 +246,66 @@ def assert_skeleton_is_usable(skeleton: dict, *, engine: dict) -> dict:
                "skeleton naming a different one is not the review that was "
                "approved")
     return skeleton
+
+
+def prepare_review_plan_core(engine: dict, *, skeleton: dict,
+                             repository_path: str, pin_record: dict,
+                             transport, authorizations, challenge: str,
+                             minimum_other_approvers: int = 1) -> dict:
+    """Call the ENGINE's shared finalization core. The whole of Slice 2.
+
+    Everything this returns — final units, the global preflight manifest, all
+    three model counts, the batches, the exact request hashes, the coverage
+    proof and the cost gates — was computed by `scripts/verifier`, which is the
+    package that actually implements them. The lane supplies four things the
+    engine cannot: an authenticated PIN record, a verified literal
+    authorization set, a real transport, and an unpredictable challenge.
+
+    `required_approver` is deliberately NOT a parameter. It is governed policy
+    and comes from the engine's own `reviewpolicy`; letting a caller pass it
+    would make "which model must approve" a call-site decision."""
+    if not isinstance(challenge, str) or len(challenge) < 16:
+        refuse("category=trusted_challenge_too_short — the challenge is what "
+               "proves a verdict was written for this run; a short or absent "
+               "one is guessable, and a guessable challenge proves nothing")
+    finalize = engine["modules"]["verifier.finalize"]
+    core = finalize.prepare_review_plan_core(
+        skeleton, cwd=repository_path, pin_record=pin_record,
+        transport=transport, authorizations=authorizations,
+        challenge=challenge,
+        required_approver=required_approver(engine),
+        minimum_other_approvers=minimum_other_approvers)
+    return assert_core_is_evidence_neutral(core, engine=engine)
+
+
+def assert_core_is_evidence_neutral(core, *, engine: dict) -> dict:
+    """The core computed review semantics; it must not have decided evidence.
+
+    Checked on the RESULT rather than trusted from the docstring. If a future
+    edit to the candidate package made the core emit `executable` or an
+    evidence class, this lane would be signing a trust conclusion drawn inside
+    the artifact under review — which is the whole defect class."""
+    if not isinstance(core, dict):
+        refuse("category=engine_core_result_not_an_object")
+    expected = engine["modules"]["verifier.finalize"].PREPARE_CORE_VERSION
+    if core.get("core_version") != expected:
+        refuse(f"category=engine_core_version_mismatch "
+               f"observed={core.get('core_version')!r} expected={expected!r} — "
+               "the artifact carries a different core than this bridge was "
+               "written against, and reading its fields by name would be "
+               "guessing")
+    present = [f for f in FORBIDDEN_CORE_FIELDS if f in core]
+    if present:
+        refuse(f"category=engine_core_decided_evidence fields={present} — the "
+               "shared core must compute review semantics and decide nothing "
+               "about trust; a core that labels evidence would be candidate "
+               "code drawing the conclusion this lane exists to draw")
+    if core.get("generation_calls_performed") != 0:
+        refuse(f"category=engine_core_made_a_generation_call "
+               f"calls={core.get('generation_calls_performed')} — counting "
+               "and generating are separately approved, and D1 holds only the "
+               "count approval")
+    return core
 
 
 def model_panel(engine: dict) -> tuple:
