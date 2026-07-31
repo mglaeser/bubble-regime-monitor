@@ -137,29 +137,155 @@ def parse_trust_store(raw) -> dict:
                              "replace it from a reviewed branch")}
 
 
-def anchor_signature_input(*, record_digest: str, anchor_reference: str,
-                           repository_numeric_id: int) -> bytes:
-    """What an operator signs: the record digest, bound to repo and reference.
+SUBJECT_DIGEST_VERSION = "operator-authorization-subject-v1"
 
-    The repository id is inside the signed bytes so a genuine signature over a
-    genuine record from a DIFFERENT repository does not verify here. Without
-    it, an operator record from any repository this operator also signs for
-    would authorize spending in this one."""
-    return (f"{ANCHOR_SIGNATURE_VERSION}\x00{repository_numeric_id}"
-            f"\x00{anchor_reference}\x00{record_digest}").encode()
+#: Prerequisites whose authorization is delegated to the candidate package's
+#: own promotion seam, because the candidate package owns that schema. Every
+#: OTHER prerequisite has a typed schema and a semantic validator below.
+#:
+#: This registry is the fix for a real defect: `authenticate_record_set` sent
+#: every prerequisite through `verify_pin_authorization`, so a signed
+#: PIN-SHAPED record merely LABELLED `delete_failed_run` or
+#: `approve_engine_identity` satisfied the set without carrying any of the
+#: evidence those prerequisites are about. A signature proves who wrote it, not
+#: what it says.
+PIN_PROMOTED = "authorize_twelve_pins"
+LITERAL_PROMOTED = "approve_literal_authorizations"
+
+#: What each remaining prerequisite must actually carry. The point is that the
+#: record has to contain the FACT the operator is attesting, not just their
+#: name on a blank form — `verify_run_404` must name the run and the observed
+#: status, `approve_engine_identity` must name the digest being approved.
+TYPED_PREREQUISITE_FIELDS = {
+    "delete_failed_run": ("deleted_run_id", "deleted_at"),
+    "verify_run_404": ("run_id", "observed_http_status", "observed_at"),
+    "rotate_probe_key": ("rotated_at", "retired_key_id", "installed_key_id"),
+    "review_key_usage": ("reviewed_at", "usage_window_start",
+                         "usage_window_end"),
+    "install_environment_key": ("environment_name", "secret_name"),
+    "no_repository_or_org_fallback": ("repository_secret_names",
+                                      "organization_secret_names"),
+    "protected_trusted_environment": ("environment_name",
+                                      "deployment_branch_policy"),
+    "authorize_capability_policy": ("capability_policy_sha256",),
+    "approve_count_spending": ("exact_values",),
+    "approve_review_request_policy_v2": ("review_request_policy_sha256",),
+    "approve_artifact_retention": ("retention_days",),
+    "approve_engine_identity": ("engine_artifact_sha256",),
+    "approve_bootstrap_branch": ("branch", "bootstrap_head_sha"),
+    "approve_generation_separately": ("exact_values",),
+}
 
 
-def verify_anchor(record: dict, *, trust_store: dict,
-                  repository_numeric_id: int, record_digest: str) -> dict:
-    """Verify the external anchor, or refuse. This is the whole point.
+def _semantic(key: str, record: dict) -> dict:
+    """The claim-specific check. A shape check alone would let an operator
+    approve a 404 that was actually a 200."""
+    if key == "verify_run_404":
+        if record.get("observed_http_status") != 404:
+            refuse(f"category=prerequisite_semantics_failed key={key} — this "
+                   "prerequisite exists to record that a deleted run's "
+                   "endpoint returns 404; any other status is the opposite "
+                   "finding")
+    if key == "no_repository_or_org_fallback":
+        for field in ("repository_secret_names", "organization_secret_names"):
+            observed = record.get(field)
+            if not isinstance(observed, list):
+                refuse(f"category=prerequisite_field_not_a_list key={key} "
+                       f"field={field}")
+            if observed:
+                refuse(f"category=prerequisite_semantics_failed key={key} "
+                       f"field={field} count={len(observed)} — a repository or "
+                       "organization secret is readable from ANY ref and "
+                       "silently defeats the environment gate; this "
+                       "prerequisite asserts there are none")
+    if key in ("approve_count_spending", "approve_generation_separately"):
+        if not isinstance(record.get("exact_values"), dict) or not record["exact_values"]:
+            refuse(f"category=prerequisite_carries_no_literal key={key} — the "
+                   "number in force must be one a human typed")
+    for field in ("capability_policy_sha256", "review_request_policy_sha256",
+                  "engine_artifact_sha256"):
+        if field in TYPED_PREREQUISITE_FIELDS.get(key, ()):
+            value = record.get(field)
+            if not isinstance(value, str) or len(value) != 64:
+                refuse(f"category=prerequisite_digest_malformed key={key} "
+                       f"field={field} — approving a description instead of a "
+                       "digest approves whatever the description later means")
+    return {"semantics_checked": key}
 
-    `verifier.authority.describe_anchor` reports `verified: False` and
-    `SHAPE_ONLY_NOT_AUTHENTICATED` by design — it is candidate code and cannot
-    do better. This does the check that function documents as missing."""
+
+def authorization_subject_digest(*, candidate_self_hash: str,
+                                 prerequisite_key: str, occurrence: dict,
+                                 expires_at: str, anchor: dict) -> str:
+    """What the operator's DETACHED signature covers.
+
+    Deliberately NOT the candidate self-hash, and this is the correction the
+    review demanded. `pins.pin_digest` strips only `pin_record_sha256`, so the
+    candidate self-hash covers the whole record INCLUDING its
+    `external_anchor` — and the candidate anchor schema is
+    `(anchor_kind, anchor_reference, anchor_digest)` with no signature field at
+    all. The signature therefore cannot live inside the record, and the
+    protected side needs its own versioned subject to sign.
+
+    The subject binds the candidate self-hash (so the record cannot change),
+    the occurrence (so a signature from another review does not transfer), the
+    prerequisite key (so a signature for one attestation cannot be presented as
+    another), the expiry, and the anchor reference."""
+    payload = {
+        "version": SUBJECT_DIGEST_VERSION,
+        "candidate_self_hash": candidate_self_hash,
+        "prerequisite_key": prerequisite_key,
+        "repository_numeric_id": occurrence["repository_numeric_id"],
+        "repository_identity": occurrence["repository_identity"],
+        "target_base_sha": occurrence["target_base_sha"],
+        "diff_base_sha": occurrence["diff_base_sha"],
+        "head_sha": occurrence["head_sha"],
+        "expires_at": expires_at,
+        "anchor_kind": anchor.get("anchor_kind"),
+        "anchor_reference": anchor.get("anchor_reference"),
+        "anchor_digest": anchor.get("anchor_digest"),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(
+        SUBJECT_DIGEST_VERSION.encode() + b"\x00" + blob).hexdigest()
+
+
+def verify_detached_signature(subject_digest: str, *, signature_entry,
+                              trust_store: dict) -> dict:
+    """Verify the operator's detached signature over the subject digest.
+
+    Detached because the record has nowhere to put it: the candidate anchor
+    schema has three fields and none of them is a signature. The signature
+    bundle travels beside the records, keyed by subject digest."""
+    if not isinstance(signature_entry, dict):
+        refuse("category=operator_signature_absent — the record carries an "
+               "anchor reference but nothing signed it; an anchor a candidate "
+               "can write is not an authentication")
+    key_id = signature_entry.get("key_id")
+    if key_id not in trust_store["keys"]:
+        refuse(f"category=signature_key_not_in_trust_store key_id={key_id!r} "
+               f"known={trust_store['key_ids']}")
+    signature = signature_entry.get("signature")
+    if not isinstance(signature, str) or len(signature) != 64:
+        refuse("category=operator_signature_malformed")
+    expected = hmac.new(trust_store["keys"][key_id],
+                        subject_digest.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        refuse("category=operator_signature_mismatch — no key in the trust "
+               "store signed this subject; a record signed by whoever wrote it "
+               "looks exactly like this")
+    return {"key_id": key_id, "signature_verified": True,
+            "subject_sha256": subject_digest}
+
+
+def assert_anchor_admissible(record: dict) -> dict:
+    """Shape of the candidate anchor, using the candidate's own field names.
+
+    `anchor_digest`, not `anchored_digest` — the previous version invented a
+    field name the candidate package never produces, so a genuine
+    `pins.operator_pin_claim` record would have been refused as anchorless."""
     anchor = record.get("external_anchor")
     if not isinstance(anchor, dict):
-        refuse("category=operator_record_has_no_external_anchor — a record "
-               "with no anchor is a record this branch could have written")
+        refuse("category=operator_record_has_no_external_anchor")
     kind = anchor.get("anchor_kind")
     if kind in UNVERIFIABLE_ANCHOR_KINDS:
         refuse(f"category=anchor_kind_not_verifiable_by_this_lane kind={kind} — "
@@ -167,74 +293,44 @@ def verify_anchor(record: dict, *, trust_store: dict,
     if kind not in VERIFIABLE_ANCHOR_KINDS:
         refuse(f"category=anchor_kind_not_permitted kind={kind!r} "
                f"permitted={list(VERIFIABLE_ANCHOR_KINDS)}")
-
-    reference = anchor.get("anchor_reference")
-    if not isinstance(reference, str) or not reference.strip():
-        refuse("category=anchor_reference_missing")
-    anchored = anchor.get("anchored_digest")
-    if anchored != record_digest:
-        refuse("category=anchor_digest_mismatch — the anchor binds a different "
-               "record than the one supplied; either the record was edited "
-               "after anchoring or the anchor belongs to something else")
-
-    key_id = anchor.get("key_id")
-    if key_id not in trust_store["keys"]:
-        refuse(f"category=anchor_key_not_in_trust_store key_id={key_id!r} "
-               f"known={trust_store['key_ids']} — the record names a key the "
-               "operator did not supply, which is what a record signed by "
-               "whoever wrote it looks like")
-    signature = anchor.get("signature")
-    if not isinstance(signature, str) or len(signature) != 64:
-        refuse("category=anchor_signature_malformed")
-
-    expected = hmac.new(
-        trust_store["keys"][key_id],
-        anchor_signature_input(record_digest=record_digest,
-                               anchor_reference=reference,
-                               repository_numeric_id=repository_numeric_id),
-        hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, signature):
-        refuse("category=anchor_signature_mismatch — the anchor does not carry "
-               "a signature by that key over this record in this repository")
-    return {"anchor_kind": kind, "anchor_reference": reference,
-            "key_id": key_id, "anchor_verified": True}
+    for field in ("anchor_reference", "anchor_digest"):
+        if not isinstance(anchor.get(field), str) or not anchor[field]:
+            refuse(f"category=anchor_field_missing field={field}")
+    return dict(anchor)
 
 
-def record_digest(record: dict, *, label: bytes) -> str:
-    """Recompute a record's digest exactly, over the record WITHOUT its anchor.
+def candidate_self_hash(record: dict, *, kind: str, engine: dict) -> str:
+    """Recompute the candidate self-hash with the CANDIDATE'S OWN function.
 
-    Recomputed rather than read: the stored value is part of the record an
-    attacker controls, and comparing a value to itself always agrees.
-
-    `external_anchor` is excluded, and that exclusion is load-bearing rather
-    than tidy. The anchor CONTAINS the signature over this digest, so a digest
-    that covered the anchor would require the operator to sign bytes containing
-    their own signature — unsatisfiable. Found immediately by the first test
-    that signed a record end to end: the digest computed before attaching the
-    anchor and the digest recomputed after could never agree.
-
-    The consequence is stated rather than glossed: the anchor's own metadata —
-    `anchor_kind`, `anchor_reference`, `key_id` — is outside this digest. It is
-    NOT outside the signature, because `anchor_signature_input` mixes the
-    reference in explicitly and `verify_anchor` looks the key up by the id the
-    record names and then requires that key to be the one that signed. A
-    swapped reference or key id therefore fails the MAC rather than passing
-    unnoticed."""
-    payload = {k: v for k, v in record.items()
-               if k not in ("authorization_sha256", "pin_record_sha256",
-                            "record_sha256", "external_anchor")}
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"),
-                      default=str).encode("utf-8")
-    return hashlib.sha256(label + b"\x00" + blob).hexdigest()
+    Not a protected reimplementation, and the correction matters.
+    `pins.pin_digest` strips only `pin_record_sha256`;
+    `authority.literal_authorization_digest` strips only
+    `authorization_sha256`; both use `canon.digest` with their own domain
+    labels. The previous version of this module computed its own digest over a
+    different field set, so a record built by `pins.operator_pin_claim` — a
+    genuine one — would never have matched. A second copy of that arithmetic is
+    a second source of truth, which is the duplication the integration addendum
+    forbids everywhere else too."""
+    modules = engine["modules"]
+    if kind == "pin":
+        computed = modules["verifier.pins"].pin_digest(record)
+        stored, field = record.get("pin_record_sha256"), "pin_record_sha256"
+    elif kind == "literal":
+        computed = modules["verifier.authority"].literal_authorization_digest(
+            record)
+        stored, field = (record.get("authorization_sha256"),
+                         "authorization_sha256")
+    else:
+        refuse(f"category=unknown_record_kind kind={kind!r}")
+    if stored != computed:
+        refuse(f"category=operator_record_self_hash_mismatch field={field} — "
+               "recomputed with the candidate package's own digest function; "
+               "the record was edited after it was hashed")
+    return computed
 
 
 def assert_binds_this_review(record: dict, *, occurrence: dict) -> dict:
-    """Every occurrence-scoped field must name THIS review.
-
-    An operator record that authorizes "spending on this repository" without
-    naming the range authorizes spending on a range the operator never saw. The
-    candidate package carries these fields on every claim precisely so a
-    trusted verifier can compare them; nothing compared them before."""
+    """Every occurrence-scoped field must name THIS review."""
     required = ("repository_identity", "target_base_sha", "diff_base_sha",
                 "head_sha")
     missing = [f for f in required if not record.get(f)]
@@ -249,16 +345,14 @@ def assert_binds_this_review(record: dict, *, occurrence: dict) -> dict:
                f"fields={mismatched} — an approval for one occurrence is not "
                "an approval for another, and a push is how the reviewed thing "
                "changes")
-    return {"binds": dict((f, record[f]) for f in required)}
+    return {"binds": {f: record[f] for f in required}}
 
 
 def assert_not_expired(record: dict, *, observed_now: str) -> dict:
-    """Expiry as instants, with the boundary closed."""
     expires_at = record.get("expires_at")
     if not expires_at:
         refuse("category=operator_record_has_no_expiry — an authorization that "
-               "never expires is one nobody has to revisit, and revocation "
-               "becomes the only way back")
+               "never expires is one nobody has to revisit")
     parse_instant(expires_at, field="expires_at")
     if record.get("authorized_at"):
         assert_ordered(earlier=record["authorized_at"], later=expires_at,
@@ -270,81 +364,97 @@ def assert_not_expired(record: dict, *, observed_now: str) -> dict:
     return {"expires_at_utc": utc_iso(expires_at, field="expires_at")}
 
 
-def assert_not_revoked(record: dict, *, revocations) -> dict:
-    """A revocation list the candidate cannot write.
-
-    Expiry and revocation are different questions: expiry is the operator
-    saying "not after this", revocation is the operator saying "not any more,
-    starting now". A lane that only checks expiry cannot be told to stop."""
+def assert_not_revoked(subject_digest: str, *, revocations) -> dict:
+    """Keyed by the SUBJECT digest — what the operator signed is the thing they
+    can point at to withdraw."""
     if revocations is None:
         refuse("category=revocation_list_not_supplied — 'no list' is not 'no "
                "revocations'; a lane that treats a missing list as empty "
                "cannot be told to stop")
-    digests = {r.get("record_sha256") for r in revocations
-               if isinstance(r, dict)}
-    observed = record.get("record_sha256") or record.get("authorization_sha256")
-    if observed in digests:
-        refuse(f"category=operator_record_revoked digest={str(observed)[:12]}")
-    return {"revocation_checked": True,
-            "revocation_list_size": len(list(revocations))}
+    entries = list(revocations)
+    if subject_digest in {r.get("subject_sha256") for r in entries
+                          if isinstance(r, dict)}:
+        refuse(f"category=operator_record_revoked subject={subject_digest[:12]}")
+    return {"revocation_checked": True, "revocation_list_size": len(entries)}
+
+
+def assert_prerequisite_evidence(record: dict) -> dict:
+    """The typed check, and the second defect this module had.
+
+    `authenticate_record_set` sent EVERY prerequisite through
+    `verify_pin_authorization`, so a signed PIN-shaped record merely LABELLED
+    `delete_failed_run` or `approve_engine_identity` satisfied the set while
+    carrying none of the evidence those prerequisites exist to record. A
+    signature proves who wrote a record, not what it says.
+
+    Two prerequisites are delegated to the candidate package's own promotion
+    seams because the candidate owns those schemas. Every other one must carry
+    the fields named in `TYPED_PREREQUISITE_FIELDS` and pass `_semantic`."""
+    key = record.get("prerequisite_key")
+    if key in (PIN_PROMOTED, LITERAL_PROMOTED):
+        return {"prerequisite_key": key, "validated_by": "CANDIDATE_SEAM"}
+    expected = TYPED_PREREQUISITE_FIELDS.get(key)
+    if expected is None:
+        refuse(f"category=prerequisite_has_no_validator key={key!r} — every "
+               "prerequisite needs a typed schema; accepting an unknown one "
+               "would let a signed blank form stand in for evidence")
+    missing = [f for f in expected if record.get(f) in (None, "")]
+    if missing:
+        refuse(f"category=prerequisite_evidence_missing key={key} "
+               f"fields={missing} — the record must carry the FACT being "
+               "attested, not just a signature on a blank form")
+    return {"prerequisite_key": key, "validated_by": "TYPED_SCHEMA",
+            **_semantic(key, record)}
 
 
 class LaneTrustedVerifier:
     """The protected-side `authority.TrustedVerifier`.
 
-    Deliberately NOT a subclass at import time: `verifier.authority` lives in
-    the candidate package, which reaches this process only inside the approved
-    engine artifact. Subclassing at module scope would make importing
-    `trustedlane` require the candidate package to be present, which is exactly
-    backwards. `bind(authority_module)` performs the registration once the
-    artifact is loaded, and `verifier_identity` is checked against what the
-    candidate package expects.
+    Not a subclass at import time: `verifier.authority` reaches this process
+    only inside the approved engine artifact, so subclassing at module scope
+    would make importing `trustedlane` require the candidate package — exactly
+    backwards. `bind(engine)` registers once the artifact is loaded.
 
-    Every method returns a record carrying a VERIFIED class — and can only do
-    so after the anchor verified against a key this lane did not choose."""
+    The candidate package's promotion seams need exactly two methods, and both
+    return a record already carrying a VERIFIED class.
+    `pins.promote_pin_authorization` and `authority.promote_literal_authorizations`
+    check that class themselves and refuse anything else, so a caller cannot
+    route around this object."""
 
     verifier_identity = "TRUSTED_LANE_OPERATOR_VERIFIER_V1"
 
     def __init__(self, *, trust_store: dict, occurrence: dict,
-                 observed_now: str, revocations, authority_module):
+                 observed_now: str, revocations, signatures, engine: dict):
         self._trust_store = trust_store
         self._occurrence = occurrence
         self._observed_now = observed_now
         self._revocations = revocations
-        self._authority = authority_module
+        self._signatures = signatures or {}
+        self._engine = engine
+        self._authority = engine["modules"]["verifier.authority"]
         self.verified = []
 
-    # -- the three methods `authority.TrustedVerifier` declares -------------
+    def verify_pin_authorization(self, record: dict) -> dict:
+        return self._verify(
+            record, kind="pin",
+            verified_class=self._authority.VERIFIED_OPERATOR_PIN_AUTHORIZATION)
 
     def verify_literal_authorization(self, record: dict) -> dict:
-        return self._verify(record,
-                            label=b"reviewed-literal-authorization-v2",
-                            digest_field="authorization_sha256",
-                            verified_class=self._authority.VERIFIED_LITERAL_AUTHORIZATION)
-
-    def verify_pin_authorization(self, record: dict) -> dict:
-        return self._verify(record,
-                            label=b"verifier-pin-record-v2",
-                            digest_field="pin_record_sha256",
-                            verified_class=self._authority.VERIFIED_OPERATOR_PIN_AUTHORIZATION)
+        return self._verify(
+            record, kind="literal",
+            verified_class=self._authority.VERIFIED_LITERAL_AUTHORIZATION)
 
     def verify_count_evidence(self, record: dict) -> dict:
-        """Count evidence is verified by its SIGNATURE, not by an anchor.
-
-        Different question from the other two: a literal authorization and a
-        PIN record are statements by a human, anchored out of band; count
-        evidence is a statement by the protected D1 run, signed with the
-        evidence key. Treating them the same would mean either that a human
-        has to sign every count, or that an anchor claim could stand in for a
-        signature."""
+        """Verified by its SIGNATURE, not by an anchor. A PIN record and a
+        literal clearance are statements by a human anchored out of band;
+        count evidence is a statement by the protected D1 run."""
         from .evidencewire import validate_envelope
         from .signing import verify_envelope
 
         key = self._trust_store["keys"].get("trusted_evidence_signing")
         if key is None:
-            refuse("category=count_evidence_key_absent key_id=trusted_evidence_signing "
-                   "— the trust store carries no evidence key, so no count "
-                   "evidence can be distinguished from a record this branch wrote")
+            refuse("category=count_evidence_key_absent "
+                   "key_id=trusted_evidence_signing")
         validate_envelope(record)
         result = verify_envelope(record, key=key)
         if record.get("evidence_class") != "TRUSTED_COUNT_EVIDENCE":
@@ -353,64 +463,53 @@ class LaneTrustedVerifier:
         return {**record, "verified_by": self.verifier_identity,
                 "signature_verified": result["signature_verified"]}
 
-    # -- the shared path ----------------------------------------------------
-
-    def _verify(self, record: dict, *, label: bytes, digest_field: str,
-                verified_class: str) -> dict:
+    def _verify(self, record: dict, *, kind: str, verified_class: str) -> dict:
         if not isinstance(record, dict):
             refuse("category=operator_record_not_an_object")
-        # A record arriving already labelled verified is the exact forgery this
-        # exists to stop: the candidate package's `validate_*` functions accept
-        # a verified label because a trusted wire record must be representable
-        # as inert input, and confer nothing by doing so.
         if record.get("authority_class") in self._authority.VERIFIED_CLASSES:
             refuse(f"category=record_arrived_pre_labelled_verified "
                    f"class={record.get('authority_class')!r} — a label is not "
                    "an authentication; this verifier assigns the verified "
                    "class and nothing upstream may")
 
-        computed = record_digest(record, label=label)
-        stored = record.get(digest_field)
-        if stored != computed:
-            refuse(f"category=operator_record_digest_mismatch field={digest_field} "
-                   "— the record was edited after it was digested")
-
+        self_hash = candidate_self_hash(record, kind=kind, engine=self._engine)
+        typed = assert_prerequisite_evidence(record)
         binding = assert_binds_this_review(record, occurrence=self._occurrence)
         expiry = assert_not_expired(record, observed_now=self._observed_now)
-        revocation = assert_not_revoked(
-            {**record, "record_sha256": computed}, revocations=self._revocations)
-        anchor = verify_anchor(
-            record, trust_store=self._trust_store,
-            repository_numeric_id=self._occurrence["repository_numeric_id"],
-            record_digest=computed)
+        anchor = assert_anchor_admissible(record)
 
-        verified = {
+        subject = authorization_subject_digest(
+            candidate_self_hash=self_hash,
+            prerequisite_key=record.get("prerequisite_key") or kind,
+            occurrence=self._occurrence, expires_at=record["expires_at"],
+            anchor=anchor)
+        revocation = assert_not_revoked(subject, revocations=self._revocations)
+        signature = verify_detached_signature(
+            subject, signature_entry=self._signatures.get(subject),
+            trust_store=self._trust_store)
+
+        self.verified.append(subject)
+        return {
             **record,
             "authority_class": verified_class,
             "executable_authority": True,
             "verified_by": self.verifier_identity,
-            "verification": {**anchor, **binding, **expiry, **revocation,
-                             "record_sha256": computed},
+            "verification": {**binding, **expiry, **revocation, **signature,
+                             **typed, "candidate_self_hash": self_hash,
+                             "anchor_kind": anchor["anchor_kind"],
+                             "anchor_reference": anchor["anchor_reference"]},
         }
-        self.verified.append(computed)
-        return verified
 
 
-def bind(authority_module, **kwargs) -> LaneTrustedVerifier:
-    """Construct the verifier against the candidate package's authority module.
-
-    Checked rather than assumed: if the loaded module does not carry the
-    verified-class vocabulary this verifier assigns, the engine artifact is not
-    the package this code was written against, and assigning a class it does
-    not recognise would produce records nothing downstream accepts."""
+def bind(engine: dict, **kwargs) -> LaneTrustedVerifier:
+    """Construct the verifier against the engine loaded from the artifact."""
+    authority_module = engine["modules"]["verifier.authority"]
     for name in ("VERIFIED_LITERAL_AUTHORIZATION",
                  "VERIFIED_OPERATOR_PIN_AUTHORIZATION", "VERIFIED_CLASSES",
-                 "TrustedVerifier"):
+                 "TrustedVerifier", "literal_authorization_digest"):
         if not hasattr(authority_module, name):
-            refuse(f"category=authority_module_missing_symbol symbol={name} — "
-                   "the engine artifact does not carry the authority "
-                   "vocabulary this verifier assigns")
-    return LaneTrustedVerifier(authority_module=authority_module, **kwargs)
+            refuse(f"category=authority_module_missing_symbol symbol={name}")
+    return LaneTrustedVerifier(engine=engine, **kwargs)
 
 
 #: The fifteen prerequisites D1 needs and the sixteenth D2 adds, by the
