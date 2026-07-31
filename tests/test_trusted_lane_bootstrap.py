@@ -90,6 +90,9 @@ LANE_DIR = ROOT / "scripts" / "trustedlane"
 SHA_A = "b08844a0755710035d62830faa84902d9d85d3fe"  # pragma: allowlist secret
 SHA_B = "caf5119dc39a9596a73b0d2f4ffbefc6c092890f"  # pragma: allowlist secret
 SHA_C = "a9062aa656a5a6f3dbe5991d16ce9c218aad0454"  # pragma: allowlist secret
+# The base of the PR #25 range. D1 reviews it because it is a range this
+# repository's own objects can really produce a skeleton for.
+PR25_BASE = "75a093de45f73169072837c7c062fab421caaf8b"  # pragma: allowlist secret
 DIGEST = hashlib.sha256(b"digest").hexdigest()
 
 
@@ -4738,6 +4741,52 @@ def _inert_fetch(*, destination, head_sha, target_base_sha):
             "full_history": True}
 
 
+def _fetch_into(destination):
+    """`fetch` for a D1 run whose engine will really read the repository.
+
+    The clone already exists — made once per session — so this returns the
+    shape `candidatefetch.fetch_candidate` returns, pointing at it. It is still
+    a bare `--no-checkout` clone: `_d1_clone` asserts there is no working
+    tree, which is the property `_assert_fetch_was_inert` exists to protect."""
+    def fetch(**kwargs):
+        return {"destination": destination, "head_sha": kwargs["head_sha"],
+                "target_base_sha": kwargs["target_base_sha"],
+                "checked_out": False, "full_history": True}
+    return fetch
+
+
+_D1_CACHE: dict = {}
+
+
+def _d1_clone():
+    """One real clone of this repository, per session.
+
+    D1 no longer takes an injected `skeleton_rebuild`, so the units it counts
+    are whatever `verifier.plan.build_skeleton` derives from real commits. That
+    is the point of the change — "what the trusted engine rebuilt" used to
+    depend on what the runner passed — and it means these tests need a real
+    repository rather than a dictionary."""
+    if "clone" not in _D1_CACHE:
+        for sha in (PR25_BASE, SHA_A):
+            if subprocess.run(["git", "cat-file", "-e", sha],  # noqa: S603
+                              cwd=str(ROOT), capture_output=True).returncode:
+                pytest.skip(f"object {sha[:12]} absent in this checkout")
+        destination = Path(tempfile.mkdtemp(prefix="d1-candidate-")) / "candidate"
+        subprocess.run(["git", "clone", "-q", "--no-local",  # noqa: S603
+                        str(ROOT), str(destination)], check=True,
+                       capture_output=True)
+        _D1_CACHE["clone"] = str(destination)
+    return _D1_CACHE["clone"]
+
+
+def _d1_skeleton():
+    if "skeleton" not in _D1_CACHE:
+        _D1_CACHE["skeleton"] = enginebridge.build_skeleton(
+            _engine(), target_base_sha=PR25_BASE, candidate_head_sha=SHA_A,
+            repository_path=_d1_clone())
+    return _D1_CACHE["skeleton"]
+
+
 
 def _authenticated_claims(phase="D1", *, ceiling=10_000, omit=None, head=None,
                           key_hex=None):
@@ -4791,33 +4840,113 @@ def _d1_unit(index=0, tokens=100):
             "worst_case_input_tokens": tokens}
 
 
-def _d1_kwargs(units=None, *, ceiling=10_000, publisher=None, opener=None,
-               count=1234, **overrides):
-    units = units if units is not None else [_d1_unit(0), _d1_unit(1)]
-    digests = [u["unit_sha256"] for u in units]
+#: The occurrence D1 now really reviews. It is the PR25 range, because that is
+#: a range this repository's own objects can actually produce a skeleton for —
+#: D1 no longer takes an injected `skeleton_rebuild`, so the units are whatever
+#: `verifier.plan.build_skeleton` derives.
+D1_OCCURRENCE = {"repository_identity": CANONICAL_REPOSITORY,
+                 "target_base_sha": PR25_BASE, "diff_base_sha": PR25_BASE,
+                 "head_sha": SHA_A, "repository_numeric_id":
+                 REPOSITORY_NUMERIC_ID}
+
+
+def _real_literal_members(occurrence, **over):
+    """One protected envelope per literal occurrence the range ACTUALLY has.
+
+    Not a placeholder. The engine's global preflight resolves every literal in
+    the exact transmitted bytes to one exact reviewed SOURCE occurrence — same
+    atom, same index, same digest, same category set — so a set that clears an
+    invented path clears nothing, and D1 refuses with
+    `occurrence_not_authorized`. Which is the whole design working: an operator
+    approves occurrences, not files.
+
+    The plaintext is read out of the clone at runtime and never stored: the
+    claim records only `literal_sha256`, and
+    `validate_literal_authorization` refuses a record in which any string field
+    hashes to the literal."""
+    engine = _engine()
+    finalize = engine["modules"]["verifier.finalize"]
+    preflight = engine["modules"]["verifier.preflight"]
+    import verifier.unitpayload
+
+    skeleton = _d1_skeleton()
+    atom_map = finalize.atom_texts(skeleton, cwd=_d1_clone())
+    atom_records = verifier.unitpayload.index_atom_records(skeleton)
+    members, seen = [], set()
+    for atom_id, text in atom_map.items():
+        record = atom_records.get(atom_id)
+        if record is None:
+            continue
+        for index, _digest, finding in preflight.occurrence_index_map(text):
+            literal = text[finding["offset"]:
+                           finding["offset"] + finding["length"]]
+            key = (record["path_bytes_b64"], atom_id, index)
+            if key in seen:
+                continue
+            seen.add(key)
+            members.append(_literal_member(
+                occurrence=occurrence, atom_id=atom_id, occurrence_index=index,
+                path_bytes_b64=record["path_bytes_b64"], literal=literal,
+                categories=finding.get("categories") or [finding["category"]],
+                **over))
+    return members
+
+
+def _d1_claims(*, ceiling=10 ** 9, omit=None, head=None, key_hex=None):
+    """A complete envelope set bound to the range D1 actually reviews."""
+    occurrence = dict(D1_OCCURRENCE, head_sha=head) if head else D1_OCCURRENCE
+    over = {"key_hex": key_hex} if key_hex else {}
+    minted = []
+    for key in trustedverifier.D1_PREREQUISITES:
+        if key == omit:
+            continue
+        if key == authzenvelope.PIN_PREREQUISITE:
+            minted.append(_pin_envelope(occurrence=occurrence,
+                                        pins=_trusted_pins(), **over))
+            continue
+        if key == authzenvelope.LITERAL_PREREQUISITE:
+            minted.append(_literal_set(
+                _real_literal_members(occurrence, **over),
+                occurrence=occurrence, **over))
+            continue
+        payload = _typed_payload(key)
+        if key == "approve_count_spending":
+            payload["max_input_tokens"] = ceiling
+        for field, source in (("authorized_target_base_sha", "target_base_sha"),
+                              ("authorized_diff_base_sha", "diff_base_sha"),
+                              ("authorized_head_sha", "head_sha")):
+            if field in payload:
+                payload[field] = occurrence[source]
+        minted.append(_mint(key, typed_payload=payload, occurrence=occurrence,
+                            **over))
+    return minted
+
+
+def _d1_kwargs(*, ceiling=10 ** 9, publisher=None, opener=None,
+               clone=None, **overrides):
+    clone = clone or _d1_clone()
+    plan_units = [u["unit_sha256"] for u in _d1_skeleton()["units"]]
     base = dict(
         observations=_protected_observation(),
-        operator_claims=_authenticated_claims("D1", ceiling=ceiling),
-        lane_verifier=_lane_verifier(),
+        operator_claims=_d1_claims(ceiling=ceiling),
+        lane_verifier=_verifier(occurrence=D1_OCCURRENCE),
+        engine=_engine(),
         engine_artifact=_engine_artifact_argument(),
         candidate={"repository_numeric_id": REPOSITORY_NUMERIC_ID,
-                   "candidate_head_sha": SHA_B, "target_base_sha": SHA_A,
+                   "candidate_head_sha": SHA_A,
+                   "target_base_sha": PR25_BASE,
                    "challenge_seed": D1_SEED,
-                   "checkout_destination": "/tmp/candidate"},
-        plan={"unit_sha256s": digests},
-        fetch=_inert_fetch,
-        opener=opener if opener is not None else _fake_server(
-            body=json.dumps({"object": "response.input_tokens",
-                             "input_tokens": count}).encode()),
+                   "checkout_destination": clone},
+        plan={"unit_sha256s": plan_units},
+        fetch=_fetch_into(clone),
+        opener=opener if opener is not None else _counting_opener([]),
         credential=FAKE_CREDENTIAL,
         signing_key=TEST_KEY,
         publisher=publisher if publisher is not None else (lambda request: None),
         trusted_run={"id": 55, "attempt": 1,
                      "url": "https://github.com/x/y/actions/runs/55"},
         observed_now="2026-07-30T21:00:00Z",
-        produced_at="2026-07-30T21:00:00Z",
-        skeleton_rebuild=lambda **_: {"units": units},
-        model="gpt-5")
+        produced_at="2026-07-30T21:00:00Z")
     base.update(overrides)
     return base
 
@@ -4841,10 +4970,40 @@ def d1_engine(monkeypatch, tmp_path):
 
 
 def test_d1_runs_end_to_end_and_produces_signed_evidence(d1_engine):
+    """The whole lane, against a fake server, in D0, with no credential.
+
+    The old version of this test asserted `total_input_tokens == 2468`, being
+    "1234 x 2 units" — one count per unit, for ONE model, over units a stub
+    handed back. That number WAS the finding: governed policy is a three-model
+    panel, and the lane was counting a single-model review of a plan it had not
+    rebuilt. There is no arithmetic here now because the total is whatever the
+    engine's counting of the engine's requests comes to; what is asserted is
+    the shape of the claim the evidence makes."""
     published = []
     result = d1runtime.run(**_d1_kwargs(publisher=published.append))
+    payload = result["payload"]
+
     assert result["generation_calls"] == 0
-    assert result["payload"]["total_input_tokens"] == 2468  # 1234 x 2 units
+    assert payload["generation_calls"] == 0
+    # The panel is governed policy, read from the engine, and there are three.
+    assert payload["requested_model_ids"] == list(
+        enginebridge.model_panel(_engine()))
+    assert len(payload["requested_model_ids"]) == 3
+    assert payload["required_approver"] == "gpt-5.6-sol"
+    assert len(payload["policy_pin_names"]) == 12
+    # The plan that was counted is identified by its request hashes, and the
+    # bytes that were counted were scanned first.
+    assert payload["trusted_plan_sha256"]
+    assert payload["preflight_manifest_sha256"]
+    assert payload["review_skeleton_sha256"] == _d1_skeleton()[
+        "review_skeleton_sha256"]
+    assert payload["total_input_tokens"] > 0
+    assert payload["count_attempts"] >= len(payload["requested_model_ids"])
+    # The challenge is bound by DIGEST. Publishing the challenge itself would
+    # hand the next run's models the string they are meant to prove they were
+    # given.
+    assert payload["execution_challenge_sha256"]
+    assert "execution_challenge" not in payload
     assert signing.verify_envelope(result["evidence"],
                                    key=TEST_KEY)["signature_verified"] is True
     assert [p["state"] for p in published] == ["pending", "success"]
@@ -4885,7 +5044,7 @@ def test_d1_status_lands_on_the_exact_candidate_head(d1_engine):
     published = []
     d1runtime.run(**_d1_kwargs(publisher=published.append))
     for publication in published:
-        assert publication["candidate_head_sha"] == SHA_B
+        assert publication["candidate_head_sha"] == SHA_A
         assert publication["context"] == "trusted-verifier-count"
 
 
@@ -4906,8 +5065,8 @@ def test_d1_refuses_before_the_credential_when_the_repository_is_unprotected(
 
 def test_d1_refuses_when_the_operator_record_has_expired(d1_engine):
     with _refusal("operator_authorization_expired"):
-        d1runtime.run(**_d1_kwargs(
-            lane_verifier=_lane_verifier(observed_now="2027-01-01T00:00:00Z")))
+        d1runtime.run(**_d1_kwargs(lane_verifier=_verifier(
+            occurrence=D1_OCCURRENCE, observed_now="2027-01-01T00:00:00Z")))
 
 
 def test_d1_refuses_when_no_operator_wrote_a_ceiling(d1_engine):
@@ -4919,48 +5078,49 @@ def test_d1_refuses_when_no_operator_wrote_a_ceiling(d1_engine):
     payload = {k: v for k, v
                in _typed_payload("approve_count_spending").items()
                if k != "max_input_tokens"}
-    claims = [_mint("approve_count_spending", typed_payload=payload)
+    payload.update(authorized_target_base_sha=PR25_BASE,
+                   authorized_diff_base_sha=PR25_BASE,
+                   authorized_head_sha=SHA_A)
+    claims = [_mint("approve_count_spending", typed_payload=payload,
+                    occurrence=D1_OCCURRENCE)
               if e["header"]["prerequisite_key"] == "approve_count_spending"
               else e
-              for e in _authenticated_claims("D1")]
+              for e in _d1_claims()]
     with _refusal("typed_payload_incomplete"):
         d1runtime.run(**_d1_kwargs(operator_claims=claims))
 
 
 def test_d1_budget_is_global_not_per_request(d1_engine):
     """The bug this prevents: a hundred requests that are each individually
-    under budget spend a hundred times the budget."""
-    units = [_d1_unit(i, tokens=100) for i in range(5)]
-    # Each unit's worst case (100) is far under the ceiling; five of them are
-    # not. A per-request check would clear all five.
+    under budget spend a hundred times the budget.
+
+    The check moved and got stricter. It used to be `countledger.preflight`,
+    comparing a unit's DECLARED worst case to a running total — a number the
+    lane was handed, not one it measured. It is now the operator's ceiling
+    applied to the total the provider actually counted, over every request in
+    the engine's plan. A ceiling of 1 makes any real plan exceed it, and no
+    per-request check would notice."""
     with _refusal("authorized_input_tokens_would_be_exceeded"):
-        d1runtime.run(**_d1_kwargs(units, ceiling=250, count=100))
+        d1runtime.run(**_d1_kwargs(ceiling=1))
 
 
-def test_d1_stops_at_the_unit_that_would_exceed_rather_than_after(d1_engine):
-    """Preflight runs BEFORE the request, with the worst case: the actual is
-    not known until the reply arrives, and by then it has been spent."""
-    calls = []
-    units = [_d1_unit(i, tokens=100) for i in range(5)]
-
-    def counting_opener(*args):
-        calls.append(1)
-        return _fake_server(body=json.dumps(
-            {"object": "response.input_tokens", "input_tokens": 100}).encode())(*args)
-
+def test_d1_publishes_failure_when_the_ceiling_is_exceeded(d1_engine):
+    """The pending status is already on the pull request when the ceiling
+    refuses, and leaving it there would block the candidate forever with no
+    explanation."""
+    published = []
     with _refusal("authorized_input_tokens_would_be_exceeded"):
-        d1runtime.run(**_d1_kwargs(units, ceiling=250, opener=counting_opener))
-    # Two units cleared (100 + 100 = 200); the third would project 300 > 250.
-    assert len(calls) == 2
+        d1runtime.run(**_d1_kwargs(ceiling=1, publisher=published.append))
+    assert [p["state"] for p in published] == ["pending", "failure"]
+    assert "refused" in published[-1]["description"]
 
 
 def test_d1_refuses_when_the_rebuild_disagrees_with_the_candidates_plan(
         d1_engine):
     """The candidate's plan is an input to COMPARE against. Proceeding on
     either side alone is a different failure and both are refused."""
-    units = [_d1_unit(0), _d1_unit(1)]
     with _refusal("rebuilt_plan_differs_from_candidate_plan"):
-        d1runtime.run(**_d1_kwargs(units, plan={"unit_sha256s": [
+        d1runtime.run(**_d1_kwargs(plan={"unit_sha256s": [
             f"{0:064d}", f"{9:064d}"]}))
 
 
@@ -4971,24 +5131,53 @@ def test_d1_refuses_a_candidate_plan_that_declares_nothing_to_compare(d1_engine)
         d1runtime.run(**_d1_kwargs(plan={}))
 
 
-def test_d1_refuses_a_rebuild_that_produced_no_units(d1_engine):
+def test_d1_refuses_a_rebuild_that_produced_no_units():
+    """No longer reachable by injection, which is the improvement.
+
+    `skeleton_rebuild` used to be a parameter, so what "the trusted engine
+    rebuilt" meant depended on what the runner passed — a caller could hand D1
+    an empty plan, or any other plan. The rebuild is now
+    `verifier.plan.build_skeleton` and cannot be substituted, so this drives
+    the comparison directly."""
     with _refusal("skeleton_rebuild_produced_no_units"):
-        d1runtime.run(**_d1_kwargs(skeleton_rebuild=lambda **_: {"units": []}))
+        d1runtime._assert_rebuilt_plan_matches({"units": []},
+                                               {"unit_sha256s": []})
+    with _refusal("skeleton_rebuild_not_a_result"):
+        d1runtime._assert_rebuilt_plan_matches(None, {"unit_sha256s": []})
+    with _refusal("skeleton_units_duplicated"):
+        d1runtime._assert_rebuilt_plan_matches(
+            {"units": [{"unit_sha256": "a" * 64}, {"unit_sha256": "a" * 64}]},
+            {"unit_sha256s": ["a" * 64]})
 
 
 def test_d1_every_request_carries_this_runs_challenge(d1_engine):
     """A verdict produced for an earlier commit would otherwise validate
-    against a later one, every field intact."""
+    against a later one, every field intact.
+
+    Every request now, not every unit: the engine assembles one request per
+    (unit, model) over the governed three-model panel, and the run challenge is
+    bound into all of them. The old version asserted two requests — one per
+    unit, for one model — which is the single-model finding stated as an
+    assertion."""
     seen = []
-    d1runtime.run(**_d1_kwargs(opener=_fake_server(
-        record=seen, body=json.dumps({"object": "response.input_tokens",
-                                      "input_tokens": 10}).encode())))
-    assert len(seen) == 2
-    for index, call in enumerate(seen):
-        expected = challenge.token_for_unit(
-            seed=D1_SEED, unit_sha256=f"{index:064d}", candidate_head_sha=SHA_B,
-            trusted_run_id=55, trusted_run_attempt=1)
-        assert expected in json.loads(call["body"])["instructions"]
+
+    def recording_opener(method, url, headers, body):
+        seen.append(body)
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": 10}).encode()
+
+    d1runtime.run(**_d1_kwargs(opener=recording_opener))
+    expected = challenge.run_token(
+        seed=D1_SEED, candidate_head_sha=SHA_A, trusted_run_id=55,
+        trusted_run_attempt=1)
+    units = len(_d1_skeleton()["units"])
+    panel = len(enginebridge.model_panel(_engine()))
+    assert len(seen) >= units * panel, (len(seen), units, panel)
+    assert all(expected in body.decode() for body in seen)
+    # A token from a different run does not appear anywhere.
+    other = challenge.run_token(seed=b"\x09" * 32, candidate_head_sha=SHA_A,
+                                trusted_run_id=55, trusted_run_attempt=1)
+    assert not any(other in body.decode() for body in seen)
 
 
 def test_the_challenge_is_bound_to_the_run_and_the_head():
@@ -5070,8 +5259,8 @@ def test_d1_evidence_is_unusable_if_the_signature_is_stripped(d1_engine):
 
 def test_d1_evidence_binds_the_exact_range_it_reviewed(d1_engine):
     result = d1runtime.run(**_d1_kwargs())
-    assert result["evidence"]["candidate_head_sha"] == SHA_B
-    assert result["evidence"]["target_base_sha"] == SHA_A
+    assert result["evidence"]["candidate_head_sha"] == SHA_A
+    assert result["evidence"]["target_base_sha"] == PR25_BASE
     assert evidencewire.assert_payload_matches(
         result["evidence"], result["payload"])["payload_bound"] is True
 
@@ -5830,12 +6019,12 @@ def test_d1_fetches_the_candidate_as_data(d1_engine):
 
     def recording_fetch(**kwargs):
         calls.append(kwargs)
-        return _inert_fetch(**kwargs)
+        return _fetch_into(_d1_clone())(**kwargs)
 
     d1runtime.run(**_d1_kwargs(fetch=recording_fetch))
     assert len(calls) == 1
-    assert calls[0]["head_sha"] == SHA_B
-    assert calls[0]["target_base_sha"] == SHA_A
+    assert calls[0]["head_sha"] == SHA_A
+    assert calls[0]["target_base_sha"] == PR25_BASE
 
 
 def test_d1_refuses_a_fetch_that_left_a_working_tree(d1_engine):
@@ -6068,19 +6257,41 @@ def _bridge_layout_fixture():
     return root
 
 
-def test_the_planner_import_is_deferred_past_the_isolation_check(tmp_path):
-    """The eager import put `verifier` in sys.modules before d1runtime step 4
-    called assert_no_candidate_import, which refuses on exactly that — so the
-    D1 lane refused on every invocation and could never have run."""
-    import sys
+def test_the_planner_import_no_longer_has_to_be_deferred(tmp_path):
+    """The deferral was a workaround for a check asking the wrong question.
 
-    before = set(sys.modules)
-    engine = tmp_path_holder = None  # noqa: F841 - readability
-    builder = d1cli.load_skeleton_builder(
-        engine_root=str(_bridge_layout_fixture()))
-    assert callable(builder)
-    # Nothing was imported by building the loader.
-    assert "verifier" not in (set(sys.modules) - before)
+    History, because it explains two removals. The first `d1cli` imported
+    `verifier.plan` eagerly, and `d1runtime` step 2 called
+    `assert_no_candidate_import`, which refused whenever anything named
+    `verifier` was in `sys.modules` — so the D1 lane refused on every
+    invocation and could never have run. The fix at the time was a LAZY
+    builder, which moved the import past the gate.
+
+    Both are gone. That gate was a name check standing in for an origin
+    question, and under the integration addendum the engine IS
+    `scripts/verifier` inside the approved artifact, so D1 must import it.
+    `assert_no_candidate_import` now asks where each module came from, and
+    `d1cli.load_engine` loads it once, up front.
+
+    What must NOT come back is the direct import: `enginebridge` is the single
+    seam, and it is the only place the origin check has to hold."""
+    assert not hasattr(d1cli, "load_skeleton_builder")
+    assert callable(d1cli.load_engine)
+    # `assert_layout` still runs before anything is imported, so a malformed
+    # artifact is refused without loading it.
+    with _refusal("engine_artifact_missing_packages"):
+        d1cli.load_engine(engine_root=str(tmp_path))
+    # And the CLI reaches the engine ONLY through the bridge. `_imported_names`
+    # reports absolute module names and drops relative ones, so the sibling
+    # import is read off the AST rather than inferred from that set — asking
+    # the set would be asking a question it cannot answer.
+    tree = ast.parse((LANE_DIR / "d1cli.py").read_text(encoding="utf-8"))
+    siblings = {alias.name for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.level
+                for alias in node.names}
+    assert "enginebridge" in siblings
+    assert not any(name.startswith("verifier")
+                   for name in _imported_names(LANE_DIR / "d1cli.py") | siblings)
 
 
 def _planted_verifier(monkeypatch, origin):
@@ -7896,9 +8107,6 @@ def test_the_bridge_is_the_only_lane_entry_into_the_verifier_package():
 # literal set, a real transport, and an unpredictable challenge. These tests
 # run that whole path against a fake server, in D0, with no credential.
 # --------------------------------------------------------------------------
-
-PR25_BASE = "75a093de45f73169072837c7c062fab421caaf8b"  # pragma: allowlist secret
-
 
 def _counting_opener(calls, *, tokens_per_4_bytes=True):
     """A fake provider that answers the count endpoint and records every call.

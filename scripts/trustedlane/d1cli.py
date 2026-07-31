@@ -36,7 +36,17 @@ from __future__ import annotations
 import json
 import os
 
-from . import candidatefetch, d1runtime, phases, signing, statuspublish, transport
+from . import (
+    CANONICAL_REPOSITORY,  # noqa: F401
+    candidatefetch,
+    d1runtime,
+    enginebridge,
+    phases,
+    signing,
+    statuspublish,
+    transport,
+    trustedverifier,
+)
 from .errors import refuse
 
 REQUIRED_ENV = (
@@ -59,9 +69,18 @@ REQUIRED_ENV = (
     # the rebuild comparison compare the engine against itself.
     "TRUSTED_CANDIDATE_PLAN_PATH",
     "TRUSTED_CANDIDATE_CHECKOUT",
-    "TRUSTED_MODEL_ID",
+    # The operator's revocation list. Required, not optional: "no list" is not
+    # "no revocations", and a lane that treats a missing list as empty cannot
+    # be told to stop.
+    "TRUSTED_REVOCATION_LIST_PATH",
     "TRUSTED_OBSERVED_NOW",
 )
+
+#: REMOVED, and the removal is the fix. `TRUSTED_MODEL_ID` let the runner name
+#: ONE model, so the trusted lane counted a single-model review while governed
+#: policy is a three-model panel. The panel now comes from the engine's own
+#: `policy.REQUESTED_MODEL_IDS` and no environment variable can change it.
+RETIRED_ENV = ("TRUSTED_MODEL_ID",)
 
 
 def read_environment(environ=None) -> dict:
@@ -96,31 +115,22 @@ def load_json_document(path: str, *, field: str):
                f"exception_class={type(exc).__name__}")
 
 
-def load_skeleton_builder(*, engine_root: str):
-    """Return a lazy planner bound to the approved artifact, VIA THE BRIDGE.
+def load_engine(*, engine_root: str) -> dict:
+    """Load the approved engine, VIA THE BRIDGE, before the lane runs.
 
     This used to import `verifier.plan` directly — and it imported
-    `build_review_skeleton`, which does not exist. Both problems are fixed by
-    the same change: `enginebridge` is the single seam into the candidate
-    package, it names the real `build_skeleton`, and it proves every loaded
-    module came out of the artifact rather than off the disk beside it.
+    `build_review_skeleton`, which does not exist. It was then wrapped in a
+    LAZY builder, because `assert_no_candidate_import` refused whenever
+    `verifier` was in `sys.modules`, so an eager load made the lane refuse on
+    every invocation.
 
-    Still lazy. `d1runtime` step 4 calls
-    `enginepolicy.assert_no_candidate_import`, which refuses when `verifier` is
-    in `sys.modules` — so loading the engine eagerly here made the lane refuse
-    on every invocation. Deferring to first call puts the load after that gate,
-    where the gate is still asking the right question."""
-    from . import enginebridge
-
+    Both workarounds are gone. That check asked a name question standing in for
+    an origin question; it now asks the origin question, and the engine IS
+    `scripts/verifier` inside the approved artifact. So the engine loads here,
+    once, and `d1runtime` step 2 verifies that every `verifier` module in the
+    process came out of the root it was told to expect."""
     enginebridge.assert_layout(engine_root)
-    state = {}
-
-    def builder(**kwargs):
-        if "engine" not in state:
-            state["engine"] = enginebridge.load_engine(engine_root)
-        return enginebridge.build_skeleton(state["engine"], **kwargs)
-
-    return builder
+    return enginebridge.load_engine(engine_root)
 
 
 def main(environ=None) -> dict:
@@ -139,13 +149,31 @@ def main(environ=None) -> dict:
                                       field="protected_state_observation")
     operator_records = load_json_document(
         values["TRUSTED_OPERATOR_RECORDS_PATH"], field="operator_records")
-    builder = load_skeleton_builder(engine_root=values["TRUSTED_ENGINE_ROOT"])
+    engine = load_engine(engine_root=values["TRUSTED_ENGINE_ROOT"])
     candidate_plan = load_json_document(values["TRUSTED_CANDIDATE_PLAN_PATH"],
                                         field="candidate_plan")
+    revocations = load_json_document(values["TRUSTED_REVOCATION_LIST_PATH"],
+                                     field="revocation_list")
+
+    # The trust store is phase-gated for the same reason the credential is: it
+    # decides what counts as authorized, and a lane that can read one outside
+    # D1/D2 can authorize itself there.
+    lane_verifier = trustedverifier.bind(
+        engine,
+        trust_store=trustedverifier.load_trust_store(phase=phases.D1),
+        occurrence={"repository_identity": CANONICAL_REPOSITORY,
+                    "repository_numeric_id": values["EVENT_REPOSITORY_ID"],
+                    "target_base_sha": values["TARGET_BASE_SHA"],
+                    "diff_base_sha": values["TARGET_BASE_SHA"],
+                    "head_sha": values["CANDIDATE_HEAD_SHA"]},
+        observed_now=values["TRUSTED_OBSERVED_NOW"],
+        revocations=revocations)
 
     return d1runtime.run(
         observations=observations,
-        operator_records=operator_records,
+        operator_claims=operator_records,
+        lane_verifier=lane_verifier,
+        engine=engine,
         engine_artifact={"path": values["TRUSTED_ENGINE_ARTIFACT_PATH"],
                          "expected_sha256": values["TRUSTED_ENGINE_DIGEST"],
                          "root": values["TRUSTED_ENGINE_ROOT"],
@@ -169,8 +197,4 @@ def main(environ=None) -> dict:
                      "attempt": values["TRUSTED_RUN_ATTEMPT"],
                      "url": values["TRUSTED_RUN_URL"]},
         observed_now=values["TRUSTED_OBSERVED_NOW"],
-        produced_at=values["TRUSTED_OBSERVED_NOW"],
-        # `builder` imports the planner on FIRST CALL, which happens at step 7
-        # — after step 4's candidate-isolation check has run.
-        skeleton_rebuild=builder,
-        model=values["TRUSTED_MODEL_ID"])
+        produced_at=values["TRUSTED_OBSERVED_NOW"])

@@ -85,6 +85,34 @@ def token_for_unit(*, seed: bytes, unit_sha256: str, candidate_head_sha: str,
                     hashlib.sha256).hexdigest()[:TOKEN_HEX]
 
 
+def run_token(*, seed: bytes, candidate_head_sha: str, trusted_run_id,
+              trusted_run_attempt) -> str:
+    """ONE challenge for the whole run, for the engine's shared core.
+
+    `token_for_unit` binds a token to a unit, which is what D2 needs: a verdict
+    must echo the token for the unit it claims to answer. The engine's Stage-2
+    core takes a single run-level challenge and binds it into every request it
+    assembles — so this is that value, minted from the same seed and bound to
+    the same run, with a distinct domain separator so a run token can never be
+    presented as a unit token or the reverse.
+
+    The all-zero unit id is NOT the separator; the version string is. A
+    sentinel id would be a value some future unit could collide with."""
+    if not isinstance(seed, (bytes, bytearray)) or len(seed) < SEED_BYTES:
+        refuse(f"category=challenge_seed_too_short minimum={SEED_BYTES}")
+    from .identity import assert_commit_sha
+
+    assert_commit_sha(candidate_head_sha, field="candidate_head_sha")
+    for label, value in (("trusted_run_id", trusted_run_id),
+                         ("trusted_run_attempt", trusted_run_attempt)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            refuse(f"category=challenge_run_field_invalid field={label}")
+    message = "\x00".join([f"{CHALLENGE_VERSION}-run", candidate_head_sha,
+                            str(trusted_run_id), str(trusted_run_attempt)])
+    return hmac.new(bytes(seed), message.encode(),
+                    hashlib.sha256).hexdigest()[:TOKEN_HEX]
+
+
 def instruction_line(token: str) -> str:
     """The single line added to the model's instructions.
 
