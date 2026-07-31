@@ -53,7 +53,7 @@ documents this in its own header and deliberately omits a
 
 | # | Key | Action | Verifiable by the lane | Blocks |
 |---|-----|--------|------------------------|--------|
-| 7 | `protect_trusted_environment` | Protect the trusted environment **and** the default ref. | No | D1 |
+| 7 | `protected_trusted_environment` | Protect the trusted environment **and** the default ref. | No | D1 |
 
 ### Required status checks — the exact strings
 

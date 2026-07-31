@@ -81,27 +81,30 @@ def authorize(*, record_set, prerequisite_key: str = "approve_count_spending",
     implementation of a policy that already lives one layer up, which is
     precisely the duplication the integration addendum forbids.
 
-    What remains is this function's actual job: find the record that carries
-    the spending literal, and refuse if the operator did not write one."""
+    **The ceiling comes out of a TYPED payload.** It used to be read from a
+    free-form `exact_values` dictionary, so `max_input_tokens` could sit beside
+    anything and the record for `approve_count_spending` was structurally the
+    same record as the one for `delete_failed_run`. The typed schema for this
+    prerequisite now names `max_input_tokens`, the two caps, the billing
+    treatment and the authorized range, and the schema is closed both ways —
+    the authenticator therefore covers a payload whose every field something
+    reads.
+
+    What remains is this function's actual job: find the value the operator
+    wrote, and refuse if they did not write one."""
     from .trustedverifier import assert_authenticated
 
     assert_authenticated(record_set, phase="D1")
-    record = record_set.require(prerequisite_key)
-
-    literals = record.get("exact_values")
-    if not isinstance(literals, dict):
-        refuse("category=operator_records_carry_no_exact_values — the ceiling "
-               "must be a literal an operator wrote, not one this code chose")
-    if key not in literals:
-        refuse(f"category=authorized_ceiling_absent key={key} — a budget the "
-               "code picked is a budget nobody approved")
-    ceiling = literals[key]
+    envelope = record_set.require(prerequisite_key)
+    ceiling = envelope.require_typed(key)
     if isinstance(ceiling, bool) or not isinstance(ceiling, int) or ceiling < 1:
         refuse(f"category=authorized_ceiling_not_a_positive_integer key={key}")
     return {"key": key, "authorized_input_tokens": ceiling,
             "prerequisite_key": prerequisite_key,
             "record_set_sha256": record_set.record_set_sha256,
-            "source": "AUTHENTICATED_OPERATOR_RECORD_EXACT_VALUE"}
+            "authorization_subject_sha256":
+                envelope.authorization_subject_sha256,
+            "source": "AUTHENTICATED_OPERATOR_ENVELOPE_TYPED_VALUE"}
 
 
 def preflight(ledger: dict, *, authorization: dict,

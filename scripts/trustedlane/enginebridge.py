@@ -63,8 +63,17 @@ REQUIRED_ENGINE_SYMBOLS = {
                       "POLICY_PIN_NAMES"),
     "verifier.policy": ("REQUESTED_MODEL_IDS", "POLICY_PIN_NAMES"),
     "verifier.authority": ("TrustedVerifier", "VERIFIED_CLASSES",
-                           "promote_literal_authorizations"),
-    "verifier.pins": ("validate_pins", "promote_pin_authorization"),
+                           "promote_literal_authorizations",
+                           "literal_authorization_digest",
+                           "validate_literal_authorization",
+                           "assert_usable_for_real_call"),
+    "verifier.pins": ("validate_pins", "promote_pin_authorization",
+                      "validate_pin_authority", "pin_digest"),
+    # The engine's own typed failure. The lane catches it at the seam and
+    # re-raises a lane refusal: a `BlockingError` escaping into D1 would be an
+    # unhandled crash in a credential-bearing job, and catching `Exception`
+    # would swallow real bugs in this bridge.
+    "verifier.errors": ("BlockingError",),
     "verifier.reviewpolicy": ("GOVERNED_REQUIRED_APPROVER", "policy_record",
                               "LENS_IDS"),
     "verifier.providerreq": ("assemble_request", "ProviderRequest"),

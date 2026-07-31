@@ -194,8 +194,14 @@ def run(*, observations: dict, operator_claims, lane_verifier,
     steps.append(("engine_root",
                   artifactload.assert_engine_root_is_not_the_candidate(
                       engine_artifact["root"])))
+    # `engine_root` is supplied, so this refuses a `verifier` module loaded from
+    # ANYWHERE ELSE rather than refusing the name outright. The engine is
+    # `scripts/verifier` inside the approved artifact — the lane authenticates
+    # PIN and literal claims through it — so a name check here would mean either
+    # that this step or that authentication had to go.
     steps.append(("no_candidate_import", enginepolicy.assert_no_candidate_import(
-        search_path=engine_artifact.get("search_path"))))
+        search_path=engine_artifact.get("search_path"),
+        engine_root=engine_artifact.get("root"))))
 
     # AUTHENTICATED, not parsed — see the note in d1runtime. D2 requires the
     # same fifteen records D1 does PLUS prerequisite 16, and phase="D2" is what
@@ -322,8 +328,8 @@ def _assert_generation_approved(record_set, *, candidate: dict):
     is a second, explicit assertion of the same fact rather than the only one:
     an approval to count has never been an approval to generate."""
     trustedverifier.assert_authenticated(record_set, phase="D2")
-    matching = [r for r in record_set.records.values()
-                if r.get("prerequisite_key") == GENERATION_PREREQUISITE]
+    matching = [e for e in record_set.records.values()
+                if e.prerequisite_key == GENERATION_PREREQUISITE]
     if not matching:
         refuse("category=generation_not_separately_approved — operator "
                "prerequisite 16 is outstanding. An approval to count has never "

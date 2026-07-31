@@ -15,64 +15,56 @@ real calls.
 `verifier.authority` defines a `TrustedVerifier` interface with three methods,
 a `RejectingVerifier` as the module default so that writing nothing is
 fail-closed, and a `VERIFIED_CLASSES` set that candidate code structurally
-cannot mint — `promote_literal_authorizations` and `pins.promote_pin_authorization`
-both refuse unless a verifier returns a record already carrying the verified
-class. Nothing in the candidate package can produce one. That is the hole this
-module is supposed to fill, from the protected side, and the previous lane
-filled it with a parallel check that conferred authority it had not
-established.
+cannot mint — `promote_literal_authorizations` and
+`pins.promote_pin_authorization` both refuse unless a verifier returns a record
+already carrying the verified class. Nothing in the candidate package can
+produce one. That is the hole this module fills, from the protected side.
 
-**What "authenticated" means here, precisely.** Three things must hold, and
-each is a separate refusal:
+**What this module owns, and what it does not.** `authzenvelope` owns the
+protected authorization envelope: header digest, typed prerequisite evidence,
+authorization-subject digest and the detached MAC. It has no dependency on the
+candidate package, so it imports and tests without one. THIS module owns the
+seam: the candidate claim's own validators and digest functions, the promotion
+calls, and the two verified types that downstream consumers require by
+`isinstance`.
 
-1. the record's own digest recomputes — it was not edited after anchoring;
-2. the external anchor VERIFIES against a trust store the candidate cannot
-   write — a detached signature over the record digest under a key the operator
-   supplied out of band;
-3. every occurrence-scoped field binds THIS review — repository numeric id,
-   target base, diff base, head, policy versions, and an expiry that has not
-   passed.
+**Every prerequisite is typed (§4).** The previous version sent all sixteen
+through `verify_pin_authorization`, so a genuinely signed PIN-shaped record
+merely LABELLED `delete_failed_run` satisfied that prerequisite while carrying
+no run evidence whatsoever. Only `authorize_twelve_pins` and
+`approve_literal_authorizations` touch the candidate promotion seams; the other
+fourteen must carry the evidence specific to them, and a valid MAC over the
+wrong typed payload is still refused.
 
-Only then is the record relabelled with a verified class, and the relabelling
-happens here rather than anywhere a candidate can reach.
-
-**The trust store is a parameter, not a constant.** A public key committed to
-this repository is a key this repository can replace, which is the same defect
-as a candidate-supplied adapter. It arrives from the operator, out of band, and
+**The trust store is a parameter, not a constant.** A key committed to this
+repository is a key this repository can replace, which is the same defect as a
+candidate-supplied adapter. It arrives from the operator, out of band, and
 `load_trust_store` refuses to invent one.
 """
 
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 
+from . import authzenvelope as envelopes
 from .errors import refuse
-from .instants import assert_ordered, is_expired, parse_instant, utc_iso
 
-#: Anchor kinds this lane can actually verify. `verifier.authority.ANCHOR_KINDS`
-#: also lists `TRUSTED_WORKFLOW_RUN` and `PROTECTED_SERVICE_RECORD`; those need
-#: a GitHub API read and an external service call respectively, and a verifier
-#: that pretended to check them would be the shape-only check again wearing a
-#: better name. They are refused with a message that says which capability is
-#: missing rather than being silently treated as unsupported.
-VERIFIABLE_ANCHOR_KINDS = ("SIGNED_EVIDENCE_RECORD",)
-UNVERIFIABLE_ANCHOR_KINDS = {
-    "TRUSTED_WORKFLOW_RUN":
-        "verifying this needs an authenticated read of the protected run's API "
-        "record; this lane has no installation token, so it would be shape-only",
-    "PROTECTED_SERVICE_RECORD":
-        "verifying this needs a call to the external record system; this lane "
-        "cannot reach it, so it would be shape-only",
-}
+#: Re-exported so callers (and the workflow templates) have one import for the
+#: whole authorization vocabulary.
+VERIFIABLE_ANCHOR_KINDS = (envelopes.VERIFIABLE_ANCHOR_KIND,)
+UNVERIFIABLE_ANCHOR_KINDS = envelopes.UNVERIFIABLE_ANCHOR_KINDS
+AUTHENTICATOR_ALGORITHM = envelopes.AUTHENTICATOR_ALGORITHM
 
 TRUST_STORE_ENV = "TRUSTED_OPERATOR_TRUST_STORE"  # pragma: allowlist secret
-ANCHOR_SIGNATURE_VERSION = "operator-anchor-signature-v1"
 
-#: The fifteen D1 prerequisites and the sixteenth D2 one, by the canonical keys
-#: in `verifier.trustedlane.OPERATOR_PREREQUISITES`. Listed here so a missing
-#: one is a named refusal rather than a count mismatch.
+#: The evidence-signing key id. Count evidence is signed by the protected D1
+#: run rather than anchored by a human, so it is verified differently and its
+#: key is named separately.
+EVIDENCE_KEY_ID = "trusted_evidence_signing"
+
+PIN_PREREQUISITE = envelopes.PIN_PREREQUISITE
+LITERAL_PREREQUISITE = envelopes.LITERAL_PREREQUISITE
 D2_ONLY_PREREQUISITE = "approve_generation_separately"
 
 
@@ -137,156 +129,105 @@ def parse_trust_store(raw) -> dict:
                              "replace it from a reviewed branch")}
 
 
-def anchor_signature_input(*, record_digest: str, anchor_reference: str,
-                           repository_numeric_id: int) -> bytes:
-    """What an operator signs: the record digest, bound to repo and reference.
-
-    The repository id is inside the signed bytes so a genuine signature over a
-    genuine record from a DIFFERENT repository does not verify here. Without
-    it, an operator record from any repository this operator also signs for
-    would authorize spending in this one."""
-    return (f"{ANCHOR_SIGNATURE_VERSION}\x00{repository_numeric_id}"
-            f"\x00{anchor_reference}\x00{record_digest}").encode()
+# ------------------------------------------------- the candidate-claim seam --
 
 
-def verify_anchor(record: dict, *, trust_store: dict,
-                  repository_numeric_id: int, record_digest: str) -> dict:
-    """Verify the external anchor, or refuse. This is the whole point.
+def candidate_self_hash(claim, *, claim_kind: str, engine) -> str:
+    """Recompute a claim's self-hash with the CANDIDATE's own function.
 
-    `verifier.authority.describe_anchor` reports `verified: False` and
-    `SHAPE_ONLY_NOT_AUTHENTICATED` by design — it is candidate code and cannot
-    do better. This does the check that function documents as missing."""
-    anchor = record.get("external_anchor")
-    if not isinstance(anchor, dict):
-        refuse("category=operator_record_has_no_external_anchor — a record "
-               "with no anchor is a record this branch could have written")
-    kind = anchor.get("anchor_kind")
-    if kind in UNVERIFIABLE_ANCHOR_KINDS:
-        refuse(f"category=anchor_kind_not_verifiable_by_this_lane kind={kind} — "
-               f"{UNVERIFIABLE_ANCHOR_KINDS[kind]}")
-    if kind not in VERIFIABLE_ANCHOR_KINDS:
-        refuse(f"category=anchor_kind_not_permitted kind={kind!r} "
-               f"permitted={list(VERIFIABLE_ANCHOR_KINDS)}")
-
-    reference = anchor.get("anchor_reference")
-    if not isinstance(reference, str) or not reference.strip():
-        refuse("category=anchor_reference_missing")
-    anchored = anchor.get("anchored_digest")
-    if anchored != record_digest:
-        refuse("category=anchor_digest_mismatch — the anchor binds a different "
-               "record than the one supplied; either the record was edited "
-               "after anchoring or the anchor belongs to something else")
-
-    key_id = anchor.get("key_id")
-    if key_id not in trust_store["keys"]:
-        refuse(f"category=anchor_key_not_in_trust_store key_id={key_id!r} "
-               f"known={trust_store['key_ids']} — the record names a key the "
-               "operator did not supply, which is what a record signed by "
-               "whoever wrote it looks like")
-    signature = anchor.get("signature")
-    if not isinstance(signature, str) or len(signature) != 64:
-        refuse("category=anchor_signature_malformed")
-
-    expected = hmac.new(
-        trust_store["keys"][key_id],
-        anchor_signature_input(record_digest=record_digest,
-                               anchor_reference=reference,
-                               repository_numeric_id=repository_numeric_id),
-        hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, signature):
-        refuse("category=anchor_signature_mismatch — the anchor does not carry "
-               "a signature by that key over this record in this repository")
-    return {"anchor_kind": kind, "anchor_reference": reference,
-            "key_id": key_id, "anchor_verified": True}
+    Not a lane reimplementation, and the difference is not cosmetic:
+    `pins.pin_digest` strips exactly `pin_record_sha256` and
+    `authority.literal_authorization_digest` strips exactly
+    `authorization_sha256`. A lane-side digest over a different field set can
+    never agree with a genuine claim, which is precisely how the previous
+    version passed its own tests and could not have accepted one real
+    record."""
+    if claim_kind == envelopes.PIN_CLAIM:
+        return engine["modules"]["verifier.pins"].pin_digest(claim)
+    if claim_kind == envelopes.LITERAL_CLAIM:
+        return engine["modules"][
+            "verifier.authority"].literal_authorization_digest(claim)
+    refuse(f"category=claim_kind_has_no_candidate_digest kind={claim_kind!r}")
 
 
-def record_digest(record: dict, *, label: bytes) -> str:
-    """Recompute a record's digest exactly, over the record WITHOUT its anchor.
-
-    Recomputed rather than read: the stored value is part of the record an
-    attacker controls, and comparing a value to itself always agrees.
-
-    `external_anchor` is excluded, and that exclusion is load-bearing rather
-    than tidy. The anchor CONTAINS the signature over this digest, so a digest
-    that covered the anchor would require the operator to sign bytes containing
-    their own signature — unsatisfiable. Found immediately by the first test
-    that signed a record end to end: the digest computed before attaching the
-    anchor and the digest recomputed after could never agree.
-
-    The consequence is stated rather than glossed: the anchor's own metadata —
-    `anchor_kind`, `anchor_reference`, `key_id` — is outside this digest. It is
-    NOT outside the signature, because `anchor_signature_input` mixes the
-    reference in explicitly and `verify_anchor` looks the key up by the id the
-    record names and then requires that key to be the one that signed. A
-    swapped reference or key id therefore fails the MAC rather than passing
-    unnoticed."""
-    payload = {k: v for k, v in record.items()
-               if k not in ("authorization_sha256", "pin_record_sha256",
-                            "record_sha256", "external_anchor")}
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"),
-                      default=str).encode("utf-8")
-    return hashlib.sha256(label + b"\x00" + blob).hexdigest()
+def _authority(engine):
+    return engine["modules"]["verifier.authority"]
 
 
-def assert_binds_this_review(record: dict, *, occurrence: dict) -> dict:
-    """Every occurrence-scoped field must name THIS review.
-
-    An operator record that authorizes "spending on this repository" without
-    naming the range authorizes spending on a range the operator never saw. The
-    candidate package carries these fields on every claim precisely so a
-    trusted verifier can compare them; nothing compared them before."""
-    required = ("repository_identity", "target_base_sha", "diff_base_sha",
-                "head_sha")
-    missing = [f for f in required if not record.get(f)]
-    if missing:
-        refuse(f"category=operator_record_does_not_bind_the_review "
-               f"fields={missing} — a record that does not name the range "
-               "authorizes a range the operator never saw")
-    mismatched = sorted(f for f in required
-                        if record.get(f) != occurrence.get(f))
-    if mismatched:
-        refuse(f"category=operator_record_is_for_a_different_review "
-               f"fields={mismatched} — an approval for one occurrence is not "
-               "an approval for another, and a push is how the reviewed thing "
-               "changes")
-    return {"binds": dict((f, record[f]) for f in required)}
+def _pins(engine):
+    return engine["modules"]["verifier.pins"]
 
 
-def assert_not_expired(record: dict, *, observed_now: str) -> dict:
-    """Expiry as instants, with the boundary closed."""
-    expires_at = record.get("expires_at")
-    if not expires_at:
-        refuse("category=operator_record_has_no_expiry — an authorization that "
-               "never expires is one nobody has to revisit, and revocation "
-               "becomes the only way back")
-    parse_instant(expires_at, field="expires_at")
-    if record.get("authorized_at"):
-        assert_ordered(earlier=record["authorized_at"], later=expires_at,
-                       earlier_field="authorized_at", later_field="expires_at")
-    if is_expired(observed_now=observed_now, expires_at=expires_at):
-        refuse(f"category=operator_authorization_expired "
-               f"expires_at_utc={utc_iso(expires_at, field='expires_at')} "
-               f"observed_now_utc={utc_iso(observed_now, field='observed_now')}")
-    return {"expires_at_utc": utc_iso(expires_at, field="expires_at")}
+def _blocking_error(engine):
+    return engine["modules"]["verifier.errors"].BlockingError
 
 
-def assert_not_revoked(record: dict, *, revocations) -> dict:
-    """A revocation list the candidate cannot write.
+def _validate_candidate_claim(claim, *, claim_kind: str, engine, model_ids):
+    """§6 steps 1-2: the candidate's OWN validator, then its own digest.
 
-    Expiry and revocation are different questions: expiry is the operator
-    saying "not after this", revocation is the operator saying "not any more,
-    starting now". A lane that only checks expiry cannot be told to stop."""
-    if revocations is None:
-        refuse("category=revocation_list_not_supplied — 'no list' is not 'no "
-               "revocations'; a lane that treats a missing list as empty "
-               "cannot be told to stop")
-    digests = {r.get("record_sha256") for r in revocations
-               if isinstance(r, dict)}
-    observed = record.get("record_sha256") or record.get("authorization_sha256")
-    if observed in digests:
-        refuse(f"category=operator_record_revoked digest={str(observed)[:12]}")
-    return {"revocation_checked": True,
-            "revocation_list_size": len(list(revocations))}
+    Run before the protected checks, in the order the addendum specifies. A
+    `BlockingError` from candidate code is translated into a lane refusal — the
+    lane must never surface a candidate exception class as its own control
+    flow, and it must never let one escape as a crash."""
+    if not isinstance(claim, dict):
+        refuse(f"category=candidate_claim_not_an_object kind={claim_kind}")
+    authority = _authority(engine)
+    if claim.get("authority_class") in authority.VERIFIED_CLASSES:
+        refuse(f"category=claim_arrived_pre_labelled_verified "
+               f"class={claim.get('authority_class')!r} — a label is not an "
+               "authentication; this verifier assigns the verified class and "
+               "nothing upstream may")
+    try:
+        if claim_kind == envelopes.PIN_CLAIM:
+            _pins(engine).validate_pin_authority(claim, list(model_ids))
+            stored_field = "pin_record_sha256"
+        else:
+            authority.validate_literal_authorization(claim, "envelope")
+            stored_field = "authorization_sha256"
+    except _blocking_error(engine) as exc:
+        refuse(f"category=candidate_claim_rejected_by_engine kind={claim_kind} "
+               f"code={getattr(exc, 'code', 'UNKNOWN')}")
+    recomputed = candidate_self_hash(claim, claim_kind=claim_kind, engine=engine)
+    if claim.get(stored_field) != recomputed:
+        refuse(f"category=candidate_claim_self_hash_mismatch kind={claim_kind} "
+               f"field={stored_field} — the claim was edited after the "
+               "candidate engine hashed it")
+    return recomputed
+
+
+#: For a claim-bearing envelope, which typed-payload field must equal which
+#: field of the wrapped candidate claim. Without this the MAC would cover a
+#: payload describing occurrence 3 while the claim cleared occurrence 7 — both
+#: internally consistent, and describing different approvals.
+_PAYLOAD_CLAIM_BINDINGS = {
+    envelopes.LITERAL_CLAIM: (
+        ("path_bytes_b64", "path_bytes_b64"),
+        ("atom_id", "atom_id"),
+        ("occurrence_index", "occurrence_index"),
+        ("literal_sha256", "literal_sha256"),
+        ("literal_category_set_sha256", "literal_category_set_sha256"),
+        ("scanner_policy_sha256", "scanner_policy_sha256"),
+    ),
+    envelopes.PIN_CLAIM: (),
+}
+
+
+def _assert_payload_binds_claim(payload: dict, *, claim: dict,
+                                claim_kind: str) -> None:
+    for payload_field, claim_field in _PAYLOAD_CLAIM_BINDINGS[claim_kind]:
+        if payload[payload_field] != claim.get(claim_field):
+            refuse(f"category=typed_payload_does_not_describe_the_claim "
+                   f"kind={claim_kind} field={payload_field} — the operator "
+                   "authenticated a payload describing a different subject "
+                   "than the claim it is wrapped around")
+    if claim_kind == envelopes.PIN_CLAIM:
+        pins = claim.get("pins")
+        if not isinstance(pins, dict) or len(pins) != payload[
+                "policy_pin_name_count"]:
+            refuse("category=pin_claim_does_not_carry_the_authorized_pin_count "
+                   f"expected={payload['policy_pin_name_count']} — twelve PINs "
+                   "were approved; a claim carrying a different number is a "
+                   "different decision")
 
 
 class LaneTrustedVerifier:
@@ -296,53 +237,56 @@ class LaneTrustedVerifier:
     the candidate package, which reaches this process only inside the approved
     engine artifact. Subclassing at module scope would make importing
     `trustedlane` require the candidate package to be present, which is exactly
-    backwards. `bind(authority_module)` performs the registration once the
-    artifact is loaded, and `verifier_identity` is checked against what the
-    candidate package expects.
+    backwards. `bind(engine, ...)` performs the registration once the artifact
+    is loaded.
 
-    Every method returns a record carrying a VERIFIED class — and can only do
-    so after the anchor verified against a key this lane did not choose."""
+    The three methods take an ENVELOPE, not a bare record. That is the change
+    the four candidate-schema mismatches forced: a bare candidate claim carries
+    no prerequisite key, no diff base, no expiry and no repository numeric id,
+    so a verifier handed one has nothing to compare against this review."""
 
     verifier_identity = "TRUSTED_LANE_OPERATOR_VERIFIER_V1"
 
     def __init__(self, *, trust_store: dict, occurrence: dict,
-                 observed_now: str, revocations, authority_module):
+                 observed_now: str, revocations, engine):
         self._trust_store = trust_store
-        self._occurrence = occurrence
+        self._occurrence = dict(occurrence)
         self._observed_now = observed_now
         self._revocations = revocations
-        self._authority = authority_module
-        self.verified = []
+        self._engine = engine
+        self.verified: list[str] = []
 
     # -- the three methods `authority.TrustedVerifier` declares -------------
 
-    def verify_literal_authorization(self, record: dict) -> dict:
-        return self._verify(record,
-                            label=b"reviewed-literal-authorization-v2",
-                            digest_field="authorization_sha256",
-                            verified_class=self._authority.VERIFIED_LITERAL_AUTHORIZATION)
+    def verify_pin_authorization(self, envelope) -> dict:
+        """§6 for a PIN claim, in order: candidate validator, candidate digest,
+        protected envelope/header, detached authenticator, protected
+        scope/expiry/revocation, then promotion through the candidate seam."""
+        return self._verify_claim_envelope(
+            envelope, prerequisite_key=PIN_PREREQUISITE,
+            claim_kind=envelopes.PIN_CLAIM)
 
-    def verify_pin_authorization(self, record: dict) -> dict:
-        return self._verify(record,
-                            label=b"verifier-pin-record-v2",
-                            digest_field="pin_record_sha256",
-                            verified_class=self._authority.VERIFIED_OPERATOR_PIN_AUTHORIZATION)
+    def verify_literal_authorization(self, envelope) -> dict:
+        return self._verify_claim_envelope(
+            envelope, prerequisite_key=LITERAL_PREREQUISITE,
+            claim_kind=envelopes.LITERAL_CLAIM,
+            schema=envelopes.LITERAL_MEMBER_SCHEMA)
 
     def verify_count_evidence(self, record: dict) -> dict:
-        """Count evidence is verified by its SIGNATURE, not by an anchor.
+        """Count evidence is verified by its SIGNATURE, not by an envelope.
 
         Different question from the other two: a literal authorization and a
-        PIN record are statements by a human, anchored out of band; count
+        PIN record are statements by a human, authenticated out of band; count
         evidence is a statement by the protected D1 run, signed with the
-        evidence key. Treating them the same would mean either that a human
-        has to sign every count, or that an anchor claim could stand in for a
-        signature."""
+        evidence key. Treating them the same would mean either that a human has
+        to sign every count, or that an operator authorization could stand in
+        for a run signature."""
         from .evidencewire import validate_envelope
         from .signing import verify_envelope
 
-        key = self._trust_store["keys"].get("trusted_evidence_signing")
+        key = self._trust_store["keys"].get(EVIDENCE_KEY_ID)
         if key is None:
-            refuse("category=count_evidence_key_absent key_id=trusted_evidence_signing "
+            refuse(f"category=count_evidence_key_absent key_id={EVIDENCE_KEY_ID} "
                    "— the trust store carries no evidence key, so no count "
                    "evidence can be distinguished from a record this branch wrote")
         validate_envelope(record)
@@ -355,68 +299,207 @@ class LaneTrustedVerifier:
 
     # -- the shared path ----------------------------------------------------
 
-    def _verify(self, record: dict, *, label: bytes, digest_field: str,
-                verified_class: str) -> dict:
-        if not isinstance(record, dict):
-            refuse("category=operator_record_not_an_object")
-        # A record arriving already labelled verified is the exact forgery this
-        # exists to stop: the candidate package's `validate_*` functions accept
-        # a verified label because a trusted wire record must be representable
-        # as inert input, and confer nothing by doing so.
-        if record.get("authority_class") in self._authority.VERIFIED_CLASSES:
-            refuse(f"category=record_arrived_pre_labelled_verified "
-                   f"class={record.get('authority_class')!r} — a label is not "
-                   "an authentication; this verifier assigns the verified "
-                   "class and nothing upstream may")
+    def authenticate_typed(self, envelope, *, prerequisite_key: str) -> dict:
+        """A prerequisite whose evidence is a protected typed payload only.
 
-        computed = record_digest(record, label=label)
-        stored = record.get(digest_field)
-        if stored != computed:
-            refuse(f"category=operator_record_digest_mismatch field={digest_field} "
-                   "— the record was edited after it was digested")
+        Fourteen of the sixteen. No candidate claim is involved, so no
+        candidate seam is touched — which is the point: `delete_failed_run` is
+        not a statement about PIN values and must not be provable by a
+        PIN-shaped record."""
+        if envelope.get("candidate_claim") is not None:
+            refuse(f"category=typed_prerequisite_carries_a_candidate_claim "
+                   f"key={prerequisite_key} — only the PIN and literal "
+                   "prerequisites wrap a candidate claim; a claim here is a "
+                   "record borrowed from a different decision")
+        if envelope.get("candidate_claim_self_sha256") is not None:
+            refuse(f"category=typed_prerequisite_carries_a_claim_self_hash "
+                   f"key={prerequisite_key}")
+        checked = envelopes.authenticate_envelope(
+            envelope, prerequisite_key=prerequisite_key,
+            occurrence=self._occurrence, trust_store=self._trust_store,
+            observed_now=self._observed_now, revocations=self._revocations)
+        self.verified.append(checked["subject"])
+        return envelopes.VerifiedAuthorizationEnvelope(
+            prerequisite_key=prerequisite_key,
+            claim_kind=envelopes.TYPED_PAYLOAD_ONLY,
+            header=checked["header"],
+            envelope_header_sha256=checked["header_digest"],
+            typed_payload=checked["typed_payload"],
+            candidate_claim=None, candidate_claim_self_sha256=None,
+            authorization_subject_sha256=checked["subject"],
+            authenticator=checked["authenticator"])
 
-        binding = assert_binds_this_review(record, occurrence=self._occurrence)
-        expiry = assert_not_expired(record, observed_now=self._observed_now)
-        revocation = assert_not_revoked(
-            {**record, "record_sha256": computed}, revocations=self._revocations)
-        anchor = verify_anchor(
-            record, trust_store=self._trust_store,
-            repository_numeric_id=self._occurrence["repository_numeric_id"],
-            record_digest=computed)
+    def _verify_claim_envelope(self, envelope, *, prerequisite_key: str,
+                               claim_kind: str, schema=None) -> dict:
+        """The claim-bearing path, shared by PIN and by one literal member."""
+        if not isinstance(envelope, dict):
+            refuse(f"category=authorization_envelope_not_an_object "
+                   f"kind={claim_kind}")
+        header = envelope.get("header")
+        model_ids = []
+        if claim_kind == envelopes.PIN_CLAIM:
+            payload = envelope.get("typed_payload")
+            model_ids = (payload or {}).get("model_ids") or []
 
-        verified = {
-            **record,
+        # §6 steps 1-2 — the candidate's own validator and digest, first.
+        self_hash = _validate_candidate_claim(
+            envelope.get("candidate_claim"), claim_kind=claim_kind,
+            engine=self._engine, model_ids=model_ids)
+        if self_hash != envelope.get("candidate_claim_self_sha256"):
+            refuse(f"category=envelope_claim_self_hash_mismatch kind={claim_kind} "
+                   "— the envelope authorizes a different claim than the one "
+                   "supplied with it")
+
+        # §6 steps 3-5 — protected header, detached authenticator, scope.
+        checked = envelopes.authenticate_envelope(
+            envelope, prerequisite_key=prerequisite_key, claim_kind=claim_kind,
+            occurrence=self._occurrence, trust_store=self._trust_store,
+            observed_now=self._observed_now, revocations=self._revocations,
+            schema=schema)
+        header = checked["header"]
+        anchor = envelopes.assert_anchor_matches_header(
+            envelope["candidate_claim"].get("external_anchor"), header=header,
+            header_digest=checked["header_digest"])
+
+        _assert_payload_binds_claim(checked["typed_payload"],
+                                    claim=envelope["candidate_claim"],
+                                    claim_kind=claim_kind)
+
+        promoted = self._promote(envelope["candidate_claim"],
+                                 claim_kind=claim_kind, header=header,
+                                 checked=checked, self_hash=self_hash,
+                                 model_ids=model_ids)
+        self.verified.append(checked["subject"])
+        return envelopes.VerifiedAuthorizationEnvelope(
+            prerequisite_key=prerequisite_key, claim_kind=claim_kind,
+            header=header, envelope_header_sha256=checked["header_digest"],
+            typed_payload=checked["typed_payload"],
+            candidate_claim=envelope["candidate_claim"],
+            candidate_claim_self_sha256=self_hash,
+            authorization_subject_sha256=checked["subject"],
+            authenticator={**checked["authenticator"], **anchor},
+            promoted=promoted)
+
+    def _promoted_record(self, claim, *, verified_class: str, header: dict,
+                         checked: dict, self_hash: str) -> dict:
+        """The record the candidate seam returns, re-sealed under its OWN digest.
+
+        Two things are happening and both are load-bearing.
+
+        First, the promoted record is a DIFFERENT record from the claim: it
+        carries the verified class, `expires_at` (which
+        `authority.REAL_CALL_REQUIRED_EXACT` requires and no candidate
+        constructor produces), and the protected verification block. So its
+        `authorization_sha256`/`pin_record_sha256` is recomputed — otherwise
+        `assert_usable_for_real_call`, which recomputes the digest, would
+        refuse every genuine promotion.
+
+        Second, the ORIGINAL self-hash is not overwritten, it is retained in
+        `protected_verification.candidate_claim_self_sha256`. §3 forbids
+        requiring `authorization_sha256 == authorization_subject_sha256`: those
+        hashes prove different things, and collapsing them would mean the
+        candidate claim's own integrity and the operator's authorization
+        decision could no longer disagree."""
+        promoted = {
+            **claim,
             "authority_class": verified_class,
             "executable_authority": True,
+            "expires_at": header["expires_at"],
             "verified_by": self.verifier_identity,
-            "verification": {**anchor, **binding, **expiry, **revocation,
-                             "record_sha256": computed},
+            "protected_verification": {
+                "candidate_claim_self_sha256": self_hash,
+                "envelope_header_sha256": checked["header_digest"],
+                "authorization_subject_sha256": checked["subject"],
+                "prerequisite_key": header["prerequisite_key"],
+                "authenticator_algorithm": AUTHENTICATOR_ALGORITHM,
+                "mac_key_id": checked["authenticator"]["mac_key_id"],
+                "authenticator_verified": True,
+            },
         }
-        self.verified.append(computed)
-        return verified
+        return promoted
+
+    def _promote(self, claim, *, claim_kind: str, header: dict, checked: dict,
+                 self_hash: str, model_ids):
+        """§6 step 6/7: promotion through the candidate package's own seam.
+
+        Called with `verifier=` a one-shot adapter rather than `self`, because
+        the candidate seam re-validates the claim and then hands it to
+        `verify_*`, which is the method we are already inside. Re-entering it
+        would re-run the whole envelope check against a claim with no envelope
+        around it."""
+        authority = _authority(self._engine)
+        outer = self
+
+        class _Promoter:
+            verifier_identity = outer.verifier_identity
+
+            def verify_pin_authorization(self, record):
+                return outer._promoted_record(
+                    record,
+                    verified_class=authority.VERIFIED_OPERATOR_PIN_AUTHORIZATION,
+                    header=header, checked=checked, self_hash=self_hash)
+
+            def verify_literal_authorization(self, record):
+                return outer._promoted_record(
+                    record,
+                    verified_class=authority.VERIFIED_LITERAL_AUTHORIZATION,
+                    header=header, checked=checked, self_hash=self_hash)
+
+            def verify_count_evidence(self, record):
+                refuse("category=count_evidence_not_promoted_through_this_seam")
+
+        try:
+            if claim_kind == envelopes.PIN_CLAIM:
+                promoted = _pins(self._engine).promote_pin_authorization(
+                    claim, list(model_ids), verifier=_Promoter())
+                digest_field, digest_fn = ("pin_record_sha256",
+                                           _pins(self._engine).pin_digest)
+            else:
+                promoted = authority.promote_literal_authorizations(
+                    [claim], verifier=_Promoter())[0]
+                digest_field, digest_fn = (
+                    "authorization_sha256",
+                    authority.literal_authorization_digest)
+        except _blocking_error(self._engine) as exc:
+            refuse(f"category=candidate_promotion_refused kind={claim_kind} "
+                   f"code={getattr(exc, 'code', 'UNKNOWN')}")
+        promoted = dict(promoted)
+        promoted.pop(digest_field, None)
+        promoted[digest_field] = digest_fn(promoted)
+        return promoted
 
 
-def bind(authority_module, **kwargs) -> LaneTrustedVerifier:
-    """Construct the verifier against the candidate package's authority module.
+def bind(engine, **kwargs) -> LaneTrustedVerifier:
+    """Construct the verifier against a loaded engine.
 
-    Checked rather than assumed: if the loaded module does not carry the
-    verified-class vocabulary this verifier assigns, the engine artifact is not
+    Checked rather than assumed: if the loaded artifact does not carry the
+    modules and the verified-class vocabulary this verifier assigns, it is not
     the package this code was written against, and assigning a class it does
     not recognise would produce records nothing downstream accepts."""
+    if not isinstance(engine, dict) or not isinstance(engine.get("modules"),
+                                                      dict):
+        refuse("category=engine_not_loaded — bind requires the result of "
+               "enginebridge.load_engine, which proves each module came out of "
+               "the approved artifact rather than off the candidate checkout")
+    for name in ("verifier.authority", "verifier.pins", "verifier.errors"):
+        if name not in engine["modules"]:
+            refuse(f"category=engine_missing_module module={name}")
+    authority = engine["modules"]["verifier.authority"]
     for name in ("VERIFIED_LITERAL_AUTHORIZATION",
                  "VERIFIED_OPERATOR_PIN_AUTHORIZATION", "VERIFIED_CLASSES",
-                 "TrustedVerifier"):
-        if not hasattr(authority_module, name):
+                 "TrustedVerifier", "promote_literal_authorizations",
+                 "assert_usable_for_real_call"):
+        if not hasattr(authority, name):
             refuse(f"category=authority_module_missing_symbol symbol={name} — "
                    "the engine artifact does not carry the authority "
                    "vocabulary this verifier assigns")
-    return LaneTrustedVerifier(authority_module=authority_module, **kwargs)
+    return LaneTrustedVerifier(engine=engine, **kwargs)
 
 
 #: The fifteen prerequisites D1 needs and the sixteenth D2 adds, by the
-#: canonical keys in `verifier.trustedlane.OPERATOR_PREREQUISITES`. Listed
-#: explicitly so a missing one is a NAMED refusal rather than a count mismatch:
-#: "15 of 16 present" does not tell an operator which record to go and sign.
+#: canonical keys in `prerequisites.OPERATOR_PREREQUISITES`. Listed explicitly
+#: so a missing one is a NAMED refusal rather than a count mismatch: "15 of 16
+#: present" does not tell an operator which record to go and sign.
 D1_PREREQUISITES = (
     "delete_failed_run",
     "verify_run_404",
@@ -437,6 +520,119 @@ D1_PREREQUISITES = (
 D2_PREREQUISITES = (*D1_PREREQUISITES, D2_ONLY_PREREQUISITE)
 
 
+class VerifiedLiteralAuthorizationSet:
+    """The exact clearances in force for exactly one range (§5).
+
+    `authority.LiteralAuthorizationSet` is the candidate's version and is
+    honest about what it is: `confers_real_call_authority` returns False
+    unconditionally, because candidate code cannot produce a verified record.
+    This is the protected counterpart, and it exposes ONLY the four members
+    `finalize.PreflightGenerationManifest` actually consumes —
+    `clears_occurrence`, `digest`, `authority_class`,
+    `confers_real_call_authority`. A wider surface would be a second review
+    engine growing out of an adapter.
+
+    Every record here went through `promote_literal_authorizations` and then
+    `assert_usable_for_real_call`, so an atom-wide or file-wide clearance is
+    refused rather than quietly matching a broader key: the candidate lookup
+    falls back from (path, atom, occurrence) to (path, atom, None) to
+    (path, None, None), and a set that contained a null-scoped record would
+    make that fallback reachable with real authority behind it."""
+
+    def __init__(self, promoted, *, engine, occurrence: dict,
+                 expected_occurrence_count: int, scanner_policy_sha256: str,
+                 set_sha256: str):
+        authority = _authority(engine)
+        if not isinstance(promoted, (list, tuple)) or not promoted:
+            refuse("category=literal_authorization_set_empty — a set that "
+                   "clears nothing must not read as one that clears "
+                   "everything")
+        records = []
+        for index, record in enumerate(promoted):
+            try:
+                authority.assert_usable_for_real_call(
+                    record, where=f"entry[{index}]")
+            except _blocking_error(engine) as exc:
+                refuse(f"category=literal_authorization_not_usable_for_real_call "
+                       f"entry={index} code={getattr(exc, 'code', 'UNKNOWN')} — "
+                       "an atom-wide or file-wide clearance never authorizes a "
+                       "provider request, however it is labelled")
+            if record["atom_id"] is None or record["occurrence_index"] is None:
+                refuse(f"category=literal_authorization_scope_not_exact "
+                       f"entry={index}")
+            for field in ("repository_identity", "target_base_sha",
+                          "diff_base_sha", "head_sha"):
+                if record.get(field) != occurrence.get(field):
+                    refuse(f"category=literal_authorization_range_mismatch "
+                           f"entry={index} field={field}")
+            if record.get("scanner_policy_sha256") != scanner_policy_sha256:
+                refuse(f"category=literal_authorization_scanner_policy_mismatch "
+                       f"entry={index} — a clearance issued under one scanner "
+                       "policy does not clear findings produced by another")
+            records.append(record)
+        if len(records) != expected_occurrence_count:
+            refuse(f"category=literal_authorization_set_count_mismatch "
+                   f"approved={len(records)} "
+                   f"expected={expected_occurrence_count} — the operator "
+                   "authorized an exact number of occurrences; a set with "
+                   "fewer clears less than was approved and a set with more "
+                   "clears something that was not")
+        self._records = records
+        self._occurrence = dict(occurrence)
+        self._set_sha256 = set_sha256
+        self._scanner_policy_sha256 = scanner_policy_sha256
+        self._index: dict[tuple, dict] = {}
+        for record in records:
+            key = (record["path_bytes_b64"], record["atom_id"],
+                   record["occurrence_index"], record["literal_sha256"])
+            if key in self._index:
+                refuse("category=duplicate_literal_authorization_scope")
+            self._index[key] = record
+
+    # -- the exact interface PreflightGenerationManifest consumes ------------
+
+    def clears_occurrence(self, *, literal_sha256: str, path_bytes_b64: str,
+                          atom_id, occurrence_index: int,
+                          literal_categories=None) -> bool:
+        """Exact key only. No atom-wide or file-wide fallback exists here,
+        which is the difference from the candidate set rather than an
+        omission."""
+        record = self._index.get((path_bytes_b64, atom_id, occurrence_index,
+                                  literal_sha256))
+        if record is None:
+            return False
+        if literal_categories is not None:
+            if record["literal_categories"] != sorted(set(literal_categories)):
+                return False
+        return True
+
+    @property
+    def authority_class(self) -> str:
+        return "VERIFIED_LITERAL_AUTHORIZATION"
+
+    @property
+    def confers_real_call_authority(self) -> bool:
+        return True
+
+    def digest(self) -> str:
+        return self._set_sha256
+
+    def record(self) -> dict:
+        """Inert evidence. Deserializing this does not rebuild the set: the
+        promoted records are not in it, so nothing downstream can reconstruct
+        executable authority from an evidence file."""
+        return {"authority_class": self.authority_class,
+                "confers_real_call_authority": True,
+                "entry_count": len(self._records),
+                "literal_authorization_set_sha256": self._set_sha256,
+                "scanner_policy_sha256": self._scanner_policy_sha256,
+                "occurrence": dict(self._occurrence),
+                "honest_scope": (
+                    "every entry was promoted by the trusted verifier and "
+                    "passed authority.assert_usable_for_real_call; this record "
+                    "describes the set and cannot reconstruct it")}
+
+
 class VerifiedOperatorRecordSet:
     """The ONLY thing downstream accepts as operator authority.
 
@@ -447,28 +643,28 @@ class VerifiedOperatorRecordSet:
     because writing that string is free. `isinstance` is not free: instances
     come from `authenticate_record_set` and nowhere else, so a caller holding
     only candidate data cannot manufacture one however carefully it copies the
-    shape.
-
-    Construction is deliberately not defensive about being called directly —
-    Python has no private constructors — but every field it carries was
-    produced by `LaneTrustedVerifier`, and the verifier is the thing that needs
-    the trust store. A caller that could construct this could also just read
-    the store."""
+    shape."""
 
     def __init__(self, *, records: dict, covered: tuple, verifier_identity: str,
-                 occurrence: dict, record_set_sha256: str):
+                 occurrence: dict, record_set_sha256: str,
+                 literal_authorizations=None):
         self.records = records
         self.covered = covered
         self.verifier_identity = verifier_identity
         self.occurrence = dict(occurrence)
         self.record_set_sha256 = record_set_sha256
+        self.literal_authorizations = literal_authorizations
 
-    def require(self, prerequisite_key: str) -> dict:
-        """One authenticated record, by prerequisite key."""
+    def require(self, prerequisite_key: str):
+        """One authenticated envelope, by prerequisite key."""
         if prerequisite_key not in self.records:
             refuse(f"category=prerequisite_not_in_authenticated_set "
                    f"key={prerequisite_key}")
         return self.records[prerequisite_key]
+
+    def operator_pin_record(self) -> dict:
+        """The PROMOTED PIN record, for the engine that needs the values."""
+        return self.require(PIN_PREREQUISITE).promoted
 
     def to_record(self) -> dict:
         """A description for evidence. Not authority — reading this back does
@@ -478,8 +674,16 @@ class VerifiedOperatorRecordSet:
                 "covered": list(self.covered),
                 "record_set_sha256": self.record_set_sha256,
                 "occurrence": dict(self.occurrence),
-                "honest_scope": ("every record in this set had its digest "
-                                 "recomputed, its anchor verified against an "
+                "envelopes": [self.records[k].to_record()
+                              for k in self.covered],
+                "literal_authorizations": (
+                    self.literal_authorizations.record()
+                    if self.literal_authorizations is not None else None),
+                "honest_scope": ("every envelope in this set had its typed "
+                                 "evidence validated against the schema for "
+                                 "its own prerequisite, its header and subject "
+                                 "digests recomputed, its subject "
+                                 "authenticated with a detached MAC under an "
                                  "operator-supplied key, and its range "
                                  "compared to this review")}
 
@@ -507,26 +711,112 @@ def assert_authenticated(record_set, *, phase: str) -> VerifiedOperatorRecordSet
     return record_set
 
 
+def _authenticate_literal_set(envelope, *, verifier) -> tuple:
+    """`approve_literal_authorizations` is a SET, never one generic record (§5).
+
+    The set envelope binds the sorted member self-hashes AND the sorted member
+    subject digests AND the exact expected occurrence count. Each member is a
+    genuine `authority.literal_claim` inside its own protected envelope, so a
+    member cannot be moved between sets and the set cannot be satisfied by
+    approving one literal when two were required."""
+    members = envelope.get("member_envelopes")
+    if not isinstance(members, (list, tuple)) or not members:
+        refuse("category=literal_authorization_set_has_no_members — one "
+               "generic record does not approve a set of occurrences")
+    if envelope.get("candidate_claim") is not None:
+        refuse("category=literal_set_envelope_carries_a_claim — the set "
+               "envelope binds its members by digest; a claim on the set "
+               "itself is a member wearing the set's authority")
+
+    promoted, self_hashes, subjects = [], [], []
+    for index, member in enumerate(members):
+        if not isinstance(member, dict):
+            refuse(f"category=literal_member_not_an_object entry={index}")
+        verified = verifier.verify_literal_authorization(member)
+        promoted.append(verified.promoted)
+        self_hashes.append(verified.candidate_claim_self_sha256)
+        subjects.append(verified.authorization_subject_sha256)
+
+    checked = envelopes.authenticate_envelope(
+        envelope, prerequisite_key=LITERAL_PREREQUISITE,
+        occurrence=verifier._occurrence, trust_store=verifier._trust_store,
+        observed_now=verifier._observed_now, revocations=verifier._revocations)
+    payload = checked["typed_payload"]
+    if envelope.get("candidate_claim_self_sha256") is not None:
+        refuse("category=literal_set_envelope_carries_a_claim_self_hash")
+
+    if sorted(self_hashes) != list(payload["member_claim_self_sha256_in_order"]):
+        refuse("category=literal_set_member_claims_do_not_match — the set the "
+               "operator approved is not the set of claims supplied")
+    if sorted(subjects) != list(payload["member_subject_sha256_in_order"]):
+        refuse("category=literal_set_member_authorizations_do_not_match — the "
+               "member claims match but their authorizations do not, which is "
+               "two different approvals stapled together")
+    expected_digest = envelopes.literal_set_digest(
+        expected_occurrence_count=payload["expected_occurrence_count"],
+        member_claim_self_sha256_in_order=sorted(self_hashes),
+        member_subject_sha256_in_order=sorted(subjects),
+        scanner_policy_sha256=payload["scanner_policy_sha256"])
+    if expected_digest != payload["literal_authorization_set_sha256"]:
+        refuse("category=literal_authorization_set_digest_mismatch")
+
+    authorizations = VerifiedLiteralAuthorizationSet(
+        promoted, engine=verifier._engine, occurrence=verifier._occurrence,
+        expected_occurrence_count=payload["expected_occurrence_count"],
+        scanner_policy_sha256=payload["scanner_policy_sha256"],
+        set_sha256=expected_digest)
+    verifier.verified.append(checked["subject"])
+    return envelopes.VerifiedAuthorizationEnvelope(
+        prerequisite_key=LITERAL_PREREQUISITE,
+        claim_kind=envelopes.LITERAL_CLAIM_SET,
+        header=checked["header"],
+        envelope_header_sha256=checked["header_digest"],
+        typed_payload=payload, candidate_claim=None,
+        candidate_claim_self_sha256=None,
+        authorization_subject_sha256=checked["subject"],
+        authenticator=checked["authenticator"],
+        promoted=promoted, members=tuple(subjects)), authorizations
+
+
+#: The typed dispatch (§4). Exactly two entries reach a candidate promotion
+#: seam; every other prerequisite is authenticated as protected typed evidence.
+def _validator_for(prerequisite_key: str):
+    if prerequisite_key == PIN_PREREQUISITE:
+        return "pin"
+    if prerequisite_key == LITERAL_PREREQUISITE:
+        return "literal_set"
+    return "typed"
+
+
 def authenticate_record_set(claims, *, verifier: LaneTrustedVerifier,
                             phase: str) -> VerifiedOperatorRecordSet:
-    """Authenticate a whole claim set, or refuse. The D1/D2 entry point.
+    """Authenticate a whole envelope set, or refuse. The D1/D2 entry point.
 
-    Every claim goes through `LaneTrustedVerifier`, so every one gets its
-    digest recomputed, its anchor verified against the operator's key, its
-    range compared to this review, and its expiry and revocation checked. A
-    claim that fails any of those refuses the WHOLE set rather than being
-    skipped — a partially authenticated set is one where the missing record is
-    the interesting one."""
+    Every envelope is routed by its prerequisite key through the validator for
+    THAT prerequisite. An envelope that fails any check refuses the WHOLE set
+    rather than being skipped — a partially authenticated set is one where the
+    missing record is the interesting one.
+
+    D1 and D2 pass RAW envelopes here (§3). They never accept a caller-created
+    `VerifiedAuthorizationEnvelope`: a type whose instances a caller can
+    construct is a label again, just spelled with a class name."""
     if not isinstance(claims, (list, tuple)) or not claims:
         refuse("category=operator_claims_empty — an empty claim set covers no "
                "prerequisite, and a set that covers nothing must not read as "
                "one that covers everything")
     expected = D2_PREREQUISITES if phase == "D2" else D1_PREREQUISITES
-    verified = {}
-    for index, claim in enumerate(claims):
-        if not isinstance(claim, dict):
+    verified: dict = {}
+    literal_authorizations = None
+    for index, envelope in enumerate(claims):
+        if isinstance(envelope, envelopes.VerifiedAuthorizationEnvelope):
+            refuse(f"category=pre_authenticated_envelope_supplied index={index} "
+                   "— this entry point authenticates raw envelopes; accepting "
+                   "an already-verified instance would let the caller decide "
+                   "what was verified")
+        if not isinstance(envelope, dict):
             refuse(f"category=operator_claim_not_an_object index={index}")
-        key = claim.get("prerequisite_key")
+        header = envelope.get("header")
+        key = header.get("prerequisite_key") if isinstance(header, dict) else None
         if not isinstance(key, str) or not key:
             refuse(f"category=operator_claim_names_no_prerequisite index={index}")
         if key not in expected:
@@ -536,18 +826,27 @@ def authenticate_record_set(claims, *, verifier: LaneTrustedVerifier,
             refuse(f"category=operator_claim_duplicated key={key} — two "
                    "authorizations for one prerequisite means one is stale and "
                    "nothing here says which")
-        verified[key] = verifier.verify_pin_authorization(claim)
+        kind = _validator_for(key)
+        if kind == "pin":
+            verified[key] = verifier.verify_pin_authorization(envelope)
+        elif kind == "literal_set":
+            verified[key], literal_authorizations = _authenticate_literal_set(
+                envelope, verifier=verifier)
+        else:
+            verified[key] = verifier.authenticate_typed(envelope,
+                                                        prerequisite_key=key)
 
     covered = tuple(sorted(verified))
     blob = json.dumps(
         {"covered": list(covered),
-         "digests": {k: v["verification"]["record_sha256"]
-                     for k, v in sorted(verified.items())}},
+         "subjects": {k: v.authorization_subject_sha256
+                      for k, v in sorted(verified.items())}},
         sort_keys=True, separators=(",", ":")).encode()
     record_set = VerifiedOperatorRecordSet(
         records=verified, covered=covered,
         verifier_identity=verifier.verifier_identity,
         occurrence=verifier._occurrence,
+        literal_authorizations=literal_authorizations,
         record_set_sha256=hashlib.sha256(
-            b"verified-operator-record-set-v1\x00" + blob).hexdigest())
+            b"verified-operator-record-set-v2\x00" + blob).hexdigest())
     return assert_authenticated(record_set, phase=phase)

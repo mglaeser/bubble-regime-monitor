@@ -118,8 +118,14 @@ def run(*, observations: dict, operator_claims, lane_verifier,
         expected_sha256=engine_artifact["expected_sha256"])))
     steps.append(("engine_root", artifactload.assert_engine_root_is_not_the_candidate(
         engine_artifact["root"])))
+    # `engine_root` is supplied, so this refuses a `verifier` module loaded from
+    # ANYWHERE ELSE rather than refusing the name outright. The engine is
+    # `scripts/verifier` inside the approved artifact — the lane authenticates
+    # PIN and literal claims through it — so a name check here would mean either
+    # that this step or that authentication had to go.
     steps.append(("no_candidate_import", enginepolicy.assert_no_candidate_import(
-        search_path=engine_artifact.get("search_path"))))
+        search_path=engine_artifact.get("search_path"),
+        engine_root=engine_artifact.get("root"))))
 
     # 3. Did a human authorize this, recently, for this occurrence?
     #

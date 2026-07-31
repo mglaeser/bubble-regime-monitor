@@ -30,7 +30,11 @@ OPERATOR_PREREQUISITES = (
     Prerequisite("no_repository_or_org_fallback",
                  "no repository-level or organization-level secret satisfies "
                  "the same name", False),
-    Prerequisite("protect_trusted_environment",
+    # `protected_…`, not `protect_…`. This list and
+    # `trustedverifier.D1_PREREQUISITES` disagreed on this one key, so the
+    # sixteen an operator was told to satisfy were not the sixteen the
+    # authenticator required. A test now binds the two lists.
+    Prerequisite("protected_trusted_environment",
                  "the trusted environment and default ref are protected",
                  False),
     Prerequisite("authorize_twelve_pins", "all twelve operator PINs are "
