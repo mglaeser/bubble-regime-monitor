@@ -63,50 +63,49 @@ constants `scripts/trustedlane/statusnames.py` asserts on, so the instruction
 cannot drift from the policy. `statusnames.branch_protection_instructions()`
 prints them.
 
-| when | require exactly |
+| when | require exactly, on the candidate pull request |
 |---|---|
-| now | `test (3.12)`, `image`, `d0-containment` |
-| after D1 is deployed and approved | add `trusted-verifier-count`, `d1-containment-gate` |
-| after D2 is separately approved | add `trusted-cross-vendor-review`, `d2-containment-gate` |
+| now | `test (3.12)`, `image` |
+| after D1 is deployed and approved | add `trusted-verifier-count` |
+| after D2 is separately approved | add `trusted-cross-vendor-review` |
 
-**Never require `independent-verify-inactive`.** That job runs, reports a
-documented residual, and casts **zero votes** — it holds no provider credential
-since V-TRUST was closed. Requiring it would make a no-review success
-permanently satisfy a review requirement.
+Also set **"Require branches to be up to date before merging"** (strict). Without
+it a status earned against an older base counts for code that is not what
+merges.
 
-It was called `cross-vendor` until Exchange 3, which is exactly the hazard: the
-name sounded like the authoritative cross-vendor review, and the programme's own
-older documents recommended requiring it. If you have `cross-vendor` configured
-from before, remove it — nothing publishes that name any more, and a required
-status nothing publishes blocks every PR forever.
+The two trusted contexts must additionally be **restricted to the approved
+publisher** (GitHub App id) where the ruleset supports it. A required trusted
+context that any source may publish can be published by the candidate's own
+workflow, which turns the trusted gate into a self-signed claim.
 
-**Never require `probe`.** It runs only on `workflow_dispatch`, so it never
-reports on a pull request; requiring it leaves every PR pending on a check that
-cannot start.
+#### Never require any of these
+
+| status | why it can never work as a PR check |
+|---|---|
+| `independent-verify-inactive` | reports success having cast **zero votes** — it holds no provider credential since V-TRUST was closed. Requiring it makes a no-review success satisfy a review requirement. Called `cross-vendor` until Exchange 3; if you have that name configured, **remove it** — nothing publishes it any more, and a required status nothing publishes blocks every PR forever. |
+| `d0-containment` | D0 triggers on `push` and `workflow_dispatch` only, **never on `pull_request`**, so it never reports on a candidate head. Requiring it deadlocks every PR. (An earlier version of this packet listed it under "require now". That was wrong.) |
+| `probe` | `workflow_dispatch` only — same deadlock. |
+| `d1-containment-gate`, `d2-containment-gate` | internal jobs of a **main-dispatched** trusted run; their checks land on main's commit, not on a candidate head. |
 
 `test (3.12)` is the string to configure, not `test` — a matrix job publishes
 its check name with the matrix values appended.
 
 Pass the list you actually configured to
-`statusnames.assert_no_inactive_status_is_required(...)` to have it checked. The
-lane holds no credential and cannot read or set branch protection itself, so
-that is a check over an observed value, not an enforcement.
+`statusnames.assert_only_requirable_statuses(...)` to have it checked. The lane
+holds no credential and cannot read or set branch protection itself, so that is
+a check over an observed value, not an enforcement.
 
-**This one is currently false, and it was verified, not assumed.**
-`GET /repos/mglaeser/bubble-regime-monitor/branches` reports `main` with
-`"protected": false`, while the programme's documents describe a
-"protected/default main" throughout. The design premise and the world disagree.
+### Why a trusted status must be published on the candidate SHA
 
-`identity.assert_protected_ref` compares a ref **name** and would pass on an
-unprotected `main` — a name is not a protection. That is why
-`identity.assert_branch_protection_observed` exists as a separate check taking
-the branch record the API actually returned, and why it refuses
-`branch_protection_not_observed` (nobody looked) separately from
-`branch_not_protected` (looked, and it is not). Those are different failures
-and the operator fixes them differently.
+D1 and D2 run from the protected default ref via `workflow_dispatch`. A
+dispatched run's own job checks are associated with **the dispatched ref's
+commit — main** — not with the pull request under review. Reserving a job name
+in a workflow on main therefore does nothing for the PR's required check.
 
-Until this is done, deploying a credential-bearing workflow to `main` deploys it
-to a branch anyone with push access can rewrite.
+The lane publishes `trusted-verifier-count` and `trusted-cross-vendor-review`
+**explicitly onto the exact candidate head SHA**, pending before any provider
+work and final afterwards. That published status is what branch protection
+requires. See `scripts/trustedlane/statuspublish.py`.
 
 ## Group 3 — PINs and policy authorization (items 8–13)
 

@@ -36,6 +36,7 @@ import json
 import re
 
 from .errors import refuse
+from .instants import assert_ordered, is_expired, parse_instant, utc_iso
 
 REQUIRED_FIELDS = (
     "prerequisite_key",
@@ -146,9 +147,9 @@ def parse_operator_record(record: dict) -> dict:
                "an authorization for something that is not a prerequisite "
                "authorizes nothing and hides that it authorized nothing")
 
-    if not _TIMESTAMP.match(str(record["authorized_at"])):
-        refuse("category=operator_timestamp_malformed — an unparseable "
-               "timestamp cannot be compared to an expiry")
+    # Parsed as an INSTANT, not matched as a string. A regex that accepts an
+    # offset while comparison ignores it is worse than no offset support.
+    parse_instant(record["authorized_at"], field="authorized_at")
 
     if not isinstance(record["exact_values"], dict) or not record["exact_values"]:
         refuse("category=operator_exact_values_not_a_nonempty_object — "
@@ -164,8 +165,9 @@ def parse_operator_record(record: dict) -> dict:
                "spending and generation approvals must not become standing "
                "permission; an approval given once for one range would "
                "otherwise cover every future one")
-    if expires not in (None, "") and not _TIMESTAMP.match(str(expires)):
-        refuse("category=operator_expiry_malformed")
+    if expires not in (None, ""):
+        assert_ordered(earlier=record["authorized_at"], later=expires,
+                       earlier_field="authorized_at", later_field="expires_at")
 
     anchor = assert_anchor_is_admissible(record["anchor"])
     expected = record_digest(record)
@@ -190,22 +192,34 @@ def parse_operator_record(record: dict) -> dict:
     }
 
 
-def assert_not_expired(parsed: dict, *, observed_now: str) -> dict:
-    """Expiry against an observed clock, supplied rather than read.
+def assert_not_expired(parsed: dict, *, observed_now) -> dict:
+    """Expiry compared as INSTANTS, against a supplied clock.
 
-    `observed_now` is a parameter because a lane that reads its own clock can be
-    run on a machine whose clock says whatever is convenient. In D1/D2 it comes
-    from the protected run; here it makes the check testable without one."""
-    if not _TIMESTAMP.match(str(observed_now)):
-        refuse("category=observed_now_malformed")
+    Two separate things, both load-bearing.
+
+    The clock is a parameter because a lane that reads its own clock can be run
+    on a machine whose clock says whatever is convenient. In D1/D2 it comes from
+    the protected run.
+
+    The comparison parses both sides into UTC-normalized aware datetimes. It
+    used to be `str(observed_now) >= str(expires)`, and the accepted grammar
+    allows offsets — so an authorization that expired at 10:00Z, written
+    `2026-07-30T12:00:00+02:00`, was accepted at 10:30Z because the string
+    `"...10:30:00Z"` sorts below `"...12:00:00+02:00"`. Confirmed against the
+    real function before this was fixed: it accepted."""
+    observed = utc_iso(observed_now, field="observed_now")
     expires = parsed.get("expires_at")
     if expires in (None, ""):
-        return {"expiry_checked": False,
+        return {"expiry_checked": False, "observed_now_utc": observed,
                 "honest_scope": "this prerequisite declares no expiry"}
-    if str(observed_now) >= str(expires):
-        refuse(f"category=operator_authorization_expired expires_at={expires} "
-               f"observed_now={observed_now}")
-    return {"expiry_checked": True, "expires_at": expires}
+    if is_expired(observed_now=observed_now, expires_at=expires):
+        refuse(f"category=operator_authorization_expired "
+               f"expires_at_utc={utc_iso(expires, field='expires_at')} "
+               f"observed_now_utc={observed} — compared as instants; the "
+               "boundary is closed, so an authorization is not valid AT its own "
+               "expiry")
+    return {"expiry_checked": True, "observed_now_utc": observed,
+            "expires_at_utc": utc_iso(expires, field="expires_at")}
 
 
 def verify_records(records, *, observed_now: str) -> dict:

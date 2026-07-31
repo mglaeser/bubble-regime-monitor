@@ -51,6 +51,7 @@ from trustedlane import (  # noqa: E402
     errors,
     evidencewire,
     identity,
+    instants,
     livepolicy,
     operatorrecord,
     phases,
@@ -2531,20 +2532,49 @@ def test_f02_every_status_belongs_to_exactly_one_class(monkeypatch):
 def test_f02_requiring_the_inactive_status_is_refused():
     """The exact operator mistake this whole section exists to stop."""
     with pytest.raises(errors.LaneRefusal) as excinfo:
-        statusnames.assert_no_inactive_status_is_required(
+        statusnames.assert_only_requirable_statuses(
             ["test (3.12)", "independent-verify-inactive"])
-    assert "inactive_status_is_required" in excinfo.value.reason
-    # And the refusal names what to require instead, rather than only objecting.
-    assert "trusted-verifier-count" in excinfo.value.reason
+    assert "status_is_not_candidate_requirable" in excinfo.value.reason
+    # And the refusal says WHY this particular one can never work.
+    assert "cast zero votes" in excinfo.value.reason
 
 
-def test_f02_requiring_a_dispatch_only_diagnostic_is_refused():
-    """Different failure, different message: an inactive check passes when it
-    should not; a dispatch-only diagnostic never reports at all, so requiring it
-    leaves every PR pending forever."""
-    with _refusal("diagnostic_status_is_required"):
-        statusnames.assert_no_inactive_status_is_required(
-            ["test (3.12)", "probe"])
+@pytest.mark.parametrize("status,why", [
+    ("probe", "never reports on a candidate head"),
+    ("d0-containment", "never reports on a candidate head"),
+    ("d1-containment-gate", "lands on main's commit"),
+    ("d2-containment-gate", "lands on main's commit"),
+])
+def test_f02_no_status_that_cannot_report_on_a_pr_head_is_requirable(status, why):
+    """EX3-R03. Requiring a status that never reports on a candidate head is a
+    deadlock, not a gate — every PR waits forever for a check that cannot
+    arrive.
+
+    `d0-containment` was classified CONTAINMENT and put in `require_now` with
+    the comment "safe to require". Safe, and useless: D0 triggers on
+    `workflow_dispatch` and `push` to main, never on `pull_request`.
+
+    `d1/d2-containment-gate` fail for a neighbouring reason: they are internal
+    jobs of a main-dispatched run, so their checks land on main's commit."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        statusnames.assert_only_requirable_statuses(["test (3.12)", status])
+    assert "status_is_not_candidate_requirable" in excinfo.value.reason
+    assert why in excinfo.value.reason
+
+
+def test_f02_requirability_is_derived_not_enumerated(monkeypatch):
+    """The first version listed INACTIVE and DIAGNOSTIC by name, so when D0
+    moved out of the requirable set it kept accepting `d0-containment` — the
+    enumerate-the-hazards mistake, inside the module written to stop making it.
+
+    Shrinking REQUIRABLE_CLASSES must immediately make the dropped class
+    non-requirable, with no other edit."""
+    monkeypatch.setattr(statusnames, "REQUIRABLE_CLASSES", ("TRUSTED",))
+    monkeypatch.setattr(statusnames, "NEVER_REQUIRABLE_CLASSES",
+                        tuple(c for c in statusnames.STATUS_CLASSES
+                              if c != "TRUSTED"))
+    with _refusal("status_is_not_candidate_requirable"):
+        statusnames.assert_only_requirable_statuses(["test (3.12)"])
 
 
 def test_f02_the_old_name_is_no_longer_a_known_status():
@@ -2636,9 +2666,21 @@ def test_f02_the_operator_instructions_are_literals_from_the_policy():
     defect. The instruction is generated from the same constants the code
     asserts on, so it cannot drift from the policy."""
     ins = statusnames.branch_protection_instructions()
-    assert ins["never_require"] == list(statusnames.INACTIVE_STATUSES)
+    # Every non-requirable class appears, derived — not just the inactive one.
+    expected_never = sorted({n for c in statusnames.NEVER_REQUIRABLE_CLASSES
+                             for n in statusnames.STATUS_CLASSES[c]})
+    assert ins["never_require"] == expected_never
+    assert "d0-containment" in ins["never_require"]
+    assert ins["require_now"] == list(statusnames.ORDINARY_STATUSES)
     assert statusnames.TRUSTED_STATUSES[0] in ins["require_after_d1"]
     assert statusnames.TRUSTED_STATUSES[1] in ins["require_after_d2"]
+    # Each exclusion carries its own mechanical reason, not one blanket phrase.
+    for name in ins["never_require"]:
+        reason = ins["why_never"][name]
+        assert len(reason) > 20, name
+        # A cross-reference ("same as X") is useless to an operator reading one
+        # line in a settings page; every reason must stand alone.
+        assert "same as" not in reason, name
     # Nothing non-requirable leaks into a require_* list.
     requirable = {n for c in statusnames.REQUIRABLE_CLASSES
                   for n in statusnames.STATUS_CLASSES[c]}
@@ -3097,7 +3139,15 @@ def _protected_observation(**overrides):
         # shadowing check compares across the repository and organization
         # inventories. Flagged by the `secret_name=` keyword heuristic.
         secret_name="TRUSTED_VERIFIER_OPENAI_KEY",  # pragma: allowlist secret
-        repository_secret_names=[], organization_secret_names=[])
+        repository_secret_names=[], organization_secret_names=[],
+        # EX3-R08 added these. A protected branch that requires nothing merges
+        # a red suite, so readiness now needs the observed required-check
+        # configuration rather than only the protected flag.
+        required_status_checks={"strict": True, "checks": [
+            {"context": "test (3.12)", "app_id": 15368},
+            {"context": "image", "app_id": 15368}]},
+        expected_contexts=["test (3.12)", "image"],
+        expected_app_id=None)
     base.update(overrides)
     return base
 
@@ -3242,3 +3292,195 @@ def test_the_live_policy_reports_credential_reach_before_supply_chain():
             livepolicy.validate_live_workflows(root=tmp)
     assert "pr_controlled_workflow_reaches_a_secret" in excinfo.value.reason
     assert "action_not_pinned" not in excinfo.value.reason
+
+
+# --------------------------------------------------------------------------
+# EX3-R07 — timestamps are instants, not strings.
+# --------------------------------------------------------------------------
+
+
+def test_r07_the_offset_crossing_case_that_was_actually_accepted():
+    """The exact reported case, reproduced against the fixed function.
+
+    expires_at 2026-07-30T12:00:00+02:00 IS 10:00Z. observed_now 10:30Z is half
+    an hour past it. The old `str(a) >= str(b)` saw "…10:30:00Z" sorting below
+    "…12:00:00+02:00" and accepted. Verified accepting before the fix."""
+    assert instants.is_expired(observed_now="2026-07-30T10:30:00Z",
+                               expires_at="2026-07-30T12:00:00+02:00") is True
+    with _refusal("operator_authorization_expired"):
+        operatorrecord.assert_not_expired(
+            {"expires_at": "2026-07-30T12:00:00+02:00"},
+            observed_now="2026-07-30T10:30:00Z")
+
+
+def test_r07_the_expiry_boundary_is_closed():
+    """An authorization that expires at T is not valid AT T. An off-by-one on an
+    expiry is a window in which a revoked permission still works."""
+    assert instants.is_expired(observed_now="2026-07-30T10:00:00Z",
+                               expires_at="2026-07-30T10:00:00Z") is True
+    assert instants.is_expired(observed_now="2026-07-30T09:59:59Z",
+                               expires_at="2026-07-30T10:00:00Z") is False
+
+
+@pytest.mark.parametrize("value,category", [
+    ("2026-07-30T10:00:00", "timestamp_not_rfc3339"),
+    ("2026-07-30 10:00:00Z", "timestamp_not_rfc3339"),
+    ("2026-07-30T10:00:60Z", "timestamp_leap_second"),
+    ("not-a-time", "timestamp_not_rfc3339"),
+    (1753876800, "timestamp_not_a_string"),
+    (None, "timestamp_not_a_string"),
+])
+def test_r07_unrepresentable_timestamps_are_refused(value, category):
+    """Naive is refused rather than assumed UTC — assuming is how an operator in
+    +02:00 writes a local time, means one thing, and gets another. A leap second
+    is refused rather than clamped, because clamping moves the instant in a
+    direction nobody chose."""
+    with _refusal(category):
+        instants.parse_instant(value, field="t")
+
+
+def test_r07_equivalent_instants_in_different_offsets_compare_equal():
+    a = instants.parse_instant("2026-07-30T12:00:00+02:00")
+    b = instants.parse_instant("2026-07-30T10:00:00Z")
+    assert a == b
+    assert instants.utc_iso("2026-07-30T12:00:00+02:00") == "2026-07-30T10:00:00Z"
+
+
+def test_r07_an_authorization_expiring_before_it_was_issued_is_refused():
+    """Well-formed, parses, and already dead — a typo an operator cannot see."""
+    record = _operator_record()
+    record["expires_at"] = "2026-07-03T00:00:00Z"   # month/day transposed
+    record["anchor"]["anchored_digest"] = operatorrecord.record_digest(record)
+    with _refusal("timestamps_out_of_order"):
+        operatorrecord.parse_operator_record(record)
+
+
+def test_r07_an_aware_datetime_object_is_accepted_and_a_naive_one_is_not():
+    from datetime import datetime, timedelta
+    from datetime import timezone as _tz
+    aware = datetime(2026, 7, 30, 12, 0, tzinfo=_tz(timedelta(hours=2)))
+    assert instants.parse_instant(aware).hour == 10
+    with _refusal("naive_datetime"):
+        instants.parse_instant(datetime(2026, 7, 30, 12, 0))
+
+
+# --------------------------------------------------------------------------
+# EX3-R08 — a protected branch that requires nothing.
+# --------------------------------------------------------------------------
+
+
+def _readiness(**overrides):
+    base = dict(
+        observed_ref="refs/heads/main",
+        branch_record={"name": "main", "protected": True},
+        branch_rules={"required_pull_request_reviews": True,
+                      "block_force_pushes": True, "block_deletions": True,
+                      "bypass_actors": []},
+        required_status_checks={"strict": True, "checks": [
+            {"context": "test (3.12)", "app_id": 15368},
+            {"context": "image", "app_id": 15368}]},
+        expected_contexts=["test (3.12)", "image"],
+        expected_app_id=None,
+        environment_record={"name": "trusted-verifier",
+                            "deployment_branch_policy": {
+                                "custom_branch_policies": True},
+                            "allowed_branches": ["main"]},
+        environment_name="trusted-verifier",
+        # A secret NAME, not a value — what the shadow check compares.
+        secret_name="TRUSTED_VERIFIER_OPENAI_KEY",  # pragma: allowlist secret
+        repository_secret_names=[], organization_secret_names=[])
+    base.update(overrides)
+    return base
+
+
+def test_r08_a_protected_branch_that_requires_no_status_is_refused():
+    """`protected: true` plus a review rule says a pull request is needed. It
+    says nothing about whether anything must PASS — the branch would merge a
+    change to the trusted lane with a red suite."""
+    with _refusal("required_context_missing"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(required_status_checks={"strict": True, "checks": []}))
+
+
+def test_r08_an_unobserved_required_check_list_is_refused():
+    with _refusal("required_status_checks_not_observed"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(required_status_checks=None))
+
+
+def test_r08_loose_checks_are_refused_when_strict_is_required():
+    """A status earned against an older base is a status about code that is not
+    what merges."""
+    with _refusal("required_checks_not_strict"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(required_status_checks={"strict": False, "checks": [
+                {"context": "test (3.12)", "app_id": 1},
+                {"context": "image", "app_id": 1}]}))
+
+
+@pytest.mark.parametrize("context", ["d0-containment",
+                                     "independent-verify-inactive", "probe"])
+def test_r08_a_non_requirable_context_in_the_config_is_refused(context):
+    """EX3-R03 enforced at the readiness gate too, not only in the advice."""
+    with _refusal("status_is_not_candidate_requirable"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(
+                required_status_checks={"strict": True, "checks": [
+                    {"context": "test (3.12)", "app_id": 1},
+                    {"context": "image", "app_id": 1},
+                    {"context": context, "app_id": 1}]},
+                expected_contexts=["test (3.12)", "image"]))
+
+
+def test_r08_an_unknown_context_is_refused():
+    with _refusal("required_status_not_in_registry"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(required_status_checks={"strict": True, "checks": [
+                {"context": "surprise", "app_id": 1}]},
+                expected_contexts=["surprise"]))
+
+
+def _with_trusted(app_id, expected_app_id):
+    return _readiness(
+        required_status_checks={"strict": True, "checks": [
+            {"context": "test (3.12)", "app_id": 15368},
+            {"context": "image", "app_id": 15368},
+            {"context": "trusted-verifier-count", "app_id": app_id}]},
+        expected_contexts=["test (3.12)", "image", "trusted-verifier-count"],
+        expected_app_id=expected_app_id)
+
+
+def test_r08_a_trusted_context_any_source_may_publish_is_refused():
+    """The half that is easy to forget. A required trusted context with no
+    publisher pinned can be published by the candidate's own workflow, which
+    turns the trusted gate into a self-signed claim."""
+    with _refusal("trusted_context_publisher_not_pinned"):
+        protectedstate.assert_ready_for_credential(
+            **_with_trusted(None, 999))
+
+
+def test_r08_a_trusted_context_from_the_wrong_publisher_is_refused():
+    with _refusal("trusted_context_publisher_mismatch"):
+        protectedstate.assert_ready_for_credential(**_with_trusted(42, 999))
+
+
+def test_r08_a_pinned_observation_with_no_expected_publisher_is_refused():
+    """Nothing to compare against is not the same as matching."""
+    with _refusal("expected_publisher_not_supplied"):
+        protectedstate.assert_ready_for_credential(**_with_trusted(42, None))
+
+
+def test_r08_the_correct_publisher_passes_and_is_recorded():
+    record = protectedstate.assert_ready_for_credential(
+        **_with_trusted(999, 999))
+    assert record["publisher_pinned_contexts"] == {
+        "trusted-verifier-count": 999}
+    assert record["strict"] is True
+    assert record["credential_may_be_reachable"] is True
+
+
+def test_r08_ordinary_contexts_do_not_need_a_pinned_publisher():
+    """Only the trusted contexts carry the self-signing risk; requiring an app
+    pin on `test (3.12)` would be friction with no threat behind it."""
+    assert protectedstate.assert_ready_for_credential(
+        **_readiness())["credential_may_be_reachable"] is True
