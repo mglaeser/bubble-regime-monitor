@@ -45,11 +45,11 @@ from . import (
     challenge,
     enginepolicy,
     evidencewire,
-    operatorrecord,
     protectedstate,
     signing,
     statuspublish,
     transport,
+    trustedverifier,
 )
 from .errors import LaneRefusal, refuse
 
@@ -176,7 +176,8 @@ def plan_digest(units) -> str:
     return hashlib.sha256(b"trusted-plan-v2\x00" + blob).hexdigest()
 
 
-def run(*, observations: dict, operator_records, engine_artifact: dict,
+def run(*, observations: dict, operator_claims, lane_verifier,
+        engine_artifact: dict,
         candidate: dict, plan: dict, trusted_plan_sha256: str, opener,
         credential: str, signing_key, publisher, trusted_run: dict,
         observed_now: str, produced_at: str, model: str,
@@ -196,13 +197,16 @@ def run(*, observations: dict, operator_records, engine_artifact: dict,
     steps.append(("no_candidate_import", enginepolicy.assert_no_candidate_import(
         search_path=engine_artifact.get("search_path"))))
 
-    verified_records = operatorrecord.verify_records(
-        operator_records, observed_now=observed_now)
-    steps.append(("operator_records", verified_records))
+    # AUTHENTICATED, not parsed — see the note in d1runtime. D2 requires the
+    # same fifteen records D1 does PLUS prerequisite 16, and phase="D2" is what
+    # makes `authenticate_record_set` demand it.
+    record_set = trustedverifier.authenticate_record_set(
+        operator_claims, verifier=lane_verifier, phase="D2")
+    steps.append(("operator_records", record_set.to_record()))
 
     # Prerequisite 16, its own record. An approval to count has never been an
     # approval to generate, so this is a DIFFERENT key from D1's.
-    _assert_generation_approved(verified_records, candidate=candidate)
+    _assert_generation_approved(record_set, candidate=candidate)
 
     steps.append(("plan", assert_plan_is_the_counted_one(
         plan, expected_sha256=trusted_plan_sha256)))
@@ -303,26 +307,32 @@ def run(*, observations: dict, operator_records, engine_artifact: dict,
     }
 
 
-def _assert_generation_approved(verified_records: dict, *, candidate: dict):
-    """Its own prerequisite, its own scope. Not D1's, reused."""
-    from . import CANONICAL_REPOSITORY
+def _assert_generation_approved(record_set, *, candidate: dict):
+    """Prerequisite 16, its own record, authenticated like every other.
 
-    expected_scope = (f"{CANONICAL_REPOSITORY}@"
-                      f"{candidate['candidate_head_sha']}")
-    matching = [r for r in verified_records["records"]
+    The scope comparison that used to live here is gone.
+    `LaneTrustedVerifier.assert_binds_this_review` compares repository
+    identity, target base, diff base and head against this review for EVERY
+    record before promoting any of them, so a second, weaker version of that
+    check here would be duplicated policy — and duplicated policy is how the
+    two copies end up disagreeing.
+
+    What remains is the question only this phase asks: is the SIXTEENTH record
+    present. `assert_authenticated(phase="D2")` requires it by name, so this
+    is a second, explicit assertion of the same fact rather than the only one:
+    an approval to count has never been an approval to generate."""
+    trustedverifier.assert_authenticated(record_set, phase="D2")
+    matching = [r for r in record_set.records.values()
                 if r.get("prerequisite_key") == GENERATION_PREREQUISITE]
     if not matching:
         refuse("category=generation_not_separately_approved — operator "
                "prerequisite 16 is outstanding. An approval to count has never "
-               "been an approval to generate, and D1's record does not carry "
-               "over")
+               "been an approval to generate, and D1's record set does not "
+               "carry over")
     if len(matching) > 1:
         refuse("category=generation_approval_duplicated")
-    if matching[0].get("scope") != expected_scope:
-        refuse(f"category=generation_approval_scope_mismatch "
-               f"record_scope={matching[0].get('scope')!r} "
-               f"expected={expected_scope!r}")
-    return {"generation_approved_for": expected_scope}
+    return {"generation_approved": True,
+            "record_set_sha256": record_set.record_set_sha256}
 
 
 def _assert_verdicts_are_for_this_unit(verdicts, unit: dict):

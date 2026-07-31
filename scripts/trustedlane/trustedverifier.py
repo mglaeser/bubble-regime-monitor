@@ -411,3 +411,143 @@ def bind(authority_module, **kwargs) -> LaneTrustedVerifier:
                    "the engine artifact does not carry the authority "
                    "vocabulary this verifier assigns")
     return LaneTrustedVerifier(authority_module=authority_module, **kwargs)
+
+
+#: The fifteen prerequisites D1 needs and the sixteenth D2 adds, by the
+#: canonical keys in `verifier.trustedlane.OPERATOR_PREREQUISITES`. Listed
+#: explicitly so a missing one is a NAMED refusal rather than a count mismatch:
+#: "15 of 16 present" does not tell an operator which record to go and sign.
+D1_PREREQUISITES = (
+    "delete_failed_run",
+    "verify_run_404",
+    "rotate_probe_key",
+    "review_key_usage",
+    "install_environment_key",
+    "no_repository_or_org_fallback",
+    "protected_trusted_environment",
+    "authorize_twelve_pins",
+    "authorize_capability_policy",
+    "approve_literal_authorizations",
+    "approve_count_spending",
+    "approve_review_request_policy_v2",
+    "approve_artifact_retention",
+    "approve_engine_identity",
+    "approve_bootstrap_branch",
+)
+D2_PREREQUISITES = (*D1_PREREQUISITES, D2_ONLY_PREREQUISITE)
+
+
+class VerifiedOperatorRecordSet:
+    """The ONLY thing downstream accepts as operator authority.
+
+    A real Python type rather than a labelled dict, and that is the whole
+    point. The mandate's requirement is that "a branch-supplied class label
+    must never satisfy the check" — and a dict carrying
+    `authority_class: VERIFIED_...` satisfies any check that reads the label,
+    because writing that string is free. `isinstance` is not free: instances
+    come from `authenticate_record_set` and nowhere else, so a caller holding
+    only candidate data cannot manufacture one however carefully it copies the
+    shape.
+
+    Construction is deliberately not defensive about being called directly —
+    Python has no private constructors — but every field it carries was
+    produced by `LaneTrustedVerifier`, and the verifier is the thing that needs
+    the trust store. A caller that could construct this could also just read
+    the store."""
+
+    def __init__(self, *, records: dict, covered: tuple, verifier_identity: str,
+                 occurrence: dict, record_set_sha256: str):
+        self.records = records
+        self.covered = covered
+        self.verifier_identity = verifier_identity
+        self.occurrence = dict(occurrence)
+        self.record_set_sha256 = record_set_sha256
+
+    def require(self, prerequisite_key: str) -> dict:
+        """One authenticated record, by prerequisite key."""
+        if prerequisite_key not in self.records:
+            refuse(f"category=prerequisite_not_in_authenticated_set "
+                   f"key={prerequisite_key}")
+        return self.records[prerequisite_key]
+
+    def to_record(self) -> dict:
+        """A description for evidence. Not authority — reading this back does
+        not reconstruct the type, which is intentional."""
+        return {"authority_class": "VERIFIED_OPERATOR_RECORD_SET",
+                "verifier_identity": self.verifier_identity,
+                "covered": list(self.covered),
+                "record_set_sha256": self.record_set_sha256,
+                "occurrence": dict(self.occurrence),
+                "honest_scope": ("every record in this set had its digest "
+                                 "recomputed, its anchor verified against an "
+                                 "operator-supplied key, and its range "
+                                 "compared to this review")}
+
+
+def assert_authenticated(record_set, *, phase: str) -> VerifiedOperatorRecordSet:
+    """The gate every credential-bearing consumer must apply.
+
+    Replaces `countledger.authorize(operator_records=verify_records(...))`,
+    which consumed a result that reported `authorized: False` in its own
+    payload."""
+    if not isinstance(record_set, VerifiedOperatorRecordSet):
+        refuse("category=operator_authority_not_authenticated — this consumer "
+               "requires a VerifiedOperatorRecordSet produced by "
+               "trustedverifier.authenticate_record_set. A parsed claim set, "
+               "or any object merely labelled with a verified class, is "
+               "refused: `operatorrecord.verify_records` reports "
+               "`authorized: False` and was nonetheless being spent on")
+    expected = D2_PREREQUISITES if phase == "D2" else D1_PREREQUISITES
+    missing = [k for k in expected if k not in record_set.records]
+    if missing:
+        refuse(f"category=operator_prerequisites_outstanding phase={phase} "
+               f"missing={missing} — each is a record an operator must sign; "
+               "naming them is the difference between a blocked run and a "
+               "blocked run somebody can unblock")
+    return record_set
+
+
+def authenticate_record_set(claims, *, verifier: LaneTrustedVerifier,
+                            phase: str) -> VerifiedOperatorRecordSet:
+    """Authenticate a whole claim set, or refuse. The D1/D2 entry point.
+
+    Every claim goes through `LaneTrustedVerifier`, so every one gets its
+    digest recomputed, its anchor verified against the operator's key, its
+    range compared to this review, and its expiry and revocation checked. A
+    claim that fails any of those refuses the WHOLE set rather than being
+    skipped — a partially authenticated set is one where the missing record is
+    the interesting one."""
+    if not isinstance(claims, (list, tuple)) or not claims:
+        refuse("category=operator_claims_empty — an empty claim set covers no "
+               "prerequisite, and a set that covers nothing must not read as "
+               "one that covers everything")
+    expected = D2_PREREQUISITES if phase == "D2" else D1_PREREQUISITES
+    verified = {}
+    for index, claim in enumerate(claims):
+        if not isinstance(claim, dict):
+            refuse(f"category=operator_claim_not_an_object index={index}")
+        key = claim.get("prerequisite_key")
+        if not isinstance(key, str) or not key:
+            refuse(f"category=operator_claim_names_no_prerequisite index={index}")
+        if key not in expected:
+            refuse(f"category=operator_claim_unknown_prerequisite key={key!r} "
+                   f"— not one of the {len(expected)} this phase requires")
+        if key in verified:
+            refuse(f"category=operator_claim_duplicated key={key} — two "
+                   "authorizations for one prerequisite means one is stale and "
+                   "nothing here says which")
+        verified[key] = verifier.verify_pin_authorization(claim)
+
+    covered = tuple(sorted(verified))
+    blob = json.dumps(
+        {"covered": list(covered),
+         "digests": {k: v["verification"]["record_sha256"]
+                     for k, v in sorted(verified.items())}},
+        sort_keys=True, separators=(",", ":")).encode()
+    record_set = VerifiedOperatorRecordSet(
+        records=verified, covered=covered,
+        verifier_identity=verifier.verifier_identity,
+        occurrence=verifier._occurrence,
+        record_set_sha256=hashlib.sha256(
+            b"verified-operator-record-set-v1\x00" + blob).hexdigest())
+    return assert_authenticated(record_set, phase=phase)

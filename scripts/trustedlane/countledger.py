@@ -59,51 +59,34 @@ def new_ledger(*, repository_numeric_id: int, candidate_head_sha: str,
     }
 
 
-def authorize(*, operator_records: dict, expected_scope: str,
-              prerequisite_key: str = "approve_count_spending",
+def authorize(*, record_set, prerequisite_key: str = "approve_count_spending",
               key: str = "max_input_tokens") -> dict:
-    """Read the ceiling out of a verified operator record — never invent one.
+    """Read the ceiling out of an AUTHENTICATED record set — never invent one.
 
-    `operator_records` is the OUTPUT of `operatorrecord.verify_records`, so a
-    caller cannot reach this with a record set that was never checked.
+    Two things changed here, and both are removals.
 
-    **Occurrence-scoped.** The record's `scope` must name the exact occurrence
-    being reviewed. Operator records carried a scope field that nothing
-    compared against anything, which meant an approval to spend on reviewing
-    one commit silently authorized spending on another — and a push is exactly
-    how the thing being reviewed changes. The comparison is here because this
-    is where the authorization is actually consumed.
+    **The type is the authority.** This used to take the output of
+    `operatorrecord.verify_records`, whose own payload reports
+    `authorized: False`. It now requires a `VerifiedOperatorRecordSet`, an
+    instance of a real class produced only by
+    `trustedverifier.authenticate_record_set`. A dict carrying
+    `authority_class: VERIFIED_...` no longer satisfies it, because writing
+    that string is free and passing `isinstance` is not.
 
-    **Literal.** The ceiling must be an `exact_value`. A range, a default or a
-    formula is something the operator did not write down, and the whole point
-    of the literal rule is that the number in force is the number a human
-    typed."""
-    if not isinstance(operator_records, dict):
-        refuse("category=operator_records_not_a_verified_result")
-    parsed = operator_records.get("records")
-    if not isinstance(parsed, list):
-        refuse("category=operator_records_not_a_verified_result")
-    if not isinstance(expected_scope, str) or "@" not in expected_scope:
-        refuse("category=expected_scope_malformed — a scope names one "
-               "repository at one commit")
+    **The occurrence check is gone from here.** It used to compare a `scope`
+    string. `LaneTrustedVerifier.assert_binds_this_review` now compares
+    repository identity, target base, diff base and head against this review
+    for EVERY record in the set, before any of them is promoted — so repeating
+    a weaker version of that comparison in this function would be a second
+    implementation of a policy that already lives one layer up, which is
+    precisely the duplication the integration addendum forbids.
 
-    matching = [r for r in parsed if r.get("prerequisite_key") == prerequisite_key]
-    if not matching:
-        refuse(f"category=authorizing_record_absent key={prerequisite_key} — no "
-               "operator record covers this prerequisite, so nothing here was "
-               "approved by a human")
-    # verify_records already refuses duplicates, but this consumer does not get
-    # to assume that: if it ever stopped, silently taking the first would pick
-    # an authorization arbitrarily.
-    if len(matching) > 1:
-        refuse(f"category=authorizing_record_duplicated key={prerequisite_key}")
-    record = matching[0]
+    What remains is this function's actual job: find the record that carries
+    the spending literal, and refuse if the operator did not write one."""
+    from .trustedverifier import assert_authenticated
 
-    if record.get("scope") != expected_scope:
-        refuse(f"category=operator_record_scope_mismatch "
-               f"record_scope={record.get('scope')!r} expected={expected_scope!r} "
-               "— an approval to spend on reviewing one commit is not an "
-               "approval to spend on another")
+    assert_authenticated(record_set, phase="D1")
+    record = record_set.require(prerequisite_key)
 
     literals = record.get("exact_values")
     if not isinstance(literals, dict):
@@ -116,8 +99,9 @@ def authorize(*, operator_records: dict, expected_scope: str,
     if isinstance(ceiling, bool) or not isinstance(ceiling, int) or ceiling < 1:
         refuse(f"category=authorized_ceiling_not_a_positive_integer key={key}")
     return {"key": key, "authorized_input_tokens": ceiling,
-            "prerequisite_key": prerequisite_key, "scope": expected_scope,
-            "source": "OPERATOR_RECORD_EXACT_VALUE"}
+            "prerequisite_key": prerequisite_key,
+            "record_set_sha256": record_set.record_set_sha256,
+            "source": "AUTHENTICATED_OPERATOR_RECORD_EXACT_VALUE"}
 
 
 def preflight(ledger: dict, *, authorization: dict,

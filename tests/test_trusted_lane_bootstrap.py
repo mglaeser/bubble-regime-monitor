@@ -4733,6 +4733,35 @@ def _inert_fetch(*, destination, head_sha, target_base_sha):
             "full_history": True}
 
 
+
+def _signed_claim(prerequisite_key, *, exact_values=None, head=None, **over):
+    """One operator claim, genuinely signed by the test operator key."""
+    return _operator_pin_record(
+        prerequisite_key=prerequisite_key,
+        exact_values=exact_values or {},
+        **({"head_sha": head} if head else {}), **over)
+
+
+def _authenticated_claims(phase="D1", *, ceiling=10_000, omit=None,
+                          head=None):
+    """A complete, genuinely signed claim set for the phase.
+
+    Fifteen prerequisites for D1, sixteen for D2. Each is really signed with
+    the operator key, so `authenticate_record_set` verifies rather than
+    trusts."""
+    keys = (trustedverifier.D2_PREREQUISITES if phase == "D2"
+            else trustedverifier.D1_PREREQUISITES)
+    values = {"approve_count_spending": {"max_input_tokens": ceiling}}
+    return [_signed_claim(k, exact_values=values.get(k, {}), head=head)
+            for k in keys if k != omit]
+
+
+def _lane_verifier(observed_now="2026-08-01T00:00:00Z", revocations=()):
+    return trustedverifier.bind(
+        _stub_authority(), trust_store=_trust_store(), occurrence=_OCCURRENCE,
+        observed_now=observed_now, revocations=revocations)
+
+
 def _d1_unit(index=0, tokens=100):
     return {"unit_sha256": f"{index:064d}",
             "instructions": f"review unit {index}",
@@ -4746,10 +4775,8 @@ def _d1_kwargs(units=None, *, ceiling=10_000, publisher=None, opener=None,
     digests = [u["unit_sha256"] for u in units]
     base = dict(
         observations=_protected_observation(),
-        operator_records=[_operator_record(
-            prerequisite_key="approve_count_spending",
-            scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
-            exact_values={"max_input_tokens": ceiling})],
+        operator_claims=_authenticated_claims("D1", ceiling=ceiling),
+        lane_verifier=_lane_verifier(),
         engine_artifact={"path": None, "expected_sha256": "c" * 64,
                          "root": "/opt/engine", "search_path": []},
         candidate={"repository_numeric_id": REPOSITORY_NUMERIC_ID,
@@ -4858,16 +4885,17 @@ def test_d1_refuses_before_the_credential_when_the_repository_is_unprotected(
 
 def test_d1_refuses_when_the_operator_record_has_expired(d1_engine):
     with _refusal("operator_authorization_expired"):
-        d1runtime.run(**_d1_kwargs(observed_now="2027-01-01T00:00:00Z"))
+        d1runtime.run(**_d1_kwargs(
+            lane_verifier=_lane_verifier(observed_now="2027-01-01T00:00:00Z")))
 
 
 def test_d1_refuses_when_no_operator_wrote_a_ceiling(d1_engine):
     """A budget the code picked is a budget nobody approved."""
     with _refusal("authorized_ceiling_absent"):
-        d1runtime.run(**_d1_kwargs(operator_records=[_operator_record(
-            prerequisite_key="approve_count_spending",
-            scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
-            exact_values={"max_usd": 25})]))
+        d1runtime.run(**_d1_kwargs(operator_claims=[
+            _signed_claim(k, exact_values=({"max_usd": 25}
+                                           if k == "approve_count_spending" else {}))
+            for k in trustedverifier.D1_PREREQUISITES]))
 
 
 def test_d1_budget_is_global_not_per_request(d1_engine):
@@ -5133,19 +5161,26 @@ def test_a_generation_call_in_the_count_ledger_is_refused():
 
 
 def test_an_approval_for_one_commit_does_not_authorize_another():
-    """Operator records carried a scope that nothing compared against
-    anything, so an approval to spend on reviewing one commit silently
-    authorized spending on another — and a push is how the reviewed thing
-    changes."""
+    """An approval to spend on reviewing one commit must not authorize another,
+    and a push is how the reviewed thing changes. The comparison now lives in
+    `LaneTrustedVerifier`, which checks it for EVERY record before promoting
+    any of them, so it is driven through the authenticator."""
+    with _refusal("operator_record_is_for_a_different_review"):
+        trustedverifier.authenticate_record_set(
+            _authenticated_claims("D1", head=SHA_C),
+            verifier=_lane_verifier(), phase="D1")
+
+
+def test_a_parsed_record_set_cannot_authorize_spending():
+    """The type is the authority. `operatorrecord.verify_records` returns a
+    dict whose own payload says `authorized: False`, and `authorize` used to
+    spend on it."""
     verified = operatorrecord.verify_records(
         [_operator_record(prerequisite_key="approve_count_spending",
-                          scope=f"{CANONICAL_REPOSITORY}@{SHA_A}",
                           exact_values={"max_input_tokens": 100})],
         observed_now="2026-07-30T21:00:00Z")
-    with _refusal("operator_record_scope_mismatch"):
-        countledger.authorize(
-            operator_records=verified,
-            expected_scope=f"{CANONICAL_REPOSITORY}@{SHA_B}")
+    with _refusal("operator_authority_not_authenticated"):
+        countledger.authorize(record_set=verified)
 
 
 def test_the_parsed_operator_record_still_carries_its_literal():
@@ -5158,15 +5193,13 @@ def test_the_parsed_operator_record_still_carries_its_literal():
 
 @pytest.mark.parametrize("ceiling", [0, -5, True, "1000", 1.5])
 def test_a_ceiling_that_is_not_a_positive_integer_is_refused(ceiling):
-    verified = operatorrecord.verify_records(
-        [_operator_record(prerequisite_key="approve_count_spending",
-                          scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
-                          exact_values={"max_input_tokens": ceiling})],
-        observed_now="2026-07-30T21:00:00Z")
+    record_set = trustedverifier.authenticate_record_set(
+        [_signed_claim(k, exact_values=({"max_input_tokens": ceiling}
+                                        if k == "approve_count_spending" else {}))
+         for k in trustedverifier.D1_PREREQUISITES],
+        verifier=_lane_verifier(), phase="D1")
     with _refusal("authorized_ceiling_not_a_positive_integer"):
-        countledger.authorize(
-            operator_records=verified,
-            expected_scope=f"{CANONICAL_REPOSITORY}@{SHA_B}")
+        countledger.authorize(record_set=record_set)
 
 
 # ---- the engine artifact ---------------------------------------------------
@@ -5362,10 +5395,8 @@ def _d2_kwargs(units=None, *, publisher=None, opener=None, decision="approve",
                                     "custom_branch_policies": True},
                                 "allowed_branches": ["main"]},
             environment_name="trusted-verifier-generation"),
-        operator_records=[_operator_record(
-            prerequisite_key="approve_generation_separately",
-            scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
-            exact_values={"max_generation_calls": 10})],
+        operator_claims=_authenticated_claims("D2"),
+        lane_verifier=_lane_verifier(),
         engine_artifact={"path": None, "expected_sha256": "c" * 64,
                          "root": "/opt/engine", "search_path": []},
         candidate={"repository_numeric_id": REPOSITORY_NUMERIC_ID,
@@ -5400,19 +5431,16 @@ def test_d2_runs_end_to_end_and_produces_signed_execution_evidence(d1_engine):
 def test_d2_refuses_without_its_own_operator_approval(d1_engine):
     """An approval to count has never been an approval to generate, and D1's
     record does not carry over."""
-    with _refusal("generation_not_separately_approved"):
-        d2runtime.run(**_d2_kwargs(operator_records=[_operator_record(
-            prerequisite_key="approve_count_spending",
-            scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
-            exact_values={"max_input_tokens": 100})]))
+    # The whole D1 set, genuinely signed, with prerequisite 16 absent.
+    with _refusal("operator_prerequisites_outstanding"):
+        d2runtime.run(**_d2_kwargs(
+            operator_claims=_authenticated_claims("D1")))
 
 
 def test_d2_refuses_an_approval_scoped_to_a_different_commit(d1_engine):
-    with _refusal("generation_approval_scope_mismatch"):
-        d2runtime.run(**_d2_kwargs(operator_records=[_operator_record(
-            prerequisite_key="approve_generation_separately",
-            scope=f"{CANONICAL_REPOSITORY}@{SHA_A}",
-            exact_values={"max_generation_calls": 10})]))
+    with _refusal("operator_record_is_for_a_different_review"):
+        d2runtime.run(**_d2_kwargs(
+            operator_claims=_authenticated_claims("D2", head=SHA_C)))
 
 
 def test_d2_refuses_a_plan_that_is_not_the_one_d1_counted(d1_engine):
@@ -6325,3 +6353,171 @@ def test_binding_against_a_module_without_the_authority_vocabulary_is_refused():
         trustedverifier.bind(types.ModuleType("empty"), trust_store=_trust_store(),
                              occurrence=_OCCURRENCE, observed_now="2026-08-01T00:00:00Z",
                              revocations=[])
+
+
+# --------------------------------------------------------------------------
+# EX4-R01 wiring. The authenticator existed at 212b0c1 but D1/D2 still consumed
+# `operatorrecord.verify_records` — implemented, not wired. These are the
+# conditions the integration addendum sets for closing it.
+# --------------------------------------------------------------------------
+
+CREDENTIAL_BEARING_MODULES = ("d1runtime.py", "d2runtime.py", "d1cli.py",
+                              "d2cli.py", "countledger.py")
+
+
+@pytest.mark.parametrize("name", CREDENTIAL_BEARING_MODULES)
+def test_no_credential_bearing_module_uses_the_parsed_authority_path(name):
+    """The source guard. `operatorrecord.verify_records` reports
+    `authorized: False` in its own return payload; it is a claim PARSER. A
+    credential-bearing module that consults it as its authority decision is the
+    defect this finding names, and it must not come back by an innocent-looking
+    edit."""
+    tree = ast.parse((LANE_DIR / name).read_text(encoding="utf-8"))
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                called.add(func.attr)
+            elif isinstance(func, ast.Name):
+                called.add(func.id)
+    assert "verify_records" not in called, (
+        f"{name} calls verify_records, which authenticates nothing")
+
+
+@pytest.mark.parametrize("name", CREDENTIAL_BEARING_MODULES)
+def test_no_credential_bearing_module_imports_the_claim_parser(name):
+    """Stronger than the call check: importing it is how it gets called.
+
+    Checked by AST rather than by grepping the text. Both of these modules
+    MENTION `operatorrecord.verify_records` in a comment explaining why they no
+    longer use it, and a text scan flags that explanation — asking whether a
+    string appears rather than whether the module depends on it. The comment is
+    the record of the fix; removing it to satisfy a grep would delete the one
+    thing that stops the path being reintroduced by someone who never knew it
+    was wrong."""
+    imported = _imported_names(LANE_DIR / name)
+    offending = sorted(n for n in imported if n.endswith("operatorrecord"))
+    assert offending == [], f"{name} imports {offending}"
+    # A deferred import inside a function is still an import; `_imported_names`
+    # walks the whole tree, so this is covered by the assertion above.
+
+
+def test_the_authenticated_set_is_a_type_not_a_label():
+    """A branch-supplied class label must never satisfy the check. Writing
+    `authority_class: VERIFIED_...` is free; passing isinstance is not."""
+    impostor = {"authority_class": "VERIFIED_OPERATOR_RECORD_SET",
+                "records": {}, "covered": [], "executable_authority": True}
+    with _refusal("operator_authority_not_authenticated"):
+        trustedverifier.assert_authenticated(impostor, phase="D1")
+    with _refusal("operator_authority_not_authenticated"):
+        countledger.authorize(record_set=impostor)
+
+
+def test_d1_requires_all_fifteen_prerequisites():
+    assert len(trustedverifier.D1_PREREQUISITES) == 15
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        trustedverifier.authenticate_record_set(
+            _authenticated_claims("D1", omit="approve_engine_identity"),
+            verifier=_lane_verifier(), phase="D1")
+    assert "operator_prerequisites_outstanding" in excinfo.value.reason
+    # Named, not counted: "15 of 16" does not tell an operator what to sign.
+    assert "approve_engine_identity" in excinfo.value.reason
+
+
+def test_d2_requires_the_same_fifteen_plus_the_sixteenth():
+    assert len(trustedverifier.D2_PREREQUISITES) == 16
+    assert set(trustedverifier.D1_PREREQUISITES) < set(
+        trustedverifier.D2_PREREQUISITES)
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        trustedverifier.authenticate_record_set(
+            _authenticated_claims("D1"), verifier=_lane_verifier(), phase="D2")
+    assert "approve_generation_separately" in excinfo.value.reason
+
+
+def test_a_duplicated_prerequisite_is_refused():
+    claims = _authenticated_claims("D1")
+    with _refusal("operator_claim_duplicated"):
+        trustedverifier.authenticate_record_set(
+            [*claims, claims[0]], verifier=_lane_verifier(), phase="D1")
+
+
+def test_an_empty_claim_set_does_not_read_as_covering_everything():
+    with _refusal("operator_claims_empty"):
+        trustedverifier.authenticate_record_set(
+            [], verifier=_lane_verifier(), phase="D1")
+
+
+# ---- the acceptance condition: every invalid record -> zero attempts -------
+
+
+def _attempt_counting_opener(calls):
+    def opener(method, url, headers, body):
+        calls.append(url)
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": 10}).encode()
+    return opener
+
+
+@pytest.mark.parametrize("label,mutate", [
+    ("shaped but unsigned", lambda c: [{k: v for k, v in r.items()
+                                        if k != "external_anchor"} for r in c]),
+    ("signed by the wrong key",
+     lambda c: [_signed_claim(r["prerequisite_key"], key_hex=OTHER_KEY_HEX,
+                              exact_values=r.get("exact_values", {}))
+                for r in c]),
+    ("for a different head",
+     lambda c: [_signed_claim(r["prerequisite_key"], head=SHA_C,
+                              exact_values=r.get("exact_values", {}))
+                for r in c]),
+    ("pre-labelled verified",
+     lambda c: [dict(r, authority_class="VERIFIED_OPERATOR_PIN_AUTHORIZATION")
+                for r in c]),
+    ("one prerequisite absent", lambda c: c[:-1]),
+])
+def test_an_unauthenticated_record_causes_zero_provider_attempts(
+        d1_engine, label, mutate):
+    """The acceptance condition. Not 'refuses somewhere' — refuses BEFORE any
+    request reaches the transport, so nothing was spent finding out."""
+    calls = []
+    with pytest.raises(errors.LaneRefusal):
+        d1runtime.run(**_d1_kwargs(
+            operator_claims=mutate(_authenticated_claims("D1")),
+            opener=_attempt_counting_opener(calls)))
+    assert calls == [], f"{label}: {len(calls)} provider attempt(s) were made"
+
+
+@pytest.mark.parametrize("label,kwargs", [
+    ("expired", {"lane_verifier": None}),
+    ("revoked", {"lane_verifier": None}),
+])
+def test_a_stale_or_revoked_record_causes_zero_provider_attempts(
+        d1_engine, label, kwargs):
+    claims = _authenticated_claims("D1")
+    verifier = (_lane_verifier(observed_now="2027-01-01T00:00:00Z")
+                if label == "expired" else
+                _lane_verifier(revocations=[
+                    {"record_sha256": trustedverifier.record_digest(
+                        {k: v for k, v in claims[0].items()
+                         if k not in ("external_anchor", "pin_record_sha256")},
+                        label=PIN_LABEL)}]))
+    calls = []
+    with pytest.raises(errors.LaneRefusal):
+        d1runtime.run(**_d1_kwargs(operator_claims=claims,
+                                   lane_verifier=verifier,
+                                   opener=_attempt_counting_opener(calls)))
+    assert calls == [], f"{label}: {len(calls)} provider attempt(s)"
+
+
+def test_d2_without_prerequisite_sixteen_makes_zero_generation_attempts(
+        d1_engine):
+    calls = []
+
+    def opener(method, url, headers, body):
+        calls.append(url)
+        raise AssertionError("unreachable")
+
+    with _refusal("operator_prerequisites_outstanding"):
+        d2runtime.run(**_d2_kwargs(operator_claims=_authenticated_claims("D1"),
+                                   opener=opener))
+    assert calls == []

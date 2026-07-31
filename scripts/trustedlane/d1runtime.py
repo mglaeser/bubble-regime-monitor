@@ -66,11 +66,11 @@ from . import (
     countledger,
     enginepolicy,
     evidencewire,
-    operatorrecord,
     protectedstate,
     signing,
     statuspublish,
     transport,
+    trustedverifier,
 )
 from .errors import LaneRefusal, refuse
 
@@ -92,7 +92,8 @@ def _publish(publisher, request: dict, sink: list) -> dict:
     return request
 
 
-def run(*, observations: dict, operator_records, engine_artifact: dict,
+def run(*, observations: dict, operator_claims, lane_verifier,
+        engine_artifact: dict,
         candidate: dict, plan: dict, opener, credential: str, signing_key,
         publisher, trusted_run: dict, observed_now: str, produced_at: str,
         skeleton_rebuild, fetch, model: str) -> dict:
@@ -120,19 +121,26 @@ def run(*, observations: dict, operator_records, engine_artifact: dict,
     steps.append(("no_candidate_import", enginepolicy.assert_no_candidate_import(
         search_path=engine_artifact.get("search_path"))))
 
-    # 3. Did a human authorize this, recently, for this scope?
-    verified_records = operatorrecord.verify_records(
-        operator_records, observed_now=observed_now)
-    steps.append(("operator_records", verified_records))
+    # 3. Did a human authorize this, recently, for this occurrence?
+    #
+    #    AUTHENTICATED, not parsed. This used to be
+    #
+    #        verified_records = operatorrecord.verify_records(...)
+    #
+    #    whose own return payload says `authorized: False`: it checks shape,
+    #    anchor KIND, digest, scope syntax and expiry, and never checks that
+    #    the anchor exists or that anything is signed. A well-shaped
+    #    branch-written record authorized real spending. `authenticate_record_set`
+    #    puts every claim through `LaneTrustedVerifier`, which verifies the
+    #    anchor against a key the operator supplied out of band.
+    record_set = trustedverifier.authenticate_record_set(
+        operator_claims, verifier=lane_verifier, phase="D1")
+    steps.append(("operator_records", record_set.to_record()))
 
-    # 4. The exact number they wrote, for THIS occurrence. Scoped to the head:
-    #    an approval to spend on reviewing one commit is not an approval to
-    #    spend on another, and a push is how the reviewed thing changes.
-    from . import CANONICAL_REPOSITORY
-
-    authorization = countledger.authorize(
-        operator_records=verified_records,
-        expected_scope=f"{CANONICAL_REPOSITORY}@{candidate['candidate_head_sha']}")
+    # 4. The exact number they wrote, for THIS occurrence, out of a record set
+    #    whose TYPE is the authority — a dict wearing a verified label cannot
+    #    satisfy `assert_authenticated`.
+    authorization = countledger.authorize(record_set=record_set)
     steps.append(("authorization", authorization))
 
     # 5. Minted before anything is sent, so every request carries it.
