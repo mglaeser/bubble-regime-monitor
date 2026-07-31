@@ -6473,28 +6473,63 @@ def _literal_member(*, atom_id="atom-0001", occurrence_index=0,
 
 
 def _literal_set(members=None, *, expected_count=None, occurrence=None,
-                 declared_members=None, **over):
+                 declared_members=None, declared_subjects=None,
+                 scanner_policy=None, set_digest=None, **over):
     """The SET envelope of §5, binding sorted member self-hashes AND sorted
-    member subject digests AND the exact expected occurrence count."""
+    member subject digests AND the exact expected occurrence count.
+
+    The overrides exist so each of those bindings can be attacked SEPARATELY.
+    Without them the four checks mask one another — a wrong count also produces
+    a wrong set digest — and a mutation sweep reports three of the four as
+    unreachable when what is actually unreachable is the test."""
     members = (members if members is not None
                else [_literal_member(occurrence_index=0, occurrence=occurrence)])
     declared = declared_members if declared_members is not None else members
     self_hashes = sorted(m["candidate_claim_self_sha256"] for m in declared)
-    subjects = sorted(m["authorization_subject_sha256"] for m in declared)
+    subjects = sorted(declared_subjects if declared_subjects is not None
+                      else [m["authorization_subject_sha256"] for m in declared])
     count = expected_count if expected_count is not None else len(declared)
+    policy = scanner_policy or _scanner_policy()
     payload = {
         "expected_occurrence_count": count,
         "member_claim_self_sha256_in_order": self_hashes,
         "member_subject_sha256_in_order": subjects,
-        "literal_authorization_set_sha256": authzenvelope.literal_set_digest(
-            expected_occurrence_count=count,
-            member_claim_self_sha256_in_order=self_hashes,
-            member_subject_sha256_in_order=subjects,
-            scanner_policy_sha256=_scanner_policy()),
-        "scanner_policy_sha256": _scanner_policy(),
+        "literal_authorization_set_sha256":
+            set_digest or authzenvelope.literal_set_digest(
+                expected_occurrence_count=count,
+                member_claim_self_sha256_in_order=self_hashes,
+                member_subject_sha256_in_order=subjects,
+                scanner_policy_sha256=policy),
+        "scanner_policy_sha256": policy,
     }
     return _mint(authzenvelope.LITERAL_PREREQUISITE, typed_payload=payload,
                  occurrence=occurrence, member_envelopes=members, **over)
+
+
+def _engine_with(module_name, **attributes):
+    """The real engine with ONE candidate function replaced.
+
+    Used to drive the lane's own copies of checks the candidate package also
+    performs. Those copies are deliberate — a lane whose integrity check is
+    "the reviewed package said it was fine" has no integrity check — but while
+    the real validator runs first they are unreachable, and an unreachable
+    check is indistinguishable from an absent one until the candidate changes.
+    This makes them reachable so a mutation sweep can kill them."""
+    engine = _engine()
+    real = engine["modules"][module_name]
+    shim = types.ModuleType(module_name)
+    for name in dir(real):
+        if not name.startswith("__"):
+            setattr(shim, name, getattr(real, name))
+    for name, value in attributes.items():
+        setattr(shim, name, value)
+    return {**engine, "modules": {**engine["modules"], module_name: shim}}
+
+
+def _verifier_over(engine, **over):
+    return trustedverifier.bind(
+        engine, trust_store=_trust_store(), occurrence=_OCCURRENCE,
+        observed_now="2026-08-01T00:00:00Z", revocations=(), **over)
 
 
 def _verifier(*, observed_now="2026-08-01T00:00:00Z", revocations=(),
@@ -7138,6 +7173,365 @@ def test_an_already_authenticated_envelope_cannot_be_supplied_by_the_caller():
     with _refusal("pre_authenticated_envelope_supplied"):
         trustedverifier.authenticate_record_set(
             [verified], verifier=_lane_verifier(), phase="D1")
+
+
+# ---- the checks that only the mutation sweep could reach -------------------
+#
+# Eleven guards survived the first sweep. Not one of them was wrong; every one
+# was masked — either by another check that fires first, or by the candidate
+# package performing the same check before the lane's copy runs. A masked guard
+# and an absent guard are the same thing the day the mask moves, so each is
+# driven here on its own.
+
+
+def test_a_recorded_subject_digest_that_disagrees_is_refused():
+    """The MAC is verified against the RECOMPUTED subject, so a tampered
+    recorded subject changes nothing about whether the tag verifies. It still
+    has to be refused: the recorded value is what goes into evidence, and
+    evidence that disagrees with what was authenticated is worse than none."""
+    with _refusal("authorization_subject_digest_mismatch"):
+        _verifier().authenticate_typed(
+            _tampered(_mint("authorize_capability_policy"),
+                      "authorization_subject_sha256", "d" * 64),
+            prerequisite_key="authorize_capability_policy")
+
+
+def test_a_claim_citing_a_different_external_record_is_refused():
+    """The anchor is inside the claim's self-hash, so EDITING the reference
+    breaks the digest first. This builds the case the check is actually for: a
+    claim anchored to this envelope's header but citing a different external
+    record, both internally consistent."""
+    original = _pin_envelope()
+    header = original["header"]
+    claim = _pin_claim(authzenvelope.anchor_for(
+        original["envelope_header_sha256"],
+        anchor_reference="operator-record/a-different-decision"))
+    envelope = authzenvelope.seal(
+        header=header,
+        typed_payload=_typed_payload(authzenvelope.PIN_PREREQUISITE),
+        candidate_claim=claim,
+        candidate_claim_self_sha256=claim["pin_record_sha256"],
+        key=bytes.fromhex(OPERATOR_KEY_HEX), mac_key_id="op-1")
+    with _refusal("anchor_reference_mismatch"):
+        _verifier().verify_pin_authorization(envelope)
+
+
+def test_an_envelope_whose_header_names_a_different_claim_kind_is_refused():
+    """`claim_kind` decides which validator runs and which seam is reached. A
+    header naming one kind while the caller authenticates another is a request
+    to check the wrong thing."""
+    envelope = _mint("authorize_capability_policy",
+                     claim_kind=authzenvelope.PIN_CLAIM)
+    with _refusal("authorization_claim_kind_mismatch"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="authorize_capability_policy")
+
+
+def test_a_typed_payload_with_an_extra_field_is_refused():
+    """Closed both ways. A field the MAC covers and no check reads is where a
+    difference hides — and the operator authenticated it, so it looks
+    approved."""
+    envelope = _mint("authorize_capability_policy",
+                     typed_payload=_typed_payload("authorize_capability_policy",
+                                                  also_approve_generation=True))
+    with _refusal("typed_payload_unknown_fields"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="authorize_capability_policy")
+
+
+def test_the_lane_checks_the_claim_digest_even_if_the_engine_stops():
+    """`pins.validate_pin_authority` recomputes `pin_digest` itself, which
+    masks the lane's own recomputation. Run it against an engine whose
+    validator accepts everything: candidate code checking candidate integrity
+    is exactly what this whole slice exists to not depend on."""
+    engine = _engine_with("verifier.pins", validate_pin_authority=
+                          lambda record, model_ids: record)
+    envelope = _tampered(_pin_envelope(), "candidate_claim.operator_identity",
+                         "someone-else@example.invalid")
+    with _refusal("candidate_claim_self_hash_mismatch"):
+        _verifier_over(engine).verify_pin_authorization(envelope)
+
+
+def test_the_lane_requires_exact_literal_scope_even_if_the_engine_stops():
+    """Same shape, for `authority.assert_usable_for_real_call`. The candidate
+    already refuses a null atom or occurrence; the lane refuses it too, because
+    the atom-wide and file-wide fallbacks in the candidate lookup are only safe
+    while no promoted record can reach them."""
+    engine = _engine_with("verifier.authority",
+                          assert_usable_for_real_call=
+                          lambda record, *, where="": record)
+    promoted = _verifier().verify_literal_authorization(
+        _literal_member()).promoted
+    with _refusal("literal_authorization_scope_not_exact"):
+        trustedverifier.VerifiedLiteralAuthorizationSet(
+            [{**promoted, "occurrence_index": None}], engine=engine,
+            occurrence=_OCCURRENCE, expected_occurrence_count=1,
+            scanner_policy_sha256=_scanner_policy(), set_sha256="0" * 64)
+
+
+def test_an_approved_count_that_does_not_match_the_members_is_refused():
+    """The count, the member list, the subject list and the set digest are four
+    separate bindings, and a mismatch in one usually breaks the others too.
+    This one moves the count ALONE, with the digest recomputed to match, so the
+    count check is what refuses."""
+    members = [_literal_member(occurrence_index=0),
+               _literal_member(occurrence_index=1)]
+    with _refusal("literal_authorization_set_count_mismatch"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set(members, expected_count=3), verifier=_verifier())
+
+
+def test_a_literal_set_issued_under_a_different_scanner_policy_is_refused():
+    """A clearance issued under one pattern set does not clear findings
+    produced by another: the same bytes are a different STATEMENT when the
+    scanner that classified them changed."""
+    with _refusal("literal_authorization_scanner_policy_mismatch"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set(scanner_policy="7" * 64), verifier=_verifier())
+
+
+def test_a_set_whose_members_and_authorizations_disagree_is_refused():
+    """The self-hashes say WHICH claims; the subject digests say which
+    authorizations OF them. A set that matches on one and not the other is two
+    different approvals stapled together — and because both lists are inside
+    the operator's MAC, this is an internally inconsistent approval rather than
+    a tamper."""
+    with _refusal("literal_set_member_authorizations_do_not_match"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set(declared_subjects=["e" * 64]), verifier=_verifier())
+
+
+def test_a_set_digest_that_does_not_cover_the_approved_set_is_refused():
+    with _refusal("literal_authorization_set_digest_mismatch"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set(set_digest="f" * 64), verifier=_verifier())
+
+
+def test_a_verifier_module_from_outside_the_approved_engine_is_refused():
+    """The restated containment invariant. With an engine root supplied the
+    question is no longer "is anything named `verifier` loaded" — D1 must load
+    it — but "did it come from the approved artifact"."""
+    root = _ENGINE_CACHE["artifact"]["root"]
+    impostor = types.ModuleType("verifier.authority")
+    impostor.__file__ = "/somewhere/else/verifier/authority.py"
+    with _refusal("candidate_module_imported_from_outside_the_engine"):
+        enginepolicy.assert_no_candidate_import(
+            modules={"verifier.authority": impostor}, search_path=[],
+            engine_root=root)
+    # A module with no traceable origin is refused rather than assumed
+    # approved.
+    untraceable = types.ModuleType("verifier.authority")
+    with _refusal("candidate_module_origin_unknown"):
+        enginepolicy.assert_no_candidate_import(
+            modules={"verifier.authority": untraceable}, search_path=[],
+            engine_root=root)
+    # And an "approved root" inside the candidate checkout approves nothing.
+    with _refusal("engine_from_candidate_checkout"):
+        enginepolicy.assert_no_candidate_import(
+            modules={}, search_path=[],
+            engine_root=os.path.join("/work", "scripts", "verifier"))
+
+
+# ---- what no single envelope can check about itself -----------------------
+
+
+def test_pins_approved_for_a_different_model_panel_block():
+    """EX4-R03/R14 arriving by a different road. The PIN claim validates
+    perfectly against a one-model list — `validate_pins` only requires the
+    reasoning-effort map to MATCH the model ids it is given — so a genuinely
+    authenticated approval would have authorized a single-model review."""
+    solo = ["gpt-5.6-sol"]
+    envelope = _pin_envelope(
+        model_ids=solo,
+        pins={**_valid_pins(),
+              "VERIFIER_REASONING_EFFORT_BY_MODEL": {"gpt-5.6-sol": "high"}},
+        typed_payload=_typed_payload(authzenvelope.PIN_PREREQUISITE,
+                                     model_ids=solo))
+    # Individually authentic: the envelope verifies on its own.
+    assert _verifier().verify_pin_authorization(envelope).promoted[
+        "authority_class"] == "VERIFIED_OPERATOR_PIN_AUTHORIZATION"
+    # It is the SET that knows the panel is governed policy.
+    claims = [envelope if e["header"]["prerequisite_key"]
+              == authzenvelope.PIN_PREREQUISITE else e
+              for e in _authenticated_claims("D1")]
+    with _refusal("pin_authorization_names_a_different_model_panel"):
+        trustedverifier.authenticate_record_set(
+            claims, verifier=_lane_verifier(), phase="D1")
+
+
+def test_two_digests_for_one_capability_policy_block():
+    """"The capability policy" appears in two envelopes. Two digests for one
+    thing is how the two copies end up disagreeing."""
+    claims = [_mint("authorize_capability_policy",
+                    typed_payload=_typed_payload("authorize_capability_policy",
+                                                 capability_policy_sha256="1" * 64))
+              if e["header"]["prerequisite_key"] == "authorize_capability_policy"
+              else e
+              for e in _authenticated_claims("D1")]
+    with _refusal("capability_policy_digest_disagrees_across_authorizations"):
+        trustedverifier.authenticate_record_set(
+            claims, verifier=_lane_verifier(), phase="D1")
+
+
+def test_deleting_one_run_and_observing_another_blocks():
+    """Two halves of one fact. Different run ids means run A was deleted and
+    run B answers 404, which proves neither."""
+    claims = [_mint("verify_run_404",
+                    typed_payload=_typed_payload("verify_run_404",
+                                                 run_id=30214247763))
+              if e["header"]["prerequisite_key"] == "verify_run_404" else e
+              for e in _authenticated_claims("D1")]
+    with _refusal("run_deletion_and_observation_name_different_runs"):
+        trustedverifier.authenticate_record_set(
+            claims, verifier=_lane_verifier(), phase="D1")
+
+
+@pytest.mark.parametrize("field", ["authorized_target_base_sha",
+                                   "authorized_diff_base_sha",
+                                   "authorized_head_sha"])
+def test_a_payload_range_that_disagrees_with_its_own_header_blocks(field):
+    """A schema cannot say "and it must be the same range". The payload
+    restates what the header binds, so the restatement is compared."""
+    envelope = _mint("approve_count_spending",
+                     typed_payload=_typed_payload("approve_count_spending",
+                                                  **{field: SHA_C}))
+    with _refusal("typed_payload_range_disagrees_with_header"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="approve_count_spending")
+
+
+def test_a_payload_repository_that_disagrees_with_its_own_header_blocks():
+    envelope = _mint("delete_failed_run",
+                     typed_payload=_typed_payload("delete_failed_run",
+                                                  repository_numeric_id=42))
+    with _refusal("typed_payload_repository_disagrees_with_header"):
+        _verifier().authenticate_typed(envelope,
+                                       prerequisite_key="delete_failed_run")
+
+
+def test_a_key_usage_window_that_ends_before_it_starts_blocks():
+    envelope = _mint("review_key_usage",
+                     typed_payload=_typed_payload(
+                         "review_key_usage",
+                         usage_window_start="2026-06-30T00:00:00Z",
+                         usage_window_end="2026-05-01T00:00:00Z"))
+    with _refusal("timestamps_out_of_order"):
+        _verifier().authenticate_typed(envelope,
+                                       prerequisite_key="review_key_usage")
+
+
+def test_a_signed_but_malformed_policy_digest_block_is_refused():
+    """`policy_digests` is inside the MAC, which makes it tamper-EVIDENT and
+    not well-formed. A signed field nothing validates is a place to put
+    arbitrary structure."""
+    with _refusal("typed_payload_field_not_sha256"):
+        _verifier().authenticate_typed(
+            _mint("authorize_capability_policy",
+                  policy_digests={"review_request_policy": "not-a-digest"}),
+            prerequisite_key="authorize_capability_policy")
+    with _refusal("authorization_policy_digests_not_an_object"):
+        _verifier().authenticate_typed(
+            _tampered(_mint("authorize_capability_policy"),
+                      "header.policy_digests", []),
+            prerequisite_key="authorize_capability_policy")
+
+
+def test_an_envelope_that_disagrees_with_its_own_header_schema_is_refused():
+    """Two places record the schema, so they can disagree. An unknown version
+    on the ENVELOPE is refused outright; a header that names a different one
+    from the envelope wrapping it is refused as the disagreement it is, before
+    any digest is recomputed over bytes whose meaning is in dispute."""
+    with _refusal("authorization_envelope_schema_unknown"):
+        _verifier().authenticate_typed(
+            _tampered(_mint("authorize_capability_policy"), "schema_version",
+                      "operator-authorization-envelope-v0"),
+            prerequisite_key="authorize_capability_policy")
+    with _refusal("authorization_envelope_schema_version_disagrees"):
+        _verifier().authenticate_typed(
+            _tampered(_mint("authorize_capability_policy"),
+                      "header.schema_version",
+                      "operator-authorization-envelope-v0"),
+            prerequisite_key="authorize_capability_policy")
+
+
+def test_members_on_an_envelope_that_does_not_bind_them_are_refused():
+    """`member_envelopes` is outside the header, so it is outside the MAC. A
+    literal SET binds its members by digest through the typed payload; every
+    other kind reads the field not at all, and a field the schema permits and
+    no check reads is where a difference hides."""
+    envelope = dict(_mint("authorize_capability_policy"),
+                    member_envelopes=[_literal_member()])
+    with _refusal("authorization_envelope_carries_unread_members"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="authorize_capability_policy")
+
+
+@pytest.mark.parametrize("field", sorted(authzenvelope.ENVELOPE_FIELDS))
+def test_the_envelope_field_set_is_closed_both_ways(field):
+    envelope = _mint("authorize_capability_policy")
+    with _refusal("authorization_envelope_incomplete"):
+        _verifier().authenticate_typed(
+            {k: v for k, v in envelope.items() if k != field},
+            prerequisite_key="authorize_capability_policy")
+    with _refusal("authorization_envelope_unknown_fields"):
+        _verifier().authenticate_typed(
+            dict(envelope, extra_field="anything"),
+            prerequisite_key="authorize_capability_policy")
+
+
+# ---- the acceptance condition, over the envelope refusals ------------------
+
+
+@pytest.mark.parametrize("label,mutate", [
+    ("tampered header",
+     lambda c: [_tampered(e, "header.expires_at", "2099-01-01T00:00:00Z")
+                for e in c]),
+    ("tampered typed payload",
+     lambda c: [_tampered(e, "typed_payload.max_input_tokens", 10 ** 9)
+                if e["header"]["prerequisite_key"] == "approve_count_spending"
+                else e for e in c]),
+    ("borrowed mac key id",
+     lambda c: [_tampered(e, "authenticator.mac_key_id", "not-the-operator")
+                for e in c]),
+    ("pins for a one-model panel",
+     lambda c: [_pin_envelope(
+         model_ids=["gpt-5.6-sol"],
+         pins={**_valid_pins(),
+               "VERIFIER_REASONING_EFFORT_BY_MODEL": {"gpt-5.6-sol": "high"}},
+         typed_payload=_typed_payload(authzenvelope.PIN_PREREQUISITE,
+                                      model_ids=["gpt-5.6-sol"]))
+         if e["header"]["prerequisite_key"] == authzenvelope.PIN_PREREQUISITE
+         else e for e in c]),
+    ("a literal set that approves a different occurrence",
+     lambda c: [_literal_set([_literal_member(occurrence_index=2)],
+                             declared_members=[_literal_member(
+                                 occurrence_index=5)])
+                if e["header"]["prerequisite_key"]
+                == authzenvelope.LITERAL_PREREQUISITE else e for e in c]),
+])
+def test_every_envelope_refusal_makes_zero_provider_attempts(d1_engine, label,
+                                                             mutate):
+    """§7's condition on every one of the twenty-three: not "refuses
+    somewhere", but refuses before any request reaches the transport, so
+    nothing was spent finding out.
+
+    Count and generation are asserted separately because they are separately
+    approved: D1 must make zero of both, and a run that generated nothing while
+    counting something has still spent money nobody authorized."""
+    count_calls, generation_calls = [], []
+
+    def opener(method, url, headers, body):
+        (generation_calls if url.endswith("/responses") else count_calls
+         ).append(url)
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": 10}).encode()
+
+    with pytest.raises(errors.LaneRefusal):
+        d1runtime.run(**_d1_kwargs(
+            operator_claims=mutate(_authenticated_claims("D1")),
+            opener=opener))
+    assert count_calls == [], f"{label}: {len(count_calls)} count attempt(s)"
+    assert generation_calls == [], f"{label}: generation attempt(s)"
 
 
 def test_the_envelope_evidence_record_is_inert():

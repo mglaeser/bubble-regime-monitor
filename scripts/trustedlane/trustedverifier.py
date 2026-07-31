@@ -48,6 +48,7 @@ import hashlib
 import json
 
 from . import authzenvelope as envelopes
+from . import enginebridge
 from .errors import refuse
 
 #: Re-exported so callers (and the workflow templates) have one import for the
@@ -233,17 +234,22 @@ def _assert_payload_binds_claim(payload: dict, *, claim: dict,
 class LaneTrustedVerifier:
     """The protected-side `authority.TrustedVerifier`.
 
-    Deliberately NOT a subclass at import time: `verifier.authority` lives in
-    the candidate package, which reaches this process only inside the approved
-    engine artifact. Subclassing at module scope would make importing
-    `trustedlane` require the candidate package to be present, which is exactly
-    backwards. `bind(engine, ...)` performs the registration once the artifact
-    is loaded.
+    Deliberately NOT a subclass: `verifier.authority` lives in the candidate
+    package, which reaches this process only inside the approved engine
+    artifact, so subclassing at module scope would make importing `trustedlane`
+    require the candidate package to be present — exactly backwards. `bind`
+    checks that the loaded artifact carries the vocabulary this class assigns;
+    it registers nothing, and saying otherwise would be a docstring describing
+    a step that does not happen.
 
-    The three methods take an ENVELOPE, not a bare record. That is the change
-    the four candidate-schema mismatches forced: a bare candidate claim carries
-    no prerequisite key, no diff base, no expiry and no repository numeric id,
-    so a verifier handed one has nothing to compare against this review."""
+    The three methods take an ENVELOPE, not a bare record, so this class does
+    NOT satisfy `authority.TrustedVerifier`'s signature and must never be
+    passed to `promote_*` directly. That is the change the four
+    candidate-schema mismatches forced: a bare candidate claim carries no
+    prerequisite key, no diff base, no expiry and no repository numeric id, so
+    a verifier handed one has nothing to compare against this review. `_promote`
+    builds a one-shot adapter that does satisfy the candidate interface, after
+    the envelope has already been authenticated."""
 
     verifier_identity = "TRUSTED_LANE_OPERATOR_VERIFIER_V1"
 
@@ -788,6 +794,51 @@ def _validator_for(prerequisite_key: str):
     return "typed"
 
 
+def _assert_the_set_is_internally_consistent(verified: dict, *,
+                                             verifier) -> None:
+    """What no single envelope can check about itself.
+
+    Each envelope is individually authentic long before this runs. These are the
+    questions that only exist ACROSS envelopes, and every one of them is a way
+    for sixteen individually valid approvals to add up to an approval of
+    something else:
+
+    * the twelve PINs are approved for a MODEL PANEL, and the panel is governed
+      policy. An operator handed a PIN claim naming one model would authenticate
+      perfectly and authorize a single-model review — EX4-R03/R14, arriving by a
+      different road;
+    * "the capability policy" appears in two envelopes. Two digests for one
+      thing is how the two copies end up disagreeing;
+    * `delete_failed_run` and `verify_run_404` are two halves of one fact.
+      Different run ids in them means run A was deleted and run B answers 404.
+    """
+    panel = tuple(enginebridge.model_panel(verifier._engine))
+    pin = verified.get(PIN_PREREQUISITE)
+    if pin is not None:
+        approved = tuple(pin.require_typed("model_ids"))
+        if approved != tuple(sorted(panel)):
+            refuse(f"category=pin_authorization_names_a_different_model_panel "
+                   f"approved={list(approved)} governed={sorted(panel)} — the "
+                   "panel is governed policy, and PINs approved for one panel "
+                   "do not authorize a review by another")
+        capability = verified.get("authorize_capability_policy")
+        if capability is not None and pin.require_typed(
+                "capability_policy_sha256") != capability.require_typed(
+                    "capability_policy_sha256"):
+            refuse("category=capability_policy_digest_disagrees_across_"
+                   "authorizations — the PINs were validated against one "
+                   "capability policy and another was separately approved")
+
+    deletion = verified.get("delete_failed_run")
+    observation = verified.get("verify_run_404")
+    if deletion is not None and observation is not None:
+        if deletion.require_typed("run_id") != observation.require_typed(
+                "run_id"):
+            refuse("category=run_deletion_and_observation_name_different_runs "
+                   "— one run was deleted and a different one was observed "
+                   "returning 404, which proves neither")
+
+
 def authenticate_record_set(claims, *, verifier: LaneTrustedVerifier,
                             phase: str) -> VerifiedOperatorRecordSet:
     """Authenticate a whole envelope set, or refuse. The D1/D2 entry point.
@@ -835,6 +886,8 @@ def authenticate_record_set(claims, *, verifier: LaneTrustedVerifier,
         else:
             verified[key] = verifier.authenticate_typed(envelope,
                                                         prerequisite_key=key)
+
+    _assert_the_set_is_internally_consistent(verified, verifier=verifier)
 
     covered = tuple(sorted(verified))
     blob = json.dumps(

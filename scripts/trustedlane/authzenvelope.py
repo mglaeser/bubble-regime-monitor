@@ -63,7 +63,7 @@ import hmac
 import json
 import re
 
-from .errors import LaneRefusal, refuse
+from .errors import refuse
 from .instants import assert_ordered, is_expired, parse_instant, utc_iso
 
 ENVELOPE_SCHEMA_VERSION = "operator-authorization-envelope-v1"
@@ -239,23 +239,6 @@ def _exactly(expected):
                    f"expected={expected!r} observed={value!r} — a valid MAC "
                    "over the wrong evidence is still the wrong evidence")
         return value
-    return check
-
-
-def _one_of(*checks):
-    """A field satisfying ANY of several kinds.
-
-    `LaneRefusal` only — a `TypeError` from a mis-written check is a bug in
-    this module and must surface, not be swallowed as "that alternative did
-    not match"."""
-    def check(value, *, where):
-        for candidate in checks:
-            try:
-                return candidate(value, where=where)
-            except LaneRefusal:
-                continue
-        refuse(f"category=typed_payload_field_matches_no_permitted_kind "
-               f"field={where}")
     return check
 
 
@@ -627,6 +610,20 @@ def assert_envelope_shape(envelope) -> dict:
         refuse(f"category=authenticator_algorithm_not_permitted "
                f"algorithm={authenticator['authenticator_algorithm']!r} "
                f"permitted={AUTHENTICATOR_ALGORITHM}")
+    # `policy_digests` is inside the header digest and therefore inside the MAC,
+    # which makes it tamper-evident and not well-formed. A signed field nothing
+    # validates is a place to put arbitrary structure, so its shape is checked
+    # here rather than assumed from the fact that it was authenticated.
+    digests = header["policy_digests"]
+    if not isinstance(digests, dict):
+        refuse("category=authorization_policy_digests_not_an_object")
+    for name, value in sorted(digests.items()):
+        if not isinstance(name, str) or not name:
+            refuse("category=authorization_policy_digest_name_malformed")
+        _sha256_hex(value, where=f"policy_digests.{name}")
+    if envelope["schema_version"] != header["schema_version"]:
+        refuse("category=authorization_envelope_schema_version_disagrees "
+               "— the envelope and its own header claim different schemas")
     return header
 
 
@@ -653,6 +650,33 @@ def assert_typed_payload(payload, *, schema: dict, where: str) -> str:
     return typed_payload_digest(payload)
 
 
+#: Payload fields that RESTATE something the header already binds. A schema
+#: cannot express "and it must be the same range" — so the restatement is
+#: compared rather than trusted. Without this a correctly authenticated
+#: `approve_count_spending` could name range X in its payload while its header
+#: named range Y, and each half would look right to whichever check read it.
+RANGE_ECHO_FIELDS = (
+    ("authorized_target_base_sha", "target_base_sha"),
+    ("authorized_diff_base_sha", "diff_base_sha"),
+    ("authorized_head_sha", "head_sha"),
+)
+
+
+def _assert_payload_agrees_with_header(payload: dict, *, header: dict) -> None:
+    mismatched = sorted(field for field, header_field in RANGE_ECHO_FIELDS
+                        if field in payload
+                        and payload[field] != header[header_field])
+    if mismatched:
+        refuse(f"category=typed_payload_range_disagrees_with_header "
+               f"fields={mismatched} — the payload the operator authenticated "
+               "names a different range than the envelope authorizes, and "
+               "nothing here says which one they meant")
+    if ("repository_numeric_id" in payload
+            and payload["repository_numeric_id"] != header[
+                "repository_numeric_id"]):
+        refuse("category=typed_payload_repository_disagrees_with_header")
+
+
 def _assert_rotation_is_complete(payload: dict) -> None:
     """`rotate_probe_key` has a genuine either/or: the key was replaced, or it
     was deleted outright. Neither being true is the state where nothing
@@ -667,6 +691,20 @@ def _assert_rotation_is_complete(payload: dict) -> None:
         refuse("category=probe_key_both_replaced_and_deleted — two "
                "incompatible dispositions in one record leaves the actual "
                "state of the key unstated")
+
+
+def _assert_usage_window_is_ordered(payload: dict) -> None:
+    assert_ordered(earlier=payload["usage_window_start"],
+                   later=payload["usage_window_end"],
+                   earlier_field="usage_window_start",
+                   later_field="usage_window_end")
+
+
+#: Per-prerequisite semantic checks a field schema cannot express.
+SEMANTIC_CHECKS = {
+    "rotate_probe_key": _assert_rotation_is_complete,
+    "review_key_usage": _assert_usage_window_is_ordered,
+}
 
 
 def assert_anchor_matches_header(anchor, *, header: dict,
@@ -845,6 +883,14 @@ def authenticate_envelope(envelope, *, prerequisite_key: str, occurrence: dict,
     package, so it imports and tests without one."""
     header = assert_envelope_shape(envelope)
     expected_kind = claim_kind or claim_kind_for(prerequisite_key)
+    # `member_envelopes` is NOT inside the header, so it is not inside the MAC.
+    # For a literal SET that is fine — the members are bound by digest through
+    # the typed payload — but for every other kind nothing reads the field, and
+    # a field the schema permits and no check reads is where a difference hides.
+    if expected_kind != LITERAL_CLAIM_SET and envelope["member_envelopes"]:
+        refuse(f"category=authorization_envelope_carries_unread_members "
+               f"kind={expected_kind} count={len(envelope['member_envelopes'])} "
+               "— only a literal set binds members, and it binds them by digest")
     if header["prerequisite_key"] != prerequisite_key:
         refuse(f"category=authorization_prerequisite_mismatch "
                f"header={header['prerequisite_key']!r} "
@@ -859,8 +905,11 @@ def authenticate_envelope(envelope, *, prerequisite_key: str, occurrence: dict,
         prerequisite_key]
     payload_digest = assert_typed_payload(payload, schema=schema,
                                           where=f"{where}:{prerequisite_key}")
-    if prerequisite_key == "rotate_probe_key":
-        _assert_rotation_is_complete(payload)
+    semantic = SEMANTIC_CHECKS.get(prerequisite_key)
+    if semantic is not None and schema is TYPED_PAYLOAD_SCHEMAS.get(
+            prerequisite_key):
+        semantic(payload)
+    _assert_payload_agrees_with_header(payload, header=header)
     if payload_digest != header["typed_payload_sha256"]:
         refuse("category=typed_payload_digest_mismatch — the header binds a "
                "different payload than the one supplied, so the evidence the "
