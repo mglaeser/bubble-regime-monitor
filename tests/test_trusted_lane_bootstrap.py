@@ -8544,3 +8544,54 @@ def test_the_trust_store_is_an_environment_secret_in_both_templates():
         # secret gate exists to forbid.
         assert "vars.TRUSTED_OPERATOR_TRUST_STORE" not in text
         assert "|| secrets.TRUSTED_OPERATOR_TRUST_STORE" not in text
+
+
+# --------------------------------------------------------------------------
+# EX4-R11 — readiness before the credential, in the CLI as well as the runtime.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("module_name", ["d1cli", "d2cli"])
+def test_the_cli_establishes_readiness_before_obtaining_any_capability(
+        module_name):
+    """`run` asserting protected state as step 1 was true and did not help.
+
+    The CLI read the credential three lines above the observation, so a run on
+    an unprotected ref pulled the provider key into the process and only then
+    asked whether a key was allowed to be there. By the time step 1 refused,
+    the secret was in the environment of a process the refusal does not unwind.
+
+    Checked by AST over statement ORDER, not by reading the source: the point
+    is which call happens first, and a comment saying so is not the check."""
+    module = {"d1cli": d1cli, "d2cli": d2cli}[module_name]
+    tree = ast.parse((LANE_DIR / f"{module_name}.py").read_text(
+        encoding="utf-8"))
+    function = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+
+    order = []
+    for index, statement in enumerate(function.body):
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "attr", getattr(node.func, "id", ""))
+                if name in ("assert_ready_for_credential", "read_credential",
+                            "open_https", "read_signing_key",
+                            "load_trust_store"):
+                    order.append((index, name))
+    names = [name for _index, name in order]
+    assert "assert_ready_for_credential" in names, (
+        f"{module_name}.main never establishes readiness itself")
+    readiness = names.index("assert_ready_for_credential")
+    for capability in ("read_credential", "open_https", "read_signing_key",
+                       "load_trust_store"):
+        if capability in names:
+            assert names.index(capability) > readiness, (
+                f"{module_name}.main obtains {capability} before protected "
+                "state is established")
+    # And the runtime still asserts it: the CLI having checked is not
+    # something `run` may depend on, because `run` takes the capabilities as
+    # parameters and a different caller could supply them unchecked.
+    runtime = {"d1cli": "d1runtime.py", "d2cli": "d2runtime.py"}[module_name]
+    assert "assert_ready_for_credential" in (
+        LANE_DIR / runtime).read_text(encoding="utf-8")
+    assert module.REQUIRED_ENV

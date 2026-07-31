@@ -42,6 +42,7 @@ from . import (
     d1runtime,
     enginebridge,
     phases,
+    protectedstate,
     signing,
     statuspublish,
     transport,
@@ -141,12 +142,25 @@ def main(environ=None) -> dict:
     phases.assert_phase_permitted(phases.D1)
 
     values = read_environment(environ)
+    # EX4-R11. The credential used to be read HERE, above the protected-state
+    # observation — so a run on an unprotected ref pulled the provider key into
+    # the process and only THEN asked whether a key was allowed to be there.
+    # `run` asserts readiness as its first step, which was true and did not
+    # help: by the time step 1 refused, the secret was already in the
+    # environment of a process the refusal does not unwind.
+    #
+    # Readiness is now established before any capability is obtained. `run`
+    # still asserts it — that is not redundant, because `run` takes the
+    # capabilities as parameters and must not depend on its caller having
+    # checked.
+    observations = load_json_document(values["TRUSTED_OBSERVATION_PATH"],
+                                      field="protected_state_observation")
+    protectedstate.assert_ready_for_credential(**observations)
+
     credential = transport.read_credential(phase=phases.D1)
     opener = transport.open_https(phase=phases.D1)
     signing_key = signing.read_signing_key(phase=phases.D1)
 
-    observations = load_json_document(values["TRUSTED_OBSERVATION_PATH"],
-                                      field="protected_state_observation")
     operator_records = load_json_document(
         values["TRUSTED_OPERATOR_RECORDS_PATH"], field="operator_records")
     engine = load_engine(engine_root=values["TRUSTED_ENGINE_ROOT"])

@@ -23,6 +23,7 @@ from . import (
     d2runtime,
     enginebridge,
     phases,
+    protectedstate,
     signing,
     statuspublish,
     transport,
@@ -80,6 +81,21 @@ def main(environ=None) -> dict:
     phases.assert_phase_permitted(phases.D2)
 
     values = read_environment(environ)
+    # EX4-R11. The credential used to be read HERE, above the protected-state
+    # observation — so a run on an unprotected ref pulled the provider key into
+    # the process and only THEN asked whether a key was allowed to be there.
+    # `d2runtime.run` asserts readiness as its first step, which was true and did not
+    # help: by the time step 1 refused, the secret was already in the
+    # environment of a process the refusal does not unwind.
+    #
+    # Readiness is now established before any capability is obtained. `d2runtime.run`
+    # still asserts it — that is not redundant, because `d2runtime.run` takes the
+    # capabilities as parameters and must not depend on its caller having
+    # checked.
+    observations = load_json_document(values["TRUSTED_OBSERVATION_PATH"],
+                                      field="protected_state_observation")
+    protectedstate.assert_ready_for_credential(**observations)
+
     credential = transport.read_credential(phase=phases.D2)
     # The GENERATION bound, not the count lane's. A generation body is orders
     # of magnitude larger than a token count, and reading it through the count
@@ -102,8 +118,7 @@ def main(environ=None) -> dict:
                                        field="revocation_list"))
 
     return d2runtime.run(
-        observations=load_json_document(values["TRUSTED_OBSERVATION_PATH"],
-                                        field="protected_state_observation"),
+        observations=observations,
         operator_claims=load_json_document(
             values["TRUSTED_OPERATOR_RECORDS_PATH"], field="operator_records"),
         lane_verifier=lane_verifier,
