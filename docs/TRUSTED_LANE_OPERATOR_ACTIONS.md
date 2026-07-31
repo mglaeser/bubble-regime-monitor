@@ -160,6 +160,22 @@ Fifteen of the sixteen are attestations that an operator performed an action in
 a console this repository cannot see. The lane stores them, gates on them, and
 reports them as `attested`, never as `verified`.
 
+## V-TRUST is two facts, not one
+
+Reporting "V-TRUST closed" as a single state conflates a defect that is fixed
+with an authority that does not exist yet.
+
+| machine fact | state |
+|---|---|
+| `pr_controlled_provider_credential_exposure` | **CLOSED** — no live workflow injects a provider credential into a job running PR-controlled code, and `livepolicy` refuses any that tries |
+| `candidate_self_authentication` | **CLOSED** by refusal design — candidate code cannot promote its own evidence |
+| `trusted_review_authority` | **INACTIVE_OPEN_BLOCKING** — D1/D2 are inert templates; no count and no generation has ever run |
+| `precursor_trusted_evidence` | **ABSENT** |
+| `precursor_merge_trust_gate` | **OPEN_BLOCKING** |
+
+The inactive `independent-verify-inactive` success is **not a review**. It is a
+job reporting a documented residual, and it casts zero votes.
+
 ## Current state
 
 | Item | State |

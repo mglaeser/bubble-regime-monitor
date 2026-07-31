@@ -58,6 +58,7 @@ from trustedlane import (  # noqa: E402
     prerequisites,
     protectedstate,
     statusnames,
+    statuspublish,
     workflowfile,
     workflowpolicy,
 )
@@ -3484,3 +3485,183 @@ def test_r08_ordinary_contexts_do_not_need_a_pinned_publisher():
     pin on `test (3.12)` would be friction with no threat behind it."""
     assert protectedstate.assert_ready_for_credential(
         **_readiness())["credential_may_be_reachable"] is True
+
+
+# --------------------------------------------------------------------------
+# EX3-R02 — the trusted status must land on the CANDIDATE head.
+#
+# D1/D2 run from the protected ref via workflow_dispatch, and a dispatched
+# run's job checks attach to the dispatched ref's commit — main. Branch
+# protection on the PR needs a status on the candidate head. Different commits.
+# Reserving a job name on main satisfies nothing; the PR would wait forever for
+# a check that lands somewhere else.
+# --------------------------------------------------------------------------
+
+_CANDIDATE_SHA = SHA_B
+_EVIDENCE = "e" * 64
+
+
+def _status(**overrides):
+    base = dict(repository_numeric_id=REPOSITORY_NUMERIC_ID,
+                candidate_head_sha=_CANDIDATE_SHA,
+                context="trusted-verifier-count", state="pending",
+                description="counting", trusted_run_id=42,
+                trusted_run_attempt=1,
+                target_url="https://github.invalid/evidence")
+    base.update(overrides)
+    return statuspublish.status_request(**base)
+
+
+def test_r02_pending_must_exist_before_any_terminal_status():
+    """Without pending, a run that dies mid-flight leaves the PR with NO
+    trusted status — which under some configurations reads as "not required
+    yet" rather than "failed"."""
+    pending = _status()
+    success = _status(state="success", description="green",
+                      evidence_sha256=_EVIDENCE)
+    assert statuspublish.assert_pending_preceded_terminal(
+        [pending, success])["final_state"] == "success"
+    with _refusal("first_publication_not_pending"):
+        statuspublish.assert_pending_preceded_terminal([success])
+
+
+def test_r02_a_run_that_never_reaches_a_terminal_status_is_refused():
+    """Pending forever blocks rather than fails, and hides that the run ended."""
+    with _refusal("run_never_reached_a_terminal_status"):
+        statuspublish.assert_pending_preceded_terminal([_status()])
+
+
+def test_r02_publishing_nothing_at_all_is_refused():
+    with _refusal("no_status_published"):
+        statuspublish.assert_pending_preceded_terminal([])
+
+
+def test_r02_a_terminal_status_on_a_different_commit_is_refused():
+    """A status about a different commit, arriving exactly when a reader is
+    least likely to check."""
+    pending = _status()
+    elsewhere = _status(state="success", description="green",
+                        candidate_head_sha=SHA_C, evidence_sha256=_EVIDENCE)
+    with _refusal("publication_sha_changed"):
+        statuspublish.assert_pending_preceded_terminal([pending, elsewhere])
+
+
+def test_r02_two_terminal_statuses_for_one_run_are_refused():
+    """One of them is a correction nobody recorded as one."""
+    pending = _status()
+    success = _status(state="success", description="g",
+                      evidence_sha256=_EVIDENCE)
+    with _refusal("multiple_terminal_publications"):
+        statuspublish.assert_pending_preceded_terminal(
+            [pending, success, success])
+
+
+@pytest.mark.parametrize("state", ["failure", "error"])
+def test_r02_failure_and_error_are_terminal_too(state):
+    """An exception must land as a terminal status, not leave pending."""
+    record = statuspublish.assert_pending_preceded_terminal(
+        [_status(), _status(state=state, description="the run died")])
+    assert record["final_state"] == state
+
+
+def test_r02_a_green_trusted_context_without_evidence_is_refused():
+    """A green trusted context asserts a review happened. Publishing one with
+    no evidence digest is the self-signed claim the whole lane prevents."""
+    with _refusal("success_without_evidence"):
+        _status(state="success", description="green")
+
+
+@pytest.mark.parametrize("context", ["independent-verify-inactive",
+                                     "d0-containment", "probe",
+                                     "d1-containment-gate", "test (3.12)"])
+def test_r02_only_a_reserved_trusted_context_may_be_published(context):
+    """Structurally: no amount of caller creativity turns a no-key job into a
+    trusted context on the candidate head."""
+    with _refusal("context_not_publishable"):
+        _status(context=context)
+
+
+@pytest.mark.parametrize("value", ["refs/heads/main", "HEAD",
+                                   "fix/verifier-intra-file-review-plan",
+                                   "6fc13eb", ""])
+def test_r02_a_textual_ref_may_never_stand_in_for_the_candidate_sha(value):
+    """A ref resolves differently at different moments. The status must name the
+    exact immutable commit that was reviewed — including against a newer commit
+    the author pushed while the review was running."""
+    with _refusal("candidate_sha_not_a_commit_sha"):
+        _status(candidate_head_sha=value)
+
+
+def test_r02_a_status_for_an_earlier_head_does_not_satisfy_a_later_one():
+    """The reader's half. A new push must invalidate the trusted review, and
+    the check for that is comparing SHAs — not trusting GitHub to forget."""
+    success = _status(state="success", description="green",
+                      evidence_sha256=_EVIDENCE)
+    assert statuspublish.assert_status_covers_head(
+        success, observed_head_sha=_CANDIDATE_SHA,
+        context="trusted-verifier-count")["satisfied"] is True
+    with _refusal("status_is_for_an_earlier_head"):
+        statuspublish.assert_status_covers_head(
+            success, observed_head_sha=SHA_C,
+            context="trusted-verifier-count")
+
+
+def test_r02_a_status_for_the_other_trusted_context_does_not_substitute():
+    """A count is not a review. Satisfying `trusted-cross-vendor-review` with a
+    `trusted-verifier-count` success would let D1 stand in for D2."""
+    success = _status(state="success", description="green",
+                      evidence_sha256=_EVIDENCE)
+    with _refusal("status_context_mismatch"):
+        statuspublish.assert_status_covers_head(
+            success, observed_head_sha=_CANDIDATE_SHA,
+            context="trusted-cross-vendor-review")
+
+
+def test_r02_the_external_id_binds_run_attempt_and_evidence():
+    """The same context published twice from different runs must be
+    distinguishable, or a stale success is indistinguishable from a fresh one."""
+    first = _status(state="success", description="g", evidence_sha256=_EVIDENCE)
+    same = _status(state="success", description="g", evidence_sha256=_EVIDENCE)
+    other_run = _status(state="success", description="g", trusted_run_id=43,
+                        evidence_sha256=_EVIDENCE)
+    other_evidence = _status(state="success", description="g",
+                             evidence_sha256="f" * 64)
+    assert first["external_id"] == same["external_id"]
+    assert first["external_id"] != other_run["external_id"]
+    assert first["external_id"] != other_evidence["external_id"]
+
+
+def test_r02_publishing_itself_refuses_and_names_the_token_it_would_need():
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        statuspublish.publish(_status())
+    assert "installation token" in excinfo.value.reason
+    assert "never by a reviewed branch" in excinfo.value.reason
+
+
+def test_r02_an_unvalidated_request_cannot_be_handed_to_publish():
+    """Build it through status_request so the refusals run before anything is
+    sent, rather than after."""
+    with _refusal("status_request_not_validated"):
+        statuspublish.publish({"state": "success"})
+
+
+def test_r02_the_operator_packet_explains_the_candidate_head_requirement():
+    """The packet is what the operator configures from; if it does not say the
+    trusted context is published on the candidate SHA, they will look for it on
+    the workflow run and not find it."""
+    text = OPERATOR_DOC.read_text(encoding="utf-8")
+    assert "candidate head SHA" in text or "candidate SHA" in text
+    assert "statuspublish.py" in text
+
+
+def test_r11_the_packet_splits_v_trust_into_separate_machine_facts():
+    """EX3-R11. "V-TRUST closed" as one undifferentiated state conflates a
+    defect that is fixed with an authority that does not exist. The exposure is
+    closed; the trusted review authority is not active, and the precursor merge
+    gate is open."""
+    text = OPERATOR_DOC.read_text(encoding="utf-8")
+    assert "pr_controlled_provider_credential_exposure" in text
+    assert "trusted_review_authority" in text
+    assert "INACTIVE_OPEN_BLOCKING" in text
+    assert "precursor_merge_trust_gate" in text
+    assert "casts zero votes" in text or "casts zero votes" in text.lower()
