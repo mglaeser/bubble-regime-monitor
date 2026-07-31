@@ -781,23 +781,65 @@ def _assert_mock_transport(transport) -> None:
                 "network method; refused before any request is built")
 
 
-def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
-             authorizations=None, challenge: str = "LOCAL-MOCK-CHALLENGE",
-             required_approver: str = reviewpolicy.GOVERNED_REQUIRED_APPROVER,
-             minimum_other_approvers: int = 1) -> dict:
-    """Produce a strict, PRIVATE mock-finalization report. Zero generation.
+#: The neutral core's contract version, bound into its result so a caller that
+#: was written against a different shape fails loudly rather than reading a
+#: field that moved.
+PREPARE_CORE_VERSION = "prepare-review-plan-core-v1"
 
-    Named for what it does locally. Nothing here can produce provider
-    evidence, so nothing here can produce an executable plan."""
-    _assert_mock_transport(transport)          # before ANY request is built
+
+def prepare_review_plan_core(skeleton: dict, *, cwd, pin_record: dict,
+                             transport, authorizations=None,
+                             challenge: str,
+                             required_approver: str =
+                             reviewpolicy.GOVERNED_REQUIRED_APPROVER,
+                             minimum_other_approvers: int = 1) -> dict:
+    """Everything both lanes do, and nothing either lane does alone.
+
+    This is the whole of Stage 2's REVIEW SEMANTICS: strict rebuild, structural
+    preconditions, atom content reconstruction, final unit derivation, the
+    request generation, the global preflight manifest, recursive fitting, all
+    three model counts, batch packing, exact request hashes, the coverage and
+    disposition proof, the context/output/call/cost gates, and the count
+    attempt ledger.
+
+    It does NOT label evidence trusted or mock, does not sign, does not publish
+    status, and does not decide external authority. Those are the four things
+    that differ between a local mock run and a trusted one, and they are
+    exactly what a shared core must not contain — a core that took an
+    `is_trusted` flag would put the difference between "a mock report" and "a
+    plan that can spend money" inside a branch nobody reads.
+
+    Two parameters carry that separation:
+
+    * `pin_record` arrives BUILT. The mock wrapper passes
+      `pins.test_pin_record`, whose authority class is
+      TEST_FIXTURE_UNAUTHORIZED; the trusted lane passes the record it got back
+      from `pins.promote_pin_authorization`. This function reads
+      `pin_record["pins"]` and draws no conclusion from the class, because
+      drawing one here would be candidate code deciding what is authorized.
+    * `authorizations` is any object exposing the four members
+      `PreflightGenerationManifest` consumes. Candidate-side that is
+      `authority.LiteralAuthorizationSet`, whose
+      `confers_real_call_authority` is False by construction; the trusted lane
+      passes its own verified set. Neither is constructed here.
+
+    `challenge` is required rather than defaulted. A default would be a
+    constant, a constant is predictable, and the challenge exists to be
+    unpredictable to both the candidate and the models."""
     artifact.validate_strict(skeleton)
     _rebuild_and_compare(skeleton, cwd=cwd)
     structural_preconditions(skeleton)
 
     model_ids = list(skeleton["requested_model_ids"])
     capability_policy = capabilities.policy_record(model_ids)
-    pin_record = pinsmod.test_pin_record(operator_pins, model_ids)
-    pin_values = pin_record["pins"]
+    if not isinstance(pin_record, dict) or not isinstance(
+            pin_record.get("pins"), dict):
+        raise BlockingError(
+            EXECUTABLE_PLAN_INVALID,
+            "category=pin_record_not_supplied — the core reads the twelve "
+            "values out of a record its caller built; building one here would "
+            "make the mock and trusted paths share a decision they must not")
+    pin_values = pinsmod.validate_pins(pin_record["pins"], model_ids)
     review_policy = reviewpolicy.policy_record(
         model_ids,
         required_approver=required_approver,
@@ -850,15 +892,66 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
             f"{cost['planned_generation_calls']} "
             f"cap={pin_values['VERIFIER_MAX_GENERATION_CALLS']}")
 
-    source = counting.transport_source(transport)
+    return {
+        "core_version": PREPARE_CORE_VERSION,
+        "model_ids": model_ids,
+        "capability_policy": capability_policy,
+        "operator_pin_record": pin_record,
+        "review_request_policy": review_policy,
+        "requested_model_acceptance_policy":
+            counting.requested_model_acceptance_policy(model_ids,
+                                                       transport=transport),
+        "final_units": final_units,
+        "batches": batches,
+        "cost_plan": cost,
+        "count_records": list(ledger.records),
+        "count_ledger": ledger.record(),
+        "preflight_manifest": manifest.record(),
+        "logical_count_requests": ledger.logical_requests,
+        "provider_attempts": ledger.provider_attempts,
+        "count_cache_hits": ledger.cache_hits,
+        "generation_calls_performed": 0,
+        "challenge": challenge,
+        "transport_source": counting.transport_source(transport),
+    }
+
+
+def finalize_mock(skeleton: dict, *, cwd, operator_pins: dict, transport,
+                  authorizations=None, challenge: str = "LOCAL-MOCK-CHALLENGE",
+                  required_approver: str =
+                  reviewpolicy.GOVERNED_REQUIRED_APPROVER,
+                  minimum_other_approvers: int = 1) -> dict:
+    """Produce a strict, PRIVATE mock-finalization report. Zero generation.
+
+    Named for what it does locally. Nothing here can produce provider
+    evidence, so nothing here can produce an executable plan — and the three
+    things that make that true all live in this wrapper rather than in the
+    shared core: the mock-transport assertion, the TEST_FIXTURE_UNAUTHORIZED
+    PIN record, and the MOCK evidence label."""
+    _assert_mock_transport(transport)          # before ANY request is built
+    artifact.validate_strict(skeleton)
+    pin_record = pinsmod.test_pin_record(
+        operator_pins, list(skeleton["requested_model_ids"]))
+    core = prepare_review_plan_core(
+        skeleton, cwd=cwd, pin_record=pin_record, transport=transport,
+        authorizations=authorizations, challenge=challenge,
+        required_approver=required_approver,
+        minimum_other_approvers=minimum_other_approvers)
+
+    capability_policy = core["capability_policy"]
+    review_policy = core["review_request_policy"]
+    final_units = core["final_units"]
+    batches = core["batches"]
+    cost = core["cost_plan"]
+    source = core["transport_source"]
     count_evidence = evidence.candidate_evidence_record(
         evidence.MOCK_TEST_EVIDENCE if source == counting.SOURCE_MOCK
         else evidence.UNTRUSTED_LOCAL_EVIDENCE,
         counts=[{**r, "count_request_sha256": r["count_request_sha256"],
                  "request_semantics_sha256": r["request_semantics_sha256"]}
-                for r in ledger.records],
-        logical_request_count=ledger.logical_requests,
-        provider_attempt_count=ledger.provider_attempts,
+                for r in core["count_records"]],
+        logical_request_count=core["logical_count_requests"],
+        provider_attempt_count=core["provider_attempts"],
         endpoint=counting.COUNT_PATH,
         billing_state=counting.COUNT_BILLING_STATE)
 
@@ -887,19 +980,18 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
         "operator_pin_record": pin_record,
         "review_request_policy": review_policy,
         "requested_model_acceptance_policy":
-            counting.requested_model_acceptance_policy(model_ids,
-                                                       transport=transport),
+            core["requested_model_acceptance_policy"],
         "final_units": final_units,
         "batches": batches,
         "count_evidence": count_evidence,
-        "count_ledger": ledger.record(),
-        "preflight_manifest": manifest.record(),
+        "count_ledger": core["count_ledger"],
+        "preflight_manifest": core["preflight_manifest"],
         "cost_plan": cost,
-        "logical_count_requests": ledger.logical_requests,
+        "logical_count_requests": core["logical_count_requests"],
         # C4-F19: a MOCK report never contacted a provider. The field is
         # named for what it counts — attempts against the local stand-in.
-        "mock_transport_attempts": ledger.provider_attempts,
-        "count_cache_hits": ledger.cache_hits,
+        "mock_transport_attempts": core["provider_attempts"],
+        "count_cache_hits": core["count_cache_hits"],
         "generation_calls_performed": 0,
         # C4-F13: the challenge the executor MUST use, bound into the report
         # and therefore into its digest. It was previously a caller argument
@@ -914,6 +1006,15 @@ def finalize(skeleton: dict, *, cwd, operator_pins: dict, transport,
     executable_plan["mock_finalization_report_sha256"] = mock_report_digest(
         executable_plan)
     return executable_plan
+
+
+#: The MC3/MC4 name. Kept as a delegating alias rather than deleted: every
+#: existing caller means "the local mock report", which is exactly what
+#: `finalize_mock` produces, and a rename that broke them would be churn. It is
+#: NOT a second implementation — one line, no arguments reinterpreted.
+def finalize(skeleton: dict, **kwargs) -> dict:
+    """Deprecated spelling of `finalize_mock`. Same function, honest name."""
+    return finalize_mock(skeleton, **kwargs)
 
 
 def mock_report_digest(record: dict) -> str:

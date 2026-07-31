@@ -459,3 +459,245 @@ class TestFinalizeEndToEnd:
         assert "path_bytes_b64" not in blob
         assert pub["generation_calls_performed"] == 0
         assert pub["executable"] is False
+
+
+# --------------------------------------------------------------------------
+# SLICE 2 — one evidence-neutral core, a mock wrapper, and a protected bridge.
+#
+# The trusted lane needs everything `finalize` does EXCEPT the four things that
+# make its output a mock report: the mock-transport assertion, the
+# TEST_FIXTURE_UNAUTHORIZED PIN record, the MOCK evidence label, and the
+# non-executable verdict. Copying the rest into `scripts/trustedlane` would be
+# a second review engine — the exact thing that produced single-model review
+# and budget-only "preflight" the first time. So the shared part becomes a core
+# that decides nothing about evidence, and the two callers differ only in what
+# they wrap it with.
+# --------------------------------------------------------------------------
+
+
+def _core_source():
+    import ast
+    import inspect
+
+    return ast.parse(inspect.getsource(finalize.prepare_review_plan_core))
+
+
+def _called_names(tree):
+    import ast
+
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                names.add(func.attr)
+            elif isinstance(func, ast.Name):
+                names.add(func.id)
+    return names
+
+
+class TestSharedFinalizationCore:
+    def _core(self, skeleton, clone, **over):
+        return finalize.prepare_review_plan_core(
+            skeleton, cwd=clone,
+            pin_record=pinsmod.test_pin_record(good_pins(), MODELS),
+            transport=counting.MockCountTransport(),
+            authorizations=proposed_authorizations(skeleton, clone),
+            challenge="CORE-TEST-CHALLENGE", **over)
+
+    def test_the_core_decides_nothing_about_evidence(self, skeleton, clone):
+        """The four fields that make a report a MOCK report are absent, and so
+        is every field that would make one trusted. A core that emitted either
+        would be deciding, for both callers, a question only one of them can
+        answer."""
+        core = self._core(skeleton, clone)
+        for field in ("count_evidence", "evidence_class", "executable",
+                      "publication_class", "signature", "signed_by",
+                      "authority_class", "pending_requirements",
+                      "mock_finalization_report_sha256", "artifact", "stage"):
+            assert field not in core, field
+        assert core["core_version"] == finalize.PREPARE_CORE_VERSION
+
+    def test_the_core_still_does_all_the_review_semantics(self, skeleton,
+                                                          clone):
+        """Everything §8 lists as the core's own: units, batches, counts,
+        packing, coverage, cost, the preflight manifest and the ledger."""
+        core = self._core(skeleton, clone)
+        assert core["final_units"]
+        assert core["batches"]
+        assert core["logical_count_requests"] > 0
+        assert core["provider_attempts"] > 0
+        assert core["generation_calls_performed"] == 0
+        assert core["cost_plan"]["worst_case_total_micro_usd"] > 0
+        assert core["preflight_manifest"]["request_count"] > 0
+        assert core["preflight_manifest"]["scanned_payload_count"] == (
+            2 * core["preflight_manifest"]["request_count"])
+        assert core["count_ledger"]["provider_attempt_count"] > 0
+        assert core["count_ledger"]["count_ledger_sha256"]
+        assert core["model_ids"] == MODELS
+        batching.prove_batch_partition(core["final_units"], core["batches"])
+
+    def test_the_core_names_no_evidence_or_signing_function(self):
+        """Structural, not a promise in a docstring. The core must not call the
+        mock-transport assertion, the evidence labeller, the test PIN
+        constructor, or anything that signs or publishes — those are what the
+        two wrappers are FOR, and a core that called one would make the other
+        wrapper's version unreachable."""
+        called = _called_names(_core_source())
+        for forbidden in ("_assert_mock_transport", "candidate_evidence_record",
+                          "test_pin_record", "is_executable_authority",
+                          "mock_report_digest", "sign", "publish"):
+            assert forbidden not in called, forbidden
+
+    def test_the_core_requires_a_pin_record_its_caller_built(self, skeleton,
+                                                            clone):
+        """The mock wrapper passes `test_pin_record`; the trusted lane passes
+        what `promote_pin_authorization` returned. Building one here would make
+        the two paths share a decision they must not."""
+        with pytest.raises(BlockingError) as e:
+            finalize.prepare_review_plan_core(
+                skeleton, cwd=clone, pin_record=None,
+                transport=counting.MockCountTransport(),
+                challenge="CORE-TEST-CHALLENGE")
+        assert "pin_record_not_supplied" in e.value.message
+        with pytest.raises(BlockingError):
+            finalize.prepare_review_plan_core(
+                skeleton, cwd=clone, pin_record={"pins": "not a mapping"},
+                transport=counting.MockCountTransport(),
+                challenge="CORE-TEST-CHALLENGE")
+
+    def test_the_core_revalidates_the_pins_it_is_handed(self, skeleton, clone):
+        """A record whose twelve values are invalid is refused even though its
+        caller built it. The core reads the values; it does not get to assume
+        somebody upstream checked them."""
+        record = pinsmod.test_pin_record(good_pins(), MODELS)
+        record["pins"] = dict(record["pins"], VERIFIER_MAX_OUTPUT_TOKENS=10 ** 9)
+        with pytest.raises(BlockingError) as e:
+            finalize.prepare_review_plan_core(
+                skeleton, cwd=clone, pin_record=record,
+                transport=counting.MockCountTransport(),
+                challenge="CORE-TEST-CHALLENGE")
+        assert e.value.code == UNSET_POLICY_PIN
+
+    def test_the_core_draws_no_conclusion_from_the_pin_authority_class(
+            self, skeleton, clone):
+        """A record LABELLED verified gets no more from the core than a test
+        fixture does, and a test fixture gets no less. The class is the trusted
+        verifier's statement; reading it here would be candidate code deciding
+        what is authorized."""
+        fixture = pinsmod.test_pin_record(good_pins(), MODELS)
+        labelled = dict(fixture,
+                        authority_class=authority.VERIFIED_OPERATOR_PIN_AUTHORIZATION)
+        transports = (counting.MockCountTransport(),
+                      counting.MockCountTransport())
+        first = finalize.prepare_review_plan_core(
+            skeleton, cwd=clone, pin_record=fixture, transport=transports[0],
+            authorizations=proposed_authorizations(skeleton, clone),
+            challenge="CORE-TEST-CHALLENGE")
+        second = finalize.prepare_review_plan_core(
+            skeleton, cwd=clone, pin_record=labelled, transport=transports[1],
+            authorizations=proposed_authorizations(skeleton, clone),
+            challenge="CORE-TEST-CHALLENGE")
+        assert first["batches"] == second["batches"]
+        assert first["cost_plan"] == second["cost_plan"]
+
+    def test_the_core_requires_an_explicit_challenge(self):
+        """No default. A default is a constant, a constant is predictable, and
+        the challenge exists to be unpredictable to the candidate and to the
+        models."""
+        import inspect
+
+        signature = inspect.signature(finalize.prepare_review_plan_core)
+        assert signature.parameters["challenge"].default is inspect.Parameter.empty
+        assert signature.parameters["challenge"].kind is (
+            inspect.Parameter.KEYWORD_ONLY)
+
+    def test_the_challenge_reaches_the_counted_request_bytes(self, skeleton,
+                                                            clone):
+        """Not merely accepted — bound into what was COUNTED.
+
+        A batch stores request hashes rather than request text, which makes
+        this the honest test rather than the convenient one: change only the
+        challenge and every request hash must move. If it did not, the string
+        the core takes would be a parameter it never transmits, and the trusted
+        lane's unpredictable challenge would buy nothing."""
+        first = self._core(skeleton, clone)
+        second = finalize.prepare_review_plan_core(
+            skeleton, cwd=clone,
+            pin_record=pinsmod.test_pin_record(good_pins(), MODELS),
+            transport=counting.MockCountTransport(),
+            authorizations=proposed_authorizations(skeleton, clone),
+            challenge="A-DIFFERENT-CHALLENGE")
+        assert len(first["batches"]) == len(second["batches"])
+        for left, right in zip(first["batches"], second["batches"],
+                               strict=True):
+            assert left["unit_sha256_in_order"] == right["unit_sha256_in_order"]
+            assert left["request_hashes_by_model"] != right[
+                "request_hashes_by_model"], (
+                "the challenge did not reach the counted bytes")
+
+
+class TestMockWrapperKeepsTheMockProperties:
+    def test_the_mock_wrapper_still_refuses_a_non_mock_transport(self, skeleton,
+                                                                clone):
+        """Moved, not lost. The assertion is the mock wrapper's job now, and it
+        still runs BEFORE any request is assembled — so a refused transport
+        never sees a byte."""
+
+        class RealishTransport:
+            source = "PROVIDER"
+            calls = 0
+
+            def request(self, *args, **kwargs):        # a network method
+                raise AssertionError("unreachable")
+
+        transport = RealishTransport()
+        with pytest.raises(BlockingError) as e:
+            finalize.finalize_mock(skeleton, cwd=clone,
+                                   operator_pins=good_pins(),
+                                   transport=transport)
+        assert e.value.code == SECRET_PREFLIGHT_FAILED
+        assert "requires_mock_transport" in e.value.message
+        assert transport.calls == 0
+
+    def test_the_core_does_not_refuse_a_non_mock_transport(self, skeleton,
+                                                           clone):
+        """The other half, and the reason the assertion had to move: the
+        trusted lane's transport is a real one, and a core that refused it
+        could not be shared. The core is reached only from a wrapper, and each
+        wrapper decides what a permitted transport is."""
+        called = _called_names(_core_source())
+        assert "_assert_mock_transport" not in called
+
+    def test_the_mock_report_is_unchanged(self, skeleton, clone):
+        """The refactor must not move the report. Same fields, same mock
+        evidence class, same non-executable verdict."""
+        report = finalize.finalize_mock(
+            skeleton, cwd=clone, operator_pins=good_pins(),
+            transport=counting.MockCountTransport(),
+            authorizations=proposed_authorizations(skeleton, clone))
+        assert report["artifact"] == "mock-finalization-report"
+        assert report["executable"] is False
+        assert report["publication_class"] == "private"
+        assert report["count_evidence"]["evidence_class"] == (
+            evidence.MOCK_TEST_EVIDENCE)
+        assert report["operator_pin_record"]["authority_class"] == (
+            authority.TEST_FIXTURE_UNAUTHORIZED)
+        assert report["generation_calls_performed"] == 0
+        assert report["mock_finalization_report_sha256"] == (
+            finalize.mock_report_digest(report))
+
+    def test_the_old_name_delegates_rather_than_duplicating(self):
+        """`finalize` is kept because every existing caller means "the local
+        mock report". It must stay ONE line: a second implementation that
+        drifted from `finalize_mock` is how two spellings of the same thing end
+        up meaning different things."""
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(finalize.finalize))
+        body = [n for n in tree.body[0].body
+                if not isinstance(n, ast.Expr)
+                or not isinstance(n.value, ast.Constant)]
+        assert len(body) == 1 and isinstance(body[0], ast.Return)
+        assert body[0].value.func.id == "finalize_mock"
