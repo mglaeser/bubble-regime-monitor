@@ -65,11 +65,36 @@ loader. Call the engine, through `enginebridge` and nowhere else.
   `verifier*` — a name check standing in for an origin question, and
   incompatible with an architecture where the engine IS `scripts/verifier`.
 
+## Also done
+
+* **Slice 3 — D1 counts what the engine plans.** Steps 7-10 were the lane's own
+  loop: one model named by a `model=` parameter, `countledger.preflight`
+  (a budget comparison that scans nothing), its own ledger over units an
+  injected `skeleton_rebuild` handed back. All of it is now the engine's.
+  `model` and `skeleton_rebuild` are gone from `run`; `TRUSTED_MODEL_ID` is
+  gone from both CLIs and both templates.
+* **D2 asks the governed panel**, and requires the governed approver plus at
+  least one corroborator. A panel member that did not ANSWER is refused
+  outright.
+* **EX4-R18** — D2 calls `verifier.verdicts.assert_distinct_reasoning`. It
+  fired on the first run: the fixture returned one canned sentence for all
+  three models.
+* **EX4-R11** — both CLIs establish readiness BEFORE obtaining any capability.
+  `run` asserting it as step 1 was true and did not help: by then the secret
+  was in the environment of a process the refusal does not unwind.
+* **A gate binds the templates to the CLIs.** It found two more drifts
+  immediately, and caught one proxy question of my own.
+
 ## Open, in dependency order
 
-    Slice 3  D1/D2 wired end to end through core+executor  EX4-R04 R09 R12 R13 R14 R18
-    Slice 4  workflow materialization + status publisher   EX4-R06 R07 R10 R11
-    Slice 5  merge PR #33, rebase PR #29, operator block   EX4-R15
+    R06/R10  workflows materialize inputs + build the engine artifact
+    R12      D2 responses through executor.validate_response_envelope
+    R02/R09  D2 global preflight over generation payloads
+    R04/R13  D2 consumes D1's signed plan digest rather than its own
+    R19      output privacy scan
+    R07/R15/R20              operator action — see EXCHANGE_5_REPORT.md §9
+
+`docs/EXCHANGE_5_REPORT.md` is the authoritative per-finding status.
 
 ## Facts established, so they are not re-derived
 
