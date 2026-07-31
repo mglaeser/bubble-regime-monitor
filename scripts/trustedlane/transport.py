@@ -139,15 +139,54 @@ def read_credential(*, phase: str, environ=None) -> str:
         refuse(f"category=credential_absent variable={CREDENTIAL_ENV} — the "
                "protected environment did not bind it, which is what happens "
                "when this runs from an unapproved ref")
+    return assert_credential_shape(value)
+
+
+def assert_credential_shape(value) -> str:
+    """Every rule about the credential's SHAPE, with no phase gate.
+
+    Separate from `read_credential` so it can be driven directly in D0. Inside
+    `read_credential` these checks sit behind `assert_phase_permitted`, which
+    always refuses here — so a test could only reach them by grepping the
+    source, and a test that greps source is asking whether a string is present
+    rather than whether a value is refused.
+
+    Nothing in this function reports the value. Only a length, a position and a
+    count ever appear in a refusal."""
     if not isinstance(value, str) or value.strip() != value or len(value) < 20:
         refuse("category=credential_malformed — length and surrounding "
                "whitespace only; the value is never echoed")
+    # An INTERIOR control character is the one shape that puts the key into an
+    # exception message. `f"Bearer {value}"` with a newline in it reaches
+    # `http.client.putheader`, which raises
+    # `ValueError("Invalid header value %r" % b"Bearer sk-...\nrest")` — the
+    # whole credential inside exception text, on the machine holding it.
+    # `strip()` does not catch this because the character is not at either end.
+    #
+    # Refusing here, where only the position is reportable, removes the only
+    # construction that gets the key into an exception at all. Found by
+    # adversarial review.
+    bad = [index for index, char in enumerate(value)
+           if ord(char) < 0x20 or ord(char) == 0x7f]
+    if bad:
+        refuse(f"category=credential_contains_control_character "
+               f"first_offset={bad[0]} count={len(bad)} — a control character "
+               "inside the value makes an HTTP header no client can send, and "
+               "the resulting exception carries the whole credential")
     return value
 
 
-def open_https(*, phase: str):
+def open_https(*, phase: str, max_response_bytes: int = MAX_RESPONSE_BYTES):
     """Build the real opener. The HTTP client is imported HERE, after the
     refusal, so that importing this module loads no network code at all.
+
+    `max_response_bytes` is a parameter because D1 and D2 have different
+    bounds. It used to be hardcoded to this module's `MAX_RESPONSE_BYTES`
+    (64 KiB), which is right for a count reply of a few hundred bytes and wrong
+    for a generation body — `adapter.MAX_RESPONSE_BYTES` is 4 MiB. D2 was
+    handed the count lane's opener, so any real generation response over 64 KiB
+    was silently truncated and then failed to parse, and the adapter's own
+    4 MiB bound was unreachable. Found by adversarial review.
 
     No proxy environment is consulted. On a hosted runner there is none, and
     honouring one would let an environment variable redirect a credential-
@@ -159,6 +198,10 @@ def open_https(*, phase: str):
     capabilities = assert_phase_permitted(phase)
     if not capabilities.get("calls_provider"):
         refuse(f"category=phase_does_not_call_provider phase={phase}")
+
+    if isinstance(max_response_bytes, bool) or not isinstance(
+            max_response_bytes, int) or max_response_bytes < 1:
+        refuse("category=transport_response_bound_invalid")
 
     import http.client
     import ssl
@@ -175,7 +218,7 @@ def open_https(*, phase: str):
         try:
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
-            return response.status, response.read(MAX_RESPONSE_BYTES + 1)
+            return response.status, response.read(max_response_bytes + 1)
         finally:
             connection.close()
 

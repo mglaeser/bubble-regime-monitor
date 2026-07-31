@@ -129,31 +129,41 @@ def sign_envelope(record: dict, *, key) -> dict:
     key is the capability, not calling this function. Signing with a test key
     produces a record that fails verification under the real key, which grants
     nothing."""
-    from .evidencewire import TRUSTED_CLASSES
+    from .evidencewire import TRUSTED_CLASSES, envelope_digest, validate_envelope_for_signing
 
     material = _key_bytes(key)
     if record.get("signature"):
         refuse("category=envelope_already_signed — re-signing would replace an "
                "existing attestation with a new one and leave no trace that "
                "there had been two")
-    message = signature_input(record)
+    validate_envelope_for_signing(record)
     if record["evidence_class"] not in TRUSTED_CLASSES:
         refuse(f"category=candidate_class_must_not_be_signed "
                f"class={record['evidence_class']} — a signature on a "
                "candidate-class record invites a reader to treat it as "
                "trusted, and the class is what a reader keys on")
+
+    # `honest_scope` is stamped and the digest RECOMPUTED before the MAC is
+    # taken, because `honest_scope` is now inside `ENVELOPE_FIELDS`. Writing it
+    # afterwards — which is what this function used to do — would leave the
+    # signature covering the unsigned record's wording while the record shipped
+    # with different wording, and that gap is exactly the hole adversarial
+    # review walked through: the field a reader leans on hardest was the one
+    # nothing protected.
     signed = dict(record)
-    signed["signature"] = hmac.new(material, message, hashlib.sha256).hexdigest()
-    signed["signer_identity"] = {
-        "algorithm": SIGNATURE_ALGORITHM,
-        "signature_version": SIGNATURE_VERSION,
-        "key_id": key_id(material),
-    }
     signed["honest_scope"] = (
         "a symmetric MAC. It proves the signer held the trusted signing key "
         "and can be checked only by someone else holding it — the operator, or "
         "a later protected run. It is not a public-key signature and a third "
         "party cannot verify it independently")
+    signed["envelope_sha256"] = envelope_digest(signed)
+    signed["signature"] = hmac.new(material, signature_input(signed),
+                                   hashlib.sha256).hexdigest()
+    signed["signer_identity"] = {
+        "algorithm": SIGNATURE_ALGORITHM,
+        "signature_version": SIGNATURE_VERSION,
+        "key_id": key_id(material),
+    }
     return signed
 
 

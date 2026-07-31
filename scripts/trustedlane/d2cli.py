@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 
-from . import d2runtime, phases, signing, statuspublish, transport
+from . import adapter, d2runtime, phases, signing, statuspublish, transport
 from .d1cli import load_json_document
 from .errors import refuse
 
@@ -65,7 +65,11 @@ def main(environ=None) -> dict:
 
     values = read_environment(environ)
     credential = transport.read_credential(phase=phases.D2)
-    opener = transport.open_https(phase=phases.D2)
+    # The GENERATION bound, not the count lane's. A generation body is orders
+    # of magnitude larger than a token count, and reading it through the count
+    # lane's 64 KiB cap truncated it into a parse failure.
+    opener = transport.open_https(phase=phases.D2,
+                                  max_response_bytes=adapter.MAX_RESPONSE_BYTES)
     signing_key = signing.read_signing_key(phase=phases.D2)
 
     return d2runtime.run(

@@ -134,9 +134,7 @@ def assert_plan_is_the_counted_one(plan: dict, *, expected_sha256: str) -> dict:
         refuse("category=trusted_plan_unit_sha_malformed")
     if len(set(digests)) != len(digests):
         refuse("category=trusted_plan_units_duplicated")
-    blob = json.dumps({"units": sorted(digests)}, sort_keys=True,
-                      separators=(",", ":")).encode()
-    observed = hashlib.sha256(b"trusted-plan-v1\x00" + blob).hexdigest()
+    observed = plan_digest(units)
     if observed != expected_sha256:
         refuse(f"category=trusted_plan_digest_mismatch observed={observed} "
                f"expected={expected_sha256} — this is not the plan D1 counted, "
@@ -144,13 +142,38 @@ def assert_plan_is_the_counted_one(plan: dict, *, expected_sha256: str) -> dict:
     return {"trusted_plan_sha256": observed, "units": len(units)}
 
 
-def plan_digest(unit_sha256s) -> str:
-    """The digest D1 publishes and D2 requires. Sorted, so the same plan in a
-    different order is the same plan and a different plan cannot hide behind
-    reordering."""
-    blob = json.dumps({"units": sorted(unit_sha256s)}, sort_keys=True,
-                      separators=(",", ":")).encode()
-    return hashlib.sha256(b"trusted-plan-v1\x00" + blob).hexdigest()
+def plan_digest(units) -> str:
+    """The digest D1 publishes and D2 requires — over the PROMPT BYTES.
+
+    It used to hash only `sorted(unit_sha256)`. Nothing anywhere recomputes a
+    unit id from its content, so the instructions and input text D2 actually
+    sends to the generation endpoint were outside the digest that is supposed
+    to identify "the plan D1 counted": swap a unit's prompt while keeping its
+    id and the digest still matched. Found by adversarial review.
+
+    Sorted by unit id, so the same plan in a different order is the same plan
+    and a different plan cannot hide behind reordering."""
+    entries = []
+    for unit in units:
+        if not isinstance(unit, dict):
+            refuse("category=trusted_plan_unit_not_an_object")
+        missing = [f for f in ("unit_sha256", "instructions", "input_text")
+                   if not unit.get(f)]
+        if missing:
+            refuse(f"category=trusted_plan_unit_incomplete fields={missing} — "
+                   "a digest that skips the prompt does not identify what was "
+                   "counted")
+        entries.append({
+            "unit_sha256": unit["unit_sha256"],
+            "instructions_sha256": hashlib.sha256(
+                unit["instructions"].encode("utf-8")).hexdigest(),
+            "input_text_sha256": hashlib.sha256(
+                unit["input_text"].encode("utf-8")).hexdigest(),
+        })
+    blob = json.dumps({"units": sorted(entries,
+                                       key=lambda e: e["unit_sha256"])},
+                      sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(b"trusted-plan-v2\x00" + blob).hexdigest()
 
 
 def run(*, observations: dict, operator_records, engine_artifact: dict,

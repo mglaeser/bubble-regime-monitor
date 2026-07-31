@@ -77,6 +77,17 @@ ENVELOPE_FIELDS = (
     "candidate_head_sha",
     "payload_sha256",
     "produced_at",
+    # Inside the digest, therefore inside the MAC. Adversarial review showed
+    # that a signed record's `honest_scope` — the field whose entire job is
+    # telling a reader what the record does NOT prove — could be rewritten to
+    # "FULLY VERIFIED BY AN INDEPENDENT THIRD PARTY" while verification still
+    # succeeded, because the digest covered only the ten fields above. The
+    # field a reader leans on hardest was the one nothing protected.
+    #
+    # Both constructors therefore set it BEFORE computing the digest; setting
+    # it afterwards, as they used to, would leave the digest describing a
+    # record with `honest_scope: None`.
+    "honest_scope",
 )
 
 _SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
@@ -138,13 +149,13 @@ def envelope(*, evidence_class: str, payload, produced_by: str,
         "payload_sha256": canonical_payload_digest(payload),
         "produced_at": produced_at,
     }
-    record["envelope_sha256"] = envelope_digest(record)
-    record["signature"] = None
-    record["signer_identity"] = None
     record["honest_scope"] = (
         "a candidate-class envelope, unsigned by construction. It binds a "
         "payload digest and a range; it attests nothing about whether the "
         "payload is true")
+    record["envelope_sha256"] = envelope_digest(record)
+    record["signature"] = None
+    record["signer_identity"] = None
     return record
 
 
@@ -192,6 +203,31 @@ def _assert_envelope_shape(record: dict) -> str:
         refuse("category=evidence_envelope_digest_mismatch — the envelope was "
                "edited after it was digested, or the digest belongs to a "
                "different envelope")
+
+    # An envelope may carry ONLY the fields the digest covers, plus the three
+    # the signature step adds and the one advisory string. Anything else is
+    # outside the MAC.
+    #
+    # Found by adversarial review, and it was the worst defect in this file.
+    # `envelope_digest` covers exactly `ENVELOPE_FIELDS`, so before this check
+    # existed an attacker could take a correctly signed record and rewrite
+    # `honest_scope` — the field whose entire job is telling a reader what the
+    # record does and does not prove — to "FULLY VERIFIED BY AN INDEPENDENT
+    # THIRD PARTY", or add `operator_approved: true`, and BOTH
+    # `verify_envelope` and `validate_envelope` still returned success.
+    # Demonstrated end to end against the shipped code.
+    #
+    # Refusing unknown keys rather than widening the digest is deliberate: a
+    # digest over "whatever happens to be present" cannot be recomputed by a
+    # reader who does not already have the record, and every future field would
+    # silently join the signed set without anyone deciding that it should.
+    permitted = set(ENVELOPE_FIELDS) | {"envelope_sha256", "signature",
+                                        "signer_identity"}
+    unknown = sorted(set(record) - permitted)
+    if unknown:
+        refuse(f"category=evidence_envelope_unknown_fields fields={unknown} — "
+               "these are outside the digest the signature covers, so they can "
+               "be rewritten after signing while verification still succeeds")
     return evidence_class
 
 
@@ -293,13 +329,13 @@ def trusted_envelope(*, evidence_class: str, payload, produced_by: str,
         "payload_sha256": canonical_payload_digest(payload),
         "produced_at": produced_at,
     }
-    record["envelope_sha256"] = envelope_digest(record)
-    record["signature"] = None
-    record["signer_identity"] = None
     record["honest_scope"] = (
         "an unsigned trusted-class envelope. It does NOT validate in this "
         "state — validate_envelope refuses a trusted class with no signature — "
         "so it is an intermediate, not evidence")
+    record["envelope_sha256"] = envelope_digest(record)
+    record["signature"] = None
+    record["signer_identity"] = None
     return record
 
 

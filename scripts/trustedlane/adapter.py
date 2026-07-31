@@ -161,8 +161,10 @@ def validate_normalized_verdict(verdict: dict, *, where: str = "") -> dict:
     keys = frozenset(verdict)
     extra = sorted(keys - NORMALIZED_VERDICT_FIELDS)
     if extra:
+        # Count only — see parse_verdict_payload. A key name here is a string
+        # the model chose.
         refuse(f"category=normalized_verdict_unknown_field where={where} "
-               f"fields={extra}")
+               f"count={len(extra)}")
     missing = sorted(NORMALIZED_VERDICT_FIELDS - keys)
     if missing:
         refuse(f"category=normalized_verdict_field_missing where={where} "
@@ -342,9 +344,16 @@ def parse_verdict_payload(text: str) -> list:
         refuse("category=verdict_payload_not_an_object")
     extra = sorted(set(document) - {"verdicts"})
     if extra:
-        refuse(f"category=verdict_payload_unknown_field fields={extra} — "
-               "dropping it is a forbidden transform, and an adapter that "
-               "ignores unknown keys cannot notice the provider changed")
+        # The COUNT, never the names. These keys came out of the model's own
+        # output text, so printing them puts provider-controlled strings into a
+        # refusal — the exact channel this module says it closes, arriving on
+        # the failure path where nobody is looking. Found by adversarial
+        # review; the module claimed "no observed provider string is ever
+        # recorded" a few lines above while doing this.
+        refuse(f"category=verdict_payload_unknown_field count={len(extra)} — "
+               "the key names are not reported: they are provider-controlled "
+               "text. Dropping them is a forbidden transform, and an adapter "
+               "that ignores unknown keys cannot notice the provider changed")
     verdicts = document.get("verdicts")
     if not isinstance(verdicts, list) or not verdicts:
         refuse("category=verdict_payload_verdicts_not_a_nonempty_list")

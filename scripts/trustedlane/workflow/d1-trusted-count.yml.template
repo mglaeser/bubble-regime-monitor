@@ -173,7 +173,6 @@ jobs:
           TRUSTED_CANDIDATE_PLAN_PATH: ${{ runner.temp }}/candidate/candidate-plan.json
           TRUSTED_CANDIDATE_CHECKOUT: ${{ runner.temp }}/candidate
           TRUSTED_MODEL_ID: ${{ vars.TRUSTED_VERIFIER_MODEL_ID }}
-          TRUSTED_OBSERVED_NOW: ${{ vars.TRUSTED_OBSERVED_NOW }}
           TRUSTED_RUN_ID: ${{ github.run_id }}
           TRUSTED_RUN_ATTEMPT: ${{ github.run_attempt }}
           TRUSTED_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -191,6 +190,19 @@ jobs:
           # It is a module rather than a heredoc because a heredoc is not a
           # place where refusals can be tested, and the previous version of
           # this step was a heredoc containing `exit 1`.
+          #
+          # `TRUSTED_OBSERVED_NOW` is set HERE, from the runner's clock, and is
+          # deliberately NOT a `vars.` repository variable. It was one, and a
+          # repository variable is a fixed string: operator-record expiry would
+          # have been compared against the same frozen instant on every future
+          # run, and every signed record would have carried the same
+          # `produced_at`. An expiry that never advances is not an expiry.
+          # Found by adversarial review.
+          export TRUSTED_OBSERVED_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # `laneentry` is the process boundary: it catches every exception,
+          # prints one sanitized line and exits non-zero, so no traceback —
+          # whose frames can carry a path, a header or a response fragment —
+          # reaches the log of a step that holds a provider key.
           python -c 'import sys; sys.path.insert(0, "scripts"); \
-            from trustedlane import d1cli; \
-            import json; print(json.dumps(d1cli.main()["payload"]))'
+            from trustedlane import laneentry; \
+            sys.exit(laneentry.main("D1"))'

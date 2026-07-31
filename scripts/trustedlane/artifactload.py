@@ -106,6 +106,17 @@ def _assert_member_is_safe(name: str, *, kind: str, size: int, seen: set) -> str
     if any(part in ("..", "") for part in parts[:-1]) or ".." in parts:
         refuse(f"category=engine_member_path_traversal name={name!r} — `..` "
                "leaves the destination one directory at a time")
+    # `.` is refused rather than normalised away. It does not escape the
+    # destination, but `engine/a.py` and `./engine/a.py` are two DIFFERENT
+    # strings that write the SAME file, so the duplicate check below — which
+    # compares names — cleared them both. The second write wins and the
+    # manifest describes the first, which is precisely the disagreement the
+    # duplicate rule exists to prevent. Found by adversarial review.
+    if "." in parts:
+        refuse(f"category=engine_member_redundant_path_segment name={name!r} — "
+               "`.` writes the same file under a different name, so two "
+               "members that collide on disk look distinct to the duplicate "
+               "check")
     if kind == "link":
         refuse(f"category=engine_member_is_a_link name={name!r} — a symlink or "
                "hardlink points outside the destination while its own path "

@@ -138,7 +138,6 @@ jobs:
           TRUSTED_OBSERVATION_PATH: ${{ runner.temp }}/protected-state.json
           TRUSTED_OPERATOR_RECORDS_PATH: ${{ runner.temp }}/operator-records.json
           TRUSTED_MODEL_ID: ${{ vars.TRUSTED_VERIFIER_MODEL_ID }}
-          TRUSTED_OBSERVED_NOW: ${{ vars.TRUSTED_OBSERVED_NOW }}
           TARGET_BASE_SHA: ${{ vars.TRUSTED_TARGET_BASE_SHA }}
           CANDIDATE_HEAD_SHA: ${{ vars.TRUSTED_CANDIDATE_HEAD_SHA }}
           TRUSTED_RUN_ID: ${{ github.run_id }}
@@ -147,6 +146,11 @@ jobs:
           OBSERVED_REF: ${{ github.ref }}
           EVENT_REPOSITORY_ID: ${{ github.repository_id }}
         run: |
+          # From the runner's clock, not a `vars.` repository variable — see
+          # the note in the D1 template. An expiry compared against a frozen
+          # instant never expires.
+          export TRUSTED_OBSERVED_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # `laneentry` keeps every traceback out of a credential-bearing log.
           python -c 'import sys; sys.path.insert(0, "scripts"); \
-            from trustedlane import d2cli; \
-            import json; print(json.dumps(d2cli.main()["payload"]))'
+            from trustedlane import laneentry; \
+            sys.exit(laneentry.main("D2"))'
