@@ -1,0 +1,327 @@
+"""Check-status naming policy — which green means what.
+
+A branch-protection rule requires a status by NAME. It does not know what the
+job did, whether it held a credential, or whether it cast a vote. So the name is
+the entire interface between "this ran" and "this is authoritative", and a name
+that sounds authoritative while the job is inert is a fail-open waiting for
+someone to tick a box in a settings page.
+
+That is not hypothetical here. The repository shipped a job literally called
+`cross-vendor` whose step is named "Cross-vendor review panel (inactive — no
+provider credential here)". It reports `success` in seconds having cast zero
+votes, because the provider secrets were removed from it (V-TRUST). If an
+operator later marks `cross-vendor` a required status — a completely reasonable
+thing to do given the name, and something the programme's own older documents
+recommend — the required cross-vendor review would be satisfied, permanently, by
+a job that reviews nothing.
+
+So statuses are classified, the classes are disjoint by assertion, and the
+inactive class can never be the required one:
+
+    ORDINARY      the deterministic gate; merge authority today
+    CONTAINMENT   D0; hosted proof that the gates refuse. Holds no credential.
+    INACTIVE      runs, reports, decides nothing. NEVER required.
+    TRUSTED       D1/D2. Reserved now, deployable only after operator approval.
+
+The TRUSTED names are declared here before the workflows that use them are
+deployable, on purpose. Reserving a name is what stops the inactive job from
+drifting into it later, and it gives the operator an exact string to configure
+rather than a description to interpret.
+"""
+
+from __future__ import annotations
+
+import os
+
+from .errors import refuse
+
+#: The deterministic gate. Authoritative for ordinary correctness, and the sole
+#: merge authority while the trusted lane is inactive.
+ORDINARY_STATUSES = ("test (3.12)", "image")
+
+#: D0. Proves containment on the allowed default ref; holds no credential, casts
+#: no vote, and reviews nothing. Safe to require, but it is not a review.
+CONTAINMENT_STATUSES = ("d0-containment",)
+
+#: Runs and reports a documented residual. Requiring one of these would make a
+#: no-vote success satisfy a review requirement.
+INACTIVE_STATUSES = ("independent-verify-inactive",)
+
+#: Reserved for the credential-bearing lane. Neither is deployable yet — D1 and
+#: D2 live as `.yml.template` — and the names exist here so that the inactive
+#: job cannot later be renamed into one of them without this policy refusing.
+TRUSTED_STATUSES = ("trusted-verifier-count", "trusted-cross-vendor-review")
+
+#: D1/D2 each embed their own containment job. It must NOT be called
+#: `d0-containment`: two live workflows declaring the same check name make the
+#: required-status setting ambiguous — the operator picks one string and gets
+#: whichever workflow GitHub matched. Same defect class as the inactive name,
+#: reached from the other direction.
+TRUSTED_CONTAINMENT_STATUSES = ("d1-containment-gate", "d2-containment-gate")
+
+#: Operator-dispatched diagnostics. `workflow_dispatch` only, so they never run
+#: on a pull request — requiring one would leave every PR permanently pending on
+#: a check that cannot start. Not requirable for a different reason than
+#: INACTIVE: an inactive check passes when it should not, a diagnostic never
+#: reports at all.
+DIAGNOSTIC_STATUSES = ("probe",)
+
+STATUS_CLASSES = {
+    "ORDINARY": ORDINARY_STATUSES,
+    "CONTAINMENT": CONTAINMENT_STATUSES,
+    "INACTIVE": INACTIVE_STATUSES,
+    "TRUSTED": TRUSTED_STATUSES,
+    "TRUSTED_CONTAINMENT": TRUSTED_CONTAINMENT_STATUSES,
+    "DIAGNOSTIC": DIAGNOSTIC_STATUSES,
+}
+
+#: Classes an operator may configure as a required status once the corresponding
+#: phase is live. INACTIVE and DIAGNOSTIC are deliberately absent, and those
+#: absences are the point.
+REQUIRABLE_CLASSES = ("ORDINARY", "CONTAINMENT", "TRUSTED", "TRUSTED_CONTAINMENT")
+
+#: Everything that must never appear in a required-status list, for either
+#: reason. Derived rather than written out, so adding a class cannot forget it.
+NEVER_REQUIRABLE_CLASSES = tuple(
+    label for label in STATUS_CLASSES if label not in REQUIRABLE_CLASSES)
+
+
+def all_statuses() -> tuple:
+    return tuple(name for names in STATUS_CLASSES.values() for name in names)
+
+
+def class_of(status: str):
+    for label, names in STATUS_CLASSES.items():
+        if status in names:
+            return label
+    return None
+
+
+def assert_classes_are_disjoint() -> dict:
+    """No status may belong to two classes.
+
+    The failure this prevents is a rename that quietly promotes: move
+    `independent-verify-inactive` into TRUSTED_STATUSES and, without this check,
+    the policy would happily report it as both inactive and trusted, and every
+    downstream question ("is this requirable?") would depend on dict order."""
+    seen = {}
+    for label, names in STATUS_CLASSES.items():
+        for name in names:
+            if name in seen:
+                refuse(f"category=status_name_in_two_classes status={name!r} "
+                       f"classes={[seen[name], label]} — a status that is both "
+                       "inactive and trusted is whichever one the caller "
+                       "happens to ask about")
+            seen[name] = label
+    return {"statuses": len(seen), "classes": len(STATUS_CLASSES)}
+
+
+def assert_inactive_and_trusted_never_collide() -> dict:
+    """The regression test the contract asks for, as an assertion.
+
+    Stated separately from disjointness because this is the specific pair that
+    matters: an inactive status satisfying a trusted requirement is the
+    fail-open. Disjointness would also be violated by a harmless ORDINARY /
+    CONTAINMENT overlap; this one is never harmless."""
+    overlap = sorted(set(INACTIVE_STATUSES) & set(TRUSTED_STATUSES))
+    if overlap:
+        refuse(f"category=inactive_status_is_also_trusted overlap={overlap} — "
+               "an inactive no-vote job must never be able to satisfy a trusted "
+               "review requirement")
+    for inactive in INACTIVE_STATUSES:
+        for trusted in TRUSTED_STATUSES:
+            if inactive.strip().lower() == trusted.strip().lower():
+                refuse(f"category=inactive_status_matches_trusted_case_"
+                       f"insensitively inactive={inactive!r} trusted={trusted!r}")
+    return {"inactive": list(INACTIVE_STATUSES),
+            "trusted": list(TRUSTED_STATUSES), "collisions": 0}
+
+
+def assert_no_inactive_status_is_required(required) -> dict:
+    """Refuse a required-status list that includes an inactive check.
+
+    Takes the list an operator configured (or proposes to configure). The lane
+    cannot read branch-protection settings without a credential, so this is a
+    checkable function over an observed value rather than something it enforces
+    on its own — and the operator packet says so rather than implying the code
+    guarantees it."""
+    if required is None:
+        refuse("category=required_status_list_not_observed — nobody supplied "
+               "the configured list; the lane must not assume it is clean")
+    if isinstance(required, str) or not hasattr(required, "__iter__"):
+        refuse("category=required_status_list_not_a_sequence")
+    names = [str(n) for n in required]
+    inactive = sorted(set(names) & set(INACTIVE_STATUSES))
+    if inactive:
+        refuse(f"category=inactive_status_is_required statuses={inactive} — "
+               "these jobs run, report a documented residual and cast zero "
+               "votes; requiring one makes a no-review success satisfy a review "
+               f"requirement. Require {list(TRUSTED_STATUSES)} instead, once the "
+               "corresponding phase is deployed and approved")
+    diagnostic = sorted(set(names) & set(DIAGNOSTIC_STATUSES))
+    if diagnostic:
+        refuse(f"category=diagnostic_status_is_required statuses={diagnostic} — "
+               "these run only on workflow_dispatch, so they never report on a "
+               "pull request; requiring one leaves every PR pending forever on "
+               "a check that cannot start")
+    unknown = sorted(n for n in names if class_of(n) is None)
+    if unknown:
+        refuse(f"category=required_status_not_in_registry statuses={unknown} — "
+               "a required status this policy does not know about is a status "
+               "nobody classified; add it to STATUS_CLASSES first")
+    return {"required": sorted(names),
+            "classes": sorted({class_of(n) for n in names})}
+
+
+def _matrix_suffixes(job: dict, *, where: str) -> list:
+    """The ` (v1, v2)` suffixes a matrix job appends to its check name.
+
+    A matrix job does NOT publish its job id. `jobs.test` with
+    `matrix.python-version: ["3.12"]` publishes `test (3.12)` — which is exactly
+    the string an operator types into branch protection, and exactly the string
+    reading the job id would miss. Caught by this policy refusing `test` as
+    unregistered on its first run: the job id was a proxy for the published
+    name, and for matrix jobs the two differ.
+
+    Only the plain cartesian form is resolved. `include`/`exclude` change the
+    published names in ways that depend on GitHub's expansion order, so they are
+    refused rather than guessed — a wrong name here is a required status that
+    silently matches nothing."""
+    strategy = job.get("strategy") or {}
+    matrix = strategy.get("matrix")
+    if not matrix:
+        return [""]
+    if not isinstance(matrix, dict):
+        refuse(f"category=matrix_not_a_mapping where={where}")
+    unsupported = sorted(k for k in matrix if k in ("include", "exclude"))
+    if unsupported:
+        refuse(f"category=matrix_include_exclude_unresolved where={where} "
+               f"keys={unsupported} — the published check name depends on how "
+               "these expand; resolve it explicitly rather than guessing a "
+               "required-status string that may match nothing")
+    axes = []
+    for key in matrix:
+        values = matrix[key]
+        if not isinstance(values, list) or not values:
+            refuse(f"category=matrix_axis_not_a_nonempty_list where={where} "
+                   f"axis={key}")
+        axes.append([str(v) for v in values])
+    combos = [[]]
+    for axis in axes:
+        combos = [combo + [value] for combo in combos for value in axis]
+    return [f" ({', '.join(combo)})" for combo in combos]
+
+
+def check_names(document: dict) -> list:
+    """The check names a workflow will actually publish.
+
+    GitHub names a check after the job's `name:` when present and the job id
+    otherwise, then appends the matrix values. Both halves matter: reading only
+    the id misses a job that renames itself into a reserved string, and ignoring
+    the matrix misses that `test` publishes as `test (3.12)`."""
+    names = []
+    for job_id, job in (document.get("jobs") or {}).items():
+        job = job or {}
+        declared = job.get("name")
+        base = str(declared) if declared else str(job_id)
+        for suffix in _matrix_suffixes(job, where=str(job_id)):
+            names.append(f"{base}{suffix}")
+    return names
+
+
+def assert_workflow_statuses_are_registered(document: dict, *,
+                                            name: str = "") -> dict:
+    """Every check a workflow publishes must be a classified name.
+
+    Refuse-by-default: an unregistered check name is refused rather than
+    ignored, because "we did not think about this one" is exactly the state in
+    which `cross-vendor` sat for the whole life of the programme."""
+    published = check_names(document)
+    unknown = sorted(n for n in published if class_of(n) is None)
+    if unknown:
+        refuse(f"category=unregistered_check_name workflow={name} "
+               f"statuses={unknown} — every published check name must be "
+               "classified in statusnames.STATUS_CLASSES so an operator can "
+               "tell what requiring it would mean")
+    return {"published": published,
+            "classes": sorted({class_of(n) for n in published})}
+
+
+def assert_no_duplicate_check_names(documents: dict) -> dict:
+    """Two workflows must not publish the same check name.
+
+    A required-status setting is one string. If D0 and D1 both publish
+    `d0-containment`, the operator configures one name and gets whichever
+    workflow GitHub matched — and the one that matched may be the one that did
+    not run. `documents` maps workflow filename -> parsed document."""
+    owners = {}
+    clashes = []
+    for filename, document in sorted(documents.items()):
+        for published in check_names(document):
+            if published in owners:
+                clashes.append(f"{published!r}: {owners[published]} and {filename}")
+            else:
+                owners[published] = filename
+    if clashes:
+        refuse(f"category=duplicate_check_name_across_workflows "
+               f"clashes={clashes} — a required status is one string; two "
+               "workflows publishing it makes the requirement ambiguous")
+    return {"check_names": len(owners),
+            "owners": {k: owners[k] for k in sorted(owners)}}
+
+
+def branch_protection_instructions() -> dict:
+    """The exact strings an operator should and should not configure.
+
+    A description ("require the cross-vendor review") is what produced this
+    defect. These are literals, generated from the same constants the code
+    asserts on, so the instruction cannot drift from the policy."""
+    return {
+        "require_now": list(ORDINARY_STATUSES) + list(CONTAINMENT_STATUSES),
+        "require_after_d1": [TRUSTED_STATUSES[0], TRUSTED_CONTAINMENT_STATUSES[0]],
+        "require_after_d2": [TRUSTED_STATUSES[1], TRUSTED_CONTAINMENT_STATUSES[1]],
+        "never_require": list(INACTIVE_STATUSES),
+        "why_never": ("these jobs report a documented residual and cast zero "
+                      "votes; requiring one makes a no-review success satisfy a "
+                      "review requirement"),
+        "honest_scope": ("this is the instruction, not the enforcement — the "
+                         "lane holds no credential and cannot read or set "
+                         "branch protection; pass the configured list to "
+                         "assert_no_inactive_status_is_required to check it"),
+    }
+
+
+def validate_status_policy(*, root: str = ".") -> dict:
+    """Whole-policy check over every workflow the repository carries.
+
+    Covers the live directory AND the D1/D2 templates: a template is not live,
+    but it is what gets deployed, and a name collision introduced there would
+    only be discovered at deployment time, on the protected ref, with a
+    credential attached."""
+    from . import workflowfile
+    from .livepolicy import _read, live_workflow_paths
+
+    assert_classes_are_disjoint()
+    assert_inactive_and_trusted_never_collide()
+
+    documents = {}
+    for path in live_workflow_paths(root=root):
+        documents[os.path.basename(path)] = _read(path)
+    for template in (workflowfile.D1_FILE, workflowfile.D2_FILE):
+        path = os.path.join(root, workflowfile.WORKFLOW_DIR, template)
+        if os.path.exists(path):
+            documents[template] = _read(path)
+
+    per_workflow = {}
+    for filename, document in sorted(documents.items()):
+        per_workflow[filename] = assert_workflow_statuses_are_registered(
+            document, name=filename)
+    duplicates = assert_no_duplicate_check_names(documents)
+    return {
+        "workflows": per_workflow,
+        **duplicates,
+        "instructions": branch_protection_instructions(),
+        "honest_scope": ("names are classified and unique across workflows; "
+                         "whether branch protection actually requires the right "
+                         "ones is an operator setting this cannot observe"),
+    }

@@ -1,16 +1,43 @@
-# Independent cross-vendor PR review panel — ported from
-# RoseLohr/roses-food-blog (same mechanism, same roles). Active AS SOON AS the
-# operator provisions a second-vendor secret (SECOND_VENDOR_API_KEY, a vendor
-# other than Anthropic; OPENAI_API_KEY is accepted since OpenAI is the default
-# provider — no renaming needed). Without a secret the job reports the
-# documented residual and does NOT block (no fake green); with a secret the
-# panel attacks the diff and blocks unless the required approver ("Sol",
-# gpt-5.6-sol) explicitly approves AND at least one independent model
-# corroborates, with anti-sham-green and proof-of-check integrity gates.
+# Independent cross-vendor PR review panel — CURRENTLY INACTIVE, BY DESIGN.
 #
-# NOTE (honesty): making this an AUTHORITATIVE gate additionally requires
-# branch protection to mark `cross-vendor` a REQUIRED status check — a
-# repo-settings action for the human-in-command (same open item as for `test`).
+# This workflow used to inject SECOND_VENDOR_API_KEY and OPENAI_API_KEY into a
+# job that runs `on: pull_request`, checks out the PR merge ref, and executes
+# `python scripts/independent_verify.py` FROM THAT CHECKOUT. Every one of those
+# is PR-controlled: a pull request that edits that script runs its own code
+# with both provider credentials in the environment. Opening a PR was
+# sufficient — no approval step stood between an untrusted diff and the keys.
+#
+# That is the defect the trusted-lane programme exists to close, stated in one
+# line: the reviewed artifact must never hold the reviewer's credentials, and
+# candidate code must never authenticate its own review.
+#
+# So the secrets are gone from here. What remains is the deterministic CI gate
+# in ci.yml as the sole merge authority, and this job reporting the residual
+# out loud rather than a fake green from a panel that did not run.
+#
+# The replacement is NOT a repair of this workflow — it is the phased trusted
+# lane in scripts/trustedlane/, where the credential-bearing run executes from
+# a protected ref, holds credentials the candidate branch never sees, and takes
+# the candidate in as inert data. D1 (trusted count) and D2 (trusted
+# generation) are staged as `.yml.template` and are each a separate operator
+# approval; neither is deployable from a pull request.
+#
+# VERIFIER_REQUIRE_KEY is deliberately false now. Its purpose was to tell
+# "operator chose not to provision a key" (residual, green) apart from "secrets
+# were withheld because the origin is a fork" (fail closed, since a required
+# check must not pass with zero review). With no secret referenced at all that
+# distinction no longer exists: every run is keyless by construction, not by
+# withholding. Leaving it true would block every fork and Dependabot PR
+# permanently with no operator remedy — the documented remedy was to mirror the
+# key into the Dependabot secrets store, which cannot work when the workflow
+# reads no key at all. A gate that can never pass is a gate someone deletes
+# under pressure. The script's fail-closed branch is untouched and still tested
+# (tests/test_independent_verify.py::test_fork_origin_without_key_fails_closed).
+#
+# Actions are pinned to immutable commit SHAs, not moving tags: `@v4` is
+# whatever that tag points at today, which is a supply-chain decision made by
+# someone else at a time of their choosing. Pins and their release mapping are
+# recorded in scripts/trustedlane/actionpolicy.py.
 name: Independent-Verify
 
 on:
@@ -21,30 +48,25 @@ permissions:
   contents: read
 
 jobs:
-  cross-vendor:
+  independent-verify-inactive:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      # v5.6.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
-      - name: Cross-vendor review panel (required approver + corroboration)
+      - name: Cross-vendor review panel (inactive — no provider credential here)
         env:
-          SECOND_VENDOR_API_KEY: ${{ secrets.SECOND_VENDOR_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # No SECOND_VENDOR_API_KEY. No OPENAI_API_KEY. This job runs
+          # PR-controlled code, so it holds no provider credential — see header.
           VERIFIER_BASE_URL: ${{ vars.VERIFIER_BASE_URL }}
           VERIFIER_MODEL: ${{ vars.VERIFIER_MODEL }}
           VERIFIER_PANEL_MODELS: ${{ vars.VERIFIER_PANEL_MODELS }}
           VERIFIER_REQUIRED_APPROVER: ${{ vars.VERIFIER_REQUIRED_APPROVER }}
           VERIFIER_MIN_OTHER_APPROVERS: ${{ vars.VERIFIER_MIN_OTHER_APPROVERS }}
-          # Fork PRs run WITHOUT secrets (Sol round 2), and Dependabot PRs are
-          # same-repo yet ALSO run with Actions secrets withheld (Sol round 5) —
-          # in both cases a no-key exit-0 would green a required check with zero
-          # votes, so the panel must fail closed there. Operator remedy for
-          # Dependabot: mirror the key into the Dependabot secrets store to get
-          # those PRs reviewed instead of blocked. Same-repo human no-key runs
-          # keep the documented residual behavior.
-          VERIFIER_REQUIRE_KEY: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.actor, 'dependabot')) }}
+          VERIFIER_REQUIRE_KEY: "false"
         run: python scripts/independent_verify.py

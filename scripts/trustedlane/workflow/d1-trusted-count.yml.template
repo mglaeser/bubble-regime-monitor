@@ -1,0 +1,123 @@
+# D1 — trusted count lane. INERT TEMPLATE. NOT DEPLOYABLE AS WRITTEN.
+#
+# The `.yml.template` extension is the containment: GitHub reads only `.yml` and
+# `.yaml` in `.github/workflows/`, so copying this directory there activates
+# nothing. Renaming this file is a deliberate deployment act, gated on
+# RELEASE_EXECUTION_CONTRACT_v1 §13 Phase B and operator prerequisites 1–15.
+#
+# What D1 is allowed to do: authenticate operator records, mint a challenge,
+# preflight every request, and call POST /v1/responses/input_tokens. It makes
+# ZERO generation calls. Generation is D2 and a separate approval.
+#
+# Action pins (immutable SHAs, release mapping in actionpolicy.py):
+#   actions/checkout        11d5960a326750d5838078e36cf38b85af677262  (v4.4.0)
+#   actions/setup-python    a26af69be951a213d495a4c3e4e4022e16d87065  (v5.6.0)
+#
+# The candidate range arrives as two SHAs and nothing else. There is no
+# repository or remote input: the source is fixed in trusted policy
+# (trustedlane.CANONICAL_REPOSITORY) so the numeric-id check downstream compares
+# two values the caller could not both have chosen.
+
+name: trusted-lane-d1-count
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_base_sha:
+        description: Candidate range base commit (40-hex, inert data)
+        required: true
+        type: string
+      candidate_head_sha:
+        description: Candidate range head commit (40-hex, inert data)
+        required: true
+        type: string
+      operator_authorization_sha256:
+        description: Digest of the operator authorization record held outside this repository
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Containment runs first and everything credential-bearing is gated behind it.
+  d1-containment-gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted engine from the protected ref only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Containment invariants
+        env:
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          OBSERVED_REF: ${{ github.ref }}
+        run: |
+          python - <<'PROBE'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import enginepolicy, identity
+          identity.assert_repository_numeric_id(int(os.environ["EVENT_REPOSITORY_ID"]))
+          identity.assert_allowed_default_ref(os.environ["OBSERVED_REF"])
+          enginepolicy.assert_no_candidate_import()
+          PROBE
+
+  trusted-verifier-count:
+    needs: d1-containment-gate
+    runs-on: ubuntu-latest
+    # `environment:` is what makes the key reachable, and the environment's own
+    # deployment-branch policy is what keeps an unprotected ref out. There is
+    # deliberately NO repository- or organization-level fallback secret: a
+    # repo-level secret is readable from ANY ref and would silently defeat this.
+    environment: trusted-verifier
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted engine from the protected ref only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      # The engine is loaded from an operator-approved signed artifact by exact
+      # digest — never imported from the candidate checkout. The candidate
+      # repository is fetched separately, --no-checkout, as inert data.
+      - name: Verify and load the approved engine artifact
+        env:
+          TRUSTED_ENGINE_DIGEST: ${{ vars.TRUSTED_ENGINE_ARTIFACT_SHA256 }}
+        run: |
+          echo "engine verification is implemented in the D1 activation PR"
+          exit 1
+
+      - name: Trusted count
+        env:
+          # Referenced BY NAME. No value lives in this file, and the name
+          # resolves to nothing outside the protected environment.
+          TRUSTED_VERIFIER_OPENAI_KEY: ${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}
+          TARGET_BASE_SHA: ${{ inputs.target_base_sha }}
+          CANDIDATE_HEAD_SHA: ${{ inputs.candidate_head_sha }}
+        run: |
+          python - <<'PROBE'
+          import sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import phases
+          # Refuses until this lane is actually deployed as D1. The activation
+          # PR raises IMPLEMENTED_PHASE; editing this file does not.
+          phases.assert_phase_permitted(phases.D1)
+          PROBE
