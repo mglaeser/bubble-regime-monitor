@@ -5641,7 +5641,9 @@ def _d2_kwargs(units=None, *, publisher=None, opener=None, decision="approve",
         trusted_run={"id": 77, "attempt": 1,
                      "url": "https://github.com/x/y/actions/runs/77"},
         observed_now="2026-07-30T21:00:00Z",
-        produced_at="2026-07-30T21:00:00Z", model="gpt-5",
+        produced_at="2026-07-30T21:00:00Z",
+        # No `model=`. The panel is governed policy, read from the engine.
+        engine=_engine(),
         engine_source_sha256=ENGINE_DIGEST)
     base.update(overrides)
     return base
@@ -5650,7 +5652,16 @@ def _d2_kwargs(units=None, *, publisher=None, opener=None, decision="approve",
 def test_d2_runs_end_to_end_and_produces_signed_execution_evidence(d1_engine):
     published = []
     result = d2runtime.run(**_d2_kwargs(publisher=published.append))
-    assert result["payload"]["verdict_count"] == 2
+    panel = enginebridge.model_panel(_engine())
+    # Two units, asked of every governed model. The old assertion was
+    # `verdict_count == 2` — one verdict per unit, because the lane asked ONE
+    # model chosen by a `model=` parameter while the check it publishes is
+    # named `trusted-cross-vendor-review`.
+    assert result["payload"]["requested_model_ids"] == list(panel)
+    assert result["payload"]["required_approver"] == "gpt-5.6-sol"
+    assert result["payload"]["unit_count"] == 2
+    assert result["payload"]["verdict_count"] == 2 * len(panel)
+    assert result["payload"]["generation_calls"] == 2 * len(panel)
     assert result["payload"]["all_approved"] is True
     assert result["evidence"]["evidence_class"] == "TRUSTED_EXECUTION_EVIDENCE"
     assert signing.verify_envelope(result["evidence"],
@@ -5792,11 +5803,48 @@ def test_d2_counts_an_abstain_as_not_approved(d1_engine):
 def test_d2_refuses_a_partial_review_reported_as_a_review(d1_engine):
     """The reader would believe the unanswered units passed."""
     units = [_d2_unit(0), _d2_unit(1)]
+    panel = list(enginebridge.model_panel(_engine()))
+    answered = {units[0]["unit_sha256"]: {m: {"decision": "approve"}
+                                          for m in panel}}
     with _refusal("verdict_coverage_incomplete"):
         d2runtime._finalize(
-            [{"unit_sha256": units[0]["unit_sha256"], "decision": "approve"}],
-            plan={"units": units}, head=SHA_B, generation_calls=1,
-            trusted_plan_sha256="a" * 64)
+            {units[0]["unit_sha256"]: "approve"}, answered,
+            plan={"units": units}, head=SHA_B,
+            generation_calls=len(panel), trusted_plan_sha256="a" * 64,
+            panel=panel, approver="gpt-5.6-sol")
+
+
+def test_d2_refuses_when_a_panel_member_did_not_answer(d1_engine):
+    """A panel with a silent member is a smaller panel, and reporting it as
+    the governed one is exactly the finding this closes."""
+    panel = list(enginebridge.model_panel(_engine()))
+    with _refusal("panel_member_did_not_answer"):
+        d2runtime._assert_panel_decided(
+            {panel[0]: {"decision": "approve"}}, unit_sha256="a" * 64,
+            panel=panel, approver="gpt-5.6-sol")
+
+
+def test_d2_requires_the_governed_approver_and_a_corroborator(d1_engine):
+    """Two separate requirements, and neither substitutes for the other."""
+    panel = list(enginebridge.model_panel(_engine()))
+    approver = "gpt-5.6-sol"
+    others = [m for m in panel if m != approver]
+
+    def decided(**by_model):
+        return d2runtime._assert_panel_decided(
+            {m: {"decision": by_model[m]} for m in panel},
+            unit_sha256="a" * 64, panel=panel, approver=approver)
+
+    everyone = dict.fromkeys(panel, "approve")
+    assert decided(**everyone) == "approve"
+    # The required approver abstaining is not covered by the others approving.
+    assert decided(**{**everyone, approver: "abstain"}) == "abstain"
+    assert decided(**{**everyone, approver: "reject"}) == "reject"
+    # The approver alone is one model's opinion wearing a panel's name.
+    solo = {**dict.fromkeys(others, "abstain"), approver: "approve"}
+    assert decided(**solo) == "abstain"
+    # Any rejection makes the unit rejected even with the approver in favour.
+    assert decided(**{**everyone, others[0]: "reject"}) == "reject"
 
 
 def test_d2_publishes_a_failure_status_once_the_run_has_started(d1_engine):
@@ -8412,3 +8460,87 @@ def _unverified_local_authorizations(engine_clone, skeleton):
     return authority.propose_local_fixture_authorizations(
         skeleton, atom_map, verifier.unitpayload.index_atom_records(skeleton),
         repository_identity=CANONICAL_REPOSITORY)
+
+
+# --------------------------------------------------------------------------
+# The templates and the CLIs must agree about the environment.
+#
+# Nothing bound them, which is how they drifted: `TRUSTED_MODEL_ID` stayed in
+# both templates after the CLIs stopped reading it, and
+# `TRUSTED_REVOCATION_LIST_PATH` was added to the CLIs while no template set
+# it. Either direction is a lane that refuses on a real runner for a reason no
+# test reproduces — the D0 suite never runs the template.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("module_name,template_name", [
+    ("d1cli", "d1-trusted-count.yml.template"),
+    ("d2cli", "d2-trusted-generation.yml.template"),
+])
+def test_every_required_environment_variable_is_set_by_its_template(
+        module_name, template_name):
+    module = {"d1cli": d1cli, "d2cli": d2cli}[module_name]
+    text = (LANE_DIR / "workflow" / template_name).read_text(encoding="utf-8")
+    document = yaml.safe_load(text)
+    supplied = set()
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            supplied |= set(step.get("env", {}) or {})
+            # `export NAME=` inside the step script counts, and the first
+            # version of this test said it did not — my own proxy question.
+            # `TRUSTED_OBSERVED_NOW` is exported from the runner's CLOCK
+            # precisely because it must not be an `env:` entry: it was a `vars.`
+            # repository variable, which is a fixed string, so operator-record
+            # expiry was compared against the same frozen instant on every
+            # future run. Asking "is it in an env: mapping" would have marked
+            # the better source as the missing one.
+            supplied |= set(re.findall(r"^\s*export\s+([A-Z0-9_]+)=",
+                                       str(step.get("run") or ""),
+                                       flags=re.MULTILINE))
+        supplied |= set(job.get("env", {}) or {})
+    supplied |= set(document.get("env", {}) or {})
+
+    missing = sorted(set(module.REQUIRED_ENV) - supplied)
+    assert missing == [], (
+        f"{template_name} does not set {missing}; the lane would refuse on a "
+        "real runner with `environment_incomplete` and no test would show it")
+
+
+@pytest.mark.parametrize("module_name,template_name", [
+    ("d1cli", "d1-trusted-count.yml.template"),
+    ("d2cli", "d2-trusted-generation.yml.template"),
+])
+def test_no_template_still_sets_a_retired_environment_variable(module_name,
+                                                               template_name):
+    """A retired variable left in a template is worse than a missing one.
+
+    `TRUSTED_MODEL_ID` named ONE model. After the panel moved to governed
+    policy the CLIs stopped reading it — but the templates went on setting it
+    from a repository variable, which reads to an operator as "this is how you
+    choose the model" long after it stopped being true."""
+    module = {"d1cli": d1cli, "d2cli": d2cli}[module_name]
+    text = (LANE_DIR / "workflow" / template_name).read_text(encoding="utf-8")
+    document = yaml.safe_load(text)
+    assigned = set()
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            assigned |= set(step.get("env", {}) or {})
+        assigned |= set(job.get("env", {}) or {})
+    for retired in module.RETIRED_ENV:
+        assert retired not in assigned, (
+            f"{template_name} still assigns {retired}, which nothing reads")
+
+
+def test_the_trust_store_is_an_environment_secret_in_both_templates():
+    """It decides what counts as an operator authorization, so it is exactly as
+    dangerous as the provider credential and gets the same containment: an
+    environment secret, never a repository or organization one."""
+    for template_name in ("d1-trusted-count.yml.template",
+                          "d2-trusted-generation.yml.template"):
+        text = (LANE_DIR / "workflow" / template_name).read_text(
+            encoding="utf-8")
+        assert "secrets.TRUSTED_OPERATOR_TRUST_STORE" in text, template_name
+        # Never through the repository- or organization-level fallbacks the
+        # secret gate exists to forbid.
+        assert "vars.TRUSTED_OPERATOR_TRUST_STORE" not in text
+        assert "|| secrets.TRUSTED_OPERATOR_TRUST_STORE" not in text

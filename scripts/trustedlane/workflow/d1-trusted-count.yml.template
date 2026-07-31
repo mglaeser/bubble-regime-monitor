@@ -172,7 +172,18 @@ jobs:
           # the rebuild comparison compare the engine against itself.
           TRUSTED_CANDIDATE_PLAN_PATH: ${{ runner.temp }}/candidate/candidate-plan.json
           TRUSTED_CANDIDATE_CHECKOUT: ${{ runner.temp }}/candidate
-          TRUSTED_MODEL_ID: ${{ vars.TRUSTED_VERIFIER_MODEL_ID }}
+          # `TRUSTED_MODEL_ID` is GONE. It let a repository variable name
+          # ONE model, so a check published as a cross-vendor review asked
+          # a single model and whoever could edit that variable chose
+          # which. The panel is `verifier.policy.REQUESTED_MODEL_IDS`.
+          #
+          # The trust store decides what counts as an operator
+          # authorization, so it is an ENVIRONMENT secret like the provider
+          # credential — never a repository or organization one.
+          TRUSTED_OPERATOR_TRUST_STORE: ${{ secrets.TRUSTED_OPERATOR_TRUST_STORE }}
+          # Required, not optional: "no list" is not "no revocations", and a
+          # lane that treats a missing list as empty cannot be told to stop.
+          TRUSTED_REVOCATION_LIST_PATH: ${{ runner.temp }}/operator-revocations.json
           TRUSTED_RUN_ID: ${{ github.run_id }}
           TRUSTED_RUN_ATTEMPT: ${{ github.run_attempt }}
           TRUSTED_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

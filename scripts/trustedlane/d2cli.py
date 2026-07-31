@@ -17,7 +17,17 @@ from __future__ import annotations
 
 import os
 
-from . import adapter, d2runtime, phases, signing, statuspublish, transport
+from . import (
+    CANONICAL_REPOSITORY,  # noqa: F401
+    adapter,
+    d2runtime,
+    enginebridge,
+    phases,
+    signing,
+    statuspublish,
+    transport,
+    trustedverifier,
+)
 from .d1cli import load_json_document
 from .errors import refuse
 
@@ -37,9 +47,15 @@ REQUIRED_ENV = (
     "EVENT_REPOSITORY_ID",
     "TRUSTED_OBSERVATION_PATH",
     "TRUSTED_OPERATOR_RECORDS_PATH",
-    "TRUSTED_MODEL_ID",
+    "TRUSTED_REVOCATION_LIST_PATH",
     "TRUSTED_OBSERVED_NOW",
 )
+
+#: REMOVED. `TRUSTED_MODEL_ID` let the runner name ONE model, so a check
+#: published as `trusted-cross-vendor-review` asked a single model and the
+#: runner chose which. The panel is `verifier.policy.REQUESTED_MODEL_IDS` and
+#: no environment variable can change it.
+RETIRED_ENV = ("TRUSTED_MODEL_ID",)
 
 
 def read_environment(environ=None) -> dict:
@@ -72,11 +88,26 @@ def main(environ=None) -> dict:
                                   max_response_bytes=adapter.MAX_RESPONSE_BYTES)
     signing_key = signing.read_signing_key(phase=phases.D2)
 
+    engine = enginebridge.load_engine(values["TRUSTED_ENGINE_ROOT"])
+    lane_verifier = trustedverifier.bind(
+        engine,
+        trust_store=trustedverifier.load_trust_store(phase=phases.D2),
+        occurrence={"repository_identity": CANONICAL_REPOSITORY,
+                    "repository_numeric_id": values["EVENT_REPOSITORY_ID"],
+                    "target_base_sha": values["TARGET_BASE_SHA"],
+                    "diff_base_sha": values["TARGET_BASE_SHA"],
+                    "head_sha": values["CANDIDATE_HEAD_SHA"]},
+        observed_now=values["TRUSTED_OBSERVED_NOW"],
+        revocations=load_json_document(values["TRUSTED_REVOCATION_LIST_PATH"],
+                                       field="revocation_list"))
+
     return d2runtime.run(
         observations=load_json_document(values["TRUSTED_OBSERVATION_PATH"],
                                         field="protected_state_observation"),
-        operator_records=load_json_document(
+        operator_claims=load_json_document(
             values["TRUSTED_OPERATOR_RECORDS_PATH"], field="operator_records"),
+        lane_verifier=lane_verifier,
+        engine=engine,
         engine_artifact={"path": values["TRUSTED_ENGINE_ARTIFACT_PATH"],
                          "expected_sha256": values["TRUSTED_ENGINE_DIGEST"],
                          "root": values["TRUSTED_ENGINE_ROOT"],
@@ -98,5 +129,5 @@ def main(environ=None) -> dict:
                      "url": values["TRUSTED_RUN_URL"]},
         observed_now=values["TRUSTED_OBSERVED_NOW"],
         produced_at=values["TRUSTED_OBSERVED_NOW"],
-        model=values["TRUSTED_MODEL_ID"],
+        # No `model=`. The panel is governed policy, from the engine.
         engine_source_sha256=values["TRUSTED_ENGINE_SOURCE_SHA256"])

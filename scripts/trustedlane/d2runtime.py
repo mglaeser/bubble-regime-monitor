@@ -43,6 +43,7 @@ from . import (
     adapter,
     artifactload,
     challenge,
+    enginebridge,
     enginepolicy,
     evidencewire,
     protectedstate,
@@ -177,10 +178,10 @@ def plan_digest(units) -> str:
 
 
 def run(*, observations: dict, operator_claims, lane_verifier,
-        engine_artifact: dict,
+        engine: dict, engine_artifact: dict,
         candidate: dict, plan: dict, trusted_plan_sha256: str, opener,
         credential: str, signing_key, publisher, trusted_run: dict,
-        observed_now: str, produced_at: str, model: str,
+        observed_now: str, produced_at: str,
         engine_source_sha256: str) -> dict:
     """Run the generation lane. Returns signed execution evidence, or refuses."""
     steps = []
@@ -232,42 +233,63 @@ def run(*, observations: dict, operator_claims, lane_verifier,
     _publish(publisher, pending, publications)
 
     try:
-        verdicts = []
+        # THE PANEL, from the engine. It used to be a `model=` parameter, so a
+        # check named "cross-vendor review" asked ONE model and a caller chose
+        # which — the finding stated as a signature. `verifier.policy` owns the
+        # panel and `verifier.reviewpolicy` owns which member must approve.
+        panel = enginebridge.model_panel(engine)
+        approver = enginebridge.required_approver(engine)
+        steps.append(("review_panel", {"requested_model_ids": list(panel),
+                                       "required_approver": approver,
+                                       "minimum_other_approvers":
+                                       MINIMUM_OTHER_APPROVERS}))
+
+        by_unit: dict = {}
         generation_calls = 0
         for unit in plan["units"]:
             token = challenge.token_for_unit(
                 seed=seed, unit_sha256=unit["unit_sha256"],
                 candidate_head_sha=head, trusted_run_id=trusted_run["id"],
                 trusted_run_attempt=trusted_run["attempt"])
-            request = build_generation_request(
-                model=model,
-                instructions=(f"{unit['instructions']}\n"
-                              f"{challenge.instruction_line(token)}"),
-                input_text=unit["input_text"])
-            assert_request_is_generation(request)
-            reply = transport.exchange_generation(
-                request, opener=opener, credential=credential)
-            generation_calls += 1
-            raw = bytes(reply["body"])
-            normalized = adapter.normalize(
-                raw, adapter_identity=adapter_identity,
-                http_status=reply["status"],
-                raw_binding={"raw_response_sha256": hashlib.sha256(raw).hexdigest(),
-                             "raw_response_bytes": len(raw),
-                             "http_status": reply["status"], "model_id": model,
-                             "request_semantics_sha256": request["payload_sha256"],
-                             "attempt": trusted_run["attempt"]})
-            challenge.assert_all_echoed(
-                normalized["verdicts"], seed=seed, candidate_head_sha=head,
-                trusted_run_id=trusted_run["id"],
-                trusted_run_attempt=trusted_run["attempt"])
-            _assert_verdicts_are_for_this_unit(normalized["verdicts"], unit)
-            verdicts.extend(normalized["verdicts"])
+            for model_id in panel:
+                request = build_generation_request(
+                    model=model_id,
+                    instructions=(f"{unit['instructions']}\n"
+                                  f"{challenge.instruction_line(token)}"),
+                    input_text=unit["input_text"])
+                assert_request_is_generation(request)
+                reply = transport.exchange_generation(
+                    request, opener=opener, credential=credential)
+                generation_calls += 1
+                raw = bytes(reply["body"])
+                normalized = adapter.normalize(
+                    raw, adapter_identity=adapter_identity,
+                    http_status=reply["status"],
+                    raw_binding={
+                        "raw_response_sha256": hashlib.sha256(raw).hexdigest(),
+                        "raw_response_bytes": len(raw),
+                        "http_status": reply["status"], "model_id": model_id,
+                        "request_semantics_sha256": request["payload_sha256"],
+                        "attempt": trusted_run["attempt"]})
+                challenge.assert_all_echoed(
+                    normalized["verdicts"], seed=seed, candidate_head_sha=head,
+                    trusted_run_id=trusted_run["id"],
+                    trusted_run_attempt=trusted_run["attempt"])
+                _assert_verdicts_are_for_this_unit(normalized["verdicts"], unit)
+                for verdict in normalized["verdicts"]:
+                    by_unit.setdefault(verdict["unit_sha256"], {})[
+                        model_id] = verdict
 
-        payload = _finalize(verdicts, plan=plan, head=head,
+        decisions = {unit["unit_sha256"]: _assert_panel_decided(
+            by_unit.get(unit["unit_sha256"], {}), unit_sha256=unit["unit_sha256"],
+            panel=panel, approver=approver)
+            for unit in plan["units"]}
+        payload = _finalize(decisions, by_unit, plan=plan, head=head,
                             generation_calls=generation_calls,
-                            trusted_plan_sha256=trusted_plan_sha256)
-        steps.append(("verdicts", {"count": len(verdicts),
+                            trusted_plan_sha256=trusted_plan_sha256,
+                            panel=panel, approver=approver)
+        steps.append(("verdicts", {"count": payload["verdict_count"],
+                                   "units": payload["unit_count"],
                                    "generation_calls": generation_calls}))
 
         unsigned = evidencewire.trusted_envelope(
@@ -359,31 +381,89 @@ def _assert_verdicts_are_for_this_unit(verdicts, unit: dict):
         refuse(f"category=unit_answered_more_than_once count={len(verdicts)}")
 
 
-def _finalize(verdicts, *, plan: dict, head: str, generation_calls: int,
-              trusted_plan_sha256: str) -> dict:
+#: How many models BESIDES the required approver must also approve. One is the
+#: governed minimum: an approval that only the required approver gave is one
+#: model's opinion wearing a panel's name.
+MINIMUM_OTHER_APPROVERS = 1
+
+
+def _assert_panel_decided(verdicts_by_model: dict, *, unit_sha256: str,
+                          panel, approver: str) -> str:
+    """One unit's decision, from the whole panel rather than from one model.
+
+    Three separate refusals, because they are three different failures:
+
+    * a model that did not answer is not a model that abstained. A panel with a
+      silent member is a smaller panel, and reporting it as the governed one is
+      the finding this closes;
+    * the REQUIRED approver must have approved. Its approval is not
+      interchangeable with another model's — that is what "required" means;
+    * enough others must also approve. An approval only the required approver
+      gave is one model's opinion wearing a panel's name.
+
+    Anything short of all three is not an approval. It is not a rejection
+    either, and the distinction is kept: `abstain` says the panel declined to
+    decide, which a reader must not read as "passed"."""
+    missing = sorted(m for m in panel if m not in verdicts_by_model)
+    if missing:
+        refuse(f"category=panel_member_did_not_answer unit={unit_sha256[:12]} "
+               f"models={missing} — a panel with a silent member is a smaller "
+               "panel, and a silent model has not approved anything")
+    decisions = {m: verdicts_by_model[m].get("decision") for m in panel}
+    if decisions.get(approver) != "approve":
+        if decisions.get(approver) == "reject":
+            return "reject"
+        return "abstain"
+    others = [m for m in panel
+              if m != approver and decisions.get(m) == "approve"]
+    if len(others) < MINIMUM_OTHER_APPROVERS:
+        return "abstain"
+    if any(d == "reject" for d in decisions.values()):
+        return "reject"
+    return "approve"
+
+
+def _finalize(decisions: dict, by_unit: dict, *, plan: dict, head: str,
+              generation_calls: int, trusted_plan_sha256: str, panel,
+              approver: str) -> dict:
     planned = sorted(u["unit_sha256"] for u in plan["units"])
-    answered = sorted(v["unit_sha256"] for v in verdicts)
+    answered = sorted(decisions)
     if answered != planned:
         refuse(f"category=verdict_coverage_incomplete planned={len(planned)} "
                f"answered={len(answered)} — a partial review reported as a "
                "review is the reader believing the unanswered units passed")
-    if generation_calls != len(planned):
+    expected_calls = len(planned) * len(panel)
+    if generation_calls != expected_calls:
         refuse(f"category=generation_call_count_mismatch "
-               f"calls={generation_calls} units={len(planned)}")
-    decisions = {v["unit_sha256"]: v["decision"] for v in verdicts}
+               f"calls={generation_calls} expected={expected_calls} "
+               f"units={len(planned)} panel={len(panel)} — every unit is asked "
+               "of every governed model, exactly once")
+    verdicts = [v for unit in sorted(by_unit)
+                for _model, v in sorted(by_unit[unit].items())]
     return {
         "trusted_plan_sha256": trusted_plan_sha256,
         "candidate_head_sha": head,
+        "requested_model_ids": list(panel),
+        "required_approver": approver,
+        "minimum_other_approvers": MINIMUM_OTHER_APPROVERS,
         "verdict_count": len(verdicts),
+        "unit_count": len(planned),
         "generation_calls": generation_calls,
         "decisions": dict(sorted(decisions.items())),
+        "decisions_by_model": {
+            unit: {model: verdict.get("decision")
+                   for model, verdict in sorted(by_unit[unit].items())}
+            for unit in sorted(by_unit)},
         "all_approved": all(d == "approve" for d in decisions.values()),
         "abstained": sorted(u for u, d in decisions.items() if d == "abstain"),
-        "verdicts": sorted(verdicts, key=lambda v: v["unit_sha256"]),
-        "honest_scope": ("every planned unit was asked exactly once and "
-                         "answered exactly once. An abstain is counted as not "
-                         "approved, because a reviewer that declined to decide "
-                         "has not approved anything"),
+        "verdicts": verdicts,
+        "honest_scope": ("every planned unit was asked of every governed "
+                         "model exactly once. A unit counts as approved only "
+                         "when the required approver approved it and at least "
+                         f"{MINIMUM_OTHER_APPROVERS} other panel member did "
+                         "too; anything less is recorded as abstain, because a "
+                         "panel that declined to decide has not approved "
+                         "anything"),
     }
 
 

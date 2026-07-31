@@ -137,7 +137,18 @@ jobs:
           TRUSTED_ENGINE_SOURCE_SHA256: ${{ vars.TRUSTED_ENGINE_SOURCE_SHA256 }}
           TRUSTED_OBSERVATION_PATH: ${{ runner.temp }}/protected-state.json
           TRUSTED_OPERATOR_RECORDS_PATH: ${{ runner.temp }}/operator-records.json
-          TRUSTED_MODEL_ID: ${{ vars.TRUSTED_VERIFIER_MODEL_ID }}
+          # `TRUSTED_MODEL_ID` is GONE. It let a repository variable name
+          # ONE model, so a check published as a cross-vendor review asked
+          # a single model and whoever could edit that variable chose
+          # which. The panel is `verifier.policy.REQUESTED_MODEL_IDS`.
+          #
+          # The trust store decides what counts as an operator
+          # authorization, so it is an ENVIRONMENT secret like the provider
+          # credential — never a repository or organization one.
+          TRUSTED_OPERATOR_TRUST_STORE: ${{ secrets.TRUSTED_OPERATOR_TRUST_STORE }}
+          # Required, not optional: "no list" is not "no revocations", and a
+          # lane that treats a missing list as empty cannot be told to stop.
+          TRUSTED_REVOCATION_LIST_PATH: ${{ runner.temp }}/operator-revocations.json
           TARGET_BASE_SHA: ${{ vars.TRUSTED_TARGET_BASE_SHA }}
           CANDIDATE_HEAD_SHA: ${{ vars.TRUSTED_CANDIDATE_HEAD_SHA }}
           TRUSTED_RUN_ID: ${{ github.run_id }}
