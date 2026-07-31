@@ -160,8 +160,16 @@ def envelope_digest(record: dict) -> str:
     return hashlib.sha256(b"trusted-evidence-envelope-v1\x00" + blob).hexdigest()
 
 
-def validate_envelope(record: dict) -> dict:
-    """Shape-check any envelope, candidate or trusted, without trusting it."""
+def _assert_envelope_shape(record: dict) -> str:
+    """Every check that does not depend on whether a signature is present yet.
+
+    Split out because signing needs exactly these and NOT the class/signature
+    coherence rule below: unsigned is the state a trusted record is in
+    immediately before it is signed, so validating it with the reader's rule
+    would make signing impossible — the check would demand the signature the
+    call is about to produce. Sharing the shape pass keeps the pre-signing
+    check strict rather than skipping it, which is what a separate re-listing
+    of the same rules would eventually drift into."""
     if not isinstance(record, dict):
         refuse("category=evidence_envelope_not_object")
     if record.get("wire_version") != WIRE_VERSION:
@@ -184,7 +192,12 @@ def validate_envelope(record: dict) -> dict:
         refuse("category=evidence_envelope_digest_mismatch — the envelope was "
                "edited after it was digested, or the digest belongs to a "
                "different envelope")
+    return evidence_class
 
+
+def validate_envelope(record: dict) -> dict:
+    """Shape-check any envelope, candidate or trusted, without trusting it."""
+    evidence_class = _assert_envelope_shape(record)
     trusted = evidence_class in TRUSTED_CLASSES
     signed = bool(record.get("signature"))
     if trusted and not signed:
@@ -232,20 +245,107 @@ def assert_payload_matches(record: dict, payload) -> dict:
     return {"payload_bound": True, "payload_sha256": actual}
 
 
-def sign(record: dict, **_kwargs):
-    """Refuses. Signing needs a key this branch must not hold."""
-    validate_envelope(record)
-    refuse("category=signing_not_available_in_D0 — the wire format, its digest "
-           "binding and its refusals are defined and tested; producing a "
-           "signature requires the trusted signing key, which lives with the "
-           "protected run and never on a reviewed branch")
+def trusted_envelope(*, evidence_class: str, payload, produced_by: str,
+                     repository_numeric_id: int, workflow_run_id,
+                     workflow_run_attempt, ref: str, target_base_sha: str,
+                     candidate_head_sha: str, produced_at: str) -> dict:
+    """Build an UNSIGNED trusted-class envelope, which is not yet usable.
+
+    Separate from `envelope()` because that function's refusal — a candidate
+    branch may not name a trusted class — is load-bearing and stays exactly as
+    it is. This one exists because D1 has to build the record it will sign.
+
+    There is deliberately no phase gate here, and the reason is structural
+    rather than lenient: what this returns cannot pass `validate_envelope`,
+    because a trusted class without a signature is refused. The capability is
+    the signing key, not the constructor, so the gate sits on
+    `signing.read_signing_key` where it can actually hold."""
+    from .identity import assert_commit_sha, assert_repository_numeric_id
+
+    if evidence_class not in TRUSTED_CLASSES:
+        refuse(f"category=not_a_trusted_class class={evidence_class!r} "
+               f"permitted={list(TRUSTED_CLASSES)} — build a candidate-class "
+               "record with envelope(), which refuses trusted classes on "
+               "purpose")
+    assert_repository_numeric_id(repository_numeric_id)
+    assert_commit_sha(target_base_sha, field="target_base_sha")
+    assert_commit_sha(candidate_head_sha, field="candidate_head_sha")
+    if not _TIMESTAMP.match(str(produced_at)):
+        refuse("category=evidence_timestamp_malformed")
+    if not isinstance(produced_by, str) or not produced_by.strip():
+        refuse("category=evidence_producer_missing")
+    for label, value in (("workflow_run_id", workflow_run_id),
+                         ("workflow_run_attempt", workflow_run_attempt)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            refuse(f"category=trusted_evidence_run_field_invalid field={label} "
+                   "— trusted evidence that cannot name the protected run that "
+                   "produced it cannot be traced back to one")
+    record = {
+        "wire_version": WIRE_VERSION,
+        "evidence_class": evidence_class,
+        "produced_by": produced_by,
+        "repository_numeric_id": repository_numeric_id,
+        "workflow_run_id": workflow_run_id,
+        "workflow_run_attempt": workflow_run_attempt,
+        "ref": ref,
+        "target_base_sha": target_base_sha,
+        "candidate_head_sha": candidate_head_sha,
+        "payload_sha256": canonical_payload_digest(payload),
+        "produced_at": produced_at,
+    }
+    record["envelope_sha256"] = envelope_digest(record)
+    record["signature"] = None
+    record["signer_identity"] = None
+    record["honest_scope"] = (
+        "an unsigned trusted-class envelope. It does NOT validate in this "
+        "state — validate_envelope refuses a trusted class with no signature — "
+        "so it is an intermediate, not evidence")
+    return record
 
 
-def verify(record: dict, **_kwargs):
-    """Refuses, and says which key would be needed rather than implying the
-    capability is merely unimplemented."""
+def sign(record: dict, *, key=None, **_kwargs):
+    """Sign, if a key is supplied. Without one, refuse and say what is missing.
+
+    The refusal is no longer "signing is not implemented": it is implemented,
+    in `signing`, and what D0 lacks is the key. Saying so accurately matters,
+    because "not available in D0" invited the reading that the format was the
+    unfinished part."""
+    validate_envelope_for_signing(record)
+    if key is None:
+        refuse("category=signing_key_not_supplied — the wire format, the MAC "
+               "and every refusal are implemented in trustedlane.signing; what "
+               "is absent is the trusted signing key, which lives with the "
+               "protected run and never on a reviewed branch. Call "
+               "signing.read_signing_key(phase=...) inside D1/D2, or pass a "
+               "key explicitly in a test")
+    from .signing import sign_envelope
+
+    return sign_envelope(record, key=key)
+
+
+def validate_envelope_for_signing(record: dict) -> dict:
+    """Shape-check a record that is about to be signed, or has just been.
+
+    Everything `validate_envelope` checks except the one rule that cannot hold
+    at this point: that a trusted class carries a signature. That rule is the
+    reader's, and it is enforced by `validate_envelope` and by
+    `signing.verify_envelope` — neither of which this replaces."""
+    return {"ready_to_sign": True,
+            "evidence_class": _assert_envelope_shape(record)}
+
+
+def verify(record: dict, *, key=None, expected_key_id=None, **_kwargs):
+    """Verify, if the trusted key is supplied out of band.
+
+    The key is a parameter and not a repository constant on purpose: a key
+    committed here is a key this repository can replace, so it must arrive from
+    the operator record."""
     validate_envelope(record)
-    refuse("category=verification_not_available_in_D0 — verifying a signature "
-           "needs the trusted PUBLIC key, and a public key committed to this "
-           "repository is a key this repository can replace; it must arrive "
-           "from the operator record, out of band")
+    if key is None:
+        refuse("category=verification_key_not_supplied — verifying needs the "
+               "trusted key, and one committed to this repository is a key "
+               "this repository can replace; it must arrive from the operator "
+               "record, out of band")
+    from .signing import verify_envelope
+
+    return verify_envelope(record, key=key, expected_key_id=expected_key_id)

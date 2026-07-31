@@ -234,14 +234,170 @@ def normalization_record(*, raw_binding: dict, adapter_identity: dict,
     }
 
 
-def normalize(raw_body, **_kwargs):
-    """The D0 entry point, which refuses.
+#: The provider's own names for the pieces of a `/v1/responses` body. Used as
+#: comparison targets only — no observed provider string is ever recorded.
+RESPONSE_OBJECT = "response"
+RESPONSE_STATUS_COMPLETED = "completed"
+OUTPUT_TYPE_MESSAGE = "message"
+CONTENT_TYPE_TEXT = "output_text"
+CONTENT_TYPE_REFUSAL = "refusal"
 
-    Deliberately unimplemented rather than guessed. Writing a parser for a
-    response shape that no real call has returned would produce code that looks
-    verified and is not; the honest D0 artifact is the contract above plus this
-    refusal."""
-    refuse("category=normalization_not_implemented_in_D0 — the adapter "
-           "contract, field whitelist and digest binding are defined and "
-           "tested; parsing a real provider response requires a real response, "
-           "which D0 must not obtain")
+#: A generation body larger than this is refused before it is parsed.
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def builtin_adapter_identity(*, engine_source_sha256: str) -> dict:
+    """The identity of THIS adapter, bound to the approved engine.
+
+    `adapter_sha256` is the engine source digest rather than a hash this module
+    computes of its own file. A module hashing itself from disk is the EX3-R05
+    defect in miniature — it records a digest of whatever happens to be there,
+    which is the thing an attacker who can write that file controls. The engine
+    digest comes from the verified manifest, so the adapter is identified by
+    the artifact the operator actually approved."""
+    if not isinstance(engine_source_sha256, str) or len(
+            engine_source_sha256) != 64:
+        refuse("category=adapter_engine_digest_malformed — the adapter is "
+               "identified by the approved engine, not by hashing its own file")
+    return {
+        "normalization_version": NORMALIZATION_VERSION,
+        "adapter_source": "TRUSTED_LANE_BUILTIN",
+        "adapter_sha256": engine_source_sha256,
+    }
+
+
+def _extract_single_text_block(document) -> str:
+    """The provider's envelope, unwrapped with no leniency anywhere.
+
+    Every branch here is a refusal rather than a fallback. A normalizer that
+    scans a list for "the first thing that looks like text" has made an
+    editorial choice, and `SELECT_FIRST_OF_MANY_OUTPUTS` is a forbidden
+    transform precisely because that choice is invisible afterwards."""
+    if document.get("object") != RESPONSE_OBJECT:
+        refuse("category=response_object_mismatch — the observed value is not "
+               "reported; only that it differs from the expected one")
+    status = document.get("status")
+    if status != RESPONSE_STATUS_COMPLETED:
+        # `incomplete` is the truncation case, and treating a truncated answer
+        # as an answer is exactly `TRUNCATE_OVERLONG_FIELD` arriving from the
+        # other direction.
+        refuse("category=response_status_not_completed — an incomplete "
+               "response is a partial answer, and a partial answer accepted as "
+               "a whole one is a verdict the model did not give")
+    if document.get("incomplete_details") not in (None, {}):
+        refuse("category=response_declares_incomplete_details")
+
+    output = document.get("output")
+    if not isinstance(output, list):
+        refuse("category=response_output_not_a_list")
+    assert_single_output(len(output))
+    block = output[0]
+    if not isinstance(block, dict):
+        refuse("category=response_output_block_not_an_object")
+    if block.get("type") != OUTPUT_TYPE_MESSAGE:
+        refuse("category=response_output_block_not_a_message — a tool call or "
+               "a reasoning block is not a verdict, and reading one as if it "
+               "were is the adapter inventing content")
+
+    content = block.get("content")
+    if not isinstance(content, list) or len(content) != 1:
+        refuse(f"category=response_content_not_single "
+               f"count={len(content) if isinstance(content, list) else 'n/a'} "
+               "— picking among several content parts is an editorial choice "
+               "the lane must not make silently")
+    part = content[0]
+    if not isinstance(part, dict):
+        refuse("category=response_content_part_not_an_object")
+    if part.get("type") == CONTENT_TYPE_REFUSAL:
+        refuse("category=response_is_a_refusal — the model declined; that is "
+               "an outcome to report, not a verdict to parse, and the refusal "
+               "text is not recorded because it is provider-controlled")
+    if part.get("type") != CONTENT_TYPE_TEXT:
+        refuse("category=response_content_part_not_text")
+    text = part.get("text")
+    if not isinstance(text, str) or not text:
+        refuse("category=response_text_missing")
+    return text
+
+
+def parse_verdict_payload(text: str) -> list:
+    """Strict JSON, no repair, exact shape.
+
+    `REPAIR_INVALID_JSON` is a forbidden transform, so a body that does not
+    parse is refused rather than fixed. The tempting repair — stripping a
+    ```json fence — is exactly the one that would let a model's prose become
+    part of a verdict."""
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
+        refuse(f"category=verdict_payload_not_json "
+               f"exception_class={type(exc).__name__} — repairing it is a "
+               "forbidden transform: the repair decides what the model meant")
+    if not isinstance(document, dict):
+        refuse("category=verdict_payload_not_an_object")
+    extra = sorted(set(document) - {"verdicts"})
+    if extra:
+        refuse(f"category=verdict_payload_unknown_field fields={extra} — "
+               "dropping it is a forbidden transform, and an adapter that "
+               "ignores unknown keys cannot notice the provider changed")
+    verdicts = document.get("verdicts")
+    if not isinstance(verdicts, list) or not verdicts:
+        refuse("category=verdict_payload_verdicts_not_a_nonempty_list")
+    return verdicts
+
+
+def normalize(raw_body, *, adapter_identity=None, raw_binding=None,
+              http_status=None, **_kwargs) -> dict:
+    """Parse a real `/v1/responses` body into normalized verdicts, or refuse.
+
+    EX3-R09. This used to refuse outright, and that was right while no real
+    call had ever been made: a parser written against a guessed shape is code
+    that looks verified and is not. The shape is now established — the hosted
+    capability probe and the documented Responses envelope — so the honest
+    artifact is the parser, with every leniency that would let a malformed
+    answer become a well-formed one written as a refusal.
+
+    Nothing here applies a transform. `applied_transforms` is empty and that is
+    a claim the caller can check: every branch that would have needed one is a
+    `refuse` instead, so there is no path through this function that coerces,
+    defaults, drops, truncates, selects or repairs."""
+    if adapter_identity is None or raw_binding is None:
+        refuse("category=normalization_requires_adapter_and_binding — a "
+               "normalized verdict that cannot be traced to the exact bytes it "
+               "came from is a verdict with no provenance; build the identity "
+               "with builtin_adapter_identity()")
+    assert_adapter_is_trusted(adapter_identity)
+
+    if not isinstance(raw_body, (bytes, bytearray)):
+        refuse("category=raw_response_not_bytes — normalizing a str means "
+               "someone already chose an encoding, and that choice is part of "
+               "what the digest is supposed to cover")
+    if len(raw_body) > MAX_RESPONSE_BYTES:
+        refuse(f"category=raw_response_oversized bytes={len(raw_body)} "
+               f"max={MAX_RESPONSE_BYTES}")
+    if http_status is not None and http_status != 200:
+        refuse(f"category=response_status_not_ok status={http_status} — the "
+               "body is not reported; a provider error string is a channel")
+
+    actual_digest = hashlib.sha256(raw_body).hexdigest()
+    if raw_binding.get("raw_response_sha256") != actual_digest:
+        refuse("category=raw_binding_digest_mismatch — the binding describes "
+               "different bytes than the ones being parsed, so the verdict "
+               "would be traceable to a response nobody read")
+    if raw_binding.get("raw_response_bytes") != len(raw_body):
+        refuse("category=raw_binding_length_mismatch")
+
+    try:
+        document = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        refuse(f"category=raw_response_not_json "
+               f"exception_class={type(exc).__name__}")
+    if not isinstance(document, dict):
+        refuse("category=raw_response_not_an_object")
+
+    text = _extract_single_text_block(document)
+    verdicts = parse_verdict_payload(text)
+    return normalization_record(
+        raw_binding=raw_binding, adapter_identity=adapter_identity,
+        normalized_verdicts=verdicts, applied_transforms=(),
+        raw_output_count=1)

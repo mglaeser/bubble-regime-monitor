@@ -59,8 +59,10 @@ from trustedlane import (  # noqa: E402
     prerequisites,
     protectedstate,
     runtimelock,
+    signing,
     statusnames,
     statuspublish,
+    transport,
     workflowfile,
     workflowpolicy,
 )
@@ -97,6 +99,19 @@ NETWORK_MODULES = {
 CREDENTIAL_ENV_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
+#: The count lane cannot count without sending a request, so exactly one file
+#: is permitted to reach a provider. Naming it here rather than deleting the
+#: rule keeps the property checkable: the scan still runs over every other
+#: file, and the exception carries conditions of its own (below) that a plain
+#: allowlist entry would not.
+NETWORK_EXEMPT = {"transport.py"}
+
+#: Reading the provider key is `transport.py`; reading the evidence signing key
+#: is `signing.py`. Both are credential-bearing by design and both refuse
+#: outside D1/D2.
+CREDENTIAL_EXEMPT = {"transport.py", "signing.py"}
+
+
 def _lane_sources():
     return sorted(LANE_DIR.rglob("*.py"))
 
@@ -106,8 +121,7 @@ def test_lane_has_sources():
     assert len(_lane_sources()) >= 10
 
 
-@pytest.mark.parametrize("path", _lane_sources(), ids=lambda p: p.name)
-def test_no_lane_module_imports_a_network_client(path):
+def _imported_names(path):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     imported = set()
     for node in ast.walk(tree):
@@ -115,15 +129,65 @@ def test_no_lane_module_imports_a_network_client(path):
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             imported.add(node.module)
+    return imported
+
+
+@pytest.mark.parametrize("path", _lane_sources(), ids=lambda p: p.name)
+def test_no_lane_module_imports_a_network_client(path):
+    if path.name in NETWORK_EXEMPT:
+        pytest.skip(f"{path.name} is the named transport; see the tests that "
+                    "constrain it")
     offending = sorted(
-        name for name in imported
+        name for name in _imported_names(path)
         if name in NETWORK_MODULES or name.split(".")[0] in NETWORK_MODULES)
     assert offending == [], f"{path.name} imports {offending}"
+
+
+def test_the_network_exemption_names_files_that_exist():
+    """An exemption for a file that is not there stops being an exemption and
+    becomes a hole waiting for someone to create that name."""
+    present = {p.name for p in _lane_sources()}
+    assert NETWORK_EXEMPT <= present, NETWORK_EXEMPT - present
+    assert CREDENTIAL_EXEMPT <= present, CREDENTIAL_EXEMPT - present
+
+
+@pytest.mark.parametrize("name", sorted(NETWORK_EXEMPT))
+def test_the_exempt_module_imports_its_client_inside_a_function(name):
+    """Module level would mean importing `transport` loads an HTTP client into
+    the process — in D0, in the test suite, everywhere. Inside a function body,
+    behind a refusal, it is loaded only on a path D0 cannot reach."""
+    path = LANE_DIR / name
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    module_level = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            module_level.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            module_level.add(node.module)
+    offending = sorted(n for n in module_level
+                       if n in NETWORK_MODULES
+                       or n.split(".")[0] in NETWORK_MODULES)
+    assert offending == [], f"{name} imports {offending} at module level"
+
+
+def test_importing_the_transport_binds_no_http_client():
+    """The same claim by execution rather than by AST.
+
+    Checking `sys.modules` would prove nothing — pytest and the standard
+    library pull `ssl` in for their own reasons, so it is present in any real
+    process. The checkable form is the module's own namespace: `transport` has
+    been imported by this suite, and it must still hold no reference to a
+    client, which is only true if the import never ran."""
+    assert not hasattr(transport, "http"), "transport bound an HTTP client"
+    assert not hasattr(transport, "ssl"), "transport bound ssl"
 
 
 @pytest.mark.parametrize("path", _lane_sources(), ids=lambda p: p.name)
 def test_no_lane_module_reads_a_credential_from_the_environment(path):
     """`os.environ["..._KEY"]` anywhere in D0 would contradict the phase."""
+    if path.name in CREDENTIAL_EXEMPT:
+        pytest.skip(f"{path.name} reads a credential by design; the tests "
+                    "below prove it refuses to in D0")
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     literals = [node.value for node in ast.walk(tree)
                 if isinstance(node, ast.Constant) and isinstance(node.value, str)]
@@ -1300,8 +1364,12 @@ def _raw_binding(**overrides):
     return base
 
 
-def test_the_d0_adapter_refuses_to_parse_a_response():
-    with _refusal("normalization_not_implemented_in_D0"):
+def test_normalizing_without_provenance_is_refused():
+    """EX3-R09. This used to refuse outright ("not implemented in D0"), which
+    was right while no real call had ever been made. The shape is established
+    now, so the refusal that remains is the one that still matters: a verdict
+    that cannot be traced to the exact bytes it came from has no provenance."""
+    with _refusal("normalization_requires_adapter_and_binding"):
         adapter.normalize(b'{"output": []}')
 
 
@@ -3255,13 +3323,23 @@ def test_wire_formatting_does_not_change_the_payload_digest():
 
 
 def test_wire_signing_and_verifying_both_refuse_and_say_which_key():
+    """What is missing at D0 is the KEY, not the implementation.
+
+    The earlier refusals said "signing is not available in D0", which invited
+    the reading that the format was the unfinished part. EX3-R09 implemented it
+    in `signing`, so the refusal now names the actual gap. It also no longer
+    says "PUBLIC key": the construction is a symmetric MAC, and promising a
+    public key nobody will ever be handed was a claim about a design that does
+    not exist."""
     record = _envelope()
     with pytest.raises(errors.LaneRefusal) as sign_exc:
         evidencewire.sign(record)
-    assert "signing key" in sign_exc.value.reason
+    assert "signing_key_not_supplied" in sign_exc.value.reason
+    assert "never on a reviewed branch" in sign_exc.value.reason
     with pytest.raises(errors.LaneRefusal) as verify_exc:
         evidencewire.verify(record)
-    assert "PUBLIC key" in verify_exc.value.reason
+    assert "verification_key_not_supplied" in verify_exc.value.reason
+    assert "operator record" in verify_exc.value.reason
 
 
 # ---- operator records: a branch-local file is not authority -----------------
@@ -3926,3 +4004,699 @@ def test_r11_the_packet_splits_v_trust_into_separate_machine_facts():
     assert "INACTIVE_OPEN_BLOCKING" in text
     assert "precursor_merge_trust_gate" in text
     assert "casts zero votes" in text or "casts zero votes" in text.lower()
+
+
+# --------------------------------------------------------------------------
+# EX3-R01 — the transport. The one lane module that can reach a provider.
+#
+# The seam that makes this testable is `opener`. The dangerous operations are
+# reading the real credential and opening a real socket, and those are the only
+# two behind the phase gate. Building the request, sending it through a
+# caller-supplied opener and parsing the reply have no gate, so the entire
+# protocol — every refusal included — runs against a fake server here, in D0,
+# with no credential anywhere in the process.
+# --------------------------------------------------------------------------
+
+COUNT_ARGS = dict(model="gpt-5", instructions="review this",
+                  input_text="diff --git a/x b/x")
+
+#: The credential the fake server sees. Long enough to pass the length check,
+#: and obviously not a key.
+FAKE_CREDENTIAL = "test-not-a-real-key-" + "0" * 24
+
+
+def _fake_server(status=200, body=None, *, record=None, raise_with=None):
+    """An opener that answers like the probed endpoint, and records what it saw.
+
+    `record` is a list the call is appended to, so a test can assert on the
+    exact bytes and headers that WOULD have gone out — including that the
+    credential was attached exactly once and never appeared in the request the
+    caller built."""
+    if body is None:
+        body = json.dumps({"object": "response.input_tokens",
+                           "input_tokens": 1234}).encode()
+
+    def opener(method, url, headers, request_body):
+        if record is not None:
+            record.append({"method": method, "url": url,
+                           "headers": dict(headers), "body": request_body})
+        if raise_with is not None:
+            raise raise_with
+        return status, body
+
+    return opener
+
+
+def test_the_built_request_carries_no_credential():
+    """The record a caller holds, digests and puts in evidence is safe by
+    construction rather than by remembering to strip a header."""
+    request = transport.build_count_request(**COUNT_ARGS)
+    assert request["carries_credential"] is False
+    blob = json.dumps(request, default=str).lower()
+    assert "authorization" not in blob
+    assert "bearer" not in blob
+
+
+def test_the_credential_is_attached_once_at_send_time():
+    seen = []
+    request = transport.build_count_request(**COUNT_ARGS)
+    transport.count_once(request=request, opener=_fake_server(record=seen),
+                         credential=FAKE_CREDENTIAL)
+    assert len(seen) == 1
+    headers = seen[0]["headers"]
+    assert headers["authorization"] == f"Bearer {FAKE_CREDENTIAL}"
+    # And the caller's own request object was not mutated to hold it.
+    assert "authorization" not in request["headers"]
+
+
+def test_a_full_count_against_the_fake_server_returns_only_an_integer():
+    request = transport.build_count_request(**COUNT_ARGS)
+    result = transport.count_once(request=request, opener=_fake_server(),
+                                  credential=FAKE_CREDENTIAL)
+    assert result["input_tokens"] == 1234
+    assert result["generation_call"] is False
+    assert result["payload_sha256"] == request["payload_sha256"]
+
+
+def test_the_request_body_is_exactly_the_probed_payload_shape():
+    """The endpoint and payload are not guesses — they are what the hosted
+    capability probe established."""
+    request = transport.build_count_request(**COUNT_ARGS)
+    assert request["url"] == "https://api.openai.com/v1/responses/input_tokens"
+    assert json.loads(request["body"]) == {
+        "model": "gpt-5", "instructions": "review this",
+        "input": "diff --git a/x b/x", "truncation": "disabled"}
+
+
+def test_truncation_must_be_disabled():
+    """Truncation lets the provider decide what was counted, so the number
+    would describe an input nobody chose."""
+    with _refusal("count_request_truncation_not_disabled"):
+        transport.build_count_request(**dict(COUNT_ARGS, truncation="auto"))
+
+
+@pytest.mark.parametrize("field", ["model", "instructions", "input_text"])
+def test_an_empty_count_request_field_is_refused(field):
+    with _refusal("count_request_field_missing"):
+        transport.build_count_request(**dict(COUNT_ARGS, **{field: ""}))
+
+
+# ---- D1 counts; it does not generate --------------------------------------
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.openai.com/v1/responses",
+    "https://api.openai.com/v1/chat/completions",
+    "https://api.openai.com/v1/responses/input_tokens/../responses",
+    "https://evil.example/v1/responses/input_tokens",
+])
+def test_only_the_count_endpoint_may_be_called(url):
+    request = dict(transport.build_count_request(**COUNT_ARGS), url=url)
+    with _refusal("request_endpoint_not_the_count_endpoint"):
+        transport.exchange(request, opener=_fake_server(),
+                           credential=FAKE_CREDENTIAL)
+
+
+def test_a_non_post_request_is_refused():
+    request = dict(transport.build_count_request(**COUNT_ARGS), method="GET")
+    with _refusal("request_method_not_permitted"):
+        transport.exchange(request, opener=_fake_server(),
+                           credential=FAKE_CREDENTIAL)
+
+
+# ---- strict parsing: no provider string survives ---------------------------
+
+
+def test_a_non_200_reply_is_refused_without_echoing_the_body():
+    """A provider error string is a channel, and it arrives on the path where
+    nobody is looking."""
+    body = json.dumps({"error": {"message": "sk-LEAKED-LOOKING-STRING"}}).encode()
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        transport.parse_count_response(401, body)
+    assert "count_response_status_not_ok" in excinfo.value.reason
+    assert "LEAKED" not in excinfo.value.reason
+
+
+def test_a_wrong_object_name_is_refused_without_echoing_it():
+    body = json.dumps({"object": "chat.completion",
+                       "input_tokens": 5}).encode()
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        transport.parse_count_response(200, body)
+    assert "count_response_object_mismatch" in excinfo.value.reason
+    assert "chat.completion" not in excinfo.value.reason
+
+
+def test_true_cannot_masquerade_as_a_count_of_one():
+    """`bool` subclasses `int`. Without an explicit exclusion, `true` parses as
+    a token count of 1 and the ledger budgets for it."""
+    body = json.dumps({"object": "response.input_tokens",
+                       "input_tokens": True}).encode()
+    with _refusal("count_response_input_tokens_not_an_integer"):
+        transport.parse_count_response(200, body)
+
+
+@pytest.mark.parametrize("value,category", [
+    ("1234", "count_response_input_tokens_not_an_integer"),
+    (-1, "count_response_input_tokens_negative"),
+    (10**12, "count_response_input_tokens_implausible"),
+    (None, "count_response_input_tokens_not_an_integer"),
+])
+def test_an_implausible_or_mistyped_count_is_refused(value, category):
+    body = json.dumps({"object": "response.input_tokens",
+                       "input_tokens": value}).encode()
+    with _refusal(category):
+        transport.parse_count_response(200, body)
+
+
+def test_an_oversized_body_is_refused_before_it_is_parsed():
+    """Decoding it in order to find out how big it is is the wrong order."""
+    body = b"{" + b"a" * (transport.MAX_RESPONSE_BYTES + 10) + b"}"
+    with _refusal("response_body_oversized"):
+        transport.parse_count_response(200, body)
+
+
+@pytest.mark.parametrize("body,category", [
+    (b"not json at all", "count_response_not_json"),
+    (b'"a string"', "count_response_not_an_object"),
+    (b"[1,2,3]", "count_response_not_an_object"),
+    (b"\xff\xfe", "count_response_not_json"),
+])
+def test_a_malformed_body_is_refused(body, category):
+    with _refusal(category):
+        transport.parse_count_response(200, body)
+
+
+def test_a_transport_exception_reports_its_class_and_not_its_text():
+    """This is the one place a credential is in scope, and an exception message
+    can carry a URL, a header or a response fragment."""
+    boom = OSError("connect to api.openai.com with Bearer sk-SENSITIVE failed")
+    request = transport.build_count_request(**COUNT_ARGS)
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        transport.exchange(request, opener=_fake_server(raise_with=boom),
+                           credential=FAKE_CREDENTIAL)
+    assert "exception_class=OSError" in excinfo.value.reason
+    assert "SENSITIVE" not in excinfo.value.reason
+    assert "Bearer" not in excinfo.value.reason
+
+
+# ---- the phase gate: at D0 the two dangerous calls always refuse -----------
+
+
+@pytest.mark.parametrize("phase", [phases.D1, phases.D2])
+def test_reading_the_credential_refuses_because_d1_is_not_deployed(phase):
+    with _refusal("phase_not_deployed"):
+        transport.read_credential(phase=phase,
+                                  environ={transport.CREDENTIAL_ENV: "x" * 40})
+
+
+@pytest.mark.parametrize("phase", [phases.D0, "D9", ""])
+def test_reading_the_credential_refuses_for_a_phase_that_never_holds_one(phase):
+    with _refusal("credential_phase_not_permitted"):
+        transport.read_credential(phase=phase, environ={})
+
+
+@pytest.mark.parametrize("phase", [phases.D1, phases.D2])
+def test_opening_a_real_connection_refuses_because_d1_is_not_deployed(phase):
+    with _refusal("phase_not_deployed"):
+        transport.open_https(phase=phase)
+
+
+def test_opening_a_real_connection_refuses_outright_for_d0():
+    with _refusal("transport_phase_not_permitted"):
+        transport.open_https(phase=phases.D0)
+
+
+@pytest.mark.parametrize("name", ["transport.py", "signing.py"])
+def test_a_credential_bearing_module_cannot_raise_its_own_phase(name):
+    """The question is not whether the file MENTIONS `IMPLEMENTED_PHASE` — the
+    docstring does, and grepping for the string asks something adjacent to what
+    matters. The question is whether it ASSIGNS to it.
+
+    `assert_phase_permitted` compares against `phases.IMPLEMENTED_PHASE`, so a
+    module that could write to it could authorize itself. Nothing may."""
+    path = LANE_DIR / name
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    written = set()
+    for node in ast.walk(tree):
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                written.add(target.id)
+            elif isinstance(target, ast.Attribute):
+                written.add(target.attr)
+    assert "IMPLEMENTED_PHASE" not in written, f"{name} assigns the phase"
+    assert "PHASE_CAPABILITIES" not in written, f"{name} rewrites capabilities"
+    source = path.read_text(encoding="utf-8")
+    assert "assert_phase_permitted" in source, f"{name} has no phase gate"
+
+
+def test_setattr_is_not_available_as_a_way_around_that():
+    """An AST scan for assignment is only as good as the absence of a dynamic
+    equivalent, and `setattr(phases, 'IMPLEMENTED_PHASE', ...)` is not an
+    assignment node."""
+    for name in ("transport.py", "signing.py"):
+        path = LANE_DIR / name
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        calls = {getattr(node.func, "id", None) for node in ast.walk(tree)
+                 if isinstance(node, ast.Call)}
+        assert "setattr" not in calls, name
+        assert "globals" not in calls, name
+        assert "vars" not in calls, name
+
+
+# --------------------------------------------------------------------------
+# EX3-R09 — trusted evidence signing and verification.
+#
+# The gate is on reading the REAL key and nowhere else. Signing with a key
+# supplied explicitly is an ordinary function, so the whole format runs here in
+# D0 — and an envelope signed with a test key fails verification under the real
+# one, which is the property that matters. Forging trusted evidence requires
+# the key, not the code, and the code is what a candidate branch can change.
+# --------------------------------------------------------------------------
+
+TEST_KEY = b"test-signing-key-not-the-real-one-0123456789"
+OTHER_KEY = b"a-different-test-key-also-not-real-9876543210"
+
+
+def _trusted_envelope(evidence_class="TRUSTED_COUNT_EVIDENCE", payload=None):
+    return evidencewire.trusted_envelope(
+        evidence_class=evidence_class, payload=payload or {"input_tokens": 10},
+        **_WIRE_ARGS)
+
+
+def test_an_unsigned_trusted_envelope_does_not_validate():
+    """The structural reason `trusted_envelope` needs no phase gate: what it
+    returns cannot be used until it is signed, and signing needs the key."""
+    record = _trusted_envelope()
+    assert record["signature"] is None
+    with _refusal("trusted_class_without_signature"):
+        evidencewire.validate_envelope(record)
+
+
+def test_a_signed_trusted_envelope_validates_and_verifies():
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    assert evidencewire.validate_envelope(signed)["signature_present"] is True
+    result = signing.verify_envelope(signed, key=TEST_KEY)
+    assert result["signature_verified"] is True
+    assert result["key_id"] == signing.key_id(TEST_KEY)
+
+
+def test_a_signature_from_another_key_does_not_verify():
+    """The whole point: the code is public, the key is not."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=OTHER_KEY)
+    with _refusal("signature_key_id_does_not_match_supplied_key"):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_verifying_against_whichever_key_the_record_names_is_refused():
+    """`expected_key_id` exists because verifying against the key the record
+    points at is agreement, not verification."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    with _refusal("signature_key_id_mismatch"):
+        signing.verify_envelope(signed, key=TEST_KEY,
+                                expected_key_id="0" * 16)
+
+
+def test_an_edited_payload_digest_breaks_the_signature():
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    signed["payload_sha256"] = "b" * 64
+    with _refusal("evidence_envelope_digest_mismatch"):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_recomputing_the_envelope_digest_after_editing_still_fails():
+    """The realistic attack is not leaving a stale digest behind — it is
+    editing the record and recomputing it. The MAC is what catches that."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    signed["payload_sha256"] = "b" * 64
+    signed["envelope_sha256"] = evidencewire.envelope_digest(signed)
+    with _refusal("signature_mismatch"):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_the_evidence_class_cannot_be_swapped_under_a_valid_signature():
+    """The MAC covers the class explicitly, so a signature over one envelope
+    cannot be presented beside a differently-classed record while a careless
+    reader checks only that "the signature verifies"."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    signed["evidence_class"] = "TRUSTED_EXECUTION_EVIDENCE"
+    signed["envelope_sha256"] = evidencewire.envelope_digest(signed)
+    with _refusal("signature_mismatch"):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_a_candidate_class_envelope_cannot_be_signed():
+    """A signature on a candidate-class record invites a reader to treat it as
+    trusted, and the class is what a reader keys on."""
+    with _refusal("candidate_class_must_not_be_signed"):
+        signing.sign_envelope(_envelope(), key=TEST_KEY)
+
+
+def test_resigning_an_already_signed_envelope_is_refused():
+    """Replacing an attestation would leave no trace that there had been two."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    with _refusal("envelope_already_signed"):
+        signing.sign_envelope(signed, key=OTHER_KEY)
+
+
+@pytest.mark.parametrize("field,value,category", [
+    ("algorithm", "none", "signature_algorithm_not_permitted"),
+    ("algorithm", "MD5", "signature_algorithm_not_permitted"),
+    ("signature_version", "v0", "signature_version_mismatch"),
+])
+def test_the_verifier_does_not_let_the_record_choose_the_algorithm(
+        field, value, category):
+    """An attacker who picks the algorithm picks a weak one."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    signed["signer_identity"] = dict(signed["signer_identity"], **{field: value})
+    with _refusal(category):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+@pytest.mark.parametrize("mutation,category", [
+    ({"signature": None}, "signature_absent"),
+    ({"signature": "short"}, "signature_malformed"),
+    ({"signer_identity": None}, "signer_identity_missing"),
+])
+def test_a_malformed_signature_block_is_refused(mutation, category):
+    signed = dict(signing.sign_envelope(_trusted_envelope(), key=TEST_KEY),
+                  **mutation)
+    with _refusal(category):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_a_short_key_is_refused_and_never_echoed():
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        signing.sign_envelope(_trusted_envelope(), key=b"tiny-key")
+    assert "signing_key_too_short" in excinfo.value.reason
+    assert "tiny-key" not in excinfo.value.reason
+    assert "bytes=8" in excinfo.value.reason
+
+
+def test_the_key_id_names_a_key_without_carrying_it():
+    identifier = signing.key_id(TEST_KEY)
+    assert len(identifier) == 16
+    assert identifier != signing.key_id(OTHER_KEY)
+    assert TEST_KEY.decode() not in identifier
+
+
+def test_a_signed_record_contains_no_key_material():
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    blob = json.dumps(signed, default=str)
+    assert TEST_KEY.decode() not in blob
+
+
+def test_the_signed_record_states_the_symmetric_limit_rather_than_implying_more():
+    """An HMAC is not a public-key signature, and a record that let a reader
+    assume otherwise would be overclaiming in the field a reader most wants to
+    trust."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    scope = signed["honest_scope"]
+    assert "not a public-key signature" in scope
+    assert "third party cannot verify it independently" in scope
+    assert signed["signer_identity"]["algorithm"] == "HMAC-SHA256"
+
+
+@pytest.mark.parametrize("phase", [phases.D1, phases.D2])
+def test_reading_the_signing_key_refuses_because_d1_is_not_deployed(phase):
+    with _refusal("phase_not_deployed"):
+        signing.read_signing_key(
+            phase=phase, environ={signing.SIGNING_KEY_ENV: "x" * 40})
+
+
+@pytest.mark.parametrize("phase", [phases.D0, "D9"])
+def test_reading_the_signing_key_refuses_for_a_phase_that_emits_no_evidence(phase):
+    with _refusal("signing_phase_not_permitted"):
+        signing.read_signing_key(phase=phase, environ={})
+
+
+def test_trusted_envelope_refuses_a_candidate_class():
+    """`envelope()` refuses trusted classes; this refuses candidate ones. The
+    two constructors do not overlap, so neither is a way around the other."""
+    with _refusal("not_a_trusted_class"):
+        evidencewire.trusted_envelope(
+            evidence_class="MOCK_TEST_EVIDENCE", payload={}, **_WIRE_ARGS)
+
+
+def test_the_candidate_constructor_still_refuses_a_trusted_class():
+    """The load-bearing original refusal, unchanged by R09."""
+    with _refusal("candidate_emitted_trusted_class"):
+        evidencewire.envelope(evidence_class="TRUSTED_COUNT_EVIDENCE",
+                              payload={}, **_WIRE_ARGS)
+
+
+def test_trusted_evidence_must_name_the_protected_run_that_produced_it():
+    for field in ("workflow_run_id", "workflow_run_attempt"):
+        with _refusal("trusted_evidence_run_field_invalid"):
+            evidencewire.trusted_envelope(
+                evidence_class="TRUSTED_COUNT_EVIDENCE", payload={},
+                **dict(_WIRE_ARGS, **{field: 0}))
+
+
+# --------------------------------------------------------------------------
+# EX3-R09 — the real normalization adapter.
+#
+# Every branch that would have needed a transform is a refusal instead, so
+# `applied_transforms` being empty is a claim these tests can check rather than
+# a promise the adapter makes about itself.
+# --------------------------------------------------------------------------
+
+ENGINE_DIGEST = "e" * 64
+
+
+def _norm_verdict(**overrides):
+    base = {"unit_sha256": "a" * 64, "decision": "approve", "reason": "checked",
+            "proof_of_check": "read the hunk", "checked_categories": ["logic"],
+            "lens_id": "correctness"}
+    base.update(overrides)
+    return base
+
+
+def _response_body(verdicts=None, *, text=None, content=None, output=None,
+                   **overrides):
+    if text is None:
+        text = json.dumps({"verdicts": verdicts or [_norm_verdict()]})
+    if content is None:
+        content = [{"type": "output_text", "text": text}]
+    if output is None:
+        output = [{"type": "message", "role": "assistant", "content": content}]
+    document = {"object": "response", "status": "completed", "output": output}
+    document.update(overrides)
+    return json.dumps(document).encode()
+
+
+def _binding_for(body, **overrides):
+    base = {"raw_response_sha256": hashlib.sha256(body).hexdigest(),
+            "raw_response_bytes": len(body), "http_status": 200,
+            "model_id": "gpt-5", "request_semantics_sha256": "d" * 64,
+            "attempt": 1}
+    base.update(overrides)
+    return base
+
+
+def _normalize(body, **kwargs):
+    if "adapter_identity" not in kwargs:
+        kwargs["adapter_identity"] = adapter.builtin_adapter_identity(
+            engine_source_sha256=ENGINE_DIGEST)
+    if "raw_binding" not in kwargs:
+        # NOT setdefault: it evaluates its default eagerly, so the str-body
+        # test hashed a str before the refusal it was checking could fire.
+        kwargs["raw_binding"] = _binding_for(body)
+    kwargs.setdefault("http_status", 200)
+    return adapter.normalize(body, **kwargs)
+
+
+def test_a_real_response_normalizes_and_applies_no_transform():
+    body = _response_body()
+    record = _normalize(body)
+    assert record["applied_transforms"] == []
+    assert len(record["verdicts"]) == 1
+    assert record["verdicts"][0]["decision"] == "approve"
+    assert record["adapter_source"] == "TRUSTED_LANE_BUILTIN"
+
+
+def test_the_adapter_is_identified_by_the_approved_engine_not_by_its_own_file():
+    """A module hashing itself from disk records a digest of whatever happens
+    to be there, which is what an attacker who can write that file controls —
+    the EX3-R05 defect in miniature."""
+    identity_record = adapter.builtin_adapter_identity(
+        engine_source_sha256=ENGINE_DIGEST)
+    assert identity_record["adapter_sha256"] == ENGINE_DIGEST
+    with _refusal("adapter_engine_digest_malformed"):
+        adapter.builtin_adapter_identity(engine_source_sha256="short")
+
+
+def test_a_binding_describing_different_bytes_is_refused():
+    """Otherwise the verdict is traceable to a response nobody read."""
+    body = _response_body()
+    with _refusal("raw_binding_digest_mismatch"):
+        _normalize(body, raw_binding=_binding_for(
+            body, raw_response_sha256="f" * 64))
+
+
+def test_a_binding_with_the_wrong_length_is_refused():
+    body = _response_body()
+    with _refusal("raw_binding_length_mismatch"):
+        _normalize(body, raw_binding=_binding_for(body, raw_response_bytes=1))
+
+
+# ---- every leniency that would have been a transform is a refusal ----------
+
+
+def test_an_incomplete_response_is_not_a_norm_verdict():
+    """Truncation arriving from the other direction: a partial answer accepted
+    as a whole one is a verdict the model did not give."""
+    body = _response_body(status="incomplete")
+    with _refusal("response_status_not_completed"):
+        _normalize(body)
+
+
+def test_incomplete_details_are_refused_even_when_the_status_says_completed():
+    body = _response_body(incomplete_details={"reason": "max_output_tokens"})
+    with _refusal("response_declares_incomplete_details"):
+        _normalize(body)
+
+
+def test_several_output_blocks_are_ambiguity_not_a_norm_verdict():
+    """SELECT_FIRST_OF_MANY_OUTPUTS is a forbidden transform because the
+    choice is invisible afterwards."""
+    block = {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text",
+                          "text": json.dumps({"verdicts": [_norm_verdict()]})}]}
+    with _refusal("raw_output_not_single"):
+        _normalize(_response_body(output=[block, block]))
+
+
+def test_several_content_parts_are_refused():
+    part = {"type": "output_text", "text": json.dumps({"verdicts": [_norm_verdict()]})}
+    with _refusal("response_content_not_single"):
+        _normalize(_response_body(content=[part, part]))
+
+
+def test_a_reasoning_block_is_not_read_as_a_norm_verdict():
+    with _refusal("response_output_block_not_a_message"):
+        _normalize(_response_body(output=[{"type": "reasoning",
+                                           "content": []}]))
+
+
+def test_a_model_refusal_is_an_outcome_not_a_verdict_and_is_not_echoed():
+    body = _response_body(content=[{"type": "refusal",
+                                    "refusal": "I will not SENSITIVE"}])
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        _normalize(body)
+    assert "response_is_a_refusal" in excinfo.value.reason
+    assert "SENSITIVE" not in excinfo.value.reason
+
+
+def test_invalid_json_in_the_text_is_refused_not_repaired():
+    """The tempting repair — stripping a ```json fence — is exactly the one
+    that would let the model's prose become part of a verdict."""
+    body = _response_body(text='```json\n{"verdicts": []}\n```')
+    with _refusal("verdict_payload_not_json"):
+        _normalize(body)
+
+
+def test_an_unknown_key_in_the_payload_is_refused_not_dropped():
+    """An adapter that ignores unknown keys cannot notice the provider
+    changed."""
+    body = _response_body(text=json.dumps({"verdicts": [_norm_verdict()],
+                                           "confidence": 0.9}))
+    with _refusal("verdict_payload_unknown_field"):
+        _normalize(body)
+
+
+def test_an_unknown_key_in_a_verdict_is_refused():
+    body = _response_body([dict(_norm_verdict(), severity="high")])
+    with _refusal("normalized_verdict_unknown_field"):
+        _normalize(body)
+
+
+def test_a_missing_verdict_field_is_refused_not_defaulted():
+    partial = _norm_verdict()
+    del partial["proof_of_check"]
+    with _refusal("normalized_verdict_field_missing"):
+        _normalize(_response_body([partial]))
+
+
+def test_a_decision_outside_the_vocabulary_is_refused_not_lowercased():
+    """LOWERCASE_DECISION and STRIP_WHITESPACE_FROM_DECISION are both forbidden
+    transforms, so neither `Approve` nor ` approve ` may be rescued."""
+    for decision in ("Approve", " approve ", "APPROVE", "yes", ""):
+        with _refusal("normalized_decision_not_permitted"):
+            _normalize(_response_body([_norm_verdict(decision=decision)]))
+
+
+def test_a_scalar_category_is_not_coerced_to_a_list():
+    with _refusal("normalized_categories_not_nonempty_list"):
+        _normalize(_response_body([_norm_verdict(checked_categories="logic")]))
+
+
+def test_two_verdicts_for_one_unit_are_refused():
+    with _refusal("normalized_verdict_unit_duplicated"):
+        _normalize(_response_body([_norm_verdict(), _norm_verdict(decision="reject")]))
+
+
+def test_an_empty_verdict_list_is_refused():
+    with _refusal("verdict_payload_verdicts_not_a_nonempty_list"):
+        _normalize(_response_body(text=json.dumps({"verdicts": []})))
+
+
+@pytest.mark.parametrize("body,category", [
+    (b"not json", "raw_response_not_json"),
+    (b'"a string"', "raw_response_not_an_object"),
+])
+def test_a_malformed_response_body_is_refused(body, category):
+    with _refusal(category):
+        _normalize(body)
+
+
+def test_a_wrong_response_object_name_is_refused_without_echoing_it():
+    body = _response_body(object="chat.completion")
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        _normalize(body)
+    assert "response_object_mismatch" in excinfo.value.reason
+    assert "chat.completion" not in excinfo.value.reason
+
+
+def test_a_non_200_status_is_refused_without_reporting_the_body():
+    body = _response_body()
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        _normalize(body, http_status=500, raw_binding=_binding_for(
+            body, http_status=500))
+    assert "response_status_not_ok" in excinfo.value.reason
+
+
+def test_a_str_body_is_refused_because_someone_already_chose_an_encoding():
+    body = _response_body()
+    with _refusal("raw_response_not_bytes"):
+        _normalize(body.decode(), raw_binding=_binding_for(body))
+
+
+def test_a_candidate_supplied_adapter_still_cannot_normalize():
+    """The load-bearing refusal, unchanged: the reviewed package must not
+    define how its reviewer's answers are read."""
+    body = _response_body()
+    hostile = dict(adapter.builtin_adapter_identity(
+        engine_source_sha256=ENGINE_DIGEST), adapter_source="CANDIDATE_CHECKOUT")
+    with _refusal("adapter_from_candidate"):
+        _normalize(body, adapter_identity=hostile)
+
+
+def test_the_normalizer_contains_no_path_that_applies_a_transform():
+    """`applied_transforms=[]` is a claim about the code, so it is checked
+    against the code: `normalize` must pass an empty tuple literally, and every
+    forbidden-transform name must be absent from its body."""
+    source = (LANE_DIR / "adapter.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(node for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "normalize")
+    call = next(node for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "normalization_record")
+    applied = next(k.value for k in call.keywords if k.arg == "applied_transforms")
+    assert isinstance(applied, ast.Tuple) and applied.elts == []
