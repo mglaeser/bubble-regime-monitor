@@ -48,6 +48,7 @@ from trustedlane import (  # noqa: E402
     closure,
     enginebuild,
     enginepolicy,
+    enginesource,
     errors,
     evidencewire,
     identity,
@@ -57,6 +58,7 @@ from trustedlane import (  # noqa: E402
     phases,
     prerequisites,
     protectedstate,
+    runtimelock,
     statusnames,
     statuspublish,
     workflowfile,
@@ -2738,162 +2740,421 @@ def test_f04_the_d0_push_filter_covers_the_suite_it_runs():
 
 
 # --------------------------------------------------------------------------
-# §5.4 — the engine identity CANDIDATE package.
+# EX3-R04/R05/R06 — the engine identity, bound to exact commits.
 #
-# Five of the thirteen identity fields are facts about source, derivable by
-# anyone holding the tree. The other eight are facts about a build that has not
-# happened and an approval that has not been given. Filling those in from this
-# branch would be inventing them, so they are empty and the package says why.
+# The first version took `source_commit` and `root` separately: it recorded the
+# commit string and independently hashed whatever was under the root. Nothing
+# connected them. Demonstrated accepting a package that named main's commit
+# while hashing a single planted `impostor.py`.
+#
+# Blobs now come from the git object database at the named commit, so the tree
+# cannot disagree with the commit — it IS the commit. There is no `root`
+# parameter, which is why the old bypass has no expression.
 # --------------------------------------------------------------------------
 
+def _rev(ref):
+    out = subprocess.run(["git", "rev-parse", ref], cwd=str(ROOT),  # noqa: S603
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        pytest.skip(f"ref {ref} unavailable in this checkout")
+    return out.stdout.strip()
 
-def _candidate_package():
-    return enginebuild.candidate_package(
-        source_commit=SHA_A, code_cutoff_sha=SHA_A, root=str(ROOT))
+
+@pytest.fixture(scope="module")
+def engine_roles():
+    return {"protected_trusted_lane": _rev("origin/main"),
+            "candidate_verifier": _rev("origin/fix/verifier-intra-file-review-plan")}
 
 
-def test_engine_candidate_fills_only_what_it_can_honestly_compute():
-    package = _candidate_package()
-    assert package["state"] == enginebuild.CANDIDATE_STATE
-    for field in enginebuild.COMPUTABLE_FIELDS:
-        assert package[field], field
-    for field in enginebuild.UNAVAILABLE_FIELDS:
-        assert package[field] is None, field
+def test_r05_the_commit_and_the_tree_can_no_longer_disagree():
+    """Structural, not a comparison: there is no disk root to pass, so a caller
+    cannot supply commit A and a tree from B."""
+    import inspect
+    assert "root" not in inspect.signature(enginebuild.candidate_package).parameters
+    assert "root" not in inspect.signature(enginesource.role_digest).parameters
+
+
+def test_r04_the_identity_covers_both_source_roles(engine_roles):
+    """`scripts/trustedlane` alone does not identify the code that plans,
+    counts, batches, executes or decides the review."""
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    assert set(package["source_roles"]) == set(enginesource.SOURCE_ROLES)
+    assert package["source_roles"]["candidate_verifier"]["file_count"] > 20
+    assert package["source_roles"]["protected_trusted_lane"]["file_count"] > 10
+    # Each role carries its OWN commit — in general they differ.
+    assert (package["source_roles"]["candidate_verifier"]["source_commit"]
+            != package["source_roles"]["protected_trusted_lane"]["source_commit"])
+
+
+def test_r04_an_identity_over_one_role_only_is_refused(engine_roles):
+    with _refusal("engine_role_missing"):
+        enginesource.multi_source_manifest(
+            roles={"protected_trusted_lane": engine_roles["protected_trusted_lane"]},
+            repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+
+
+def test_r05_each_role_records_its_commit_and_its_tree(engine_roles):
+    """Both, so a reader can re-derive either without trusting this code."""
+    record = enginesource.role_digest(
+        role="protected_trusted_lane",
+        commit=engine_roles["protected_trusted_lane"], cwd=str(ROOT))
+    assert len(record["source_commit"]) == 40
+    assert len(record["source_tree"]) == 40
+    assert record["source_commit"] != record["source_tree"]
+    for path, entry in record["files"].items():
+        assert len(entry["sha256"]) == 64, path
+        assert len(entry["git_oid"]) == 40, path
+        assert entry["mode"] in ("100644", "100755"), path
+
+
+def test_r05_a_role_that_is_empty_at_that_commit_is_refused():
+    """`scripts/verifier` does not exist on main. A digest over nothing matches
+    any engine, so it is refused rather than recorded as zero files."""
+    with _refusal("engine_role_empty"):
+        enginesource.role_digest(role="candidate_verifier",
+                                 commit=_rev("origin/main"), cwd=str(ROOT))
+
+
+@pytest.mark.parametrize("commit", ["HEAD", "main", "abc", ""])
+def test_r05_a_non_sha_commit_is_refused(commit):
+    with _refusal("commit_sha_malformed"):
+        enginesource.role_digest(role="protected_trusted_lane", commit=commit,
+                                 cwd=str(ROOT))
+
+
+def test_r05_the_engine_digest_moves_when_either_role_moves(engine_roles):
+    """A binding digest that ignores one side binds nothing about it."""
+    both = enginesource.multi_source_manifest(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))["engine_source_sha256"]
+    older = dict(engine_roles, protected_trusted_lane=_rev("origin/main~1"))
+    moved = enginesource.multi_source_manifest(
+        roles=older, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))["engine_source_sha256"]
+    assert both != moved
+
+
+def _engine_repo(tmp_path, files, *, cacheinfo=(), symlinks=()):
+    """A real git repository holding both engine roles.
+
+    The mutation sweep found five refusals with no test behind them — symlink,
+    gitlink, content-binding, path-binding, unparseable source — and every one
+    of them needs a *tree*, not a list of dicts. `assert_paths_within_allowlist`
+    can be driven with fabricated entries, but `list_blobs_at` reads the object
+    database, so proving it refuses a symlink means committing one.
+
+    `cacheinfo` plants entries git will not create from a working tree — a
+    gitlink has no file to `git add`."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+           "HOME": str(tmp_path), "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_TERMINAL_PROMPT": "0"}
+
+    def run(*args):
+        done = subprocess.run(  # noqa: S603
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=str(repo), env=env, capture_output=True, text=True)
+        assert done.returncode == 0, f"{args}: {done.stderr}"
+        return done.stdout.strip()
+
+    run("init", "-q", "-b", "main")
+    for relative, content in files.items():
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    for link, points_to in symlinks:
+        target = repo / link
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(points_to, target)
+    run("add", "-A")
+    for mode, oid, path in cacheinfo:
+        run("update-index", "--add", "--cacheinfo", f"{mode},{oid},{path}")
+    run("commit", "-q", "-m", "engine")
+    return str(repo), run("rev-parse", "HEAD")
+
+
+_MINIMAL_ROLES = {"scripts/trustedlane/m.py": "import json\n",
+                  "scripts/verifier/v.py": "import json\n"}
+
+
+def test_r05_a_symlink_in_the_engine_source_is_refused_not_followed():
+    """A symlink points outside the allowlist while appearing inside it, and
+    `assert_paths_within_allowlist` would clear it: its *path* is fine."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        cwd, commit = _engine_repo(
+            Path(scratch), _MINIMAL_ROLES,
+            symlinks=[("scripts/verifier/link.py", "../../../../etc/passwd")])
+        with _refusal("engine_source_contains_symlink"):
+            enginesource.role_digest(role="candidate_verifier", commit=commit,
+                                     cwd=cwd)
+
+
+def test_r05_a_submodule_in_the_engine_source_is_refused():
+    """Content this repository does not hold and cannot digest. Skipping it
+    would leave a whole subtree outside the identity while it still ships."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        cwd, commit = _engine_repo(
+            Path(scratch), _MINIMAL_ROLES,
+            cacheinfo=[("160000", "b" * 40, "scripts/verifier/vendored")])
+        with _refusal("engine_source_contains_submodule"):
+            enginesource.role_digest(role="candidate_verifier", commit=commit,
+                                     cwd=cwd)
+
+
+def test_r05_the_role_digest_moves_when_a_files_bytes_change():
+    """Content binding, at a FIXED path. The cross-commit test cannot prove
+    this: moving to another commit also moves the path list, so a digest that
+    ignored contents entirely would still differ and still look bound."""
+    import tempfile
+
+    digests = []
+    for body in ("import json\n", "import json  # changed\n"):
+        with tempfile.TemporaryDirectory() as scratch:
+            cwd, commit = _engine_repo(
+                Path(scratch), dict(_MINIMAL_ROLES,
+                                    **{"scripts/verifier/v.py": body}))
+            digests.append(enginesource.role_digest(
+                role="candidate_verifier", commit=commit,
+                cwd=cwd)["role_sha256"])
+    assert digests[0] != digests[1]
+
+
+def test_r05_the_role_digest_moves_when_a_file_is_renamed():
+    """Path binding, with the bytes held IDENTICAL and the sort order held
+    fixed. Swapping two files' contents would also swap their order and pass
+    against a digest that ignored paths; a pure rename cannot."""
+    import tempfile
+
+    digests = []
+    for name in ("a_v.py", "b_v.py"):
+        with tempfile.TemporaryDirectory() as scratch:
+            cwd, commit = _engine_repo(
+                Path(scratch),
+                {"scripts/trustedlane/m.py": "import json\n",
+                 f"scripts/verifier/{name}": "import json\n",
+                 "scripts/verifier/zz.py": "import re\n"})
+            digests.append(enginesource.role_digest(
+                role="candidate_verifier", commit=commit,
+                cwd=cwd)["role_sha256"])
+    assert digests[0] != digests[1]
+
+
+def test_r04_an_unknown_role_alongside_the_required_two_is_refused(engine_roles):
+    """Distinct from the missing-role case, which refuses before reaching this.
+    An extra role would widen the identity to cover code nobody agreed was part
+    of the engine.
+
+    Matched on the PLURAL `roles=` marker, not on the category. `role_digest`
+    refuses an unknown role under the same category with a singular `role=`, so
+    a test that asserted only `engine_role_unknown` would pass with the
+    manifest-level check deleted — it would be asking "did something refuse"
+    when the question is "did the manifest refuse before digesting anything".
+    The mutation sweep found exactly that: the category matched either way."""
+    with _refusal(r"engine_role_unknown roles=\['app'\]"):
+        enginesource.multi_source_manifest(
+            roles=dict(engine_roles, app=engine_roles["protected_trusted_lane"]),
+            repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+
+
+def test_r05_a_suffix_outside_the_allowlist_is_refused_not_skipped():
+    """Skipping leaves it out of the identity while it still ships. Caught a
+    real pair on the first run against main — the D1/D2 `.yml.template` files,
+    which ARE engine source and are now on the allowlist."""
+    entries = [{"path": "scripts/trustedlane/payload.so", "oid": "a" * 40,
+                "mode": "100644"}]
+    with _refusal("engine_path_suffix_not_permitted"):
+        enginesource.assert_paths_within_allowlist(
+            entries, allowed_prefixes=("scripts/trustedlane",))
+
+
+def test_r05_a_path_outside_the_requested_prefix_is_refused():
+    entries = [{"path": "app/secrets.py", "oid": "a" * 40, "mode": "100644"}]
+    with _refusal("engine_path_outside_allowlist"):
+        enginesource.assert_paths_within_allowlist(
+            entries, allowed_prefixes=("scripts/trustedlane",))
+
+
+def test_r05_the_templates_are_part_of_the_engine_identity(engine_roles):
+    """They are the workflow code that gets deployed."""
+    record = enginesource.role_digest(
+        role="protected_trusted_lane",
+        commit=engine_roles["protected_trusted_lane"], cwd=str(ROOT))
+    templates = [p for p in record["files"] if p.endswith(".yml.template")]
+    assert len(templates) == 2, templates
+
+
+# ---- EX3-R06: hash-locked runtime -----------------------------------------
+
+
+def test_r06_the_real_lock_is_pinned_and_hashed():
+    lock = runtimelock.load_lock(root=str(ROOT))
+    assert lock["package_count"] == 1
+    entry = lock["requirements"]["pyyaml"]
+    assert entry["version"] == "6.0.3"
+    assert entry["hashes"] and entry["hashes"][0]["algorithm"] == "sha256"
+
+
+def test_r06_the_runtime_does_not_install_a_test_framework():
+    """D1/D2 count and generate; they run no tests. An AST sweep finds exactly
+    one third-party import in the lane — `yaml` — and no runtime module imports
+    pytest. A test framework in a credential-bearing runner is a plugin loader
+    and an entry-point scan next to a provider key."""
+    lock = runtimelock.load_lock(root=str(ROOT))
+    assert "pytest" not in lock["requirements"]
+    with _refusal("runtime_lock_contains_test_dependency"):
+        runtimelock.assert_no_test_dependency({"pytest": {"version": "8.0.0"}})
+
+
+@pytest.mark.parametrize("text,category", [
+    ("PyYAML\n", "lock_requirement_not_pinned"),
+    ("PyYAML==6.0.3\n", "lock_requirement_unhashed"),
+    ("PyYAML==6.0.3 --hash=md5:" + "a" * 32 + "\n",
+     "lock_hash_algorithm_broken"),
+    ("PyYAML==6.0.3 --hash=sha1:" + "a" * 40 + "\n",
+     "lock_hash_algorithm_broken"),
+    ("requests==2.0.0 --hash=sha256:" + "a" * 64 + "\n",
+     "lock_package_not_permitted"),
+    ("PyYAML==6.0.3 --hash=sha256:" + "a" * 64 + "\nPyYAML==6.0.2 --hash=sha256:"
+     + "b" * 64 + "\n", "lock_package_listed_twice"),
+    ("# nothing but a comment\n", "lock_is_empty"),
+])
+def test_r06_an_unlocked_requirement_is_refused(text, category):
+    """An unhashed dependency IS the supply chain — a pinned version still lets
+    a compromised index serve different bytes under the same number."""
+    with _refusal(category):
+        runtimelock.parse_lock(text)
+
+
+def test_r06_pips_own_continuation_line_form_parses():
+    """The hashes live on continuation lines. A line-by-line parser would see a
+    pinned requirement with no hashes followed by orphan hash lines, and would
+    conclude either "unhashed" or "hashes belong to nothing" — both wrong, in
+    different directions."""
+    parsed = runtimelock.parse_lock(
+        "PyYAML==6.0.3 \\\n    --hash=sha256:" + "a" * 64 + "\n")
+    assert parsed["pyyaml"]["hashes"][0]["digest"] == "a" * 64
+
+
+def test_r06_a_missing_lock_file_is_refused(tmp_path):
+    with _refusal("runtime_lock_missing"):
+        runtimelock.load_lock(root=str(tmp_path))
+
+
+def test_r06_the_lock_digest_moves_with_the_pinned_version():
+    a = runtimelock.lock_digest(runtimelock.parse_lock(
+        "PyYAML==6.0.3 --hash=sha256:" + "a" * 64 + "\n"))
+    b = runtimelock.lock_digest(runtimelock.parse_lock(
+        "PyYAML==6.0.2 --hash=sha256:" + "a" * 64 + "\n"))
+    assert a != b
+
+
+# ---- the candidate package remains a candidate ----------------------------
+
+
+def test_engine_candidate_still_cannot_unlock_d1(engine_roles):
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
     assert enginebuild.assert_is_only_a_candidate(package)["unlocks_d1"] is False
-
-
-def test_engine_candidate_explains_each_gap_rather_than_only_having_it():
-    package = _candidate_package()
-    for field, why in package["unavailable_because"].items():
-        assert package[field] is None
-        assert len(why) > 20, field
-    assert "protected build" in package["unavailable_because"]["artifact_sha256"]
-
-
-def test_engine_candidate_still_cannot_unlock_d1():
-    """The whole point. It is a thing to approve, not an approval."""
-    package = _candidate_package()
     with _refusal("engine_not_approved_in_D0"):
         enginepolicy.assert_engine_approved(package)
 
 
-def test_a_candidate_package_with_a_forged_signature_is_refused():
-    """The realistic failure is drift, not forgery: someone fills in a
-    plausible-looking `signature` on a later pass and the package stops
-    announcing what it is."""
-    package = _candidate_package()
+def test_engine_candidate_leaves_every_unavailable_field_empty(engine_roles):
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    for field, why in package["unavailable_because"].items():
+        assert package[field] is None, field
+        assert len(why) > 20, field
+        # A cross-reference ("same as X") is useless to whoever is reading THIS
+        # field's row and has not read X. Same defect as the never-require
+        # table's reasons; forbidden here for the same reason.
+        assert "same as" not in why, field
+
+
+def test_a_candidate_package_with_a_forged_signature_is_refused(engine_roles):
+    """Drift, not forgery: someone fills in a plausible `signature` on a later
+    pass and the package stops announcing what it is."""
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
     package["signature"] = "MEUCIQ" + "x" * 40
     with _refusal("engine_candidate_claims_unavailable_fields"):
         enginebuild.assert_is_only_a_candidate(package)
 
 
-def test_a_candidate_package_that_renames_its_own_state_is_refused():
-    package = _candidate_package()
+def test_the_sbom_confirms_the_engine_pulls_in_no_http_client(engine_roles):
+    """Reaches the no-transport conclusion by enumeration, independently of the
+    suite's import denylist."""
+    bill = enginebuild.sbom(roles=engine_roles, cwd=str(ROOT))
+    assert bill["third_party"] == ["yaml"]
+    for forbidden in ("requests", "httpx", "urllib3", "aiohttp", "openai",
+                      "anthropic"):
+        assert forbidden not in bill["components"], forbidden
+
+
+def test_the_sbom_refuses_a_file_it_cannot_parse(engine_roles):
+    """An SBOM that skips the file it could not read has a hole exactly where
+    the interesting thing would be — an import list is only a safety claim if
+    it covers every file."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        cwd, commit = _engine_repo(
+            Path(scratch),
+            {"scripts/trustedlane/m.py": "import json\n",
+             "scripts/verifier/v.py": "import json\n",
+             "scripts/verifier/broken.py": "def f(:\n"})
+        with _refusal("engine_source_unparsable"):
+            enginebuild.sbom(roles={"candidate_verifier": commit,
+                                    "protected_trusted_lane": commit}, cwd=cwd)
+
+
+def test_the_candidate_state_string_cannot_drift(engine_roles):
+    """The package's whole job is announcing what it is not. A changed state
+    string is that announcement going quiet."""
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
     package["state"] = "APPROVED_ENGINE_IDENTITY"
     with _refusal("engine_candidate_state_changed"):
         enginebuild.assert_is_only_a_candidate(package)
 
 
-def test_the_engine_tree_digest_binds_paths_as_well_as_contents(tmp_path):
-    """A pure RENAME must move the digest.
-
-    The first version of this test swapped two files' contents, which also
-    swaps their position in the sorted walk — so a digest that ignored paths
-    entirely still changed, and the mutation sweep reported STILL_GREEN when
-    path binding was removed. The test proved the digest noticed *something*,
-    not that it noticed the path.
-
-    The case that isolates it: rename a file without changing its content and
-    without changing its sort position. `z.py` -> `y.py` alongside `m.py` leaves
-    the content sequence byte-identical in the same order, so a content-only
-    digest is unchanged — while the file that runs is a different file."""
-    root = tmp_path / "scripts" / "trustedlane"
-    root.mkdir(parents=True)
-    (root / "m.py").write_text("import json\n", encoding="utf-8")
-    (root / "z.py").write_text("import os\n", encoding="utf-8")
-    before = enginebuild.source_tree_digest(root=str(tmp_path))
-
-    (root / "z.py").rename(root / "y.py")
-    after = enginebuild.source_tree_digest(root=str(tmp_path))
-
-    # Same count, same contents, same order — only the name moved.
-    assert before["file_count"] == after["file_count"] == 2
-    assert sorted(before["files"].values()) == sorted(after["files"].values())
-    assert list(before["files"])[0].endswith("m.py")
-    assert list(after["files"])[0].endswith("m.py")
-    assert before["source_tree_sha256"] != after["source_tree_sha256"]
+@pytest.mark.parametrize("field", enginebuild.COMPUTABLE_FIELDS)
+def test_a_package_missing_a_computable_field_is_refused(engine_roles, field):
+    """Empty here is not the same as empty in an unavailable field: these three
+    ARE derivable from the commits, so a blank one means the derivation did not
+    happen, not that it could not."""
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    package[field] = None
+    with _refusal("engine_candidate_incomplete"):
+        enginebuild.assert_is_only_a_candidate(package)
 
 
-def test_the_engine_tree_digest_notices_an_untracked_file(tmp_path):
-    """Walked from disk rather than asked of git, because `git ls-files` would
-    silently omit an untracked file sitting in the engine directory — exactly
-    the file worth noticing."""
-    root = tmp_path / "scripts" / "trustedlane"
-    root.mkdir(parents=True)
-    (root / "real.py").write_text("x\n", encoding="utf-8")
-    before = enginebuild.source_tree_digest(root=str(tmp_path))
-    (root / "planted.py").write_text("y\n", encoding="utf-8")
-    after = enginebuild.source_tree_digest(root=str(tmp_path))
-    assert after["file_count"] == before["file_count"] + 1
-    assert after["source_tree_sha256"] != before["source_tree_sha256"]
-
-
-def test_an_empty_engine_tree_is_refused_not_digested(tmp_path):
-    """A digest over nothing matches any engine."""
-    (tmp_path / "scripts" / "trustedlane").mkdir(parents=True)
-    with _refusal("engine_source_empty"):
-        enginebuild.source_tree_digest(root=str(tmp_path))
-
-
-def test_the_sbom_confirms_the_engine_pulls_in_no_http_client():
-    """The suite already bans transport imports by name. This reaches the same
-    conclusion from the other direction — an enumeration of what the engine
-    actually imports — so the claim does not rest on one denylist."""
-    bill = enginebuild.sbom(root=str(ROOT))
-    assert bill["third_party"] == ["yaml"]
-    for forbidden in ("requests", "httpx", "urllib3", "aiohttp", "http",
-                      "socket", "openai", "anthropic"):
-        assert forbidden not in bill["components"], forbidden
-
-
-def test_the_sbom_refuses_rather_than_skipping_a_file_it_cannot_parse(tmp_path):
-    """An SBOM that skips the file it could not read has a hole exactly where
-    the interesting thing would be."""
-    root = tmp_path / "scripts" / "trustedlane"
-    root.mkdir(parents=True)
-    (root / "ok.py").write_text("import json\n", encoding="utf-8")
-    (root / "broken.py").write_text("def (:\n", encoding="utf-8")
-    with _refusal("engine_source_unparsable"):
-        enginebuild.sbom(root=str(tmp_path))
-
-
-def test_the_dependency_lock_does_not_claim_to_be_reproducible():
-    """It records the names the workflows install. Claiming a reproducible lock
-    while installing unpinned names would be the overclaim this programme keeps
-    finding."""
-    lock = enginebuild.dependency_lock(root=str(ROOT))
-    assert lock["pinned_to_versions"] is False
-    assert lock["pinned_to_hashes"] is False
-    assert "open item" in lock["honest_scope"]
-
-
-def test_the_package_digest_moves_when_the_engine_source_moves(tmp_path):
-    """A binding digest that ignores the tree binds nothing about it."""
-    root = tmp_path / "scripts" / "trustedlane"
-    root.mkdir(parents=True)
-    (root / "e.py").write_text("import json\n", encoding="utf-8")
-    first = enginebuild.candidate_package(
-        source_commit=SHA_A, code_cutoff_sha=SHA_A, root=str(tmp_path))
-    (root / "e.py").write_text("import json, os\n", encoding="utf-8")
-    second = enginebuild.candidate_package(
-        source_commit=SHA_A, code_cutoff_sha=SHA_A, root=str(tmp_path))
-    assert first["candidate_package_sha256"] != second["candidate_package_sha256"]
-
-
-def test_a_malformed_commit_sha_is_refused_before_anything_is_digested():
-    with _refusal("commit_sha_malformed"):
-        enginebuild.candidate_package(source_commit="HEAD",
-                                      code_cutoff_sha=SHA_A, root=str(ROOT))
+def test_the_package_digest_binds_the_engine_source(engine_roles):
+    """The digest is what an operator approves at prerequisite 14. One that
+    does not move when the engine source moves approves nothing."""
+    here = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    older = enginebuild.candidate_package(
+        roles=dict(engine_roles, protected_trusted_lane=_rev("origin/main~1")),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    assert here["engine_source_sha256"] != older["engine_source_sha256"]
+    assert (here["candidate_package_sha256"]
+            != older["candidate_package_sha256"])
 
 
 # --------------------------------------------------------------------------

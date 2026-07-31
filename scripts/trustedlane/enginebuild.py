@@ -5,12 +5,11 @@ call any of it authenticated. This module produces the half of that record a
 candidate branch can honestly compute, and leaves the other half empty on
 purpose.
 
-The split is not arbitrary. Three of the thirteen identity fields are facts
-about *source*, derivable by anyone holding the tree, and reproducible by a
-reader who clones the same commit:
+The split is not arbitrary. Three of the eleven identity fields are facts about
+*source*, derivable by anyone holding the commits, and reproducible by a reader
+who fetches the same two:
 
-    source_commit, code_cutoff_sha, source_tree_sha256, dependency_lock_sha256,
-    sbom_sha256
+    engine_source_sha256, dependency_lock_sha256, sbom_sha256
 
 The rest are facts about a *build that has not happened* and an *approval that
 has not been given*:
@@ -39,28 +38,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import sys
 
+from .candidatefetch import git
 from .errors import refuse
 
 CANDIDATE_STATE = "UNVERIFIED_ENGINE_IDENTITY_CANDIDATE"
 
-#: The engine is the trusted lane itself — the code that will run inside D1/D2
-#: holding a credential. Deliberately NOT the whole repository: the engine's
-#: identity should not change because an unrelated app file changed, or the
-#: operator would be re-approving it constantly and would stop reading.
-ENGINE_SOURCE_ROOTS = ("scripts/trustedlane",)
-
-#: Files that define the dependency closure of a D1/D2 run. The D0/D1/D2
-#: workflows install exactly `pytest` and `PyYAML`, so the lock surface is small
-#: and is recorded rather than described.
-ENGINE_RUNTIME_DEPENDENCIES = ("pytest", "PyYAML")
-
-#: Fields this branch can honestly compute.
+#: Fields this branch can honestly compute. The source and lock membership lists
+#: live in `enginesource.SOURCE_ROLES` and `runtimelock.PERMITTED_RUNTIME_PACKAGES`
+#: rather than here, so there is one place to change what the engine is made of.
 COMPUTABLE_FIELDS = (
-    "source_commit",
-    "code_cutoff_sha",
-    "source_tree_sha256",
+    "engine_source_sha256",
     "dependency_lock_sha256",
     "sbom_sha256",
 )
@@ -77,7 +66,8 @@ UNAVAILABLE_FIELDS = {
     "build_workflow_run_id":
         "no protected build workflow exists yet; D1/D2 are .yml.template",
     "build_workflow_run_attempt":
-        "same as build_workflow_run_id",
+        "an attempt number identifies a re-run of a build; with no build there "
+        "is no first attempt to re-run",
     "signer_identity":
         "signing requires a key this branch must not hold",
     "signature":
@@ -92,167 +82,115 @@ UNAVAILABLE_FIELDS = {
 }
 
 
-def _tracked_engine_files(*, root: str = ".") -> list:
-    """Every file under the engine roots, sorted, as repo-relative paths.
+def sbom(*, roles, cwd: str = ".") -> dict:
+    """A minimal SBOM over what the engine imports, read from git objects.
 
-    Walked from disk rather than asked of git: the digest must describe the tree
-    that would be shipped, and `git ls-files` would silently omit an untracked
-    file sitting in the engine directory — which is exactly the file worth
-    noticing."""
-    found = []
-    for engine_root in ENGINE_SOURCE_ROOTS:
-        base = os.path.join(root, engine_root)
-        if not os.path.isdir(base):
-            refuse(f"category=engine_source_root_missing root={engine_root}")
-        for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
-            for filename in sorted(filenames):
-                if filename.endswith(".pyc"):
-                    continue
-                absolute = os.path.join(dirpath, filename)
-                found.append(os.path.relpath(absolute, root))
-    if not found:
-        refuse("category=engine_source_empty — a digest over nothing is a "
-               "digest that matches any engine")
-    return sorted(found)
+    Every stdlib import is listed alongside the third-party ones, because
+    "the engine depends only on the standard library plus PyYAML" is a claim
+    worth being able to check rather than assert — and it reaches that
+    conclusion by enumeration, independently of the suite's import denylist.
 
-
-def source_tree_digest(*, root: str = ".") -> dict:
-    """A digest over the engine tree: paths AND contents, both bound.
-
-    Path and content are hashed together because a digest over contents alone
-    is identical if two files swap names, and a rename is a real change to what
-    runs. Each entry is length-prefixed so that no combination of path and
-    content can be reinterpreted as a different combination."""
-    files = _tracked_engine_files(root=root)
-    hasher = hashlib.sha256()
-    hasher.update(b"trusted-engine-tree-v1\x00")
-    per_file = {}
-    for relative in files:
-        with open(os.path.join(root, relative), "rb") as handle:
-            blob = handle.read()
-        digest = hashlib.sha256(blob).hexdigest()
-        per_file[relative] = digest
-        encoded = relative.encode("utf-8")
-        hasher.update(len(encoded).to_bytes(4, "big"))
-        hasher.update(encoded)
-        hasher.update(bytes.fromhex(digest))
-    return {
-        "source_tree_sha256": hasher.hexdigest(),
-        "file_count": len(files),
-        "files": per_file,
-        "roots": list(ENGINE_SOURCE_ROOTS),
-    }
-
-
-def dependency_lock(*, root: str = ".") -> dict:
-    """The runtime dependency surface of a trusted run, recorded exactly.
-
-    Deliberately NOT a pip freeze of this machine: that would record the
-    development container, which is not what a D1/D2 runner installs. It records
-    the names the workflows actually install, and says plainly that pinning them
-    to versions and hashes is an open item — because claiming a reproducible
-    lock while installing unpinned names would be the same class of overclaim
-    this programme keeps finding."""
-    names = sorted(ENGINE_RUNTIME_DEPENDENCIES)
-    payload = json.dumps({"install": names, "pinned": False},
-                         sort_keys=True, separators=(",", ":")).encode()
-    return {
-        "dependency_lock_sha256": hashlib.sha256(payload).hexdigest(),
-        "declared_dependencies": names,
-        "pinned_to_versions": False,
-        "pinned_to_hashes": False,
-        "honest_scope": ("these are the names the D0/D1/D2 workflows install, "
-                         "not resolved versions; a genuinely reproducible lock "
-                         "needs `pip install --require-hashes` against a pinned "
-                         "requirements file, which is an open item"),
-    }
-
-
-def sbom(*, root: str = ".") -> dict:
-    """A minimal SBOM over what the engine is and what it loads.
-
-    Every stdlib import the engine makes is listed alongside the third-party
-    ones, because "engine depends only on the standard library plus PyYAML" is a
-    claim worth being able to check rather than assert."""
+    Read from the object database, not from disk, for the same reason as
+    everything else here: a disk walk describes whatever is checked out."""
     import ast as _ast
 
-    files = _tracked_engine_files(root=root)
+    from .enginesource import SOURCE_ROLES, list_blobs_at
+
     imported = set()
     unparsed = []
-    for relative in files:
-        if not relative.endswith(".py"):
-            continue
-        try:
-            with open(os.path.join(root, relative), "rb") as handle:
-                tree = _ast.parse(handle.read())
-        except (SyntaxError, ValueError):
-            unparsed.append(relative)
-            continue
-        for node in _ast.walk(tree):
-            if isinstance(node, _ast.Import):
-                for alias in node.names:
-                    imported.add(alias.name.split(".")[0])
-            elif isinstance(node, _ast.ImportFrom):
-                if node.level == 0 and node.module:
-                    imported.add(node.module.split(".")[0])
+    per_role = {}
+    for role, commit in sorted(roles.items()):
+        if role not in SOURCE_ROLES:
+            refuse(f"category=engine_role_unknown role={role!r}")
+        names = set()
+        for prefix in SOURCE_ROLES[role]:
+            for entry in list_blobs_at(commit, prefix, cwd=cwd):
+                if not entry["path"].endswith(".py"):
+                    continue
+                blob = git(["cat-file", "blob", entry["oid"]], cwd=cwd,
+                           operation="cat-file-blob")
+                try:
+                    tree = _ast.parse(blob)
+                except (SyntaxError, ValueError):
+                    unparsed.append(entry["path"])
+                    continue
+                for node in _ast.walk(tree):
+                    if isinstance(node, _ast.Import):
+                        for alias in node.names:
+                            names.add(alias.name.split(".")[0])
+                    elif isinstance(node, _ast.ImportFrom):
+                        if node.level == 0 and node.module:
+                            names.add(node.module.split(".")[0])
+        per_role[role] = sorted(names)
+        imported |= names
     if unparsed:
         refuse(f"category=engine_source_unparsable files={unparsed} — an SBOM "
                "that skips the file it could not read is an SBOM with a hole "
                "exactly where the interesting thing would be")
     components = sorted(imported)
-    payload = json.dumps({"components": components},
+    third_party = sorted(n for n in components
+                         if n not in sys.stdlib_module_names)
+    payload = json.dumps({"components": components, "per_role": per_role},
                          sort_keys=True, separators=(",", ":")).encode()
     return {
         "sbom_sha256": hashlib.sha256(payload).hexdigest(),
         "components": components,
-        "third_party": sorted(set(components) & {"yaml", "pytest"}),
-        "honest_scope": ("top-level import names resolved by AST over the "
-                         "engine tree; it does not resolve transitive "
+        "per_role": per_role,
+        "third_party": third_party,
+        "honest_scope": ("top-level import names resolved by AST over the blobs "
+                         "at each role's commit; it does not resolve transitive "
                          "dependencies of third-party packages"),
     }
 
 
-def candidate_package(*, source_commit: str, code_cutoff_sha: str,
-                      root: str = ".") -> dict:
-    """The full candidate package — computable fields filled, the rest empty.
+def candidate_package(*, roles, repository_numeric_id: int,
+                      cwd: str = ".") -> dict:
+    """The engine identity CANDIDATE, bound to exact commits.
 
-    `source_commit` and `code_cutoff_sha` are parameters rather than read from
-    git here, because reading them from the working tree would let an unclean
-    tree describe itself as a commit. The caller passes what it observed, and
-    the tree digest is computed independently so the two can disagree loudly."""
-    from .identity import assert_commit_sha
+    There is no `root` parameter, and that absence is EX3-R05's fix. The old
+    signature took `source_commit` and `root` separately, recorded the commit
+    string and independently hashed whatever was under the root — demonstrated
+    accepting a package that named main's commit while hashing a single planted
+    `impostor.py`. Blobs now come from the git object database at the named
+    commit, so the tree cannot disagree with the commit: it is the commit.
 
-    assert_commit_sha(source_commit, field="source_commit")
-    assert_commit_sha(code_cutoff_sha, field="code_cutoff_sha")
+    `roles` maps each source role to its own commit, because the engine that
+    reviews is the candidate verifier package plus the protected lane, and in
+    the general case those are at different commits (EX3-R04)."""
+    from .enginesource import multi_source_manifest
+    from .runtimelock import load_lock
 
-    tree = source_tree_digest(root=root)
-    lock = dependency_lock(root=root)
-    bill = sbom(root=root)
+    manifest = multi_source_manifest(roles=roles,
+                                     repository_numeric_id=repository_numeric_id,
+                                     cwd=cwd)
+    lock = load_lock(root=cwd)
+    bill = sbom(roles=roles, cwd=cwd)
 
     record = {
         "state": CANDIDATE_STATE,
-        "source_commit": source_commit,
-        "code_cutoff_sha": code_cutoff_sha,
-        "source_tree_sha256": tree["source_tree_sha256"],
-        "dependency_lock_sha256": lock["dependency_lock_sha256"],
+        "repository_numeric_id": repository_numeric_id,
+        "engine_source_sha256": manifest["engine_source_sha256"],
+        "source_roles": manifest["binding"],
+        "dependency_lock_sha256": lock["lock_sha256"],
         "sbom_sha256": bill["sbom_sha256"],
     }
     for field in UNAVAILABLE_FIELDS:
         record[field] = None
     record["unavailable_because"] = dict(UNAVAILABLE_FIELDS)
-    record["detail"] = {"tree": tree, "dependency_lock": lock, "sbom": bill}
+    record["detail"] = {"manifest": manifest, "dependency_lock": lock,
+                        "sbom": bill}
 
     binding = {k: record[k] for k in COMPUTABLE_FIELDS}
     blob = json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()
     record["candidate_package_sha256"] = hashlib.sha256(
-        b"engine-identity-candidate-v1\x00" + blob).hexdigest()
+        b"engine-identity-candidate-v2\x00" + blob).hexdigest()
     record["honest_scope"] = (
-        "computed BY the candidate branch, over the candidate branch. Every "
-        "digest here is reproducible by anyone with the same tree, which is "
-        "exactly why none of it is evidence of anything: reproducibility is "
-        "not authority. It cannot unlock D1, and assert_engine_approved refuses "
-        "it along with every other identity.")
+        "every blob was read from the git object database at the named commit, "
+        "and every runtime dependency is version-pinned and hashed. All of it "
+        "is reproducible by anyone with the same commits, which is exactly why "
+        "none of it is evidence: reproducibility is not authority. It cannot "
+        "unlock D1, and assert_engine_approved refuses it along with every "
+        "other identity.")
     return record
 
 
