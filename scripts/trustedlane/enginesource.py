@@ -223,3 +223,90 @@ def multi_source_manifest(*, roles, repository_numeric_id: int,
                          "the commit — there is no disk root to pass. It says "
                          "nothing about whether either commit is approved"),
     }
+
+
+#: Where each source role lands inside the extracted artifact. The repository
+#: keeps both packages under `scripts/`, but an artifact needs ONE import root
+#: with the packages directly beneath it — otherwise the import root is
+#: `<root>/scripts`, which is a directory whose name says nothing about what is
+#: approved.
+ROLE_PACKAGE_NAMES = {
+    "candidate_verifier": "verifier",
+    "protected_trusted_lane": "trustedlane",
+}
+
+
+def build_engine_artifact(*, roles, destination: str, repository_numeric_id: int,
+                          cwd: str = ".") -> dict:
+    """Write a deterministic engine tarball from EXACT GIT BLOBS.
+
+    Not a `tar` of a working tree. Every byte comes from the object database at
+    the named commit, which is the same reason `role_digest` reads that way:
+    a disk walk describes whatever is checked out, and in D1 the candidate
+    clone is on the same disk as the engine.
+
+    Deterministic on purpose — fixed member order, fixed mode, fixed uid/gid and
+    a zero mtime — so the artifact digest is a function of the two source
+    commits and nothing else. A build that embedded its own timestamp would
+    produce a different digest every run, and an operator cannot approve a
+    digest that changes when nothing changed.
+    """
+    import gzip
+    import io
+    import tarfile
+
+    manifest = multi_source_manifest(
+        roles=roles, repository_numeric_id=repository_numeric_id, cwd=cwd)
+
+    members = []
+    for role in sorted(manifest["roles"]):
+        package = ROLE_PACKAGE_NAMES[role]
+        prefix = SOURCE_ROLES[role][0].rstrip("/") + "/"
+        for path in sorted(manifest["roles"][role]["files"]):
+            entry = manifest["roles"][role]["files"][path]
+            blob = git(["cat-file", "blob", entry["git_oid"]], cwd=cwd,
+                       operation="cat-file-blob")
+            members.append((f"{package}/{path[len(prefix):]}", blob))
+
+    if not members:
+        refuse("category=engine_artifact_would_be_empty")
+    names = [name for name, _ in members]
+    if len(set(names)) != len(names):
+        refuse("category=engine_artifact_member_collision — two source paths "
+               "map to one artifact path")
+
+    # `tarfile.open(mode="w:gz")` lets gzip stamp the CURRENT TIME into its
+    # header and record the output filename, so two builds of identical content
+    # produced different digests — caught by the first determinism check. An
+    # operator cannot approve a digest that moves when nothing moved. Driving
+    # gzip explicitly with mtime=0 over a file object removes both.
+    with open(destination, "wb") as raw, \
+            gzip.GzipFile(filename="", fileobj=raw, mode="wb",
+                          mtime=0) as compressed, \
+            tarfile.open(fileobj=compressed, mode="w",
+                         format=tarfile.PAX_FORMAT) as archive:
+        for name, blob in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(blob)
+            info.mtime = 0          # not "now": the digest must not move
+            info.mode = 0o644       # never executable; the engine is imported
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            archive.addfile(info, io.BytesIO(blob))
+
+    with open(destination, "rb") as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()
+    return {
+        "path": destination,
+        "engine_artifact_sha256": digest,
+        "engine_source_sha256": manifest["engine_source_sha256"],
+        "member_count": len(members),
+        "packages": sorted(ROLE_PACKAGE_NAMES.values()),
+        "binding": manifest["binding"],
+        "honest_scope": ("every member is a blob read from the git object "
+                         "database at its role's commit, written with fixed "
+                         "order, mode and a zero mtime. The digest is a "
+                         "function of the two source commits and nothing else. "
+                         "It says nothing about whether either commit is "
+                         "approved"),
+    }

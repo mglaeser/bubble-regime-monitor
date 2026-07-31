@@ -97,96 +97,30 @@ def load_json_document(path: str, *, field: str):
 
 
 def load_skeleton_builder(*, engine_root: str):
-    """Return a LAZY loader for the plan builder in the verified artifact.
+    """Return a lazy planner bound to the approved artifact, VIA THE BRIDGE.
 
-    Lazy, and that is the whole point. The eager version imported
-    `verifier.plan` here, before `d1runtime.run` was called — and step 4 of that
-    run is `enginepolicy.assert_no_candidate_import()`, which refuses when
-    `verifier` is in `sys.modules`. So the D1 lane refused on every single
-    invocation, always, at the gate that exists to catch the candidate checkout
-    leaking in. Found by adversarial review; the lane could never have run.
+    This used to import `verifier.plan` directly — and it imported
+    `build_review_skeleton`, which does not exist. Both problems are fixed by
+    the same change: `enginebridge` is the single seam into the candidate
+    package, it names the real `build_skeleton`, and it proves every loaded
+    module came out of the artifact rather than off the disk beside it.
 
-    The underlying tension is real rather than a slip. `verifier` is candidate
-    code in D0 — where any import of it means the artifact under review reached
-    the process — and it is TRUSTED code in D1, where it arrives inside the
-    operator-approved artifact. The same module name means opposite things
-    depending on where it was loaded from, so the isolation check cannot be a
-    name check once the artifact is unpacked.
+    Still lazy. `d1runtime` step 4 calls
+    `enginepolicy.assert_no_candidate_import`, which refuses when `verifier` is
+    in `sys.modules` — so loading the engine eagerly here made the lane refuse
+    on every invocation. Deferring to first call puts the load after that gate,
+    where the gate is still asking the right question."""
+    from . import enginebridge
 
-    Deferring the import to first call puts it after step 4, where the check is
-    still asking the right question, and `_assert_loaded_from` then answers the
-    question that actually matters in D1: not "is `verifier` imported" but "did
-    this `verifier` come out of the approved artifact"."""
-    import os
-
-    from .enginepolicy import assert_not_candidate_checkout
-
-    assert_not_candidate_checkout(engine_root)
-    resolved_root = os.path.realpath(engine_root)
+    enginebridge.assert_layout(engine_root)
     state = {}
 
     def builder(**kwargs):
-        if "fn" not in state:
-            state["fn"] = _import_planner(resolved_root)
-        return state["fn"](**kwargs)
+        if "engine" not in state:
+            state["engine"] = enginebridge.load_engine(engine_root)
+        return enginebridge.build_skeleton(state["engine"], **kwargs)
 
     return builder
-
-
-def _import_planner(resolved_root: str):
-    """Import the planner and prove it came out of the approved artifact."""
-    import sys
-
-    if resolved_root not in sys.path:
-        sys.path.insert(0, resolved_root)
-    try:
-        from verifier.plan import build_review_skeleton  # noqa: PLC0415
-    except ImportError as exc:
-        refuse(f"category=engine_artifact_has_no_planner "
-               f"exception_class={type(exc).__name__} — the approved artifact "
-               "does not contain the verifier planner, and falling back to the "
-               "candidate's own plan would let the reviewed branch choose what "
-               "gets reviewed")
-    _assert_loaded_from(resolved_root)
-    return build_review_skeleton
-
-
-def _assert_loaded_from(resolved_root: str) -> dict:
-    """`verifier` must resolve INSIDE the approved artifact, not beside it.
-
-    A name check cannot answer this — `import verifier` succeeds identically
-    whether the package came from the operator-approved tarball or from the
-    candidate clone sitting on the same disk. Comparing the loaded module's
-    real path against the artifact root is the only thing that distinguishes
-    them, and it is the check that has to hold once the artifact is unpacked."""
-    import os
-    import sys
-
-    module = sys.modules.get("verifier")
-    origin = getattr(module, "__file__", None)
-    if origin is None:
-        # A namespace package has no __file__; its search locations do. An
-        # empty directory is a valid namespace root, which is exactly how the
-        # candidate tree got imported once before.
-        locations = list(getattr(getattr(module, "__path__", None), "_path", [])
-                         or getattr(module, "__path__", []) or [])
-        if not locations:
-            refuse("category=planner_origin_unknown — a module with no file "
-                   "and no search path cannot be traced to an artifact")
-        outside = [p for p in locations
-                   if not os.path.realpath(p).startswith(resolved_root + os.sep)]
-        if outside:
-            refuse(f"category=planner_loaded_outside_the_artifact "
-                   f"count={len(outside)} — `verifier` resolved to a namespace "
-                   "root that is not inside the approved engine; the candidate "
-                   "clone is on the same disk and imports identically")
-        return {"planner_inside_artifact": True, "namespace_package": True}
-    if not os.path.realpath(origin).startswith(resolved_root + os.sep):
-        refuse("category=planner_loaded_outside_the_artifact — `verifier` was "
-               "imported from somewhere other than the approved engine root; "
-               "the path is not reported because it can carry the runner "
-               "layout")
-    return {"planner_inside_artifact": True, "namespace_package": False}
 
 
 def main(environ=None) -> dict:

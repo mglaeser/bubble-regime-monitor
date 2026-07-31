@@ -54,6 +54,7 @@ from trustedlane import (  # noqa: E402
     d1runtime,
     d2cli,
     d2runtime,
+    enginebridge,
     enginebuild,
     enginepolicy,
     enginesource,
@@ -6016,14 +6017,27 @@ def test_the_generation_lane_reads_a_generation_sized_body():
     assert adapter.MAX_RESPONSE_BYTES > transport.MAX_RESPONSE_BYTES
 
 
-def test_the_planner_import_is_deferred_past_the_isolation_check():
+def _bridge_layout_fixture():
+    """A directory with both engine packages, so `assert_layout` passes without
+    an artifact — the point of this test is the DEFERRAL, not the load."""
+    import tempfile
+
+    root = Path(tempfile.mkdtemp())
+    for package in enginebridge.ENGINE_PACKAGES:
+        (root / package).mkdir()
+    return root
+
+
+def test_the_planner_import_is_deferred_past_the_isolation_check(tmp_path):
     """The eager import put `verifier` in sys.modules before d1runtime step 4
     called assert_no_candidate_import, which refuses on exactly that — so the
     D1 lane refused on every invocation and could never have run."""
     import sys
 
     before = set(sys.modules)
-    builder = d1cli.load_skeleton_builder(engine_root="/opt/engine")
+    engine = tmp_path_holder = None  # noqa: F841 - readability
+    builder = d1cli.load_skeleton_builder(
+        engine_root=str(_bridge_layout_fixture()))
     assert callable(builder)
     # Nothing was imported by building the loader.
     assert "verifier" not in (set(sys.modules) - before)
@@ -6044,56 +6058,35 @@ def _planted_verifier(monkeypatch, origin):
     return module
 
 
-def test_the_planner_must_come_out_of_the_approved_artifact(monkeypatch,
-                                                            tmp_path):
-    """A name check cannot distinguish the approved tarball from the candidate
-    clone on the same disk — `import verifier` succeeds identically for both.
-    Comparing the loaded module's real path against the artifact root is the
-    only thing that tells them apart.
-
-    The mutation sweep found this untested: the earlier version of this test
-    grepped the source, which asks whether a string is present rather than
-    whether a foreign module is refused."""
-    engine = tmp_path / "engine"
-    (engine / "verifier").mkdir(parents=True)
-    inside = engine / "verifier" / "__init__.py"
-    inside.write_text("", encoding="utf-8")
-
-    candidate = tmp_path / "candidate" / "verifier"
-    candidate.mkdir(parents=True)
-    outside = candidate / "__init__.py"
-    outside.write_text("", encoding="utf-8")
-
-    root = str(engine.resolve())
-    _planted_verifier(monkeypatch, str(inside))
-    assert d1cli._assert_loaded_from(root)["planner_inside_artifact"] is True
-
-    _planted_verifier(monkeypatch, str(outside))
-    with pytest.raises(errors.LaneRefusal) as excinfo:
-        d1cli._assert_loaded_from(root)
-    assert "planner_loaded_outside_the_artifact" in excinfo.value.reason
-    # The path is not reported: it carries the runner layout.
-    assert str(candidate) not in excinfo.value.reason
+def test_the_planner_origin_check_now_lives_in_the_bridge():
+    """The check moved rather than disappearing: `enginebridge` is the single
+    seam into the candidate package, so the origin proof belongs there and
+    `d1cli` no longer imports `verifier` at all."""
+    assert not hasattr(d1cli, "_assert_loaded_from")
+    assert "verifier" not in " ".join(_imported_names(LANE_DIR / "d1cli.py"))
+    assert hasattr(enginebridge, "assert_module_loaded_from")
 
 
-def test_a_planner_with_no_traceable_origin_is_refused(monkeypatch, tmp_path):
-    """A namespace package has no __file__. An empty directory is a valid
-    namespace root, which is exactly how the candidate tree got imported once
-    before."""
-    _planted_verifier(monkeypatch, None)
-    with _refusal("planner_origin_unknown"):
-        d1cli._assert_loaded_from(str(tmp_path))
-
-
-def test_a_namespace_planner_outside_the_artifact_is_refused(monkeypatch,
-                                                             tmp_path):
+def test_a_namespace_engine_module_outside_the_artifact_is_refused(tmp_path):
+    """A namespace package has no __file__; its search locations do. An empty
+    directory is a valid namespace root, which is how the candidate tree got
+    imported once before."""
     import types
 
-    module = types.ModuleType("verifier")
+    module = types.ModuleType("verifier.plan")
     module.__path__ = [str(tmp_path / "elsewhere")]
-    monkeypatch.setitem(sys.modules, "verifier", module)
-    with _refusal("planner_loaded_outside_the_artifact"):
-        d1cli._assert_loaded_from(str(tmp_path / "engine"))
+    with _refusal("engine_module_loaded_outside_the_artifact"):
+        enginebridge.assert_module_loaded_from(
+            module, root=str(tmp_path / "engine"), name="verifier.plan")
+
+
+def test_an_engine_module_with_no_traceable_origin_is_refused(tmp_path):
+    import types
+
+    with _refusal("engine_module_origin_unknown"):
+        enginebridge.assert_module_loaded_from(
+            types.ModuleType("verifier.plan"), root=str(tmp_path),
+            name="verifier.plan")
 
 
 def test_the_d0_filter_covers_everything_the_lane_asserts_against():
@@ -6521,3 +6514,170 @@ def test_d2_without_prerequisite_sixteen_makes_zero_generation_attempts(
         d2runtime.run(**_d2_kwargs(operator_claims=_authenticated_claims("D1"),
                                    opener=opener))
     assert calls == []
+
+
+# --------------------------------------------------------------------------
+# SLICE 1 — a real engine artifact built from exact Git blobs, and the REAL
+# planner imported out of it.
+#
+# `scripts/verifier` does not exist on main, which is the whole reason the
+# artifact has to carry both roles. These tests build one from the object
+# database at two different commits, extract it, and import through the bridge.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def engine_artifact(tmp_path_factory, engine_roles):
+    """A genuine artifact: verifier/ from the candidate head, trustedlane/ from
+    this branch, every byte read from git objects."""
+    directory = tmp_path_factory.mktemp("engine-artifact")
+    record = enginesource.build_engine_artifact(
+        roles=engine_roles, destination=str(directory / "engine.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    root = directory / "engine"
+    root.mkdir()
+    artifactload.extract(str(directory / "engine.tar.gz"), destination=str(root),
+                         expected_sha256=record["engine_artifact_sha256"])
+    return {"record": record, "root": str(root)}
+
+
+def test_the_artifact_carries_both_engine_roles(engine_artifact):
+    """An artifact with only `verifier` plans and decides with no trusted lane
+    in it; one with only `trustedlane` fails at the first engine call with the
+    credential already read."""
+    assert engine_artifact["record"]["packages"] == ["trustedlane", "verifier"]
+    for package in enginebridge.ENGINE_PACKAGES:
+        assert (Path(engine_artifact["root"]) / package).is_dir()
+
+
+def test_the_artifact_digest_is_a_function_of_the_source_commits_alone(
+        tmp_path, engine_roles):
+    """An operator approves a digest. One that moves when nothing moved cannot
+    be approved.
+
+    Two defects showed up here and neither was visible by reading the code:
+    `tarfile.open(mode="w:gz")` stamps the current time into the gzip header,
+    and GzipFile derives a stored FILENAME from the output path — so builds to
+    two different temporary paths differed at byte 10 while the tar payload was
+    byte-identical."""
+    first = enginesource.build_engine_artifact(
+        roles=engine_roles, destination=str(tmp_path / "first.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    nested = tmp_path / "deeper"
+    nested.mkdir()
+    second = enginesource.build_engine_artifact(
+        roles=engine_roles, destination=str(nested / "second-name.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    assert (first["engine_artifact_sha256"]
+            == second["engine_artifact_sha256"]), "digest moved with the path"
+
+
+def test_the_artifact_digest_moves_when_a_source_commit_moves(
+        tmp_path, engine_roles):
+    here = enginesource.build_engine_artifact(
+        roles=engine_roles, destination=str(tmp_path / "a.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    older = enginesource.build_engine_artifact(
+        roles=dict(engine_roles, protected_trusted_lane=_rev("origin/main~1")),
+        destination=str(tmp_path / "b.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    assert here["engine_artifact_sha256"] != older["engine_artifact_sha256"]
+
+
+def test_the_bridge_imports_the_real_planner_from_the_artifact(engine_artifact):
+    """EX4-R05. The previous CLI imported `verifier.plan.build_review_skeleton`,
+    which does not exist, and called it with a signature that is not
+    `build_skeleton`'s either — so the D1 path could never have run once."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    planner = getattr(engine["modules"]["verifier.plan"],
+                      enginebridge.PLANNER_FUNCTION)
+    assert callable(planner)
+    assert not hasattr(engine["modules"]["verifier.plan"],
+                       "build_review_skeleton")
+    signature = inspect.signature(planner)
+    assert list(signature.parameters) == ["target_base_ref", "head_ref", "cwd",
+                                          "budget"]
+
+
+def test_the_bridge_reads_governed_policy_from_the_engine_not_a_local_copy(
+        engine_artifact):
+    """The panel, the required approver and the twelve PINs are governed
+    policy. A trusted-lane copy of any of them is a second source of truth."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    assert enginebridge.model_panel(engine) == (
+        "gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini")
+    assert enginebridge.required_approver(engine) == "gpt-5.6-sol"
+    assert len(enginebridge.pin_names(engine)) == 12
+
+
+def test_every_engine_module_is_proved_to_come_from_the_artifact(
+        engine_artifact):
+    """A name check cannot distinguish the approved tarball from the candidate
+    clone on the same disk, and in D1 both are present."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    root = os.path.realpath(engine_artifact["root"])
+    for name, module in engine["modules"].items():
+        origin = getattr(module, "__file__", None)
+        assert origin is not None, name
+        assert os.path.realpath(origin).startswith(root + os.sep), name
+
+
+def test_a_module_loaded_from_outside_the_artifact_is_refused(engine_artifact):
+    import types
+
+    outsider = types.ModuleType("verifier.plan")
+    outsider.__file__ = "/somewhere/else/verifier/plan.py"
+    with _refusal("engine_module_loaded_outside_the_artifact"):
+        enginebridge.assert_module_loaded_from(
+            outsider, root=os.path.realpath(engine_artifact["root"]),
+            name="verifier.plan")
+
+
+@pytest.mark.parametrize("package", sorted(enginebridge.ENGINE_PACKAGES))
+def test_an_artifact_missing_a_role_is_refused(tmp_path, package):
+    root = tmp_path / "partial"
+    for present in enginebridge.ENGINE_PACKAGES:
+        if present != package:
+            (root / present).mkdir(parents=True)
+    root.mkdir(exist_ok=True)
+    with _refusal("engine_artifact_missing_packages"):
+        enginebridge.assert_layout(str(root))
+
+
+def test_a_structurally_blocked_skeleton_is_refused_rather_than_reviewed(
+        engine_artifact):
+    """`build_skeleton` reports ordinary policy blocks in DATA and sets
+    `structurally_clean=False`; it does not raise. A caller that only catches
+    exceptions reviews a plan the planner refused."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    blocked = {"blocking_reasons": [{"code": "CONTENT_POLICY_BLOCKED",
+                                     "reason": "x"}],
+               "structurally_clean": False,
+               "requested_model_ids": list(enginebridge.model_panel(engine))}
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        enginebridge.assert_skeleton_is_usable(blocked, engine=engine)
+    assert "candidate_is_structurally_blocked" in excinfo.value.reason
+    assert "CONTENT_POLICY_BLOCKED" in excinfo.value.reason
+
+
+def test_a_skeleton_naming_a_different_panel_is_refused(engine_artifact):
+    """The panel is governed policy; a skeleton naming another one is not the
+    review that was approved."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    with _refusal("skeleton_model_panel_mismatch"):
+        enginebridge.assert_skeleton_is_usable(
+            {"blocking_reasons": [], "structurally_clean": True,
+             "requested_model_ids": ["gpt-5.6-sol"]}, engine=engine)
+
+
+def test_the_bridge_is_the_only_lane_entry_into_the_verifier_package():
+    """One seam, so there is one place to audit for the trusted side reaching
+    into candidate internals."""
+    offenders = []
+    for path in _lane_sources():
+        if path.name == "enginebridge.py":
+            continue
+        for name in _imported_names(path):
+            if name == "verifier" or name.startswith("verifier."):
+                offenders.append(f"{path.name}:{name}")
+    assert offenders == [], offenders
