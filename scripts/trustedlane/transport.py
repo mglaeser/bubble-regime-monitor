@@ -182,13 +182,18 @@ def open_https(*, phase: str):
     return opener
 
 
-def exchange(request: dict, *, opener, credential: str) -> dict:
-    """Send the request and return a record that contains no provider string.
+def _send(request: dict, *, opener, credential: str) -> dict:
+    """Credential handling and error containment, with NO endpoint policy.
 
-    The credential is added to a COPY of the headers. The record this returns,
-    and every record derived from it, is safe to write to evidence because the
-    only values in it are ones this repository chose or a plain integer."""
-    assert_request_is_count_only(request)
+    Split out because D1 and D2 call different endpoints and must not share a
+    gate. A single `exchange(request, allow_generation=...)` would put the
+    difference between "counts" and "generates" inside a parameter, which is
+    the one place it must never be: a caller that got that flag wrong would be
+    generating from the count lane, and the flag would look like configuration.
+
+    So the endpoint assertions live in the two public wrappers below and each
+    is specific. This function is private and asserts nothing about the URL —
+    it is unreachable without going through one of them."""
     if not callable(opener):
         refuse("category=transport_opener_not_callable")
     if not isinstance(credential, str) or not credential:
@@ -215,6 +220,37 @@ def exchange(request: dict, *, opener, credential: str) -> dict:
         "endpoint": request["url"],
         "honest_scope": "a reply was received; nothing here says it is valid",
     }
+
+
+def exchange(request: dict, *, opener, credential: str) -> dict:
+    """Send a COUNT request. Refuses any other endpoint.
+
+    The credential is added to a COPY of the headers. The record this returns,
+    and every record derived from it, is safe to write to evidence because the
+    only values in it are ones this repository chose or a plain integer."""
+    assert_request_is_count_only(request)
+    return _send(request, opener=opener, credential=credential)
+
+
+def exchange_generation(request: dict, *, opener, credential: str) -> dict:
+    """Send a GENERATION request. Refuses the count endpoint, symmetrically.
+
+    D2's entry point. It is a separate function rather than a flag on
+    `exchange` so that `count_once` — the only send path D1 has — cannot reach
+    a generation endpoint however it is called."""
+    url = request.get("url") if isinstance(request, dict) else None
+    if url == f"{BASE_URL}{COUNT_PATH}":
+        refuse("category=generation_send_given_the_count_endpoint — the count "
+               "endpoint returns a token total, not a verdict; sending here "
+               "would spend a generation approval on a number")
+    if not isinstance(url, str) or not url.startswith(f"{BASE_URL}/"):
+        refuse(f"category=generation_endpoint_not_permitted url={url!r} — the "
+               "base URL is fixed in trusted policy, so a caller cannot "
+               "choose which server sees the credential")
+    if request.get("method") != "POST":
+        refuse(f"category=request_method_not_permitted "
+               f"method={request.get('method')!r}")
+    return _send(request, opener=opener, credential=credential)
 
 
 def parse_count_response(status, body) -> dict:

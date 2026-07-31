@@ -13,12 +13,17 @@ lossless, order-independent mapping with a digest over BOTH sides:
 
     raw_response_sha256  ->  normalized_verdicts_sha256
 
-D0 implements the *contract and its refusals*. It deliberately does not
-implement provider-shape parsing, because a parser written against a shape no
-call has ever returned would be a guess presented as an adapter. What it does
-implement is every check that does not need a real response: the field
-whitelist, the tolerance ban, the single-output rule, the digest binding, and
-the refusal that fires when a caller hands over a candidate-supplied adapter.
+The D0 bootstrap implemented the contract and its refusals only, and
+deliberately not provider-shape parsing: a parser written against a shape no
+call has ever returned is a guess presented as an adapter. EX3-R09 implemented
+the parsing, because the shape stopped being a guess — the hosted capability
+probe established the count envelope and the Responses envelope is documented.
+
+What that means for the code below: `normalize` is real, and every branch in it
+that would have needed one of `FORBIDDEN_TRANSFORMS` is a `refuse` instead. It
+still holds no transport and still refuses an adapter the candidate could have
+chosen. `applied_transforms` is an empty tuple at the one call site, which a
+test checks by reading this module's AST rather than by believing the claim.
 """
 
 from __future__ import annotations

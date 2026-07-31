@@ -44,8 +44,15 @@ from trustedlane import (  # noqa: E402
     REPOSITORY_NUMERIC_ID,
     actionpolicy,
     adapter,
+    artifactload,
     candidatefetch,
+    challenge,
     closure,
+    countledger,
+    d1cli,
+    d1runtime,
+    d2cli,
+    d2runtime,
     enginebuild,
     enginepolicy,
     enginesource,
@@ -4700,3 +4707,1068 @@ def test_the_normalizer_contains_no_path_that_applies_a_transform():
                 and getattr(node.func, "id", None) == "normalization_record")
     applied = next(k.value for k in call.keywords if k.arg == "applied_transforms")
     assert isinstance(applied, ast.Tuple) and applied.elts == []
+
+
+# --------------------------------------------------------------------------
+# EX3-R01 — D1 end to end, against a fake server, in D0, with no credential.
+#
+# Everything dangerous is a parameter: the opener, the credential, the signing
+# key, the publisher. In the workflow they are built by the phase-gated
+# constructors, which refuse outside D1/D2. Here they are supplied, so the
+# whole ordered sequence and every refusal in it are exercised — the gate is on
+# OBTAINING the capability, which is what a candidate branch cannot do.
+# --------------------------------------------------------------------------
+
+D1_SEED = b"deterministic-test-seed-not-secret-0123456789"
+
+
+def _inert_fetch(*, destination, head_sha, target_base_sha):
+    """Stands in for `candidatefetch.fetch_candidate`, returning the shape the
+    real one returns — `checked_out: False`, verified rather than assumed."""
+    return {"destination": destination, "head_sha": head_sha,
+            "target_base_sha": target_base_sha, "checked_out": False,
+            "full_history": True}
+
+
+def _d1_unit(index=0, tokens=100):
+    return {"unit_sha256": f"{index:064d}",
+            "instructions": f"review unit {index}",
+            "input_text": f"diff for unit {index}",
+            "worst_case_input_tokens": tokens}
+
+
+def _d1_kwargs(units=None, *, ceiling=10_000, publisher=None, opener=None,
+               count=1234, **overrides):
+    units = units if units is not None else [_d1_unit(0), _d1_unit(1)]
+    digests = [u["unit_sha256"] for u in units]
+    base = dict(
+        observations=_protected_observation(),
+        operator_records=[_operator_record(
+            prerequisite_key="approve_count_spending",
+            scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
+            exact_values={"max_input_tokens": ceiling})],
+        engine_artifact={"path": None, "expected_sha256": "c" * 64,
+                         "root": "/opt/engine", "search_path": []},
+        candidate={"repository_numeric_id": REPOSITORY_NUMERIC_ID,
+                   "candidate_head_sha": SHA_B, "target_base_sha": SHA_A,
+                   "challenge_seed": D1_SEED,
+                   "checkout_destination": "/tmp/candidate"},
+        plan={"unit_sha256s": digests},
+        fetch=_inert_fetch,
+        opener=opener if opener is not None else _fake_server(
+            body=json.dumps({"object": "response.input_tokens",
+                             "input_tokens": count}).encode()),
+        credential=FAKE_CREDENTIAL,
+        signing_key=TEST_KEY,
+        publisher=publisher if publisher is not None else (lambda request: None),
+        trusted_run={"id": 55, "attempt": 1,
+                     "url": "https://github.com/x/y/actions/runs/55"},
+        observed_now="2026-07-30T21:00:00Z",
+        produced_at="2026-07-30T21:00:00Z",
+        skeleton_rebuild=lambda **_: {"units": units},
+        model="gpt-5")
+    base.update(overrides)
+    return base
+
+
+@pytest.fixture
+def d1_engine(monkeypatch, tmp_path):
+    """Stub the two steps that need a real artifact and a real repository.
+
+    They have their own tests. Stubbing them here keeps the D1 tests about the
+    ORDER and the gates rather than about tar handling, and each stub returns
+    the shape the real function returns rather than a bare True."""
+    monkeypatch.setattr(artifactload, "inspect_archive",
+                        lambda path, *, expected_sha256: {
+                            "engine_artifact_sha256": expected_sha256,
+                            "file_count": 22, "digest_matched": True})
+    monkeypatch.setattr(artifactload,
+                        "assert_engine_root_is_not_the_candidate",
+                        lambda root: {"engine_root": root,
+                                      "candidate_checkout": False})
+    return tmp_path
+
+
+def test_d1_runs_end_to_end_and_produces_signed_evidence(d1_engine):
+    published = []
+    result = d1runtime.run(**_d1_kwargs(publisher=published.append))
+    assert result["generation_calls"] == 0
+    assert result["payload"]["total_input_tokens"] == 2468  # 1234 x 2 units
+    assert signing.verify_envelope(result["evidence"],
+                                   key=TEST_KEY)["signature_verified"] is True
+    assert [p["state"] for p in published] == ["pending", "success"]
+
+
+def test_d1_publishes_pending_before_any_provider_call(d1_engine):
+    """A run that dies between dispatch and completion must leave a visible
+    unfinished status rather than none."""
+    order = []
+    opener = _fake_server(record=None)
+
+    def recording_opener(*args):
+        order.append("provider")
+        return opener(*args)
+
+    d1runtime.run(**_d1_kwargs(
+        opener=recording_opener,
+        publisher=lambda request: order.append(f"status:{request['state']}")))
+    assert order[0] == "status:pending"
+    assert "provider" in order
+    assert order.index("status:pending") < order.index("provider")
+
+
+def test_d1_publishes_a_failure_status_rather_than_leaving_the_pr_pending(
+        d1_engine):
+    """The pending status is already on the pull request when a later step
+    refuses. Leaving it would block the candidate with no explanation."""
+    published = []
+    with _refusal("authorized_input_tokens_would_be_exceeded"):
+        d1runtime.run(**_d1_kwargs(ceiling=50, publisher=published.append))
+    assert [p["state"] for p in published] == ["pending", "failure"]
+    assert "authorized_input_tokens_would_be_exceeded" in published[1]["description"]
+
+
+def test_d1_status_lands_on_the_exact_candidate_head(d1_engine):
+    """A workflow_dispatch run's own job checks attach to main's commit. The
+    trusted status has to be published explicitly onto the reviewed SHA."""
+    published = []
+    d1runtime.run(**_d1_kwargs(publisher=published.append))
+    for publication in published:
+        assert publication["candidate_head_sha"] == SHA_B
+        assert publication["context"] == "trusted-verifier-count"
+
+
+def test_d1_refuses_before_the_credential_when_the_repository_is_unprotected(
+        d1_engine):
+    """Step 1, and it is first because every later answer is worthless if a
+    credential is reachable from an unprotected ref."""
+    published = []
+    with _refusal("branch_not_protected"):
+        d1runtime.run(**_d1_kwargs(
+            publisher=published.append,
+            observations=_protected_observation(
+                branch_record={"name": "main", "protected": False})))
+    # Nothing was published: the refusal came before the pending status, so
+    # the pull request never saw a trusted context at all.
+    assert published == []
+
+
+def test_d1_refuses_when_the_operator_record_has_expired(d1_engine):
+    with _refusal("operator_authorization_expired"):
+        d1runtime.run(**_d1_kwargs(observed_now="2027-01-01T00:00:00Z"))
+
+
+def test_d1_refuses_when_no_operator_wrote_a_ceiling(d1_engine):
+    """A budget the code picked is a budget nobody approved."""
+    with _refusal("authorized_ceiling_absent"):
+        d1runtime.run(**_d1_kwargs(operator_records=[_operator_record(
+            prerequisite_key="approve_count_spending",
+            scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
+            exact_values={"max_usd": 25})]))
+
+
+def test_d1_budget_is_global_not_per_request(d1_engine):
+    """The bug this prevents: a hundred requests that are each individually
+    under budget spend a hundred times the budget."""
+    units = [_d1_unit(i, tokens=100) for i in range(5)]
+    # Each unit's worst case (100) is far under the ceiling; five of them are
+    # not. A per-request check would clear all five.
+    with _refusal("authorized_input_tokens_would_be_exceeded"):
+        d1runtime.run(**_d1_kwargs(units, ceiling=250, count=100))
+
+
+def test_d1_stops_at_the_unit_that_would_exceed_rather_than_after(d1_engine):
+    """Preflight runs BEFORE the request, with the worst case: the actual is
+    not known until the reply arrives, and by then it has been spent."""
+    calls = []
+    units = [_d1_unit(i, tokens=100) for i in range(5)]
+
+    def counting_opener(*args):
+        calls.append(1)
+        return _fake_server(body=json.dumps(
+            {"object": "response.input_tokens", "input_tokens": 100}).encode())(*args)
+
+    with _refusal("authorized_input_tokens_would_be_exceeded"):
+        d1runtime.run(**_d1_kwargs(units, ceiling=250, opener=counting_opener))
+    # Two units cleared (100 + 100 = 200); the third would project 300 > 250.
+    assert len(calls) == 2
+
+
+def test_d1_refuses_when_the_rebuild_disagrees_with_the_candidates_plan(
+        d1_engine):
+    """The candidate's plan is an input to COMPARE against. Proceeding on
+    either side alone is a different failure and both are refused."""
+    units = [_d1_unit(0), _d1_unit(1)]
+    with _refusal("rebuilt_plan_differs_from_candidate_plan"):
+        d1runtime.run(**_d1_kwargs(units, plan={"unit_sha256s": [
+            f"{0:064d}", f"{9:064d}"]}))
+
+
+def test_d1_refuses_a_candidate_plan_that_declares_nothing_to_compare(d1_engine):
+    """With nothing to compare against, the rebuild is unchecked and the
+    comparison is theatre."""
+    with _refusal("candidate_plan_declares_no_units"):
+        d1runtime.run(**_d1_kwargs(plan={}))
+
+
+def test_d1_refuses_a_rebuild_that_produced_no_units(d1_engine):
+    with _refusal("skeleton_rebuild_produced_no_units"):
+        d1runtime.run(**_d1_kwargs(skeleton_rebuild=lambda **_: {"units": []}))
+
+
+def test_d1_every_request_carries_this_runs_challenge(d1_engine):
+    """A verdict produced for an earlier commit would otherwise validate
+    against a later one, every field intact."""
+    seen = []
+    d1runtime.run(**_d1_kwargs(opener=_fake_server(
+        record=seen, body=json.dumps({"object": "response.input_tokens",
+                                      "input_tokens": 10}).encode())))
+    assert len(seen) == 2
+    for index, call in enumerate(seen):
+        expected = challenge.token_for_unit(
+            seed=D1_SEED, unit_sha256=f"{index:064d}", candidate_head_sha=SHA_B,
+            trusted_run_id=55, trusted_run_attempt=1)
+        assert expected in json.loads(call["body"])["instructions"]
+
+
+def test_the_challenge_is_bound_to_the_run_and_the_head():
+    """A token from one run must be refused in another, or it proves nothing
+    about freshness."""
+    common = dict(seed=D1_SEED, unit_sha256="a" * 64,
+                  candidate_head_sha=SHA_B, trusted_run_id=55,
+                  trusted_run_attempt=1)
+    baseline = challenge.token_for_unit(**common)
+    assert baseline != challenge.token_for_unit(
+        **dict(common, candidate_head_sha=SHA_A))
+    assert baseline != challenge.token_for_unit(**dict(common, trusted_run_id=56))
+    assert baseline != challenge.token_for_unit(
+        **dict(common, trusted_run_attempt=2))
+    assert baseline != challenge.token_for_unit(**dict(common, unit_sha256="b" * 64))
+    assert baseline != challenge.token_for_unit(
+        **dict(common, seed=b"a different seed, also thirty-two bytes long"))
+
+
+def test_a_verdict_without_this_runs_token_is_refused_and_not_echoed():
+    token = challenge.token_for_unit(
+        seed=D1_SEED, unit_sha256="a" * 64, candidate_head_sha=SHA_B,
+        trusted_run_id=55, trusted_run_attempt=1)
+    forged = {"unit_sha256": "a" * 64,
+              "proof_of_check": "I definitely read SENSITIVE-PROSE"}
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        challenge.assert_echoed(forged, expected_token=token)
+    assert "challenge_not_echoed" in excinfo.value.reason
+    assert "SENSITIVE-PROSE" not in excinfo.value.reason
+
+
+def test_each_verdict_is_checked_against_its_own_units_token():
+    """Checking them all against one token would let a single genuine response
+    vouch for a batch."""
+    bound = dict(seed=D1_SEED, candidate_head_sha=SHA_B, trusted_run_id=55,
+                 trusted_run_attempt=1)
+    good = challenge.token_for_unit(unit_sha256="a" * 64, **bound)
+    verdicts = [{"unit_sha256": "a" * 64, "proof_of_check": f"read it {good}"},
+                {"unit_sha256": "b" * 64, "proof_of_check": f"read it {good}"}]
+    with _refusal("challenge_not_echoed"):
+        challenge.assert_all_echoed(verdicts, **bound)
+
+
+def test_a_challenge_check_over_nothing_is_refused():
+    """It would pass for every run."""
+    with _refusal("no_verdicts_to_challenge"):
+        challenge.assert_all_echoed([], seed=D1_SEED, candidate_head_sha=SHA_B,
+                                    trusted_run_id=55, trusted_run_attempt=1)
+
+
+def test_the_challenge_states_what_it_does_not_prove():
+    """A model handed the token echoes it whether or not it did the work."""
+    token = challenge.token_for_unit(
+        seed=D1_SEED, unit_sha256="a" * 64, candidate_head_sha=SHA_B,
+        trusted_run_id=55, trusted_run_attempt=1)
+    scope = challenge.assert_echoed(
+        {"unit_sha256": "a" * 64, "proof_of_check": f"x {token} y"},
+        expected_token=token)["honest_scope"]
+    assert "does NOT show that the model read the diff" in scope
+
+
+def test_d1_makes_zero_generation_calls(d1_engine):
+    """The phase says so; the ledger makes the phase checkable."""
+    seen = []
+    result = d1runtime.run(**_d1_kwargs(opener=_fake_server(
+        record=seen, body=json.dumps({"object": "response.input_tokens",
+                                      "input_tokens": 10}).encode())))
+    assert result["payload"]["generation_calls"] == 0
+    for call in seen:
+        assert call["url"].endswith("/responses/input_tokens")
+
+
+def test_d1_evidence_is_unusable_if_the_signature_is_stripped(d1_engine):
+    result = d1runtime.run(**_d1_kwargs())
+    stripped = dict(result["evidence"], signature=None, signer_identity=None)
+    with _refusal("trusted_class_without_signature"):
+        evidencewire.validate_envelope(stripped)
+
+
+def test_d1_evidence_binds_the_exact_range_it_reviewed(d1_engine):
+    result = d1runtime.run(**_d1_kwargs())
+    assert result["evidence"]["candidate_head_sha"] == SHA_B
+    assert result["evidence"]["target_base_sha"] == SHA_A
+    assert evidencewire.assert_payload_matches(
+        result["evidence"], result["payload"])["payload_bound"] is True
+
+
+def test_d1_states_that_a_count_is_not_a_review(d1_engine):
+    result = d1runtime.run(**_d1_kwargs())
+    assert "not a review" in result["honest_scope"]
+
+
+# ---- the count ledger, on its own -----------------------------------------
+
+
+def _authorization(ceiling=1000):
+    return {"authorized_input_tokens": ceiling, "key": "max_input_tokens"}
+
+
+def _ledger():
+    return countledger.new_ledger(
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, candidate_head_sha=SHA_B,
+        trusted_run_id=1, trusted_run_attempt=1)
+
+
+def test_the_ledger_refuses_the_same_unit_twice():
+    """One of the two counts is the real one and nothing says which."""
+    ledger = countledger.record_count(
+        _ledger(), unit_sha256="a" * 64, input_tokens=10,
+        payload_sha256="b" * 64, authorization=_authorization())
+    with _refusal("ledger_unit_counted_twice"):
+        countledger.record_count(ledger, unit_sha256="a" * 64, input_tokens=10,
+                                 payload_sha256="b" * 64,
+                                 authorization=_authorization())
+
+
+def test_the_ledger_refuses_a_reply_that_lands_over_the_ceiling():
+    """Preflight cleared a worst case; a reply reporting more than that either
+    answers a different request or the estimate was wrong."""
+    with _refusal("authorized_input_tokens_exceeded"):
+        countledger.record_count(_ledger(), unit_sha256="a" * 64,
+                                 input_tokens=5000, payload_sha256="b" * 64,
+                                 authorization=_authorization(100))
+
+
+def test_preflight_refuses_a_unit_whose_worst_case_is_the_whole_budget():
+    with _refusal("unit_worst_case_implausible"):
+        countledger.preflight(_ledger(), authorization=_authorization(10**9),
+                              worst_case_input_tokens=10**8)
+
+
+def test_preflight_without_an_estimate_authorizes_an_unknown_amount():
+    for value in (0, -1, None, True, "100"):
+        with _refusal("preflight_worst_case_not_a_positive_integer"):
+            countledger.preflight(_ledger(), authorization=_authorization(),
+                                  worst_case_input_tokens=value)
+
+
+def test_a_plan_unit_that_was_never_counted_is_refused():
+    """The total would be an underestimate an operator approves as if it were
+    the whole cost."""
+    ledger = countledger.record_count(
+        _ledger(), unit_sha256="a" * 64, input_tokens=10,
+        payload_sha256="b" * 64, authorization=_authorization())
+    with _refusal("planned_units_not_counted"):
+        countledger.assert_plan_fully_counted(
+            ledger, planned_units=["a" * 64, "c" * 64])
+
+
+def test_a_counted_unit_that_was_never_planned_is_refused():
+    """A request for something the plan does not describe. The plan here holds
+    BOTH counted units plus nothing missing, so the missing-unit check cannot
+    fire first and mask this one."""
+    ledger = _ledger()
+    for unit in ("a" * 64, "c" * 64):
+        ledger = countledger.record_count(
+            ledger, unit_sha256=unit, input_tokens=10,
+            payload_sha256="b" * 64, authorization=_authorization())
+    with _refusal("counted_units_not_planned"):
+        countledger.assert_plan_fully_counted(ledger, planned_units=["a" * 64])
+
+
+def test_a_total_over_an_empty_plan_is_under_every_budget():
+    with _refusal("plan_has_no_units"):
+        countledger.assert_plan_fully_counted(_ledger(), planned_units=[])
+
+
+def _ledger_digest_for(order):
+    ledger = _ledger()
+    for unit, tokens in order:
+        ledger = countledger.record_count(
+            ledger, unit_sha256=unit, input_tokens=tokens,
+            payload_sha256="b" * 64, authorization=_authorization())
+    return countledger.ledger_digest(ledger)
+
+
+def test_the_ledger_digest_is_order_independent_but_content_sensitive():
+    forwards = _ledger_digest_for([("a" * 64, 10), ("c" * 64, 20)])
+    backwards = _ledger_digest_for([("c" * 64, 20), ("a" * 64, 10)])
+    different = _ledger_digest_for([("a" * 64, 11), ("c" * 64, 20)])
+    assert forwards == backwards
+    assert forwards != different
+
+
+def test_the_ledger_digest_binds_per_unit_attribution_not_just_the_total():
+    """Found by the mutation sweep. The previous test varied a count, which
+    also varied `total_input_tokens` — so a digest covering only the total and
+    the unit NAMES passed it. These two ledgers have the same total and the
+    same units, and differ only in which unit cost what, which is exactly the
+    claim the evidence makes."""
+    left = _ledger_digest_for([("a" * 64, 10), ("c" * 64, 20)])
+    right = _ledger_digest_for([("a" * 64, 20), ("c" * 64, 10)])
+    assert left != right
+
+
+def test_a_generation_call_in_the_count_ledger_is_refused():
+    with _refusal("d1_made_a_generation_call"):
+        countledger.assert_zero_generation(dict(_ledger(), generation_calls=1))
+
+
+def test_an_approval_for_one_commit_does_not_authorize_another():
+    """Operator records carried a scope that nothing compared against
+    anything, so an approval to spend on reviewing one commit silently
+    authorized spending on another — and a push is how the reviewed thing
+    changes."""
+    verified = operatorrecord.verify_records(
+        [_operator_record(prerequisite_key="approve_count_spending",
+                          scope=f"{CANONICAL_REPOSITORY}@{SHA_A}",
+                          exact_values={"max_input_tokens": 100})],
+        observed_now="2026-07-30T21:00:00Z")
+    with _refusal("operator_record_scope_mismatch"):
+        countledger.authorize(
+            operator_records=verified,
+            expected_scope=f"{CANONICAL_REPOSITORY}@{SHA_B}")
+
+
+def test_the_parsed_operator_record_still_carries_its_literal():
+    """A parser that validates a record and then discards the literal it
+    exists to convey forces every consumer back to the unvalidated original."""
+    parsed = operatorrecord.parse_operator_record(
+        _operator_record(exact_values={"max_input_tokens": 42}))
+    assert parsed["exact_values"] == {"max_input_tokens": 42}
+
+
+@pytest.mark.parametrize("ceiling", [0, -5, True, "1000", 1.5])
+def test_a_ceiling_that_is_not_a_positive_integer_is_refused(ceiling):
+    verified = operatorrecord.verify_records(
+        [_operator_record(prerequisite_key="approve_count_spending",
+                          scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
+                          exact_values={"max_input_tokens": ceiling})],
+        observed_now="2026-07-30T21:00:00Z")
+    with _refusal("authorized_ceiling_not_a_positive_integer"):
+        countledger.authorize(
+            operator_records=verified,
+            expected_scope=f"{CANONICAL_REPOSITORY}@{SHA_B}")
+
+
+# ---- the engine artifact ---------------------------------------------------
+
+
+def _engine_tar(tmp_path, *, members=None, name="engine.tar.gz"):
+    """Build a real gzipped tar so the member rules are exercised against
+    tarfile rather than against a mock of it."""
+    import io
+    import tarfile
+
+    path = tmp_path / name
+    with tarfile.open(path, "w:gz") as archive:
+        for member, payload in (members or {"engine/m.py": b"x = 1\n"}).items():
+            if isinstance(payload, tarfile.TarInfo):
+                archive.addfile(payload)
+                continue
+            info = tarfile.TarInfo(member)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    return str(path), hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_an_artifact_whose_bytes_differ_from_the_approved_digest_is_refused(
+        tmp_path):
+    """The whole basis of engine trust: these bytes, and no others."""
+    path, _ = _engine_tar(tmp_path)
+    with _refusal("engine_artifact_digest_mismatch"):
+        artifactload.inspect_archive(path, expected_sha256="d" * 64)
+
+
+def test_a_matching_artifact_lists_its_files(tmp_path):
+    path, digest = _engine_tar(tmp_path, members={
+        "engine/a.py": b"a\n", "engine/b.json": b"{}\n"})
+    record = artifactload.inspect_archive(path, expected_sha256=digest)
+    assert record["file_count"] == 2
+    assert [f["path"] for f in record["files"]] == ["engine/a.py",
+                                                    "engine/b.json"]
+
+
+@pytest.mark.parametrize("member,category", [
+    ("/etc/passwd", "engine_member_absolute_path"),
+    ("../outside.py", "engine_member_path_traversal"),
+    ("engine/../../x.py", "engine_member_path_traversal"),
+    ("engine\\x.py", "engine_member_backslash"),
+    ("engine/payload.so", "engine_member_suffix_not_permitted"),
+])
+def test_a_dangerous_member_path_is_refused(tmp_path, member, category):
+    path, digest = _engine_tar(tmp_path, members={member: b"x\n"})
+    with _refusal(category):
+        artifactload.inspect_archive(path, expected_sha256=digest)
+
+
+def test_a_symlink_member_is_refused(tmp_path):
+    """Its own path is fine, which is exactly why a path check clears it."""
+    import tarfile
+
+    info = tarfile.TarInfo("engine/link.py")
+    info.type = tarfile.SYMTYPE
+    info.linkname = "../../../../etc/passwd"
+    path, digest = _engine_tar(tmp_path, members={"engine/link.py": info})
+    with _refusal("engine_member_is_a_link"):
+        artifactload.inspect_archive(path, expected_sha256=digest)
+
+
+def test_a_device_member_is_refused(tmp_path):
+    import tarfile
+
+    info = tarfile.TarInfo("engine/dev.py")
+    info.type = tarfile.CHRTYPE
+    path, digest = _engine_tar(tmp_path, members={"engine/dev.py": info})
+    with _refusal("engine_member_is_a_device"):
+        artifactload.inspect_archive(path, expected_sha256=digest)
+
+
+def test_an_archive_with_no_files_is_refused(tmp_path):
+    """An empty engine satisfies any import and runs nothing."""
+    import io
+    import tarfile
+
+    path = tmp_path / "empty.tar.gz"
+    with tarfile.open(path, "w:gz") as archive:
+        info = tarfile.TarInfo("engine")
+        info.type = tarfile.DIRTYPE
+        archive.addfile(info, io.BytesIO(b""))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    with _refusal("engine_archive_has_no_files"):
+        artifactload.inspect_archive(str(path), expected_sha256=digest)
+
+
+def test_an_empty_artifact_file_is_refused(tmp_path):
+    """An empty artifact hashes to a constant, and a constant is something an
+    attacker can arrange."""
+    path = tmp_path / "empty.bin"
+    path.write_bytes(b"")
+    with _refusal("engine_artifact_empty"):
+        artifactload.file_digest(str(path))
+
+
+def test_a_missing_artifact_reports_its_exception_class_only(tmp_path):
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        artifactload.file_digest(str(tmp_path / "absent.tar.gz"))
+    assert "engine_artifact_unreadable" in excinfo.value.reason
+    assert "absent.tar.gz" not in excinfo.value.reason
+
+
+def test_extracting_over_an_existing_tree_is_refused(tmp_path):
+    """A mixture of an approved engine and whatever was there before is not an
+    approved engine."""
+    path, digest = _engine_tar(tmp_path)
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    (destination / "leftover.py").write_text("x\n")
+    with _refusal("engine_destination_not_empty"):
+        artifactload.extract(path, destination=str(destination),
+                             expected_sha256=digest)
+
+
+def test_a_verified_artifact_extracts(tmp_path):
+    path, digest = _engine_tar(tmp_path, members={"engine/m.py": b"x = 1\n"})
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    record = artifactload.extract(path, destination=str(destination),
+                                  expected_sha256=digest)
+    assert record["extracted"] is True
+    assert (destination / "engine" / "m.py").read_text() == "x = 1\n"
+
+
+def test_an_expected_digest_that_is_not_a_digest_is_refused(tmp_path):
+    """It must come from the operator, out of band — a digest that travels
+    with the thing it describes describes whatever it travels with."""
+    path, _ = _engine_tar(tmp_path)
+    for bogus in ("", "not-a-digest", None, "a" * 63):
+        with _refusal("expected_engine_digest_malformed"):
+            artifactload.inspect_archive(path, expected_sha256=bogus)
+
+
+# --------------------------------------------------------------------------
+# EX3-R01 — D2, the generation lane.
+#
+# Not D1 with a flag. The two phases differ in the ways that matter — a
+# separate approval, a plan it did not choose, verdicts to check — and a shared
+# `run(generate=True)` would put those differences inside a branch nobody
+# reads.
+# --------------------------------------------------------------------------
+
+
+def _d2_unit(index=0):
+    return {"unit_sha256": f"{index:064d}",
+            "instructions": f"review unit {index}",
+            "input_text": f"diff for unit {index}"}
+
+
+def _d2_response(unit_sha256, token, decision="approve"):
+    verdict = {"unit_sha256": unit_sha256, "decision": decision,
+               "reason": "checked", "proof_of_check": f"read it {token}",
+               "checked_categories": ["logic"], "lens_id": "correctness"}
+    return json.dumps({
+        "object": "response", "status": "completed",
+        "output": [{"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text",
+                                 "text": json.dumps({"verdicts": [verdict]})}]}],
+    }).encode()
+
+
+def _d2_opener(units, *, decision="approve", record=None):
+    """A fake server that answers each unit with a verdict carrying that
+    unit's own challenge token, derived exactly as the runtime derives it."""
+    def opener(method, url, headers, body):
+        if record is not None:
+            record.append({"method": method, "url": url, "body": body})
+        instructions = json.loads(body)["instructions"]
+        for unit in units:
+            token = challenge.token_for_unit(
+                seed=D1_SEED, unit_sha256=unit["unit_sha256"],
+                candidate_head_sha=SHA_B, trusted_run_id=77,
+                trusted_run_attempt=1)
+            if token in instructions:
+                return 200, _d2_response(unit["unit_sha256"], token, decision)
+        raise AssertionError("fake server saw no known challenge token")
+
+    return opener
+
+
+def _d2_kwargs(units=None, *, publisher=None, opener=None, decision="approve",
+               **overrides):
+    units = units if units is not None else [_d2_unit(0), _d2_unit(1)]
+    plan = {"units": units}
+    base = dict(
+        observations=_protected_observation(
+            environment_record={"name": "trusted-verifier-generation",
+                                "deployment_branch_policy": {
+                                    "custom_branch_policies": True},
+                                "allowed_branches": ["main"]},
+            environment_name="trusted-verifier-generation"),
+        operator_records=[_operator_record(
+            prerequisite_key="approve_generation_separately",
+            scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
+            exact_values={"max_generation_calls": 10})],
+        engine_artifact={"path": None, "expected_sha256": "c" * 64,
+                         "root": "/opt/engine", "search_path": []},
+        candidate={"repository_numeric_id": REPOSITORY_NUMERIC_ID,
+                   "candidate_head_sha": SHA_B, "target_base_sha": SHA_A,
+                   "challenge_seed": D1_SEED},
+        plan=plan,
+        trusted_plan_sha256=d2runtime.plan_digest(
+            [u["unit_sha256"] for u in units]),
+        opener=opener if opener is not None else _d2_opener(units,
+                                                            decision=decision),
+        credential=FAKE_CREDENTIAL, signing_key=TEST_KEY,
+        publisher=publisher if publisher is not None else (lambda request: None),
+        trusted_run={"id": 77, "attempt": 1,
+                     "url": "https://github.com/x/y/actions/runs/77"},
+        observed_now="2026-07-30T21:00:00Z",
+        produced_at="2026-07-30T21:00:00Z", model="gpt-5",
+        engine_source_sha256=ENGINE_DIGEST)
+    base.update(overrides)
+    return base
+
+
+def test_d2_runs_end_to_end_and_produces_signed_execution_evidence(d1_engine):
+    published = []
+    result = d2runtime.run(**_d2_kwargs(publisher=published.append))
+    assert result["payload"]["verdict_count"] == 2
+    assert result["payload"]["all_approved"] is True
+    assert result["evidence"]["evidence_class"] == "TRUSTED_EXECUTION_EVIDENCE"
+    assert signing.verify_envelope(result["evidence"],
+                                   key=TEST_KEY)["signature_verified"] is True
+    assert [p["state"] for p in published] == ["pending", "success"]
+
+
+def test_d2_refuses_without_its_own_operator_approval(d1_engine):
+    """An approval to count has never been an approval to generate, and D1's
+    record does not carry over."""
+    with _refusal("generation_not_separately_approved"):
+        d2runtime.run(**_d2_kwargs(operator_records=[_operator_record(
+            prerequisite_key="approve_count_spending",
+            scope=f"{CANONICAL_REPOSITORY}@{SHA_B}",
+            exact_values={"max_input_tokens": 100})]))
+
+
+def test_d2_refuses_an_approval_scoped_to_a_different_commit(d1_engine):
+    with _refusal("generation_approval_scope_mismatch"):
+        d2runtime.run(**_d2_kwargs(operator_records=[_operator_record(
+            prerequisite_key="approve_generation_separately",
+            scope=f"{CANONICAL_REPOSITORY}@{SHA_A}",
+            exact_values={"max_generation_calls": 10})]))
+
+
+def test_d2_refuses_a_plan_that_is_not_the_one_d1_counted(d1_engine):
+    """Executing a plan whose cost was never counted or approved."""
+    with _refusal("trusted_plan_digest_mismatch"):
+        d2runtime.run(**_d2_kwargs(trusted_plan_sha256="f" * 64))
+
+
+def test_the_plan_digest_is_order_independent_but_membership_sensitive():
+    assert (d2runtime.plan_digest(["a" * 64, "b" * 64])
+            == d2runtime.plan_digest(["b" * 64, "a" * 64]))
+    assert (d2runtime.plan_digest(["a" * 64, "b" * 64])
+            != d2runtime.plan_digest(["a" * 64, "c" * 64]))
+
+
+def test_d2_calls_the_generation_endpoint_and_d1_cannot(d1_engine):
+    """D2 needs the opposite assertion rather than a relaxation of D1's, so
+    neither lane's gate is weakened to let the other through."""
+    seen = []
+    units = [_d2_unit(0)]
+    d2runtime.run(**_d2_kwargs(units, opener=_d2_opener(units, record=seen)))
+    assert seen[0]["url"] == "https://api.openai.com/v1/responses"
+    # The count lane still refuses that exact endpoint.
+    with _refusal("request_endpoint_not_the_count_endpoint"):
+        transport.assert_request_is_count_only(
+            {"method": "POST", "url": "https://api.openai.com/v1/responses"})
+    # And the generation check refuses the count endpoint, symmetrically.
+    with _refusal("request_endpoint_not_the_generation_endpoint"):
+        d2runtime.assert_request_is_generation(
+            {"method": "POST",
+             "url": "https://api.openai.com/v1/responses/input_tokens"})
+
+
+def test_the_generation_send_path_refuses_the_count_endpoint():
+    """Found by the mutation sweep: `assert_request_is_generation` was tested,
+    but `transport.exchange_generation` — the function that actually joins the
+    credential and sends — was not. Sending here would spend a generation
+    approval on a number."""
+    request = transport.build_count_request(**COUNT_ARGS)
+    with _refusal("generation_send_given_the_count_endpoint"):
+        transport.exchange_generation(request, opener=_fake_server(),
+                                      credential=FAKE_CREDENTIAL)
+
+
+@pytest.mark.parametrize("url", [
+    "https://evil.example/v1/responses",
+    "http://api.openai.com/v1/responses",
+    "https://api.openai.com.evil.test/v1/responses",
+    None,
+])
+def test_the_generation_send_path_refuses_a_host_it_was_handed(url):
+    """The base URL is fixed in trusted policy, so a caller cannot choose
+    which server sees the credential."""
+    with _refusal("generation_endpoint_not_permitted"):
+        transport.exchange_generation(
+            {"method": "POST", "url": url, "headers": {}, "body": b"{}",
+             "payload_sha256": "a" * 64},
+            opener=_fake_server(), credential=FAKE_CREDENTIAL)
+
+
+def test_the_generation_send_path_refuses_a_non_post():
+    with _refusal("request_method_not_permitted"):
+        transport.exchange_generation(
+            {"method": "GET", "url": "https://api.openai.com/v1/responses",
+             "headers": {}, "body": b"{}", "payload_sha256": "a" * 64},
+            opener=_fake_server(), credential=FAKE_CREDENTIAL)
+
+
+def test_d2_refuses_a_verdict_that_answers_a_different_unit(d1_engine):
+    """One response deciding questions it was not asked is one call standing
+    in for a batch — and the challenge check alone would not catch it."""
+    units = [_d2_unit(0), _d2_unit(1)]
+
+    def crossed_opener(method, url, headers, body):
+        # Always answers for unit 1, whichever unit was asked about, and
+        # carries unit 1's genuine token so the challenge check passes.
+        token = challenge.token_for_unit(
+            seed=D1_SEED, unit_sha256=units[1]["unit_sha256"],
+            candidate_head_sha=SHA_B, trusted_run_id=77, trusted_run_attempt=1)
+        return 200, _d2_response(units[1]["unit_sha256"], token)
+
+    with _refusal("verdict_for_a_different_unit"):
+        d2runtime.run(**_d2_kwargs(units, opener=crossed_opener))
+
+
+def test_d2_reports_reject_rather_than_failing_silently(d1_engine):
+    published = []
+    result = d2runtime.run(**_d2_kwargs(decision="reject",
+                                        publisher=published.append))
+    assert result["payload"]["all_approved"] is False
+    assert published[-1]["state"] == "failure"
+    assert "reject" in published[-1]["description"]
+
+
+def test_d2_counts_an_abstain_as_not_approved(d1_engine):
+    """A reviewer that declined to decide has not approved anything."""
+    result = d2runtime.run(**_d2_kwargs(decision="abstain"))
+    assert result["payload"]["all_approved"] is False
+    assert len(result["payload"]["abstained"]) == 2
+
+
+def test_d2_refuses_a_partial_review_reported_as_a_review(d1_engine):
+    """The reader would believe the unanswered units passed."""
+    units = [_d2_unit(0), _d2_unit(1)]
+    with _refusal("verdict_coverage_incomplete"):
+        d2runtime._finalize(
+            [{"unit_sha256": units[0]["unit_sha256"], "decision": "approve"}],
+            plan={"units": units}, head=SHA_B, generation_calls=1,
+            trusted_plan_sha256="a" * 64)
+
+
+def test_d2_publishes_a_failure_status_once_the_run_has_started(d1_engine):
+    """A refusal AFTER pending must not leave the pull request blocked with no
+    explanation."""
+    units = [_d2_unit(0), _d2_unit(1)]
+    published = []
+
+    def crossed_opener(method, url, headers, body):
+        token = challenge.token_for_unit(
+            seed=D1_SEED, unit_sha256=units[1]["unit_sha256"],
+            candidate_head_sha=SHA_B, trusted_run_id=77, trusted_run_attempt=1)
+        return 200, _d2_response(units[1]["unit_sha256"], token)
+
+    with _refusal("verdict_for_a_different_unit"):
+        d2runtime.run(**_d2_kwargs(units, opener=crossed_opener,
+                                   publisher=published.append))
+    assert [p["state"] for p in published] == ["pending", "failure"]
+    assert "verdict_for_a_different_unit" in published[1]["description"]
+
+
+def test_d2_publishes_nothing_when_it_refuses_before_starting(d1_engine):
+    """The mirror case. A plan that is not the counted one is refused before
+    any status exists, so the pull request never sees a trusted context —
+    which is right: nothing was started, so there is nothing to report."""
+    published = []
+    with _refusal("trusted_plan_digest_mismatch"):
+        d2runtime.run(**_d2_kwargs(trusted_plan_sha256="f" * 64,
+                                   publisher=published.append))
+    assert published == []
+
+
+def test_d2_uses_its_own_status_context_not_d1s():
+    """Reusing D1's context would let a count satisfy a review requirement."""
+    assert d2runtime.TRUSTED_CONTEXT == "trusted-cross-vendor-review"
+    assert d1runtime.TRUSTED_CONTEXT == "trusted-verifier-count"
+    assert d2runtime.TRUSTED_CONTEXT in statusnames.TRUSTED_STATUSES
+    assert d1runtime.TRUSTED_CONTEXT in statusnames.TRUSTED_STATUSES
+
+
+def test_the_generation_request_carries_no_credential():
+    request = d2runtime.build_generation_request(
+        model="gpt-5", instructions="x", input_text="y")
+    assert request["carries_credential"] is False
+    assert "authorization" not in json.dumps(request, default=str).lower()
+
+
+# --------------------------------------------------------------------------
+# EX3-R01 — the templates, and the assemblers that replaced their placeholders.
+# --------------------------------------------------------------------------
+
+D1_TEMPLATE = LANE_DIR / "workflow" / "d1-trusted-count.yml.template"
+D2_TEMPLATE = LANE_DIR / "workflow" / "d2-trusted-generation.yml.template"
+
+
+def _run_blocks(path):
+    """The shell each step actually executes — not the file's comments.
+
+    Grepping the whole file for `exit 1` asks whether the string appears, and
+    it does: the header quotes the old placeholder so a reader knows what
+    changed. The question that matters is whether any step still exits without
+    doing the work, and that lives in the `run:` values."""
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    blocks = []
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            if "run" in step:
+                blocks.append((step.get("name", "<unnamed>"), step["run"]))
+    return blocks
+
+
+@pytest.mark.parametrize("path", [D1_TEMPLATE, D2_TEMPLATE],
+                         ids=lambda p: p.name)
+def test_no_step_still_exits_without_doing_the_work(path):
+    """The mandate's actual finding. `exit 1` under a step named "verify the
+    engine" is a step that has never verified anything, and an `echo` saying so
+    is a comment with an exit code."""
+    blocks = _run_blocks(path)
+    assert len(blocks) >= 3, "guards against a zero-block pass"
+    for name, script in blocks:
+        # Strip shell comments: a `#` line inside a run block is documentation
+        # for the same reason the file header is.
+        code = "\n".join(line for line in script.splitlines()
+                         if not line.strip().startswith("#"))
+        assert "exit 1" not in code, f"{path.name}: step {name!r} still exits"
+        assert "activation PR" not in code, f"{path.name}: step {name!r}"
+
+
+@pytest.mark.parametrize("path,module", [(D1_TEMPLATE, "d1cli"),
+                                         (D2_TEMPLATE, "d2cli")],
+                         ids=lambda x: str(x))
+def test_the_template_calls_the_real_runtime(path, module):
+    text = path.read_text(encoding="utf-8")
+    assert f"from trustedlane import {module}" in text
+    assert f"{module}.main()" in text
+
+
+@pytest.mark.parametrize("path", [D1_TEMPLATE, D2_TEMPLATE],
+                         ids=lambda p: p.name)
+def test_the_template_installs_the_hash_locked_runtime(path):
+    """A pinned version still lets a compromised index serve different bytes
+    under the same number, on a machine about to hold a provider key."""
+    text = path.read_text(encoding="utf-8")
+    assert "--require-hashes" in text
+    assert "requirements-trusted-runtime.txt" in text
+    assert "pytest" not in text.split("Install the hash-locked runtime")[1][:400]
+
+
+@pytest.mark.parametrize("path", [D1_TEMPLATE, D2_TEMPLATE],
+                         ids=lambda p: p.name)
+def test_the_template_verifies_the_engine_against_an_approved_digest(path):
+    text = path.read_text(encoding="utf-8")
+    assert "artifactload.extract" in text
+    assert "TRUSTED_ENGINE_ARTIFACT_SHA256" in text
+    assert "assert_engine_root_is_not_the_candidate" in text
+
+
+@pytest.mark.parametrize("path", [D1_TEMPLATE, D2_TEMPLATE],
+                         ids=lambda p: p.name)
+def test_the_templates_are_still_inert(path):
+    """`.yml.template` is the containment: GitHub reads only `.yml` and
+    `.yaml`, so none of the above is live until someone renames the file."""
+    assert path.suffix == ".template"
+    assert not (Path(".github/workflows") / path.name.replace(".template", "")
+                ).exists()
+
+
+def test_d2_uses_a_different_environment_from_d1():
+    """Reusing D1's environment would make an approval to count an approval to
+    generate, by accident rather than by decision."""
+    d1 = yaml.safe_load(D1_TEMPLATE.read_text(encoding="utf-8"))
+    d2 = yaml.safe_load(D2_TEMPLATE.read_text(encoding="utf-8"))
+    d1_env = d1["jobs"]["trusted-verifier-count"]["environment"]
+    d2_env = d2["jobs"]["trusted-cross-vendor-review"]["environment"]
+    assert d1_env == "trusted-verifier"
+    assert d2_env == "trusted-verifier-generation"
+    assert d1_env != d2_env
+
+
+@pytest.mark.parametrize("module", [d1cli, d2cli], ids=["d1cli", "d2cli"])
+def test_the_assembler_refuses_before_reading_anything_in_d0(module):
+    """Activating the lane is TWO deliberate acts: renaming the template, and
+    raising IMPLEMENTED_PHASE in a protected commit. This is the second gate,
+    and it fires before any input is read."""
+    with _refusal("phase_not_deployed"):
+        module.main(environ={})
+
+
+@pytest.mark.parametrize("module", [d1cli, d2cli], ids=["d1cli", "d2cli"])
+def test_the_assembler_refuses_a_missing_input_rather_than_defaulting(module):
+    """A default is how one of these quietly stops being checked — the
+    observation becomes "assume protected", the publisher becomes a no-op that
+    leaves the pull request pending forever."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        module.read_environment({})
+    assert "environment_incomplete" in excinfo.value.reason
+    for name in module.REQUIRED_ENV:
+        assert name in excinfo.value.reason, name
+
+
+@pytest.mark.parametrize("module", [d1cli, d2cli], ids=["d1cli", "d2cli"])
+def test_the_assembler_refuses_a_non_integer_run_id(module):
+    complete = {name: "x" for name in module.REQUIRED_ENV}
+    complete["TRUSTED_RUN_ID"] = "not-a-number"
+    with _refusal("environment_not_an_integer"):
+        module.read_environment(complete)
+
+
+def test_the_two_assemblers_do_not_share_a_phase_argument():
+    """One assembler with a phase parameter would put "which secret, which
+    environment, which approval" inside a branch, where three of the four could
+    be wrong while the code still looked symmetric."""
+    import inspect
+
+    for module in (d1cli, d2cli):
+        assert "phase" not in inspect.signature(module.main).parameters
+    d1_source = (LANE_DIR / "d1cli.py").read_text(encoding="utf-8")
+    d2_source = (LANE_DIR / "d2cli.py").read_text(encoding="utf-8")
+    assert "phases.D1" in d1_source and "phases.D2" not in d1_source
+    assert "phases.D2" in d2_source and "phases.D1" not in d2_source
+
+
+def test_an_unreadable_input_reports_its_field_not_its_path(tmp_path):
+    """A runner temp directory layout is not something to write into a log
+    that a refusal may be pasted from."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        d1cli.load_json_document(str(tmp_path / "secret-layout" / "x.json"),
+                                 field="operator_records")
+    assert "field=operator_records" in excinfo.value.reason
+    assert "secret-layout" not in excinfo.value.reason
+
+
+def test_a_malformed_input_document_is_refused(tmp_path):
+    path = tmp_path / "records.json"
+    path.write_text("{not json", encoding="utf-8")
+    with _refusal("d1_input_not_json"):
+        d1cli.load_json_document(str(path), field="operator_records")
+
+
+# ---- the inert fetch: a step that only exists in a comment is not a step ----
+
+
+def test_d1_fetches_the_candidate_as_data(d1_engine):
+    """Found while reviewing the runtime against its own docstring: the
+    sequence listed "inert fetch" as step 6 and never fetched anything,
+    leaving the property to whatever `skeleton_rebuild` happened to do."""
+    calls = []
+
+    def recording_fetch(**kwargs):
+        calls.append(kwargs)
+        return _inert_fetch(**kwargs)
+
+    d1runtime.run(**_d1_kwargs(fetch=recording_fetch))
+    assert len(calls) == 1
+    assert calls[0]["head_sha"] == SHA_B
+    assert calls[0]["target_base_sha"] == SHA_A
+
+
+def test_d1_refuses_a_fetch_that_left_a_working_tree(d1_engine):
+    """A working tree is candidate code on the machine that holds the
+    credential. `fetch` is injected, so the runtime checks rather than trusts."""
+    with _refusal("candidate_was_checked_out"):
+        d1runtime.run(**_d1_kwargs(
+            fetch=lambda **k: dict(_inert_fetch(**k), checked_out=True)))
+
+
+def test_d1_refuses_a_fetch_that_cannot_say_what_it_fetched(d1_engine):
+    with _refusal("candidate_fetch_named_no_head"):
+        d1runtime.run(**_d1_kwargs(
+            fetch=lambda **k: {"checked_out": False, "head_sha": None}))
+
+
+def test_d1_refuses_when_no_fetch_was_supplied(d1_engine):
+    with _refusal("candidate_fetch_not_callable"):
+        d1runtime.run(**_d1_kwargs(fetch=None))
+
+
+def test_the_real_fetch_is_what_d1cli_supplies():
+    """The runtime takes `fetch` as a parameter for testability; the assembler
+    must still wire the real one rather than something weaker."""
+    source = (LANE_DIR / "d1cli.py").read_text(encoding="utf-8")
+    assert "fetch=candidatefetch.fetch_candidate" in source
+
+
+def test_the_candidate_plan_is_not_read_from_inside_the_engine_artifact():
+    """Provenance. Putting the reviewed branch's claims inside the trusted
+    artifact would make the rebuild comparison compare the engine against
+    itself."""
+    source = (LANE_DIR / "d1cli.py").read_text(encoding="utf-8")
+    assert "TRUSTED_CANDIDATE_PLAN_PATH" in source
+    assert 'os.path.join(values["TRUSTED_ENGINE_ROOT"], "candidate-plan.json")' \
+        not in source

@@ -182,6 +182,11 @@ def parse_operator_record(record: dict) -> dict:
         "authorized_at": record["authorized_at"],
         "expires_at": expires,
         "scope": record["scope"],
+        # Carried through, not dropped. A parser that validates a record and
+        # then discards the literal the record exists to convey forces every
+        # consumer back to the unvalidated original — which is the copy an
+        # attacker edits. `record_digest` covers it, so the anchor binds it.
+        "exact_values": dict(record["exact_values"]),
         "record_sha256": expected,
         **anchor,
         "state": "PARSED_AND_ADMISSIBLE_NOT_VERIFIED",

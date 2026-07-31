@@ -93,10 +93,20 @@ def read_signing_key(*, phase: str, environ=None) -> bytes:
 def signature_input(record: dict) -> bytes:
     """What the MAC covers: the envelope digest, and the class, under a domain.
 
-    The class is included even though it is already inside the digest. A
-    signature that covered only an opaque 32 bytes would let a valid signature
-    over one envelope be presented alongside a differently-classed record while
-    a careless reader checked only that "the signature verifies"."""
+    **The class here is redundant today, and deliberately kept.** The first
+    version of this docstring claimed the class was what stopped a valid
+    signature being presented beside a differently-classed record. That was
+    wrong: `evidence_class` is inside `ENVELOPE_FIELDS`, so `envelope_digest`
+    already covers it, and the swap is caught either by the digest check below
+    (stale digest) or by the MAC over that digest (recomputed digest). The
+    mutation sweep found it — deleting the class from this line changed no test
+    result, which is what a redundant term looks like.
+
+    It stays because the redundancy is one edit deep. If `ENVELOPE_FIELDS` ever
+    stops listing `evidence_class`, the digest silently stops binding it and
+    this line is the only thing that still does. Costing one string
+    concatenation to survive that is the right trade; claiming it is load
+    bearing today is not."""
     from .evidencewire import envelope_digest, validate_envelope_for_signing
 
     # NOT `validate_envelope`: that refuses an unsigned trusted-class record,

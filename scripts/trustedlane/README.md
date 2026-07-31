@@ -126,10 +126,23 @@ of verified code.
 | `enginepolicy.py` | engine distribution; refuses a candidate-checkout engine by path, by imported module, and by importability from a parent directory |
 | `workflowpolicy.py` | forbidden triggers, ref-selecting inputs, inert checkout, no-secret job |
 | `workflowfile.py` | the same rules applied to the deployed YAML, plus permissions, secret containment and literal-credential scans |
-| `adapter.py` | the response normalization contract (above) |
+| `adapter.py` | the response normalization contract, and the real `/v1/responses` parser (EX3-R09) |
 | `candidatefetch.py` | hermetic git; full-history `--no-checkout` clone; blob and range digests |
 | `prerequisites.py` | the sixteen operator prerequisites, defaulting to none satisfied |
 | `closure.py` | the external code-cutoff closure record, produced empty |
+| `transport.py` | the ONE module that can reach a provider; count request, strict parsing, phase-gated credential and socket |
+| `signing.py` | HMAC-SHA256 evidence signatures; the gate is on reading the real key, not on signing |
+| `artifactload.py` | verify the engine artifact by digest and unpack it, refusing every unsafe member by name |
+| `countledger.py` | global preflight against a literal operator ceiling; per-unit attribution; zero generation |
+| `challenge.py` | per-run, per-unit tokens so a verdict cannot be pre-computed or replayed |
+| `enginesource.py` | engine source read from git objects at an exact commit, over both source roles |
+| `runtimelock.py` | the hash-locked D1/D2 dependency lock; refuses an unhashed or unpinned requirement |
+| `instants.py` | RFC3339 UTC instants; expiry compared as instants, boundary closed |
+| `statusnames.py` | the status-name classes and which may be required on a candidate |
+| `statuspublish.py` | trusted status publication onto the exact candidate head SHA |
+| `protectedstate.py` | the conjunction that must hold before a credential is reachable |
+| `d1runtime.py` / `d1cli.py` | the count lane, and the assembler that runs it on a runner |
+| `d2runtime.py` / `d2cli.py` | the generation lane, separate from D1 in every way that matters |
 
 `tests/test_trusted_lane_bootstrap.py` is weighted toward negative tests: it
 constructs each bypass and asserts the refusal.
@@ -142,8 +155,30 @@ constructs each bypass and asserts the refusal.
 | D1 | after D0 merge + protections + operator approval | authenticate PINs and literal clearances, mint the challenge, global preflight, real `/v1/responses/input_tokens`, signed `TRUSTED_COUNT_EVIDENCE`. Zero generation. |
 | D2 | after separate generation approval | real `/v1/responses`, strict adapter normalization, signed `TRUSTED_EXECUTION_EVIDENCE`. |
 
-D1 and D2 are **not implemented here**. `phases.py` records the contract and
-`assert_phase_permitted` refuses anything past D0.
+D1 and D2 are **implemented** here and **not activated** here, and the
+difference matters.
+
+`d1runtime.run` and `d2runtime.run` are the complete ordered sequences, and the
+D0 suite exercises both end to end against a fake server — including every
+refusal — because the capabilities they need are parameters. What they cannot
+do from this branch is *obtain* those capabilities:
+`transport.read_credential`, `transport.open_https` and
+`signing.read_signing_key` each compare against `phases.IMPLEMENTED_PHASE`,
+which is `D0`.
+
+So activation is two deliberate acts, neither of which is an ordinary edit:
+rename `d1-trusted-count.yml.template` to `.yml` (a workflow only exists at
+that name), and raise `IMPLEMENTED_PHASE` in a commit on the protected branch.
+Doing one without the other produces a workflow that refuses.
+
+The templates no longer contain `exit 1`. They install the hash-locked runtime,
+verify and unpack the approved engine artifact, and call `d1cli.main()` /
+`d2cli.main()`. The remaining external dependencies are named rather than
+stubbed: `statuspublish.publish` refuses because publishing needs an
+installation token this branch must not hold, and the protected-state
+observation is read from a file because gathering it needs administration
+reads. Neither is defaulted — a default is how one of them quietly stops being
+checked.
 
 ## Operator prerequisites
 
