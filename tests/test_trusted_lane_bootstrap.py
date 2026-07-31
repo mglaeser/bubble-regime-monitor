@@ -7966,12 +7966,15 @@ def _authenticated_for_the_real_range(engine_clone, *, ceiling=10 ** 9):
 def _run_challenge(seed=b"\x01" * 32, unit=0):
     """A challenge of the shape the lane actually mints.
 
-    Not a hand-picked literal. The first version of these tests used
-    "TRUSTED-CHALLENGE-0123456789abcdef" and the engine's global preflight
-    refused every request: that trailing run is exactly the interleaved
-    letter-and-digit shape a real key has, and a literal in verifier-written
-    scaffolding has no reviewed source occurrence, so it can never be
-    cleared."""
+    Not a hand-picked literal. The first version of these tests used a
+    descriptive prefix followed by a run of interleaved letters and digits, and
+    the engine's global preflight refused every request: that shape is exactly
+    what a real key looks like, and a literal in verifier-written scaffolding
+    has no reviewed source occurrence, so it can never be cleared.
+
+    The string is not reproduced here. It tripped this repository's own secret
+    gate for the same reason it tripped the engine's — which is the two
+    scanners agreeing, and a reasonable thing to let them do."""
     return challenge.token_for_unit(
         seed=seed, unit_sha256=f"{unit:064x}", candidate_head_sha=SHA_A,
         trusted_run_id=55, trusted_run_attempt=1)
