@@ -270,7 +270,46 @@ break, and precisely why the operator steps cannot be worked around.
 
 ---
 
-## 13. Honest scope of this report
+## 13. Adversarial review of this exchange's own code
+
+The D1/D2 lanes were roughly two thousand lines written in a single pass and
+reviewed by nobody. Five lenses — credential leakage, gate bypass, evidence
+forgery, parsing/archive safety, ordering/accounting — raised twenty findings.
+Each went to a separate skeptic instructed to refute it and to default to
+refuted when uncertain. **Ten were killed. Ten survived, were reproduced by
+hand, and are fixed.**
+
+| severity | defect | consequence if unfixed |
+|---|---|---|
+| high | a signed record's `honest_scope` sat outside the digest | the field that prevents overclaim was rewritable to "FULLY VERIFIED BY AN INDEPENDENT THIRD PARTY" while verification still succeeded |
+| high | `refuse` used a bare `raise` inside `except` | every sanitized message in the lane was preceded by the text it promised to withhold, including the Authorization header |
+| high | `TRUSTED_OBSERVED_NOW` was a static repository variable | operator-record expiry never advanced; every signed record carried the same `produced_at` |
+| medium | `d1cli` imported the planner before the isolation check | the D1 lane refused on every invocation and could never have run |
+| medium | a credential with an interior control character was accepted | the key reached `putheader`, whose ValueError carries the whole header |
+| medium | `.` path segments defeated the archive duplicate check | two members writing the same file looked distinct; the manifest described the first |
+| medium | the generation lane read through the count lane's 64 KiB bound | real generation bodies truncated into parse failures |
+| medium | the trusted-plan digest bound only unit ids | the prompt bytes D2 sends were outside the digest identifying "the plan D1 counted" |
+| medium/low | the normalizer echoed model-chosen key names into refusals | provider-controlled strings in a refusal, on the failure path |
+| — | D0's push filter was narrower than the file set the lane asserts against | `HOSTED_D0_CONTAINMENT_EVIDENCE` went stale silently while this report cited it |
+
+The last one I found myself, and its severity is lower than it first looked:
+`ci.yml` has no path filter and runs the same suite, so the V-TRUST ratchet
+still fires — the defect is which evidence regenerates, not whether the check
+runs. I checked that before reporting it.
+
+Mutation sweep over the fixes: **18/18 caught**, after a second pass on two —
+one where my mutation was wrong, and one where a test grepped source instead of
+driving the function.
+
+The relevant conclusion for this programme is not the count. It is that
+self-produced code, tested to 863 lane tests and swept to 58/58 mutations,
+still contained a defect that let a reader be told a record was independently
+verified when it was not. That is precisely the failure the trusted lane exists
+to prevent, and it survived every check the branch could run on itself.
+
+---
+
+## 14. Honest scope of this report
 
 Every claim above about test counts, mutation results and CI conclusions was
 produced by, or observed from, this session. The test counts and mutation
