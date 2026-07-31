@@ -103,19 +103,19 @@ that redden when the check is removed. Anything less is stated as what it is.
 | R15 | PR #33 unmerged | **OPEN** — operator action |
 | R16 | symmetric MAC labelled as a signature | **CLOSED** — `authenticator_algorithm = HMAC_SHA256_V1`, `mac_key_id`, `mac`; a test asserts the module does not call it a public signature |
 | R17 | import layout unproven | **CLOSED** — one import root, both packages, every module proved to come from the artifact |
-| R18 | distinct reasoning across the panel | **OPEN** — `verdicts.assert_distinct_reasoning` exists in the engine and D2 does not yet call it |
+| R18 | distinct reasoning across the panel | **CLOSED** — D2 calls `verdicts.assert_distinct_reasoning` per approved unit, over every approving model. It fired on the first run: the D2 fixture returned one canned sentence for all three models. Applied to approvals only — a refutation is a finding, and two models describing the same real defect alike is agreement |
 | R19 | output privacy scan | **OPEN** |
 | R20 | ordinary green is not trusted green | **OPEN** — the status names are reserved and collision-tested, and no trusted status has ever been published, which is the honest state |
 
-Closed: R01, R03, R05, R08 (D1), R11, R14, R16, R17, and R02/R09 for D1.
-Open: R06, R07, R10, R12, R18, R19, R20, and the D2 halves of R02/R09.
+Closed: R01, R03, R05, R08 (D1), R11, R14, R16, R17, R18, and R02/R09 for D1.
+Open: R06, R07, R10, R12, R19, R20, and the D2 halves of R02/R09.
 Partial: R04/R13.
 
 ## 6. Evidence
 
     branch     fix/instants-status-and-required-contexts
-    suite      1471 passed, 3 skipped
-    lane       1027 of those are trusted-lane tests
+    suite      1474 passed, 3 skipped
+    lane       1029 of those are trusted-lane tests
     ruff       clean over app, tests, scripts
     secrets    detect-secrets-hook over every tracked file, exit 0
     mutations  40/40 killed over authzenvelope, trustedverifier, enginepolicy
@@ -151,9 +151,9 @@ code closes any of those, and code that appeared to would be the defect this
 whole engagement exists to remove.
 
 So this report is option (B) as far as it goes, and it says plainly where it
-falls short of (B) too: R06, R07, R10, R12, R18, R19 and the D2 halves of
-R02/R09 are independent technical tasks that remain open. They are listed in
-§5 rather than described as complete.
+falls short of (B) too: R06, R07, R10, R12, R19 and the D2 halves of R02/R09
+are independent technical tasks that remain open. They are listed in §5 rather
+than described as complete.
 
 ## 9. Operator-only block
 
@@ -200,7 +200,7 @@ a missing list as empty cannot be told to stop.
 **O7 — Raise `phases.IMPLEMENTED_PHASE` to D1 in a protected commit,** and
 rename `d1-trusted-count.yml.template`. Two deliberate acts, not one.
 
-**O8 — Decide the remaining open findings.** R06, R10, R12, R18, R19 are
+**O8 — Decide the remaining open findings.** R06, R10, R12, R19 are
 implementable without operator action and are listed here only so the sequence
 is complete: they should be closed before O7, not after.
 

@@ -284,6 +284,20 @@ def run(*, observations: dict, operator_claims, lane_verifier,
             by_unit.get(unit["unit_sha256"], {}), unit_sha256=unit["unit_sha256"],
             panel=panel, approver=approver)
             for unit in plan["units"]}
+
+        # EX4-R18. The ANTI-COPY tripwire, and it is the ENGINE's — every
+        # approving model's reasoning is compared with every other's, after
+        # normalization that folds homoglyphs and strips the challenge, the
+        # model id and the lens name. Without it, three models returning one
+        # canned sentence read as three corroborations.
+        #
+        # Only where the panel approved: a refutation is a finding, and two
+        # models independently describing the same real defect in the same
+        # words is agreement, not collusion.
+        steps.append(("distinct_reasoning", _assert_distinct_reasoning(
+            by_unit, engine=engine, decisions=decisions, panel=panel,
+            approver=approver, seed=seed, head=head,
+            trusted_run=trusted_run)))
         payload = _finalize(decisions, by_unit, plan=plan, head=head,
                             generation_calls=generation_calls,
                             trusted_plan_sha256=trusted_plan_sha256,
@@ -379,6 +393,64 @@ def _assert_verdicts_are_for_this_unit(verdicts, unit: dict):
                    "standing in for a batch")
     if len(verdicts) != 1:
         refuse(f"category=unit_answered_more_than_once count={len(verdicts)}")
+
+
+def _assert_distinct_reasoning(by_unit: dict, *, engine: dict, decisions: dict,
+                               panel, approver: str, seed: bytes, head: str,
+                               trusted_run: dict) -> dict:
+    """Call the engine's tripwire, per approved unit.
+
+    Two shape translations and nothing else. The engine indexes
+    `by_model[model][unit]`; this lane collects `by_unit[unit][model]`. And the
+    engine reads `refuted`, which the lane's normalized verdict does not carry
+    because it records a three-valued `decision` — a model that ABSTAINED has
+    not approved, so for this gate it is refuted.
+
+    Deliberately not reimplemented. Similarity scoring, Unicode folding, the
+    charset policy and the governed threshold all live in
+    `verifier.verdicts`, and a lane-side second version is exactly the
+    duplication that produced a length check standing in for this gate the
+    first time."""
+    verdicts = engine["modules"]["verifier.verdicts"]
+    reviewpolicy = engine["modules"]["verifier.reviewpolicy"]
+    blocking = _blocking_error(engine)
+    corroborators = [m for m in panel if m != approver]
+    lens_ids = tuple(reviewpolicy.lens_id(m) for m in panel)
+
+    checked = []
+    for unit_sha256, decision in sorted(decisions.items()):
+        if decision != "approve":
+            continue
+        by_model = {
+            model: {unit_sha256: {**verdict,
+                                  "refuted": verdict.get("decision") != "approve"}}
+            for model, verdict in by_unit[unit_sha256].items()}
+        challenge_token = challenge.token_for_unit(
+            seed=seed, unit_sha256=unit_sha256, candidate_head_sha=head,
+            trusted_run_id=trusted_run["id"],
+            trusted_run_attempt=trusted_run["attempt"])
+        try:
+            checked.append(verdicts.assert_distinct_reasoning(
+                by_model, unit_hash=unit_sha256, approver=approver,
+                challenge=challenge_token, corroborators=corroborators,
+                model_ids=tuple(panel), lens_ids=lens_ids))
+        except blocking as exc:
+            refuse(f"category=panel_reasoning_not_distinct "
+                   f"unit={unit_sha256[:12]} "
+                   f"code={getattr(exc, 'code', 'UNKNOWN')} — two approvals "
+                   "that say the same thing are one review reported twice, "
+                   "and independent corroboration is the property this panel "
+                   "exists to provide")
+    return {"units_checked": len(checked),
+            "gate": "verifier.verdicts.assert_distinct_reasoning",
+            "honest_scope": ("this catches copies. It does not prove "
+                             "independent reasoning: prose cannot be checked "
+                             "for thought, and semantic independence stays a "
+                             "trust assumption")}
+
+
+def _blocking_error(engine: dict):
+    return engine["modules"]["verifier.errors"].BlockingError
 
 
 #: How many models BESIDES the required approver must also approve. One is the

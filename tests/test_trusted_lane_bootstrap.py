@@ -5584,9 +5584,30 @@ def _d2_unit(index=0):
             "input_text": f"diff for unit {index}"}
 
 
-def _d2_response(unit_sha256, token, decision="approve"):
+#: One sentence per model, deliberately different. The first version of this
+#: fixture returned `"reason": "checked"` for every model, and the engine's
+#: anti-copy tripwire refused the very first run — correctly: three models
+#: returning one canned sentence is one review reported three times.
+_D2_REASONING = {
+    "gpt-5.3-codex": ("traced the control flow through the changed branch and "
+                      "confirmed the early return cannot skip the cleanup"),
+    "gpt-5.6-sol": ("checked the boundary values against the callers in this "
+                    "range; none passes a width the new loop mishandles"),
+    "gpt-4.1-mini": ("compared the rewritten arithmetic with the original for "
+                     "the documented rounding cases and found them equal"),
+}
+_D2_PROOF = {
+    "gpt-5.3-codex": "walked every added line of the diff",
+    "gpt-5.6-sol": "re-read the surrounding function and its two callers",
+    "gpt-4.1-mini": "expanded the arithmetic by hand for three inputs",
+}
+
+
+def _d2_response(unit_sha256, token, decision="approve",
+                 model_id="gpt-5.6-sol"):
     verdict = {"unit_sha256": unit_sha256, "decision": decision,
-               "reason": "checked", "proof_of_check": f"read it {token}",
+               "reason": _D2_REASONING[model_id],
+               "proof_of_check": f"{_D2_PROOF[model_id]} {token}",
                "checked_categories": ["logic"], "lens_id": "correctness"}
     return json.dumps({
         "object": "response", "status": "completed",
@@ -5602,14 +5623,16 @@ def _d2_opener(units, *, decision="approve", record=None):
     def opener(method, url, headers, body):
         if record is not None:
             record.append({"method": method, "url": url, "body": body})
-        instructions = json.loads(body)["instructions"]
+        payload = json.loads(body)
+        instructions = payload["instructions"]
         for unit in units:
             token = challenge.token_for_unit(
                 seed=D1_SEED, unit_sha256=unit["unit_sha256"],
                 candidate_head_sha=SHA_B, trusted_run_id=77,
                 trusted_run_attempt=1)
             if token in instructions:
-                return 200, _d2_response(unit["unit_sha256"], token, decision)
+                return 200, _d2_response(unit["unit_sha256"], token, decision,
+                                         model_id=payload["model"])
         raise AssertionError("fake server saw no known challenge token")
 
     return opener
@@ -8595,3 +8618,71 @@ def test_the_cli_establishes_readiness_before_obtaining_any_capability(
     assert "assert_ready_for_credential" in (
         LANE_DIR / runtime).read_text(encoding="utf-8")
     assert module.REQUIRED_ENV
+
+
+# --------------------------------------------------------------------------
+# EX4-R18 — the anti-copy tripwire, and it is the engine's.
+# --------------------------------------------------------------------------
+
+
+def test_d2_refuses_a_panel_that_returned_one_canned_sentence(d1_engine):
+    """Three models returning the same reasoning is one review reported three
+    times, and it would otherwise read as three corroborations.
+
+    This is not hypothetical: the first version of the D2 fixture returned
+    `"reason": "checked"` for every model, and wiring the gate refused the very
+    first run."""
+    units = [_d2_unit(0), _d2_unit(1)]
+
+    def canned_opener(method, url, headers, body):
+        payload = json.loads(body)
+        for unit in units:
+            token = challenge.token_for_unit(
+                seed=D1_SEED, unit_sha256=unit["unit_sha256"],
+                candidate_head_sha=SHA_B, trusted_run_id=77,
+                trusted_run_attempt=1)
+            if token in payload["instructions"]:
+                verdict = {"unit_sha256": unit["unit_sha256"],
+                           "decision": "approve",
+                           "reason": "looks fine to me on inspection",
+                           "proof_of_check": f"read the diff {token}",
+                           "checked_categories": ["logic"],
+                           "lens_id": "correctness"}
+                return 200, json.dumps({
+                    "object": "response", "status": "completed",
+                    "output": [{"type": "message", "role": "assistant",
+                                "content": [{"type": "output_text",
+                                             "text": json.dumps(
+                                                 {"verdicts": [verdict]})}]}],
+                }).encode()
+        raise AssertionError("unreachable")
+
+    with _refusal("panel_reasoning_not_distinct"):
+        d2runtime.run(**_d2_kwargs(units, opener=canned_opener))
+
+
+def test_d2_does_not_apply_the_tripwire_to_refutations(d1_engine):
+    """A refutation is a FINDING. Two models independently describing the same
+    real defect in the same words is agreement, not collusion — blocking it
+    would penalise the case the panel exists to catch."""
+    result = d2runtime.run(**_d2_kwargs(decision="reject"))
+    assert result["payload"]["all_approved"] is False
+    assert set(result["payload"]["decisions"].values()) == {"reject"}
+    # The gate ran and checked nothing, because nothing was approved.
+    assert result["steps"]["distinct_reasoning"]["units_checked"] == 0
+
+
+def test_the_lane_does_not_carry_its_own_similarity_scoring(d1_engine):
+    """Similarity scoring, Unicode folding, the charset policy and the governed
+    threshold live in `verifier.verdicts`. A lane-side second version is the
+    duplication that produced a length check standing in for this gate the
+    first time."""
+    tree = ast.parse((LANE_DIR / "d2runtime.py").read_text(encoding="utf-8"))
+    defined = {n.name for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    for forbidden in ("similarity_bp", "normalize_reason",
+                      "assert_reason_charset"):
+        assert forbidden not in defined, forbidden
+    called = {getattr(n.func, "attr", getattr(n.func, "id", ""))
+              for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    assert "assert_distinct_reasoning" in called
