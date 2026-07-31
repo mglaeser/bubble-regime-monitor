@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import hmac
 import inspect
 import json
 import os
@@ -71,6 +72,7 @@ from trustedlane import (  # noqa: E402
     statusnames,
     statuspublish,
     transport,
+    trustedverifier,
     workflowfile,
     workflowpolicy,
 )
@@ -6079,3 +6081,247 @@ def test_the_d0_filter_covers_everything_the_lane_asserts_against():
                      "requirements-trusted-runtime.txt",
                      "docs/TRUSTED_LANE_OPERATOR_ACTIONS.md"):
         assert required in paths, required
+
+
+# --------------------------------------------------------------------------
+# EX4-R01 — the trusted lane's implementation of authority.TrustedVerifier.
+#
+# The defect: D1/D2 called operatorrecord.verify_records (which reports
+# `authorized: False`) and then spent money on the result. verify_records
+# checks shape, anchor KIND, digest, scope syntax and expiry — not that the
+# anchor exists, not that anything is signed. A well-shaped branch-written
+# record authorized real calls.
+#
+# The candidate package already designed the seam: authority.TrustedVerifier,
+# with RejectingVerifier as the fail-closed default and a VERIFIED_CLASSES set
+# candidate code cannot mint. This fills it from the protected side.
+# --------------------------------------------------------------------------
+
+OPERATOR_KEY_HEX = "a" * 64
+OTHER_KEY_HEX = "b" * 64
+PIN_LABEL = b"verifier-pin-record-v2"
+
+
+def _stub_authority():
+    """A stand-in for `verifier.authority`.
+
+    The real module lives in the candidate package, which reaches a trusted
+    process only inside the approved engine artifact — so CI, which checks out
+    only `main`, does not have it. This stub carries exactly the vocabulary
+    `bind` requires, which is also what makes `bind`'s symbol check meaningful:
+    a module missing any of it is refused rather than silently producing
+    records nothing downstream accepts."""
+    import types
+
+    module = types.ModuleType("verifier.authority")
+    module.VERIFIED_LITERAL_AUTHORIZATION = "VERIFIED_LITERAL_AUTHORIZATION"
+    module.VERIFIED_OPERATOR_PIN_AUTHORIZATION = "VERIFIED_OPERATOR_PIN_AUTHORIZATION"
+    module.VERIFIED_CLASSES = frozenset({module.VERIFIED_LITERAL_AUTHORIZATION,
+                                         module.VERIFIED_OPERATOR_PIN_AUTHORIZATION})
+    module.UNVERIFIED_EXTERNAL_CLAIM = "UNVERIFIED_EXTERNAL_CLAIM"
+
+    class TrustedVerifier:  # the interface `bind` checks for
+        pass
+
+    module.TrustedVerifier = TrustedVerifier
+    return module
+
+
+_OCCURRENCE = {"repository_identity": CANONICAL_REPOSITORY,
+               "target_base_sha": SHA_A, "diff_base_sha": SHA_A,
+               "head_sha": SHA_B, "repository_numeric_id": REPOSITORY_NUMERIC_ID}
+
+
+def _operator_pin_record(*, key_hex=OPERATOR_KEY_HEX, key_id="op-1",
+                         reference="ref-1", **overrides):
+    record = {"schema_version": 2, "authority_class": "UNVERIFIED_EXTERNAL_CLAIM",
+              "repository_identity": _OCCURRENCE["repository_identity"],
+              "target_base_sha": _OCCURRENCE["target_base_sha"],
+              "diff_base_sha": _OCCURRENCE["diff_base_sha"],
+              "head_sha": _OCCURRENCE["head_sha"],
+              "authorized_at": "2026-07-01T00:00:00Z",
+              "expires_at": "2026-12-01T00:00:00Z",
+              "pins": {"VERIFIER_MAX_OUTPUT_TOKENS": 8192}}
+    record.update(overrides)
+    digest = trustedverifier.record_digest(record, label=PIN_LABEL)
+    signature = hmac.new(
+        bytes.fromhex(key_hex),
+        trustedverifier.anchor_signature_input(
+            record_digest=digest, anchor_reference=reference,
+            repository_numeric_id=REPOSITORY_NUMERIC_ID),
+        hashlib.sha256).hexdigest()
+    record["external_anchor"] = {"anchor_kind": "SIGNED_EVIDENCE_RECORD",
+                                 "anchor_reference": reference,
+                                 "anchored_digest": digest, "key_id": key_id,
+                                 "signature": signature}
+    record["pin_record_sha256"] = digest
+    return record
+
+
+def _trust_store(**keys):
+    return trustedverifier.parse_trust_store(
+        json.dumps({"keys": keys or {"op-1": OPERATOR_KEY_HEX}}))
+
+
+def _verifier(*, observed_now="2026-08-01T00:00:00Z", revocations=(),
+              store=None):
+    return trustedverifier.bind(
+        _stub_authority(), trust_store=store or _trust_store(),
+        occurrence=_OCCURRENCE, observed_now=observed_now,
+        revocations=revocations)
+
+
+def test_a_genuinely_signed_operator_record_is_promoted_to_verified():
+    result = _verifier().verify_pin_authorization(_operator_pin_record())
+    assert result["authority_class"] == "VERIFIED_OPERATOR_PIN_AUTHORIZATION"
+    assert result["executable_authority"] is True
+    assert result["verification"]["anchor_verified"] is True
+
+
+def test_a_shaped_but_unsigned_record_authorizes_nothing():
+    """The exact defect: `operatorrecord.verify_records` clears this record
+    while reporting `authorized: False`, and the old lane spent on it."""
+    record = _operator_pin_record()
+    del record["external_anchor"]
+    with _refusal("operator_record_has_no_external_anchor"):
+        _verifier().verify_pin_authorization(record)
+
+
+def test_a_record_signed_by_a_key_the_operator_did_not_supply_is_refused():
+    """Anyone can sign; the question is whether the operator's key signed."""
+    with _refusal("anchor_signature_mismatch"):
+        _verifier().verify_pin_authorization(
+            _operator_pin_record(key_hex=OTHER_KEY_HEX))
+
+
+def test_a_record_naming_an_unknown_key_id_is_refused():
+    with _refusal("anchor_key_not_in_trust_store"):
+        _verifier().verify_pin_authorization(
+            _operator_pin_record(key_id="not-the-operator"))
+
+
+def test_a_record_arriving_already_labelled_verified_is_refused():
+    """`authority.validate_*` accepts a verified label because a trusted wire
+    record must be representable as inert input, and confers nothing by doing
+    so. This verifier assigns the class; nothing upstream may claim it."""
+    with _refusal("record_arrived_pre_labelled_verified"):
+        _verifier().verify_pin_authorization(_operator_pin_record(
+            authority_class="VERIFIED_OPERATOR_PIN_AUTHORIZATION"))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("head_sha", SHA_C), ("target_base_sha", SHA_C),
+    ("repository_identity", "someone/else"),
+])
+def test_a_record_for_a_different_review_is_refused(field, value):
+    """An approval for one occurrence is not an approval for another, and a
+    push is how the reviewed thing changes."""
+    with _refusal("operator_record_is_for_a_different_review"):
+        _verifier().verify_pin_authorization(
+            _operator_pin_record(**{field: value}))
+
+
+def test_an_expired_authorization_is_refused():
+    with _refusal("operator_authorization_expired"):
+        _verifier(observed_now="2027-01-01T00:00:00Z").verify_pin_authorization(
+            _operator_pin_record())
+
+
+def test_a_record_with_no_expiry_is_refused():
+    """An authorization that never expires is one nobody has to revisit."""
+    record = _operator_pin_record()
+    del record["expires_at"]
+    record["pin_record_sha256"] = trustedverifier.record_digest(
+        record, label=PIN_LABEL)
+    with _refusal("operator_record_has_no_expiry"):
+        _verifier().verify_pin_authorization(record)
+
+
+def test_a_revoked_record_is_refused():
+    """Expiry and revocation are different questions: expiry is 'not after
+    this', revocation is 'not any more, starting now'."""
+    record = _operator_pin_record()
+    with _refusal("operator_record_revoked"):
+        _verifier(revocations=[{"record_sha256": record["pin_record_sha256"]}]
+                  ).verify_pin_authorization(record)
+
+
+def test_a_missing_revocation_list_is_not_an_empty_one():
+    """A lane that treats 'no list' as 'no revocations' cannot be told to
+    stop."""
+    with _refusal("revocation_list_not_supplied"):
+        _verifier(revocations=None).verify_pin_authorization(
+            _operator_pin_record())
+
+
+def test_an_edited_record_no_longer_matches_its_digest():
+    record = _operator_pin_record()
+    record["pins"] = {"VERIFIER_MAX_OUTPUT_TOKENS": 999999}
+    with _refusal("operator_record_digest_mismatch"):
+        _verifier().verify_pin_authorization(record)
+
+
+def test_the_anchor_digest_excludes_the_anchor_itself():
+    """Load-bearing rather than tidy: the anchor CONTAINS the signature over
+    this digest, so a digest covering the anchor would require the operator to
+    sign bytes containing their own signature. The first end-to-end signing
+    test found it immediately."""
+    record = _operator_pin_record()
+    without = {k: v for k, v in record.items() if k != "external_anchor"}
+    assert (trustedverifier.record_digest(record, label=PIN_LABEL)
+            == trustedverifier.record_digest(without, label=PIN_LABEL))
+
+
+def test_a_swapped_anchor_reference_fails_the_mac():
+    """The anchor's metadata is outside the digest but INSIDE the signature —
+    `anchor_signature_input` mixes the reference in explicitly."""
+    record = _operator_pin_record()
+    record["external_anchor"]["anchor_reference"] = "some-other-reference"
+    with _refusal("anchor_signature_mismatch"):
+        _verifier().verify_pin_authorization(record)
+
+
+@pytest.mark.parametrize("kind", sorted(trustedverifier.UNVERIFIABLE_ANCHOR_KINDS))
+def test_an_anchor_kind_this_lane_cannot_check_is_refused_by_name(kind):
+    """Refused with the missing capability named, rather than treated as
+    unsupported — a verifier that pretended to check these would be the
+    shape-only check wearing a better name."""
+    record = _operator_pin_record()
+    record["external_anchor"]["anchor_kind"] = kind
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        _verifier().verify_pin_authorization(record)
+    assert "anchor_kind_not_verifiable_by_this_lane" in excinfo.value.reason
+    assert "shape-only" in excinfo.value.reason
+
+
+def test_reading_the_trust_store_refuses_outside_d1_and_d2():
+    """A trust store decides what counts as authorized; a lane that can read
+    one in D0 can authorize itself in D0."""
+    with _refusal("trust_store_phase_not_permitted"):
+        trustedverifier.load_trust_store(phase=phases.D0, environ={})
+    with _refusal("phase_not_deployed"):
+        trustedverifier.load_trust_store(
+            phase=phases.D1,
+            environ={trustedverifier.TRUST_STORE_ENV: json.dumps(
+                {"keys": {"op-1": OPERATOR_KEY_HEX}})})
+
+
+@pytest.mark.parametrize("raw,category", [
+    ("{}", "operator_trust_store_has_no_keys"),
+    ('{"keys": {}}', "operator_trust_store_has_no_keys"),
+    ('{"keys": {"op-1": "short"}}', "operator_trust_store_key_too_short"),
+    ('{"keys": {"op-1": "zz' + "z" * 62 + '"}}', "operator_trust_store_key_not_hex"),
+    ("not json", "operator_trust_store_not_json"),
+])
+def test_a_malformed_trust_store_is_refused(raw, category):
+    with _refusal(category):
+        trustedverifier.parse_trust_store(raw)
+
+
+def test_binding_against_a_module_without_the_authority_vocabulary_is_refused():
+    import types
+
+    with _refusal("authority_module_missing_symbol"):
+        trustedverifier.bind(types.ModuleType("empty"), trust_store=_trust_store(),
+                             occurrence=_OCCURRENCE, observed_now="2026-08-01T00:00:00Z",
+                             revocations=[])
