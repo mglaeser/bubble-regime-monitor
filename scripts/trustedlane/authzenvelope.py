@@ -226,6 +226,21 @@ def _any_text_list(value, *, where):
     return value
 
 
+def _digest_list(value, *, where):
+    """A sorted unique list of sha256 digests, POSSIBLY EMPTY.
+
+    Separate from `_text_list`, which requires at least one entry, because the
+    two express different things: a required-contexts list with no entries is a
+    protected environment that requires nothing, and an approved-literal list
+    with no entries is a range with nothing to approve."""
+    if (not isinstance(value, list)
+            or not all(isinstance(v, str) and _SHA256.match(v) for v in value)
+            or value != sorted(set(value))):
+        refuse(f"category=typed_payload_field_not_a_sorted_unique_digest_list "
+               f"field={where}")
+    return value
+
+
 def _object(value, *, where):
     if not isinstance(value, dict) or not value:
         refuse(f"category=typed_payload_field_not_an_object field={where}")
@@ -353,9 +368,15 @@ TYPED_PAYLOAD_SCHEMAS = {
         "capability_policy_sha256": _sha256_hex,
     },
     LITERAL_PREREQUISITE: {
-        "expected_occurrence_count": _positive_int,
-        "member_claim_self_sha256_in_order": _text_list,
-        "member_subject_sha256_in_order": _text_list,
+        # EX5-R22. Zero is a real answer. A clean range requires no clearances,
+        # and a schema that refuses to express that forces an operator to
+        # approve a fake literal to satisfy prerequisite 10 — a real
+        # authorization for something nobody looked at, which is worse than the
+        # hole it closes. `_non_negative_int` and `_digest_list` differ from
+        # `_positive_int` and `_text_list` in exactly that: they admit empty.
+        "expected_occurrence_count": _non_negative_int,
+        "member_claim_self_sha256_in_order": _digest_list,
+        "member_subject_sha256_in_order": _digest_list,
         "literal_authorization_set_sha256": _sha256_hex,
         "scanner_policy_sha256": _sha256_hex,
     },

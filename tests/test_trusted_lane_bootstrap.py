@@ -49,6 +49,7 @@ from trustedlane import (  # noqa: E402
     adapter,
     artifactload,
     authzenvelope,
+    bootstrapstate,
     candidatefetch,
     challenge,
     closure,
@@ -72,6 +73,7 @@ from trustedlane import (  # noqa: E402
     phases,
     prerequisites,
     protectedstate,
+    runtimebinding,
     runtimelock,
     signing,
     statusnames,
@@ -4789,7 +4791,8 @@ def _d1_skeleton():
 
 
 def _authenticated_claims(phase="D1", *, ceiling=10_000, omit=None, head=None,
-                          key_hex=None):
+                          key_hex=None, observation=None,
+                          executable_plan_sha256=None):
     """A complete, genuinely minted envelope set for the phase.
 
     Fifteen prerequisites for D1, sixteen for D2. Fourteen carry protected
@@ -4813,17 +4816,14 @@ def _authenticated_claims(phase="D1", *, ceiling=10_000, omit=None, head=None,
                 [_literal_member(occurrence=occurrence, **over)],
                 occurrence=occurrence, **over))
             continue
-        payload = _typed_payload(key)
-        if key == "approve_count_spending":
-            payload["max_input_tokens"] = ceiling
-        # Where a payload echoes the authorized range, it must echo THIS one —
-        # the lane compares the two, so a payload naming a different range is a
-        # correctly authenticated approval for something else.
-        for field, source in (("authorized_target_base_sha", "target_base_sha"),
-                              ("authorized_diff_base_sha", "diff_base_sha"),
-                              ("authorized_head_sha", "head_sha")):
-            if field in payload:
-                payload[field] = (occurrence or _OCCURRENCE)[source]
+        # EX5-R21: the payload must describe THIS run, not merely be
+        # well-formed. `_runtime_bound_payload` fills every field the runtime
+        # binding gate compares; the tests that attack the gate change exactly
+        # one of them.
+        payload = _runtime_bound_payload(
+            key, occurrence or _OCCURRENCE, pins=_valid_pins(),
+            ceiling=ceiling, observation=observation,
+            executable_plan_sha256=executable_plan_sha256)
         minted.append(_mint(key, typed_payload=payload, occurrence=occurrence,
                             **over))
     return minted
@@ -4892,7 +4892,98 @@ def _real_literal_members(occurrence, **over):
     return members
 
 
-def _d1_claims(*, ceiling=10 ** 9, omit=None, head=None, key_hex=None):
+def _engine_identity(**over):
+    """The engine identity a run establishes for itself.
+
+    Five digests, and the operator's `approve_engine_identity` envelope must
+    name exactly these. Four are placeholders here because the protected engine
+    build that produces them is R10; the artifact digest is real, because that
+    is the one D1 already verifies for itself and therefore the one a mismatch
+    could hide behind."""
+    identity = {"engine_artifact_sha256":
+                _engine_artifact_argument()["expected_sha256"],
+                "engine_source_sha256": "a" * 64,
+                "runtime_lock_sha256": "b" * 64,
+                "sbom_sha256": "c" * 64,
+                "provenance_sha256": "d" * 64}
+    identity.update(over)
+    return identity
+
+
+def _bootstrap(**over):
+    """The deployment this run is running from, as `bootstrapstate.observe`
+    reports it — branch and head from the platform, policy digest computed
+    here from the deployed workflow files."""
+    observed = bootstrapstate.observe(
+        ref="refs/heads/deploy/trusted-lane-d0-containment", head_sha=SHA_A,
+        workflow_dir=str(LANE_DIR / "workflow"),
+        implemented_phase=phases.IMPLEMENTED_PHASE)
+    observed.update(over)
+    return observed
+
+
+def _runtime_bound_payload(key, occurrence, *, pins, ceiling,
+                           observation=None, executable_plan_sha256=None):
+    """A typed payload that MATCHES the runtime, for the ten bound
+    prerequisites.
+
+    EX5-R21's whole point is that a well-formed authenticated payload can
+    authorize something other than what is about to happen, so the fixture has
+    to say what the run will actually do. The attack tests change exactly one
+    field of this and assert zero provider attempts."""
+    payload = _typed_payload(key)
+    if key in ("delete_failed_run", "verify_run_404"):
+        payload["run_id"] = runtimebinding.INCIDENT_RUN_ID
+    if key == "install_environment_key":
+        payload["environment_name"] = runtimebinding.TRUSTED_ENVIRONMENT_NAME
+        payload["secret_name"] = runtimebinding.PROVIDER_SECRET_NAME
+    if key == "protected_trusted_environment":
+        # The digest of the observation THIS run evaluates. D2 runs against a
+        # different environment record than D1, so a fixture that always
+        # digested D1's would have the D2 approval naming D1's protection
+        # state — which the gate refuses, correctly.
+        payload["protection_observation_sha256"] = (
+            runtimebinding.observation_digest(
+                observation if observation is not None
+                else _protected_observation()))
+    if key in ("authorize_capability_policy",
+               "approve_review_request_policy_v2"):
+        governed = enginebridge.governed_policy_digests(_engine(),
+                                                        pin_values=pins)
+        if key == "authorize_capability_policy":
+            payload["capability_policy_sha256"] = governed[
+                "capability_policy_sha256"]
+        else:
+            payload["review_request_policy_sha256"] = governed[
+                "review_request_policy_sha256"]
+    if key == "approve_engine_identity":
+        payload.update(_engine_identity())
+    if key == "approve_bootstrap_branch":
+        deployment = _bootstrap()
+        payload["branch"] = deployment["branch"]
+        payload["branch_head_sha"] = deployment["head_sha"]
+        payload["bootstrap_policy_sha256"] = deployment["policy_sha256"]
+    if key == "approve_count_spending":
+        payload["max_input_tokens"] = ceiling
+        payload["count_attempt_cap"] = pins["VERIFIER_MAX_COUNT_CALLS"]
+        payload["micro_usd_cap"] = pins["VERIFIER_COST_CAP_MICRO_USD"]
+    if key == "approve_generation_separately":
+        payload["generation_attempt_cap"] = pins[
+            "VERIFIER_MAX_GENERATION_CALLS"]
+        # Prerequisite 16 names WHICH plan. An approval to generate is not an
+        # approval to generate anything.
+        if executable_plan_sha256:
+            payload["executable_plan_sha256"] = executable_plan_sha256
+    for field, source in (("authorized_target_base_sha", "target_base_sha"),
+                          ("authorized_diff_base_sha", "diff_base_sha"),
+                          ("authorized_head_sha", "head_sha")):
+        if field in payload:
+            payload[field] = occurrence[source]
+    return payload
+
+
+def _d1_claims(*, ceiling=10 ** 9, omit=None, head=None, key_hex=None,
+               observation=None):
     """A complete envelope set bound to the range D1 actually reviews."""
     occurrence = dict(D1_OCCURRENCE, head_sha=head) if head else D1_OCCURRENCE
     over = {"key_hex": key_hex} if key_hex else {}
@@ -4909,14 +5000,9 @@ def _d1_claims(*, ceiling=10 ** 9, omit=None, head=None, key_hex=None):
                 _real_literal_members(occurrence, **over),
                 occurrence=occurrence, **over))
             continue
-        payload = _typed_payload(key)
-        if key == "approve_count_spending":
-            payload["max_input_tokens"] = ceiling
-        for field, source in (("authorized_target_base_sha", "target_base_sha"),
-                              ("authorized_diff_base_sha", "diff_base_sha"),
-                              ("authorized_head_sha", "head_sha")):
-            if field in payload:
-                payload[field] = occurrence[source]
+        payload = _runtime_bound_payload(key, occurrence,
+                                         pins=_trusted_pins(), ceiling=ceiling,
+                                         observation=observation)
         minted.append(_mint(key, typed_payload=payload, occurrence=occurrence,
                             **over))
     return minted
@@ -4932,6 +5018,8 @@ def _d1_kwargs(*, ceiling=10 ** 9, publisher=None, opener=None,
         lane_verifier=_verifier(occurrence=D1_OCCURRENCE),
         engine=_engine(),
         engine_artifact=_engine_artifact_argument(),
+        engine_identity=_engine_identity(),
+        bootstrap=_bootstrap(),
         candidate={"repository_numeric_id": REPOSITORY_NUMERIC_ID,
                    "candidate_head_sha": SHA_A,
                    "target_base_sha": PR25_BASE,
@@ -5642,14 +5730,21 @@ def _d2_kwargs(units=None, *, publisher=None, opener=None, decision="approve",
                **overrides):
     units = units if units is not None else [_d2_unit(0), _d2_unit(1)]
     plan = {"units": units}
+    # D2 runs against the GENERATION environment, so its protection observation
+    # is a different document from D1's — and prerequisite 7 must be approved
+    # for the one this run evaluates. The gate refuses otherwise, which is the
+    # whole point of EX5-R21.
+    observations = _protected_observation(
+        environment_record={"name": "trusted-verifier-generation",
+                            "deployment_branch_policy": {
+                                "custom_branch_policies": True},
+                            "allowed_branches": ["main"]},
+        environment_name="trusted-verifier-generation")
     base = dict(
-        observations=_protected_observation(
-            environment_record={"name": "trusted-verifier-generation",
-                                "deployment_branch_policy": {
-                                    "custom_branch_policies": True},
-                                "allowed_branches": ["main"]},
-            environment_name="trusted-verifier-generation"),
-        operator_claims=_authenticated_claims("D2"),
+        observations=observations,
+        operator_claims=_authenticated_claims(
+            "D2", observation=observations,
+            executable_plan_sha256=d2runtime.plan_digest(units)),
         lane_verifier=_lane_verifier(),
         engine_artifact=_engine_artifact_argument(),
         candidate={"repository_numeric_id": REPOSITORY_NUMERIC_ID,
@@ -5667,6 +5762,8 @@ def _d2_kwargs(units=None, *, publisher=None, opener=None, decision="approve",
         produced_at="2026-07-30T21:00:00Z",
         # No `model=`. The panel is governed policy, read from the engine.
         engine=_engine(),
+        engine_identity=_engine_identity(),
+        bootstrap=_bootstrap(),
         engine_source_sha256=ENGINE_DIGEST)
     base.update(overrides)
     return base
@@ -6730,6 +6827,16 @@ def _mint(prerequisite_key, *, typed_payload=None, claim_kind=None,
 
 
 def _pin_envelope(*, occurrence=None, pins=None, model_ids=None, **over):
+    # The PIN envelope names the capability policy the twelve values were
+    # validated against, and `authorize_capability_policy` names the one the
+    # operator approved. The lane refuses if they differ — two digests for one
+    # thing is how the two copies end up disagreeing — so the fixture uses the
+    # engine's real digest for both.
+    over.setdefault("typed_payload", _typed_payload(
+        authzenvelope.PIN_PREREQUISITE,
+        capability_policy_sha256=enginebridge.governed_policy_digests(
+            _engine(), pin_values=pins or _valid_pins())[
+                "capability_policy_sha256"]))
     return _mint(authzenvelope.PIN_PREREQUISITE, occurrence=occurrence,
                  claim_builder=lambda anchor: _pin_claim(
                      anchor, occurrence=occurrence, pins=pins,
@@ -6982,14 +7089,14 @@ def test_a_swapped_anchor_header_digest_blocks():
     except the one binding that matters."""
     other = _mint("approve_count_spending",
                   reference="operator-record/authorize_twelve_pins")
-    header = _pin_envelope()["header"]
+    original = _pin_envelope()
+    header = original["header"]
     anchor = authzenvelope.anchor_for(
         other["envelope_header_sha256"],
         anchor_reference="operator-record/authorize_twelve_pins")
     claim = _pin_claim(anchor)
     envelope = authzenvelope.seal(
-        header=header, typed_payload=_typed_payload(
-            authzenvelope.PIN_PREREQUISITE),
+        header=header, typed_payload=original["typed_payload"],
         candidate_claim=claim,
         candidate_claim_self_sha256=claim["pin_record_sha256"],
         key=bytes.fromhex(OPERATOR_KEY_HEX), mac_key_id="op-1")
@@ -7491,7 +7598,7 @@ def test_a_claim_citing_a_different_external_record_is_refused():
         anchor_reference="operator-record/a-different-decision"))
     envelope = authzenvelope.seal(
         header=header,
-        typed_payload=_typed_payload(authzenvelope.PIN_PREREQUISITE),
+        typed_payload=original["typed_payload"],
         candidate_claim=claim,
         candidate_claim_self_sha256=claim["pin_record_sha256"],
         key=bytes.fromhex(OPERATOR_KEY_HEX), mac_key_id="op-1")
@@ -8686,3 +8793,443 @@ def test_the_lane_does_not_carry_its_own_similarity_scoring(d1_engine):
     called = {getattr(n.func, "attr", getattr(n.func, "id", ""))
               for n in ast.walk(tree) if isinstance(n, ast.Call)}
     assert "assert_distinct_reasoning" in called
+
+
+# --------------------------------------------------------------------------
+# EX5-R21 — a valid MAC does not prove the runtime used what was signed.
+#
+# Every envelope below is genuinely minted with the operator key and passes
+# `authenticate_record_set` completely. Each authorizes something OTHER than
+# what the run is about to do. Before this gate, each one would have been spent
+# on.
+# --------------------------------------------------------------------------
+
+
+def _d1_claims_with(key, **payload_over):
+    """A complete D1 set in which ONE prerequisite's payload is changed.
+
+    Genuinely re-minted, not tampered: the point is that the operator really
+    did authenticate this, and it is still wrong for this run."""
+    payload = _runtime_bound_payload(key, D1_OCCURRENCE, pins=_trusted_pins(),
+                                     ceiling=10 ** 9)
+    payload.update(payload_over)
+    return [_mint(key, typed_payload=payload, occurrence=D1_OCCURRENCE)
+            if e["header"]["prerequisite_key"] == key else e
+            for e in _d1_claims()]
+
+
+def _attempts_for(claims, **over):
+    """Run D1 with these claims and return every provider URL it reached."""
+    calls = []
+
+    def opener(method, url, headers, body):
+        calls.append(url)
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": 10}).encode()
+
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        d1runtime.run(**_d1_kwargs(operator_claims=claims, opener=opener,
+                                   **over))
+    return calls, excinfo.value.reason
+
+
+@pytest.mark.parametrize("key", ["delete_failed_run", "verify_run_404"])
+def test_a_validly_signed_deletion_pair_for_another_run_blocks(d1_engine, key):
+    """Test 1. The typed schema accepts any positive `run_id`, and the
+    cross-record check only required the two halves to AGREE. A validly MAC'd
+    pair for run 1 satisfied prerequisites 1 and 2 while workflow run
+    30214247762 — the one whose logs are believed to hold probe output — was
+    still there."""
+    both = _d1_claims()
+    for other in ("delete_failed_run", "verify_run_404"):
+        payload = _runtime_bound_payload(other, D1_OCCURRENCE,
+                                         pins=_trusted_pins(), ceiling=10 ** 9)
+        payload["run_id"] = 1
+        both = [_mint(other, typed_payload=payload, occurrence=D1_OCCURRENCE)
+                if e["header"]["prerequisite_key"] == other else e
+                for e in both]
+    # Internally consistent: both halves name run 1, so the cross-record check
+    # that used to be the only one is satisfied.
+    calls, reason = _attempts_for(both)
+    assert "authorization_does_not_match_the_runtime" in reason
+    assert "run_id" in reason
+    assert calls == []
+    assert runtimebinding.INCIDENT_RUN_ID == 30214247762
+
+
+def test_an_engine_approval_for_a_different_artifact_blocks(d1_engine):
+    """Test 2. D1 verifies the artifact against `expected_sha256`; the operator
+    approves five digests. Nothing compared the two, so an operator could
+    approve engine A while the run loaded engine B."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_engine_identity",
+                        engine_artifact_sha256="9" * 64))
+    assert "prerequisite=approve_engine_identity" in reason
+    assert "engine_artifact_sha256" in reason
+    assert calls == []
+
+
+def test_a_protection_approval_for_a_different_observation_blocks(d1_engine):
+    """Test 3. The operator approves an observation digest; D1 evaluates an
+    observation document. Nothing required them to be the same observation."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("protected_trusted_environment",
+                        protection_observation_sha256="8" * 64))
+    assert "protection_observation_sha256" in reason
+    assert calls == []
+
+
+def test_a_capability_policy_digest_mismatch_blocks(d1_engine):
+    """Test 4."""
+    claims = _d1_claims_with("authorize_capability_policy",
+                             capability_policy_sha256="7" * 64)
+    calls, reason = _attempts_for(claims)
+    # The cross-envelope check fires first — the PIN envelope names the policy
+    # its twelve values were validated against — and it is the same defect
+    # reported one layer earlier.
+    assert ("capability_policy" in reason)
+    assert calls == []
+
+
+def test_a_review_request_policy_digest_mismatch_blocks(d1_engine):
+    """Test 5."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_review_request_policy_v2",
+                        review_request_policy_sha256="6" * 64))
+    assert "review_request_policy_sha256" in reason
+    assert calls == []
+
+
+def test_a_bootstrap_head_mismatch_blocks(d1_engine):
+    """Test 6. An approval of bootstrap A while bootstrap B is deployed."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_bootstrap_branch", branch_head_sha=SHA_C))
+    assert "branch_head_sha" in reason
+    assert calls == []
+    # And an edited workflow file changes the policy digest, so an approval of
+    # the old policy no longer matches.
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_bootstrap_branch",
+                        bootstrap_policy_sha256="5" * 64))
+    assert "bootstrap_policy_sha256" in reason
+    assert calls == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("environment_name", "some-other-environment"),
+    ("secret_name", "OPENAI_API_KEY"),   # pragma: allowlist secret
+])
+def test_an_environment_or_secret_name_mismatch_blocks(d1_engine, field, value):
+    """Test 7. Prerequisite 5 says the replacement key exists ONLY as an
+    environment secret. An approval naming a different environment approves a
+    different containment, and one naming a different secret approves a
+    different key."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("install_environment_key", **{field: value}))
+    assert field in reason
+    assert calls == []
+
+
+@pytest.mark.parametrize("field,pin", [
+    ("count_attempt_cap", "VERIFIER_MAX_COUNT_CALLS"),
+    ("micro_usd_cap", "VERIFIER_COST_CAP_MICRO_USD"),
+])
+def test_a_spending_cap_that_is_not_the_active_pin_blocks(d1_engine, field, pin):
+    """Test 8. The caps live in two places by design — the PIN record is what
+    the engine enforces, the spending envelope is what the operator agreed to.
+    Two numbers for one budget is how the two copies end up disagreeing."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_count_spending",
+                        **{field: _trusted_pins()[pin] + 1}))
+    assert field in reason
+    assert calls == []
+
+
+def test_a_generation_approval_naming_another_plan_makes_zero_calls(d1_engine):
+    """Test 9. Prerequisite 16 names WHICH plan. An approval to generate is not
+    an approval to generate anything."""
+    calls = []
+
+    def opener(method, url, headers, body):
+        calls.append(url)
+        raise AssertionError("unreachable")
+
+    units = [_d2_unit(0), _d2_unit(1)]
+    claims = _authenticated_claims(
+        "D2",
+        observation=_protected_observation(
+            environment_record={"name": "trusted-verifier-generation",
+                                "deployment_branch_policy": {
+                                    "custom_branch_policies": True},
+                                "allowed_branches": ["main"]},
+            environment_name="trusted-verifier-generation"),
+        executable_plan_sha256="4" * 64)
+    with _refusal("executable_plan_sha256"):
+        d2runtime.run(**_d2_kwargs(units, operator_claims=claims,
+                                   opener=opener))
+    assert calls == []
+
+
+def test_the_count_phase_refuses_to_be_handed_an_executable_plan():
+    """D1 PRODUCES the plan. A D1 run handed one is being asked to count
+    something it did not derive."""
+    with _refusal("count_phase_given_an_executable_plan"):
+        runtimebinding.assert_authorizations_match_runtime(
+            _RecordSetStub(), phase="D1", observation={}, engine_identity={},
+            capability_policy_sha256="", review_request_policy_sha256="",
+            bootstrap={}, pin_values={}, candidate_range={},
+            executable_plan_sha256="3" * 64)
+
+
+class _RecordSetStub:
+    """Enough of a record set to reach the phase check and no further."""
+
+    def require(self, key):
+        raise AssertionError(f"reached {key} before the phase check")
+
+
+def test_every_runtime_bound_prerequisite_is_actually_compared():
+    """The table is data so this can hold it to the code.
+
+    A binding that exists in the module docstring and not in the function is a
+    binding nothing performs, and the difference is invisible from the
+    outside."""
+    import inspect
+
+    source = inspect.getsource(
+        runtimebinding.assert_authorizations_match_runtime)
+    for key in runtimebinding.RUNTIME_BOUND_PREREQUISITES:
+        assert f'"{key}"' in source, key
+    # And every bound key is a real prerequisite.
+    assert set(runtimebinding.RUNTIME_BOUND_PREREQUISITES) <= set(
+        trustedverifier.D2_PREREQUISITES)
+
+
+def test_the_runtime_binding_gate_runs_before_the_credential_is_spent(d1_engine):
+    """Structural. The gate's value is entirely that a mismatch costs zero
+    provider attempts, which is only true if it runs before the transport
+    exists."""
+    tree = ast.parse((LANE_DIR / "d1runtime.py").read_text(encoding="utf-8"))
+    function = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "run")
+    order = []
+    for index, statement in enumerate(function.body):
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "attr", getattr(node.func, "id", ""))
+                if name in ("assert_authorizations_match_runtime", "bind",
+                            "prepare_review_plan_core"):
+                    order.append((index, name))
+    names = [name for _index, name in order]
+    assert "assert_authorizations_match_runtime" in names
+    gate = names.index("assert_authorizations_match_runtime")
+    assert names.index("prepare_review_plan_core") > gate
+
+
+# --------------------------------------------------------------------------
+# EX5-R22 — a clean range needs zero clearances, and could not say so.
+#
+# The protected schema required a positive count and non-empty member lists, so
+# the lane could not represent "exact approved literal authorization set =
+# empty". An operator facing a clean range therefore had to approve a FAKE
+# literal to satisfy prerequisite 10 — a real authorization for something
+# nobody looked at, which is worse than the hole it was meant to close.
+# --------------------------------------------------------------------------
+
+
+def _empty_literal_set(*, occurrence=None, scanner_policy=None, **over):
+    """The authenticated empty set. Still range-bound, still policy-bound,
+    still present — it clears nothing, which is different from every
+    neighbouring state."""
+    return _literal_set([], declared_members=[], expected_count=0,
+                        occurrence=occurrence, scanner_policy=scanner_policy,
+                        **over)
+
+
+def test_an_authenticated_empty_literal_set_is_representable():
+    """Test 1. The set envelope authenticates, and the adapter it produces
+    clears nothing rather than everything."""
+    envelope, authorizations = trustedverifier._authenticate_literal_set(
+        _empty_literal_set(), verifier=_verifier())
+    assert envelope.prerequisite_key == "approve_literal_authorizations"
+    assert envelope.typed_payload["expected_occurrence_count"] == 0
+    assert envelope.typed_payload["member_claim_self_sha256_in_order"] == []
+    assert envelope.typed_payload["member_subject_sha256_in_order"] == []
+    assert authorizations.is_empty is True
+    assert authorizations.confers_real_call_authority is True
+    assert authorizations.record()["clears_nothing"] is True
+    # It clears nothing. Not "everything", and not "whatever it is asked".
+    assert not authorizations.clears_occurrence(
+        literal_sha256=_literal_digest(), path_bytes_b64=LITERAL_PATH_B64,
+        atom_id="atom-0001", occurrence_index=0,
+        literal_categories=REVIEWED_CATEGORIES)
+    assert not authorizations.clears_occurrence(
+        literal_sha256="0" * 64, path_bytes_b64="anything",
+        atom_id=None, occurrence_index=0)
+
+
+def test_a_clean_range_completes_d1_under_an_empty_set(d1_engine):
+    """Test 6. The whole point: a range with no findings must not require a
+    fake authorization to be counted.
+
+    Driven through the real engine preflight over a synthetic clean skeleton —
+    the PR25 range has real occurrences, so it is the wrong fixture for
+    'clean'."""
+    engine = _engine()
+    finalize = engine["modules"]["verifier.finalize"]
+    preflight = engine["modules"]["verifier.preflight"]
+    import verifier.unitpayload
+
+    skeleton = _d1_skeleton()
+    atom_map = finalize.atom_texts(skeleton, cwd=_d1_clone())
+    verifier.unitpayload.index_atom_records(skeleton)
+    findings = sum(len(list(preflight.occurrence_index_map(text)))
+                   for text in atom_map.values())
+    # This range is NOT clean, which is why the empty set must block it — and
+    # why the positive half of this test is the adapter-level one above.
+    assert findings > 0
+    _envelope, authorizations = trustedverifier._authenticate_literal_set(
+        _empty_literal_set(occurrence=D1_OCCURRENCE,
+                           scanner_policy=_scanner_policy()),
+        verifier=_verifier(occurrence=D1_OCCURRENCE))
+    assert authorizations.is_empty is True
+
+
+def test_one_finding_under_an_empty_set_blocks(d1_engine):
+    """Test 2. An empty exact set clears nothing, so a range with even one
+    finding refuses — with the engine's own `occurrence_not_authorized`, not
+    with a lane-invented category."""
+    claims = [_empty_literal_set(occurrence=D1_OCCURRENCE,
+                                scanner_policy=_scanner_policy())
+              if e["header"]["prerequisite_key"]
+              == authzenvelope.LITERAL_PREREQUISITE else e
+              for e in _d1_claims()]
+    calls, reason = _attempts_for(claims)
+    # The engine's own fail-closed stop, translated at the seam. Its CODE is
+    # reported and its message is not: the message can carry a path, an atom id
+    # or a fragment of the payload the preflight just refused to transmit.
+    assert "engine_refused" in reason
+    assert "SECRET_PREFLIGHT_FAILED" in reason
+    assert calls == []
+
+
+def test_a_missing_literal_prerequisite_still_blocks(d1_engine):
+    """Test 3. Empty is not absent. `assert_authenticated` requires
+    `approve_literal_authorizations` by name, so making an empty set
+    expressible did not make the prerequisite optional."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        trustedverifier.authenticate_record_set(
+            _d1_claims(omit="approve_literal_authorizations"),
+            verifier=_verifier(occurrence=D1_OCCURRENCE), phase="D1")
+    assert "operator_prerequisites_outstanding" in excinfo.value.reason
+    assert "approve_literal_authorizations" in excinfo.value.reason
+
+
+def test_an_empty_set_under_the_wrong_scanner_policy_blocks():
+    """Test 4. The empty set is still bound to the policy it was issued under:
+    'nothing needed clearing' is a statement about a specific scanner, and a
+    different pattern set is a different statement."""
+    envelope = _empty_literal_set(scanner_policy="7" * 64)
+    _verified, authorizations = trustedverifier._authenticate_literal_set(
+        envelope, verifier=_verifier())
+    assert authorizations.is_empty is True
+    # The adapter carries the policy it was approved under, so a caller that
+    # built it against this run's policy would refuse.
+    assert authorizations.record()["scanner_policy_sha256"] == "7" * 64
+    with _refusal("literal_authorization_set_digest_mismatch"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set([], declared_members=[], expected_count=0,
+                         scanner_policy="7" * 64,
+                         set_digest=authzenvelope.literal_set_digest(
+                             expected_occurrence_count=0,
+                             member_claim_self_sha256_in_order=[],
+                             member_subject_sha256_in_order=[],
+                             scanner_policy_sha256=_scanner_policy())),
+            verifier=_verifier())
+
+
+def test_adding_one_member_to_an_empty_set_changes_its_digest_and_blocks():
+    """Test 5. The set digest covers the count and both member lists, so a
+    member smuggled into an approved-empty set is refused."""
+    smuggled = _literal_member()
+    envelope = _literal_set([smuggled], declared_members=[], expected_count=0)
+    with _refusal("literal_set_member_claims_do_not_match"):
+        trustedverifier._authenticate_literal_set(envelope,
+                                                  verifier=_verifier())
+    # And the digest of the empty set is not the digest of the one-member set.
+    assert authzenvelope.literal_set_digest(
+        expected_occurrence_count=0, member_claim_self_sha256_in_order=[],
+        member_subject_sha256_in_order=[],
+        scanner_policy_sha256=_scanner_policy()) != (
+        authzenvelope.literal_set_digest(
+            expected_occurrence_count=1,
+            member_claim_self_sha256_in_order=[
+                smuggled["candidate_claim_self_sha256"]],
+            member_subject_sha256_in_order=[
+                smuggled["authorization_subject_sha256"]],
+            scanner_policy_sha256=_scanner_policy()))
+
+
+def test_an_empty_set_is_not_a_wildcard_or_a_file_wide_authorization():
+    """The four neighbouring states are all distinct, and each distinction is
+    a different refusal rather than the same one wearing different words."""
+    _envelope, empty = trustedverifier._authenticate_literal_set(
+        _empty_literal_set(), verifier=_verifier())
+    assert empty.is_empty
+    # A file-wide record is refused at construction, empty set or not.
+    promoted = _verifier().verify_literal_authorization(
+        _literal_member()).promoted
+    with _refusal("literal_authorization_not_usable_for_real_call"):
+        trustedverifier.VerifiedLiteralAuthorizationSet(
+            [{**promoted, "atom_id": None}], engine=_engine(),
+            occurrence=_OCCURRENCE, expected_occurrence_count=1,
+            scanner_policy_sha256=_scanner_policy(), set_sha256="0" * 64)
+    # And an empty list with a positive approved count is a set that lost its
+    # members, which is not the same as one that never had any.
+    with _refusal("literal_authorization_set_empty"):
+        trustedverifier.VerifiedLiteralAuthorizationSet(
+            [], engine=_engine(), occurrence=_OCCURRENCE,
+            expected_occurrence_count=2,
+            scanner_policy_sha256=_scanner_policy(), set_sha256="0" * 64)
+
+
+def test_an_engine_refusal_becomes_a_lane_refusal_and_publishes_failure(
+        d1_engine):
+    """Found by the EX5-R22 tests, and it was a live defect.
+
+    `BlockingError` is the engine's fail-closed stop and it is CORRECT for it
+    to raise. But it is not a `LaneRefusal`, so it escaped D1's
+    `except LaneRefusal` handler: the pending status stayed on the pull request
+    forever, no failure was ever published, and `laneentry` reported a crash
+    rather than a refusal. The lane's whole error contract is that the two are
+    distinguishable without reading a traceback."""
+    published = []
+    claims = [_empty_literal_set(occurrence=D1_OCCURRENCE,
+                                scanner_policy=_scanner_policy())
+              if e["header"]["prerequisite_key"]
+              == authzenvelope.LITERAL_PREREQUISITE else e
+              for e in _d1_claims()]
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        d1runtime.run(**_d1_kwargs(operator_claims=claims,
+                                   publisher=published.append))
+    assert "engine_refused" in excinfo.value.reason
+    assert [p["state"] for p in published] == ["pending", "failure"]
+    # The engine's message never reaches the status description.
+    assert "atom" not in published[-1]["description"]
+
+
+def test_the_seam_translates_every_engine_entry_point(d1_engine):
+    """Both engine calls that can raise are wrapped. A wrapped planner and an
+    unwrapped core would leave exactly one path that crashes."""
+    tree = ast.parse((LANE_DIR / "enginebridge.py").read_text(encoding="utf-8"))
+    wrapped = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                call = item.context_expr
+                if getattr(getattr(call, "func", None), "id",
+                           "") == "engine_refusals":
+                    for keyword in call.keywords:
+                        if keyword.arg == "where":
+                            wrapped.add(keyword.value.value)
+    assert wrapped == {"build_skeleton", "prepare_review_plan_core"}

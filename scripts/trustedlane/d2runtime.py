@@ -47,6 +47,7 @@ from . import (
     enginepolicy,
     evidencewire,
     protectedstate,
+    runtimebinding,
     signing,
     statuspublish,
     transport,
@@ -179,6 +180,7 @@ def plan_digest(units) -> str:
 
 def run(*, observations: dict, operator_claims, lane_verifier,
         engine: dict, engine_artifact: dict,
+        engine_identity: dict, bootstrap: dict,
         candidate: dict, plan: dict, trusted_plan_sha256: str, opener,
         credential: str, signing_key, publisher, trusted_run: dict,
         observed_now: str, produced_at: str,
@@ -217,6 +219,27 @@ def run(*, observations: dict, operator_claims, lane_verifier,
 
     steps.append(("plan", assert_plan_is_the_counted_one(
         plan, expected_sha256=trusted_plan_sha256)))
+
+    # EX5-R21, with the D2-only half: prerequisite 16 names WHICH executable
+    # plan was approved for generation. An approval to generate is not an
+    # approval to generate anything.
+    pin_values = record_set.operator_pin_record()["pins"]
+    governed = enginebridge.governed_policy_digests(engine,
+                                                    pin_values=pin_values)
+    steps.append(("runtime_binding",
+                  runtimebinding.assert_authorizations_match_runtime(
+                      record_set, phase="D2", observation=observations,
+                      engine_identity=engine_identity,
+                      capability_policy_sha256=governed[
+                          "capability_policy_sha256"],
+                      review_request_policy_sha256=governed[
+                          "review_request_policy_sha256"],
+                      bootstrap=bootstrap, pin_values=pin_values,
+                      candidate_range={
+                          "target_base_sha": candidate["target_base_sha"],
+                          "diff_base_sha": candidate["target_base_sha"],
+                          "head_sha": candidate["candidate_head_sha"]},
+                      executable_plan_sha256=trusted_plan_sha256)))
 
     head = candidate["candidate_head_sha"]
     base = candidate["target_base_sha"]

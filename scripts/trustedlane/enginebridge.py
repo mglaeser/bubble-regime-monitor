@@ -35,6 +35,7 @@ refusals that protect the boundary.
 
 from __future__ import annotations
 
+import contextlib
 import os
 
 from .errors import refuse
@@ -89,6 +90,7 @@ REQUIRED_ENGINE_SYMBOLS = {
     "verifier.finalize": ("prepare_review_plan_core", "finalize_mock",
                           "PREPARE_CORE_VERSION"),
     "verifier.counting": ("SOURCE_PROVIDER", "SOURCE_MOCK", "COUNT_PATH"),
+    "verifier.capabilities": ("policy_record", "policy_digest", "capability"),
 }
 
 #: What the lane refuses to find in a core result. `prepare_review_plan_core`
@@ -101,6 +103,32 @@ FORBIDDEN_CORE_FIELDS = ("count_evidence", "evidence_class", "executable",
 
 def _resolved(path: str) -> str:
     return os.path.realpath(path)
+
+
+@contextlib.contextmanager
+def engine_refusals(engine: dict, *, where: str):
+    """Translate the engine's typed failure into a lane refusal.
+
+    `BlockingError` is the engine's fail-closed stop and it is CORRECT for it
+    to raise — a preflight that found an unauthorized literal must not return
+    normally. But it is not a `LaneRefusal`, so it escaped D1's
+    `except LaneRefusal` handler: the pending status stayed on the pull request
+    forever, no failure was published, and `laneentry` reported a crash rather
+    than a refusal. The lane's whole error contract is that a refusal is
+    distinguishable from a crash without reading a traceback.
+
+    The engine's CODE is reported and its message is not. The message can carry
+    a path, an atom id or a fragment of the scanned payload, and the payload is
+    the thing the preflight just refused to transmit."""
+    blocking = engine["modules"]["verifier.errors"].BlockingError
+    try:
+        yield
+    except blocking as exc:
+        refuse(f"category=engine_refused where={where} "
+               f"code={getattr(exc, 'code', 'UNKNOWN')} — the engine's own "
+               "fail-closed stop; its message is not reported because it can "
+               "carry a path, an atom id or a fragment of the payload the "
+               "engine just refused to transmit")
 
 
 def assert_layout(engine_root: str) -> dict:
@@ -211,7 +239,8 @@ def build_skeleton(engine: dict, *, target_base_sha: str,
     kwargs = {"cwd": repository_path}
     if budget is not None:
         kwargs["budget"] = budget
-    skeleton = planner(target_base_sha, candidate_head_sha, **kwargs)
+    with engine_refusals(engine, where="build_skeleton"):
+        skeleton = planner(target_base_sha, candidate_head_sha, **kwargs)
     return assert_skeleton_is_usable(skeleton, engine=engine)
 
 
@@ -269,12 +298,13 @@ def prepare_review_plan_core(engine: dict, *, skeleton: dict,
                "proves a verdict was written for this run; a short or absent "
                "one is guessable, and a guessable challenge proves nothing")
     finalize = engine["modules"]["verifier.finalize"]
-    core = finalize.prepare_review_plan_core(
-        skeleton, cwd=repository_path, pin_record=pin_record,
-        transport=transport, authorizations=authorizations,
-        challenge=challenge,
-        required_approver=required_approver(engine),
-        minimum_other_approvers=minimum_other_approvers)
+    with engine_refusals(engine, where="prepare_review_plan_core"):
+        core = finalize.prepare_review_plan_core(
+            skeleton, cwd=repository_path, pin_record=pin_record,
+            transport=transport, authorizations=authorizations,
+            challenge=challenge,
+            required_approver=required_approver(engine),
+            minimum_other_approvers=minimum_other_approvers)
     return assert_core_is_evidence_neutral(core, engine=engine)
 
 
@@ -306,6 +336,61 @@ def assert_core_is_evidence_neutral(core, *, engine: dict) -> dict:
                "and generating are separately approved, and D1 holds only the "
                "count approval")
     return core
+
+
+def governed_policy_digests(engine: dict, *, pin_values: dict,
+                            minimum_other_approvers: int = 1) -> dict:
+    """The two governed policy records, and their digests, BEFORE any call.
+
+    EX5-R21 compares the operator's approved capability-policy and
+    ReviewRequestPolicy digests against the ones the engine actually loads. That
+    comparison has to happen before a credential is spent, and the shared core
+    computes both internally — so they are computed here first, from the same
+    engine, and `assert_core_used_the_governed_policies` proves afterwards that
+    the core used these and not something else.
+
+    Both are pure functions of the panel and the PIN values. Recomputing them is
+    not a second implementation: it is the same engine function called
+    twice."""
+    model_ids = list(model_panel(engine))
+    capabilities = engine["modules"]["verifier.capabilities"]
+    reviewpolicy = engine["modules"]["verifier.reviewpolicy"]
+    capability_policy = capabilities.policy_record(model_ids)
+    review_request_policy = reviewpolicy.policy_record(
+        model_ids, required_approver=required_approver(engine),
+        minimum_other_approvers=minimum_other_approvers,
+        max_output_tokens=pin_values["VERIFIER_MAX_OUTPUT_TOKENS"])
+    return {
+        "capability_policy": capability_policy,
+        "review_request_policy": review_request_policy,
+        "capability_policy_sha256":
+            capability_policy["capability_policy_sha256"],
+        "review_request_policy_sha256":
+            review_request_policy["review_request_policy_sha256"],
+    }
+
+
+def assert_core_used_the_governed_policies(core: dict, *, governed: dict
+                                           ) -> dict:
+    """The core must have used the policies the operator's approval was checked
+    against.
+
+    Without this the gate is decorative: it would compare an operator approval
+    to a policy record computed for the comparison and then discarded, while
+    the core built requests under whatever it computed for itself."""
+    for field in ("capability_policy_sha256", "review_request_policy_sha256"):
+        source = ("capability_policy" if field.startswith("capability")
+                  else "review_request_policy")
+        observed = (core.get(source) or {}).get(field)
+        if observed != governed[field]:
+            refuse(f"category=engine_core_used_a_different_governed_policy "
+                   f"field={field} — the operator's approval was checked "
+                   "against one policy record and the requests were built "
+                   "under another")
+    return {"governed_policies_match": True,
+            "capability_policy_sha256": governed["capability_policy_sha256"],
+            "review_request_policy_sha256":
+                governed["review_request_policy_sha256"]}
 
 
 def model_panel(engine: dict) -> tuple:

@@ -86,6 +86,7 @@ from . import (
     enginepolicy,
     evidencewire,
     protectedstate,
+    runtimebinding,
     signing,
     statuspublish,
     trustedverifier,
@@ -111,7 +112,7 @@ def _publish(publisher, request: dict, sink: list) -> dict:
 
 
 def run(*, observations: dict, operator_claims, lane_verifier, engine: dict,
-        engine_artifact: dict,
+        engine_artifact: dict, engine_identity: dict, bootstrap: dict,
         candidate: dict, plan: dict, opener, credential: str, signing_key,
         publisher, trusted_run: dict, observed_now: str, produced_at: str,
         fetch) -> dict:
@@ -173,6 +174,32 @@ def run(*, observations: dict, operator_claims, lane_verifier, engine: dict,
     #    satisfy `assert_authenticated`.
     authorization = countledger.authorize(record_set=record_set)
     steps.append(("authorization", authorization))
+
+    # 4b. EX5-R21. Authentication proved the operator TAGGED these payloads. It
+    #     did not prove they were talking about this run. A validly MAC'd
+    #     deletion/404 pair for run 1, an engine approval for a different
+    #     artifact, a protection approval for a different observation, a
+    #     spending cap that is not the active PIN — every one of those passes
+    #     `authenticate_record_set` and authorizes something else.
+    #
+    #     Before the credential is spent, not after: the whole value of this
+    #     gate is that a mismatch costs zero provider attempts.
+    pin_values = record_set.operator_pin_record()["pins"]
+    governed = enginebridge.governed_policy_digests(engine,
+                                                    pin_values=pin_values)
+    steps.append(("runtime_binding",
+                  runtimebinding.assert_authorizations_match_runtime(
+                      record_set, phase="D1", observation=observations,
+                      engine_identity=engine_identity,
+                      capability_policy_sha256=governed[
+                          "capability_policy_sha256"],
+                      review_request_policy_sha256=governed[
+                          "review_request_policy_sha256"],
+                      bootstrap=bootstrap, pin_values=pin_values,
+                      candidate_range={
+                          "target_base_sha": candidate["target_base_sha"],
+                          "diff_base_sha": candidate["target_base_sha"],
+                          "head_sha": candidate["candidate_head_sha"]})))
 
     # 5. Minted before anything is sent, so every request carries it.
     seed = challenge.mint_seed(seed=candidate.get("challenge_seed"))
@@ -239,6 +266,13 @@ def run(*, observations: dict, operator_claims, lane_verifier, engine: dict,
             transport=count_transport,
             authorizations=record_set.literal_authorizations,
             challenge=run_challenge)
+        # The gate above compared the operator's approvals to THESE policy
+        # digests. Without this the comparison would be decorative: it would
+        # check a record computed for the check and then discarded, while the
+        # requests were built under whatever the core computed for itself.
+        steps.append(("governed_policies",
+                      enginebridge.assert_core_used_the_governed_policies(
+                          core, governed=governed)))
 
         # 10. The operator's ceiling, applied to what was ACTUALLY counted, and
         #     zero generation asserted on the transport rather than inferred

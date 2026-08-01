@@ -549,10 +549,24 @@ class VerifiedLiteralAuthorizationSet:
                  expected_occurrence_count: int, scanner_policy_sha256: str,
                  set_sha256: str):
         authority = _authority(engine)
-        if not isinstance(promoted, (list, tuple)) or not promoted:
-            refuse("category=literal_authorization_set_empty — a set that "
-                   "clears nothing must not read as one that clears "
-                   "everything")
+        # EX5-R22. An EMPTY exact set is legitimate and had to be made
+        # representable. A clean range genuinely requires zero clearances, and
+        # a lane that cannot express that forces an operator to approve a fake
+        # literal to satisfy prerequisite 10 — which is worse than the hole it
+        # was meant to close, because the fake one is a real authorization for
+        # something nobody looked at.
+        #
+        # Empty is not the same as absent. The set envelope is still
+        # authenticated, still range-bound, still scanner-policy-bound, and it
+        # still has to be PRESENT: `assert_authenticated` requires
+        # `approve_literal_authorizations` by name, so a missing prerequisite
+        # refuses whether or not an empty set is expressible.
+        if not isinstance(promoted, (list, tuple)):
+            refuse("category=literal_authorization_set_not_a_list")
+        if not promoted and expected_occurrence_count != 0:
+            refuse(f"category=literal_authorization_set_empty "
+                   f"expected={expected_occurrence_count} — the operator "
+                   "approved occurrences and none were supplied")
         records = []
         for index, record in enumerate(promoted):
             try:
@@ -597,6 +611,16 @@ class VerifiedLiteralAuthorizationSet:
 
     # -- the exact interface PreflightGenerationManifest consumes ------------
 
+    @property
+    def is_empty(self) -> bool:
+        """An exact set that clears nothing, which a clean range needs.
+
+        Distinct from every neighbouring state, and each distinction matters:
+        a MISSING prerequisite refuses at `assert_authenticated`; a file-wide
+        or wildcard authorization is refused at construction; and this clears
+        no occurrence at all, so a range with even one finding blocks."""
+        return not self._records
+
     def clears_occurrence(self, *, literal_sha256: str, path_bytes_b64: str,
                           atom_id, occurrence_index: int,
                           literal_categories=None) -> bool:
@@ -630,6 +654,7 @@ class VerifiedLiteralAuthorizationSet:
         return {"authority_class": self.authority_class,
                 "confers_real_call_authority": True,
                 "entry_count": len(self._records),
+                "clears_nothing": self.is_empty,
                 "literal_authorization_set_sha256": self._set_sha256,
                 "scanner_policy_sha256": self._scanner_policy_sha256,
                 "occurrence": dict(self._occurrence),
@@ -724,15 +749,36 @@ def _authenticate_literal_set(envelope, *, verifier) -> tuple:
     subject digests AND the exact expected occurrence count. Each member is a
     genuine `authority.literal_claim` inside its own protected envelope, so a
     member cannot be moved between sets and the set cannot be satisfied by
-    approving one literal when two were required."""
-    members = envelope.get("member_envelopes")
-    if not isinstance(members, (list, tuple)) or not members:
-        refuse("category=literal_authorization_set_has_no_members — one "
-               "generic record does not approve a set of occurrences")
+    approving one literal when two were required.
+
+    **The set envelope is authenticated FIRST** (EX5-R22). It used to be the
+    other way round, with a hard refusal on an empty member list before the
+    operator's statement had been read at all — which made "the approved set is
+    empty" inexpressible, and a clean range therefore required a FAKE literal
+    authorization to satisfy prerequisite 10. Reading the operator's statement
+    before counting what was supplied against it is also simply the right
+    order: how many members are expected is something they said."""
     if envelope.get("candidate_claim") is not None:
         refuse("category=literal_set_envelope_carries_a_claim — the set "
                "envelope binds its members by digest; a claim on the set "
                "itself is a member wearing the set's authority")
+    if envelope.get("candidate_claim_self_sha256") is not None:
+        refuse("category=literal_set_envelope_carries_a_claim_self_hash")
+
+    checked = envelopes.authenticate_envelope(
+        envelope, prerequisite_key=LITERAL_PREREQUISITE,
+        occurrence=verifier._occurrence, trust_store=verifier._trust_store,
+        observed_now=verifier._observed_now, revocations=verifier._revocations)
+    payload = checked["typed_payload"]
+
+    members = envelope.get("member_envelopes")
+    if not isinstance(members, (list, tuple)):
+        refuse("category=literal_set_member_envelopes_not_a_list")
+    if not members and payload["expected_occurrence_count"] != 0:
+        refuse(f"category=literal_authorization_set_has_no_members "
+               f"expected={payload['expected_occurrence_count']} — the "
+               "operator approved occurrences and none were supplied; one "
+               "generic record does not approve a set of occurrences")
 
     promoted, self_hashes, subjects = [], [], []
     for index, member in enumerate(members):
@@ -742,14 +788,6 @@ def _authenticate_literal_set(envelope, *, verifier) -> tuple:
         promoted.append(verified.promoted)
         self_hashes.append(verified.candidate_claim_self_sha256)
         subjects.append(verified.authorization_subject_sha256)
-
-    checked = envelopes.authenticate_envelope(
-        envelope, prerequisite_key=LITERAL_PREREQUISITE,
-        occurrence=verifier._occurrence, trust_store=verifier._trust_store,
-        observed_now=verifier._observed_now, revocations=verifier._revocations)
-    payload = checked["typed_payload"]
-    if envelope.get("candidate_claim_self_sha256") is not None:
-        refuse("category=literal_set_envelope_carries_a_claim_self_hash")
 
     if sorted(self_hashes) != list(payload["member_claim_self_sha256_in_order"]):
         refuse("category=literal_set_member_claims_do_not_match — the set the "
