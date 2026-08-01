@@ -17,13 +17,30 @@ and this module is the seam. Everything the lane needs from the engine comes
 through here, so there is one place to audit for "did the trusted side reach
 into candidate internals", rather than a scatter of imports across the runtime.
 
-**Why the import is deferred and path-checked.** `verifier` is candidate code
-in D0 — any import of it there means the artifact under review reached the
-process — and it is TRUSTED code in D1/D2, where it arrives inside the
-operator-approved engine artifact. The same module name means opposite things
-depending on where it was loaded from, so the check cannot be a name check once
-the artifact is unpacked. `load_engine` resolves the import root, imports, and
-then proves every loaded module's file lives under that root.
+**The artifact is NEVER imported as `verifier` (EX6-R02).** It used to be, and
+that was the defect. `load_engine` inserted the artifact root on `sys.path` and
+imported `verifier`, so one interpreter could hold two packages called
+`verifier` — the artifact's and the candidate checkout's — whose classes are
+different objects. Everything downstream then depended on which one won:
+`pytest.raises(BlockingError)` caught the wrong class, and
+`assert_no_candidate_import` needed an `engine_root` exception carved into it
+because it could no longer tell the two apart by name.
+
+The engine's modules use ONLY relative imports — `from .errors import`, never
+`from verifier.errors import`, verified by `test_the_engine_uses_only_relative_
+imports` — so the package is relocatable. `EngineSession` loads it under a
+top-level name derived from the artifact root:
+
+    trustedengine_<16 hex of the root path>
+
+Nothing named `verifier` enters `sys.modules`, `sys.path` is not touched at all,
+and the origin question is answered by the module NAME as well as by its file.
+That makes `assert_no_candidate_import` absolute again: in a credential-bearing
+runner, ANY `verifier` module is the candidate, full stop.
+
+The logical keys stay `verifier.executor` and so on, because that is what the
+engine's own documentation calls them and what a reader is looking for. The
+actual `sys.modules` name is the alias, and `record()` reports both.
 
 **What this module must never grow.** A second scanner, origin map, PIN schema,
 capability table, review policy, request builder, response schema, batcher,
@@ -36,7 +53,10 @@ refusals that protect the boundary.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import importlib.util
 import os
+import sys
 
 from .errors import refuse
 
@@ -95,6 +115,14 @@ REQUIRED_ENGINE_SYMBOLS = {
                           "PREPARE_CORE_VERSION"),
     "verifier.counting": ("SOURCE_PROVIDER", "SOURCE_MOCK", "COUNT_PATH"),
     "verifier.capabilities": ("policy_record", "policy_digest", "capability"),
+    # The two the lane had been reaching for by direct `import verifier.…`,
+    # which is exactly what this seam exists to prevent. `canon.b64` encodes
+    # every path identity the lane passes to the executor, and
+    # `unitpayload.index_atom_records` is how a literal occurrence is located
+    # in the transmitted bytes. Both were being imported from the CHECKOUT in
+    # the test process — a second engine instance, silently.
+    "verifier.canon": ("b64", "canonical_json", "digest", "sha256_hex"),
+    "verifier.unitpayload": ("structured_unit", "index_atom_records"),
 }
 
 #: What the lane refuses to find in a core result. `prepare_review_plan_core`
@@ -163,34 +191,95 @@ def assert_layout(engine_root: str) -> dict:
     return {"engine_root": root, "packages": list(ENGINE_PACKAGES)}
 
 
+#: The top-level package name the artifact's `verifier` is loaded under. The
+#: suffix is derived from the artifact ROOT rather than from the artifact
+#: digest, because two roots holding identical bytes are still two extractions
+#: and a test that loads both must be able to tell them apart.
+ENGINE_NAMESPACE_PREFIX = "trustedengine"
+
+
+def engine_namespace(engine_root: str) -> str:
+    """The alias this artifact's package is imported under.
+
+    Deterministic in the root, so a second `load_engine` of the same root
+    reuses the same modules instead of building a third copy of the engine in
+    one process."""
+    digest = hashlib.sha256(
+        os.path.realpath(engine_root).encode("utf-8")).hexdigest()[:16]
+    return f"{ENGINE_NAMESPACE_PREFIX}_{digest}"
+
+
+def _import_aliased(root: str, alias: str, logical: str):
+    """Import one engine module under the alias, or refuse naming it.
+
+    `verifier.executor` becomes `<alias>.executor`. The engine's own imports
+    are relative, so they resolve inside the alias and never reach a `verifier`
+    on `sys.path` — which is the whole point: there is no `sys.path` entry to
+    reach."""
+    package, _, submodule = logical.partition(".")
+    if package not in ENGINE_PACKAGES:
+        refuse(f"category=engine_module_not_in_an_engine_package "
+               f"module={logical} packages={list(ENGINE_PACKAGES)}")
+    if package in sys.modules and not sys.modules[package].__name__.startswith(
+            ENGINE_NAMESPACE_PREFIX):
+        # Not fatal here — `assert_no_candidate_import` is the check that
+        # decides whether a loaded candidate package is permitted. This only
+        # guarantees the LOADER never resolves to it.
+        pass
+    top = f"{alias}" if package == "verifier" else f"{alias}__{package}"
+    if top not in sys.modules:
+        package_dir = os.path.join(root, package)
+        init = os.path.join(package_dir, "__init__.py")
+        if not os.path.isfile(init):
+            refuse(f"category=engine_package_absent package={package} — the "
+                   "approved artifact does not carry it")
+        spec = importlib.util.spec_from_file_location(
+            top, init, submodule_search_locations=[package_dir])
+        if spec is None or spec.loader is None:
+            refuse(f"category=engine_package_unloadable package={package}")
+        module = importlib.util.module_from_spec(spec)
+        # Registered BEFORE exec: a package whose submodules import each other
+        # relatively needs its own name resolvable while its `__init__` runs.
+        sys.modules[top] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:  # noqa: BLE001 — the class, never the text
+            del sys.modules[top]
+            refuse(f"category=engine_package_import_failed package={package} "
+                   f"exception_class={type(exc).__name__} — the message is not "
+                   "reported; an import error quotes source lines")
+    if not submodule:
+        return sys.modules[top]
+    try:
+        return importlib.import_module(f"{top}.{submodule}")
+    except ImportError as exc:
+        refuse(f"category=engine_module_absent module={logical} "
+               f"exception_class={type(exc).__name__} — the approved "
+               "artifact does not carry the engine this lane was written "
+               "against, and falling back to anything else would let the "
+               "reviewed branch choose its own reviewer")
+
+
 def load_engine(engine_root: str) -> dict:
     """Import the engine from the artifact and prove it came from there.
 
-    Returns the loaded modules by name. Nothing else in the trusted lane may
-    import `verifier` — this is the single seam, so this is the single place
-    the origin check has to hold."""
-    import importlib
-    import sys
+    Returns the loaded modules by their LOGICAL names (`verifier.executor`),
+    which is what the engine's documentation calls them and what a reader is
+    looking for. The actual `sys.modules` name is the alias, and both appear in
+    the returned record.
 
+    Nothing else in the trusted lane may import the engine — this is the single
+    seam, so this is the single place the origin check has to hold."""
     from .enginepolicy import assert_not_candidate_checkout
 
     layout = assert_layout(engine_root)
     root = layout["engine_root"]
     assert_not_candidate_checkout(root)
-
-    if root not in sys.path:
-        sys.path.insert(0, root)
+    alias = engine_namespace(root)
 
     modules = {}
     for name, symbols in sorted(REQUIRED_ENGINE_SYMBOLS.items()):
-        try:
-            module = importlib.import_module(name)
-        except ImportError as exc:
-            refuse(f"category=engine_module_absent module={name} "
-                   f"exception_class={type(exc).__name__} — the approved "
-                   "artifact does not carry the engine this lane was written "
-                   "against, and falling back to anything else would let the "
-                   "reviewed branch choose its own reviewer")
+        module = _import_aliased(root, alias, name)
         assert_module_loaded_from(module, root=root, name=name)
         missing = [s for s in symbols if not hasattr(module, s)]
         if missing:
@@ -198,7 +287,93 @@ def load_engine(engine_root: str) -> dict:
                    f"symbols={missing} — the artifact carries a different "
                    "version of the engine than this bridge calls")
         modules[name] = module
-    return {**layout, "modules": modules}
+    return {**layout, "modules": modules, "namespace": alias,
+            "honest_scope": (
+                "every module above was loaded from a file under the approved "
+                "root AND is named under this artifact's own namespace. The "
+                "second half is what makes the first non-negotiable: there is "
+                "no `verifier` on sys.path for an import to fall back to")}
+
+
+def unload_engine(engine_root: str) -> dict:
+    """Remove every module this artifact contributed, and nothing else.
+
+    The counterpart `load_engine` never had. Used by `EngineSession` and by the
+    isolation regressions; production does not call it, because a trusted run
+    is one artifact in one fresh process and unloading at the end would only be
+    tidying up before exit.
+
+    Scoped by the alias prefix, so it cannot remove a module some other loader
+    put there — which is exactly what the old purge did."""
+    alias = engine_namespace(engine_root)
+    removed = sorted(name for name in list(sys.modules)
+                     if name == alias or name.startswith(alias + ".")
+                     or name.startswith(alias + "__"))
+    for name in removed:
+        del sys.modules[name]
+    return {"namespace": alias, "removed": removed,
+            "removed_count": len(removed)}
+
+
+class EngineSession:
+    """Load one artifact, and prove the process is unchanged afterwards.
+
+    The mandate's alternative to a subprocess, and it is only worth anything if
+    the restoration is EXACT rather than approximate — so this asserts it
+    rather than performing it and hoping. On exit:
+
+    * every module the artifact added is removed, by alias prefix;
+    * `sys.path` is compared to the entry snapshot and refuses on any drift;
+    * every module object that existed on entry is still the SAME object.
+
+    That third check is the one that matters. Removing the artifact's modules
+    is easy; proving nothing else moved is what a reader needs, because the
+    failure this exists to prevent — the checkout's `verifier` being silently
+    swapped for the artifact's — shows up as a changed object under an
+    unchanged name.
+    """
+
+    def __init__(self, engine_root: str):
+        self.engine_root = engine_root
+        self.namespace = engine_namespace(engine_root)
+        self._modules_before: dict = {}
+        self._path_before: list = []
+        self.engine = None
+
+    def __enter__(self):
+        self._modules_before = dict(sys.modules)
+        self._path_before = list(sys.path)
+        self.engine = load_engine(self.engine_root)
+        return self.engine
+
+    def __exit__(self, exc_type, exc, tb):
+        # Remove what this session ADDED, then put back exactly what was there.
+        # Removing the artifact's modules unconditionally would be wrong when
+        # the engine was already loaded on entry: the session did not load it,
+        # and unloading it is a side effect the caller did not ask for. Found
+        # by `test_an_engine_session_restores_the_process_exactly`, which ran
+        # after another test had already loaded the same root.
+        unload_engine(self.engine_root)
+        for name, module in self._modules_before.items():
+            if name.startswith(self.namespace):
+                sys.modules[name] = module
+        if list(sys.path) != self._path_before:
+            added = [p for p in sys.path if p not in self._path_before]
+            removed = [p for p in self._path_before if p not in sys.path]
+            refuse(f"category=engine_session_leaked_sys_path "
+                   f"added={len(added)} removed={len(removed)} — the paths are "
+                   "not reported; they carry the runner layout. A session that "
+                   "leaves an import root behind changes what every later "
+                   "import resolves to")
+        changed = sorted(name for name, module in self._modules_before.items()
+                         if sys.modules.get(name) is not module)
+        if changed:
+            refuse(f"category=engine_session_replaced_a_module "
+                   f"modules={changed[:8]} count={len(changed)} — a module "
+                   "that existed before the session is a different object "
+                   "after it, so every class identity taken from it before is "
+                   "now wrong")
+        return False
 
 
 def assert_module_loaded_from(module, *, root: str, name: str) -> dict:
