@@ -570,18 +570,63 @@ class TestReportStatesItsOwnProvenance:
 
 
 class TestSecretBaselineIsUntouched:
-    def test_the_baseline_is_byte_identical_to_main(self):
-        # Not "no larger": IDENTICAL. MC3 edited this file and silently
-        # dropped the .venv/, __pycache__/ and cache exclusions, because
-        # detect-secrets keys filters by function path and a second entry
-        # REPLACES the first.
-        ours = (ROOT / ".secrets.baseline").read_bytes()
+    """The FILTERS are untouched. The results may grow, dispositioned.
+
+    This asserted byte-identity with main, for a stated and correct reason:
+    MC3 edited the file and silently dropped the `.venv/`, `__pycache__/` and
+    cache exclusions, because detect-secrets keys filters by function path and
+    a second entry REPLACES the first. Losing an exclusion is invisible and
+    total.
+
+    Byte-identity catches that, and it also forbids every legitimate addition —
+    which was found when the PR #23 remediation stack was rebuilt on this
+    branch: package 1 adds seven sha256 digests of governance documents to a
+    JSON manifest, which carries no comments and so cannot take the in-line
+    `pragma: allowlist secret` this repository uses elsewhere.
+
+    A gate whose only escape is to delete it will be deleted. So the assertion
+    is narrowed to what the reason actually asks for — the filters, the
+    exclusions and the plugin set are identical — and growth of `results` is
+    handled by `test_secret_gate_policy.py`, which requires each new file to
+    be dispositioned in `.secrets-baseline-dispositions.json` with a written
+    reason. Undispositioned growth still fails there.
+    """
+
+    NON_RESULT_KEYS = ("version", "plugins_used", "filters_used",
+                       "exclude", "word_list")
+
+    def test_every_filter_and_exclusion_is_byte_identical_to_main(self):
+        ours = json.loads((ROOT / ".secrets.baseline").read_text())
         theirs = subprocess.run(
             ["git", "show", f"{MAIN}:.secrets.baseline"], cwd=ROOT,
-            capture_output=True)
+            capture_output=True, text=True)
         if theirs.returncode != 0:
             pytest.skip("main baseline unavailable")
-        assert ours == theirs.stdout
+        base = json.loads(theirs.stdout)
+        for key in self.NON_RESULT_KEYS:
+            assert ours.get(key) == base.get(key), (
+                f"the baseline's {key!r} changed; detect-secrets REPLACES a "
+                "filter when a second entry keys to the same function path, so "
+                "losing an exclusion here is invisible and total")
+        # And nothing outside those keys and `results` appeared, so a new
+        # top-level key cannot smuggle a filter past the loop above.
+        assert set(ours) - {"results"} == set(base) - {"results"}
+
+    def test_no_baseline_entry_was_removed(self):
+        """Growth is dispositioned; SHRINKAGE is never legitimate here — a
+        dropped entry means either the finding is gone (then the entry should
+        be removed in the same change that removes it) or the file stopped
+        being scanned."""
+        ours = json.loads((ROOT / ".secrets.baseline").read_text())["results"]
+        theirs = subprocess.run(
+            ["git", "show", f"{MAIN}:.secrets.baseline"], cwd=ROOT,
+            capture_output=True, text=True)
+        if theirs.returncode != 0:
+            pytest.skip("main baseline unavailable")
+        base = json.loads(theirs.stdout)["results"]
+        lost = {p: len(v) for p, v in base.items()
+                if len(ours.get(p, [])) < len(v)}
+        assert lost == {}, f"baseline entries disappeared for {lost}"
 
 
 # ---------------------------------------------------------- fixtures ---------

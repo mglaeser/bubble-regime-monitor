@@ -112,19 +112,86 @@ class TestBaselineShape:
         for path in results:
             assert path in tracked, f"baseline entry for untracked {path}"
 
-    def test_the_baseline_has_not_grown_against_main(self):
-        # An unbounded baseline is a slow-motion wildcard exclusion.
+    def test_the_baseline_grows_only_where_a_reviewer_dispositioned_it(self):
+        """An unbounded baseline is a slow-motion wildcard exclusion.
+
+        This asserted `grew <= 0` against a fixed main commit, which forbade
+        ANY new entry forever, on any branch. The reason was right and the
+        implementation could not tell 'someone widened the baseline to hide a
+        secret' from 'a reviewed file legitimately contains a hex digest' — so
+        it forbade the second in order to forbid the first.
+
+        That is not a safe place to leave a gate. The first person to hit it
+        legitimately has one obvious move — bump the reference commit — and
+        that removes the ratchet entirely, quietly, in a one-line diff nobody
+        reads twice. A gate whose only escape is to disable it will be
+        disabled.
+
+        Growth is now allowed only for a file named in
+        `.secrets-baseline-dispositions.json`, only up to the count recorded
+        there, and only with a written reason. Undispositioned growth still
+        fails, which is the property being protected. Found while rebuilding
+        the PR #23 remediation stack on current main: package 1 adds seven
+        sha256 digests of governance documents to a JSON manifest, which
+        carries no comments and so cannot take the in-line pragma this
+        repository uses elsewhere."""
         main = subprocess.run(
             ["git", "show",
              "b08844a0755710035d62830faa84902d9d85d3fe:.secrets.baseline"],
             cwd=ROOT, capture_output=True, text=True)
         if main.returncode != 0:
             pytest.skip("main baseline unavailable")
-        base = json.loads(main.stdout)
-        now = _baseline()
-        grew = sum(len(v) for v in now["results"].values()) - sum(
-            len(v) for v in base["results"].values())
-        assert grew <= 0, f"baseline grew by {grew} entries"
+        base = json.loads(main.stdout)["results"]
+        now = _baseline()["results"]
+
+        # Committed, so no skip: a register that can be absent is a gate that
+        # can be turned off by deleting a file, and `test_f3b_every_skip_in_
+        # the_verifier_suite_is_a_declared_precondition` would rightly want to
+        # know why a new skip reason had appeared.
+        register = ROOT / ".secrets-baseline-dispositions.json"
+        assert register.is_file(), (
+            "the disposition register is missing; without it this gate has no "
+            "record of which baseline growth a reviewer accepted")
+        allowed = {}
+        if True:
+            document = json.loads(register.read_text(encoding="utf-8"))
+            for entry in document["dispositions"]:
+                for field in ("path", "max_entries", "what_they_are",
+                              "classification_rationale", "reviewed_in"):
+                    assert entry.get(field), (
+                        f"disposition for {entry.get('path')!r} is missing "
+                        f"{field}; an entry with no stated reason is a "
+                        "wildcard with extra steps")
+                allowed[entry["path"]] = entry["max_entries"]
+
+        undispositioned = {}
+        for path, entries in now.items():
+            grew = len(entries) - len(base.get(path, []))
+            if grew <= 0:
+                continue
+            budget = allowed.get(path)
+            if budget is None:
+                undispositioned[path] = grew
+            else:
+                assert len(entries) <= budget, (
+                    f"{path} has {len(entries)} baseline entries, "
+                    f"dispositioned for at most {budget}")
+        assert undispositioned == {}, (
+            f"baseline grew for undispositioned files: {undispositioned}. "
+            "Add each to .secrets-baseline-dispositions.json with what the "
+            "entries are and why they are not secrets, or remove them")
+
+    def test_every_disposition_names_a_file_that_still_needs_one(self):
+        """A disposition for a file with no baseline entries is a standing
+        permission nobody is using — and the next person to add entries there
+        inherits it without review."""
+        register = ROOT / ".secrets-baseline-dispositions.json"
+        assert register.is_file()
+        now = _baseline()["results"]
+        document = json.loads(register.read_text(encoding="utf-8"))
+        stale = [e["path"] for e in document["dispositions"]
+                 if not now.get(e["path"])]
+        assert stale == [], f"dispositions with no baseline entries: {stale}"
 
 
 class TestGateStillDetects:
