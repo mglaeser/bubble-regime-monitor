@@ -26,7 +26,7 @@ from . import (
     phases,
     protectedstate,
     signing,
-    statuspublish,
+    statustransport,
     transport,
     trustedverifier,
 )
@@ -125,6 +125,18 @@ def main(environ=None) -> dict:
     opener = transport.open_https(phase=phases.D2,
                                   max_response_bytes=adapter.MAX_RESPONSE_BYTES)
     signing_key = signing.read_signing_key(phase=phases.D2)
+    # R07. The status publisher is REAL now. `statuspublish.publish` refused,
+    # and the refusal was honest about needing a token this branch must not
+    # hold — but it was also standing in for code that did not exist, and only
+    # the first half of that is legitimate. The token is obtained here, behind
+    # the phase gate, exactly like the provider credential; everything the
+    # publisher does with it is exercised in D0 against a fake server.
+    publisher = statustransport.bind(
+        opener=transport.open_https(
+            phase=phases.D2,
+            max_response_bytes=statustransport.MAX_RESPONSE_BYTES),
+        token=statustransport.read_installation_token(phase=phases.D2),
+        phase=phases.D2)
 
     engine = enginebridge.load_engine(values["TRUSTED_ENGINE_ROOT"])
     lane_verifier = trustedverifier.bind(
@@ -172,7 +184,7 @@ def main(environ=None) -> dict:
         opener=opener,
         credential=credential,
         signing_key=signing_key,
-        publisher=statuspublish.publish,
+        publisher=publisher,
         trusted_run={"id": values["TRUSTED_RUN_ID"],
                      "attempt": values["TRUSTED_RUN_ATTEMPT"],
                      "url": values["TRUSTED_RUN_URL"]},

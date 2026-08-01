@@ -216,6 +216,13 @@ jobs:
           # an approval to generate by accident.
           TRUSTED_VERIFIER_OPENAI_KEY: ${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}
           TRUSTED_EVIDENCE_SIGNING_KEY: ${{ secrets.TRUSTED_EVIDENCE_SIGNING_KEY }}
+          # R07. The installation token that sets the trusted status on the
+          # candidate head. A THIRD capability, in its own variable and read
+          # through its own function: a lane that obtained the provider key
+          # and this one through one call would grant both wherever it
+          # granted either. Environment-scoped like the others, so it is
+          # unreachable from an unapproved ref.
+          TRUSTED_STATUS_TOKEN: ${{ secrets.TRUSTED_STATUS_TOKEN }}
           # `TRUSTED_PLAN_SHA256` is GONE, and so is
           # `TRUSTED_ENGINE_SOURCE_SHA256`. The first was a digest handed to D2
           # beside a plan, which is not a binding; the second was a second copy

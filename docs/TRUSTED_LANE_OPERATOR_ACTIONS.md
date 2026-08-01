@@ -86,6 +86,7 @@ workflow, which turns the trusted gate into a self-signed claim.
 | `d0-containment` | D0 triggers on `push` and `workflow_dispatch` only, **never on `pull_request`**, so it never reports on a candidate head. Requiring it deadlocks every PR. (An earlier version of this packet listed it under "require now". That was wrong.) |
 | `probe` | `workflow_dispatch` only — same deadlock. |
 | `d1-containment-gate`, `d2-containment-gate` | internal jobs of a **main-dispatched** trusted run; their checks land on main's commit, not on a candidate head. |
+| `build-engine` | `workflow_dispatch` only — same deadlock. And a green build says the engine artifact was *produced*, never that anyone approved it; approval of its five digests is item 14. |
 
 `test (3.12)` is the string to configure, not `test` — a matrix job publishes
 its check name with the matrix values appended.
@@ -146,6 +147,67 @@ approving spend and model output that becomes review evidence. D1 and D2 are
 staged as two files (`d1-trusted-count.yml.template`,
 `d2-trusted-generation.yml.template`) with two different `environment:` names
 precisely so that approving one cannot approve the other.
+
+---
+
+## Group 6 — the runner inputs (not prerequisites, but D1/D2 will not start
+without them)
+
+These are not attestations, so they are not in the sixteen. They are the
+concrete values the workflow steps read, and the lane refuses by name when any
+is absent — a default for any of them would be a check that quietly stopped
+running.
+
+### Environment secrets (scope: environment only, never repository or org)
+
+| name | environment | what it is | who else may hold it |
+|---|---|---|---|
+| `TRUSTED_VERIFIER_OPENAI_KEY` | `trusted-verifier`, `trusted-verifier-generation` | the provider key (prerequisite 5) | nobody |
+| `TRUSTED_EVIDENCE_SIGNING_KEY` | both | signs the evidence envelope and the executable plan | nobody |
+| `TRUSTED_OPERATOR_TRUST_STORE` | both | the MAC keys that make an operator envelope authentic | nobody |
+| `TRUSTED_STATUS_TOKEN` | both | an installation token with **Statuses: write**, used only to set `trusted-verifier-count` / `trusted-cross-vendor-review` on the candidate commit | nobody |
+| `TRUSTED_PROTECTED_STATE_OBSERVATION` | both | the branch-protection and environment records, as JSON. Needs repository **administration: read**, which a workflow token cannot have — so it is taken out of band and pasted here |
+| `TRUSTED_OPERATOR_RECORDS` | both | the authenticated prerequisite envelopes, as JSON |
+| `TRUSTED_OPERATOR_REVOCATIONS` | both | the revocation list. **Required.** "No list" is not "no revocations", and a lane that reads a missing list as empty cannot be told to stop |
+
+`TRUSTED_STATUS_TOKEN` is a **third** capability with its own variable and its
+own reader (`statustransport.read_installation_token`). A lane that obtained the
+provider key and this one through one call would grant both wherever it granted
+either — and the two are not comparable: one spends money, one marks a pull
+request green.
+
+### Repository variables
+
+| name | what it is |
+|---|---|
+| `TRUSTED_ENGINE_ARTIFACT_SHA256` | the approved artifact digest. The release supplies the bytes; **this** supplies the number they are checked against, and a release that supplied both would be checking itself |
+| `TRUSTED_ENGINE_RELEASE_TAG` | which release the artifact and its identity record are downloaded from |
+
+### The engine release
+
+Run `trusted-engine-build` (dispatch-only, holds no credential, `contents:
+read`). It builds the artifact deterministically from two exact commits, proves
+determinism by rebuilding and comparing, and retains `engine.tar.gz` plus
+`engine-identity.json`. Download both, create the release, set the two variables
+above, and approve the five digests in the identity record as prerequisite 14.
+
+The build **retains rather than releases** on purpose: publishing needs
+`contents: write`, and a build that can write to the repository can move the tag
+it publishes under.
+
+A green `build-engine` says the artifact was **produced**. It does not say
+anyone approved it — that is prerequisite 14, and it is yours.
+
+### D1 → D2
+
+D2 is dispatched with `d1_run_id`, and downloads D1's two signed documents from
+that run's private artifacts. Not a digest: a digest identifies a plan, and
+whoever hands D2 the plan chooses which plan gets identified.
+
+The executable plan is **private**. It carries the exact prompt bytes of every
+request — the candidate's code and the reviewer's questions — so it lives only
+in a retained artifact with a short retention, and only its digest appears in
+anything a pull request can see. That is what prerequisite 13 approves.
 
 ---
 

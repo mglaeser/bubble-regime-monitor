@@ -81,6 +81,7 @@ from trustedlane import (  # noqa: E402
     signing,
     statusnames,
     statuspublish,
+    statustransport,
     transport,
     trustedverifier,
     workflowfile,
@@ -132,7 +133,15 @@ NETWORK_EXEMPT = {"transport.py"}
 #: Reading the provider key is `transport.py`; reading the evidence signing key
 #: is `signing.py`. Both are credential-bearing by design and both refuse
 #: outside D1/D2.
-CREDENTIAL_EXEMPT = {"transport.py", "signing.py"}
+#: Modules that read a capability from the environment BY DESIGN. Each is
+#: exempt from the blanket AST scan and covered instead by its own tests, which
+#: drive the phase gate rather than grep for the name.
+#:
+#: `statustransport.py` joined them with R07. It reads the installation token
+#: that sets a status on the candidate head — a different capability from the
+#: provider key and deliberately obtained through a different function, so a
+#: lane granted one is not granted the other.
+CREDENTIAL_EXEMPT = {"transport.py", "signing.py", "statustransport.py"}
 
 
 def _lane_sources():
@@ -10204,3 +10213,216 @@ def test_the_candidate_package_still_refuses_to_fill_in_the_built_fields():
     with _refusal("engine_candidate_claims_unavailable_fields"):
         enginebuild.assert_is_only_a_candidate(
             {**record, "artifact_sha256": "e" * 64})
+
+
+# --------------------------------------------------------------------------
+# R07/R20 — the status publisher is real.
+#
+# `statuspublish.publish` refused, and the refusal named a genuine operator
+# dependency: publishing needs an installation token a reviewed branch must not
+# hold. It was also standing in for code that did not exist, and only the first
+# half of that is legitimate. Everything except OBTAINING the token is below,
+# driven against a fake server exactly as the provider transport is.
+# --------------------------------------------------------------------------
+
+FAKE_STATUS_TOKEN = "ghs-not-a-real-token-000000000"  # pragma: allowlist secret
+
+
+def _status_request(**over):
+    return statuspublish.status_request(**{
+        "repository_numeric_id": REPOSITORY_NUMERIC_ID,
+        "candidate_head_sha": SHA_A,
+        "context": "trusted-verifier-count",
+        "state": "pending",
+        "description": "trusted count in progress",
+        "target_url": "https://github.com/x/y/actions/runs/77",
+        "trusted_run_id": 77,
+        "trusted_run_attempt": 1, **over})
+
+
+def _status_server(status=201, record=None, body=b'{"id":1}'):
+    def opener(method, url, headers, payload):
+        if record is not None:
+            record.append({"method": method, "url": url, "headers": headers,
+                           "body": payload})
+        return status, body
+
+    return opener
+
+
+def test_the_status_token_is_never_read_in_d0():
+    """The phase gate, driven rather than grepped."""
+    with _refusal("phase_not_deployed"):
+        statustransport.read_installation_token(
+            phase=phases.D1, environ={statustransport.TOKEN_ENV: "x" * 40})
+    with _refusal("status_token_phase_not_permitted"):
+        statustransport.read_installation_token(phase="D0")
+
+
+@pytest.mark.parametrize("value,category", [
+    (" " + "x" * 40, "status_token_has_surrounding_whitespace"),
+    ("x" * 40 + "\n", "status_token_has_surrounding_whitespace"),
+    ("x" * 5, "status_token_too_short"),
+    ("xx xx" + "y" * 40, "status_token_contains_whitespace"),
+    (None, "status_token_not_a_string"),
+])
+def test_a_malformed_status_token_is_refused(value, category):
+    """Shape checks live outside the phase gate so they are reachable in D0.
+    Inside it they would only be provable by grepping the source, and a test
+    that greps source asks whether a string is present rather than whether a
+    value is refused."""
+    with _refusal(category):
+        statustransport.assert_token_shape(value)
+
+
+def test_the_publisher_posts_to_the_exact_candidate_head():
+    """Not a ref. A status on a branch name follows the branch, and the whole
+    point of R20 is that a trusted green names the commit that was reviewed."""
+    seen = []
+    publisher = statustransport.bind(opener=_status_server(record=seen),
+                                     token=FAKE_STATUS_TOKEN, phase="D1")
+    record = publisher(_status_request())
+    assert seen[0]["url"] == (
+        f"https://api.github.com/repos/{CANONICAL_REPOSITORY}/statuses/{SHA_A}")
+    assert seen[0]["method"] == "POST"
+    assert record["candidate_head_sha"] == SHA_A
+    assert record["http_status"] == 201
+
+
+def test_the_status_post_record_carries_no_token():
+    """The token is joined to a COPY of the headers inside `send`, so the
+    record a caller holds and digests never held it."""
+    seen = []
+    post = statustransport.build_post(_status_request(),
+                                      repository=CANONICAL_REPOSITORY)
+    assert post["carries_credential"] is False
+    assert FAKE_STATUS_TOKEN not in json.dumps(post, default=str)
+    publisher = statustransport.bind(opener=_status_server(record=seen),
+                                     token=FAKE_STATUS_TOKEN, phase="D1")
+    publisher(_status_request())
+    # It DID reach the wire — that is the transport's job.
+    assert any("authorization" in {k.lower() for k in call["headers"]}
+               for call in seen)
+    assert FAKE_STATUS_TOKEN not in json.dumps(publisher.record(), default=str)
+
+
+def test_the_publisher_refuses_a_repository_it_was_handed():
+    """A caller-supplied repository is a caller choosing which pull request
+    gets a green trusted status."""
+    with _refusal("status_repository_not_canonical"):
+        statustransport.build_post(_status_request(), repository="evil/repo")
+
+
+def test_the_publisher_refuses_a_request_that_did_not_go_through_validation():
+    with _refusal("status_request_not_validated"):
+        statustransport.build_post({"state": "success"},
+                                   repository=CANONICAL_REPOSITORY)
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.github.com/repos/mglaeser/bubble-regime-monitor/issues/1",
+    "https://evil.example/repos/mglaeser/bubble-regime-monitor/statuses/" + SHA_A,
+    "https://api.github.com/repos/other/repo/statuses/" + SHA_A,
+])
+def test_the_endpoint_gate_refuses_a_url_the_publisher_did_not_build(url):
+    """The mirror of the count and generation endpoint gates. This token cannot
+    spend money, but it can mark a pull request green."""
+    with _refusal("status_endpoint_not_permitted"):
+        statustransport.assert_request_is_a_status_post(
+            {"method": "POST", "url": url}, repository=CANONICAL_REPOSITORY)
+
+
+def test_the_endpoint_gate_refuses_a_ref_in_the_url():
+    """`/statuses/main` is accepted by the API and is exactly the thing that
+    must not happen: it resolves to whatever main points at now."""
+    with _refusal("candidate_sha_not_a_commit_sha"):
+        statustransport.assert_request_is_a_status_post(
+            {"method": "POST",
+             "url": f"https://api.github.com/repos/{CANONICAL_REPOSITORY}"
+                    "/statuses/main"},
+            repository=CANONICAL_REPOSITORY)
+
+
+def test_a_rejected_publication_reports_the_code_and_never_the_body():
+    """A GitHub error body echoes the description and the target URL, and on an
+    auth failure it can echo request headers."""
+    publisher = statustransport.bind(
+        opener=_status_server(status=403,
+                              body=b'{"message":"Bad credentials Bearer ghs_x"}'),
+        token=FAKE_STATUS_TOKEN, phase="D1")
+    with pytest.raises(errors.LaneRefusal) as caught:
+        publisher(_status_request())
+    assert "http_status=403" in caught.value.reason
+    assert "Bearer" not in caught.value.reason
+    assert "Bad credentials" not in caught.value.reason
+
+
+def test_a_transport_failure_reports_the_class_and_never_the_text():
+    """A transport error can carry the whole Authorization header."""
+    def exploding(method, url, headers, body):
+        raise OSError(f"connection failed: {headers.get('authorization')}")
+
+    publisher = statustransport.bind(opener=exploding, token=FAKE_STATUS_TOKEN,
+                                     phase="D1")
+    with pytest.raises(errors.LaneRefusal) as caught:
+        publisher(_status_request())
+    assert "exception_class=OSError" in caught.value.reason
+    assert FAKE_STATUS_TOKEN not in caught.value.reason
+
+
+def test_an_oversized_status_response_is_refused():
+    publisher = statustransport.bind(
+        opener=_status_server(
+            body=b"x" * (statustransport.MAX_RESPONSE_BYTES + 1)),
+        token=FAKE_STATUS_TOKEN, phase="D1")
+    with _refusal("status_response_too_large"):
+        publisher(_status_request())
+
+
+def test_the_publisher_bounds_how_many_statuses_one_run_may_set():
+    """A run publishes pending plus one terminal. A loop that republished on
+    every retry would spam the timeline, and the ordering rules alone would not
+    stop it."""
+    publisher = statustransport.TrustedStatusPublisher(
+        opener=_status_server(), token=FAKE_STATUS_TOKEN,
+        repository=CANONICAL_REPOSITORY, phase="D1", max_publications=2)
+    publisher(_status_request())
+    publisher(_status_request(state="success", evidence_sha256="a" * 64,
+                              description="done"))
+    with _refusal("status_publication_cap_reached"):
+        publisher(_status_request())
+
+
+def test_a_success_without_evidence_never_reaches_the_publisher():
+    """The decision lives in `status_request`, which is what makes it checkable
+    without a token — the publisher never sees an unvalidated request."""
+    with _refusal("success_without_evidence"):
+        _status_request(state="success", description="all good")
+
+
+def test_only_a_trusted_context_may_be_published():
+    """R20. An ordinary green and a trusted green must stay distinguishable,
+    and the publisher is one of the two things that keeps them apart."""
+    for context in ("test (3.12)", "d0-containment", "build-engine",
+                    "independent-verify-inactive"):
+        with _refusal("context_not_publishable"):
+            _status_request(context=context)
+    for context in statusnames.TRUSTED_STATUSES:
+        assert _status_request(context=context)["context"] == context
+
+
+def test_d1_and_d2_publish_through_the_real_publisher_now():
+    """Both CLIs used to pass `statuspublish.publish`, which refuses. The
+    refusal was honest about the token and was also standing in for code that
+    did not exist."""
+    for module in (d1cli, d2cli):
+        source = inspect.getsource(module.main)
+        assert "statustransport.bind" in source
+        assert "publisher=statuspublish.publish" not in source
+
+
+def test_the_refusing_stub_still_refuses_for_a_caller_that_has_no_token():
+    """`statuspublish.publish` stays, and stays refusing. A lane handed no
+    publisher must not silently publish nothing — it must say so."""
+    with _refusal("status_publication_not_available_in_D0"):
+        statuspublish.publish(_status_request())

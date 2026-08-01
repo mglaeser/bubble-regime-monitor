@@ -261,6 +261,13 @@ jobs:
           # resolves to nothing outside the protected environment.
           TRUSTED_VERIFIER_OPENAI_KEY: ${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}
           TRUSTED_EVIDENCE_SIGNING_KEY: ${{ secrets.TRUSTED_EVIDENCE_SIGNING_KEY }}
+          # R07. The installation token that sets the trusted status on the
+          # candidate head. A THIRD capability, in its own variable and read
+          # through its own function: a lane that obtained the provider key
+          # and this one through one call would grant both wherever it
+          # granted either. Environment-scoped like the others, so it is
+          # unreachable from an unapproved ref.
+          TRUSTED_STATUS_TOKEN: ${{ secrets.TRUSTED_STATUS_TOKEN }}
           TARGET_BASE_SHA: ${{ inputs.target_base_sha }}
           CANDIDATE_HEAD_SHA: ${{ inputs.candidate_head_sha }}
           OPERATOR_AUTHORIZATION_SHA256: ${{ inputs.operator_authorization_sha256 }}
