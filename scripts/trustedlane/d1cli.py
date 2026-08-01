@@ -38,6 +38,7 @@ import os
 
 from . import (
     CANONICAL_REPOSITORY,  # noqa: F401
+    bootstrapstate,
     candidatefetch,
     d1runtime,
     enginebridge,
@@ -56,6 +57,15 @@ REQUIRED_ENV = (
     "TRUSTED_ENGINE_ROOT",
     "TRUSTED_ENGINE_ARTIFACT_PATH",
     "TRUSTED_ENGINE_DIGEST",
+    # The five approved digests, as the protected build published them. Four
+    # describe how the artifact was made and cannot be recomputed from it; the
+    # fifth is checked against the archive this run opens.
+    "TRUSTED_ENGINE_IDENTITY_PATH",
+    # Which deployment of the trusted lane is running. Prerequisite 15 approves
+    # a branch, a head and a policy digest, and EX5-R21 compares all three
+    # against the deployment that actually dispatched.
+    "TRUSTED_BOOTSTRAP_HEAD_SHA",
+    "TRUSTED_WORKFLOW_DIR",
     "TRUSTED_RUN_ID",
     "TRUSTED_RUN_ATTEMPT",
     "TRUSTED_RUN_URL",
@@ -75,6 +85,13 @@ REQUIRED_ENV = (
     # be told to stop.
     "TRUSTED_REVOCATION_LIST_PATH",
     "TRUSTED_OBSERVED_NOW",
+    # R04/R13 + R06. Where the two SIGNED documents are written so the retain
+    # steps have files to upload and D2 has documents to download. Required,
+    # not optional: a run that produced a plan and wrote it nowhere is a run
+    # whose count can never be executed, and the failure would look like D2
+    # being misconfigured.
+    "TRUSTED_PLAN_OUTPUT_PATH",
+    "TRUSTED_COUNT_EVIDENCE_OUTPUT_PATH",
 )
 
 #: REMOVED, and the removal is the fix. `TRUSTED_MODEL_ID` let the runner name
@@ -114,6 +131,76 @@ def load_json_document(path: str, *, field: str):
     except json.JSONDecodeError as exc:
         refuse(f"category=d1_input_not_json field={field} "
                f"exception_class={type(exc).__name__}")
+
+
+def load_engine_identity(path: str) -> dict:
+    """The five digests the protected engine build published.
+
+    Read from a file the BUILD produced, not derived here. Four of the five —
+    source, lock, SBOM, provenance — describe how the artifact was made, and a
+    process that computed them from the artifact it is holding would be
+    certifying its own inputs. The fifth, the artifact digest, IS verified
+    here, by `enginebridge.assert_identity_is_this_engine` against the archive
+    this run opened.
+
+    Shape-checked at the boundary so a truncated or half-written record refuses
+    with a name rather than a `KeyError` three layers down."""
+    record = load_json_document(path, field="engine_identity")
+    if not isinstance(record, dict):
+        refuse("category=engine_identity_not_an_object")
+    missing = [f for f in enginebridge.ENGINE_IDENTITY_FIELDS
+               if not isinstance(record.get(f), str) or len(record[f]) != 64]
+    if missing:
+        refuse(f"category=engine_identity_incomplete fields={missing} — the "
+               "operator approves five digests, so a run that can state fewer "
+               "is asking them to approve something it cannot check")
+    return {f: record[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS}
+
+
+def observe_bootstrap(values: dict) -> dict:
+    """Which deployment of the trusted lane this run is running FROM.
+
+    Prerequisite 15 approves a branch, a head and a policy. EX5-R21 compares
+    them against the deployment actually running, so the deployment has to be
+    stated — and two of the three come from the platform, which is recorded
+    in the observation rather than smoothed over.
+
+    `OBSERVED_REF` is reused deliberately. It is `github.ref`, the same
+    platform fact `protectedstate` reads, and minting a second name for one
+    value is how two copies of it end up disagreeing."""
+    return bootstrapstate.observe(
+        ref=values["OBSERVED_REF"],
+        head_sha=values["TRUSTED_BOOTSTRAP_HEAD_SHA"],
+        workflow_dir=values["TRUSTED_WORKFLOW_DIR"],
+        implemented_phase=phases.IMPLEMENTED_PHASE)
+
+
+def write_signed_documents(result: dict, values: dict) -> dict:
+    """Persist D1's two signed documents, as ENVELOPE plus PAYLOAD pairs.
+
+    Both halves, because the envelope carries `payload_sha256` and not the
+    payload: a stored envelope alone proves a signature over bytes nobody
+    kept, and a stored payload alone is a document with no signature. D2's
+    `_load_signed_plan` verifies the signature and then
+    `assert_payload_matches`, which needs exactly this pair.
+
+    The plan file is PRIVATE and stays private: it carries the exact prompt
+    bytes of every request. The workflow uploads it as a retained artifact with
+    a short retention, never as a release asset and never anywhere a pull
+    request can see."""
+    written = {}
+    for key, path_var in (
+            ("executable_plan", "TRUSTED_PLAN_OUTPUT_PATH"),
+            ("count_evidence", "TRUSTED_COUNT_EVIDENCE_OUTPUT_PATH")):
+        document = result.get(key)
+        if not isinstance(document, dict) or "envelope" not in document or (
+                "payload" not in document):
+            refuse(f"category=signed_document_missing document={key} — the run "
+                   "reported success and produced no document to retain")
+        with open(values[path_var], "w", encoding="utf-8") as handle:
+            json.dump(document, handle, sort_keys=True, separators=(",", ":"))
+        written[key] = values[path_var]
+    return written
 
 
 def load_engine(*, engine_root: str) -> dict:
@@ -183,7 +270,7 @@ def main(environ=None) -> dict:
         observed_now=values["TRUSTED_OBSERVED_NOW"],
         revocations=revocations)
 
-    return d1runtime.run(
+    result = d1runtime.run(
         observations=observations,
         operator_claims=operator_records,
         lane_verifier=lane_verifier,
@@ -192,6 +279,9 @@ def main(environ=None) -> dict:
                          "expected_sha256": values["TRUSTED_ENGINE_DIGEST"],
                          "root": values["TRUSTED_ENGINE_ROOT"],
                          "search_path": None},
+        engine_identity=load_engine_identity(
+            values["TRUSTED_ENGINE_IDENTITY_PATH"]),
+        bootstrap=observe_bootstrap(values),
         candidate={"repository_numeric_id": values["EVENT_REPOSITORY_ID"],
                    "candidate_head_sha": values["CANDIDATE_HEAD_SHA"],
                    "target_base_sha": values["TARGET_BASE_SHA"],
@@ -212,3 +302,7 @@ def main(environ=None) -> dict:
                      "url": values["TRUSTED_RUN_URL"]},
         observed_now=values["TRUSTED_OBSERVED_NOW"],
         produced_at=values["TRUSTED_OBSERVED_NOW"])
+    # After the run, never before: a refusal must leave no file behind that a
+    # retain step would upload under a name meaning "D1 counted this".
+    write_signed_documents(result, values)
+    return result

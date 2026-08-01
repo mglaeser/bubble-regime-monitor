@@ -48,6 +48,17 @@ APPROVED_ACTION_PINS = {
     "actions/setup-python": {
         "a26af69be951a213d495a4c3e4e4022e16d87065": "v5.6.0",  # pragma: allowlist secret
     },
+    # R06. D1 retains its two signed documents as private artifacts and D2
+    # downloads them BY RUN ID. Adding two actions to a credential-bearing lane
+    # is a deliberate decision, which is why it is an edit here: both SHAs were
+    # resolved with `git ls-remote` and each carried a concrete release tag as
+    # well as its moving one, per PIN_VERIFICATION_METHOD below.
+    "actions/upload-artifact": {
+        "ea165f8d65b6e75b540449e92b4886f43607fa02": "v4.6.2",  # pragma: allowlist secret
+    },
+    "actions/download-artifact": {
+        "634f93cb2916e3fdff6788551b99b062d0335ce0": "v5.0.0",  # pragma: allowlist secret
+    },
 }
 
 #: How the mapping above was verified, recorded so the claim is checkable.

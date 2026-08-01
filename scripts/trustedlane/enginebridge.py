@@ -80,7 +80,11 @@ REQUIRED_ENGINE_SYMBOLS = {
     "verifier.providerreq": ("assemble_request", "ProviderRequest"),
     "verifier.preflight": ("scan_text", "preflight_request"),
     "verifier.origin": ("OriginMap", "resolve_finding"),
-    "verifier.executor": ("execute_batch", "validate_response_envelope"),
+    "verifier.executor": ("execute_batch", "validate_response_envelope",
+                          "rebuild_payloads", "reconstruct_batch_requests",
+                          "assert_request_matches_plan", "GenerationLedger",
+                          "ExecutionPreflightManifest", "synthesize",
+                          "assert_output_carries_no_secret"),
     "verifier.verdicts": ("validate_verdicts", "assert_distinct_reasoning"),
     # Slice 2. `prepare_review_plan_core` is the evidence-NEUTRAL half of
     # `finalize`: everything both lanes do, and nothing either does alone. The
@@ -99,6 +103,12 @@ REQUIRED_ENGINE_SYMBOLS = {
 FORBIDDEN_CORE_FIELDS = ("count_evidence", "evidence_class", "executable",
                          "publication_class", "signature", "signed_by",
                          "authority_class")
+
+#: The key `executor.execute_batch` returns its per-model verdict evidence
+#: under. Named as a constant so the test that asserts the engine still emits
+#: it has something to compare against, rather than repeating the string and
+#: agreeing with itself.
+EVIDENCE_RECORDS_KEY = "per_model_verdict_evidence"
 
 
 def _resolved(path: str) -> str:
@@ -355,11 +365,18 @@ def governed_policy_digests(engine: dict, *, pin_values: dict,
     model_ids = list(model_panel(engine))
     capabilities = engine["modules"]["verifier.capabilities"]
     reviewpolicy = engine["modules"]["verifier.reviewpolicy"]
-    capability_policy = capabilities.policy_record(model_ids)
-    review_request_policy = reviewpolicy.policy_record(
-        model_ids, required_approver=required_approver(engine),
-        minimum_other_approvers=minimum_other_approvers,
-        max_output_tokens=pin_values["VERIFIER_MAX_OUTPUT_TOKENS"])
+    # Wrapped, like every other engine call. Both refuse a model outside the
+    # capability table and a max-output above what the model supports — a PIN
+    # the operator set too high reaches here, and unwrapped it would escape as
+    # a crash rather than as the lane's own refusal. Found by the test that
+    # asks which engine calls are NOT inside `engine_refusals`, after that test
+    # stopped comparing against a hand-written list.
+    with engine_refusals(engine, where="governed_policy_digests"):
+        capability_policy = capabilities.policy_record(model_ids)
+        review_request_policy = reviewpolicy.policy_record(
+            model_ids, required_approver=required_approver(engine),
+            minimum_other_approvers=minimum_other_approvers,
+            max_output_tokens=pin_values["VERIFIER_MAX_OUTPUT_TOKENS"])
     return {
         "capability_policy": capability_policy,
         "review_request_policy": review_request_policy,
@@ -391,6 +408,183 @@ def assert_core_used_the_governed_policies(core: dict, *, governed: dict
             "capability_policy_sha256": governed["capability_policy_sha256"],
             "review_request_policy_sha256":
                 governed["review_request_policy_sha256"]}
+
+
+def execute_review_plan(engine: dict, *, skeleton: dict, plan: dict,
+                        repository_path: str, transport, authorizations,
+                        challenge: str) -> dict:
+    """Stage 3, in the ENGINE. The protected counterpart of the Slice-2 bridge.
+
+    Everything the mandate lists for D2 is already implemented in
+    `verifier.executor`, correctly and with the properties the lane needs:
+
+    * `rebuild_payloads` earns the prompt bytes again from the commits, which
+      also re-proves that every unit's atoms still exist in the claimed range —
+      the plan stores request HASHES, not bodies, deliberately, so that it
+      carries no source content;
+    * `assert_request_matches_plan` requires HASH equality, not token equality.
+      Usage drift is arithmetic and two different review questions can cost the
+      same; only the hash says the reviewer is being asked what was priced;
+    * `ExecutionPreflightManifest.scan_all` scans EVERY execution payload
+      before any generation call, so a secret in the last batch blocks the
+      first batch's call rather than being discovered after it;
+    * `execute_batch` runs the whole panel, validates each response envelope,
+      validates the verdicts, applies the anti-copy tripwire and decides each
+      unit;
+    * `synthesize` is additive-only: a unit any panelist refuted stays refuted.
+
+    The lane supplies the four things the engine cannot have: the verified
+    plan, a real transport, a verified literal set, and the challenge D1
+    counted. It reimplements none of the above, which is the rule this bridge
+    exists to keep.
+    """
+    executor = engine["modules"]["verifier.executor"]
+    if plan["execution_challenge"] != challenge:
+        refuse("category=execution_challenge_is_not_the_counted_one — the "
+               "challenge is in the request bytes and the request bytes are "
+               "what was counted, so sending a different one executes requests "
+               "whose cost nobody approved")
+    if skeleton["review_skeleton_sha256"] != plan["review_skeleton_sha256"]:
+        refuse("category=rebuilt_skeleton_is_not_the_counted_one — D2 rebuilt "
+               "the range and got a different plan than D1 counted; the "
+               "candidate moved, or the plan is for another range")
+
+    review_policy = plan["review_request_policy"]
+    pin_values = plan["operator_pin_record"]["pins"]
+    with engine_refusals(engine, where="rebuild_payloads"):
+        payloads = executor.rebuild_payloads(skeleton, plan,
+                                             cwd=repository_path)
+        paths = executor._path_identities(skeleton, plan["final_units"])
+
+    # 1. Reconstruct EVERY request first, and hash-check each against the plan.
+    assemblies_by_batch = {}
+    with engine_refusals(engine, where="reconstruct_batch_requests"):
+        for batch in plan["batches"]:
+            assemblies = executor.reconstruct_batch_requests(
+                plan, batch, payloads_by_unit=payloads,
+                path_bytes_b64_by_unit=paths)
+            for model_id, assembly in assemblies.items():
+                executor.assert_request_matches_plan(assembly, batch, model_id)
+            assemblies_by_batch[batch["batch_id"]] = assemblies
+
+    # 2. Scan them ALL before any is sent.
+    with engine_refusals(engine, where="execution_preflight"):
+        # Inside the guard: the ledger validates the PIN values it is built
+        # from, so a retry or timeout PIN the operator set out of range refuses
+        # HERE, before any request is scanned and long before one is sent.
+        ledger = executor.GenerationLedger(pin_values)
+        manifest = executor.ExecutionPreflightManifest(
+            skeleton, plan, cwd=repository_path,
+            authorizations=authorizations)
+        manifest.scan_all(assemblies_by_batch, ledger)
+
+    # 3. Only now does anything reach a socket.
+    results = []
+    with engine_refusals(engine, where="execute_batch"):
+        for batch in plan["batches"]:
+            counted = {model_id: (batch.get("input_tokens_by_model") or {}).get(
+                           model_id)
+                       for model_id in review_policy["model_ids"]}
+            results.append(executor.execute_batch(
+                batch, review_policy, transport=transport,
+                pin_values=pin_values, challenge=challenge,
+                counted_by_model=counted,
+                assemblies=assemblies_by_batch[batch["batch_id"]],
+                ledger=ledger))
+
+    # 4. Refutations survive synthesis, and provider text is scanned before it
+    #    is persisted — a secret that leaves in a request and comes back in a
+    #    verdict has still left twice.
+    with engine_refusals(engine, where="synthesize"):
+        synthesis = executor.synthesize(results)
+    # `per_model_verdict_evidence`, by its exact name and with no default. The
+    # first version of this line read `result.get("evidence_records", [])` — a
+    # key the engine has never emitted — so the scan received an empty list,
+    # scanned nothing, and returned a record saying so. Every test asserting
+    # "the output was scanned" passed. A `.get` with a default turns "the
+    # engine renamed this" into "there was nothing to scan", which is the
+    # answer a caller wants and not the one that is true.
+    evidence_records = []
+    for result in results:
+        if EVIDENCE_RECORDS_KEY not in result:
+            refuse(f"category=engine_batch_result_carries_no_verdict_evidence "
+                   f"key={EVIDENCE_RECORDS_KEY} present={sorted(result)} — the "
+                   "privacy scan reads the provider's own text out of this "
+                   "key; absent, it would scan nothing and report success")
+        evidence_records.extend(result[EVIDENCE_RECORDS_KEY])
+    with engine_refusals(engine, where="output_privacy"):
+        privacy = executor.assert_output_carries_no_secret(
+            evidence_records, path_identities=frozenset(paths.values()))
+    # A scan that scanned nothing is not a scan. Every verdict carries at least
+    # `reason` and `proof_of_check`, so zero here means the records were empty
+    # or the field set moved — either way the run must not report that the
+    # provider's output was checked.
+    if privacy["scanned_field_count"] < 1:
+        refuse(f"category=output_privacy_scanned_nothing "
+               f"evidence_records={len(evidence_records)} — the scan reported "
+               "success over an empty field set; a check nothing passed "
+               "through is not a check")
+
+    return {
+        "batch_results": results,
+        "synthesis": synthesis,
+        "execution_preflight": manifest.record(),
+        "generation_ledger": ledger.record(),
+        "output_privacy": privacy,
+        "requested_model_ids": list(review_policy["model_ids"]),
+        "required_approver": review_policy["required_approver"],
+        # From the policy the requests were COUNTED under, not from a lane
+        # constant. `d2runtime.MINIMUM_OTHER_APPROVERS = 1` used to sit beside
+        # the engine's own value; two numbers for one rule is how the two
+        # copies end up disagreeing, and the lane's copy is the one no
+        # governance change would reach.
+        "minimum_other_approvers": review_policy["minimum_other_approvers"],
+    }
+
+
+#: The five digests an operator approves under `approve_engine_identity`, and
+#: therefore the five a run must be able to state about the engine it loaded.
+ENGINE_IDENTITY_FIELDS = ("engine_artifact_sha256", "engine_source_sha256",
+                          "runtime_lock_sha256", "sbom_sha256",
+                          "provenance_sha256")
+
+
+def assert_identity_is_this_engine(engine_identity, *,
+                                   engine_artifact: dict) -> dict:
+    """The identity record must describe the artifact this run VERIFIED.
+
+    The missing link in EX5-R21's chain, and it was a real gap.
+    `runtimebinding` compares the operator's five approved digests against the
+    identity record; `artifactload.inspect_archive` verifies the artifact
+    against `engine_artifact["expected_sha256"]`. Both passed while nothing
+    required the two artifact digests to be the same number — so an identity
+    record naming the approved engine could sit beside a run that loaded a
+    different one, and each half looked right to whichever check read it.
+
+    Deliberately here rather than inside `runtimebinding`: that module compares
+    authorizations to runtime facts and must never go looking for facts itself.
+    This is a fact about the runtime, established where both values are in
+    scope, and passed in."""
+    if not isinstance(engine_identity, dict):
+        refuse("category=engine_identity_not_supplied")
+    missing = [f for f in ENGINE_IDENTITY_FIELDS if not engine_identity.get(f)]
+    if missing:
+        refuse(f"category=engine_identity_incomplete fields={missing} — five "
+               "digests are approved; a run that can only state four is asking "
+               "the operator to approve something it cannot check")
+    verified = engine_artifact.get("expected_sha256")
+    if engine_identity["engine_artifact_sha256"] != verified:
+        refuse("category=engine_identity_is_for_a_different_artifact — the "
+               "identity record names one artifact and this run verified "
+               "another; the operator's approval would then be compared "
+               "against a document, not against what loaded")
+    return {"engine_artifact_sha256": verified,
+            "identity_fields": list(ENGINE_IDENTITY_FIELDS),
+            "honest_scope": (
+                "the artifact digest was verified by this run against the "
+                "archive on disk. The other four are claims made by the "
+                "protected build that produced them; this only proves the "
+                "record is about the artifact that loaded")}
 
 
 def model_panel(engine: dict) -> tuple:

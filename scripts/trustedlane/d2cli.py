@@ -20,6 +20,7 @@ import os
 from . import (
     CANONICAL_REPOSITORY,  # noqa: F401
     adapter,
+    candidatefetch,
     d2runtime,
     enginebridge,
     phases,
@@ -29,7 +30,11 @@ from . import (
     transport,
     trustedverifier,
 )
-from .d1cli import load_json_document
+from .d1cli import (
+    load_engine_identity,
+    load_json_document,
+    observe_bootstrap,
+)
 from .errors import refuse
 
 REQUIRED_ENV = (
@@ -38,9 +43,15 @@ REQUIRED_ENV = (
     "TRUSTED_ENGINE_ROOT",
     "TRUSTED_ENGINE_ARTIFACT_PATH",
     "TRUSTED_ENGINE_DIGEST",
-    "TRUSTED_ENGINE_SOURCE_SHA256",
+    # The five approved digests, as the protected build published them.
+    "TRUSTED_ENGINE_IDENTITY_PATH",
+    # Which deployment of the trusted lane is running. Prerequisite 15 approves
+    # a branch, a head and a policy digest; EX5-R21 compares all three.
+    "TRUSTED_BOOTSTRAP_HEAD_SHA",
+    "TRUSTED_WORKFLOW_DIR",
     "TRUSTED_PLAN_PATH",
-    "TRUSTED_PLAN_SHA256",
+    "TRUSTED_COUNT_EVIDENCE_PATH",
+    "TRUSTED_CANDIDATE_CHECKOUT",
     "TRUSTED_RUN_ID",
     "TRUSTED_RUN_ATTEMPT",
     "TRUSTED_RUN_URL",
@@ -56,7 +67,18 @@ REQUIRED_ENV = (
 #: published as `trusted-cross-vendor-review` asked a single model and the
 #: runner chose which. The panel is `verifier.policy.REQUESTED_MODEL_IDS` and
 #: no environment variable can change it.
-RETIRED_ENV = ("TRUSTED_MODEL_ID",)
+#: `TRUSTED_PLAN_SHA256` is retired with `TRUSTED_MODEL_ID`. A digest handed to
+#: D2 alongside a plan is not a binding: the digest identifies a plan, and
+#: whoever supplies the plan chooses which plan gets identified. D2 now reads
+#: the digest out of the document D1 signed.
+#: `TRUSTED_ENGINE_SOURCE_SHA256` is retired for a third reason: the engine
+#: identity record already carries `engine_source_sha256`, and the runtime
+#: binding gate compares THAT one against the operator's approval. A separate
+#: environment variable holding the same digest is a second copy nothing
+#: reconciles — the runner could set one value while the approved record named
+#: another, and the adapter identity would report the runner's.
+RETIRED_ENV = ("TRUSTED_MODEL_ID", "TRUSTED_PLAN_SHA256",
+               "TRUSTED_ENGINE_SOURCE_SHA256")
 
 
 def read_environment(environ=None) -> dict:
@@ -117,6 +139,8 @@ def main(environ=None) -> dict:
         revocations=load_json_document(values["TRUSTED_REVOCATION_LIST_PATH"],
                                        field="revocation_list"))
 
+    engine_identity = load_engine_identity(
+        values["TRUSTED_ENGINE_IDENTITY_PATH"])
     return d2runtime.run(
         observations=observations,
         operator_claims=load_json_document(
@@ -127,14 +151,24 @@ def main(environ=None) -> dict:
                          "expected_sha256": values["TRUSTED_ENGINE_DIGEST"],
                          "root": values["TRUSTED_ENGINE_ROOT"],
                          "search_path": None},
+        engine_identity=engine_identity,
+        bootstrap=observe_bootstrap(values),
         candidate={"repository_numeric_id": values["EVENT_REPOSITORY_ID"],
                    "candidate_head_sha": values["CANDIDATE_HEAD_SHA"],
-                   "target_base_sha": values["TARGET_BASE_SHA"]},
-        # NOT rebuilt. D2 executes the plan D1 counted, and the digest is what
-        # says it is that plan rather than a plan claiming to be.
-        plan=load_json_document(values["TRUSTED_PLAN_PATH"],
-                                field="trusted_plan"),
-        trusted_plan_sha256=values["TRUSTED_PLAN_SHA256"],
+                   "target_base_sha": values["TARGET_BASE_SHA"],
+                   "checkout_destination": values["TRUSTED_CANDIDATE_CHECKOUT"]},
+        # D1's two SIGNED documents. D2 verifies both signatures before it
+        # reads either — it used to take a plan and a digest and check they
+        # matched, which is not a binding: the digest identifies a plan, and
+        # whoever hands D2 the plan chooses which plan gets identified.
+        count_evidence=load_json_document(values["TRUSTED_COUNT_EVIDENCE_PATH"],
+                                          field="count_evidence"),
+        signed_plan=load_json_document(values["TRUSTED_PLAN_PATH"],
+                                       field="signed_executable_plan"),
+        # The real inert fetch. D2 needs the repository because the plan stores
+        # request HASHES, not bodies, so the prompt bytes are earned again from
+        # the commits.
+        fetch=candidatefetch.fetch_candidate,
         opener=opener,
         credential=credential,
         signing_key=signing_key,
@@ -145,4 +179,8 @@ def main(environ=None) -> dict:
         observed_now=values["TRUSTED_OBSERVED_NOW"],
         produced_at=values["TRUSTED_OBSERVED_NOW"],
         # No `model=`. The panel is governed policy, from the engine.
-        engine_source_sha256=values["TRUSTED_ENGINE_SOURCE_SHA256"])
+        # From the approved identity record, which is the digest the runtime
+        # binding gate compares against the operator's approval. A separate
+        # environment variable for the same fact is a second copy nothing
+        # reconciles.
+        engine_source_sha256=engine_identity["engine_source_sha256"])

@@ -85,6 +85,7 @@ from . import (
     enginebridge,
     enginepolicy,
     evidencewire,
+    executableplan,
     protectedstate,
     runtimebinding,
     signing,
@@ -142,6 +143,8 @@ def run(*, observations: dict, operator_claims, lane_verifier, engine: dict,
     steps.append(("engine_artifact", artifactload.inspect_archive(
         engine_artifact["path"],
         expected_sha256=engine_artifact["expected_sha256"])))
+    steps.append(("engine_identity", enginebridge.assert_identity_is_this_engine(
+        engine_identity, engine_artifact=engine_artifact)))
     steps.append(("engine_root", artifactload.assert_engine_root_is_not_the_candidate(
         engine_artifact["root"])))
     # `engine_root` is supplied, so this refuses a `verifier` module loaded from
@@ -283,15 +286,31 @@ def run(*, observations: dict, operator_claims, lane_verifier, engine: dict,
                       count_transport.assert_within_authorized_tokens(total)))
         steps.append(("zero_generation",
                       count_transport.assert_zero_generation()))
+        # 10b. R04/R13. The PLAN, not only its digest. D1 used to publish
+        #      `trusted_plan_sha256` and nothing else, and D2 checked that a
+        #      plan it was handed matched it — which looks like a binding and
+        #      is not one: the digest identifies a plan, and whoever hands D2
+        #      the plan chooses which plan gets identified.
+        #
+        #      Private, because it carries the exact prompt bytes: the
+        #      candidate's code and the reviewer's questions.
+        executable = executableplan.build(
+            core, skeleton=skeleton, engine=engine, record_set=record_set,
+            candidate=candidate, trusted_run=trusted_run,
+            produced_at=produced_at, run_challenge=run_challenge,
+            total_input_tokens=total, governed=governed)
         payload = _count_payload(
             core, skeleton=skeleton, engine=engine, total_input_tokens=total,
             run_challenge=run_challenge, transport=count_transport,
             record_set=record_set,
             repository_numeric_id=candidate["repository_numeric_id"],
-            candidate_head_sha=head, trusted_run=trusted_run)
+            candidate_head_sha=head, trusted_run=trusted_run,
+            trusted_plan_sha256=executable["plan_sha256"])
         steps.append(("ledger", {"total_input_tokens": total,
                                  "trusted_plan_sha256":
                                  payload["trusted_plan_sha256"]}))
+        steps.append(("executable_plan",
+                      executableplan.public_reference(executable)))
 
         # 11. Signed evidence. Unsigned, this record does not validate at all.
         unsigned = evidencewire.trusted_envelope(
@@ -303,6 +322,28 @@ def run(*, observations: dict, operator_claims, lane_verifier, engine: dict,
             candidate_head_sha=head, produced_at=produced_at)
         evidence = signing.sign_envelope(unsigned, key=signing_key)
         evidencewire.validate_envelope(evidence)
+
+        # The plan gets its OWN signature. Two documents, two signatures, and
+        # D2 verifies both — the evidence is what a reader sees a digest of,
+        # the plan is what D2 executes, and a run where those disagree is a run
+        # whose public record describes something other than what happened.
+        # Its OWN class, not `EVIDENCE_CLASS`. Both documents were briefly
+        # `TRUSTED_COUNT_EVIDENCE`, so nothing in either envelope said which
+        # was which and the only thing keeping them apart was the argument slot
+        # D2 received them in — chosen by the caller.
+        signed_plan = signing.sign_envelope(
+            evidencewire.trusted_envelope(
+                evidence_class=executableplan.PLAN_CLASS, payload=executable,
+                produced_by=PRODUCER,
+                repository_numeric_id=candidate["repository_numeric_id"],
+                workflow_run_id=trusted_run["id"],
+                workflow_run_attempt=trusted_run["attempt"],
+                ref=observations["observed_ref"], target_base_sha=base,
+                candidate_head_sha=head, produced_at=produced_at),
+            key=signing_key)
+        evidencewire.validate_envelope(signed_plan)
+        executableplan.assert_plan_matches_evidence(
+            executable, evidence_payload=payload)
 
         # 12. Success only after the signature exists.
         terminal = statuspublish.status_request(
@@ -331,6 +372,12 @@ def run(*, observations: dict, operator_claims, lane_verifier, engine: dict,
         "phase": "D1_TRUSTED_COUNT",
         "evidence": evidence,
         "payload": payload,
+        # PRIVATE. `executable_plan` carries the exact prompt bytes and belongs
+        # only in a retained private artifact; `steps["executable_plan"]` is
+        # the reference a reader may see.
+        "executable_plan": {"envelope": signed_plan, "payload": executable},
+        "count_evidence": {"envelope": evidence, "payload": payload},
+        "trusted_plan_sha256": executable["plan_sha256"],
         "steps": dict(steps),
         "publications": publications,
         "generation_calls": 0,
@@ -402,7 +449,8 @@ def trusted_plan_digest(core: dict, *, skeleton: dict,
 def _count_payload(core: dict, *, skeleton: dict, engine: dict,
                    total_input_tokens: int, run_challenge: str, transport,
                    record_set, repository_numeric_id: int,
-                   candidate_head_sha: str, trusted_run: dict) -> dict:
+                   candidate_head_sha: str, trusted_run: dict,
+                   trusted_plan_sha256: str) -> dict:
     """What the signature covers.
 
     Everything a reader would have to take on trust otherwise: which panel,
@@ -418,7 +466,12 @@ def _count_payload(core: dict, *, skeleton: dict, engine: dict,
         "trusted_run_id": trusted_run["id"],
         "trusted_run_attempt": trusted_run["attempt"],
         "review_skeleton_sha256": skeleton["review_skeleton_sha256"],
-        "trusted_plan_sha256": trusted_plan_digest(
+        # The digest of the SIGNED PLAN, so the public record and the private
+        # artifact name the same object. `trusted_plan_digest` below computes
+        # the same identity over the core's batches; the plan's own digest is
+        # authoritative because that is the document D2 executes.
+        "trusted_plan_sha256": trusted_plan_sha256,
+        "count_plan_identity_sha256": trusted_plan_digest(
             core, skeleton=skeleton, run_challenge=run_challenge),
         "execution_challenge_sha256": hashlib.sha256(
             run_challenge.encode()).hexdigest(),

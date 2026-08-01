@@ -52,10 +52,26 @@ CANDIDATE_CLASSES = (
 TRUSTED_CLASSES = (
     "HOSTED_D0_CONTAINMENT_EVIDENCE",
     "TRUSTED_COUNT_EVIDENCE",
+    # R04/R13. D1 emits TWO signed documents: the public count evidence and the
+    # private executable plan. They were briefly both `TRUSTED_COUNT_EVIDENCE`,
+    # which meant nothing in the envelope said which was which — the only thing
+    # separating them was which argument slot D2 received them in, and an
+    # argument slot is chosen by the caller. The class carries the distinction
+    # now, and `d2runtime._load_signed_plan` requires each document to name its
+    # own.
+    "TRUSTED_EXECUTABLE_REVIEW_PLAN",
     "TRUSTED_EXECUTION_EVIDENCE",
     "VERIFIED_LITERAL_AUTHORIZATION",
     "TRUSTED_CLOSURE_RECORD",
 )
+
+#: Trusted classes that must NEVER be published. The executable plan carries
+#: the exact prompt bytes of every request — the candidate's code and the
+#: reviewer's questions — so only its digest may appear anywhere a pull request
+#: can see. Named here rather than only in `executableplan`, because the
+#: publication path reads this module and would otherwise have to know about
+#: that one.
+PRIVATE_ONLY_CLASSES = ("TRUSTED_EXECUTABLE_REVIEW_PLAN",)
 
 #: The one exception, and it is narrow on purpose. D0 runs hosted on the allowed
 #: default ref and holds no credential, so its containment evidence is anchored
