@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     fmp_api_key: str = ""           # optional SEC fundamentals fallback
 
     # Admin / security
-    admin_api_key: str = "change-me-to-a-long-random-string"
+    admin_api_key: str = "change-me-to-a-long-random-string"  # pragma: allowlist secret -- fail-closed placeholder default
     read_endpoints_public: bool = True
 
     # Auto-deploy webhook (v3.5.0, docs/AUTO_DEPLOY.md). The endpoint is

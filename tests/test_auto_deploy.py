@@ -15,7 +15,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-WEBHOOK_SECRET = "test-webhook-secret-not-a-real-one-0123456789"
+WEBHOOK_SECRET = "test-webhook-secret-not-a-real-one-0123456789"  # pragma: allowlist secret -- throwaway test fixture
 DEPLOY_BRANCH = "claude/bubblegauge-build-spec-fzthju"
 
 

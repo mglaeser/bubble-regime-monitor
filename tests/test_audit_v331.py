@@ -53,12 +53,12 @@ class TestAdminKeyFailClosed:
         from app import security
 
         class _S:
-            admin_api_key = "change-me-to-a-long-random-string"
+            admin_api_key = "change-me-to-a-long-random-string"  # pragma: allowlist secret -- throwaway test fixture
             read_endpoints_public = True
 
         monkeypatch.setattr(security, "get_settings", lambda: _S())
         with pytest.raises(HTTPException) as exc:
-            security.require_admin_key(x_api_key="change-me-to-a-long-random-string")
+            security.require_admin_key(x_api_key="change-me-to-a-long-random-string")  # pragma: allowlist secret -- throwaway test fixture
         assert exc.value.status_code in (401, 503)
 
     def test_empty_key_is_rejected(self, monkeypatch):
@@ -76,12 +76,12 @@ class TestAdminKeyFailClosed:
         from app import security
 
         class _S:
-            admin_api_key = "a-genuinely-long-random-secret-value-123456"
+            admin_api_key = "a-genuinely-long-random-secret-value-123456"  # pragma: allowlist secret -- throwaway test fixture
             read_endpoints_public = True
 
         monkeypatch.setattr(security, "get_settings", lambda: _S())
         # correct key: no exception
-        security.require_admin_key(x_api_key="a-genuinely-long-random-secret-value-123456")
+        security.require_admin_key(x_api_key="a-genuinely-long-random-secret-value-123456")  # pragma: allowlist secret -- throwaway test fixture
         # wrong key: 401
         with pytest.raises(HTTPException) as exc:
             security.require_admin_key(x_api_key="wrong")
@@ -93,12 +93,12 @@ class TestAdminKeyFailClosed:
         from app import security
 
         class _S:
-            admin_api_key = "a-genuinely-long-random-secret-value-123456"
+            admin_api_key = "a-genuinely-long-random-secret-value-123456"  # pragma: allowlist secret -- throwaway test fixture
             read_endpoints_public = True
 
         monkeypatch.setattr(security, "get_settings", lambda: _S())
         with pytest.raises(HTTPException) as exc:
-            security.require_admin_key(x_api_key="cl\xe9f-invalide")  # latin-1 é
+            security.require_admin_key(x_api_key="cl\xe9f-invalide")  # latin-1 é; pragma: allowlist secret -- throwaway test fixture
         assert exc.value.status_code == 401
 
 
@@ -110,19 +110,19 @@ class TestReadAccessFailClosed:
         from app import security
 
         class _S:
-            admin_api_key = "change-me-to-a-long-random-string"
+            admin_api_key = "change-me-to-a-long-random-string"  # pragma: allowlist secret -- throwaway test fixture
             read_endpoints_public = False  # keyed reads
 
         monkeypatch.setattr(security, "get_settings", lambda: _S())
         with pytest.raises(HTTPException) as exc:
-            security.require_read_access(request=None, x_api_key="change-me-to-a-long-random-string")
+            security.require_read_access(request=None, x_api_key="change-me-to-a-long-random-string")  # pragma: allowlist secret -- throwaway test fixture
         assert exc.value.status_code == 503
 
     def test_public_reads_still_open(self, monkeypatch):
         from app import security
 
         class _S:
-            admin_api_key = "change-me-to-a-long-random-string"
+            admin_api_key = "change-me-to-a-long-random-string"  # pragma: allowlist secret -- throwaway test fixture
             read_endpoints_public = True
 
         monkeypatch.setattr(security, "get_settings", lambda: _S())
