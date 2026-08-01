@@ -220,3 +220,180 @@ def assert_is_only_a_candidate(record: dict) -> dict:
     return {"state": CANDIDATE_STATE, "authenticated": False,
             "unlocks_d1": False,
             "honest_scope": "shape and emptiness verified; nothing attested"}
+
+
+# --------------------------------------------------------------------------
+# R10 — the PROTECTED build, which is the only thing that can fill in the
+# fields `UNAVAILABLE_FIELDS` explains are empty.
+#
+# The candidate package above is honest about its gaps and useless for
+# unlocking anything, which is correct and is also the problem: D1 and D2
+# compare the operator's five approved digests against an identity record, and
+# until something produces one, that comparison has nothing to read.
+#
+# What makes this build trustworthy is NOT that it runs different code — it
+# runs the same `enginesource.build_engine_artifact`, deterministically, so
+# anyone can reproduce the artifact. It is that it runs on a protected ref,
+# holds no provider credential, and records WHICH run produced the bytes. The
+# provenance is a statement by the builder about the build, and this is the
+# only place a builder exists.
+# --------------------------------------------------------------------------
+
+BUILT_STATE = "PROTECTED_ENGINE_IDENTITY"
+
+#: The five digests D1/D2 compare against the operator's approval, and the
+#: names they are compared under. The lane's `ENGINE_IDENTITY_FIELDS` is the
+#: consumer half; this is the producer half, and a test binds the two — a build
+#: that emitted four of five would make the fifth unapprovable, and the failure
+#: would look like operator error.
+BUILT_IDENTITY_FIELDS = ("engine_artifact_sha256", "engine_source_sha256",
+                         "runtime_lock_sha256", "sbom_sha256",
+                         "provenance_sha256")
+
+#: What the build must be told about itself, and cannot derive. A process
+#: cannot verify which ref dispatched it or which image it is running in; the
+#: platform supplies both, and the record says so rather than implying the
+#: build checked.
+PROVENANCE_FIELDS = ("build_workflow_run_id", "build_workflow_run_attempt",
+                     "build_ref", "build_head_sha", "runner_image_digest",
+                     "repository_numeric_id")
+
+PROVENANCE_DIGEST_LABEL = b"trusted-engine-provenance-v1"
+
+
+def provenance_record(context: dict, *, roles: dict) -> dict:
+    """What the builder says about the build, and its digest.
+
+    Includes the source roles by commit, so the provenance is about a specific
+    pair of commits rather than about "a build that happened". A provenance
+    that named only the run would be satisfied by any artifact that run
+    produced."""
+    if not isinstance(context, dict):
+        refuse("category=build_context_not_an_object")
+    missing = [f for f in PROVENANCE_FIELDS if not context.get(f)]
+    if missing:
+        refuse(f"category=build_context_incomplete fields={missing} — a "
+               "provenance record with a hole in it is a builder declining to "
+               "say which build this was")
+    if not str(context["build_ref"]).startswith("refs/heads/"):
+        refuse(f"category=build_ref_not_a_branch ref={context['build_ref']!r} "
+               "— the engine is built from a protected branch; a tag can be "
+               "moved to a different commit without changing its name")
+    record = {f: context[f] for f in PROVENANCE_FIELDS}
+    record["source_roles"] = {role: commit for role, commit in sorted(
+        roles.items())}
+    record["builder"] = "trusted-engine-build"
+    blob = json.dumps(record, sort_keys=True, separators=(",", ":"),
+                      default=str).encode("utf-8")
+    record["provenance_sha256"] = hashlib.sha256(
+        PROVENANCE_DIGEST_LABEL + b"\x00" + blob).hexdigest()
+    record["honest_scope"] = (
+        "the run id, ref, head and image digest were supplied by the platform "
+        "and cannot be verified from inside the build. What this record proves "
+        "is that a build SAID so; what makes it worth anything is that the "
+        "workflow producing it runs only on a protected ref and holds no "
+        "provider credential")
+    return record
+
+
+def built_package(*, roles, repository_numeric_id: int, artifact_sha256: str,
+                  context: dict, cwd: str = ".") -> dict:
+    """The identity record a protected build publishes beside the artifact.
+
+    Everything except the provenance is recomputed here from the same git
+    blobs the artifact was built from, so the record cannot describe a
+    different tree than the tarball. The artifact digest is passed IN rather
+    than recomputed, because the caller is the one that wrote the file and
+    hashing it again here would hash whatever is now at that path.
+
+    `engine-identity.json` is what `d1cli.load_engine_identity` reads and what
+    `enginebridge.assert_identity_is_this_engine` checks against the archive
+    the run actually opened."""
+    from .enginesource import multi_source_manifest
+    from .runtimelock import load_lock
+
+    if not isinstance(artifact_sha256, str) or len(artifact_sha256) != 64:
+        refuse("category=engine_artifact_digest_malformed")
+    manifest = multi_source_manifest(
+        roles=roles, repository_numeric_id=repository_numeric_id, cwd=cwd)
+    lock = load_lock(root=cwd)
+    bill = sbom(roles=roles, cwd=cwd)
+    provenance = provenance_record(context, roles=roles)
+    if provenance["repository_numeric_id"] != repository_numeric_id:
+        refuse("category=build_context_repository_mismatch — the provenance "
+               "names one repository and the manifest was built for another")
+
+    record = {
+        "state": BUILT_STATE,
+        "repository_numeric_id": repository_numeric_id,
+        "engine_artifact_sha256": artifact_sha256,
+        "engine_source_sha256": manifest["engine_source_sha256"],
+        "runtime_lock_sha256": lock["lock_sha256"],
+        "sbom_sha256": bill["sbom_sha256"],
+        "provenance_sha256": provenance["provenance_sha256"],
+        "source_roles": manifest["binding"],
+        "provenance": provenance,
+        "sbom": bill,
+        "dependency_lock": lock,
+        "honest_scope": (
+            "the artifact is deterministic in the two source commits, so "
+            "anyone with them can rebuild it and get this digest. That is "
+            "reproducibility, not authority: what makes THIS record usable is "
+            "that an operator approved these five digests out of band, and "
+            "the lane compares their approval against the artifact it opened"),
+    }
+    return assert_built_record(record)
+
+
+def assert_built_record(record: dict) -> dict:
+    """Five digests, all present, all 64 hex. The consumer's half is
+    `enginebridge.assert_identity_is_this_engine`, and this is the producer
+    refusing to publish a record that one would reject."""
+    if not isinstance(record, dict):
+        refuse("category=engine_identity_not_an_object")
+    if record.get("state") != BUILT_STATE:
+        refuse(f"category=engine_identity_wrong_state "
+               f"state={record.get('state')!r} expected={BUILT_STATE}")
+    bad = [f for f in BUILT_IDENTITY_FIELDS
+           if not isinstance(record.get(f), str) or len(record[f]) != 64]
+    if bad:
+        refuse(f"category=engine_identity_incomplete fields={bad} — the "
+               "operator approves five digests; publishing fewer makes the "
+               "missing one unapprovable and the failure look like operator "
+               "error")
+    if record.get("provenance", {}).get(
+            "provenance_sha256") != record["provenance_sha256"]:
+        refuse("category=engine_provenance_digest_mismatch — the record's "
+               "provenance digest and the provenance it carries disagree")
+    return record
+
+
+def assert_build_holds_no_provider_secret(environ) -> dict:
+    """The build must not be able to reach the provider, at all.
+
+    Checked in the build rather than only in review, because the workflow that
+    produces what the lane trusts is exactly the workflow whose compromise
+    would be worth the most — and a build that could spend the credential is a
+    build that could be made to."""
+    from .runtimebinding import PROVIDER_SECRET_NAME
+
+    present = sorted(name for name in environ
+                     if name in (PROVIDER_SECRET_NAME,
+                                 "TRUSTED_EVIDENCE_SIGNING_KEY",
+                                 "TRUSTED_OPERATOR_TRUST_STORE")
+                     and environ.get(name))
+    if present:
+        refuse(f"category=engine_build_holds_a_capability names={present} — "
+               "the build produces what the lane trusts; a build that can "
+               "reach the provider or sign evidence is a build whose "
+               "compromise is worth more than the lane's")
+    return {"provider_secret_present": False,
+            "signing_key_present": False,
+            "checked_names": [PROVIDER_SECRET_NAME,
+                              "TRUSTED_EVIDENCE_SIGNING_KEY",
+                              "TRUSTED_OPERATOR_TRUST_STORE"],
+            "honest_scope": ("this proves the NAMES are unset in this "
+                             "process. It does not prove the workflow could "
+                             "not have set them — that is what the job's "
+                             "absent `environment:` and the review of this "
+                             "file are for")}

@@ -39,6 +39,13 @@ BOOTSTRAP_POLICY_FILES = (
     "d0-trusted-lane-containment.yml",
     "d1-trusted-count.yml",
     "d2-trusted-generation.yml",
+    # R10. It holds no credential, which is why it can be deployed as a `.yml`
+    # while D1 and D2 are templates — and it is in the policy digest for the
+    # opposite reason: it PRODUCES what the lane trusts. A build workflow
+    # edited after the operator approved the bootstrap builds a different
+    # engine, and prerequisite 15 is exactly the approval that should stop
+    # being valid when that happens.
+    "trusted-engine-build.yml",
 )
 
 #: Templates count too. Before activation the deployed name is the template

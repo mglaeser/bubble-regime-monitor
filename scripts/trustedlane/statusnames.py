@@ -78,6 +78,21 @@ TRUSTED_CONTAINMENT_STATUSES = ("d1-containment-gate", "d2-containment-gate")
 #: reports at all.
 DIAGNOSTIC_STATUSES = ("probe",)
 
+#: R10. The protected engine build, which produces what the trusted lane
+#: trusts. Its own class rather than DIAGNOSTIC: a diagnostic reports on
+#: something, and this one MAKES the artifact and the identity record D1 and D2
+#: read. Never requirable for the same mechanical reason as the others — it is
+#: `workflow_dispatch` only, so it never reports on a candidate head, and
+#: requiring it would leave every pull request waiting on a check that cannot
+#: start.
+#:
+#: There is a second reason worth stating, because it is the one a reader
+#: would otherwise supply for themselves and get wrong: a green build says the
+#: artifact was PRODUCED, not that anyone approved it. Approval of the five
+#: digests is operator prerequisite 14, out of band, and `runtimebinding`
+#: compares it to the artifact the run opened.
+BUILD_STATUSES = ("build-engine",)
+
 STATUS_CLASSES = {
     "ORDINARY": ORDINARY_STATUSES,
     "CONTAINMENT": CONTAINMENT_STATUSES,
@@ -85,6 +100,7 @@ STATUS_CLASSES = {
     "TRUSTED": TRUSTED_STATUSES,
     "TRUSTED_CONTAINMENT": TRUSTED_CONTAINMENT_STATUSES,
     "DIAGNOSTIC": DIAGNOSTIC_STATUSES,
+    "BUILD": BUILD_STATUSES,
 }
 
 #: Classes an operator may configure as a required status ON A CANDIDATE PULL
@@ -94,6 +110,8 @@ STATUS_CLASSES = {
 #:   INACTIVE            reports success having reviewed nothing
 #:   DIAGNOSTIC          dispatch-only, never reports on a PR head
 #:   CONTAINMENT         D0: push/dispatch only, never reports on a PR head
+#:   BUILD               dispatch-only, and a green build is production, not
+#:                       approval
 #:   TRUSTED_CONTAINMENT internal jobs of a main-dispatched trusted run; their
 #:                       checks land on main's commit, not the candidate head
 #:
@@ -330,6 +348,11 @@ def branch_protection_instructions() -> dict:
             "d2-containment-gate":
                 "internal job of a main-dispatched trusted run; its check "
                 "lands on main's commit, not on a candidate head",
+            "build-engine":
+                "workflow_dispatch only, so it never reports on a candidate "
+                "head; and a green build says the engine artifact was "
+                "PRODUCED, never that anyone approved it — approval of its "
+                "five digests is operator prerequisite 14, out of band",
         },
         "trusted_contexts_must_be_published_on_the_candidate_sha": True,
         "honest_scope": ("this is the instruction, not the enforcement — the "

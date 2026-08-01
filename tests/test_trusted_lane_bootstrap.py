@@ -2742,16 +2742,25 @@ def test_f02_two_workflows_may_not_publish_the_same_check_name():
         })
 
 
-def test_f02_the_real_workflows_publish_nine_distinct_registered_names():
+def test_f02_the_real_workflows_publish_only_registered_distinct_names():
     """Live directory plus both templates: every published name classified, no
-    two workflows publishing the same one."""
+    two workflows publishing the same one.
+
+    The count is derived from the registry rather than written as a literal.
+    It was `== 9`, which meant adding a workflow reddened this test for the
+    right reason and was then fixed by editing the number — a check whose
+    repair is "make the number match" stops asking anything. What matters is
+    that every name a workflow publishes is classified and owned by exactly one
+    file, which is what the two assertions below say."""
     record = statusnames.validate_status_policy(root=str(ROOT))
-    assert record["check_names"] == 9
+    assert record["check_names"] == len(record["owners"])
+    assert set(record["owners"]) <= set(statusnames.all_statuses())
     owners = record["owners"]
     assert owners["independent-verify-inactive"] == "independent-verify.yml"
     assert owners["d0-containment"] == "d0-trusted-lane-containment.yml"
     assert owners["trusted-verifier-count"] == workflowfile.D1_FILE
     assert owners["trusted-cross-vendor-review"] == workflowfile.D2_FILE
+    assert owners["build-engine"] == "trusted-engine-build.yml"
     assert "cross-vendor" not in owners
 
 
@@ -9954,3 +9963,244 @@ def test_d2_scans_every_provider_written_field_before_persisting(d1_engine):
         plan["final_units"])
     assert set(privacy["scanned_fields"]) >= {"reason", "proof_of_check",
                                               "checked_categories"}
+
+
+# --------------------------------------------------------------------------
+# R10 — the protected engine build, which is the only thing that can produce
+# the two files R06 materializes.
+#
+# `enginebuild.candidate_package` could honestly compute three of the five
+# approved digests and had to leave the rest empty. That is correct and it also
+# means the operator had nothing to approve and `runtimebinding` had nothing to
+# compare against.
+# --------------------------------------------------------------------------
+
+#: The SOURCE of truth, beside D0 and the two templates. The deployed copy in
+#: `.github/workflows/` must be byte-identical — a test below checks it, the
+#: same way D0's two copies are kept in step.
+ENGINE_BUILD_WORKFLOW = LANE_DIR / "workflow" / "trusted-engine-build.yml"
+DEPLOYED_ENGINE_BUILD = (ROOT / ".github" / "workflows"
+                         / "trusted-engine-build.yml")
+
+
+def _build_context(**over):
+    return {"build_workflow_run_id": 4242,
+            "build_workflow_run_attempt": 1,
+            "build_ref": "refs/heads/main",
+            "build_head_sha": SHA_A,
+            "runner_image_digest": "Linux-X64-github-hosted",
+            "repository_numeric_id": REPOSITORY_NUMERIC_ID, **over}
+
+
+def _build_roles():
+    return {"protected_trusted_lane": _rev("origin/main"),
+            "candidate_verifier": _rev("origin/fix/verifier-intra-file-review-plan")}
+
+
+def test_the_built_package_carries_all_five_approved_digests():
+    """The producer half of `enginebridge.ENGINE_IDENTITY_FIELDS`. A build that
+    emitted four of five would make the fifth unapprovable and the failure look
+    like operator error."""
+    record = enginebuild.built_package(
+        roles=_build_roles(), repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        artifact_sha256="a" * 64, context=_build_context(), cwd=str(ROOT))
+    assert set(enginebuild.BUILT_IDENTITY_FIELDS) == set(
+        enginebridge.ENGINE_IDENTITY_FIELDS)
+    assert all(len(record[f]) == 64
+               for f in enginebuild.BUILT_IDENTITY_FIELDS)
+    assert record["state"] == enginebuild.BUILT_STATE
+    # And it is exactly what the consumer reads.
+    assert enginebridge.assert_identity_is_this_engine(
+        record, engine_artifact={"expected_sha256": "a" * 64})
+
+
+def test_the_built_record_is_what_the_cli_will_accept(tmp_path):
+    """Producer and consumer, joined. `d1cli.load_engine_identity` reads the
+    file this build writes, and a shape either side invents alone is a shape
+    the other rejects on a runner."""
+    record = enginebuild.built_package(
+        roles=_build_roles(), repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        artifact_sha256="b" * 64, context=_build_context(), cwd=str(ROOT))
+    path = tmp_path / "engine-identity.json"
+    path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    loaded = d1cli.load_engine_identity(str(path))
+    assert loaded == {f: record[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS}
+
+
+def test_the_provenance_names_the_run_and_the_source_commits():
+    """A provenance that named only the run would be satisfied by any artifact
+    that run produced."""
+    roles = _build_roles()
+    record = enginebuild.provenance_record(_build_context(), roles=roles)
+    assert record["source_roles"] == dict(sorted(roles.items()))
+    assert record["build_workflow_run_id"] == 4242
+    # A different candidate commit is a different provenance.
+    other = enginebuild.provenance_record(
+        _build_context(), roles={**roles, "candidate_verifier": SHA_C})
+    assert other["provenance_sha256"] != record["provenance_sha256"]
+    # And so is a different run.
+    rerun = enginebuild.provenance_record(
+        _build_context(build_workflow_run_attempt=2), roles=roles)
+    assert rerun["provenance_sha256"] != record["provenance_sha256"]
+
+
+@pytest.mark.parametrize("field", enginebuild.PROVENANCE_FIELDS)
+def test_a_provenance_with_a_hole_in_it_is_refused(field):
+    """A builder declining to say which build this was."""
+    context = {k: v for k, v in _build_context().items() if k != field}
+    with _refusal("build_context_incomplete"):
+        enginebuild.provenance_record(context, roles=_build_roles())
+
+
+def test_the_engine_may_not_be_built_from_a_tag():
+    """A tag can be moved to a different commit without changing its name."""
+    with _refusal("build_ref_not_a_branch"):
+        enginebuild.provenance_record(
+            _build_context(build_ref="refs/tags/v1"), roles=_build_roles())
+
+
+def test_a_built_record_missing_a_digest_is_refused():
+    record = enginebuild.built_package(
+        roles=_build_roles(), repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        artifact_sha256="c" * 64, context=_build_context(), cwd=str(ROOT))
+    for field in enginebuild.BUILT_IDENTITY_FIELDS:
+        with _refusal("engine_identity_incomplete"):
+            enginebuild.assert_built_record({**record, field: None})
+    with _refusal("engine_identity_wrong_state"):
+        enginebuild.assert_built_record({**record, "state": "APPROVED"})
+    with _refusal("engine_provenance_digest_mismatch"):
+        enginebuild.assert_built_record({**record,
+                                         "provenance_sha256": "d" * 64})
+
+
+def test_the_build_refuses_to_run_holding_a_capability():
+    """The workflow that produces what the lane trusts is the one whose
+    compromise is worth the most."""
+    clean = enginebuild.assert_build_holds_no_provider_secret(
+        {"PATH": "/usr/bin", "GITHUB_REF": "refs/heads/main"})
+    assert clean["provider_secret_present"] is False
+    for name in ("TRUSTED_VERIFIER_OPENAI_KEY", "TRUSTED_EVIDENCE_SIGNING_KEY",
+                 "TRUSTED_OPERATOR_TRUST_STORE"):
+        with _refusal("engine_build_holds_a_capability"):
+            enginebuild.assert_build_holds_no_provider_secret({name: "x"})
+    # And an EMPTY value is not "present": an unset secret expands to "" in a
+    # workflow, and refusing that would refuse every correct run.
+    assert enginebuild.assert_build_holds_no_provider_secret(
+        {"TRUSTED_VERIFIER_OPENAI_KEY": ""})["provider_secret_present"] is False
+
+
+def test_the_engine_build_workflow_names_no_secret_and_no_environment():
+    """The containment, read off the file rather than asserted about it."""
+    text = ENGINE_BUILD_WORKFLOW.read_text(encoding="utf-8")
+    document = yaml.safe_load(text)
+    for job_name, job in document["jobs"].items():
+        assert "environment" not in job, (
+            f"{job_name} declares an environment; that is how a secret becomes "
+            "reachable, and this build must not be able to reach one")
+        assert job.get("permissions") == {"contents": "read"}, (
+            f"{job_name}: a build that can write to the repository can move "
+            "the tag it publishes under")
+    # Over the VALUES, not the raw text. The blunt version — `"secrets." not
+    # in text` — was written first and it failed on this workflow's own header,
+    # which explains that the file names no secret. Asking whether the string
+    # appears is a proxy for the question that matters, which is whether any
+    # value the runner expands references one.
+    def values(node):
+        if isinstance(node, dict):
+            for key, item in node.items():
+                yield str(key)
+                yield from values(item)
+        elif isinstance(node, list):
+            for item in node:
+                yield from values(item)
+        elif node is not None:
+            yield str(node)
+
+    referenced = [v for v in values(document) if "secrets." in v]
+    assert referenced == [], f"the build references {referenced}"
+    assert document["permissions"] == {"contents": "read"}
+
+
+def test_the_engine_build_uses_no_forbidden_trigger():
+    document = yaml.safe_load(ENGINE_BUILD_WORKFLOW.read_text(encoding="utf-8"))
+    triggers = set(document[True] if True in document else document["on"])
+    assert triggers == {"workflow_dispatch"}
+    assert not (triggers & set(workflowpolicy.FORBIDDEN_TRIGGERS))
+
+
+def test_the_engine_build_pins_every_action():
+    document = yaml.safe_load(ENGINE_BUILD_WORKFLOW.read_text(encoding="utf-8"))
+    seen = 0
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            if "uses" in step:
+                actionpolicy.assert_pinned(step["uses"],
+                                           where="trusted-engine-build.yml")
+                seen += 1
+    assert seen >= 3
+
+
+def test_the_engine_build_proves_determinism_before_it_retains():
+    """An operator cannot approve a digest that moves when nothing moved: they
+    would approve one and the lane would open another. `gzip` stamping the
+    current time caused exactly this."""
+    document = yaml.safe_load(ENGINE_BUILD_WORKFLOW.read_text(encoding="utf-8"))
+    steps = document["jobs"]["build-engine"]["steps"]
+    determinism = next(i for i, s in enumerate(steps)
+                       if "deterministic" in str(s.get("name", "")).lower())
+    retain = next(i for i, s in enumerate(steps)
+                  if "upload-artifact" in str(s.get("uses", "")))
+    assert determinism < retain, (
+        "the artifact is retained before its determinism is proved, so a "
+        "non-reproducible build would still publish a digest")
+
+
+def test_the_engine_build_is_part_of_the_approved_bootstrap_policy():
+    """A build workflow edited after the operator approved the bootstrap builds
+    a different engine, and prerequisite 15 is the approval that should stop
+    being valid when it does."""
+    assert "trusted-engine-build.yml" in bootstrapstate.BOOTSTRAP_POLICY_FILES
+    # Deployed as a `.yml`, not a template — it holds no credential, which is
+    # the whole reason it can be. D1 and D2 stay templates until activation,
+    # so the digest is computed over a directory carrying both forms.
+    assert "trusted-engine-build.yml" not in (
+        bootstrapstate.BOOTSTRAP_POLICY_ALTERNATES)
+    assert DEPLOYED_ENGINE_BUILD.is_file()
+    # The deployed copy must be the reviewed one. Two files with one name that
+    # differ means the bootstrap policy digest describes a workflow other than
+    # the one that runs — which is the exact thing prerequisite 15 approves.
+    assert DEPLOYED_ENGINE_BUILD.read_bytes() == (
+        ENGINE_BUILD_WORKFLOW.read_bytes())
+
+
+def test_editing_the_build_workflow_changes_the_bootstrap_policy_digest(
+        tmp_path):
+    """The mutation. A digest nothing moves is a digest that checks nothing."""
+    for name in bootstrapstate.BOOTSTRAP_POLICY_FILES:
+        source = LANE_DIR / "workflow" / name
+        if source.exists():
+            (tmp_path / name).write_bytes(source.read_bytes())
+        else:
+            # D1/D2 are deployed as templates before activation.
+            (tmp_path / (name + ".template")).write_bytes(
+                (LANE_DIR / "workflow" / (name + ".template")).read_bytes())
+    original = bootstrapstate.policy_digest(
+        workflow_dir=str(tmp_path), implemented_phase=phases.IMPLEMENTED_PHASE)
+    build = tmp_path / "trusted-engine-build.yml"
+    build.write_bytes(build.read_bytes() + b"\n# an edit after approval\n")
+    edited = bootstrapstate.policy_digest(
+        workflow_dir=str(tmp_path), implemented_phase=phases.IMPLEMENTED_PHASE)
+    assert edited["policy_sha256"] != original["policy_sha256"]
+
+
+def test_the_candidate_package_still_refuses_to_fill_in_the_built_fields():
+    """R10 adds a producer for the fields the candidate leaves empty; it must
+    not make the candidate able to fill them. A value there would be the
+    reviewed branch attesting itself."""
+    record = enginebuild.candidate_package(
+        roles=_build_roles(), repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    assert enginebuild.assert_is_only_a_candidate(record)["unlocks_d1"] is False
+    with _refusal("engine_candidate_claims_unavailable_fields"):
+        enginebuild.assert_is_only_a_candidate(
+            {**record, "artifact_sha256": "e" * 64})
