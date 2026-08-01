@@ -53,7 +53,7 @@ documents this in its own header and deliberately omits a
 
 | # | Key | Action | Verifiable by the lane | Blocks |
 |---|-----|--------|------------------------|--------|
-| 7 | `protect_trusted_environment` | Protect the trusted environment **and** the default ref. | No | D1 |
+| 7 | `protected_trusted_environment` | Protect the trusted environment **and** the default ref. | No | D1 |
 
 ### Required status checks — the exact strings
 
@@ -63,50 +63,50 @@ constants `scripts/trustedlane/statusnames.py` asserts on, so the instruction
 cannot drift from the policy. `statusnames.branch_protection_instructions()`
 prints them.
 
-| when | require exactly |
+| when | require exactly, on the candidate pull request |
 |---|---|
-| now | `test (3.12)`, `image`, `d0-containment` |
-| after D1 is deployed and approved | add `trusted-verifier-count`, `d1-containment-gate` |
-| after D2 is separately approved | add `trusted-cross-vendor-review`, `d2-containment-gate` |
+| now | `test (3.12)`, `image` |
+| after D1 is deployed and approved | add `trusted-verifier-count` |
+| after D2 is separately approved | add `trusted-cross-vendor-review` |
 
-**Never require `independent-verify-inactive`.** That job runs, reports a
-documented residual, and casts **zero votes** — it holds no provider credential
-since V-TRUST was closed. Requiring it would make a no-review success
-permanently satisfy a review requirement.
+Also set **"Require branches to be up to date before merging"** (strict). Without
+it a status earned against an older base counts for code that is not what
+merges.
 
-It was called `cross-vendor` until Exchange 3, which is exactly the hazard: the
-name sounded like the authoritative cross-vendor review, and the programme's own
-older documents recommended requiring it. If you have `cross-vendor` configured
-from before, remove it — nothing publishes that name any more, and a required
-status nothing publishes blocks every PR forever.
+The two trusted contexts must additionally be **restricted to the approved
+publisher** (GitHub App id) where the ruleset supports it. A required trusted
+context that any source may publish can be published by the candidate's own
+workflow, which turns the trusted gate into a self-signed claim.
 
-**Never require `probe`.** It runs only on `workflow_dispatch`, so it never
-reports on a pull request; requiring it leaves every PR pending on a check that
-cannot start.
+#### Never require any of these
+
+| status | why it can never work as a PR check |
+|---|---|
+| `independent-verify-inactive` | reports success having cast **zero votes** — it holds no provider credential since V-TRUST was closed. Requiring it makes a no-review success satisfy a review requirement. Called `cross-vendor` until Exchange 3; if you have that name configured, **remove it** — nothing publishes it any more, and a required status nothing publishes blocks every PR forever. |
+| `d0-containment` | D0 triggers on `push` and `workflow_dispatch` only, **never on `pull_request`**, so it never reports on a candidate head. Requiring it deadlocks every PR. (An earlier version of this packet listed it under "require now". That was wrong.) |
+| `probe` | `workflow_dispatch` only — same deadlock. |
+| `d1-containment-gate`, `d2-containment-gate` | internal jobs of a **main-dispatched** trusted run; their checks land on main's commit, not on a candidate head. |
+| `build-engine` | `workflow_dispatch` only — same deadlock. And a green build says the engine artifact was *produced*, never that anyone approved it; approval of its five digests is item 14. |
 
 `test (3.12)` is the string to configure, not `test` — a matrix job publishes
 its check name with the matrix values appended.
 
 Pass the list you actually configured to
-`statusnames.assert_no_inactive_status_is_required(...)` to have it checked. The
-lane holds no credential and cannot read or set branch protection itself, so
-that is a check over an observed value, not an enforcement.
+`statusnames.assert_only_requirable_statuses(...)` to have it checked. The lane
+holds no credential and cannot read or set branch protection itself, so that is
+a check over an observed value, not an enforcement.
 
-**This one is currently false, and it was verified, not assumed.**
-`GET /repos/mglaeser/bubble-regime-monitor/branches` reports `main` with
-`"protected": false`, while the programme's documents describe a
-"protected/default main" throughout. The design premise and the world disagree.
+### Why a trusted status must be published on the candidate SHA
 
-`identity.assert_protected_ref` compares a ref **name** and would pass on an
-unprotected `main` — a name is not a protection. That is why
-`identity.assert_branch_protection_observed` exists as a separate check taking
-the branch record the API actually returned, and why it refuses
-`branch_protection_not_observed` (nobody looked) separately from
-`branch_not_protected` (looked, and it is not). Those are different failures
-and the operator fixes them differently.
+D1 and D2 run from the protected default ref via `workflow_dispatch`. A
+dispatched run's own job checks are associated with **the dispatched ref's
+commit — main** — not with the pull request under review. Reserving a job name
+in a workflow on main therefore does nothing for the PR's required check.
 
-Until this is done, deploying a credential-bearing workflow to `main` deploys it
-to a branch anyone with push access can rewrite.
+The lane publishes `trusted-verifier-count` and `trusted-cross-vendor-review`
+**explicitly onto the exact candidate head SHA**, pending before any provider
+work and final afterwards. That published status is what branch protection
+requires. See `scripts/trustedlane/statuspublish.py`.
 
 ## Group 3 — PINs and policy authorization (items 8–13)
 
@@ -150,6 +150,67 @@ precisely so that approving one cannot approve the other.
 
 ---
 
+## Group 6 — the runner inputs (not prerequisites, but D1/D2 will not start
+without them)
+
+These are not attestations, so they are not in the sixteen. They are the
+concrete values the workflow steps read, and the lane refuses by name when any
+is absent — a default for any of them would be a check that quietly stopped
+running.
+
+### Environment secrets (scope: environment only, never repository or org)
+
+| name | environment | what it is | who else may hold it |
+|---|---|---|---|
+| `TRUSTED_VERIFIER_OPENAI_KEY` | `trusted-verifier`, `trusted-verifier-generation` | the provider key (prerequisite 5) | nobody |
+| `TRUSTED_EVIDENCE_SIGNING_KEY` | both | signs the evidence envelope and the executable plan | nobody |
+| `TRUSTED_OPERATOR_TRUST_STORE` | both | the MAC keys that make an operator envelope authentic | nobody |
+| `TRUSTED_STATUS_TOKEN` | both | an installation token with **Statuses: write**, used only to set `trusted-verifier-count` / `trusted-cross-vendor-review` on the candidate commit | nobody |
+| `TRUSTED_PROTECTED_STATE_OBSERVATION` | both | the branch-protection and environment records, as JSON. Needs repository **administration: read**, which a workflow token cannot have — so it is taken out of band and pasted here |
+| `TRUSTED_OPERATOR_RECORDS` | both | the authenticated prerequisite envelopes, as JSON |
+| `TRUSTED_OPERATOR_REVOCATIONS` | both | the revocation list. **Required.** "No list" is not "no revocations", and a lane that reads a missing list as empty cannot be told to stop |
+
+`TRUSTED_STATUS_TOKEN` is a **third** capability with its own variable and its
+own reader (`statustransport.read_installation_token`). A lane that obtained the
+provider key and this one through one call would grant both wherever it granted
+either — and the two are not comparable: one spends money, one marks a pull
+request green.
+
+### Repository variables
+
+| name | what it is |
+|---|---|
+| `TRUSTED_ENGINE_ARTIFACT_SHA256` | the approved artifact digest. The release supplies the bytes; **this** supplies the number they are checked against, and a release that supplied both would be checking itself |
+| `TRUSTED_ENGINE_RELEASE_TAG` | which release the artifact and its identity record are downloaded from |
+
+### The engine release
+
+Run `trusted-engine-build` (dispatch-only, holds no credential, `contents:
+read`). It builds the artifact deterministically from two exact commits, proves
+determinism by rebuilding and comparing, and retains `engine.tar.gz` plus
+`engine-identity.json`. Download both, create the release, set the two variables
+above, and approve the five digests in the identity record as prerequisite 14.
+
+The build **retains rather than releases** on purpose: publishing needs
+`contents: write`, and a build that can write to the repository can move the tag
+it publishes under.
+
+A green `build-engine` says the artifact was **produced**. It does not say
+anyone approved it — that is prerequisite 14, and it is yours.
+
+### D1 → D2
+
+D2 is dispatched with `d1_run_id`, and downloads D1's two signed documents from
+that run's private artifacts. Not a digest: a digest identifies a plan, and
+whoever hands D2 the plan chooses which plan gets identified.
+
+The executable plan is **private**. It carries the exact prompt bytes of every
+request — the candidate's code and the reviewer's questions — so it lives only
+in a retained artifact with a short retention, and only its digest appears in
+anything a pull request can see. That is what prerequisite 13 approves.
+
+---
+
 ## What the lane does with these
 
 `prerequisites.prerequisite_status` returns which are recorded and which are
@@ -160,6 +221,22 @@ Recording is not verification, and the code says so rather than implying it.
 Fifteen of the sixteen are attestations that an operator performed an action in
 a console this repository cannot see. The lane stores them, gates on them, and
 reports them as `attested`, never as `verified`.
+
+## V-TRUST is two facts, not one
+
+Reporting "V-TRUST closed" as a single state conflates a defect that is fixed
+with an authority that does not exist yet.
+
+| machine fact | state |
+|---|---|
+| `pr_controlled_provider_credential_exposure` | **CLOSED** — no live workflow injects a provider credential into a job running PR-controlled code, and `livepolicy` refuses any that tries |
+| `candidate_self_authentication` | **CLOSED** by refusal design — candidate code cannot promote its own evidence |
+| `trusted_review_authority` | **INACTIVE_OPEN_BLOCKING** — D1/D2 are inert templates; no count and no generation has ever run |
+| `precursor_trusted_evidence` | **ABSENT** |
+| `precursor_merge_trust_gate` | **OPEN_BLOCKING** |
+
+The inactive `independent-verify-inactive` success is **not a review**. It is a
+job reporting a documented residual, and it casts zero votes.
 
 ## Current state
 

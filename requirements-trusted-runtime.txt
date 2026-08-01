@@ -1,0 +1,38 @@
+# Dependency lock for the CREDENTIAL-BEARING trusted runtime (D1/D2).
+#
+# Install with:
+#
+#     pip install --require-hashes --no-deps -r requirements-trusted-runtime.txt
+#
+# `--require-hashes` is the point. A pinned version alone still lets a
+# compromised index serve different bytes under the same number, on a machine
+# that is about to hold a provider key.
+#
+# ONE package, not two. The D0/D1/D2 workflows installed `pytest` alongside
+# `PyYAML` because D0 runs the containment suite. D1 and D2 do not run tests —
+# they count and generate. An AST sweep over scripts/trustedlane/ finds exactly
+# one third-party import, `yaml`, and no runtime module imports pytest. A test
+# framework in a credential-bearing runner is a plugin loader, a conftest search
+# and an entry-point scan sitting next to a key, so it is not installed here.
+# `runtimelock.assert_no_test_dependency` refuses one if it reappears.
+#
+# SCOPE OF THIS HASH — read before reusing it.
+# The digest below is the CPython 3.12 x86_64 manylinux wheel, which is what
+# `ubuntu-latest` with `python-version: '3.12'` resolves. It was obtained by
+# downloading that exact artifact:
+#
+#     pip download PyYAML==6.0.3 --no-deps --only-binary=:all: \
+#         --python-version 312 --platform manylinux2014_x86_64 \
+#         --implementation cp --abi cp312
+#     sha256sum pyyaml-6.0.3-cp312-*.whl
+#
+# A different interpreter, ABI or platform installs a different artifact with a
+# different digest, and `--require-hashes` will refuse it — correctly. Resolving
+# additional platforms is a job for the no-secret protected build, which may
+# reach the index; it is not something a reviewed branch should guess at.
+#
+# The digest is a public artifact fingerprint, not a credential; the pragma is
+# only there because a 64-hex literal trips the secret scanner's shape rule.
+
+PyYAML==6.0.3 \
+    --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc

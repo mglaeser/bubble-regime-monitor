@@ -22,6 +22,7 @@ and nothing to leak — and that is a property worth proving, not asserting.
 from __future__ import annotations
 
 import ast
+import base64
 import hashlib
 import inspect
 import json
@@ -30,6 +31,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import types
 from pathlib import Path
 
 import pytest
@@ -44,19 +47,43 @@ from trustedlane import (  # noqa: E402
     REPOSITORY_NUMERIC_ID,
     actionpolicy,
     adapter,
+    artifactload,
+    authzenvelope,
+    bootstrapstate,
     candidatefetch,
+    challenge,
     closure,
+    countledger,
+    counttransport,
+    d1cli,
+    d1runtime,
+    d2cli,
+    d2runtime,
+    enginebridge,
     enginebuild,
     enginepolicy,
+    enginesource,
     errors,
     evidencewire,
+    executableplan,
+    generationtransport,
     identity,
+    inputmaterial,
+    instants,
+    laneentry,
     livepolicy,
     operatorrecord,
     phases,
     prerequisites,
     protectedstate,
+    runtimebinding,
+    runtimelock,
+    signing,
     statusnames,
+    statuspublish,
+    statustransport,
+    transport,
+    trustedverifier,
     workflowfile,
     workflowpolicy,
 )
@@ -69,6 +96,9 @@ LANE_DIR = ROOT / "scripts" / "trustedlane"
 SHA_A = "b08844a0755710035d62830faa84902d9d85d3fe"  # pragma: allowlist secret
 SHA_B = "caf5119dc39a9596a73b0d2f4ffbefc6c092890f"  # pragma: allowlist secret
 SHA_C = "a9062aa656a5a6f3dbe5991d16ce9c218aad0454"  # pragma: allowlist secret
+# The base of the PR #25 range. D1 reviews it because it is a range this
+# repository's own objects can really produce a skeleton for.
+PR25_BASE = "75a093de45f73169072837c7c062fab421caaf8b"  # pragma: allowlist secret
 DIGEST = hashlib.sha256(b"digest").hexdigest()
 
 
@@ -93,6 +123,27 @@ NETWORK_MODULES = {
 CREDENTIAL_ENV_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
+#: The count lane cannot count without sending a request, so exactly one file
+#: is permitted to reach a provider. Naming it here rather than deleting the
+#: rule keeps the property checkable: the scan still runs over every other
+#: file, and the exception carries conditions of its own (below) that a plain
+#: allowlist entry would not.
+NETWORK_EXEMPT = {"transport.py"}
+
+#: Reading the provider key is `transport.py`; reading the evidence signing key
+#: is `signing.py`. Both are credential-bearing by design and both refuse
+#: outside D1/D2.
+#: Modules that read a capability from the environment BY DESIGN. Each is
+#: exempt from the blanket AST scan and covered instead by its own tests, which
+#: drive the phase gate rather than grep for the name.
+#:
+#: `statustransport.py` joined them with R07. It reads the installation token
+#: that sets a status on the candidate head — a different capability from the
+#: provider key and deliberately obtained through a different function, so a
+#: lane granted one is not granted the other.
+CREDENTIAL_EXEMPT = {"transport.py", "signing.py", "statustransport.py"}
+
+
 def _lane_sources():
     return sorted(LANE_DIR.rglob("*.py"))
 
@@ -102,8 +153,7 @@ def test_lane_has_sources():
     assert len(_lane_sources()) >= 10
 
 
-@pytest.mark.parametrize("path", _lane_sources(), ids=lambda p: p.name)
-def test_no_lane_module_imports_a_network_client(path):
+def _imported_names(path):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     imported = set()
     for node in ast.walk(tree):
@@ -111,15 +161,65 @@ def test_no_lane_module_imports_a_network_client(path):
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             imported.add(node.module)
+    return imported
+
+
+@pytest.mark.parametrize("path", _lane_sources(), ids=lambda p: p.name)
+def test_no_lane_module_imports_a_network_client(path):
+    if path.name in NETWORK_EXEMPT:
+        pytest.skip(f"{path.name} is the named transport; see the tests that "
+                    "constrain it")
     offending = sorted(
-        name for name in imported
+        name for name in _imported_names(path)
         if name in NETWORK_MODULES or name.split(".")[0] in NETWORK_MODULES)
     assert offending == [], f"{path.name} imports {offending}"
+
+
+def test_the_network_exemption_names_files_that_exist():
+    """An exemption for a file that is not there stops being an exemption and
+    becomes a hole waiting for someone to create that name."""
+    present = {p.name for p in _lane_sources()}
+    assert NETWORK_EXEMPT <= present, NETWORK_EXEMPT - present
+    assert CREDENTIAL_EXEMPT <= present, CREDENTIAL_EXEMPT - present
+
+
+@pytest.mark.parametrize("name", sorted(NETWORK_EXEMPT))
+def test_the_exempt_module_imports_its_client_inside_a_function(name):
+    """Module level would mean importing `transport` loads an HTTP client into
+    the process — in D0, in the test suite, everywhere. Inside a function body,
+    behind a refusal, it is loaded only on a path D0 cannot reach."""
+    path = LANE_DIR / name
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    module_level = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            module_level.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            module_level.add(node.module)
+    offending = sorted(n for n in module_level
+                       if n in NETWORK_MODULES
+                       or n.split(".")[0] in NETWORK_MODULES)
+    assert offending == [], f"{name} imports {offending} at module level"
+
+
+def test_importing_the_transport_binds_no_http_client():
+    """The same claim by execution rather than by AST.
+
+    Checking `sys.modules` would prove nothing — pytest and the standard
+    library pull `ssl` in for their own reasons, so it is present in any real
+    process. The checkable form is the module's own namespace: `transport` has
+    been imported by this suite, and it must still hold no reference to a
+    client, which is only true if the import never ran."""
+    assert not hasattr(transport, "http"), "transport bound an HTTP client"
+    assert not hasattr(transport, "ssl"), "transport bound ssl"
 
 
 @pytest.mark.parametrize("path", _lane_sources(), ids=lambda p: p.name)
 def test_no_lane_module_reads_a_credential_from_the_environment(path):
     """`os.environ["..._KEY"]` anywhere in D0 would contradict the phase."""
+    if path.name in CREDENTIAL_EXEMPT:
+        pytest.skip(f"{path.name} reads a credential by design; the tests "
+                    "below prove it refuses to in D0")
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     literals = [node.value for node in ast.walk(tree)
                 if isinstance(node, ast.Constant) and isinstance(node.value, str)]
@@ -1296,8 +1396,12 @@ def _raw_binding(**overrides):
     return base
 
 
-def test_the_d0_adapter_refuses_to_parse_a_response():
-    with _refusal("normalization_not_implemented_in_D0"):
+def test_normalizing_without_provenance_is_refused():
+    """EX3-R09. This used to refuse outright ("not implemented in D0"), which
+    was right while no real call had ever been made. The shape is established
+    now, so the refusal that remains is the one that still matters: a verdict
+    that cannot be traced to the exact bytes it came from has no provenance."""
+    with _refusal("normalization_requires_adapter_and_binding"):
         adapter.normalize(b'{"output": []}')
 
 
@@ -2531,20 +2635,49 @@ def test_f02_every_status_belongs_to_exactly_one_class(monkeypatch):
 def test_f02_requiring_the_inactive_status_is_refused():
     """The exact operator mistake this whole section exists to stop."""
     with pytest.raises(errors.LaneRefusal) as excinfo:
-        statusnames.assert_no_inactive_status_is_required(
+        statusnames.assert_only_requirable_statuses(
             ["test (3.12)", "independent-verify-inactive"])
-    assert "inactive_status_is_required" in excinfo.value.reason
-    # And the refusal names what to require instead, rather than only objecting.
-    assert "trusted-verifier-count" in excinfo.value.reason
+    assert "status_is_not_candidate_requirable" in excinfo.value.reason
+    # And the refusal says WHY this particular one can never work.
+    assert "cast zero votes" in excinfo.value.reason
 
 
-def test_f02_requiring_a_dispatch_only_diagnostic_is_refused():
-    """Different failure, different message: an inactive check passes when it
-    should not; a dispatch-only diagnostic never reports at all, so requiring it
-    leaves every PR pending forever."""
-    with _refusal("diagnostic_status_is_required"):
-        statusnames.assert_no_inactive_status_is_required(
-            ["test (3.12)", "probe"])
+@pytest.mark.parametrize("status,why", [
+    ("probe", "never reports on a candidate head"),
+    ("d0-containment", "never reports on a candidate head"),
+    ("d1-containment-gate", "lands on main's commit"),
+    ("d2-containment-gate", "lands on main's commit"),
+])
+def test_f02_no_status_that_cannot_report_on_a_pr_head_is_requirable(status, why):
+    """EX3-R03. Requiring a status that never reports on a candidate head is a
+    deadlock, not a gate — every PR waits forever for a check that cannot
+    arrive.
+
+    `d0-containment` was classified CONTAINMENT and put in `require_now` with
+    the comment "safe to require". Safe, and useless: D0 triggers on
+    `workflow_dispatch` and `push` to main, never on `pull_request`.
+
+    `d1/d2-containment-gate` fail for a neighbouring reason: they are internal
+    jobs of a main-dispatched run, so their checks land on main's commit."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        statusnames.assert_only_requirable_statuses(["test (3.12)", status])
+    assert "status_is_not_candidate_requirable" in excinfo.value.reason
+    assert why in excinfo.value.reason
+
+
+def test_f02_requirability_is_derived_not_enumerated(monkeypatch):
+    """The first version listed INACTIVE and DIAGNOSTIC by name, so when D0
+    moved out of the requirable set it kept accepting `d0-containment` — the
+    enumerate-the-hazards mistake, inside the module written to stop making it.
+
+    Shrinking REQUIRABLE_CLASSES must immediately make the dropped class
+    non-requirable, with no other edit."""
+    monkeypatch.setattr(statusnames, "REQUIRABLE_CLASSES", ("TRUSTED",))
+    monkeypatch.setattr(statusnames, "NEVER_REQUIRABLE_CLASSES",
+                        tuple(c for c in statusnames.STATUS_CLASSES
+                              if c != "TRUSTED"))
+    with _refusal("status_is_not_candidate_requirable"):
+        statusnames.assert_only_requirable_statuses(["test (3.12)"])
 
 
 def test_f02_the_old_name_is_no_longer_a_known_status():
@@ -2618,16 +2751,25 @@ def test_f02_two_workflows_may_not_publish_the_same_check_name():
         })
 
 
-def test_f02_the_real_workflows_publish_nine_distinct_registered_names():
+def test_f02_the_real_workflows_publish_only_registered_distinct_names():
     """Live directory plus both templates: every published name classified, no
-    two workflows publishing the same one."""
+    two workflows publishing the same one.
+
+    The count is derived from the registry rather than written as a literal.
+    It was `== 9`, which meant adding a workflow reddened this test for the
+    right reason and was then fixed by editing the number — a check whose
+    repair is "make the number match" stops asking anything. What matters is
+    that every name a workflow publishes is classified and owned by exactly one
+    file, which is what the two assertions below say."""
     record = statusnames.validate_status_policy(root=str(ROOT))
-    assert record["check_names"] == 9
+    assert record["check_names"] == len(record["owners"])
+    assert set(record["owners"]) <= set(statusnames.all_statuses())
     owners = record["owners"]
     assert owners["independent-verify-inactive"] == "independent-verify.yml"
     assert owners["d0-containment"] == "d0-trusted-lane-containment.yml"
     assert owners["trusted-verifier-count"] == workflowfile.D1_FILE
     assert owners["trusted-cross-vendor-review"] == workflowfile.D2_FILE
+    assert owners["build-engine"] == "trusted-engine-build.yml"
     assert "cross-vendor" not in owners
 
 
@@ -2636,9 +2778,21 @@ def test_f02_the_operator_instructions_are_literals_from_the_policy():
     defect. The instruction is generated from the same constants the code
     asserts on, so it cannot drift from the policy."""
     ins = statusnames.branch_protection_instructions()
-    assert ins["never_require"] == list(statusnames.INACTIVE_STATUSES)
+    # Every non-requirable class appears, derived — not just the inactive one.
+    expected_never = sorted({n for c in statusnames.NEVER_REQUIRABLE_CLASSES
+                             for n in statusnames.STATUS_CLASSES[c]})
+    assert ins["never_require"] == expected_never
+    assert "d0-containment" in ins["never_require"]
+    assert ins["require_now"] == list(statusnames.ORDINARY_STATUSES)
     assert statusnames.TRUSTED_STATUSES[0] in ins["require_after_d1"]
     assert statusnames.TRUSTED_STATUSES[1] in ins["require_after_d2"]
+    # Each exclusion carries its own mechanical reason, not one blanket phrase.
+    for name in ins["never_require"]:
+        reason = ins["why_never"][name]
+        assert len(reason) > 20, name
+        # A cross-reference ("same as X") is useless to an operator reading one
+        # line in a settings page; every reason must stand alone.
+        assert "same as" not in reason, name
     # Nothing non-requirable leaks into a require_* list.
     requirable = {n for c in statusnames.REQUIRABLE_CLASSES
                   for n in statusnames.STATUS_CLASSES[c]}
@@ -2695,162 +2849,421 @@ def test_f04_the_d0_push_filter_covers_the_suite_it_runs():
 
 
 # --------------------------------------------------------------------------
-# §5.4 — the engine identity CANDIDATE package.
+# EX3-R04/R05/R06 — the engine identity, bound to exact commits.
 #
-# Five of the thirteen identity fields are facts about source, derivable by
-# anyone holding the tree. The other eight are facts about a build that has not
-# happened and an approval that has not been given. Filling those in from this
-# branch would be inventing them, so they are empty and the package says why.
+# The first version took `source_commit` and `root` separately: it recorded the
+# commit string and independently hashed whatever was under the root. Nothing
+# connected them. Demonstrated accepting a package that named main's commit
+# while hashing a single planted `impostor.py`.
+#
+# Blobs now come from the git object database at the named commit, so the tree
+# cannot disagree with the commit — it IS the commit. There is no `root`
+# parameter, which is why the old bypass has no expression.
 # --------------------------------------------------------------------------
 
+def _rev(ref):
+    out = subprocess.run(["git", "rev-parse", ref], cwd=str(ROOT),  # noqa: S603
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        pytest.skip(f"ref {ref} unavailable in this checkout")
+    return out.stdout.strip()
 
-def _candidate_package():
-    return enginebuild.candidate_package(
-        source_commit=SHA_A, code_cutoff_sha=SHA_A, root=str(ROOT))
+
+@pytest.fixture(scope="module")
+def engine_roles():
+    return {"protected_trusted_lane": _rev("origin/main"),
+            "candidate_verifier": _rev("origin/fix/verifier-intra-file-review-plan")}
 
 
-def test_engine_candidate_fills_only_what_it_can_honestly_compute():
-    package = _candidate_package()
-    assert package["state"] == enginebuild.CANDIDATE_STATE
-    for field in enginebuild.COMPUTABLE_FIELDS:
-        assert package[field], field
-    for field in enginebuild.UNAVAILABLE_FIELDS:
-        assert package[field] is None, field
+def test_r05_the_commit_and_the_tree_can_no_longer_disagree():
+    """Structural, not a comparison: there is no disk root to pass, so a caller
+    cannot supply commit A and a tree from B."""
+    import inspect
+    assert "root" not in inspect.signature(enginebuild.candidate_package).parameters
+    assert "root" not in inspect.signature(enginesource.role_digest).parameters
+
+
+def test_r04_the_identity_covers_both_source_roles(engine_roles):
+    """`scripts/trustedlane` alone does not identify the code that plans,
+    counts, batches, executes or decides the review."""
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    assert set(package["source_roles"]) == set(enginesource.SOURCE_ROLES)
+    assert package["source_roles"]["candidate_verifier"]["file_count"] > 20
+    assert package["source_roles"]["protected_trusted_lane"]["file_count"] > 10
+    # Each role carries its OWN commit — in general they differ.
+    assert (package["source_roles"]["candidate_verifier"]["source_commit"]
+            != package["source_roles"]["protected_trusted_lane"]["source_commit"])
+
+
+def test_r04_an_identity_over_one_role_only_is_refused(engine_roles):
+    with _refusal("engine_role_missing"):
+        enginesource.multi_source_manifest(
+            roles={"protected_trusted_lane": engine_roles["protected_trusted_lane"]},
+            repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+
+
+def test_r05_each_role_records_its_commit_and_its_tree(engine_roles):
+    """Both, so a reader can re-derive either without trusting this code."""
+    record = enginesource.role_digest(
+        role="protected_trusted_lane",
+        commit=engine_roles["protected_trusted_lane"], cwd=str(ROOT))
+    assert len(record["source_commit"]) == 40
+    assert len(record["source_tree"]) == 40
+    assert record["source_commit"] != record["source_tree"]
+    for path, entry in record["files"].items():
+        assert len(entry["sha256"]) == 64, path
+        assert len(entry["git_oid"]) == 40, path
+        assert entry["mode"] in ("100644", "100755"), path
+
+
+def test_r05_a_role_that_is_empty_at_that_commit_is_refused():
+    """`scripts/verifier` does not exist on main. A digest over nothing matches
+    any engine, so it is refused rather than recorded as zero files."""
+    with _refusal("engine_role_empty"):
+        enginesource.role_digest(role="candidate_verifier",
+                                 commit=_rev("origin/main"), cwd=str(ROOT))
+
+
+@pytest.mark.parametrize("commit", ["HEAD", "main", "abc", ""])
+def test_r05_a_non_sha_commit_is_refused(commit):
+    with _refusal("commit_sha_malformed"):
+        enginesource.role_digest(role="protected_trusted_lane", commit=commit,
+                                 cwd=str(ROOT))
+
+
+def test_r05_the_engine_digest_moves_when_either_role_moves(engine_roles):
+    """A binding digest that ignores one side binds nothing about it."""
+    both = enginesource.multi_source_manifest(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))["engine_source_sha256"]
+    older = dict(engine_roles, protected_trusted_lane=_rev("origin/main~1"))
+    moved = enginesource.multi_source_manifest(
+        roles=older, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))["engine_source_sha256"]
+    assert both != moved
+
+
+def _engine_repo(tmp_path, files, *, cacheinfo=(), symlinks=()):
+    """A real git repository holding both engine roles.
+
+    The mutation sweep found five refusals with no test behind them — symlink,
+    gitlink, content-binding, path-binding, unparseable source — and every one
+    of them needs a *tree*, not a list of dicts. `assert_paths_within_allowlist`
+    can be driven with fabricated entries, but `list_blobs_at` reads the object
+    database, so proving it refuses a symlink means committing one.
+
+    `cacheinfo` plants entries git will not create from a working tree — a
+    gitlink has no file to `git add`."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+           "HOME": str(tmp_path), "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_TERMINAL_PROMPT": "0"}
+
+    def run(*args):
+        done = subprocess.run(  # noqa: S603
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+             "-c", "commit.gpgsign=false", *args],
+            cwd=str(repo), env=env, capture_output=True, text=True)
+        assert done.returncode == 0, f"{args}: {done.stderr}"
+        return done.stdout.strip()
+
+    run("init", "-q", "-b", "main")
+    for relative, content in files.items():
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    for link, points_to in symlinks:
+        target = repo / link
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(points_to, target)
+    run("add", "-A")
+    for mode, oid, path in cacheinfo:
+        run("update-index", "--add", "--cacheinfo", f"{mode},{oid},{path}")
+    run("commit", "-q", "-m", "engine")
+    return str(repo), run("rev-parse", "HEAD")
+
+
+_MINIMAL_ROLES = {"scripts/trustedlane/m.py": "import json\n",
+                  "scripts/verifier/v.py": "import json\n"}
+
+
+def test_r05_a_symlink_in_the_engine_source_is_refused_not_followed():
+    """A symlink points outside the allowlist while appearing inside it, and
+    `assert_paths_within_allowlist` would clear it: its *path* is fine."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        cwd, commit = _engine_repo(
+            Path(scratch), _MINIMAL_ROLES,
+            symlinks=[("scripts/verifier/link.py", "../../../../etc/passwd")])
+        with _refusal("engine_source_contains_symlink"):
+            enginesource.role_digest(role="candidate_verifier", commit=commit,
+                                     cwd=cwd)
+
+
+def test_r05_a_submodule_in_the_engine_source_is_refused():
+    """Content this repository does not hold and cannot digest. Skipping it
+    would leave a whole subtree outside the identity while it still ships."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        cwd, commit = _engine_repo(
+            Path(scratch), _MINIMAL_ROLES,
+            cacheinfo=[("160000", "b" * 40, "scripts/verifier/vendored")])
+        with _refusal("engine_source_contains_submodule"):
+            enginesource.role_digest(role="candidate_verifier", commit=commit,
+                                     cwd=cwd)
+
+
+def test_r05_the_role_digest_moves_when_a_files_bytes_change():
+    """Content binding, at a FIXED path. The cross-commit test cannot prove
+    this: moving to another commit also moves the path list, so a digest that
+    ignored contents entirely would still differ and still look bound."""
+    import tempfile
+
+    digests = []
+    for body in ("import json\n", "import json  # changed\n"):
+        with tempfile.TemporaryDirectory() as scratch:
+            cwd, commit = _engine_repo(
+                Path(scratch), dict(_MINIMAL_ROLES,
+                                    **{"scripts/verifier/v.py": body}))
+            digests.append(enginesource.role_digest(
+                role="candidate_verifier", commit=commit,
+                cwd=cwd)["role_sha256"])
+    assert digests[0] != digests[1]
+
+
+def test_r05_the_role_digest_moves_when_a_file_is_renamed():
+    """Path binding, with the bytes held IDENTICAL and the sort order held
+    fixed. Swapping two files' contents would also swap their order and pass
+    against a digest that ignored paths; a pure rename cannot."""
+    import tempfile
+
+    digests = []
+    for name in ("a_v.py", "b_v.py"):
+        with tempfile.TemporaryDirectory() as scratch:
+            cwd, commit = _engine_repo(
+                Path(scratch),
+                {"scripts/trustedlane/m.py": "import json\n",
+                 f"scripts/verifier/{name}": "import json\n",
+                 "scripts/verifier/zz.py": "import re\n"})
+            digests.append(enginesource.role_digest(
+                role="candidate_verifier", commit=commit,
+                cwd=cwd)["role_sha256"])
+    assert digests[0] != digests[1]
+
+
+def test_r04_an_unknown_role_alongside_the_required_two_is_refused(engine_roles):
+    """Distinct from the missing-role case, which refuses before reaching this.
+    An extra role would widen the identity to cover code nobody agreed was part
+    of the engine.
+
+    Matched on the PLURAL `roles=` marker, not on the category. `role_digest`
+    refuses an unknown role under the same category with a singular `role=`, so
+    a test that asserted only `engine_role_unknown` would pass with the
+    manifest-level check deleted — it would be asking "did something refuse"
+    when the question is "did the manifest refuse before digesting anything".
+    The mutation sweep found exactly that: the category matched either way."""
+    with _refusal(r"engine_role_unknown roles=\['app'\]"):
+        enginesource.multi_source_manifest(
+            roles=dict(engine_roles, app=engine_roles["protected_trusted_lane"]),
+            repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+
+
+def test_r05_a_suffix_outside_the_allowlist_is_refused_not_skipped():
+    """Skipping leaves it out of the identity while it still ships. Caught a
+    real pair on the first run against main — the D1/D2 `.yml.template` files,
+    which ARE engine source and are now on the allowlist."""
+    entries = [{"path": "scripts/trustedlane/payload.so", "oid": "a" * 40,
+                "mode": "100644"}]
+    with _refusal("engine_path_suffix_not_permitted"):
+        enginesource.assert_paths_within_allowlist(
+            entries, allowed_prefixes=("scripts/trustedlane",))
+
+
+def test_r05_a_path_outside_the_requested_prefix_is_refused():
+    entries = [{"path": "app/secrets.py", "oid": "a" * 40, "mode": "100644"}]
+    with _refusal("engine_path_outside_allowlist"):
+        enginesource.assert_paths_within_allowlist(
+            entries, allowed_prefixes=("scripts/trustedlane",))
+
+
+def test_r05_the_templates_are_part_of_the_engine_identity(engine_roles):
+    """They are the workflow code that gets deployed."""
+    record = enginesource.role_digest(
+        role="protected_trusted_lane",
+        commit=engine_roles["protected_trusted_lane"], cwd=str(ROOT))
+    templates = [p for p in record["files"] if p.endswith(".yml.template")]
+    assert len(templates) == 2, templates
+
+
+# ---- EX3-R06: hash-locked runtime -----------------------------------------
+
+
+def test_r06_the_real_lock_is_pinned_and_hashed():
+    lock = runtimelock.load_lock(root=str(ROOT))
+    assert lock["package_count"] == 1
+    entry = lock["requirements"]["pyyaml"]
+    assert entry["version"] == "6.0.3"
+    assert entry["hashes"] and entry["hashes"][0]["algorithm"] == "sha256"
+
+
+def test_r06_the_runtime_does_not_install_a_test_framework():
+    """D1/D2 count and generate; they run no tests. An AST sweep finds exactly
+    one third-party import in the lane — `yaml` — and no runtime module imports
+    pytest. A test framework in a credential-bearing runner is a plugin loader
+    and an entry-point scan next to a provider key."""
+    lock = runtimelock.load_lock(root=str(ROOT))
+    assert "pytest" not in lock["requirements"]
+    with _refusal("runtime_lock_contains_test_dependency"):
+        runtimelock.assert_no_test_dependency({"pytest": {"version": "8.0.0"}})
+
+
+@pytest.mark.parametrize("text,category", [
+    ("PyYAML\n", "lock_requirement_not_pinned"),
+    ("PyYAML==6.0.3\n", "lock_requirement_unhashed"),
+    ("PyYAML==6.0.3 --hash=md5:" + "a" * 32 + "\n",
+     "lock_hash_algorithm_broken"),
+    ("PyYAML==6.0.3 --hash=sha1:" + "a" * 40 + "\n",
+     "lock_hash_algorithm_broken"),
+    ("requests==2.0.0 --hash=sha256:" + "a" * 64 + "\n",
+     "lock_package_not_permitted"),
+    ("PyYAML==6.0.3 --hash=sha256:" + "a" * 64 + "\nPyYAML==6.0.2 --hash=sha256:"
+     + "b" * 64 + "\n", "lock_package_listed_twice"),
+    ("# nothing but a comment\n", "lock_is_empty"),
+])
+def test_r06_an_unlocked_requirement_is_refused(text, category):
+    """An unhashed dependency IS the supply chain — a pinned version still lets
+    a compromised index serve different bytes under the same number."""
+    with _refusal(category):
+        runtimelock.parse_lock(text)
+
+
+def test_r06_pips_own_continuation_line_form_parses():
+    """The hashes live on continuation lines. A line-by-line parser would see a
+    pinned requirement with no hashes followed by orphan hash lines, and would
+    conclude either "unhashed" or "hashes belong to nothing" — both wrong, in
+    different directions."""
+    parsed = runtimelock.parse_lock(
+        "PyYAML==6.0.3 \\\n    --hash=sha256:" + "a" * 64 + "\n")
+    assert parsed["pyyaml"]["hashes"][0]["digest"] == "a" * 64
+
+
+def test_r06_a_missing_lock_file_is_refused(tmp_path):
+    with _refusal("runtime_lock_missing"):
+        runtimelock.load_lock(root=str(tmp_path))
+
+
+def test_r06_the_lock_digest_moves_with_the_pinned_version():
+    a = runtimelock.lock_digest(runtimelock.parse_lock(
+        "PyYAML==6.0.3 --hash=sha256:" + "a" * 64 + "\n"))
+    b = runtimelock.lock_digest(runtimelock.parse_lock(
+        "PyYAML==6.0.2 --hash=sha256:" + "a" * 64 + "\n"))
+    assert a != b
+
+
+# ---- the candidate package remains a candidate ----------------------------
+
+
+def test_engine_candidate_still_cannot_unlock_d1(engine_roles):
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
     assert enginebuild.assert_is_only_a_candidate(package)["unlocks_d1"] is False
-
-
-def test_engine_candidate_explains_each_gap_rather_than_only_having_it():
-    package = _candidate_package()
-    for field, why in package["unavailable_because"].items():
-        assert package[field] is None
-        assert len(why) > 20, field
-    assert "protected build" in package["unavailable_because"]["artifact_sha256"]
-
-
-def test_engine_candidate_still_cannot_unlock_d1():
-    """The whole point. It is a thing to approve, not an approval."""
-    package = _candidate_package()
     with _refusal("engine_not_approved_in_D0"):
         enginepolicy.assert_engine_approved(package)
 
 
-def test_a_candidate_package_with_a_forged_signature_is_refused():
-    """The realistic failure is drift, not forgery: someone fills in a
-    plausible-looking `signature` on a later pass and the package stops
-    announcing what it is."""
-    package = _candidate_package()
+def test_engine_candidate_leaves_every_unavailable_field_empty(engine_roles):
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    for field, why in package["unavailable_because"].items():
+        assert package[field] is None, field
+        assert len(why) > 20, field
+        # A cross-reference ("same as X") is useless to whoever is reading THIS
+        # field's row and has not read X. Same defect as the never-require
+        # table's reasons; forbidden here for the same reason.
+        assert "same as" not in why, field
+
+
+def test_a_candidate_package_with_a_forged_signature_is_refused(engine_roles):
+    """Drift, not forgery: someone fills in a plausible `signature` on a later
+    pass and the package stops announcing what it is."""
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
     package["signature"] = "MEUCIQ" + "x" * 40
     with _refusal("engine_candidate_claims_unavailable_fields"):
         enginebuild.assert_is_only_a_candidate(package)
 
 
-def test_a_candidate_package_that_renames_its_own_state_is_refused():
-    package = _candidate_package()
+def test_the_sbom_confirms_the_engine_pulls_in_no_http_client(engine_roles):
+    """Reaches the no-transport conclusion by enumeration, independently of the
+    suite's import denylist."""
+    bill = enginebuild.sbom(roles=engine_roles, cwd=str(ROOT))
+    assert bill["third_party"] == ["yaml"]
+    for forbidden in ("requests", "httpx", "urllib3", "aiohttp", "openai",
+                      "anthropic"):
+        assert forbidden not in bill["components"], forbidden
+
+
+def test_the_sbom_refuses_a_file_it_cannot_parse(engine_roles):
+    """An SBOM that skips the file it could not read has a hole exactly where
+    the interesting thing would be — an import list is only a safety claim if
+    it covers every file."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as scratch:
+        cwd, commit = _engine_repo(
+            Path(scratch),
+            {"scripts/trustedlane/m.py": "import json\n",
+             "scripts/verifier/v.py": "import json\n",
+             "scripts/verifier/broken.py": "def f(:\n"})
+        with _refusal("engine_source_unparsable"):
+            enginebuild.sbom(roles={"candidate_verifier": commit,
+                                    "protected_trusted_lane": commit}, cwd=cwd)
+
+
+def test_the_candidate_state_string_cannot_drift(engine_roles):
+    """The package's whole job is announcing what it is not. A changed state
+    string is that announcement going quiet."""
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
     package["state"] = "APPROVED_ENGINE_IDENTITY"
     with _refusal("engine_candidate_state_changed"):
         enginebuild.assert_is_only_a_candidate(package)
 
 
-def test_the_engine_tree_digest_binds_paths_as_well_as_contents(tmp_path):
-    """A pure RENAME must move the digest.
-
-    The first version of this test swapped two files' contents, which also
-    swaps their position in the sorted walk — so a digest that ignored paths
-    entirely still changed, and the mutation sweep reported STILL_GREEN when
-    path binding was removed. The test proved the digest noticed *something*,
-    not that it noticed the path.
-
-    The case that isolates it: rename a file without changing its content and
-    without changing its sort position. `z.py` -> `y.py` alongside `m.py` leaves
-    the content sequence byte-identical in the same order, so a content-only
-    digest is unchanged — while the file that runs is a different file."""
-    root = tmp_path / "scripts" / "trustedlane"
-    root.mkdir(parents=True)
-    (root / "m.py").write_text("import json\n", encoding="utf-8")
-    (root / "z.py").write_text("import os\n", encoding="utf-8")
-    before = enginebuild.source_tree_digest(root=str(tmp_path))
-
-    (root / "z.py").rename(root / "y.py")
-    after = enginebuild.source_tree_digest(root=str(tmp_path))
-
-    # Same count, same contents, same order — only the name moved.
-    assert before["file_count"] == after["file_count"] == 2
-    assert sorted(before["files"].values()) == sorted(after["files"].values())
-    assert list(before["files"])[0].endswith("m.py")
-    assert list(after["files"])[0].endswith("m.py")
-    assert before["source_tree_sha256"] != after["source_tree_sha256"]
+@pytest.mark.parametrize("field", enginebuild.COMPUTABLE_FIELDS)
+def test_a_package_missing_a_computable_field_is_refused(engine_roles, field):
+    """Empty here is not the same as empty in an unavailable field: these three
+    ARE derivable from the commits, so a blank one means the derivation did not
+    happen, not that it could not."""
+    package = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    package[field] = None
+    with _refusal("engine_candidate_incomplete"):
+        enginebuild.assert_is_only_a_candidate(package)
 
 
-def test_the_engine_tree_digest_notices_an_untracked_file(tmp_path):
-    """Walked from disk rather than asked of git, because `git ls-files` would
-    silently omit an untracked file sitting in the engine directory — exactly
-    the file worth noticing."""
-    root = tmp_path / "scripts" / "trustedlane"
-    root.mkdir(parents=True)
-    (root / "real.py").write_text("x\n", encoding="utf-8")
-    before = enginebuild.source_tree_digest(root=str(tmp_path))
-    (root / "planted.py").write_text("y\n", encoding="utf-8")
-    after = enginebuild.source_tree_digest(root=str(tmp_path))
-    assert after["file_count"] == before["file_count"] + 1
-    assert after["source_tree_sha256"] != before["source_tree_sha256"]
-
-
-def test_an_empty_engine_tree_is_refused_not_digested(tmp_path):
-    """A digest over nothing matches any engine."""
-    (tmp_path / "scripts" / "trustedlane").mkdir(parents=True)
-    with _refusal("engine_source_empty"):
-        enginebuild.source_tree_digest(root=str(tmp_path))
-
-
-def test_the_sbom_confirms_the_engine_pulls_in_no_http_client():
-    """The suite already bans transport imports by name. This reaches the same
-    conclusion from the other direction — an enumeration of what the engine
-    actually imports — so the claim does not rest on one denylist."""
-    bill = enginebuild.sbom(root=str(ROOT))
-    assert bill["third_party"] == ["yaml"]
-    for forbidden in ("requests", "httpx", "urllib3", "aiohttp", "http",
-                      "socket", "openai", "anthropic"):
-        assert forbidden not in bill["components"], forbidden
-
-
-def test_the_sbom_refuses_rather_than_skipping_a_file_it_cannot_parse(tmp_path):
-    """An SBOM that skips the file it could not read has a hole exactly where
-    the interesting thing would be."""
-    root = tmp_path / "scripts" / "trustedlane"
-    root.mkdir(parents=True)
-    (root / "ok.py").write_text("import json\n", encoding="utf-8")
-    (root / "broken.py").write_text("def (:\n", encoding="utf-8")
-    with _refusal("engine_source_unparsable"):
-        enginebuild.sbom(root=str(tmp_path))
-
-
-def test_the_dependency_lock_does_not_claim_to_be_reproducible():
-    """It records the names the workflows install. Claiming a reproducible lock
-    while installing unpinned names would be the overclaim this programme keeps
-    finding."""
-    lock = enginebuild.dependency_lock(root=str(ROOT))
-    assert lock["pinned_to_versions"] is False
-    assert lock["pinned_to_hashes"] is False
-    assert "open item" in lock["honest_scope"]
-
-
-def test_the_package_digest_moves_when_the_engine_source_moves(tmp_path):
-    """A binding digest that ignores the tree binds nothing about it."""
-    root = tmp_path / "scripts" / "trustedlane"
-    root.mkdir(parents=True)
-    (root / "e.py").write_text("import json\n", encoding="utf-8")
-    first = enginebuild.candidate_package(
-        source_commit=SHA_A, code_cutoff_sha=SHA_A, root=str(tmp_path))
-    (root / "e.py").write_text("import json, os\n", encoding="utf-8")
-    second = enginebuild.candidate_package(
-        source_commit=SHA_A, code_cutoff_sha=SHA_A, root=str(tmp_path))
-    assert first["candidate_package_sha256"] != second["candidate_package_sha256"]
-
-
-def test_a_malformed_commit_sha_is_refused_before_anything_is_digested():
-    with _refusal("commit_sha_malformed"):
-        enginebuild.candidate_package(source_commit="HEAD",
-                                      code_cutoff_sha=SHA_A, root=str(ROOT))
+def test_the_package_digest_binds_the_engine_source(engine_roles):
+    """The digest is what an operator approves at prerequisite 14. One that
+    does not move when the engine source moves approves nothing."""
+    here = enginebuild.candidate_package(
+        roles=engine_roles, repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    older = enginebuild.candidate_package(
+        roles=dict(engine_roles, protected_trusted_lane=_rev("origin/main~1")),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    assert here["engine_source_sha256"] != older["engine_source_sha256"]
+    assert (here["candidate_package_sha256"]
+            != older["candidate_package_sha256"])
 
 
 # --------------------------------------------------------------------------
@@ -2951,13 +3364,23 @@ def test_wire_formatting_does_not_change_the_payload_digest():
 
 
 def test_wire_signing_and_verifying_both_refuse_and_say_which_key():
+    """What is missing at D0 is the KEY, not the implementation.
+
+    The earlier refusals said "signing is not available in D0", which invited
+    the reading that the format was the unfinished part. EX3-R09 implemented it
+    in `signing`, so the refusal now names the actual gap. It also no longer
+    says "PUBLIC key": the construction is a symmetric MAC, and promising a
+    public key nobody will ever be handed was a claim about a design that does
+    not exist."""
     record = _envelope()
     with pytest.raises(errors.LaneRefusal) as sign_exc:
         evidencewire.sign(record)
-    assert "signing key" in sign_exc.value.reason
+    assert "signing_key_not_supplied" in sign_exc.value.reason
+    assert "never on a reviewed branch" in sign_exc.value.reason
     with pytest.raises(errors.LaneRefusal) as verify_exc:
         evidencewire.verify(record)
-    assert "PUBLIC key" in verify_exc.value.reason
+    assert "verification_key_not_supplied" in verify_exc.value.reason
+    assert "operator record" in verify_exc.value.reason
 
 
 # ---- operator records: a branch-local file is not authority -----------------
@@ -3097,7 +3520,15 @@ def _protected_observation(**overrides):
         # shadowing check compares across the repository and organization
         # inventories. Flagged by the `secret_name=` keyword heuristic.
         secret_name="TRUSTED_VERIFIER_OPENAI_KEY",  # pragma: allowlist secret
-        repository_secret_names=[], organization_secret_names=[])
+        repository_secret_names=[], organization_secret_names=[],
+        # EX3-R08 added these. A protected branch that requires nothing merges
+        # a red suite, so readiness now needs the observed required-check
+        # configuration rather than only the protected flag.
+        required_status_checks={"strict": True, "checks": [
+            {"context": "test (3.12)", "app_id": 15368},
+            {"context": "image", "app_id": 15368}]},
+        expected_contexts=["test (3.12)", "image"],
+        expected_app_id=None)
     base.update(overrides)
     return base
 
@@ -3242,3 +3673,6756 @@ def test_the_live_policy_reports_credential_reach_before_supply_chain():
             livepolicy.validate_live_workflows(root=tmp)
     assert "pr_controlled_workflow_reaches_a_secret" in excinfo.value.reason
     assert "action_not_pinned" not in excinfo.value.reason
+
+
+# --------------------------------------------------------------------------
+# EX3-R07 — timestamps are instants, not strings.
+# --------------------------------------------------------------------------
+
+
+def test_r07_the_offset_crossing_case_that_was_actually_accepted():
+    """The exact reported case, reproduced against the fixed function.
+
+    expires_at 2026-07-30T12:00:00+02:00 IS 10:00Z. observed_now 10:30Z is half
+    an hour past it. The old `str(a) >= str(b)` saw "…10:30:00Z" sorting below
+    "…12:00:00+02:00" and accepted. Verified accepting before the fix."""
+    assert instants.is_expired(observed_now="2026-07-30T10:30:00Z",
+                               expires_at="2026-07-30T12:00:00+02:00") is True
+    with _refusal("operator_authorization_expired"):
+        operatorrecord.assert_not_expired(
+            {"expires_at": "2026-07-30T12:00:00+02:00"},
+            observed_now="2026-07-30T10:30:00Z")
+
+
+def test_r07_the_expiry_boundary_is_closed():
+    """An authorization that expires at T is not valid AT T. An off-by-one on an
+    expiry is a window in which a revoked permission still works."""
+    assert instants.is_expired(observed_now="2026-07-30T10:00:00Z",
+                               expires_at="2026-07-30T10:00:00Z") is True
+    assert instants.is_expired(observed_now="2026-07-30T09:59:59Z",
+                               expires_at="2026-07-30T10:00:00Z") is False
+
+
+@pytest.mark.parametrize("value,category", [
+    ("2026-07-30T10:00:00", "timestamp_not_rfc3339"),
+    ("2026-07-30 10:00:00Z", "timestamp_not_rfc3339"),
+    ("2026-07-30T10:00:60Z", "timestamp_leap_second"),
+    ("not-a-time", "timestamp_not_rfc3339"),
+    (1753876800, "timestamp_not_a_string"),
+    (None, "timestamp_not_a_string"),
+])
+def test_r07_unrepresentable_timestamps_are_refused(value, category):
+    """Naive is refused rather than assumed UTC — assuming is how an operator in
+    +02:00 writes a local time, means one thing, and gets another. A leap second
+    is refused rather than clamped, because clamping moves the instant in a
+    direction nobody chose."""
+    with _refusal(category):
+        instants.parse_instant(value, field="t")
+
+
+def test_r07_equivalent_instants_in_different_offsets_compare_equal():
+    a = instants.parse_instant("2026-07-30T12:00:00+02:00")
+    b = instants.parse_instant("2026-07-30T10:00:00Z")
+    assert a == b
+    assert instants.utc_iso("2026-07-30T12:00:00+02:00") == "2026-07-30T10:00:00Z"
+
+
+def test_r07_an_authorization_expiring_before_it_was_issued_is_refused():
+    """Well-formed, parses, and already dead — a typo an operator cannot see."""
+    record = _operator_record()
+    record["expires_at"] = "2026-07-03T00:00:00Z"   # month/day transposed
+    record["anchor"]["anchored_digest"] = operatorrecord.record_digest(record)
+    with _refusal("timestamps_out_of_order"):
+        operatorrecord.parse_operator_record(record)
+
+
+def test_r07_an_aware_datetime_object_is_accepted_and_a_naive_one_is_not():
+    from datetime import datetime, timedelta
+    from datetime import timezone as _tz
+    aware = datetime(2026, 7, 30, 12, 0, tzinfo=_tz(timedelta(hours=2)))
+    assert instants.parse_instant(aware).hour == 10
+    with _refusal("naive_datetime"):
+        instants.parse_instant(datetime(2026, 7, 30, 12, 0))
+
+
+# --------------------------------------------------------------------------
+# EX3-R08 — a protected branch that requires nothing.
+# --------------------------------------------------------------------------
+
+
+def _readiness(**overrides):
+    base = dict(
+        observed_ref="refs/heads/main",
+        branch_record={"name": "main", "protected": True},
+        branch_rules={"required_pull_request_reviews": True,
+                      "block_force_pushes": True, "block_deletions": True,
+                      "bypass_actors": []},
+        required_status_checks={"strict": True, "checks": [
+            {"context": "test (3.12)", "app_id": 15368},
+            {"context": "image", "app_id": 15368}]},
+        expected_contexts=["test (3.12)", "image"],
+        expected_app_id=None,
+        environment_record={"name": "trusted-verifier",
+                            "deployment_branch_policy": {
+                                "custom_branch_policies": True},
+                            "allowed_branches": ["main"]},
+        environment_name="trusted-verifier",
+        # A secret NAME, not a value — what the shadow check compares.
+        secret_name="TRUSTED_VERIFIER_OPENAI_KEY",  # pragma: allowlist secret
+        repository_secret_names=[], organization_secret_names=[])
+    base.update(overrides)
+    return base
+
+
+def test_r08_a_protected_branch_that_requires_no_status_is_refused():
+    """`protected: true` plus a review rule says a pull request is needed. It
+    says nothing about whether anything must PASS — the branch would merge a
+    change to the trusted lane with a red suite."""
+    with _refusal("required_context_missing"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(required_status_checks={"strict": True, "checks": []}))
+
+
+def test_r08_an_unobserved_required_check_list_is_refused():
+    with _refusal("required_status_checks_not_observed"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(required_status_checks=None))
+
+
+def test_r08_loose_checks_are_refused_when_strict_is_required():
+    """A status earned against an older base is a status about code that is not
+    what merges."""
+    with _refusal("required_checks_not_strict"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(required_status_checks={"strict": False, "checks": [
+                {"context": "test (3.12)", "app_id": 1},
+                {"context": "image", "app_id": 1}]}))
+
+
+@pytest.mark.parametrize("context", ["d0-containment",
+                                     "independent-verify-inactive", "probe"])
+def test_r08_a_non_requirable_context_in_the_config_is_refused(context):
+    """EX3-R03 enforced at the readiness gate too, not only in the advice."""
+    with _refusal("status_is_not_candidate_requirable"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(
+                required_status_checks={"strict": True, "checks": [
+                    {"context": "test (3.12)", "app_id": 1},
+                    {"context": "image", "app_id": 1},
+                    {"context": context, "app_id": 1}]},
+                expected_contexts=["test (3.12)", "image"]))
+
+
+def test_r08_an_unknown_context_is_refused():
+    with _refusal("required_status_not_in_registry"):
+        protectedstate.assert_ready_for_credential(
+            **_readiness(required_status_checks={"strict": True, "checks": [
+                {"context": "surprise", "app_id": 1}]},
+                expected_contexts=["surprise"]))
+
+
+def _with_trusted(app_id, expected_app_id):
+    return _readiness(
+        required_status_checks={"strict": True, "checks": [
+            {"context": "test (3.12)", "app_id": 15368},
+            {"context": "image", "app_id": 15368},
+            {"context": "trusted-verifier-count", "app_id": app_id}]},
+        expected_contexts=["test (3.12)", "image", "trusted-verifier-count"],
+        expected_app_id=expected_app_id)
+
+
+def test_r08_a_trusted_context_any_source_may_publish_is_refused():
+    """The half that is easy to forget. A required trusted context with no
+    publisher pinned can be published by the candidate's own workflow, which
+    turns the trusted gate into a self-signed claim."""
+    with _refusal("trusted_context_publisher_not_pinned"):
+        protectedstate.assert_ready_for_credential(
+            **_with_trusted(None, 999))
+
+
+def test_r08_a_trusted_context_from_the_wrong_publisher_is_refused():
+    with _refusal("trusted_context_publisher_mismatch"):
+        protectedstate.assert_ready_for_credential(**_with_trusted(42, 999))
+
+
+def test_r08_a_pinned_observation_with_no_expected_publisher_is_refused():
+    """Nothing to compare against is not the same as matching."""
+    with _refusal("expected_publisher_not_supplied"):
+        protectedstate.assert_ready_for_credential(**_with_trusted(42, None))
+
+
+def test_r08_the_correct_publisher_passes_and_is_recorded():
+    record = protectedstate.assert_ready_for_credential(
+        **_with_trusted(999, 999))
+    assert record["publisher_pinned_contexts"] == {
+        "trusted-verifier-count": 999}
+    assert record["strict"] is True
+    assert record["credential_may_be_reachable"] is True
+
+
+def test_r08_ordinary_contexts_do_not_need_a_pinned_publisher():
+    """Only the trusted contexts carry the self-signing risk; requiring an app
+    pin on `test (3.12)` would be friction with no threat behind it."""
+    assert protectedstate.assert_ready_for_credential(
+        **_readiness())["credential_may_be_reachable"] is True
+
+
+# --------------------------------------------------------------------------
+# EX3-R02 — the trusted status must land on the CANDIDATE head.
+#
+# D1/D2 run from the protected ref via workflow_dispatch, and a dispatched
+# run's job checks attach to the dispatched ref's commit — main. Branch
+# protection on the PR needs a status on the candidate head. Different commits.
+# Reserving a job name on main satisfies nothing; the PR would wait forever for
+# a check that lands somewhere else.
+# --------------------------------------------------------------------------
+
+_CANDIDATE_SHA = SHA_B
+_EVIDENCE = "e" * 64
+
+
+def _status(**overrides):
+    base = dict(repository_numeric_id=REPOSITORY_NUMERIC_ID,
+                candidate_head_sha=_CANDIDATE_SHA,
+                context="trusted-verifier-count", state="pending",
+                description="counting", trusted_run_id=42,
+                trusted_run_attempt=1,
+                target_url="https://github.invalid/evidence")
+    base.update(overrides)
+    return statuspublish.status_request(**base)
+
+
+def test_r02_pending_must_exist_before_any_terminal_status():
+    """Without pending, a run that dies mid-flight leaves the PR with NO
+    trusted status — which under some configurations reads as "not required
+    yet" rather than "failed"."""
+    pending = _status()
+    success = _status(state="success", description="green",
+                      evidence_sha256=_EVIDENCE)
+    assert statuspublish.assert_pending_preceded_terminal(
+        [pending, success])["final_state"] == "success"
+    with _refusal("first_publication_not_pending"):
+        statuspublish.assert_pending_preceded_terminal([success])
+
+
+def test_r02_a_run_that_never_reaches_a_terminal_status_is_refused():
+    """Pending forever blocks rather than fails, and hides that the run ended."""
+    with _refusal("run_never_reached_a_terminal_status"):
+        statuspublish.assert_pending_preceded_terminal([_status()])
+
+
+def test_r02_publishing_nothing_at_all_is_refused():
+    with _refusal("no_status_published"):
+        statuspublish.assert_pending_preceded_terminal([])
+
+
+def test_r02_a_terminal_status_on_a_different_commit_is_refused():
+    """A status about a different commit, arriving exactly when a reader is
+    least likely to check."""
+    pending = _status()
+    elsewhere = _status(state="success", description="green",
+                        candidate_head_sha=SHA_C, evidence_sha256=_EVIDENCE)
+    with _refusal("publication_sha_changed"):
+        statuspublish.assert_pending_preceded_terminal([pending, elsewhere])
+
+
+def test_r02_two_terminal_statuses_for_one_run_are_refused():
+    """One of them is a correction nobody recorded as one."""
+    pending = _status()
+    success = _status(state="success", description="g",
+                      evidence_sha256=_EVIDENCE)
+    with _refusal("multiple_terminal_publications"):
+        statuspublish.assert_pending_preceded_terminal(
+            [pending, success, success])
+
+
+@pytest.mark.parametrize("state", ["failure", "error"])
+def test_r02_failure_and_error_are_terminal_too(state):
+    """An exception must land as a terminal status, not leave pending."""
+    record = statuspublish.assert_pending_preceded_terminal(
+        [_status(), _status(state=state, description="the run died")])
+    assert record["final_state"] == state
+
+
+def test_r02_a_green_trusted_context_without_evidence_is_refused():
+    """A green trusted context asserts a review happened. Publishing one with
+    no evidence digest is the self-signed claim the whole lane prevents."""
+    with _refusal("success_without_evidence"):
+        _status(state="success", description="green")
+
+
+@pytest.mark.parametrize("context", ["independent-verify-inactive",
+                                     "d0-containment", "probe",
+                                     "d1-containment-gate", "test (3.12)"])
+def test_r02_only_a_reserved_trusted_context_may_be_published(context):
+    """Structurally: no amount of caller creativity turns a no-key job into a
+    trusted context on the candidate head."""
+    with _refusal("context_not_publishable"):
+        _status(context=context)
+
+
+@pytest.mark.parametrize("value", ["refs/heads/main", "HEAD",
+                                   "fix/verifier-intra-file-review-plan",
+                                   "6fc13eb", ""])
+def test_r02_a_textual_ref_may_never_stand_in_for_the_candidate_sha(value):
+    """A ref resolves differently at different moments. The status must name the
+    exact immutable commit that was reviewed — including against a newer commit
+    the author pushed while the review was running."""
+    with _refusal("candidate_sha_not_a_commit_sha"):
+        _status(candidate_head_sha=value)
+
+
+def test_r02_a_status_for_an_earlier_head_does_not_satisfy_a_later_one():
+    """The reader's half. A new push must invalidate the trusted review, and
+    the check for that is comparing SHAs — not trusting GitHub to forget."""
+    success = _status(state="success", description="green",
+                      evidence_sha256=_EVIDENCE)
+    assert statuspublish.assert_status_covers_head(
+        success, observed_head_sha=_CANDIDATE_SHA,
+        context="trusted-verifier-count")["satisfied"] is True
+    with _refusal("status_is_for_an_earlier_head"):
+        statuspublish.assert_status_covers_head(
+            success, observed_head_sha=SHA_C,
+            context="trusted-verifier-count")
+
+
+def test_r02_a_status_for_the_other_trusted_context_does_not_substitute():
+    """A count is not a review. Satisfying `trusted-cross-vendor-review` with a
+    `trusted-verifier-count` success would let D1 stand in for D2."""
+    success = _status(state="success", description="green",
+                      evidence_sha256=_EVIDENCE)
+    with _refusal("status_context_mismatch"):
+        statuspublish.assert_status_covers_head(
+            success, observed_head_sha=_CANDIDATE_SHA,
+            context="trusted-cross-vendor-review")
+
+
+def test_r02_the_external_id_binds_run_attempt_and_evidence():
+    """The same context published twice from different runs must be
+    distinguishable, or a stale success is indistinguishable from a fresh one."""
+    first = _status(state="success", description="g", evidence_sha256=_EVIDENCE)
+    same = _status(state="success", description="g", evidence_sha256=_EVIDENCE)
+    other_run = _status(state="success", description="g", trusted_run_id=43,
+                        evidence_sha256=_EVIDENCE)
+    other_evidence = _status(state="success", description="g",
+                             evidence_sha256="f" * 64)
+    assert first["external_id"] == same["external_id"]
+    assert first["external_id"] != other_run["external_id"]
+    assert first["external_id"] != other_evidence["external_id"]
+
+
+def test_r02_publishing_itself_refuses_and_names_the_token_it_would_need():
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        statuspublish.publish(_status())
+    assert "installation token" in excinfo.value.reason
+    assert "never by a reviewed branch" in excinfo.value.reason
+
+
+def test_r02_an_unvalidated_request_cannot_be_handed_to_publish():
+    """Build it through status_request so the refusals run before anything is
+    sent, rather than after."""
+    with _refusal("status_request_not_validated"):
+        statuspublish.publish({"state": "success"})
+
+
+def test_r02_the_operator_packet_explains_the_candidate_head_requirement():
+    """The packet is what the operator configures from; if it does not say the
+    trusted context is published on the candidate SHA, they will look for it on
+    the workflow run and not find it."""
+    text = OPERATOR_DOC.read_text(encoding="utf-8")
+    assert "candidate head SHA" in text or "candidate SHA" in text
+    assert "statuspublish.py" in text
+
+
+def test_r11_the_packet_splits_v_trust_into_separate_machine_facts():
+    """EX3-R11. "V-TRUST closed" as one undifferentiated state conflates a
+    defect that is fixed with an authority that does not exist. The exposure is
+    closed; the trusted review authority is not active, and the precursor merge
+    gate is open."""
+    text = OPERATOR_DOC.read_text(encoding="utf-8")
+    assert "pr_controlled_provider_credential_exposure" in text
+    assert "trusted_review_authority" in text
+    assert "INACTIVE_OPEN_BLOCKING" in text
+    assert "precursor_merge_trust_gate" in text
+    assert "casts zero votes" in text or "casts zero votes" in text.lower()
+
+
+# --------------------------------------------------------------------------
+# EX3-R01 — the transport. The one lane module that can reach a provider.
+#
+# The seam that makes this testable is `opener`. The dangerous operations are
+# reading the real credential and opening a real socket, and those are the only
+# two behind the phase gate. Building the request, sending it through a
+# caller-supplied opener and parsing the reply have no gate, so the entire
+# protocol — every refusal included — runs against a fake server here, in D0,
+# with no credential anywhere in the process.
+# --------------------------------------------------------------------------
+
+COUNT_ARGS = dict(model="gpt-5", instructions="review this",
+                  input_text="diff --git a/x b/x")
+
+#: The credential the fake server sees. Long enough to pass the length check,
+#: and obviously not a key.
+FAKE_CREDENTIAL = "test-not-a-real-key-" + "0" * 24
+
+
+def _fake_server(status=200, body=None, *, record=None, raise_with=None):
+    """An opener that answers like the probed endpoint, and records what it saw.
+
+    `record` is a list the call is appended to, so a test can assert on the
+    exact bytes and headers that WOULD have gone out — including that the
+    credential was attached exactly once and never appeared in the request the
+    caller built."""
+    if body is None:
+        body = json.dumps({"object": "response.input_tokens",
+                           "input_tokens": 1234}).encode()
+
+    def opener(method, url, headers, request_body):
+        if record is not None:
+            record.append({"method": method, "url": url,
+                           "headers": dict(headers), "body": request_body})
+        if raise_with is not None:
+            raise raise_with
+        return status, body
+
+    return opener
+
+
+def test_the_built_request_carries_no_credential():
+    """The record a caller holds, digests and puts in evidence is safe by
+    construction rather than by remembering to strip a header."""
+    request = transport.build_count_request(**COUNT_ARGS)
+    assert request["carries_credential"] is False
+    blob = json.dumps(request, default=str).lower()
+    assert "authorization" not in blob
+    assert "bearer" not in blob
+
+
+def test_the_credential_is_attached_once_at_send_time():
+    seen = []
+    request = transport.build_count_request(**COUNT_ARGS)
+    transport.count_once(request=request, opener=_fake_server(record=seen),
+                         credential=FAKE_CREDENTIAL)
+    assert len(seen) == 1
+    headers = seen[0]["headers"]
+    assert headers["authorization"] == f"Bearer {FAKE_CREDENTIAL}"
+    # And the caller's own request object was not mutated to hold it.
+    assert "authorization" not in request["headers"]
+
+
+def test_a_full_count_against_the_fake_server_returns_only_an_integer():
+    request = transport.build_count_request(**COUNT_ARGS)
+    result = transport.count_once(request=request, opener=_fake_server(),
+                                  credential=FAKE_CREDENTIAL)
+    assert result["input_tokens"] == 1234
+    assert result["generation_call"] is False
+    assert result["payload_sha256"] == request["payload_sha256"]
+
+
+def test_the_request_body_is_exactly_the_probed_payload_shape():
+    """The endpoint and payload are not guesses — they are what the hosted
+    capability probe established."""
+    request = transport.build_count_request(**COUNT_ARGS)
+    assert request["url"] == "https://api.openai.com/v1/responses/input_tokens"
+    assert json.loads(request["body"]) == {
+        "model": "gpt-5", "instructions": "review this",
+        "input": "diff --git a/x b/x", "truncation": "disabled"}
+
+
+def test_truncation_must_be_disabled():
+    """Truncation lets the provider decide what was counted, so the number
+    would describe an input nobody chose."""
+    with _refusal("count_request_truncation_not_disabled"):
+        transport.build_count_request(**dict(COUNT_ARGS, truncation="auto"))
+
+
+@pytest.mark.parametrize("field", ["model", "instructions", "input_text"])
+def test_an_empty_count_request_field_is_refused(field):
+    with _refusal("count_request_field_missing"):
+        transport.build_count_request(**dict(COUNT_ARGS, **{field: ""}))
+
+
+# ---- D1 counts; it does not generate --------------------------------------
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.openai.com/v1/responses",
+    "https://api.openai.com/v1/chat/completions",
+    "https://api.openai.com/v1/responses/input_tokens/../responses",
+    "https://evil.example/v1/responses/input_tokens",
+])
+def test_only_the_count_endpoint_may_be_called(url):
+    request = dict(transport.build_count_request(**COUNT_ARGS), url=url)
+    with _refusal("request_endpoint_not_the_count_endpoint"):
+        transport.exchange(request, opener=_fake_server(),
+                           credential=FAKE_CREDENTIAL)
+
+
+def test_a_non_post_request_is_refused():
+    request = dict(transport.build_count_request(**COUNT_ARGS), method="GET")
+    with _refusal("request_method_not_permitted"):
+        transport.exchange(request, opener=_fake_server(),
+                           credential=FAKE_CREDENTIAL)
+
+
+# ---- strict parsing: no provider string survives ---------------------------
+
+
+def test_a_non_200_reply_is_refused_without_echoing_the_body():
+    """A provider error string is a channel, and it arrives on the path where
+    nobody is looking."""
+    body = json.dumps({"error": {"message": "sk-LEAKED-LOOKING-STRING"}}).encode()
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        transport.parse_count_response(401, body)
+    assert "count_response_status_not_ok" in excinfo.value.reason
+    assert "LEAKED" not in excinfo.value.reason
+
+
+def test_a_wrong_object_name_is_refused_without_echoing_it():
+    body = json.dumps({"object": "chat.completion",
+                       "input_tokens": 5}).encode()
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        transport.parse_count_response(200, body)
+    assert "count_response_object_mismatch" in excinfo.value.reason
+    assert "chat.completion" not in excinfo.value.reason
+
+
+def test_true_cannot_masquerade_as_a_count_of_one():
+    """`bool` subclasses `int`. Without an explicit exclusion, `true` parses as
+    a token count of 1 and the ledger budgets for it."""
+    body = json.dumps({"object": "response.input_tokens",
+                       "input_tokens": True}).encode()
+    with _refusal("count_response_input_tokens_not_an_integer"):
+        transport.parse_count_response(200, body)
+
+
+@pytest.mark.parametrize("value,category", [
+    ("1234", "count_response_input_tokens_not_an_integer"),
+    (-1, "count_response_input_tokens_negative"),
+    (10**12, "count_response_input_tokens_implausible"),
+    (None, "count_response_input_tokens_not_an_integer"),
+])
+def test_an_implausible_or_mistyped_count_is_refused(value, category):
+    body = json.dumps({"object": "response.input_tokens",
+                       "input_tokens": value}).encode()
+    with _refusal(category):
+        transport.parse_count_response(200, body)
+
+
+def test_an_oversized_body_is_refused_before_it_is_parsed():
+    """Decoding it in order to find out how big it is is the wrong order."""
+    body = b"{" + b"a" * (transport.MAX_RESPONSE_BYTES + 10) + b"}"
+    with _refusal("response_body_oversized"):
+        transport.parse_count_response(200, body)
+
+
+@pytest.mark.parametrize("body,category", [
+    (b"not json at all", "count_response_not_json"),
+    (b'"a string"', "count_response_not_an_object"),
+    (b"[1,2,3]", "count_response_not_an_object"),
+    (b"\xff\xfe", "count_response_not_json"),
+])
+def test_a_malformed_body_is_refused(body, category):
+    with _refusal(category):
+        transport.parse_count_response(200, body)
+
+
+def test_a_transport_exception_reports_its_class_and_not_its_text():
+    """This is the one place a credential is in scope, and an exception message
+    can carry a URL, a header or a response fragment."""
+    boom = OSError("connect to api.openai.com with Bearer sk-SENSITIVE failed")
+    request = transport.build_count_request(**COUNT_ARGS)
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        transport.exchange(request, opener=_fake_server(raise_with=boom),
+                           credential=FAKE_CREDENTIAL)
+    assert "exception_class=OSError" in excinfo.value.reason
+    assert "SENSITIVE" not in excinfo.value.reason
+    assert "Bearer" not in excinfo.value.reason
+
+
+# ---- the phase gate: at D0 the two dangerous calls always refuse -----------
+
+
+@pytest.mark.parametrize("phase", [phases.D1, phases.D2])
+def test_reading_the_credential_refuses_because_d1_is_not_deployed(phase):
+    with _refusal("phase_not_deployed"):
+        transport.read_credential(phase=phase,
+                                  environ={transport.CREDENTIAL_ENV: "x" * 40})
+
+
+@pytest.mark.parametrize("phase", [phases.D0, "D9", ""])
+def test_reading_the_credential_refuses_for_a_phase_that_never_holds_one(phase):
+    with _refusal("credential_phase_not_permitted"):
+        transport.read_credential(phase=phase, environ={})
+
+
+@pytest.mark.parametrize("phase", [phases.D1, phases.D2])
+def test_opening_a_real_connection_refuses_because_d1_is_not_deployed(phase):
+    with _refusal("phase_not_deployed"):
+        transport.open_https(phase=phase)
+
+
+def test_opening_a_real_connection_refuses_outright_for_d0():
+    with _refusal("transport_phase_not_permitted"):
+        transport.open_https(phase=phases.D0)
+
+
+@pytest.mark.parametrize("name", ["transport.py", "signing.py"])
+def test_a_credential_bearing_module_cannot_raise_its_own_phase(name):
+    """The question is not whether the file MENTIONS `IMPLEMENTED_PHASE` — the
+    docstring does, and grepping for the string asks something adjacent to what
+    matters. The question is whether it ASSIGNS to it.
+
+    `assert_phase_permitted` compares against `phases.IMPLEMENTED_PHASE`, so a
+    module that could write to it could authorize itself. Nothing may."""
+    path = LANE_DIR / name
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    written = set()
+    for node in ast.walk(tree):
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                written.add(target.id)
+            elif isinstance(target, ast.Attribute):
+                written.add(target.attr)
+    assert "IMPLEMENTED_PHASE" not in written, f"{name} assigns the phase"
+    assert "PHASE_CAPABILITIES" not in written, f"{name} rewrites capabilities"
+    source = path.read_text(encoding="utf-8")
+    assert "assert_phase_permitted" in source, f"{name} has no phase gate"
+
+
+def test_setattr_is_not_available_as_a_way_around_that():
+    """An AST scan for assignment is only as good as the absence of a dynamic
+    equivalent, and `setattr(phases, 'IMPLEMENTED_PHASE', ...)` is not an
+    assignment node."""
+    for name in ("transport.py", "signing.py"):
+        path = LANE_DIR / name
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        calls = {getattr(node.func, "id", None) for node in ast.walk(tree)
+                 if isinstance(node, ast.Call)}
+        assert "setattr" not in calls, name
+        assert "globals" not in calls, name
+        assert "vars" not in calls, name
+
+
+# --------------------------------------------------------------------------
+# EX3-R09 — trusted evidence signing and verification.
+#
+# The gate is on reading the REAL key and nowhere else. Signing with a key
+# supplied explicitly is an ordinary function, so the whole format runs here in
+# D0 — and an envelope signed with a test key fails verification under the real
+# one, which is the property that matters. Forging trusted evidence requires
+# the key, not the code, and the code is what a candidate branch can change.
+# --------------------------------------------------------------------------
+
+TEST_KEY = b"test-signing-key-not-the-real-one-0123456789"
+OTHER_KEY = b"a-different-test-key-also-not-real-9876543210"
+
+
+def _trusted_envelope(evidence_class="TRUSTED_COUNT_EVIDENCE", payload=None):
+    return evidencewire.trusted_envelope(
+        evidence_class=evidence_class, payload=payload or {"input_tokens": 10},
+        **_WIRE_ARGS)
+
+
+def test_an_unsigned_trusted_envelope_does_not_validate():
+    """The structural reason `trusted_envelope` needs no phase gate: what it
+    returns cannot be used until it is signed, and signing needs the key."""
+    record = _trusted_envelope()
+    assert record["signature"] is None
+    with _refusal("trusted_class_without_signature"):
+        evidencewire.validate_envelope(record)
+
+
+def test_a_signed_trusted_envelope_validates_and_verifies():
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    assert evidencewire.validate_envelope(signed)["signature_present"] is True
+    result = signing.verify_envelope(signed, key=TEST_KEY)
+    assert result["signature_verified"] is True
+    assert result["key_id"] == signing.key_id(TEST_KEY)
+
+
+def test_a_signature_from_another_key_does_not_verify():
+    """The whole point: the code is public, the key is not."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=OTHER_KEY)
+    with _refusal("signature_key_id_does_not_match_supplied_key"):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_verifying_against_whichever_key_the_record_names_is_refused():
+    """`expected_key_id` exists because verifying against the key the record
+    points at is agreement, not verification."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    with _refusal("signature_key_id_mismatch"):
+        signing.verify_envelope(signed, key=TEST_KEY,
+                                expected_key_id="0" * 16)
+
+
+def test_an_edited_payload_digest_breaks_the_signature():
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    signed["payload_sha256"] = "b" * 64
+    with _refusal("evidence_envelope_digest_mismatch"):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_recomputing_the_envelope_digest_after_editing_still_fails():
+    """The realistic attack is not leaving a stale digest behind — it is
+    editing the record and recomputing it. The MAC is what catches that."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    signed["payload_sha256"] = "b" * 64
+    signed["envelope_sha256"] = evidencewire.envelope_digest(signed)
+    with _refusal("signature_mismatch"):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_the_evidence_class_cannot_be_swapped_under_a_valid_signature():
+    """The MAC covers the class explicitly, so a signature over one envelope
+    cannot be presented beside a differently-classed record while a careless
+    reader checks only that "the signature verifies"."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    signed["evidence_class"] = "TRUSTED_EXECUTION_EVIDENCE"
+    signed["envelope_sha256"] = evidencewire.envelope_digest(signed)
+    with _refusal("signature_mismatch"):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_a_candidate_class_envelope_cannot_be_signed():
+    """A signature on a candidate-class record invites a reader to treat it as
+    trusted, and the class is what a reader keys on."""
+    with _refusal("candidate_class_must_not_be_signed"):
+        signing.sign_envelope(_envelope(), key=TEST_KEY)
+
+
+def test_resigning_an_already_signed_envelope_is_refused():
+    """Replacing an attestation would leave no trace that there had been two."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    with _refusal("envelope_already_signed"):
+        signing.sign_envelope(signed, key=OTHER_KEY)
+
+
+@pytest.mark.parametrize("field,value,category", [
+    ("algorithm", "none", "signature_algorithm_not_permitted"),
+    ("algorithm", "MD5", "signature_algorithm_not_permitted"),
+    ("signature_version", "v0", "signature_version_mismatch"),
+])
+def test_the_verifier_does_not_let_the_record_choose_the_algorithm(
+        field, value, category):
+    """An attacker who picks the algorithm picks a weak one."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    signed["signer_identity"] = dict(signed["signer_identity"], **{field: value})
+    with _refusal(category):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+@pytest.mark.parametrize("mutation,category", [
+    ({"signature": None}, "signature_absent"),
+    ({"signature": "short"}, "signature_malformed"),
+    ({"signer_identity": None}, "signer_identity_missing"),
+])
+def test_a_malformed_signature_block_is_refused(mutation, category):
+    signed = dict(signing.sign_envelope(_trusted_envelope(), key=TEST_KEY),
+                  **mutation)
+    with _refusal(category):
+        signing.verify_envelope(signed, key=TEST_KEY)
+
+
+def test_a_short_key_is_refused_and_never_echoed():
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        signing.sign_envelope(_trusted_envelope(), key=b"tiny-key")
+    assert "signing_key_too_short" in excinfo.value.reason
+    assert "tiny-key" not in excinfo.value.reason
+    assert "bytes=8" in excinfo.value.reason
+
+
+def test_the_key_id_names_a_key_without_carrying_it():
+    identifier = signing.key_id(TEST_KEY)
+    assert len(identifier) == 16
+    assert identifier != signing.key_id(OTHER_KEY)
+    assert TEST_KEY.decode() not in identifier
+
+
+def test_a_signed_record_contains_no_key_material():
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    blob = json.dumps(signed, default=str)
+    assert TEST_KEY.decode() not in blob
+
+
+def test_the_signed_record_states_the_symmetric_limit_rather_than_implying_more():
+    """An HMAC is not a public-key signature, and a record that let a reader
+    assume otherwise would be overclaiming in the field a reader most wants to
+    trust."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    scope = signed["honest_scope"]
+    assert "not a public-key signature" in scope
+    assert "third party cannot verify it independently" in scope
+    assert signed["signer_identity"]["algorithm"] == "HMAC-SHA256"
+
+
+@pytest.mark.parametrize("phase", [phases.D1, phases.D2])
+def test_reading_the_signing_key_refuses_because_d1_is_not_deployed(phase):
+    with _refusal("phase_not_deployed"):
+        signing.read_signing_key(
+            phase=phase, environ={signing.SIGNING_KEY_ENV: "x" * 40})
+
+
+@pytest.mark.parametrize("phase", [phases.D0, "D9"])
+def test_reading_the_signing_key_refuses_for_a_phase_that_emits_no_evidence(phase):
+    with _refusal("signing_phase_not_permitted"):
+        signing.read_signing_key(phase=phase, environ={})
+
+
+def test_trusted_envelope_refuses_a_candidate_class():
+    """`envelope()` refuses trusted classes; this refuses candidate ones. The
+    two constructors do not overlap, so neither is a way around the other."""
+    with _refusal("not_a_trusted_class"):
+        evidencewire.trusted_envelope(
+            evidence_class="MOCK_TEST_EVIDENCE", payload={}, **_WIRE_ARGS)
+
+
+def test_the_candidate_constructor_still_refuses_a_trusted_class():
+    """The load-bearing original refusal, unchanged by R09."""
+    with _refusal("candidate_emitted_trusted_class"):
+        evidencewire.envelope(evidence_class="TRUSTED_COUNT_EVIDENCE",
+                              payload={}, **_WIRE_ARGS)
+
+
+def test_trusted_evidence_must_name_the_protected_run_that_produced_it():
+    for field in ("workflow_run_id", "workflow_run_attempt"):
+        with _refusal("trusted_evidence_run_field_invalid"):
+            evidencewire.trusted_envelope(
+                evidence_class="TRUSTED_COUNT_EVIDENCE", payload={},
+                **dict(_WIRE_ARGS, **{field: 0}))
+
+
+# --------------------------------------------------------------------------
+# EX3-R09 — the real normalization adapter.
+#
+# Every branch that would have needed a transform is a refusal instead, so
+# `applied_transforms` being empty is a claim these tests can check rather than
+# a promise the adapter makes about itself.
+# --------------------------------------------------------------------------
+
+ENGINE_DIGEST = "e" * 64
+
+
+def _norm_verdict(**overrides):
+    base = {"unit_sha256": "a" * 64, "decision": "approve", "reason": "checked",
+            "proof_of_check": "read the hunk", "checked_categories": ["logic"],
+            "lens_id": "correctness"}
+    base.update(overrides)
+    return base
+
+
+def _response_body(verdicts=None, *, text=None, content=None, output=None,
+                   **overrides):
+    if text is None:
+        text = json.dumps({"verdicts": verdicts or [_norm_verdict()]})
+    if content is None:
+        content = [{"type": "output_text", "text": text}]
+    if output is None:
+        output = [{"type": "message", "role": "assistant", "content": content}]
+    document = {"object": "response", "status": "completed", "output": output}
+    document.update(overrides)
+    return json.dumps(document).encode()
+
+
+def _binding_for(body, **overrides):
+    base = {"raw_response_sha256": hashlib.sha256(body).hexdigest(),
+            "raw_response_bytes": len(body), "http_status": 200,
+            "model_id": "gpt-5", "request_semantics_sha256": "d" * 64,
+            "attempt": 1}
+    base.update(overrides)
+    return base
+
+
+def _normalize(body, **kwargs):
+    if "adapter_identity" not in kwargs:
+        kwargs["adapter_identity"] = adapter.builtin_adapter_identity(
+            engine_source_sha256=ENGINE_DIGEST)
+    if "raw_binding" not in kwargs:
+        # NOT setdefault: it evaluates its default eagerly, so the str-body
+        # test hashed a str before the refusal it was checking could fire.
+        kwargs["raw_binding"] = _binding_for(body)
+    kwargs.setdefault("http_status", 200)
+    return adapter.normalize(body, **kwargs)
+
+
+def test_a_real_response_normalizes_and_applies_no_transform():
+    body = _response_body()
+    record = _normalize(body)
+    assert record["applied_transforms"] == []
+    assert len(record["verdicts"]) == 1
+    assert record["verdicts"][0]["decision"] == "approve"
+    assert record["adapter_source"] == "TRUSTED_LANE_BUILTIN"
+
+
+def test_the_adapter_is_identified_by_the_approved_engine_not_by_its_own_file():
+    """A module hashing itself from disk records a digest of whatever happens
+    to be there, which is what an attacker who can write that file controls —
+    the EX3-R05 defect in miniature."""
+    identity_record = adapter.builtin_adapter_identity(
+        engine_source_sha256=ENGINE_DIGEST)
+    assert identity_record["adapter_sha256"] == ENGINE_DIGEST
+    with _refusal("adapter_engine_digest_malformed"):
+        adapter.builtin_adapter_identity(engine_source_sha256="short")
+
+
+def test_a_binding_describing_different_bytes_is_refused():
+    """Otherwise the verdict is traceable to a response nobody read."""
+    body = _response_body()
+    with _refusal("raw_binding_digest_mismatch"):
+        _normalize(body, raw_binding=_binding_for(
+            body, raw_response_sha256="f" * 64))
+
+
+def test_a_binding_with_the_wrong_length_is_refused():
+    body = _response_body()
+    with _refusal("raw_binding_length_mismatch"):
+        _normalize(body, raw_binding=_binding_for(body, raw_response_bytes=1))
+
+
+# ---- every leniency that would have been a transform is a refusal ----------
+
+
+def test_an_incomplete_response_is_not_a_norm_verdict():
+    """Truncation arriving from the other direction: a partial answer accepted
+    as a whole one is a verdict the model did not give."""
+    body = _response_body(status="incomplete")
+    with _refusal("response_status_not_completed"):
+        _normalize(body)
+
+
+def test_incomplete_details_are_refused_even_when_the_status_says_completed():
+    body = _response_body(incomplete_details={"reason": "max_output_tokens"})
+    with _refusal("response_declares_incomplete_details"):
+        _normalize(body)
+
+
+def test_several_output_blocks_are_ambiguity_not_a_norm_verdict():
+    """SELECT_FIRST_OF_MANY_OUTPUTS is a forbidden transform because the
+    choice is invisible afterwards."""
+    block = {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text",
+                          "text": json.dumps({"verdicts": [_norm_verdict()]})}]}
+    with _refusal("raw_output_not_single"):
+        _normalize(_response_body(output=[block, block]))
+
+
+def test_several_content_parts_are_refused():
+    part = {"type": "output_text", "text": json.dumps({"verdicts": [_norm_verdict()]})}
+    with _refusal("response_content_not_single"):
+        _normalize(_response_body(content=[part, part]))
+
+
+def test_a_reasoning_block_is_not_read_as_a_norm_verdict():
+    with _refusal("response_output_block_not_a_message"):
+        _normalize(_response_body(output=[{"type": "reasoning",
+                                           "content": []}]))
+
+
+def test_a_model_refusal_is_an_outcome_not_a_verdict_and_is_not_echoed():
+    body = _response_body(content=[{"type": "refusal",
+                                    "refusal": "I will not SENSITIVE"}])
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        _normalize(body)
+    assert "response_is_a_refusal" in excinfo.value.reason
+    assert "SENSITIVE" not in excinfo.value.reason
+
+
+def test_invalid_json_in_the_text_is_refused_not_repaired():
+    """The tempting repair — stripping a ```json fence — is exactly the one
+    that would let the model's prose become part of a verdict."""
+    body = _response_body(text='```json\n{"verdicts": []}\n```')
+    with _refusal("verdict_payload_not_json"):
+        _normalize(body)
+
+
+def test_an_unknown_key_in_the_payload_is_refused_not_dropped():
+    """An adapter that ignores unknown keys cannot notice the provider
+    changed."""
+    body = _response_body(text=json.dumps({"verdicts": [_norm_verdict()],
+                                           "confidence": 0.9}))
+    with _refusal("verdict_payload_unknown_field"):
+        _normalize(body)
+
+
+def test_an_unknown_key_in_a_verdict_is_refused():
+    body = _response_body([dict(_norm_verdict(), severity="high")])
+    with _refusal("normalized_verdict_unknown_field"):
+        _normalize(body)
+
+
+def test_a_missing_verdict_field_is_refused_not_defaulted():
+    partial = _norm_verdict()
+    del partial["proof_of_check"]
+    with _refusal("normalized_verdict_field_missing"):
+        _normalize(_response_body([partial]))
+
+
+def test_a_decision_outside_the_vocabulary_is_refused_not_lowercased():
+    """LOWERCASE_DECISION and STRIP_WHITESPACE_FROM_DECISION are both forbidden
+    transforms, so neither `Approve` nor ` approve ` may be rescued."""
+    for decision in ("Approve", " approve ", "APPROVE", "yes", ""):
+        with _refusal("normalized_decision_not_permitted"):
+            _normalize(_response_body([_norm_verdict(decision=decision)]))
+
+
+def test_a_scalar_category_is_not_coerced_to_a_list():
+    with _refusal("normalized_categories_not_nonempty_list"):
+        _normalize(_response_body([_norm_verdict(checked_categories="logic")]))
+
+
+def test_two_verdicts_for_one_unit_are_refused():
+    with _refusal("normalized_verdict_unit_duplicated"):
+        _normalize(_response_body([_norm_verdict(), _norm_verdict(decision="reject")]))
+
+
+def test_an_empty_verdict_list_is_refused():
+    with _refusal("verdict_payload_verdicts_not_a_nonempty_list"):
+        _normalize(_response_body(text=json.dumps({"verdicts": []})))
+
+
+@pytest.mark.parametrize("body,category", [
+    (b"not json", "raw_response_not_json"),
+    (b'"a string"', "raw_response_not_an_object"),
+])
+def test_a_malformed_response_body_is_refused(body, category):
+    with _refusal(category):
+        _normalize(body)
+
+
+def test_a_wrong_response_object_name_is_refused_without_echoing_it():
+    body = _response_body(object="chat.completion")
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        _normalize(body)
+    assert "response_object_mismatch" in excinfo.value.reason
+    assert "chat.completion" not in excinfo.value.reason
+
+
+def test_a_non_200_status_is_refused_without_reporting_the_body():
+    body = _response_body()
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        _normalize(body, http_status=500, raw_binding=_binding_for(
+            body, http_status=500))
+    assert "response_status_not_ok" in excinfo.value.reason
+
+
+def test_a_str_body_is_refused_because_someone_already_chose_an_encoding():
+    body = _response_body()
+    with _refusal("raw_response_not_bytes"):
+        _normalize(body.decode(), raw_binding=_binding_for(body))
+
+
+def test_a_candidate_supplied_adapter_still_cannot_normalize():
+    """The load-bearing refusal, unchanged: the reviewed package must not
+    define how its reviewer's answers are read."""
+    body = _response_body()
+    hostile = dict(adapter.builtin_adapter_identity(
+        engine_source_sha256=ENGINE_DIGEST), adapter_source="CANDIDATE_CHECKOUT")
+    with _refusal("adapter_from_candidate"):
+        _normalize(body, adapter_identity=hostile)
+
+
+def test_the_normalizer_contains_no_path_that_applies_a_transform():
+    """`applied_transforms=[]` is a claim about the code, so it is checked
+    against the code: `normalize` must pass an empty tuple literally, and every
+    forbidden-transform name must be absent from its body."""
+    source = (LANE_DIR / "adapter.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(node for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "normalize")
+    call = next(node for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "normalization_record")
+    applied = next(k.value for k in call.keywords if k.arg == "applied_transforms")
+    assert isinstance(applied, ast.Tuple) and applied.elts == []
+
+
+# --------------------------------------------------------------------------
+# EX3-R01 — D1 end to end, against a fake server, in D0, with no credential.
+#
+# Everything dangerous is a parameter: the opener, the credential, the signing
+# key, the publisher. In the workflow they are built by the phase-gated
+# constructors, which refuse outside D1/D2. Here they are supplied, so the
+# whole ordered sequence and every refusal in it are exercised — the gate is on
+# OBTAINING the capability, which is what a candidate branch cannot do.
+# --------------------------------------------------------------------------
+
+D1_SEED = b"deterministic-test-seed-not-secret-0123456789"
+
+
+def _inert_fetch(*, destination, head_sha, target_base_sha):
+    """Stands in for `candidatefetch.fetch_candidate`, returning the shape the
+    real one returns — `checked_out: False`, verified rather than assumed."""
+    return {"destination": destination, "head_sha": head_sha,
+            "target_base_sha": target_base_sha, "checked_out": False,
+            "full_history": True}
+
+
+def _fetch_into(destination):
+    """`fetch` for a D1 run whose engine will really read the repository.
+
+    The clone already exists — made once per session — so this returns the
+    shape `candidatefetch.fetch_candidate` returns, pointing at it. It is still
+    a bare `--no-checkout` clone: `_d1_clone` asserts there is no working
+    tree, which is the property `_assert_fetch_was_inert` exists to protect."""
+    def fetch(**kwargs):
+        return {"destination": destination, "head_sha": kwargs["head_sha"],
+                "target_base_sha": kwargs["target_base_sha"],
+                "checked_out": False, "full_history": True}
+    return fetch
+
+
+_D1_CACHE: dict = {}
+
+
+def _d1_clone():
+    """One real clone of this repository, per session.
+
+    D1 no longer takes an injected `skeleton_rebuild`, so the units it counts
+    are whatever `verifier.plan.build_skeleton` derives from real commits. That
+    is the point of the change — "what the trusted engine rebuilt" used to
+    depend on what the runner passed — and it means these tests need a real
+    repository rather than a dictionary."""
+    if "clone" not in _D1_CACHE:
+        for sha in (PR25_BASE, SHA_A):
+            if subprocess.run(["git", "cat-file", "-e", sha],  # noqa: S603
+                              cwd=str(ROOT), capture_output=True).returncode:
+                pytest.skip(f"object {sha[:12]} absent in this checkout")
+        destination = Path(tempfile.mkdtemp(prefix="d1-candidate-")) / "candidate"
+        subprocess.run(["git", "clone", "-q", "--no-local",  # noqa: S603
+                        str(ROOT), str(destination)], check=True,
+                       capture_output=True)
+        _D1_CACHE["clone"] = str(destination)
+    return _D1_CACHE["clone"]
+
+
+def _d1_result():
+    """One real D1 run per session, and D2 executes what it signed.
+
+    Building the plan by hand is not an option and that is the point: it
+    carries the per-model request hashes the engine re-derives from the commits
+    and compares, so a hand-made plan could not survive
+    `assert_request_matches_plan` — which is the property under test."""
+    if "d1_result" not in _D1_CACHE:
+        _D1_CACHE["d1_result"] = d1runtime.run(**_d1_kwargs())
+    return _D1_CACHE["d1_result"]
+
+
+def _d1_skeleton():
+    if "skeleton" not in _D1_CACHE:
+        _D1_CACHE["skeleton"] = enginebridge.build_skeleton(
+            _engine(), target_base_sha=PR25_BASE, candidate_head_sha=SHA_A,
+            repository_path=_d1_clone())
+    return _D1_CACHE["skeleton"]
+
+
+
+def _authenticated_claims(phase="D1", *, ceiling=10_000, omit=None, head=None,
+                          key_hex=None, observation=None,
+                          executable_plan_sha256=None):
+    """A complete, genuinely minted envelope set for the phase.
+
+    Fifteen prerequisites for D1, sixteen for D2. Fourteen carry protected
+    typed evidence only; `authorize_twelve_pins` wraps a real
+    `verifier.pins.operator_pin_claim` and `approve_literal_authorizations`
+    wraps a real set of `verifier.authority.literal_claim`s — built by the
+    candidate engine out of the approved artifact, never by hand."""
+    keys = (trustedverifier.D2_PREREQUISITES if phase == "D2"
+            else trustedverifier.D1_PREREQUISITES)
+    occurrence = dict(_OCCURRENCE, head_sha=head) if head else None
+    over = {"key_hex": key_hex} if key_hex else {}
+    minted = []
+    for key in keys:
+        if key == omit:
+            continue
+        if key == authzenvelope.PIN_PREREQUISITE:
+            minted.append(_pin_envelope(occurrence=occurrence, **over))
+            continue
+        if key == authzenvelope.LITERAL_PREREQUISITE:
+            minted.append(_literal_set(
+                [_literal_member(occurrence=occurrence, **over)],
+                occurrence=occurrence, **over))
+            continue
+        # EX5-R21: the payload must describe THIS run, not merely be
+        # well-formed. `_runtime_bound_payload` fills every field the runtime
+        # binding gate compares; the tests that attack the gate change exactly
+        # one of them.
+        payload = _runtime_bound_payload(
+            key, occurrence or _OCCURRENCE, pins=_valid_pins(),
+            ceiling=ceiling, observation=observation,
+            executable_plan_sha256=executable_plan_sha256)
+        minted.append(_mint(key, typed_payload=payload, occurrence=occurrence,
+                            **over))
+    return minted
+
+
+def _lane_verifier(observed_now="2026-08-01T00:00:00Z", revocations=()):
+    return _verifier(observed_now=observed_now, revocations=revocations)
+
+
+def _d1_unit(index=0, tokens=100):
+    return {"unit_sha256": f"{index:064d}",
+            "instructions": f"review unit {index}",
+            "input_text": f"diff for unit {index}",
+            "worst_case_input_tokens": tokens}
+
+
+#: The occurrence D1 now really reviews. It is the PR25 range, because that is
+#: a range this repository's own objects can actually produce a skeleton for —
+#: D1 no longer takes an injected `skeleton_rebuild`, so the units are whatever
+#: `verifier.plan.build_skeleton` derives.
+D1_OCCURRENCE = {"repository_identity": CANONICAL_REPOSITORY,
+                 "target_base_sha": PR25_BASE, "diff_base_sha": PR25_BASE,
+                 "head_sha": SHA_A, "repository_numeric_id":
+                 REPOSITORY_NUMERIC_ID}
+
+
+def _real_literal_members(occurrence, **over):
+    """One protected envelope per literal occurrence the range ACTUALLY has.
+
+    Not a placeholder. The engine's global preflight resolves every literal in
+    the exact transmitted bytes to one exact reviewed SOURCE occurrence — same
+    atom, same index, same digest, same category set — so a set that clears an
+    invented path clears nothing, and D1 refuses with
+    `occurrence_not_authorized`. Which is the whole design working: an operator
+    approves occurrences, not files.
+
+    The plaintext is read out of the clone at runtime and never stored: the
+    claim records only `literal_sha256`, and
+    `validate_literal_authorization` refuses a record in which any string field
+    hashes to the literal."""
+    engine = _engine()
+    finalize = engine["modules"]["verifier.finalize"]
+    preflight = engine["modules"]["verifier.preflight"]
+    import verifier.unitpayload
+
+    skeleton = _d1_skeleton()
+    atom_map = finalize.atom_texts(skeleton, cwd=_d1_clone())
+    atom_records = verifier.unitpayload.index_atom_records(skeleton)
+    members, seen = [], set()
+    for atom_id, text in atom_map.items():
+        record = atom_records.get(atom_id)
+        if record is None:
+            continue
+        for index, _digest, finding in preflight.occurrence_index_map(text):
+            literal = text[finding["offset"]:
+                           finding["offset"] + finding["length"]]
+            key = (record["path_bytes_b64"], atom_id, index)
+            if key in seen:
+                continue
+            seen.add(key)
+            members.append(_literal_member(
+                occurrence=occurrence, atom_id=atom_id, occurrence_index=index,
+                path_bytes_b64=record["path_bytes_b64"], literal=literal,
+                categories=finding.get("categories") or [finding["category"]],
+                **over))
+    return members
+
+
+def _engine_identity(**over):
+    """The engine identity a run establishes for itself.
+
+    Five digests, and the operator's `approve_engine_identity` envelope must
+    name exactly these. Four are placeholders here because the protected engine
+    build that produces them is R10; the artifact digest is real, because that
+    is the one D1 already verifies for itself and therefore the one a mismatch
+    could hide behind."""
+    identity = {"engine_artifact_sha256":
+                _engine_artifact_argument()["expected_sha256"],
+                "engine_source_sha256": "a" * 64,
+                "runtime_lock_sha256": "b" * 64,
+                "sbom_sha256": "c" * 64,
+                "provenance_sha256": "d" * 64}
+    identity.update(over)
+    return identity
+
+
+def _bootstrap(**over):
+    """The deployment this run is running from, as `bootstrapstate.observe`
+    reports it — branch and head from the platform, policy digest computed
+    here from the deployed workflow files."""
+    observed = bootstrapstate.observe(
+        ref="refs/heads/deploy/trusted-lane-d0-containment", head_sha=SHA_A,
+        workflow_dir=str(LANE_DIR / "workflow"),
+        implemented_phase=phases.IMPLEMENTED_PHASE)
+    observed.update(over)
+    return observed
+
+
+def _runtime_bound_payload(key, occurrence, *, pins, ceiling,
+                           observation=None, executable_plan_sha256=None):
+    """A typed payload that MATCHES the runtime, for the ten bound
+    prerequisites.
+
+    EX5-R21's whole point is that a well-formed authenticated payload can
+    authorize something other than what is about to happen, so the fixture has
+    to say what the run will actually do. The attack tests change exactly one
+    field of this and assert zero provider attempts."""
+    payload = _typed_payload(key)
+    if key in ("delete_failed_run", "verify_run_404"):
+        payload["run_id"] = runtimebinding.INCIDENT_RUN_ID
+    if key == "install_environment_key":
+        payload["environment_name"] = runtimebinding.TRUSTED_ENVIRONMENT_NAME
+        payload["secret_name"] = runtimebinding.PROVIDER_SECRET_NAME
+    if key == "protected_trusted_environment":
+        # The digest of the observation THIS run evaluates. D2 runs against a
+        # different environment record than D1, so a fixture that always
+        # digested D1's would have the D2 approval naming D1's protection
+        # state — which the gate refuses, correctly.
+        payload["protection_observation_sha256"] = (
+            runtimebinding.observation_digest(
+                observation if observation is not None
+                else _protected_observation()))
+    if key in ("authorize_capability_policy",
+               "approve_review_request_policy_v2"):
+        governed = enginebridge.governed_policy_digests(_engine(),
+                                                        pin_values=pins)
+        if key == "authorize_capability_policy":
+            payload["capability_policy_sha256"] = governed[
+                "capability_policy_sha256"]
+        else:
+            payload["review_request_policy_sha256"] = governed[
+                "review_request_policy_sha256"]
+    if key == "approve_engine_identity":
+        payload.update(_engine_identity())
+    if key == "approve_bootstrap_branch":
+        deployment = _bootstrap()
+        payload["branch"] = deployment["branch"]
+        payload["branch_head_sha"] = deployment["head_sha"]
+        payload["bootstrap_policy_sha256"] = deployment["policy_sha256"]
+    if key == "approve_count_spending":
+        payload["max_input_tokens"] = ceiling
+        payload["count_attempt_cap"] = pins["VERIFIER_MAX_COUNT_CALLS"]
+        payload["micro_usd_cap"] = pins["VERIFIER_COST_CAP_MICRO_USD"]
+    if key == "approve_generation_separately":
+        payload["generation_attempt_cap"] = pins[
+            "VERIFIER_MAX_GENERATION_CALLS"]
+        # Prerequisite 16 names WHICH plan. An approval to generate is not an
+        # approval to generate anything.
+        if executable_plan_sha256:
+            payload["executable_plan_sha256"] = executable_plan_sha256
+    for field, source in (("authorized_target_base_sha", "target_base_sha"),
+                          ("authorized_diff_base_sha", "diff_base_sha"),
+                          ("authorized_head_sha", "head_sha")):
+        if field in payload:
+            payload[field] = occurrence[source]
+    return payload
+
+
+def _d1_claims(*, ceiling=10 ** 9, omit=None, head=None, key_hex=None,
+               observation=None, phase="D1", executable_plan_sha256=None):
+    """A complete envelope set bound to the range D1 actually reviews."""
+    occurrence = dict(D1_OCCURRENCE, head_sha=head) if head else D1_OCCURRENCE
+    over = {"key_hex": key_hex} if key_hex else {}
+    minted = []
+    keys = (trustedverifier.D2_PREREQUISITES if phase == "D2"
+            else trustedverifier.D1_PREREQUISITES)
+    for key in keys:
+        if key == omit:
+            continue
+        if key == authzenvelope.PIN_PREREQUISITE:
+            minted.append(_pin_envelope(occurrence=occurrence,
+                                        pins=_trusted_pins(), **over))
+            continue
+        if key == authzenvelope.LITERAL_PREREQUISITE:
+            minted.append(_literal_set(
+                _real_literal_members(occurrence, **over),
+                occurrence=occurrence, **over))
+            continue
+        payload = _runtime_bound_payload(
+            key, occurrence, pins=_trusted_pins(), ceiling=ceiling,
+            observation=observation,
+            executable_plan_sha256=executable_plan_sha256)
+        minted.append(_mint(key, typed_payload=payload, occurrence=occurrence,
+                            **over))
+    return minted
+
+
+def _d1_kwargs(*, ceiling=10 ** 9, publisher=None, opener=None,
+               clone=None, **overrides):
+    clone = clone or _d1_clone()
+    plan_units = [u["unit_sha256"] for u in _d1_skeleton()["units"]]
+    base = dict(
+        observations=_protected_observation(),
+        operator_claims=_d1_claims(ceiling=ceiling),
+        lane_verifier=_verifier(occurrence=D1_OCCURRENCE),
+        engine=_engine(),
+        engine_artifact=_engine_artifact_argument(),
+        engine_identity=_engine_identity(),
+        bootstrap=_bootstrap(),
+        candidate={"repository_numeric_id": REPOSITORY_NUMERIC_ID,
+                   "candidate_head_sha": SHA_A,
+                   "target_base_sha": PR25_BASE,
+                   "challenge_seed": D1_SEED,
+                   "checkout_destination": clone},
+        plan={"unit_sha256s": plan_units},
+        fetch=_fetch_into(clone),
+        opener=opener if opener is not None else _counting_opener([]),
+        credential=FAKE_CREDENTIAL,
+        signing_key=TEST_KEY,
+        publisher=publisher if publisher is not None else (lambda request: None),
+        trusted_run={"id": 55, "attempt": 1,
+                     "url": "https://github.com/x/y/actions/runs/55"},
+        observed_now="2026-07-30T21:00:00Z",
+        produced_at="2026-07-30T21:00:00Z")
+    base.update(overrides)
+    return base
+
+
+@pytest.fixture
+def d1_engine(monkeypatch, tmp_path):
+    """Stub the two steps that need a real artifact and a real repository.
+
+    They have their own tests. Stubbing them here keeps the D1 tests about the
+    ORDER and the gates rather than about tar handling, and each stub returns
+    the shape the real function returns rather than a bare True."""
+    monkeypatch.setattr(artifactload, "inspect_archive",
+                        lambda path, *, expected_sha256: {
+                            "engine_artifact_sha256": expected_sha256,
+                            "file_count": 22, "digest_matched": True})
+    monkeypatch.setattr(artifactload,
+                        "assert_engine_root_is_not_the_candidate",
+                        lambda root: {"engine_root": root,
+                                      "candidate_checkout": False})
+    return tmp_path
+
+
+def test_d1_runs_end_to_end_and_produces_signed_evidence(d1_engine):
+    """The whole lane, against a fake server, in D0, with no credential.
+
+    The old version of this test asserted `total_input_tokens == 2468`, being
+    "1234 x 2 units" — one count per unit, for ONE model, over units a stub
+    handed back. That number WAS the finding: governed policy is a three-model
+    panel, and the lane was counting a single-model review of a plan it had not
+    rebuilt. There is no arithmetic here now because the total is whatever the
+    engine's counting of the engine's requests comes to; what is asserted is
+    the shape of the claim the evidence makes."""
+    published = []
+    result = d1runtime.run(**_d1_kwargs(publisher=published.append))
+    payload = result["payload"]
+
+    assert result["generation_calls"] == 0
+    assert payload["generation_calls"] == 0
+    # The panel is governed policy, read from the engine, and there are three.
+    assert payload["requested_model_ids"] == list(
+        enginebridge.model_panel(_engine()))
+    assert len(payload["requested_model_ids"]) == 3
+    assert payload["required_approver"] == "gpt-5.6-sol"
+    assert len(payload["policy_pin_names"]) == 12
+    # The plan that was counted is identified by its request hashes, and the
+    # bytes that were counted were scanned first.
+    assert payload["trusted_plan_sha256"]
+    assert payload["preflight_manifest_sha256"]
+    assert payload["review_skeleton_sha256"] == _d1_skeleton()[
+        "review_skeleton_sha256"]
+    assert payload["total_input_tokens"] > 0
+    assert payload["count_attempts"] >= len(payload["requested_model_ids"])
+    # The challenge is bound by DIGEST. Publishing the challenge itself would
+    # hand the next run's models the string they are meant to prove they were
+    # given.
+    assert payload["execution_challenge_sha256"]
+    assert "execution_challenge" not in payload
+    assert signing.verify_envelope(result["evidence"],
+                                   key=TEST_KEY)["signature_verified"] is True
+    assert [p["state"] for p in published] == ["pending", "success"]
+
+
+def test_d1_publishes_pending_before_any_provider_call(d1_engine):
+    """A run that dies between dispatch and completion must leave a visible
+    unfinished status rather than none."""
+    order = []
+    opener = _fake_server(record=None)
+
+    def recording_opener(*args):
+        order.append("provider")
+        return opener(*args)
+
+    d1runtime.run(**_d1_kwargs(
+        opener=recording_opener,
+        publisher=lambda request: order.append(f"status:{request['state']}")))
+    assert order[0] == "status:pending"
+    assert "provider" in order
+    assert order.index("status:pending") < order.index("provider")
+
+
+def test_d1_publishes_a_failure_status_rather_than_leaving_the_pr_pending(
+        d1_engine):
+    """The pending status is already on the pull request when a later step
+    refuses. Leaving it would block the candidate with no explanation."""
+    published = []
+    with _refusal("authorized_input_tokens_would_be_exceeded"):
+        d1runtime.run(**_d1_kwargs(ceiling=50, publisher=published.append))
+    assert [p["state"] for p in published] == ["pending", "failure"]
+    assert "authorized_input_tokens_would_be_exceeded" in published[1]["description"]
+
+
+def test_d1_status_lands_on_the_exact_candidate_head(d1_engine):
+    """A workflow_dispatch run's own job checks attach to main's commit. The
+    trusted status has to be published explicitly onto the reviewed SHA."""
+    published = []
+    d1runtime.run(**_d1_kwargs(publisher=published.append))
+    for publication in published:
+        assert publication["candidate_head_sha"] == SHA_A
+        assert publication["context"] == "trusted-verifier-count"
+
+
+def test_d1_refuses_before_the_credential_when_the_repository_is_unprotected(
+        d1_engine):
+    """Step 1, and it is first because every later answer is worthless if a
+    credential is reachable from an unprotected ref."""
+    published = []
+    with _refusal("branch_not_protected"):
+        d1runtime.run(**_d1_kwargs(
+            publisher=published.append,
+            observations=_protected_observation(
+                branch_record={"name": "main", "protected": False})))
+    # Nothing was published: the refusal came before the pending status, so
+    # the pull request never saw a trusted context at all.
+    assert published == []
+
+
+def test_d1_refuses_when_the_operator_record_has_expired(d1_engine):
+    with _refusal("operator_authorization_expired"):
+        d1runtime.run(**_d1_kwargs(lane_verifier=_verifier(
+            occurrence=D1_OCCURRENCE, observed_now="2027-01-01T00:00:00Z")))
+
+
+def test_d1_refuses_when_no_operator_wrote_a_ceiling(d1_engine):
+    """A budget the code picked is a budget nobody approved.
+
+    The typed schema for `approve_count_spending` is closed both ways, so an
+    approval with no ceiling in it is refused while D1 is authenticating —
+    before the credential is read, not when the ledger goes looking."""
+    payload = {k: v for k, v
+               in _typed_payload("approve_count_spending").items()
+               if k != "max_input_tokens"}
+    payload.update(authorized_target_base_sha=PR25_BASE,
+                   authorized_diff_base_sha=PR25_BASE,
+                   authorized_head_sha=SHA_A)
+    claims = [_mint("approve_count_spending", typed_payload=payload,
+                    occurrence=D1_OCCURRENCE)
+              if e["header"]["prerequisite_key"] == "approve_count_spending"
+              else e
+              for e in _d1_claims()]
+    with _refusal("typed_payload_incomplete"):
+        d1runtime.run(**_d1_kwargs(operator_claims=claims))
+
+
+def test_d1_budget_is_global_not_per_request(d1_engine):
+    """The bug this prevents: a hundred requests that are each individually
+    under budget spend a hundred times the budget.
+
+    The check moved and got stricter. It used to be `countledger.preflight`,
+    comparing a unit's DECLARED worst case to a running total — a number the
+    lane was handed, not one it measured. It is now the operator's ceiling
+    applied to the total the provider actually counted, over every request in
+    the engine's plan. A ceiling of 1 makes any real plan exceed it, and no
+    per-request check would notice."""
+    with _refusal("authorized_input_tokens_would_be_exceeded"):
+        d1runtime.run(**_d1_kwargs(ceiling=1))
+
+
+def test_d1_publishes_failure_when_the_ceiling_is_exceeded(d1_engine):
+    """The pending status is already on the pull request when the ceiling
+    refuses, and leaving it there would block the candidate forever with no
+    explanation."""
+    published = []
+    with _refusal("authorized_input_tokens_would_be_exceeded"):
+        d1runtime.run(**_d1_kwargs(ceiling=1, publisher=published.append))
+    assert [p["state"] for p in published] == ["pending", "failure"]
+    assert "refused" in published[-1]["description"]
+
+
+def test_d1_refuses_when_the_rebuild_disagrees_with_the_candidates_plan(
+        d1_engine):
+    """The candidate's plan is an input to COMPARE against. Proceeding on
+    either side alone is a different failure and both are refused."""
+    with _refusal("rebuilt_plan_differs_from_candidate_plan"):
+        d1runtime.run(**_d1_kwargs(plan={"unit_sha256s": [
+            f"{0:064d}", f"{9:064d}"]}))
+
+
+def test_d1_refuses_a_candidate_plan_that_declares_nothing_to_compare(d1_engine):
+    """With nothing to compare against, the rebuild is unchecked and the
+    comparison is theatre."""
+    with _refusal("candidate_plan_declares_no_units"):
+        d1runtime.run(**_d1_kwargs(plan={}))
+
+
+def test_d1_refuses_a_rebuild_that_produced_no_units():
+    """No longer reachable by injection, which is the improvement.
+
+    `skeleton_rebuild` used to be a parameter, so what "the trusted engine
+    rebuilt" meant depended on what the runner passed — a caller could hand D1
+    an empty plan, or any other plan. The rebuild is now
+    `verifier.plan.build_skeleton` and cannot be substituted, so this drives
+    the comparison directly."""
+    with _refusal("skeleton_rebuild_produced_no_units"):
+        d1runtime._assert_rebuilt_plan_matches({"units": []},
+                                               {"unit_sha256s": []})
+    with _refusal("skeleton_rebuild_not_a_result"):
+        d1runtime._assert_rebuilt_plan_matches(None, {"unit_sha256s": []})
+    with _refusal("skeleton_units_duplicated"):
+        d1runtime._assert_rebuilt_plan_matches(
+            {"units": [{"unit_sha256": "a" * 64}, {"unit_sha256": "a" * 64}]},
+            {"unit_sha256s": ["a" * 64]})
+
+
+def test_d1_every_request_carries_this_runs_challenge(d1_engine):
+    """A verdict produced for an earlier commit would otherwise validate
+    against a later one, every field intact.
+
+    Every request now, not every unit: the engine assembles one request per
+    (unit, model) over the governed three-model panel, and the run challenge is
+    bound into all of them. The old version asserted two requests — one per
+    unit, for one model — which is the single-model finding stated as an
+    assertion."""
+    seen = []
+
+    def recording_opener(method, url, headers, body):
+        seen.append(body)
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": 10}).encode()
+
+    d1runtime.run(**_d1_kwargs(opener=recording_opener))
+    expected = challenge.run_token(
+        seed=D1_SEED, candidate_head_sha=SHA_A, trusted_run_id=55,
+        trusted_run_attempt=1)
+    units = len(_d1_skeleton()["units"])
+    panel = len(enginebridge.model_panel(_engine()))
+    assert len(seen) >= units * panel, (len(seen), units, panel)
+    assert all(expected in body.decode() for body in seen)
+    # A token from a different run does not appear anywhere.
+    other = challenge.run_token(seed=b"\x09" * 32, candidate_head_sha=SHA_A,
+                                trusted_run_id=55, trusted_run_attempt=1)
+    assert not any(other in body.decode() for body in seen)
+
+
+def test_the_challenge_is_bound_to_the_run_and_the_head():
+    """A token from one run must be refused in another, or it proves nothing
+    about freshness."""
+    common = dict(seed=D1_SEED, unit_sha256="a" * 64,
+                  candidate_head_sha=SHA_B, trusted_run_id=55,
+                  trusted_run_attempt=1)
+    baseline = challenge.token_for_unit(**common)
+    assert baseline != challenge.token_for_unit(
+        **dict(common, candidate_head_sha=SHA_A))
+    assert baseline != challenge.token_for_unit(**dict(common, trusted_run_id=56))
+    assert baseline != challenge.token_for_unit(
+        **dict(common, trusted_run_attempt=2))
+    assert baseline != challenge.token_for_unit(**dict(common, unit_sha256="b" * 64))
+    assert baseline != challenge.token_for_unit(
+        **dict(common, seed=b"a different seed, also thirty-two bytes long"))
+
+
+def test_a_verdict_without_this_runs_token_is_refused_and_not_echoed():
+    token = challenge.token_for_unit(
+        seed=D1_SEED, unit_sha256="a" * 64, candidate_head_sha=SHA_B,
+        trusted_run_id=55, trusted_run_attempt=1)
+    forged = {"unit_sha256": "a" * 64,
+              "proof_of_check": "I definitely read SENSITIVE-PROSE"}
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        challenge.assert_echoed(forged, expected_token=token)
+    assert "challenge_not_echoed" in excinfo.value.reason
+    assert "SENSITIVE-PROSE" not in excinfo.value.reason
+
+
+def test_each_verdict_is_checked_against_its_own_units_token():
+    """Checking them all against one token would let a single genuine response
+    vouch for a batch."""
+    bound = dict(seed=D1_SEED, candidate_head_sha=SHA_B, trusted_run_id=55,
+                 trusted_run_attempt=1)
+    good = challenge.token_for_unit(unit_sha256="a" * 64, **bound)
+    verdicts = [{"unit_sha256": "a" * 64, "proof_of_check": f"read it {good}"},
+                {"unit_sha256": "b" * 64, "proof_of_check": f"read it {good}"}]
+    with _refusal("challenge_not_echoed"):
+        challenge.assert_all_echoed(verdicts, **bound)
+
+
+def test_a_challenge_check_over_nothing_is_refused():
+    """It would pass for every run."""
+    with _refusal("no_verdicts_to_challenge"):
+        challenge.assert_all_echoed([], seed=D1_SEED, candidate_head_sha=SHA_B,
+                                    trusted_run_id=55, trusted_run_attempt=1)
+
+
+def test_the_challenge_states_what_it_does_not_prove():
+    """A model handed the token echoes it whether or not it did the work."""
+    token = challenge.token_for_unit(
+        seed=D1_SEED, unit_sha256="a" * 64, candidate_head_sha=SHA_B,
+        trusted_run_id=55, trusted_run_attempt=1)
+    scope = challenge.assert_echoed(
+        {"unit_sha256": "a" * 64, "proof_of_check": f"x {token} y"},
+        expected_token=token)["honest_scope"]
+    assert "does NOT show that the model read the diff" in scope
+
+
+def test_d1_makes_zero_generation_calls(d1_engine):
+    """The phase says so; the ledger makes the phase checkable."""
+    seen = []
+    result = d1runtime.run(**_d1_kwargs(opener=_fake_server(
+        record=seen, body=json.dumps({"object": "response.input_tokens",
+                                      "input_tokens": 10}).encode())))
+    assert result["payload"]["generation_calls"] == 0
+    for call in seen:
+        assert call["url"].endswith("/responses/input_tokens")
+
+
+def test_d1_evidence_is_unusable_if_the_signature_is_stripped(d1_engine):
+    result = d1runtime.run(**_d1_kwargs())
+    stripped = dict(result["evidence"], signature=None, signer_identity=None)
+    with _refusal("trusted_class_without_signature"):
+        evidencewire.validate_envelope(stripped)
+
+
+def test_d1_evidence_binds_the_exact_range_it_reviewed(d1_engine):
+    result = d1runtime.run(**_d1_kwargs())
+    assert result["evidence"]["candidate_head_sha"] == SHA_A
+    assert result["evidence"]["target_base_sha"] == PR25_BASE
+    assert evidencewire.assert_payload_matches(
+        result["evidence"], result["payload"])["payload_bound"] is True
+
+
+def test_d1_states_that_a_count_is_not_a_review(d1_engine):
+    result = d1runtime.run(**_d1_kwargs())
+    assert "not a review" in result["honest_scope"]
+
+
+# ---- the count ledger, on its own -----------------------------------------
+
+
+def _authorization(ceiling=1000):
+    return {"authorized_input_tokens": ceiling, "key": "max_input_tokens"}
+
+
+def _ledger():
+    return countledger.new_ledger(
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, candidate_head_sha=SHA_B,
+        trusted_run_id=1, trusted_run_attempt=1)
+
+
+def test_the_ledger_refuses_the_same_unit_twice():
+    """One of the two counts is the real one and nothing says which."""
+    ledger = countledger.record_count(
+        _ledger(), unit_sha256="a" * 64, input_tokens=10,
+        payload_sha256="b" * 64, authorization=_authorization())
+    with _refusal("ledger_unit_counted_twice"):
+        countledger.record_count(ledger, unit_sha256="a" * 64, input_tokens=10,
+                                 payload_sha256="b" * 64,
+                                 authorization=_authorization())
+
+
+def test_the_ledger_refuses_a_reply_that_lands_over_the_ceiling():
+    """Preflight cleared a worst case; a reply reporting more than that either
+    answers a different request or the estimate was wrong."""
+    with _refusal("authorized_input_tokens_exceeded"):
+        countledger.record_count(_ledger(), unit_sha256="a" * 64,
+                                 input_tokens=5000, payload_sha256="b" * 64,
+                                 authorization=_authorization(100))
+
+
+def test_preflight_refuses_a_unit_whose_worst_case_is_the_whole_budget():
+    with _refusal("unit_worst_case_implausible"):
+        countledger.preflight(_ledger(), authorization=_authorization(10**9),
+                              worst_case_input_tokens=10**8)
+
+
+def test_preflight_without_an_estimate_authorizes_an_unknown_amount():
+    for value in (0, -1, None, True, "100"):
+        with _refusal("preflight_worst_case_not_a_positive_integer"):
+            countledger.preflight(_ledger(), authorization=_authorization(),
+                                  worst_case_input_tokens=value)
+
+
+def test_a_plan_unit_that_was_never_counted_is_refused():
+    """The total would be an underestimate an operator approves as if it were
+    the whole cost."""
+    ledger = countledger.record_count(
+        _ledger(), unit_sha256="a" * 64, input_tokens=10,
+        payload_sha256="b" * 64, authorization=_authorization())
+    with _refusal("planned_units_not_counted"):
+        countledger.assert_plan_fully_counted(
+            ledger, planned_units=["a" * 64, "c" * 64])
+
+
+def test_a_counted_unit_that_was_never_planned_is_refused():
+    """A request for something the plan does not describe. The plan here holds
+    BOTH counted units plus nothing missing, so the missing-unit check cannot
+    fire first and mask this one."""
+    ledger = _ledger()
+    for unit in ("a" * 64, "c" * 64):
+        ledger = countledger.record_count(
+            ledger, unit_sha256=unit, input_tokens=10,
+            payload_sha256="b" * 64, authorization=_authorization())
+    with _refusal("counted_units_not_planned"):
+        countledger.assert_plan_fully_counted(ledger, planned_units=["a" * 64])
+
+
+def test_a_total_over_an_empty_plan_is_under_every_budget():
+    with _refusal("plan_has_no_units"):
+        countledger.assert_plan_fully_counted(_ledger(), planned_units=[])
+
+
+def _ledger_digest_for(order):
+    ledger = _ledger()
+    for unit, tokens in order:
+        ledger = countledger.record_count(
+            ledger, unit_sha256=unit, input_tokens=tokens,
+            payload_sha256="b" * 64, authorization=_authorization())
+    return countledger.ledger_digest(ledger)
+
+
+def test_the_ledger_digest_is_order_independent_but_content_sensitive():
+    forwards = _ledger_digest_for([("a" * 64, 10), ("c" * 64, 20)])
+    backwards = _ledger_digest_for([("c" * 64, 20), ("a" * 64, 10)])
+    different = _ledger_digest_for([("a" * 64, 11), ("c" * 64, 20)])
+    assert forwards == backwards
+    assert forwards != different
+
+
+def test_the_ledger_digest_binds_per_unit_attribution_not_just_the_total():
+    """Found by the mutation sweep. The previous test varied a count, which
+    also varied `total_input_tokens` — so a digest covering only the total and
+    the unit NAMES passed it. These two ledgers have the same total and the
+    same units, and differ only in which unit cost what, which is exactly the
+    claim the evidence makes."""
+    left = _ledger_digest_for([("a" * 64, 10), ("c" * 64, 20)])
+    right = _ledger_digest_for([("a" * 64, 20), ("c" * 64, 10)])
+    assert left != right
+
+
+def test_a_generation_call_in_the_count_ledger_is_refused():
+    with _refusal("d1_made_a_generation_call"):
+        countledger.assert_zero_generation(dict(_ledger(), generation_calls=1))
+
+
+def test_an_approval_for_one_commit_does_not_authorize_another():
+    """An approval to spend on reviewing one commit must not authorize another,
+    and a push is how the reviewed thing changes. The comparison now lives in
+    `LaneTrustedVerifier`, which checks it for EVERY record before promoting
+    any of them, so it is driven through the authenticator."""
+    with _refusal("authorization_is_for_a_different_review"):
+        trustedverifier.authenticate_record_set(
+            _authenticated_claims("D1", head=SHA_C),
+            verifier=_lane_verifier(), phase="D1")
+
+
+def test_a_parsed_record_set_cannot_authorize_spending():
+    """The type is the authority. `operatorrecord.verify_records` returns a
+    dict whose own payload says `authorized: False`, and `authorize` used to
+    spend on it."""
+    verified = operatorrecord.verify_records(
+        [_operator_record(prerequisite_key="approve_count_spending",
+                          exact_values={"max_input_tokens": 100})],
+        observed_now="2026-07-30T21:00:00Z")
+    with _refusal("operator_authority_not_authenticated"):
+        countledger.authorize(record_set=verified)
+
+
+def test_the_parsed_operator_record_still_carries_its_literal():
+    """A parser that validates a record and then discards the literal it
+    exists to convey forces every consumer back to the unvalidated original."""
+    parsed = operatorrecord.parse_operator_record(
+        _operator_record(exact_values={"max_input_tokens": 42}))
+    assert parsed["exact_values"] == {"max_input_tokens": 42}
+
+
+@pytest.mark.parametrize("ceiling", [0, -5, True, "1000", 1.5])
+def test_a_ceiling_that_is_not_a_positive_integer_is_refused(ceiling):
+    """Refused at AUTHENTICATION now, rather than at the ledger. The typed
+    schema names `max_input_tokens` as a positive integer, so a genuine MAC
+    over a bad ceiling never becomes an authenticated envelope at all."""
+    with _refusal("typed_payload_field_not_a_positive_integer"):
+        trustedverifier.authenticate_record_set(
+            _authenticated_claims("D1", ceiling=ceiling),
+            verifier=_lane_verifier(), phase="D1")
+
+
+def test_the_ledger_keeps_its_own_ceiling_guard():
+    """Defence in depth. The schema refuses a bad ceiling first, so this drives
+    the ledger's own check by editing the IN-PROCESS envelope after
+    authentication — which is the only way that path is now reachable, and a
+    reason to keep it rather than to delete it as dead."""
+    record_set = trustedverifier.authenticate_record_set(
+        _authenticated_claims("D1"), verifier=_lane_verifier(), phase="D1")
+    record_set.require("approve_count_spending").typed_payload[
+        "max_input_tokens"] = 0
+    with _refusal("authorized_ceiling_not_a_positive_integer"):
+        countledger.authorize(record_set=record_set)
+
+
+# ---- the engine artifact ---------------------------------------------------
+
+
+def _engine_tar(tmp_path, *, members=None, name="engine.tar.gz"):
+    """Build a real gzipped tar so the member rules are exercised against
+    tarfile rather than against a mock of it."""
+    import io
+    import tarfile
+
+    path = tmp_path / name
+    with tarfile.open(path, "w:gz") as archive:
+        for member, payload in (members or {"engine/m.py": b"x = 1\n"}).items():
+            if isinstance(payload, tarfile.TarInfo):
+                archive.addfile(payload)
+                continue
+            info = tarfile.TarInfo(member)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    return str(path), hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_an_artifact_whose_bytes_differ_from_the_approved_digest_is_refused(
+        tmp_path):
+    """The whole basis of engine trust: these bytes, and no others."""
+    path, _ = _engine_tar(tmp_path)
+    with _refusal("engine_artifact_digest_mismatch"):
+        artifactload.inspect_archive(path, expected_sha256="d" * 64)
+
+
+def test_a_matching_artifact_lists_its_files(tmp_path):
+    path, digest = _engine_tar(tmp_path, members={
+        "engine/a.py": b"a\n", "engine/b.json": b"{}\n"})
+    record = artifactload.inspect_archive(path, expected_sha256=digest)
+    assert record["file_count"] == 2
+    assert [f["path"] for f in record["files"]] == ["engine/a.py",
+                                                    "engine/b.json"]
+
+
+@pytest.mark.parametrize("member,category", [
+    ("/etc/passwd", "engine_member_absolute_path"),
+    ("../outside.py", "engine_member_path_traversal"),
+    ("engine/../../x.py", "engine_member_path_traversal"),
+    ("engine\\x.py", "engine_member_backslash"),
+    ("engine/payload.so", "engine_member_suffix_not_permitted"),
+])
+def test_a_dangerous_member_path_is_refused(tmp_path, member, category):
+    path, digest = _engine_tar(tmp_path, members={member: b"x\n"})
+    with _refusal(category):
+        artifactload.inspect_archive(path, expected_sha256=digest)
+
+
+def test_a_symlink_member_is_refused(tmp_path):
+    """Its own path is fine, which is exactly why a path check clears it."""
+    import tarfile
+
+    info = tarfile.TarInfo("engine/link.py")
+    info.type = tarfile.SYMTYPE
+    info.linkname = "../../../../etc/passwd"
+    path, digest = _engine_tar(tmp_path, members={"engine/link.py": info})
+    with _refusal("engine_member_is_a_link"):
+        artifactload.inspect_archive(path, expected_sha256=digest)
+
+
+def test_a_device_member_is_refused(tmp_path):
+    import tarfile
+
+    info = tarfile.TarInfo("engine/dev.py")
+    info.type = tarfile.CHRTYPE
+    path, digest = _engine_tar(tmp_path, members={"engine/dev.py": info})
+    with _refusal("engine_member_is_a_device"):
+        artifactload.inspect_archive(path, expected_sha256=digest)
+
+
+def test_an_archive_with_no_files_is_refused(tmp_path):
+    """An empty engine satisfies any import and runs nothing."""
+    import io
+    import tarfile
+
+    path = tmp_path / "empty.tar.gz"
+    with tarfile.open(path, "w:gz") as archive:
+        info = tarfile.TarInfo("engine")
+        info.type = tarfile.DIRTYPE
+        archive.addfile(info, io.BytesIO(b""))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    with _refusal("engine_archive_has_no_files"):
+        artifactload.inspect_archive(str(path), expected_sha256=digest)
+
+
+def test_an_empty_artifact_file_is_refused(tmp_path):
+    """An empty artifact hashes to a constant, and a constant is something an
+    attacker can arrange."""
+    path = tmp_path / "empty.bin"
+    path.write_bytes(b"")
+    with _refusal("engine_artifact_empty"):
+        artifactload.file_digest(str(path))
+
+
+def test_a_missing_artifact_reports_its_exception_class_only(tmp_path):
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        artifactload.file_digest(str(tmp_path / "absent.tar.gz"))
+    assert "engine_artifact_unreadable" in excinfo.value.reason
+    assert "absent.tar.gz" not in excinfo.value.reason
+
+
+def test_extracting_over_an_existing_tree_is_refused(tmp_path):
+    """A mixture of an approved engine and whatever was there before is not an
+    approved engine."""
+    path, digest = _engine_tar(tmp_path)
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    (destination / "leftover.py").write_text("x\n")
+    with _refusal("engine_destination_not_empty"):
+        artifactload.extract(path, destination=str(destination),
+                             expected_sha256=digest)
+
+
+def test_a_verified_artifact_extracts(tmp_path):
+    path, digest = _engine_tar(tmp_path, members={"engine/m.py": b"x = 1\n"})
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    record = artifactload.extract(path, destination=str(destination),
+                                  expected_sha256=digest)
+    assert record["extracted"] is True
+    assert (destination / "engine" / "m.py").read_text() == "x = 1\n"
+
+
+def test_an_expected_digest_that_is_not_a_digest_is_refused(tmp_path):
+    """It must come from the operator, out of band — a digest that travels
+    with the thing it describes describes whatever it travels with."""
+    path, _ = _engine_tar(tmp_path)
+    for bogus in ("", "not-a-digest", None, "a" * 63):
+        with _refusal("expected_engine_digest_malformed"):
+            artifactload.inspect_archive(path, expected_sha256=bogus)
+
+
+# --------------------------------------------------------------------------
+# EX3-R01 — D2, the generation lane.
+#
+# Not D1 with a flag. The two phases differ in the ways that matter — a
+# separate approval, a plan it did not choose, verdicts to check — and a shared
+# `run(generate=True)` would put those differences inside a branch nobody
+# reads.
+# --------------------------------------------------------------------------
+
+
+def _d2_unit(index=0):
+    return {"unit_sha256": f"{index:064d}",
+            "instructions": f"review unit {index}",
+            "input_text": f"diff for unit {index}"}
+
+
+#: One sentence per model, deliberately different. The first version of this
+#: fixture returned `"reason": "checked"` for every model, and the engine's
+#: anti-copy tripwire refused the very first run — correctly: three models
+#: returning one canned sentence is one review reported three times.
+_D2_REASONING = {
+    "gpt-5.3-codex": ("traced the control flow through the changed branch and "
+                      "confirmed the early return cannot skip the cleanup"),
+    "gpt-5.6-sol": ("checked the boundary values against the callers in this "
+                    "range; none passes a width the new loop mishandles"),
+    "gpt-4.1-mini": ("compared the rewritten arithmetic with the original for "
+                     "the documented rounding cases and found them equal"),
+}
+_D2_PROOF = {
+    "gpt-5.3-codex": "walked every added line of the diff",
+    "gpt-5.6-sol": "re-read the surrounding function and its two callers",
+    "gpt-4.1-mini": "expanded the arithmetic by hand for three inputs",
+}
+
+
+def _d2_response(unit_sha256, token, decision="approve",
+                 model_id="gpt-5.6-sol"):
+    verdict = {"unit_sha256": unit_sha256, "decision": decision,
+               "reason": _D2_REASONING[model_id],
+               "proof_of_check": f"{_D2_PROOF[model_id]} {token}",
+               "checked_categories": ["logic"], "lens_id": "correctness"}
+    return json.dumps({
+        "object": "response", "status": "completed",
+        "output": [{"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text",
+                                 "text": json.dumps({"verdicts": [verdict]})}]}],
+    }).encode()
+
+
+def _engine_generation_opener(*, refute=None, identical_reasons=False,
+                              record=None, status=200):
+    """A fake `/v1/responses` that answers with the ENGINE's own stand-in.
+
+    Not a second implementation of the response schema. `verifier.executor`
+    ships `MockGenerationTransport`, which produces well-formed, policy-valid,
+    challenge-echoing verdicts with model-specific reasoning — writing a lane
+    copy would mean getting the verdict schema subtly wrong somewhere and
+    testing the wrong thing.
+
+    It reaches that stand-in through the LANE's real transport, so the
+    credential joining, the endpoint assertion and the response bound are all
+    exercised."""
+    mock = _module("verifier.executor").MockGenerationTransport(
+        refute=refute or {}, identical_reasons=identical_reasons)
+
+    def opener(method, url, headers, body):
+        if record is not None:
+            record.append({"method": method, "url": url, "body": body,
+                           "has_credential": "authorization" in
+                           {k.lower() for k in headers}})
+        reply_status, payload = mock.post("/v1/responses", body, timeout=None)
+        return (status if status != 200 else reply_status), payload
+
+    return opener
+
+
+def _d2_opener(units, *, decision="approve", record=None):
+    """A fake server that answers each unit with a verdict carrying that
+    unit's own challenge token, derived exactly as the runtime derives it."""
+    def opener(method, url, headers, body):
+        if record is not None:
+            record.append({"method": method, "url": url, "body": body})
+        payload = json.loads(body)
+        instructions = payload["instructions"]
+        for unit in units:
+            token = challenge.token_for_unit(
+                seed=D1_SEED, unit_sha256=unit["unit_sha256"],
+                candidate_head_sha=SHA_B, trusted_run_id=77,
+                trusted_run_attempt=1)
+            if token in instructions:
+                return 200, _d2_response(unit["unit_sha256"], token, decision,
+                                         model_id=payload["model"])
+        raise AssertionError("fake server saw no known challenge token")
+
+    return opener
+
+
+def _d2_observations():
+    """D2 runs against the GENERATION environment, so its protection
+    observation is a DIFFERENT document from D1's.
+
+    Prerequisite 7 must be approved for the observation the run actually
+    evaluates, and this is why: an approval naming D1's environment record
+    would authorize a containment nobody checked. The gate caught exactly that
+    the first time D2 was wired to `_d1_claims`, which is EX5-R21 working."""
+    return _protected_observation(
+        environment_record={"name": "trusted-verifier-generation",
+                            "deployment_branch_policy": {
+                                "custom_branch_policies": True},
+                            "allowed_branches": ["main"]},
+        environment_name="trusted-verifier-generation")
+
+
+def _d2_kwargs(units=None, *, publisher=None, opener=None, decision="approve",
+               **overrides):
+    # `units` is now only used by the callers that build their own opener.
+    # D2's units come from the plan D1 signed, which is the point: the lane
+    # does not get to choose what gets reviewed.
+    units = units if units is not None else [_d2_unit(0), _d2_unit(1)]
+    observations = _d2_observations()
+    # D2 now executes the plan a REAL D1 run signed. Building it here is the
+    # only honest fixture: the plan carries request hashes the engine will
+    # re-derive from the commits and compare, so a hand-made one could not
+    # survive `assert_request_matches_plan` — which is the property under test.
+    d1 = _d1_result()
+    base = dict(
+        observations=observations,
+        operator_claims=_d1_claims(
+            phase="D2", observation=observations,
+            executable_plan_sha256=d1["trusted_plan_sha256"]),
+        lane_verifier=_verifier(occurrence=D1_OCCURRENCE),
+        engine_artifact=_engine_artifact_argument(),
+        candidate={"repository_numeric_id": REPOSITORY_NUMERIC_ID,
+                   "candidate_head_sha": SHA_A,
+                   "target_base_sha": PR25_BASE,
+                   "checkout_destination": _d1_clone()},
+        count_evidence=d1["count_evidence"],
+        signed_plan=d1["executable_plan"],
+        fetch=_fetch_into(_d1_clone()),
+        opener=opener if opener is not None else _engine_generation_opener(
+            refute=({m: {u["unit_sha256"] for u in _d1_skeleton()["units"]}
+                     for m in enginebridge.model_panel(_engine())}
+                    if decision != "approve" else None)),
+        credential=FAKE_CREDENTIAL, signing_key=TEST_KEY,
+        publisher=publisher if publisher is not None else (lambda request: None),
+        trusted_run={"id": 77, "attempt": 1,
+                     "url": "https://github.com/x/y/actions/runs/77"},
+        observed_now="2026-07-30T21:00:00Z",
+        produced_at="2026-07-30T21:00:00Z",
+        # No `model=`. The panel is governed policy, read from the engine.
+        engine=_engine(),
+        engine_identity=_engine_identity(),
+        bootstrap=_bootstrap(),
+        engine_source_sha256=ENGINE_DIGEST)
+    base.update(overrides)
+    return base
+
+
+def test_d2_runs_end_to_end_and_produces_signed_execution_evidence(d1_engine):
+    published = []
+    result = d2runtime.run(**_d2_kwargs(publisher=published.append))
+    panel = enginebridge.model_panel(_engine())
+    payload = result["payload"]
+    plan = _d1_result()["executable_plan"]["payload"]
+
+    # The units are the ones D1 COUNTED, not ones D2 was handed. The old
+    # assertion was `verdict_count == 2` over synthetic units a fixture
+    # invented; the plan now decides, which is the point.
+    assert payload["requested_model_ids"] == list(panel)
+    assert payload["required_approver"] == "gpt-5.6-sol"
+    assert payload["unit_count"] == len(plan["final_units"])
+    assert payload["trusted_plan_sha256"] == plan["plan_sha256"]
+    # Every execution payload in the run was scanned before any was sent, and
+    # the provider's own text was scanned before it was persisted.
+    assert payload["execution_preflight_sha256"]
+    assert payload["output_privacy"]["scanned_field_count"] > 0
+    assert result["steps"]["execution_preflight"][
+        "scanned_execution_payload_count"] == len(plan["batches"]) * len(panel)
+    assert payload["all_approved"] is True
+    assert signing.verify_envelope(result["evidence"],
+                                   key=TEST_KEY)["signature_verified"] is True
+    assert result["payload"]["all_approved"] is True
+    assert result["evidence"]["evidence_class"] == "TRUSTED_EXECUTION_EVIDENCE"
+    assert signing.verify_envelope(result["evidence"],
+                                   key=TEST_KEY)["signature_verified"] is True
+    assert [p["state"] for p in published] == ["pending", "success"]
+
+
+def test_d2_refuses_without_its_own_operator_approval(d1_engine):
+    """An approval to count has never been an approval to generate, and D1's
+    record does not carry over."""
+    # The whole D1 set, genuinely signed, with prerequisite 16 absent.
+    with _refusal("operator_prerequisites_outstanding"):
+        d2runtime.run(**_d2_kwargs(
+            operator_claims=_d1_claims(
+                phase="D1", observation=_d2_observations())))
+
+
+def test_d2_refuses_an_approval_scoped_to_a_different_commit(d1_engine):
+    with _refusal("authorization_is_for_a_different_review"):
+        d2runtime.run(**_d2_kwargs(
+            operator_claims=_authenticated_claims("D2", head=SHA_C)))
+
+
+def _resigned_plan(mutate):
+    """D1's signed plan with `mutate` applied and a GENUINE new signature.
+
+    The tampering tests have to re-sign, or they would all fail at
+    `signature_invalid` and prove only that the signature check works. Signing
+    the mutated payload puts the test where the interesting question is: an
+    edit made by someone who holds D1's key, caught by the plan's own digest
+    and by the comparison against the separately signed count evidence."""
+    d1 = _d1_result()
+    original = json.loads(json.dumps(d1["executable_plan"]["payload"]))
+    payload = mutate(json.loads(json.dumps(original)))
+    # A mutation that changed nothing produces a run that refuses nothing, and
+    # the test reads as "the gate is missing". That is not hypothetical: the
+    # first version of this helper was called with
+    # `authorized_input_tokens = 10**9`, which is what the plan already said.
+    assert payload != original, (
+        "the mutation was a no-op — this test would pass whether or not the "
+        "gate exists")
+    unsigned = evidencewire.trusted_envelope(
+        evidence_class=executableplan.PLAN_CLASS, payload=payload,
+        produced_by="trusted-lane-d1-count",
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, workflow_run_id=41,
+        workflow_run_attempt=1, ref="refs/heads/main",
+        target_base_sha=PR25_BASE, candidate_head_sha=SHA_A,
+        produced_at="2026-07-30T20:00:00Z")
+    return {"envelope": signing.sign_envelope(unsigned, key=TEST_KEY),
+            "payload": payload}
+
+
+def test_d2_refuses_a_plan_edited_inside_a_valid_signature(d1_engine):
+    """The plan's own digest, recomputed rather than read.
+
+    A signature proves the envelope is D1's. It does not prove the payload
+    inside it is the one D1 built, because whoever holds the key can sign a
+    different one — so the plan carries its own digest over its own fields and
+    `executableplan.validate` recomputes it."""
+    tampered = _resigned_plan(
+        lambda plan: {**plan, "authorized_input_tokens":
+                      plan["authorized_input_tokens"] * 2})
+    with _refusal("executable_plan_digest_mismatch"):
+        d2runtime.run(**_d2_kwargs(signed_plan=tampered))
+
+
+def test_d2_refuses_a_plan_whose_digest_was_recomputed_after_the_edit(
+        d1_engine):
+    """The same edit, with the digest fixed up. Caught by the OTHER document.
+
+    This is the attack the single-digest design could not see. D1 signs two
+    documents — the public count evidence and the private plan — and an edit
+    that repairs one of them still disagrees with the other. Here the plan
+    claims a token total the count evidence never counted."""
+    def edit(plan):
+        plan = {**plan, "total_input_tokens": plan["total_input_tokens"] + 1}
+        plan["plan_sha256"] = executableplan.plan_digest(plan)
+        return plan
+
+    with _refusal("executable_plan_disagrees_with_its_evidence"):
+        d2runtime.run(**_d2_kwargs(signed_plan=_resigned_plan(edit)))
+
+
+def test_a_plan_whose_challenge_does_not_match_its_own_digest_is_refused():
+    """A fresh challenge changes the request bytes, and the request bytes are
+    what was counted.
+
+    Asserted directly on `assert_challenge_is_the_counted_one` rather than
+    through a `run()`, because a plan edited this way is caught EARLIER — by
+    the comparison against the separately signed count evidence, which is the
+    stronger check. Driving it through `run()` would name that refusal and
+    leave this one covered by nothing."""
+    plan = _d1_result()["executable_plan"]["payload"]
+    assert executableplan.assert_challenge_is_the_counted_one(plan) == plan[
+        "execution_challenge"]
+    with _refusal("executable_plan_challenge_digest_mismatch"):
+        executableplan.assert_challenge_is_the_counted_one(
+            {**plan, "execution_challenge": "b" * 64})
+    with _refusal("executable_plan_challenge_missing"):
+        executableplan.assert_challenge_is_the_counted_one(
+            {**plan, "execution_challenge": "short"})
+
+
+def test_d2_sends_the_challenge_d1_counted_and_does_not_mint_one(d1_engine):
+    """The counted challenge reaches the provider, in the request bytes.
+
+    Not "the lane has a challenge field" — the token has to be IN what was
+    sent, because that is what the models echo and what the count priced."""
+    seen = []
+    d2runtime.run(**_d2_kwargs(opener=_engine_generation_opener(record=seen)))
+    counted = _d1_result()["executable_plan"]["payload"]["execution_challenge"]
+    assert seen, "no generation call was made"
+    for call in seen:
+        assert counted.encode() in call["body"], (
+            "a request went out carrying a challenge D1 never counted")
+
+
+def test_the_plan_digest_covers_every_field_the_executor_reads():
+    """Not a spot check. Every field `PLAN_FIELDS` names goes into the digest,
+    so a mutation of any one of them changes it — which is what makes
+    `validate`'s recomputation a check rather than a formality."""
+    plan = _d1_result()["executable_plan"]["payload"]
+    for field in executableplan.PLAN_FIELDS:
+        mutated = {**plan, field: [f"changed-{field}"]}
+        assert executableplan.plan_digest(mutated) != plan["plan_sha256"], (
+            f"{field} is outside the digest that identifies the plan")
+
+
+def test_a_plan_missing_a_field_the_executor_reads_is_refused():
+    plan = _d1_result()["executable_plan"]["payload"]
+    for field in ("final_units", "batches", "review_request_policy",
+                  "execution_challenge", "operator_pin_record"):
+        incomplete = {k: v for k, v in plan.items() if k != field}
+        with _refusal("executable_plan_incomplete"):
+            executableplan.validate(incomplete)
+
+
+def test_a_plan_may_not_carry_a_capability_or_the_operators_envelopes():
+    """D2 authenticates the operator's records itself and obtains its own
+    credential. A plan carrying either would let D1's run decide what D2
+    treats as authorized."""
+    plan = _d1_result()["executable_plan"]["payload"]
+    for field in executableplan.FORBIDDEN_PLAN_FIELDS:
+        smuggled = {**plan, field: "x"}
+        smuggled["plan_sha256"] = executableplan.plan_digest(smuggled)
+        with _refusal("executable_plan_carries_a_capability"):
+            executableplan.validate(smuggled)
+
+
+def test_the_signed_plan_carries_no_secret_and_no_credential():
+    """It is PRIVATE because it carries prompt bytes — but private is not the
+    same as harmless, and the values that could be a key are named.
+
+    Deliberately NOT `"authorization" not in blob.lower()`. That assertion was
+    written first and it failed, correctly: the review instructions the plan
+    carries tell the models to look for "authorization that fails open". The
+    string appearing is the reviewer's question, not a header — asking whether
+    the word occurs is a proxy for the question that matters, which is whether
+    any VALUE here is a credential."""
+    signed = _d1_result()["executable_plan"]
+    blob = json.dumps(signed, default=str)
+    for secret in (FAKE_CREDENTIAL, OPERATOR_KEY_HEX, OTHER_KEY_HEX,
+                   TEST_KEY.hex() if isinstance(TEST_KEY, bytes) else
+                   str(TEST_KEY)):
+        assert secret not in blob, "a key or credential reached the plan"
+    # And no header mapping at all, which is the shape a credential travels in.
+    assert "headers" not in signed["payload"]
+    assert not any(isinstance(v, dict) and "authorization" in
+                   {k.lower() for k in v}
+                   for v in signed["payload"].values())
+
+
+def test_d2_calls_the_generation_endpoint_and_d1_cannot(d1_engine):
+    """D2 needs the opposite assertion rather than a relaxation of D1's, so
+    neither lane's gate is weakened to let the other through."""
+    seen = []
+    d2runtime.run(**_d2_kwargs(opener=_engine_generation_opener(record=seen)))
+    assert seen, "the run made no generation call at all"
+    assert {s["url"] for s in seen} == {"https://api.openai.com/v1/responses"}
+    assert all(s["method"] == "POST" for s in seen)
+    assert all(s["has_credential"] for s in seen), (
+        "the credential is joined inside `exchange_generation`, to a COPY of "
+        "the headers — a request that reached the opener without it would "
+        "mean the lane was sending unauthenticated")
+    # The count lane still refuses that exact endpoint.
+    with _refusal("request_endpoint_not_the_count_endpoint"):
+        transport.assert_request_is_count_only(
+            {"method": "POST", "url": "https://api.openai.com/v1/responses"})
+    # And the generation send path refuses the count endpoint, symmetrically.
+    with _refusal("generation_send_given_the_count_endpoint"):
+        transport.exchange_generation(
+            transport.build_count_request(**COUNT_ARGS),
+            opener=_fake_server(), credential=FAKE_CREDENTIAL)
+
+
+def test_the_generation_send_path_refuses_the_count_endpoint():
+    """Found by the mutation sweep: `assert_request_is_generation` was tested,
+    but `transport.exchange_generation` — the function that actually joins the
+    credential and sends — was not. Sending here would spend a generation
+    approval on a number."""
+    request = transport.build_count_request(**COUNT_ARGS)
+    with _refusal("generation_send_given_the_count_endpoint"):
+        transport.exchange_generation(request, opener=_fake_server(),
+                                      credential=FAKE_CREDENTIAL)
+
+
+@pytest.mark.parametrize("url", [
+    "https://evil.example/v1/responses",
+    "http://api.openai.com/v1/responses",
+    "https://api.openai.com.evil.test/v1/responses",
+    None,
+])
+def test_the_generation_send_path_refuses_a_host_it_was_handed(url):
+    """The base URL is fixed in trusted policy, so a caller cannot choose
+    which server sees the credential."""
+    with _refusal("generation_endpoint_not_permitted"):
+        transport.exchange_generation(
+            {"method": "POST", "url": url, "headers": {}, "body": b"{}",
+             "payload_sha256": "a" * 64},
+            opener=_fake_server(), credential=FAKE_CREDENTIAL)
+
+
+def test_the_generation_send_path_refuses_a_non_post():
+    with _refusal("request_method_not_permitted"):
+        transport.exchange_generation(
+            {"method": "GET", "url": "https://api.openai.com/v1/responses",
+             "headers": {}, "body": b"{}", "payload_sha256": "a" * 64},
+            opener=_fake_server(), credential=FAKE_CREDENTIAL)
+
+
+def _tampered_response_opener(rewrite):
+    """The engine's own stand-in, with `rewrite` applied to each reply.
+
+    The response has to START well-formed or the test proves only that the
+    envelope validator works. `rewrite` receives the decoded response object
+    and returns the one that actually goes back, so each test can break
+    exactly one property and leave the rest valid."""
+    inner = _engine_generation_opener()
+
+    def opener(method, url, headers, body):
+        status, payload = inner(method, url, headers, body)
+        return status, json.dumps(rewrite(json.loads(payload))).encode()
+
+    return opener
+
+
+def test_d2_refuses_a_verdict_set_that_answers_different_units(d1_engine):
+    """One response deciding questions it was not asked is one call standing
+    in for a batch — and the challenge check alone would not catch it.
+
+    The engine checks the whole batch's unit set rather than one unit at a
+    time, which the lane's deleted per-unit version could not express: it sent
+    one request per unit, so "the set is wrong" was not a question it had."""
+    def swap_units(response):
+        verdicts = response["output_parsed"]["verdicts_by_unit"]
+        response["output_parsed"]["verdicts_by_unit"] = {
+            ("f" * 64): next(iter(verdicts.values()))}
+        return response
+
+    with _refusal("engine_refused where=execute_batch"):
+        d2runtime.run(**_d2_kwargs(
+            opener=_tampered_response_opener(swap_units)))
+
+
+def test_d2_refuses_a_verdict_set_that_answers_only_some_units(d1_engine):
+    """Dropping a unit rather than renaming one. A partial answer reported as
+    an answer is the reader believing the missing unit passed."""
+    def drop_one(response):
+        verdicts = response["output_parsed"]["verdicts_by_unit"]
+        if len(verdicts) > 1:
+            verdicts.pop(sorted(verdicts)[0])
+        return response
+
+    plan = _d1_result()["executable_plan"]["payload"]
+    if max(len(b["unit_sha256_in_order"]) for b in plan["batches"]) < 2:
+        pytest.skip("this range batches one unit at a time")
+    with _refusal("engine_refused where=execute_batch"):
+        d2runtime.run(**_d2_kwargs(opener=_tampered_response_opener(drop_one)))
+
+
+def test_d2_refuses_a_response_that_echoes_a_different_challenge(d1_engine):
+    """The challenge proves the reviewer saw THIS run's question."""
+    def swap_challenge(response):
+        response["output_parsed"]["challenge"] = "c" * 64
+        return response
+
+    with _refusal("engine_refused where=execute_batch"):
+        d2runtime.run(**_d2_kwargs(
+            opener=_tampered_response_opener(swap_challenge)))
+
+
+def test_d2_reports_reject_rather_than_failing_silently(d1_engine):
+    published = []
+    result = d2runtime.run(**_d2_kwargs(decision="reject",
+                                        publisher=published.append))
+    assert result["payload"]["all_approved"] is False
+    assert published[-1]["state"] == "failure"
+    assert "reject" in published[-1]["description"]
+    # And the run says WHY, by the engine's own block code. A rejection with no
+    # code is a review that says no and cannot say what it objected to.
+    codes = {b["code"] for b in result["payload"]["unit_blocks"]}
+    assert codes, "every unit was rejected and no block was recorded"
+    assert result["payload"]["refuted_unit_sha256"]
+
+
+def _refute_for(models, units=None):
+    """`refute` for the engine's stand-in: which models refute which units."""
+    plan = _d1_result()["executable_plan"]["payload"]
+    hashes = {u["unit_sha256"] for u in plan["final_units"]} if units is None \
+        else set(units)
+    return {model: set(hashes) for model in models}
+
+
+def test_d2_treats_the_required_approvers_refutation_as_a_veto(d1_engine):
+    """`gpt-5.6-sol` saying no is not outvoted by the other two saying yes."""
+    result = d2runtime.run(**_d2_kwargs(
+        opener=_engine_generation_opener(refute=_refute_for(["gpt-5.6-sol"]))))
+    payload = result["payload"]
+    assert payload["all_approved"] is False
+    assert set(payload["decisions"].values()) == {"reject"}
+    assert {b["code"] for b in payload["unit_blocks"]} == {
+        "REQUIRED_APPROVER_REFUTED"}
+
+
+def test_d2_refuses_to_approve_on_the_required_approver_alone(d1_engine):
+    """An approval only the required approver gave is one model's opinion
+    wearing a panel's name."""
+    panel = list(enginebridge.model_panel(_engine()))
+    others = [m for m in panel if m != "gpt-5.6-sol"]
+    result = d2runtime.run(**_d2_kwargs(
+        opener=_engine_generation_opener(refute=_refute_for(others))))
+    payload = result["payload"]
+    assert payload["all_approved"] is False
+    assert {b["code"] for b in payload["unit_blocks"]} == {
+        "INSUFFICIENT_CORROBORATION"}
+    assert payload["minimum_other_approvers"] == 1
+
+
+def test_d2_approves_on_sol_plus_exactly_one_corroborator(d1_engine):
+    """The governed minimum, exercised at its boundary rather than at the
+    happy path where all three agree."""
+    panel = list(enginebridge.model_panel(_engine()))
+    one_other = [m for m in panel if m != "gpt-5.6-sol"][:1]
+    result = d2runtime.run(**_d2_kwargs(
+        opener=_engine_generation_opener(refute=_refute_for(one_other))))
+    payload = result["payload"]
+    # One panelist refuted, so the unit is refuted: synthesis is additive-only
+    # and a refutation is never cleared by the count of approvals beside it.
+    assert payload["all_approved"] is False
+    assert payload["refuted_unit_sha256"]
+
+
+def test_d2_refuses_a_partial_review_reported_as_a_review(d1_engine):
+    """The reader would believe the unanswered units passed.
+
+    Driven through `_finalize_from_engine` with a plan carrying one unit the
+    engine never decided — the shape a batch silently dropped would produce."""
+    d1 = _d1_result()
+    plan = d1["executable_plan"]["payload"]
+    executed = {
+        "batch_results": [{"batch_id": "b0", "unit_decisions": {},
+                           "unit_blocks": []}],
+        "synthesis": {"overall_approved": True, "refuted_unit_sha256": []},
+        "generation_ledger": {"attempts": 0},
+        "execution_preflight": {"execution_preflight_sha256": "a" * 64},
+        "output_privacy": {"scanned_field_count": 1},
+        "requested_model_ids": list(enginebridge.model_panel(_engine())),
+        "required_approver": "gpt-5.6-sol",
+        "minimum_other_approvers": 1,
+    }
+    with _refusal("verdict_coverage_incomplete"):
+        d2runtime._finalize_from_engine(
+            executed, plan=plan, head=SHA_A,
+            trusted_plan_sha256=plan["plan_sha256"],
+            adapter_identity={"adapter": "test"})
+
+
+def test_d2_has_no_lane_local_execution_machinery():
+    """The mandate's §7.4, as a gate rather than as a note.
+
+    D2 must use the candidate verifier's executor and must not retain its own
+    request/adapter/panel loop as the final authority path. Read over the AST
+    of the module, not by grepping the file: the module's header NAMES every
+    deleted function so a reader knows what went and why, and a substring
+    search would redden on the explanation."""
+    module = ast.parse((LANE_DIR / "d2runtime.py").read_text(encoding="utf-8"))
+    defined = {node.name for node in ast.walk(module)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for gone in ("build_generation_request", "assert_request_is_generation",
+                 "plan_digest", "assert_plan_is_the_counted_one",
+                 "_assert_verdicts_are_for_this_unit", "_assert_panel_decided",
+                 "_assert_distinct_reasoning", "_finalize"):
+        assert gone not in defined, (
+            f"{gone} is back in d2runtime; the engine's executor is the "
+            "authority path and a second implementation beside it is the "
+            "finding this closes")
+    # And the two modules whose presence in the import list WAS the lane-local
+    # loop: it minted challenges and built requests for itself.
+    imported = {alias.name for node in ast.walk(module)
+                if isinstance(node, ast.ImportFrom) and node.level == 1
+                for alias in node.names}
+    assert "challenge" not in imported, "D2 mints no challenge; D1 counted one"
+    assert "transport" not in imported, (
+        "D2 reaches the provider through `generationtransport`, which is what "
+        "the engine drives")
+
+
+def test_d2_publishes_a_failure_status_once_the_run_has_started(d1_engine):
+    """A refusal AFTER pending must not leave the pull request blocked with no
+    explanation."""
+    published = []
+
+    def swap_challenge(response):
+        response["output_parsed"]["challenge"] = "c" * 64
+        return response
+
+    with _refusal("engine_refused where=execute_batch"):
+        d2runtime.run(**_d2_kwargs(
+            opener=_tampered_response_opener(swap_challenge),
+            publisher=published.append))
+    assert [p["state"] for p in published] == ["pending", "failure"]
+    assert "engine_refused" in published[1]["description"]
+
+
+def test_d2_publishes_nothing_when_it_refuses_before_starting(d1_engine):
+    """The mirror case. A plan that is not the counted one is refused before
+    any status exists, so the pull request never sees a trusted context —
+    which is right: nothing was started, so there is nothing to report."""
+    published = []
+    tampered = _resigned_plan(
+        lambda plan: {**plan, "total_input_tokens":
+                      plan["total_input_tokens"] + 7})
+    with _refusal("executable_plan_digest_mismatch"):
+        d2runtime.run(**_d2_kwargs(signed_plan=tampered,
+                                   publisher=published.append))
+    assert published == []
+
+
+def test_d2_uses_its_own_status_context_not_d1s():
+    """Reusing D1's context would let a count satisfy a review requirement."""
+    assert d2runtime.TRUSTED_CONTEXT == "trusted-cross-vendor-review"
+    assert d1runtime.TRUSTED_CONTEXT == "trusted-verifier-count"
+    assert d2runtime.TRUSTED_CONTEXT in statusnames.TRUSTED_STATUSES
+    assert d1runtime.TRUSTED_CONTEXT in statusnames.TRUSTED_STATUSES
+
+
+def test_the_generation_request_record_carries_no_credential():
+    """The record a caller holds and digests carries no key.
+
+    The key is joined to a COPY of the headers inside `exchange_generation`,
+    so the request object the transport built — and the one whose digest goes
+    into the attempt ledger — never held it."""
+    sent = []
+    lane = generationtransport.TrustedGenerationTransport(
+        opener=lambda method, url, headers, body: sent.append(
+            {"headers": headers}) or (200, b"{}"),
+        credential=FAKE_CREDENTIAL, phase="D2",
+        engine_generation_path="/v1/responses", generation_attempt_cap=2)
+    lane.post("/v1/responses", b'{"model":"gpt-5"}')
+    # The credential DID reach the wire — that is the transport's job.
+    assert any("authorization" in {k.lower() for k in call["headers"]}
+               for call in sent)
+    # And it is in none of the records the lane keeps.
+    assert FAKE_CREDENTIAL not in json.dumps(lane.record(), default=str)
+    assert FAKE_CREDENTIAL not in json.dumps(lane.attempts, default=str)
+
+
+# --------------------------------------------------------------------------
+# EX3-R01 — the templates, and the assemblers that replaced their placeholders.
+# --------------------------------------------------------------------------
+
+D1_TEMPLATE = LANE_DIR / "workflow" / "d1-trusted-count.yml.template"
+D2_TEMPLATE = LANE_DIR / "workflow" / "d2-trusted-generation.yml.template"
+
+
+def _run_blocks(path):
+    """The shell each step actually executes — not the file's comments.
+
+    Grepping the whole file for `exit 1` asks whether the string appears, and
+    it does: the header quotes the old placeholder so a reader knows what
+    changed. The question that matters is whether any step still exits without
+    doing the work, and that lives in the `run:` values."""
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    blocks = []
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            if "run" in step:
+                blocks.append((step.get("name", "<unnamed>"), step["run"]))
+    return blocks
+
+
+@pytest.mark.parametrize("path", [D1_TEMPLATE, D2_TEMPLATE],
+                         ids=lambda p: p.name)
+def test_no_step_still_exits_without_doing_the_work(path):
+    """The mandate's actual finding. `exit 1` under a step named "verify the
+    engine" is a step that has never verified anything, and an `echo` saying so
+    is a comment with an exit code."""
+    blocks = _run_blocks(path)
+    assert len(blocks) >= 3, "guards against a zero-block pass"
+    for name, script in blocks:
+        # Strip shell comments: a `#` line inside a run block is documentation
+        # for the same reason the file header is.
+        code = "\n".join(line for line in script.splitlines()
+                         if not line.strip().startswith("#"))
+        assert "exit 1" not in code, f"{path.name}: step {name!r} still exits"
+        assert "activation PR" not in code, f"{path.name}: step {name!r}"
+
+
+@pytest.mark.parametrize("path,lane", [(D1_TEMPLATE, "D1"), (D2_TEMPLATE, "D2")],
+                         ids=lambda x: str(x))
+def test_the_template_calls_the_real_runtime(path, lane):
+    """Through `laneentry`, not the CLI directly. `laneentry` is the process
+    boundary that keeps a traceback out of a credential-bearing log."""
+    text = path.read_text(encoding="utf-8")
+    assert "from trustedlane import laneentry" in text
+    assert f'laneentry.main("{lane}")' in text
+
+
+@pytest.mark.parametrize("path", [D1_TEMPLATE, D2_TEMPLATE],
+                         ids=lambda p: p.name)
+def test_the_template_takes_its_clock_from_the_runner(path):
+    """A `vars.` repository variable is a fixed string: expiry compared
+    against a frozen instant never expires, and every signed record would
+    carry the same produced_at. Found by adversarial review."""
+    text = path.read_text(encoding="utf-8")
+    assert "vars.TRUSTED_OBSERVED_NOW" not in text
+    assert 'export TRUSTED_OBSERVED_NOW="$(date -u' in text
+
+
+@pytest.mark.parametrize("path", [D1_TEMPLATE, D2_TEMPLATE],
+                         ids=lambda p: p.name)
+def test_the_template_installs_the_hash_locked_runtime(path):
+    """A pinned version still lets a compromised index serve different bytes
+    under the same number, on a machine about to hold a provider key."""
+    text = path.read_text(encoding="utf-8")
+    assert "--require-hashes" in text
+    assert "requirements-trusted-runtime.txt" in text
+    assert "pytest" not in text.split("Install the hash-locked runtime")[1][:400]
+
+
+@pytest.mark.parametrize("path", [D1_TEMPLATE, D2_TEMPLATE],
+                         ids=lambda p: p.name)
+def test_the_template_verifies_the_engine_against_an_approved_digest(path):
+    text = path.read_text(encoding="utf-8")
+    assert "artifactload.extract" in text
+    assert "TRUSTED_ENGINE_ARTIFACT_SHA256" in text
+    assert "assert_engine_root_is_not_the_candidate" in text
+
+
+@pytest.mark.parametrize("path", [D1_TEMPLATE, D2_TEMPLATE],
+                         ids=lambda p: p.name)
+def test_the_templates_are_still_inert(path):
+    """`.yml.template` is the containment: GitHub reads only `.yml` and
+    `.yaml`, so none of the above is live until someone renames the file."""
+    assert path.suffix == ".template"
+    assert not (Path(".github/workflows") / path.name.replace(".template", "")
+                ).exists()
+
+
+def test_d2_uses_a_different_environment_from_d1():
+    """Reusing D1's environment would make an approval to count an approval to
+    generate, by accident rather than by decision."""
+    d1 = yaml.safe_load(D1_TEMPLATE.read_text(encoding="utf-8"))
+    d2 = yaml.safe_load(D2_TEMPLATE.read_text(encoding="utf-8"))
+    d1_env = d1["jobs"]["trusted-verifier-count"]["environment"]
+    d2_env = d2["jobs"]["trusted-cross-vendor-review"]["environment"]
+    assert d1_env == "trusted-verifier"
+    assert d2_env == "trusted-verifier-generation"
+    assert d1_env != d2_env
+
+
+@pytest.mark.parametrize("module", [d1cli, d2cli], ids=["d1cli", "d2cli"])
+def test_the_assembler_refuses_before_reading_anything_in_d0(module):
+    """Activating the lane is TWO deliberate acts: renaming the template, and
+    raising IMPLEMENTED_PHASE in a protected commit. This is the second gate,
+    and it fires before any input is read."""
+    with _refusal("phase_not_deployed"):
+        module.main(environ={})
+
+
+@pytest.mark.parametrize("module", [d1cli, d2cli], ids=["d1cli", "d2cli"])
+def test_the_assembler_refuses_a_missing_input_rather_than_defaulting(module):
+    """A default is how one of these quietly stops being checked — the
+    observation becomes "assume protected", the publisher becomes a no-op that
+    leaves the pull request pending forever."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        module.read_environment({})
+    assert "environment_incomplete" in excinfo.value.reason
+    for name in module.REQUIRED_ENV:
+        assert name in excinfo.value.reason, name
+
+
+@pytest.mark.parametrize("module", [d1cli, d2cli], ids=["d1cli", "d2cli"])
+def test_the_assembler_refuses_a_non_integer_run_id(module):
+    complete = {name: "x" for name in module.REQUIRED_ENV}
+    complete["TRUSTED_RUN_ID"] = "not-a-number"
+    with _refusal("environment_not_an_integer"):
+        module.read_environment(complete)
+
+
+def test_the_two_assemblers_do_not_share_a_phase_argument():
+    """One assembler with a phase parameter would put "which secret, which
+    environment, which approval" inside a branch, where three of the four could
+    be wrong while the code still looked symmetric."""
+    import inspect
+
+    for module in (d1cli, d2cli):
+        assert "phase" not in inspect.signature(module.main).parameters
+    d1_source = (LANE_DIR / "d1cli.py").read_text(encoding="utf-8")
+    d2_source = (LANE_DIR / "d2cli.py").read_text(encoding="utf-8")
+    assert "phases.D1" in d1_source and "phases.D2" not in d1_source
+    assert "phases.D2" in d2_source and "phases.D1" not in d2_source
+
+
+def test_an_unreadable_input_reports_its_field_not_its_path(tmp_path):
+    """A runner temp directory layout is not something to write into a log
+    that a refusal may be pasted from."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        d1cli.load_json_document(str(tmp_path / "secret-layout" / "x.json"),
+                                 field="operator_records")
+    assert "field=operator_records" in excinfo.value.reason
+    assert "secret-layout" not in excinfo.value.reason
+
+
+def test_a_malformed_input_document_is_refused(tmp_path):
+    path = tmp_path / "records.json"
+    path.write_text("{not json", encoding="utf-8")
+    with _refusal("d1_input_not_json"):
+        d1cli.load_json_document(str(path), field="operator_records")
+
+
+# ---- the inert fetch: a step that only exists in a comment is not a step ----
+
+
+def test_d1_fetches_the_candidate_as_data(d1_engine):
+    """Found while reviewing the runtime against its own docstring: the
+    sequence listed "inert fetch" as step 6 and never fetched anything,
+    leaving the property to whatever `skeleton_rebuild` happened to do."""
+    calls = []
+
+    def recording_fetch(**kwargs):
+        calls.append(kwargs)
+        return _fetch_into(_d1_clone())(**kwargs)
+
+    d1runtime.run(**_d1_kwargs(fetch=recording_fetch))
+    assert len(calls) == 1
+    assert calls[0]["head_sha"] == SHA_A
+    assert calls[0]["target_base_sha"] == PR25_BASE
+
+
+def test_d1_refuses_a_fetch_that_left_a_working_tree(d1_engine):
+    """A working tree is candidate code on the machine that holds the
+    credential. `fetch` is injected, so the runtime checks rather than trusts."""
+    with _refusal("candidate_was_checked_out"):
+        d1runtime.run(**_d1_kwargs(
+            fetch=lambda **k: dict(_inert_fetch(**k), checked_out=True)))
+
+
+def test_d1_refuses_a_fetch_that_cannot_say_what_it_fetched(d1_engine):
+    with _refusal("candidate_fetch_named_no_head"):
+        d1runtime.run(**_d1_kwargs(
+            fetch=lambda **k: {"checked_out": False, "head_sha": None}))
+
+
+def test_d1_refuses_when_no_fetch_was_supplied(d1_engine):
+    with _refusal("candidate_fetch_not_callable"):
+        d1runtime.run(**_d1_kwargs(fetch=None))
+
+
+def test_the_real_fetch_is_what_d1cli_supplies():
+    """The runtime takes `fetch` as a parameter for testability; the assembler
+    must still wire the real one rather than something weaker."""
+    source = (LANE_DIR / "d1cli.py").read_text(encoding="utf-8")
+    assert "fetch=candidatefetch.fetch_candidate" in source
+
+
+def test_the_candidate_plan_is_not_read_from_inside_the_engine_artifact():
+    """Provenance. Putting the reviewed branch's claims inside the trusted
+    artifact would make the rebuild comparison compare the engine against
+    itself."""
+    source = (LANE_DIR / "d1cli.py").read_text(encoding="utf-8")
+    assert "TRUSTED_CANDIDATE_PLAN_PATH" in source
+    assert 'os.path.join(values["TRUSTED_ENGINE_ROOT"], "candidate-plan.json")' \
+        not in source
+
+
+# --------------------------------------------------------------------------
+# Adversarial review of the new lane code. Twenty findings raised, ten killed
+# by refutation, ten confirmed and fixed. These are the regression tests.
+# --------------------------------------------------------------------------
+
+
+def test_a_refusal_does_not_republish_the_exception_it_was_handling():
+    """The worst of the set, and it defeated every sanitization message in the
+    lane at once.
+
+    `refuse` used a bare `raise`, so a refusal raised inside an `except` block
+    kept the original exception as `__context__` and Python printed the whole
+    chain. The refusal said "the path is not reported"; the line above it
+    printed the path. In `transport._send` the chained exception can be a
+    `ValueError` whose text is the entire Authorization header."""
+    import traceback
+
+    try:
+        try:
+            raise FileNotFoundError("/home/runner/work/_temp/secret-layout.json")
+        except OSError:
+            errors.refuse("category=example — the path is not reported")
+    except errors.LaneRefusal as refusal:
+        # `from None` sets __suppress_context__; it does NOT clear __context__.
+        # Asserting on __context__ would be asking the wrong question — the one
+        # that matters is what Python actually PRINTS, so that is what this
+        # renders and inspects.
+        assert refusal.__suppress_context__ is True
+        rendered = "".join(traceback.format_exception(
+            type(refusal), refusal, refusal.__traceback__))
+        assert "secret-layout" not in rendered, rendered
+        assert "During handling of the above exception" not in rendered
+    else:  # pragma: no cover
+        raise AssertionError("refuse did not raise")
+
+
+def test_no_traceback_escapes_a_credential_bearing_step():
+    """`from None` removes the chain; it does not remove the LaneRefusal's own
+    traceback. `laneentry` is the other half — the repository already forbids
+    `Traceback` in the probe's output and a lane holding the same key must meet
+    the same bar."""
+    import io
+
+    stream = io.StringIO()
+    def refusing():
+        errors.refuse("category=example_refusal detail=safe")
+    code = laneentry.run_lane(refusing, stream=stream)
+    assert code == laneentry.EXIT_REFUSED
+    assert stream.getvalue().strip() == (
+        "TRUSTED_LANE_REFUSED: category=example_refusal detail=safe")
+    assert "Traceback" not in stream.getvalue()
+
+
+def test_a_non_refusal_crash_reports_its_class_and_never_its_text():
+    """A TypeError from a malformed operator-records document is not a
+    LaneRefusal. Letting it propagate prints a traceback whose frames include
+    source lines from a function holding a credential."""
+    import io
+
+    stream = io.StringIO()
+    def crashing():
+        raise TypeError("Bearer sk-proj-SENSITIVE-VALUE cannot be joined")
+    code = laneentry.run_lane(crashing, stream=stream)
+    assert code == laneentry.EXIT_CRASHED
+    output = stream.getvalue()
+    assert "exception_class=TypeError" in output
+    assert "SENSITIVE" not in output
+    assert "Bearer" not in output
+    assert "Traceback" not in output
+
+
+def test_the_lane_entry_prints_only_the_payload_never_the_signature():
+    import io
+
+    stream = io.StringIO()
+    code = laneentry.run_lane(
+        lambda: {"payload": {"total_input_tokens": 7},
+                 "evidence": {"signature": "a" * 64}}, stream=stream)
+    assert code == 0
+    assert "total_input_tokens" in stream.getvalue()
+    assert "a" * 64 not in stream.getvalue()
+
+
+def test_an_unknown_lane_is_refused():
+    assert laneentry.main("D9") == laneentry.EXIT_REFUSED
+
+
+def test_a_credential_with_an_interior_newline_is_refused_at_the_gate():
+    """It is the one shape that puts the key inside an exception message:
+    `f"Bearer {value}"` reaches http.client.putheader, which raises a
+    ValueError carrying the whole header. strip() does not catch it."""
+    for bad in ("sk-proj-AAAAAAAAAAAAAAAA\nBBBBBBBBBBBB",
+                "sk-proj-AAAAAAAAAAAAAAAA\rBBBBBBBBBBBB",
+                "sk-proj-AAAAAAAAAAAAAAAA\tBBBBBBBBBBBB",
+                "sk-proj-AAAAAAAAAAAAAAAA\x00BBBBBBBBBBBB"):
+        with pytest.raises(errors.LaneRefusal) as excinfo:
+            transport.assert_credential_shape(bad)
+        assert "credential_contains_control_character" in excinfo.value.reason
+        # Position and count only — never the value.
+        assert "sk-proj" not in excinfo.value.reason
+        assert "first_offset=24" in excinfo.value.reason
+
+
+def test_a_well_formed_credential_still_passes_the_shape_check():
+    """Guards the rule above against being a blanket refusal."""
+    assert transport.assert_credential_shape(FAKE_CREDENTIAL) == FAKE_CREDENTIAL
+
+
+def test_a_signed_records_honest_scope_cannot_be_rewritten():
+    """The single worst finding: `honest_scope` — the field whose entire job is
+    telling a reader what the record does NOT prove — sat outside the digest,
+    so an attacker could rewrite it to "FULLY VERIFIED BY AN INDEPENDENT THIRD
+    PARTY" on a correctly signed record and both verify and validate returned
+    success. Demonstrated end to end before the fix."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    tampered = dict(signed,
+                    honest_scope="FULLY VERIFIED BY AN INDEPENDENT THIRD PARTY")
+    with _refusal("evidence_envelope_digest_mismatch"):
+        signing.verify_envelope(tampered, key=TEST_KEY)
+    with _refusal("evidence_envelope_digest_mismatch"):
+        evidencewire.validate_envelope(tampered)
+
+
+def test_an_extra_field_on_a_signed_record_is_refused():
+    """Anything outside ENVELOPE_FIELDS is outside the MAC, so `operator_
+    approved: true` could be added post-signing and still verify."""
+    signed = signing.sign_envelope(_trusted_envelope(), key=TEST_KEY)
+    for extra in ({"operator_approved": True}, {"trusted_by": "the operator"}):
+        with _refusal("evidence_envelope_unknown_fields"):
+            evidencewire.validate_envelope(dict(signed, **extra))
+
+
+def test_honest_scope_is_inside_the_digest():
+    assert "honest_scope" in evidencewire.ENVELOPE_FIELDS
+    record = _trusted_envelope()
+    moved = dict(record, honest_scope="something else")
+    assert (evidencewire.envelope_digest(record)
+            != evidencewire.envelope_digest(moved))
+
+
+def test_the_normalizer_does_not_echo_provider_chosen_key_names():
+    """These keys came out of the model's own output text. The module claimed
+    "no observed provider string is ever recorded" while printing them."""
+    body = _response_body(text=json.dumps(
+        {"verdicts": [_norm_verdict()], "SENSITIVE_MODEL_KEY": 1}))
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        _normalize(body)
+    assert "verdict_payload_unknown_field" in excinfo.value.reason
+    assert "SENSITIVE_MODEL_KEY" not in excinfo.value.reason
+    assert "count=1" in excinfo.value.reason
+
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        _normalize(_response_body([dict(_norm_verdict(),
+                                        SENSITIVE_VERDICT_KEY="x")]))
+    assert "normalized_verdict_unknown_field" in excinfo.value.reason
+    assert "SENSITIVE_VERDICT_KEY" not in excinfo.value.reason
+
+
+@pytest.mark.parametrize("member", [
+    "./engine/a.py", "engine/./a.py", "engine/sub/./b.py",
+])
+def test_a_dot_segment_member_is_refused(tmp_path, member):
+    """`engine/a.py` and `./engine/a.py` are different strings that write the
+    same file, so the duplicate check cleared both — the second write wins and
+    the manifest describes the first."""
+    path, digest = _engine_tar(tmp_path, members={member: b"x\n"})
+    with _refusal("engine_member_redundant_path_segment"):
+        artifactload.inspect_archive(path, expected_sha256=digest)
+
+
+def test_the_generation_lane_reads_a_generation_sized_body():
+    """The opener was hardcoded to the count lane's 64 KiB bound, so any real
+    generation body over that was truncated into a parse failure — and the
+    adapter's own 4 MiB bound was unreachable."""
+    import inspect
+
+    assert "max_response_bytes" in inspect.signature(
+        transport.open_https).parameters
+    d2_source = (LANE_DIR / "d2cli.py").read_text(encoding="utf-8")
+    assert "max_response_bytes=adapter.MAX_RESPONSE_BYTES" in d2_source
+    assert adapter.MAX_RESPONSE_BYTES > transport.MAX_RESPONSE_BYTES
+
+
+def _bridge_layout_fixture():
+    """A directory with both engine packages, so `assert_layout` passes without
+    an artifact — the point of this test is the DEFERRAL, not the load."""
+    import tempfile
+
+    root = Path(tempfile.mkdtemp())
+    for package in enginebridge.ENGINE_PACKAGES:
+        (root / package).mkdir()
+    return root
+
+
+def test_the_planner_import_no_longer_has_to_be_deferred(tmp_path):
+    """The deferral was a workaround for a check asking the wrong question.
+
+    History, because it explains two removals. The first `d1cli` imported
+    `verifier.plan` eagerly, and `d1runtime` step 2 called
+    `assert_no_candidate_import`, which refused whenever anything named
+    `verifier` was in `sys.modules` — so the D1 lane refused on every
+    invocation and could never have run. The fix at the time was a LAZY
+    builder, which moved the import past the gate.
+
+    Both are gone. That gate was a name check standing in for an origin
+    question, and under the integration addendum the engine IS
+    `scripts/verifier` inside the approved artifact, so D1 must import it.
+    `assert_no_candidate_import` now asks where each module came from, and
+    `d1cli.load_engine` loads it once, up front.
+
+    What must NOT come back is the direct import: `enginebridge` is the single
+    seam, and it is the only place the origin check has to hold."""
+    assert not hasattr(d1cli, "load_skeleton_builder")
+    assert callable(d1cli.load_engine)
+    # `assert_layout` still runs before anything is imported, so a malformed
+    # artifact is refused without loading it.
+    with _refusal("engine_artifact_missing_packages"):
+        d1cli.load_engine(engine_root=str(tmp_path))
+    # And the CLI reaches the engine ONLY through the bridge. `_imported_names`
+    # reports absolute module names and drops relative ones, so the sibling
+    # import is read off the AST rather than inferred from that set — asking
+    # the set would be asking a question it cannot answer.
+    tree = ast.parse((LANE_DIR / "d1cli.py").read_text(encoding="utf-8"))
+    siblings = {alias.name for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.level
+                for alias in node.names}
+    assert "enginebridge" in siblings
+    assert not any(name.startswith("verifier")
+                   for name in _imported_names(LANE_DIR / "d1cli.py") | siblings)
+
+
+def _planted_verifier(monkeypatch, origin):
+    """Put a stub `verifier` module in sys.modules with a chosen __file__.
+
+    Driving `_assert_loaded_from` directly rather than through a real import:
+    the question is what the function concludes about a module's origin, and a
+    stub answers that without needing a packed artifact on disk."""
+    import types
+
+    module = types.ModuleType("verifier")
+    if origin is not None:
+        module.__file__ = origin
+    monkeypatch.setitem(sys.modules, "verifier", module)
+    return module
+
+
+def test_the_planner_origin_check_now_lives_in_the_bridge():
+    """The check moved rather than disappearing: `enginebridge` is the single
+    seam into the candidate package, so the origin proof belongs there and
+    `d1cli` no longer imports `verifier` at all."""
+    assert not hasattr(d1cli, "_assert_loaded_from")
+    assert "verifier" not in " ".join(_imported_names(LANE_DIR / "d1cli.py"))
+    assert hasattr(enginebridge, "assert_module_loaded_from")
+
+
+def test_a_namespace_engine_module_outside_the_artifact_is_refused(tmp_path):
+    """A namespace package has no __file__; its search locations do. An empty
+    directory is a valid namespace root, which is how the candidate tree got
+    imported once before."""
+    import types
+
+    module = types.ModuleType("verifier.plan")
+    module.__path__ = [str(tmp_path / "elsewhere")]
+    with _refusal("engine_module_loaded_outside_the_artifact"):
+        enginebridge.assert_module_loaded_from(
+            module, root=str(tmp_path / "engine"), name="verifier.plan")
+
+
+def test_an_engine_module_with_no_traceable_origin_is_refused(tmp_path):
+    import types
+
+    with _refusal("engine_module_origin_unknown"):
+        enginebridge.assert_module_loaded_from(
+            types.ModuleType("verifier.plan"), root=str(tmp_path),
+            name="verifier.plan")
+
+
+def test_the_d0_filter_covers_everything_the_lane_asserts_against():
+    """D0's push filter was narrower than the file set the suite reads, so
+    HOSTED_D0_CONTAINMENT_EVIDENCE went stale silently while the PR body and
+    the exchange report cited it."""
+    document = _document(D0)
+    block = document.get(True) or document.get("on")
+    paths = block["push"]["paths"]
+    for required in ("scripts/trustedlane/**",
+                     "tests/test_trusted_lane_bootstrap.py",
+                     ".github/workflows/**",
+                     "requirements-trusted-runtime.txt",
+                     "docs/TRUSTED_LANE_OPERATOR_ACTIONS.md"):
+        assert required in paths, required
+# --------------------------------------------------------------------------
+# EX4-R01 / SLICE 2 — the protected authorization envelope.
+#
+# The first version of this section built its own PIN-shaped record by hand and
+# passed every test. The moment a test built a REAL
+# `verifier.pins.operator_pin_claim` instead, four incompatibilities appeared at
+# once, and each of them meant no genuine operator record could ever have been
+# accepted:
+#
+#   1. the lane digested a record over its own field set; the candidate strips
+#      exactly `pin_record_sha256` / `authorization_sha256`;
+#   2. the lane read `anchored_digest` and an embedded `signature`; the
+#      candidate anchor schema is exactly (anchor_kind, anchor_reference,
+#      anchor_digest), and an embedded signature would have to sign itself;
+#   3. every prerequisite went through `verify_pin_authorization`, so a signed
+#      PIN record LABELLED `delete_failed_run` satisfied that prerequisite;
+#   4. `operator_pin_claim` carries no diff base, no prerequisite key and no
+#      expiry, so the protected checks had nothing to read.
+#
+# So the claim is left alone and wrapped: candidate claim, protected envelope,
+# detached MAC. Everything below is driven by claims the CANDIDATE ENGINE built,
+# imported out of a real artifact — a hand-made substitute cannot show that the
+# two sides agree, which is the only thing these tests are for.
+# --------------------------------------------------------------------------
+
+OPERATOR_KEY_HEX = "a" * 64
+OTHER_KEY_HEX = "b" * 64
+LITERAL_PATH_B64 = base64.b64encode(b"app/engine/compute.py").decode()
+#: Test material with no secret in it. `literal_claim` records only the DIGEST,
+#: and `validate_literal_authorization` refuses a record in which any string
+#: field hashes to the literal — so a plaintext here could not survive anyway.
+REVIEWED_LITERAL = "reviewed-test-literal-not-a-secret-000000"
+REVIEWED_CATEGORIES = ["high_entropy_token"]
+
+_OCCURRENCE = {"repository_identity": CANONICAL_REPOSITORY,
+               "target_base_sha": SHA_A, "diff_base_sha": SHA_A,
+               "head_sha": SHA_B, "repository_numeric_id": REPOSITORY_NUMERIC_ID}
+
+_ENGINE_CACHE: dict = {}
+
+
+def _engine():
+    """The REAL candidate engine, loaded out of a real artifact.
+
+    Built once per session from git blobs at two exact commits and imported
+    through `enginebridge`, which proves every module came out of the artifact
+    rather than off the candidate checkout. `scripts/verifier` does not exist on
+    this branch at all, which is why the artifact has to carry both roles and
+    why there is no shortcut that reads the package off disk."""
+    if "engine" not in _ENGINE_CACHE:
+        roles = {"protected_trusted_lane": _rev("origin/main"),
+                 "candidate_verifier":
+                     _rev("origin/fix/verifier-intra-file-review-plan")}
+        directory = Path(tempfile.mkdtemp(prefix="lane-engine-"))
+        record = enginesource.build_engine_artifact(
+            roles=roles, destination=str(directory / "engine.tar.gz"),
+            repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+        root = directory / "engine"
+        root.mkdir()
+        artifactload.extract(str(directory / "engine.tar.gz"),
+                             destination=str(root),
+                             expected_sha256=record["engine_artifact_sha256"])
+        _ENGINE_CACHE["record"] = record
+        _ENGINE_CACHE["artifact"] = {
+            "path": str(directory / "engine.tar.gz"),
+            "expected_sha256": record["engine_artifact_sha256"],
+            "root": str(root), "search_path": [str(root)]}
+        _ENGINE_CACHE["engine"] = enginebridge.load_engine(str(root))
+    return _ENGINE_CACHE["engine"]
+
+
+def _engine_artifact_argument():
+    """What D1/D2 are handed as `engine_artifact` — the REAL one.
+
+    It used to be `{"root": "/opt/engine", "expected_sha256": "c" * 64}`, which
+    was harmless while nothing loaded an engine. It is not harmless now:
+    `assert_no_candidate_import` compares every loaded `verifier` module against
+    this root, so a placeholder here would make the D1 tests pass by proving
+    nothing rather than by proving the modules came out of the artifact."""
+    _engine()
+    return dict(_ENGINE_CACHE["artifact"])
+
+
+def _module(name):
+    return _engine()["modules"][name]
+
+
+def _trust_store(**keys):
+    return trustedverifier.parse_trust_store(
+        json.dumps({"keys": keys or {"op-1": OPERATOR_KEY_HEX}}))
+
+
+def _valid_pins():
+    """Twelve PINs the candidate's own `validate_pins` accepts.
+
+    Bounded by the real capability table: `gpt-4.1-mini` supports 32 768 output
+    tokens and has no reasoning step, so a max-output above that or a reasoning
+    effort for it is a refusal rather than a clamp."""
+    return {
+        "VERIFIER_MAX_OUTPUT_TOKENS": 16_384,
+        "VERIFIER_CONTEXT_MARGIN_TOKENS": 8_000,
+        "VERIFIER_COST_CAP_MICRO_USD": 25_000_000,
+        "VERIFIER_REASONING_EFFORT_BY_MODEL": {"gpt-5.3-codex": "high",
+                                               "gpt-5.6-sol": "high",
+                                               "gpt-4.1-mini": None},
+        "VERIFIER_MAX_REVIEW_UNITS": 64,
+        "VERIFIER_MAX_GENERATION_CALLS": 12,
+        "VERIFIER_MAX_COUNT_CALLS": 12,
+        "VERIFIER_COUNT_TIMEOUT_SECONDS": 60,
+        "VERIFIER_COUNT_MAX_RETRIES": 2,
+        "VERIFIER_GENERATION_TIMEOUT_SECONDS": 600,
+        "VERIFIER_GENERATION_MAX_RETRIES": 1,
+        "VERIFIER_TOKEN_DRIFT_TOLERANCE": 64,
+    }
+
+
+def _pin_claim(anchor, *, occurrence=None, pins=None, model_ids=None):
+    """A GENUINE `verifier.pins.operator_pin_claim`, from the engine."""
+    occurrence = occurrence or _OCCURRENCE
+    return _module("verifier.pins").operator_pin_claim(
+        pins if pins is not None else _valid_pins(),
+        list(model_ids if model_ids is not None
+             else enginebridge.model_panel(_engine())),
+        repository_identity=occurrence["repository_identity"],
+        target_base_sha=occurrence["target_base_sha"],
+        head_sha=occurrence["head_sha"],
+        operator_identity="operator@example.invalid",
+        authorized_at="2026-07-01T00:00:00Z",
+        policy_version="capability-policy-2026-07-28",
+        external_anchor=anchor)
+
+
+def _literal_claim(anchor, *, occurrence=None, atom_id="atom-0001",
+                   occurrence_index=0, literal=REVIEWED_LITERAL,
+                   path_bytes_b64=LITERAL_PATH_B64, categories=None):
+    """A GENUINE `verifier.authority.literal_claim`, from the engine."""
+    occurrence = occurrence or _OCCURRENCE
+    return _module("verifier.authority").literal_claim(
+        repository_identity=occurrence["repository_identity"],
+        target_base_sha=occurrence["target_base_sha"],
+        diff_base_sha=occurrence["diff_base_sha"],
+        head_sha=occurrence["head_sha"],
+        path_bytes_b64=path_bytes_b64, atom_id=atom_id,
+        occurrence_index=occurrence_index, literal=literal,
+        literal_categories=list(categories or REVIEWED_CATEGORIES),
+        reason="occurrence inspected by the operator before approval",
+        reviewer_identity="operator@example.invalid",
+        authorized_at="2026-07-01T00:00:00Z",
+        authorization_source="OPERATOR_CONSOLE",
+        external_anchor=anchor)
+
+
+def _scanner_policy():
+    return _module("verifier.preflight").scanner_policy_sha256()
+
+
+def _category_set_digest(categories=None):
+    return _module("verifier.preflight").category_set_sha256(
+        list(categories or REVIEWED_CATEGORIES))
+
+
+def _literal_digest(literal=REVIEWED_LITERAL):
+    """The candidate's own hash of a literal, not a local reimplementation.
+
+    `verifier.canon` is not one of the modules the bridge requires — the lane
+    never calls it — so it is imported directly here, from the artifact root
+    `load_engine` already put on `sys.path`."""
+    _engine()
+    import verifier.canon
+
+    return verifier.canon.sha256_hex(literal.encode("utf-8", "surrogateescape"))
+
+
+#: One protected typed payload per prerequisite, carrying the evidence THAT
+#: prerequisite is about. Fourteen of the sixteen have no candidate claim at
+#: all, which is the point of the typed registry: `delete_failed_run` is a
+#: statement about a workflow run, and no PIN record can stand in for it.
+def _typed_payload(key, **over):
+    payloads = {
+        "delete_failed_run": {
+            "run_id": 30214247762, "deletion_requested_at":
+            "2026-06-30T09:00:00Z", "deletion_actor": "operator@example.invalid",
+            "repository_numeric_id": REPOSITORY_NUMERIC_ID},
+        "verify_run_404": {
+            "run_id": 30214247762, "observed_http_status": 404,
+            "observed_at": "2026-06-30T09:05:00Z",
+            "trusted_observer": "trusted-lane-d0-containment"},
+        "rotate_probe_key": {
+            "retired_key_id": "probe-key-2026-05",
+            "retired_key_fingerprint_sha256": "1" * 64,
+            "rotated_at": "2026-06-30T09:10:00Z",
+            "replacement_key_id": "probe-key-2026-07",
+            "replacement_key_fingerprint_sha256": "2" * 64,
+            "replacement_deleted": False},
+        "review_key_usage": {
+            "reviewed_at": "2026-06-30T10:00:00Z",
+            "usage_window_start": "2026-05-01T00:00:00Z",
+            "usage_window_end": "2026-06-30T00:00:00Z",
+            "disposition": "no unexpected usage found"},
+        "install_environment_key": {
+            "environment_name": "trusted-verifier",
+            "secret_name": "TRUSTED_OPENAI_API_KEY",   # pragma: allowlist secret
+            "installation_evidence_sha256": "3" * 64},
+        "no_repository_or_org_fallback": {
+            "repository_secret_names": [], "organization_secret_names": [],
+            "observation_source": "settings/secrets/actions",
+            "observation_sha256": "4" * 64},
+        "protected_trusted_environment": {
+            "protection_observation_sha256": "5" * 64,
+            "required_contexts": sorted(statusnames.RESERVED_TRUSTED_CONTEXTS)
+            if hasattr(statusnames, "RESERVED_TRUSTED_CONTEXTS")
+            else ["trusted-verifier / d1-count"],
+            "expected_app_slug": "github-actions",
+            "bypass_actors": [],
+            "observed_protected_state": {"required_reviewers": 1,
+                                         "deployment_branch_policy": "main"}},
+        "authorize_capability_policy": {"capability_policy_sha256": "6" * 64},
+        "approve_count_spending": {
+            "authorized_target_base_sha": SHA_A,
+            "authorized_diff_base_sha": SHA_A,
+            "authorized_head_sha": SHA_B,
+            "max_input_tokens": 10_000, "count_attempt_cap": 12,
+            "micro_usd_cap": 5_000_000,
+            "billing_treatment": "counted as billable until proven otherwise"},
+        "approve_review_request_policy_v2": {
+            "review_request_policy_sha256": "7" * 64},
+        "approve_artifact_retention": {
+            "retention_policy_sha256": "8" * 64, "retention_days": 30,
+            "access_policy": "repository administrators only",
+            "deletion_policy": "deleted on expiry, no archive"},
+        "approve_engine_identity": {
+            "engine_artifact_sha256": "9" * 64, "engine_source_sha256": "a" * 64,
+            "runtime_lock_sha256": "b" * 64, "sbom_sha256": "c" * 64,
+            "provenance_sha256": "d" * 64},
+        "approve_bootstrap_branch": {
+            "branch": "deploy/trusted-lane-d0-containment",
+            "branch_head_sha": SHA_A, "bootstrap_policy_sha256": "e" * 64},
+        "approve_generation_separately": {
+            "executable_plan_sha256": "f" * 64,
+            "authorized_target_base_sha": SHA_A,
+            "authorized_diff_base_sha": SHA_A,
+            "authorized_head_sha": SHA_B,
+            "generation_policy_sha256": "0" * 64,
+            "generation_attempt_cap": 6, "micro_usd_cap": 40_000_000},
+        authzenvelope.PIN_PREREQUISITE: {
+            "policy_pin_name_count": 12,
+            "model_ids": sorted(enginebridge.model_panel(_engine())),
+            "capability_policy_sha256": "6" * 64},
+    }
+    return {**payloads[key], **over}
+
+
+def _literal_member_payload(*, atom_id="atom-0001", occurrence_index=0,
+                            path_bytes_b64=LITERAL_PATH_B64,
+                            literal=REVIEWED_LITERAL, categories=None):
+    return {"path_bytes_b64": path_bytes_b64, "atom_id": atom_id,
+            "occurrence_index": occurrence_index,
+            "literal_sha256": _literal_digest(literal),
+            "literal_category_set_sha256": _category_set_digest(categories),
+            "scanner_policy_sha256": _scanner_policy()}
+
+
+def _mint(prerequisite_key, *, typed_payload=None, claim_kind=None,
+          claim_builder=None, member_envelopes=None, occurrence=None,
+          key_hex=OPERATOR_KEY_HEX, key_id="op-1", reference=None,
+          authorized_at="2026-07-01T00:00:00Z",
+          expires_at="2026-12-01T00:00:00Z", policy_digests=None):
+    """The operator's minting tool, following §2 steps 1-5 exactly.
+
+    The order is the whole point: the header digest exists before the claim,
+    so the claim's `anchor_digest` can carry it without the header depending on
+    anything the claim produces."""
+    occurrence = occurrence or _OCCURRENCE
+    kind = claim_kind or authzenvelope.claim_kind_for(prerequisite_key)
+    reference = reference or f"operator-record/{prerequisite_key}"
+    payload = (typed_payload if typed_payload is not None
+               else _typed_payload(prerequisite_key))
+
+    header = authzenvelope.build_header(                       # STEP 1
+        prerequisite_key=prerequisite_key, claim_kind=kind,
+        repository_numeric_id=occurrence["repository_numeric_id"],
+        repository_identity=occurrence["repository_identity"],
+        target_base_sha=occurrence["target_base_sha"],
+        diff_base_sha=occurrence["diff_base_sha"],
+        head_sha=occurrence["head_sha"], authorized_at=authorized_at,
+        expires_at=expires_at, anchor_reference=reference,
+        typed_payload=payload, policy_digests=policy_digests or {})
+    anchor = authzenvelope.anchor_for(                          # STEP 2
+        authzenvelope.envelope_header_digest(header),
+        anchor_reference=reference)
+    claim = claim_builder(anchor) if claim_builder else None    # STEP 3
+    self_hash = None
+    if claim is not None:
+        # By the field the claim CARRIES, not by the envelope's declared kind:
+        # the smuggling tests deliberately pair a PIN claim with a non-PIN kind,
+        # and a minter that assumed they agreed would fail before the lane got
+        # the chance to refuse.
+        self_hash = claim.get("pin_record_sha256") or claim[
+            "authorization_sha256"]
+    return authzenvelope.seal(                                  # STEPS 4-5
+        header=header, typed_payload=payload, candidate_claim=claim,
+        candidate_claim_self_sha256=self_hash, key=bytes.fromhex(key_hex),
+        mac_key_id=key_id, member_envelopes=member_envelopes)
+
+
+def _pin_envelope(*, occurrence=None, pins=None, model_ids=None, **over):
+    # The PIN envelope names the capability policy the twelve values were
+    # validated against, and `authorize_capability_policy` names the one the
+    # operator approved. The lane refuses if they differ — two digests for one
+    # thing is how the two copies end up disagreeing — so the fixture uses the
+    # engine's real digest for both.
+    over.setdefault("typed_payload", _typed_payload(
+        authzenvelope.PIN_PREREQUISITE,
+        capability_policy_sha256=enginebridge.governed_policy_digests(
+            _engine(), pin_values=pins or _valid_pins())[
+                "capability_policy_sha256"]))
+    return _mint(authzenvelope.PIN_PREREQUISITE, occurrence=occurrence,
+                 claim_builder=lambda anchor: _pin_claim(
+                     anchor, occurrence=occurrence, pins=pins,
+                     model_ids=model_ids),
+                 **over)
+
+
+def _literal_member(*, atom_id="atom-0001", occurrence_index=0,
+                    occurrence=None, literal=REVIEWED_LITERAL,
+                    path_bytes_b64=LITERAL_PATH_B64, categories=None, **over):
+    return _mint(
+        authzenvelope.LITERAL_PREREQUISITE,
+        claim_kind=authzenvelope.LITERAL_CLAIM, occurrence=occurrence,
+        typed_payload=_literal_member_payload(
+            atom_id=atom_id, occurrence_index=occurrence_index,
+            path_bytes_b64=path_bytes_b64, literal=literal,
+            categories=categories),
+        reference=f"operator-record/literal/{atom_id}#{occurrence_index}",
+        claim_builder=lambda anchor: _literal_claim(
+            anchor, occurrence=occurrence, atom_id=atom_id,
+            occurrence_index=occurrence_index, literal=literal,
+            path_bytes_b64=path_bytes_b64, categories=categories),
+        **over)
+
+
+def _literal_set(members=None, *, expected_count=None, occurrence=None,
+                 declared_members=None, declared_subjects=None,
+                 scanner_policy=None, set_digest=None, **over):
+    """The SET envelope of §5, binding sorted member self-hashes AND sorted
+    member subject digests AND the exact expected occurrence count.
+
+    The overrides exist so each of those bindings can be attacked SEPARATELY.
+    Without them the four checks mask one another — a wrong count also produces
+    a wrong set digest — and a mutation sweep reports three of the four as
+    unreachable when what is actually unreachable is the test."""
+    members = (members if members is not None
+               else [_literal_member(occurrence_index=0, occurrence=occurrence)])
+    declared = declared_members if declared_members is not None else members
+    self_hashes = sorted(m["candidate_claim_self_sha256"] for m in declared)
+    subjects = sorted(declared_subjects if declared_subjects is not None
+                      else [m["authorization_subject_sha256"] for m in declared])
+    count = expected_count if expected_count is not None else len(declared)
+    policy = scanner_policy or _scanner_policy()
+    payload = {
+        "expected_occurrence_count": count,
+        "member_claim_self_sha256_in_order": self_hashes,
+        "member_subject_sha256_in_order": subjects,
+        "literal_authorization_set_sha256":
+            set_digest or authzenvelope.literal_set_digest(
+                expected_occurrence_count=count,
+                member_claim_self_sha256_in_order=self_hashes,
+                member_subject_sha256_in_order=subjects,
+                scanner_policy_sha256=policy),
+        "scanner_policy_sha256": policy,
+    }
+    return _mint(authzenvelope.LITERAL_PREREQUISITE, typed_payload=payload,
+                 occurrence=occurrence, member_envelopes=members, **over)
+
+
+def _engine_with(module_name, **attributes):
+    """The real engine with ONE candidate function replaced.
+
+    Used to drive the lane's own copies of checks the candidate package also
+    performs. Those copies are deliberate — a lane whose integrity check is
+    "the reviewed package said it was fine" has no integrity check — but while
+    the real validator runs first they are unreachable, and an unreachable
+    check is indistinguishable from an absent one until the candidate changes.
+    This makes them reachable so a mutation sweep can kill them."""
+    engine = _engine()
+    real = engine["modules"][module_name]
+    shim = types.ModuleType(module_name)
+    for name in dir(real):
+        if not name.startswith("__"):
+            setattr(shim, name, getattr(real, name))
+    for name, value in attributes.items():
+        setattr(shim, name, value)
+    return {**engine, "modules": {**engine["modules"], module_name: shim}}
+
+
+def _verifier_over(engine, **over):
+    return trustedverifier.bind(
+        engine, trust_store=_trust_store(), occurrence=_OCCURRENCE,
+        observed_now="2026-08-01T00:00:00Z", revocations=(), **over)
+
+
+def _verifier(*, observed_now="2026-08-01T00:00:00Z", revocations=(),
+              store=None, occurrence=None):
+    return trustedverifier.bind(
+        _engine(), trust_store=store or _trust_store(),
+        occurrence=occurrence or _OCCURRENCE, observed_now=observed_now,
+        revocations=revocations)
+
+
+def _tampered(envelope, path, value):
+    """Edit one field of a SEALED envelope. `path` is dotted; the last segment
+    is the field replaced."""
+    edited = json.loads(json.dumps(envelope))
+    target = edited
+    for segment in path.split(".")[:-1]:
+        target = target[segment]
+    target[path.split(".")[-1]] = value
+    return edited
+
+
+# ---- 1-2: actual candidate records promote under a valid envelope ----------
+
+
+def test_an_actual_operator_pin_claim_promotes_under_a_valid_envelope():
+    """Test 1. The load-bearing one: the claim comes from
+    `verifier.pins.operator_pin_claim`, its self-hash is verified with
+    `verifier.pins.pin_digest`, and the promotion goes through
+    `verifier.pins.promote_pin_authorization`."""
+    envelope = _pin_envelope()
+    verified = _verifier().verify_pin_authorization(envelope)
+
+    assert verified.claim_kind == authzenvelope.PIN_CLAIM
+    assert verified.promoted["authority_class"] == (
+        "VERIFIED_OPERATOR_PIN_AUTHORIZATION")
+    assert verified.promoted["executable_authority"] is True
+    # §3: the three digests are three different things, and stay different.
+    assert verified.candidate_claim_self_sha256 == envelope[
+        "candidate_claim"]["pin_record_sha256"]
+    assert verified.candidate_claim_self_sha256 != (
+        verified.authorization_subject_sha256)
+    assert verified.envelope_header_sha256 != (
+        verified.authorization_subject_sha256)
+    assert verified.candidate_claim["pins"]["VERIFIER_MAX_OUTPUT_TOKENS"] == 16_384
+
+
+def test_an_actual_literal_claim_promotes_under_a_valid_envelope():
+    """Test 2. Same, through `authority.literal_claim`,
+    `literal_authorization_digest` and `promote_literal_authorizations`."""
+    envelope = _literal_member()
+    verified = _verifier().verify_literal_authorization(envelope)
+    assert verified.promoted["authority_class"] == (
+        "VERIFIED_LITERAL_AUTHORIZATION")
+    # `REAL_CALL_REQUIRED_EXACT` names `expires_at`, and NO candidate
+    # constructor produces it — it is the protected envelope's field, added by
+    # the promotion. Without it every genuine clearance would be refused for
+    # "scope not exact", which is exactly the shape of defect this slice exists
+    # to find.
+    assert verified.promoted["expires_at"] == "2026-12-01T00:00:00Z"
+    _module("verifier.authority").assert_usable_for_real_call(
+        verified.promoted, where="test")
+
+
+def test_the_promoted_record_is_still_valid_under_the_candidate_digest():
+    """A promoted record is a DIFFERENT record from the claim, so it is
+    re-sealed under the candidate's own digest function. Otherwise
+    `assert_usable_for_real_call`, which recomputes it, refuses every genuine
+    promotion — and the ORIGINAL self-hash survives beside it rather than being
+    overwritten."""
+    verified = _verifier().verify_literal_authorization(_literal_member())
+    authority = _module("verifier.authority")
+    assert authority.literal_authorization_digest(verified.promoted) == (
+        verified.promoted["authorization_sha256"])
+    assert verified.promoted["authorization_sha256"] != (
+        verified.candidate_claim_self_sha256)
+    assert verified.promoted["protected_verification"][
+        "candidate_claim_self_sha256"] == verified.candidate_claim_self_sha256
+
+
+# ---- 3-13: every tamper blocks --------------------------------------------
+
+
+def test_a_tampered_candidate_self_hash_blocks():
+    """Test 3."""
+    envelope = _pin_envelope()
+    edited = _tampered(envelope, "candidate_claim.operator_identity",
+                       "someone-else@example.invalid")
+    # `pins.validate_pin_authority` recomputes `pin_digest` itself and refuses
+    # first, which is why the refusal names the engine. The lane recomputes it
+    # again afterwards rather than relying on that — candidate code checking
+    # candidate integrity is the thing this whole slice exists to not depend on
+    # — and `test_the_lane_recomputes_the_self_hash_itself` drives that copy.
+    with _refusal("candidate_claim_rejected_by_engine"):
+        _verifier().verify_pin_authorization(edited)
+
+
+def test_the_lane_recomputes_the_self_hash_itself():
+    """The lane's own recomputation, driven directly.
+
+    It is deliberately a second check: the candidate validator happens to
+    recompute the same digest today, and a lane whose integrity check is "the
+    reviewed package said it was fine" has no integrity check."""
+    envelope = _pin_envelope()
+    claim = envelope["candidate_claim"]
+    assert trustedverifier.candidate_self_hash(
+        claim, claim_kind=authzenvelope.PIN_CLAIM,
+        engine=_engine()) == claim["pin_record_sha256"]
+    assert trustedverifier.candidate_self_hash(
+        {**claim, "operator_identity": "someone-else"},
+        claim_kind=authzenvelope.PIN_CLAIM,
+        engine=_engine()) != claim["pin_record_sha256"]
+    with _refusal("claim_kind_has_no_candidate_digest"):
+        trustedverifier.candidate_self_hash(claim, claim_kind="something_else",
+                                            engine=_engine())
+    # And an envelope whose recorded self-hash names a DIFFERENT claim is
+    # refused by the lane even though the claim is internally consistent.
+    other = _pin_claim(authzenvelope.anchor_for(
+        envelope["envelope_header_sha256"],
+        anchor_reference=envelope["header"]["anchor_reference"]),
+        pins={**_valid_pins(), "VERIFIER_MAX_COUNT_CALLS": 11})
+    with _refusal("envelope_claim_self_hash_mismatch"):
+        _verifier().verify_pin_authorization(
+            dict(envelope, candidate_claim=other))
+
+
+def test_a_tampered_envelope_header_blocks():
+    """Test 4."""
+    envelope = _pin_envelope()
+    edited = _tampered(envelope, "header.expires_at", "2027-12-01T00:00:00Z")
+    with _refusal("envelope_header_digest_mismatch"):
+        _verifier().verify_pin_authorization(edited)
+
+
+def test_a_tampered_typed_payload_blocks():
+    """Test 5."""
+    envelope = _mint("approve_count_spending")
+    edited = _tampered(envelope, "typed_payload.max_input_tokens", 10_000_000)
+    with _refusal("typed_payload_digest_mismatch"):
+        _verifier().authenticate_typed(
+            edited, prerequisite_key="approve_count_spending")
+
+
+def test_a_swapped_prerequisite_key_blocks():
+    """Test 6. The header names one prerequisite and the caller asks about
+    another; the MAC covers the header, so re-labelling either side fails."""
+    envelope = _mint("approve_count_spending")
+    with _refusal("authorization_prerequisite_mismatch"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="approve_artifact_retention")
+
+
+def test_a_swapped_anchor_reference_blocks():
+    """Test 7. The claim points at one external record, the envelope
+    authorizes another."""
+    envelope = _pin_envelope()
+    edited = _tampered(envelope, "candidate_claim.external_anchor.anchor_reference",
+                       "operator-record/somewhere-else")
+    # The anchor is inside the candidate self-hash, so the claim fails its own
+    # digest first — which is the stronger refusal, not a weaker one.
+    with _refusal("candidate_claim_rejected_by_engine"):
+        _verifier().verify_pin_authorization(edited)
+
+
+def test_a_swapped_anchor_header_digest_blocks():
+    """Test 8. A claim anchored to a DIFFERENT envelope's header, with that
+    envelope's own claim self-hash — so nothing is internally inconsistent
+    except the one binding that matters."""
+    other = _mint("approve_count_spending",
+                  reference="operator-record/authorize_twelve_pins")
+    original = _pin_envelope()
+    header = original["header"]
+    anchor = authzenvelope.anchor_for(
+        other["envelope_header_sha256"],
+        anchor_reference="operator-record/authorize_twelve_pins")
+    claim = _pin_claim(anchor)
+    envelope = authzenvelope.seal(
+        header=header, typed_payload=original["typed_payload"],
+        candidate_claim=claim,
+        candidate_claim_self_sha256=claim["pin_record_sha256"],
+        key=bytes.fromhex(OPERATOR_KEY_HEX), mac_key_id="op-1")
+    with _refusal("anchor_header_digest_mismatch"):
+        _verifier().verify_pin_authorization(envelope)
+
+
+def test_a_swapped_mac_key_id_blocks():
+    """Test 9."""
+    envelope = _tampered(_pin_envelope(), "authenticator.mac_key_id",
+                         "not-the-operator")
+    with _refusal("authenticator_key_not_in_trust_store"):
+        _verifier().verify_pin_authorization(envelope)
+
+
+def test_a_swapped_mac_blocks():
+    """Test 10. Both halves: a mac from another key, and a mac from another
+    envelope under the right key."""
+    with _refusal("authenticator_mac_mismatch"):
+        _verifier().verify_pin_authorization(_pin_envelope(key_hex=OTHER_KEY_HEX))
+    borrowed = _mint("approve_count_spending")["authenticator"]["mac"]
+    with _refusal("authenticator_mac_mismatch"):
+        _verifier().verify_pin_authorization(
+            _tampered(_pin_envelope(), "authenticator.mac", borrowed))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("repository_numeric_id", 999_999),
+    ("repository_identity", "someone/else"),
+    ("target_base_sha", SHA_C),
+    ("diff_base_sha", SHA_C),
+    ("head_sha", SHA_C),
+])
+def test_an_authorization_for_a_different_review_blocks(field, value):
+    """Test 11. Genuinely minted for another occurrence — a real MAC over a
+    real claim, for a range this review is not."""
+    envelope = _pin_envelope(occurrence={**_OCCURRENCE, field: value})
+    category = ("authorization_is_for_a_different_repository"
+                if field == "repository_numeric_id"
+                else "authorization_is_for_a_different_review")
+    with _refusal(category):
+        _verifier().verify_pin_authorization(envelope)
+
+
+def test_an_expired_or_revoked_or_unlisted_authorization_blocks():
+    """Test 12. Three separate questions, three separate refusals."""
+    envelope = _pin_envelope()
+    with _refusal("operator_authorization_expired"):
+        _verifier(observed_now="2027-01-01T00:00:00Z").verify_pin_authorization(
+            envelope)
+    with _refusal("operator_authorization_revoked"):
+        _verifier(revocations=[{"authorization_subject_sha256":
+                                envelope["authorization_subject_sha256"]}]
+                  ).verify_pin_authorization(envelope)
+    with _refusal("revocation_list_not_supplied"):
+        _verifier(revocations=None).verify_pin_authorization(envelope)
+
+
+def test_an_authorization_that_expires_before_it_was_issued_blocks():
+    with _refusal("timestamps_out_of_order"):
+        _verifier().verify_pin_authorization(
+            _pin_envelope(authorized_at="2026-07-01T00:00:00Z",
+                          expires_at="2026-06-01T00:00:00Z"))
+
+
+def test_the_construction_requires_no_circular_digest():
+    """Test 13, stated as the property rather than as prose.
+
+    Four values, and each depends only on ones computed before it:
+
+        header digest      <- header, which contains none of the three below
+        anchor_digest      == header digest
+        claim self-hash    <- claim, which contains the anchor
+        subject digest     <- header digest + claim self-hash + scope
+        mac                <- subject digest
+
+    So no value is an input to its own computation. The three explicit
+    inequalities are what §10 forbids collapsing."""
+    envelope = _pin_envelope()
+    header_digest = envelope["envelope_header_sha256"]
+    self_hash = envelope["candidate_claim_self_sha256"]
+    subject = envelope["authorization_subject_sha256"]
+
+    assert envelope["candidate_claim"]["external_anchor"][
+        "anchor_digest"] == header_digest
+    assert header_digest != subject          # anchor_digest != subject digest
+    assert self_hash != subject              # self-hash != subject digest
+    assert self_hash != header_digest
+    # The header, recomputed with the claim absent entirely, is unchanged: it
+    # never depended on it.
+    assert authzenvelope.envelope_header_digest(
+        envelope["header"]) == header_digest
+    # And the claim's own digest function agrees with the recorded self-hash.
+    assert _module("verifier.pins").pin_digest(
+        envelope["candidate_claim"]) == self_hash
+    # Nothing in the candidate claim carries a MAC (§10).
+    assert "mac" not in json.dumps(envelope["candidate_claim"])
+    assert set(envelope["candidate_claim"]["external_anchor"]) == {
+        "anchor_kind", "anchor_reference", "anchor_digest"}
+
+
+def test_the_authenticator_is_named_as_a_mac_not_as_a_signature():
+    """§1C. An HMAC is symmetric: whoever verifies it could have produced it.
+    Calling it a signature claims non-repudiation this construction does not
+    have, so the field names say what it is."""
+    envelope = _pin_envelope()
+    assert envelope["authenticator"]["authenticator_algorithm"] == (
+        "HMAC_SHA256_V1")
+    assert set(envelope["authenticator"]) == {"authenticator_algorithm",
+                                              "mac_key_id", "mac"}
+    source = (LANE_DIR / "authzenvelope.py").read_text(encoding="utf-8")
+    assert "public signature" not in source
+    with _refusal("authenticator_algorithm_not_permitted"):
+        _verifier().verify_pin_authorization(
+            _tampered(envelope, "authenticator.authenticator_algorithm",
+                      "ED25519_V1"))
+
+
+@pytest.mark.parametrize("kind", sorted(
+    trustedverifier.UNVERIFIABLE_ANCHOR_KINDS))
+def test_an_anchor_kind_this_lane_cannot_check_is_refused_by_name(kind):
+    """Named rather than silently unsupported: the refusal says which
+    capability is missing, so an operator knows what would have to exist."""
+    envelope = _pin_envelope()
+    edited = _tampered(envelope, "candidate_claim.external_anchor.anchor_kind",
+                       kind)
+    # The claim self-hash covers the anchor, so an edited kind fails the
+    # candidate digest; the named refusal is reachable by anchoring the claim
+    # to that kind at build time.
+    with _refusal("candidate_claim_rejected_by_engine"):
+        _verifier().verify_pin_authorization(edited)
+    assert kind in authzenvelope.UNVERIFIABLE_ANCHOR_KINDS
+    with _refusal("anchor_kind_not_verifiable_by_this_lane"):
+        authzenvelope.assert_anchor_matches_header(
+            {"anchor_kind": kind, "anchor_reference": "r", "anchor_digest": "x"},
+            header=envelope["header"],
+            header_digest=envelope["envelope_header_sha256"])
+
+
+# ---- 14-19: typed prerequisite attacks ------------------------------------
+
+
+def test_a_signed_pin_claim_labelled_delete_failed_run_blocks():
+    """Test 14. THE defect the typed registry exists for: the previous version
+    sent every prerequisite through `verify_pin_authorization`, so this exact
+    envelope — genuinely minted, genuinely MAC'd — satisfied
+    `delete_failed_run` while carrying no run evidence at all."""
+    envelope = _mint("delete_failed_run",
+                     typed_payload=_typed_payload(
+                         authzenvelope.PIN_PREREQUISITE),
+                     claim_kind=authzenvelope.TYPED_PAYLOAD_ONLY)
+    with _refusal("typed_payload_incomplete"):
+        _verifier().authenticate_typed(envelope,
+                                       prerequisite_key="delete_failed_run")
+
+
+def test_a_pin_claim_smuggled_into_a_typed_prerequisite_blocks():
+    """The other half of test 14: correct typed payload, but a candidate claim
+    stapled on so the PIN seam could be reached through the wrong key."""
+    envelope = _mint("delete_failed_run",
+                     claim_kind=authzenvelope.TYPED_PAYLOAD_ONLY,
+                     claim_builder=_pin_claim)
+    with _refusal("typed_prerequisite_carries_a_candidate_claim"):
+        _verifier().authenticate_typed(envelope,
+                                       prerequisite_key="delete_failed_run")
+
+
+def test_a_run_404_record_with_a_different_status_blocks():
+    """Test 15. `observed_http_status` is checked for the VALUE 404, not for
+    being an integer: "the endpoint answered" is not "the run is gone"."""
+    envelope = _mint("verify_run_404",
+                     typed_payload=_typed_payload("verify_run_404",
+                                                  observed_http_status=200))
+    with _refusal("typed_payload_field_wrong_value"):
+        _verifier().authenticate_typed(envelope,
+                                       prerequisite_key="verify_run_404")
+
+
+@pytest.mark.parametrize("missing", ["required_contexts", "expected_app_slug",
+                                     "protection_observation_sha256"])
+def test_a_protected_environment_record_without_exact_evidence_blocks(missing):
+    """Test 16. The exact status contexts and the expected App are the evidence
+    — "protection is on" without them is the claim, not the proof."""
+    payload = {k: v for k, v in
+               _typed_payload("protected_trusted_environment").items()
+               if k != missing}
+    envelope = _mint("protected_trusted_environment", typed_payload=payload)
+    with _refusal("typed_payload_incomplete"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="protected_trusted_environment")
+
+
+def test_a_protected_environment_record_with_no_required_contexts_blocks():
+    """An empty context list is a protected environment that requires nothing."""
+    envelope = _mint("protected_trusted_environment",
+                     typed_payload=_typed_payload(
+                         "protected_trusted_environment", required_contexts=[]))
+    with _refusal("typed_payload_field_not_a_sorted_unique_text_list"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="protected_trusted_environment")
+
+
+@pytest.mark.parametrize("missing", ["engine_artifact_sha256",
+                                     "engine_source_sha256",
+                                     "runtime_lock_sha256", "sbom_sha256",
+                                     "provenance_sha256"])
+def test_engine_approval_without_every_digest_blocks(missing):
+    """Test 17. Five digests, and approving four of them approves an engine
+    whose fifth component nobody looked at."""
+    payload = {k: v for k, v in _typed_payload("approve_engine_identity").items()
+               if k != missing}
+    envelope = _mint("approve_engine_identity", typed_payload=payload)
+    with _refusal("typed_payload_incomplete"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="approve_engine_identity")
+
+
+def test_a_probe_key_neither_replaced_nor_deleted_blocks():
+    envelope = _mint("rotate_probe_key",
+                     typed_payload=_typed_payload(
+                         "rotate_probe_key", replacement_key_id=None,
+                         replacement_key_fingerprint_sha256=None,
+                         replacement_deleted=False))
+    with _refusal("probe_key_neither_replaced_nor_deleted"):
+        _verifier().authenticate_typed(envelope,
+                                       prerequisite_key="rotate_probe_key")
+
+
+def test_a_fallback_record_that_lists_a_secret_name_blocks():
+    """`no_repository_or_org_fallback` claims that NOTHING satisfies the name.
+    A non-empty list is the opposite claim, correctly authenticated."""
+    envelope = _mint("no_repository_or_org_fallback",
+                     typed_payload=_typed_payload(
+                         "no_repository_or_org_fallback",
+                         repository_secret_names=["OPENAI_API_KEY"]))  # pragma: allowlist secret
+    with _refusal("typed_payload_field_not_an_empty_list"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="no_repository_or_org_fallback")
+
+
+def test_every_prerequisite_has_a_typed_schema_and_only_two_use_the_seams():
+    """§4, as a property of the registry rather than of one example."""
+    keys = set(trustedverifier.D2_PREREQUISITES)
+    assert keys == set(authzenvelope.TYPED_PAYLOAD_SCHEMAS)
+    seams = {k for k in keys
+             if authzenvelope.claim_kind_for(k) != authzenvelope.TYPED_PAYLOAD_ONLY}
+    assert seams == {"authorize_twelve_pins", "approve_literal_authorizations"}
+    # And the lane's operator-facing list is the same sixteen. These two lists
+    # disagreed on `protect_trusted_environment` vs
+    # `protected_trusted_environment`, so the sixteen an operator was told to
+    # satisfy were not the sixteen the authenticator required.
+    assert {p.key for p in prerequisites.OPERATOR_PREREQUISITES} == keys
+
+
+def test_a_d1_record_set_missing_any_prerequisite_blocks():
+    """Test 18, over every one of the fifteen rather than a representative."""
+    for key in trustedverifier.D1_PREREQUISITES:
+        with pytest.raises(errors.LaneRefusal) as excinfo:
+            trustedverifier.authenticate_record_set(
+                _authenticated_claims("D1", omit=key),
+                verifier=_lane_verifier(), phase="D1")
+        assert "operator_prerequisites_outstanding" in excinfo.value.reason
+        assert key in excinfo.value.reason
+
+
+def test_a_d2_record_set_without_the_sixteenth_blocks():
+    """Test 19."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        trustedverifier.authenticate_record_set(
+            _authenticated_claims("D1"), verifier=_lane_verifier(), phase="D2")
+    assert "approve_generation_separately" in excinfo.value.reason
+
+
+# ---- 20-23: the literal authorization set ---------------------------------
+
+
+def test_one_approved_literal_does_not_satisfy_a_set_of_two():
+    """Test 20. The set envelope declares the count the operator approved; a
+    set that supplies fewer clears less than was approved."""
+    one = _literal_member(occurrence_index=0)
+    two = _literal_member(occurrence_index=1)
+    envelope = _literal_set([one], declared_members=[one, two],
+                            expected_count=2)
+    with _refusal("literal_set_member_claims_do_not_match"):
+        trustedverifier._authenticate_literal_set(envelope,
+                                                  verifier=_verifier())
+
+
+def test_an_extra_literal_claim_blocks_set_equality():
+    """Test 21. A member the operator did not approve, added to an otherwise
+    genuine set."""
+    approved = [_literal_member(occurrence_index=0)]
+    smuggled = _literal_member(occurrence_index=1)
+    envelope = _literal_set([*approved, smuggled], declared_members=approved,
+                            expected_count=1)
+    with _refusal("literal_set_member_claims_do_not_match"):
+        trustedverifier._authenticate_literal_set(envelope,
+                                                  verifier=_verifier())
+
+
+def test_a_broad_scope_blocks_the_real_call_adapter():
+    """Test 22. `occurrence_index=None` means "any occurrence in this atom".
+    The candidate lookup falls back to it, so a set containing one would make
+    that fallback reachable with real authority behind it."""
+    with _refusal("typed_payload_field_not_a_non_negative_integer"):
+        _verifier().verify_literal_authorization(
+            _literal_member(occurrence_index=None))
+    # And the set adapter refuses a promoted record whose scope is not exact,
+    # independently of how it got there.
+    promoted = _verifier().verify_literal_authorization(
+        _literal_member()).promoted
+    with _refusal("literal_authorization_not_usable_for_real_call"):
+        trustedverifier.VerifiedLiteralAuthorizationSet(
+            [{**promoted, "atom_id": None}], engine=_engine(),
+            occurrence=_OCCURRENCE, expected_occurrence_count=1,
+            scanner_policy_sha256=_scanner_policy(), set_sha256="0" * 64)
+
+
+def test_an_exact_set_passes_the_preflight_adapter_lookup():
+    """Test 23. The four members `PreflightGenerationManifest` consumes, and
+    nothing else."""
+    members = [_literal_member(occurrence_index=0),
+               _literal_member(occurrence_index=1)]
+    _envelope, authorizations = trustedverifier._authenticate_literal_set(
+        _literal_set(members), verifier=_verifier())
+
+    assert authorizations.confers_real_call_authority is True
+    assert authorizations.authority_class == "VERIFIED_LITERAL_AUTHORIZATION"
+    assert authorizations.clears_occurrence(
+        literal_sha256=_literal_digest(), path_bytes_b64=LITERAL_PATH_B64,
+        atom_id="atom-0001", occurrence_index=1,
+        literal_categories=REVIEWED_CATEGORIES)
+    # An occurrence nobody approved, in the same atom, with the same bytes.
+    assert not authorizations.clears_occurrence(
+        literal_sha256=_literal_digest(), path_bytes_b64=LITERAL_PATH_B64,
+        atom_id="atom-0001", occurrence_index=7,
+        literal_categories=REVIEWED_CATEGORIES)
+    # The same occurrence, detected as something else.
+    assert not authorizations.clears_occurrence(
+        literal_sha256=_literal_digest(), path_bytes_b64=LITERAL_PATH_B64,
+        atom_id="atom-0001", occurrence_index=1,
+        literal_categories=["aws_access_key_id"])
+    # There is no atom-wide fallback here, which is the difference from
+    # `authority.LiteralAuthorizationSet` rather than an omission.
+    assert not authorizations.clears_occurrence(
+        literal_sha256=_literal_digest(), path_bytes_b64=LITERAL_PATH_B64,
+        atom_id=None, occurrence_index=1,
+        literal_categories=REVIEWED_CATEGORIES)
+
+
+def test_the_literal_set_is_not_reconstructible_from_its_public_record():
+    """§5. The evidence record describes the set; it does not contain the
+    promoted records, so nothing downstream can rebuild executable authority
+    from an artifact that leaked into a candidate-reachable place."""
+    _envelope, authorizations = trustedverifier._authenticate_literal_set(
+        _literal_set(), verifier=_verifier())
+    record = authorizations.record()
+    assert json.loads(json.dumps(record)) == record          # inert data
+    assert "literal_sha256" not in json.dumps(record)
+    assert record["confers_real_call_authority"] is True
+    assert not isinstance(record, trustedverifier.VerifiedLiteralAuthorizationSet)
+
+
+def test_a_literal_member_authorizing_a_different_occurrence_blocks():
+    """The member's typed payload and its claim must describe the same
+    occurrence. Without the binding, a correctly MAC'd payload for occurrence 3
+    could carry the claim that cleared occurrence 7."""
+    envelope = _mint(
+        authzenvelope.LITERAL_PREREQUISITE,
+        claim_kind=authzenvelope.LITERAL_CLAIM,
+        typed_payload=_literal_member_payload(occurrence_index=3),
+        reference="operator-record/literal/atom-0001#3",
+        claim_builder=lambda anchor: _literal_claim(anchor,
+                                                    occurrence_index=7))
+    with _refusal("typed_payload_does_not_describe_the_claim"):
+        _verifier().verify_literal_authorization(envelope)
+
+
+def test_a_set_envelope_carrying_its_own_claim_blocks():
+    envelope = _literal_set()
+    edited = dict(envelope, candidate_claim=_pin_claim(
+        authzenvelope.anchor_for("0" * 64, anchor_reference="r")))
+    with _refusal("literal_set_envelope_carries_a_claim"):
+        trustedverifier._authenticate_literal_set(edited, verifier=_verifier())
+
+
+def test_a_set_with_no_members_is_not_one_generic_record():
+    envelope = _mint(authzenvelope.LITERAL_PREREQUISITE,
+                     typed_payload=_literal_set()["typed_payload"])
+    with _refusal("literal_authorization_set_has_no_members"):
+        trustedverifier._authenticate_literal_set(envelope,
+                                                  verifier=_verifier())
+
+
+# ---- the trust store and the bind check -----------------------------------
+
+
+def test_reading_the_trust_store_refuses_outside_d1_and_d2():
+    """A trust store decides what counts as authorized. A lane that can read
+    one in D0 can authorize itself in D0."""
+    with _refusal("trust_store_phase_not_permitted"):
+        trustedverifier.load_trust_store(phase=phases.D0, environ={})
+    with _refusal("phase_not_deployed"):
+        trustedverifier.load_trust_store(
+            phase=phases.D1,
+            environ={trustedverifier.TRUST_STORE_ENV: json.dumps(
+                {"keys": {"op-1": OPERATOR_KEY_HEX}})})
+
+
+@pytest.mark.parametrize("raw,category", [
+    ("{}", "operator_trust_store_has_no_keys"),
+    ('{"keys": {}}', "operator_trust_store_has_no_keys"),
+    ('{"keys": {"op-1": "short"}}', "operator_trust_store_key_too_short"),
+    ('{"keys": {"op-1": "zz' + "z" * 62 + '"}}', "operator_trust_store_key_not_hex"),
+    ("not json", "operator_trust_store_not_json"),
+])
+def test_a_malformed_trust_store_is_refused(raw, category):
+    with _refusal(category):
+        trustedverifier.parse_trust_store(raw)
+
+
+def test_binding_against_something_that_is_not_a_loaded_engine_is_refused():
+    """`bind` takes the result of `enginebridge.load_engine`, which proved each
+    module came out of the approved artifact. A bare module dictionary has not
+    been proved to come from anywhere."""
+    with _refusal("engine_not_loaded"):
+        trustedverifier.bind(types.ModuleType("empty"),
+                             trust_store=_trust_store(), occurrence=_OCCURRENCE,
+                             observed_now="2026-08-01T00:00:00Z",
+                             revocations=())
+    with _refusal("engine_missing_module"):
+        trustedverifier.bind({"modules": {}}, trust_store=_trust_store(),
+                             occurrence=_OCCURRENCE,
+                             observed_now="2026-08-01T00:00:00Z",
+                             revocations=())
+
+
+def test_binding_against_a_module_without_the_authority_vocabulary_is_refused():
+    engine = _engine()
+    stripped = types.ModuleType("verifier.authority")
+    with _refusal("authority_module_missing_symbol"):
+        trustedverifier.bind(
+            {**engine, "modules": {**engine["modules"],
+                                   "verifier.authority": stripped}},
+            trust_store=_trust_store(), occurrence=_OCCURRENCE,
+            observed_now="2026-08-01T00:00:00Z", revocations=())
+
+
+def test_a_claim_arriving_already_labelled_verified_is_refused():
+    """`authority.validate_*` accepts a verified label because a trusted wire
+    record must be representable as inert input, and confers nothing by doing
+    so. This verifier assigns the class; nothing upstream may claim it."""
+    envelope = _tampered(_pin_envelope(), "candidate_claim.authority_class",
+                         "VERIFIED_OPERATOR_PIN_AUTHORIZATION")
+    with _refusal("claim_arrived_pre_labelled_verified"):
+        _verifier().verify_pin_authorization(envelope)
+
+
+def test_an_already_authenticated_envelope_cannot_be_supplied_by_the_caller():
+    """§3. D1/D2 authenticate raw envelopes. A type whose instances a caller
+    can hand in is a label again, spelled with a class name."""
+    verified = _verifier().verify_pin_authorization(_pin_envelope())
+    assert isinstance(verified, authzenvelope.VerifiedAuthorizationEnvelope)
+    with _refusal("pre_authenticated_envelope_supplied"):
+        trustedverifier.authenticate_record_set(
+            [verified], verifier=_lane_verifier(), phase="D1")
+
+
+# ---- the checks that only the mutation sweep could reach -------------------
+#
+# Eleven guards survived the first sweep. Not one of them was wrong; every one
+# was masked — either by another check that fires first, or by the candidate
+# package performing the same check before the lane's copy runs. A masked guard
+# and an absent guard are the same thing the day the mask moves, so each is
+# driven here on its own.
+
+
+def test_a_recorded_subject_digest_that_disagrees_is_refused():
+    """The MAC is verified against the RECOMPUTED subject, so a tampered
+    recorded subject changes nothing about whether the tag verifies. It still
+    has to be refused: the recorded value is what goes into evidence, and
+    evidence that disagrees with what was authenticated is worse than none."""
+    with _refusal("authorization_subject_digest_mismatch"):
+        _verifier().authenticate_typed(
+            _tampered(_mint("authorize_capability_policy"),
+                      "authorization_subject_sha256", "d" * 64),
+            prerequisite_key="authorize_capability_policy")
+
+
+def test_a_claim_citing_a_different_external_record_is_refused():
+    """The anchor is inside the claim's self-hash, so EDITING the reference
+    breaks the digest first. This builds the case the check is actually for: a
+    claim anchored to this envelope's header but citing a different external
+    record, both internally consistent."""
+    original = _pin_envelope()
+    header = original["header"]
+    claim = _pin_claim(authzenvelope.anchor_for(
+        original["envelope_header_sha256"],
+        anchor_reference="operator-record/a-different-decision"))
+    envelope = authzenvelope.seal(
+        header=header,
+        typed_payload=original["typed_payload"],
+        candidate_claim=claim,
+        candidate_claim_self_sha256=claim["pin_record_sha256"],
+        key=bytes.fromhex(OPERATOR_KEY_HEX), mac_key_id="op-1")
+    with _refusal("anchor_reference_mismatch"):
+        _verifier().verify_pin_authorization(envelope)
+
+
+def test_an_envelope_whose_header_names_a_different_claim_kind_is_refused():
+    """`claim_kind` decides which validator runs and which seam is reached. A
+    header naming one kind while the caller authenticates another is a request
+    to check the wrong thing."""
+    envelope = _mint("authorize_capability_policy",
+                     claim_kind=authzenvelope.PIN_CLAIM)
+    with _refusal("authorization_claim_kind_mismatch"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="authorize_capability_policy")
+
+
+def test_a_typed_payload_with_an_extra_field_is_refused():
+    """Closed both ways. A field the MAC covers and no check reads is where a
+    difference hides — and the operator authenticated it, so it looks
+    approved."""
+    envelope = _mint("authorize_capability_policy",
+                     typed_payload=_typed_payload("authorize_capability_policy",
+                                                  also_approve_generation=True))
+    with _refusal("typed_payload_unknown_fields"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="authorize_capability_policy")
+
+
+def test_the_lane_checks_the_claim_digest_even_if_the_engine_stops():
+    """`pins.validate_pin_authority` recomputes `pin_digest` itself, which
+    masks the lane's own recomputation. Run it against an engine whose
+    validator accepts everything: candidate code checking candidate integrity
+    is exactly what this whole slice exists to not depend on."""
+    engine = _engine_with("verifier.pins", validate_pin_authority=
+                          lambda record, model_ids: record)
+    envelope = _tampered(_pin_envelope(), "candidate_claim.operator_identity",
+                         "someone-else@example.invalid")
+    with _refusal("candidate_claim_self_hash_mismatch"):
+        _verifier_over(engine).verify_pin_authorization(envelope)
+
+
+def test_the_lane_requires_exact_literal_scope_even_if_the_engine_stops():
+    """Same shape, for `authority.assert_usable_for_real_call`. The candidate
+    already refuses a null atom or occurrence; the lane refuses it too, because
+    the atom-wide and file-wide fallbacks in the candidate lookup are only safe
+    while no promoted record can reach them."""
+    engine = _engine_with("verifier.authority",
+                          assert_usable_for_real_call=
+                          lambda record, *, where="": record)
+    promoted = _verifier().verify_literal_authorization(
+        _literal_member()).promoted
+    with _refusal("literal_authorization_scope_not_exact"):
+        trustedverifier.VerifiedLiteralAuthorizationSet(
+            [{**promoted, "occurrence_index": None}], engine=engine,
+            occurrence=_OCCURRENCE, expected_occurrence_count=1,
+            scanner_policy_sha256=_scanner_policy(), set_sha256="0" * 64)
+
+
+def test_an_approved_count_that_does_not_match_the_members_is_refused():
+    """The count, the member list, the subject list and the set digest are four
+    separate bindings, and a mismatch in one usually breaks the others too.
+    This one moves the count ALONE, with the digest recomputed to match, so the
+    count check is what refuses."""
+    members = [_literal_member(occurrence_index=0),
+               _literal_member(occurrence_index=1)]
+    with _refusal("literal_authorization_set_count_mismatch"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set(members, expected_count=3), verifier=_verifier())
+
+
+def test_a_literal_set_issued_under_a_different_scanner_policy_is_refused():
+    """A clearance issued under one pattern set does not clear findings
+    produced by another: the same bytes are a different STATEMENT when the
+    scanner that classified them changed."""
+    with _refusal("literal_authorization_scanner_policy_mismatch"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set(scanner_policy="7" * 64), verifier=_verifier())
+
+
+def test_a_set_whose_members_and_authorizations_disagree_is_refused():
+    """The self-hashes say WHICH claims; the subject digests say which
+    authorizations OF them. A set that matches on one and not the other is two
+    different approvals stapled together — and because both lists are inside
+    the operator's MAC, this is an internally inconsistent approval rather than
+    a tamper."""
+    with _refusal("literal_set_member_authorizations_do_not_match"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set(declared_subjects=["e" * 64]), verifier=_verifier())
+
+
+def test_a_set_digest_that_does_not_cover_the_approved_set_is_refused():
+    with _refusal("literal_authorization_set_digest_mismatch"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set(set_digest="f" * 64), verifier=_verifier())
+
+
+def test_a_verifier_module_from_outside_the_approved_engine_is_refused():
+    """The restated containment invariant. With an engine root supplied the
+    question is no longer "is anything named `verifier` loaded" — D1 must load
+    it — but "did it come from the approved artifact"."""
+    root = _ENGINE_CACHE["artifact"]["root"]
+    impostor = types.ModuleType("verifier.authority")
+    impostor.__file__ = "/somewhere/else/verifier/authority.py"
+    with _refusal("candidate_module_imported_from_outside_the_engine"):
+        enginepolicy.assert_no_candidate_import(
+            modules={"verifier.authority": impostor}, search_path=[],
+            engine_root=root)
+    # A module with no traceable origin is refused rather than assumed
+    # approved.
+    untraceable = types.ModuleType("verifier.authority")
+    with _refusal("candidate_module_origin_unknown"):
+        enginepolicy.assert_no_candidate_import(
+            modules={"verifier.authority": untraceable}, search_path=[],
+            engine_root=root)
+    # And an "approved root" inside the candidate checkout approves nothing.
+    with _refusal("engine_from_candidate_checkout"):
+        enginepolicy.assert_no_candidate_import(
+            modules={}, search_path=[],
+            engine_root=os.path.join("/work", "scripts", "verifier"))
+
+
+# ---- what no single envelope can check about itself -----------------------
+
+
+def test_pins_approved_for_a_different_model_panel_block():
+    """EX4-R03/R14 arriving by a different road. The PIN claim validates
+    perfectly against a one-model list — `validate_pins` only requires the
+    reasoning-effort map to MATCH the model ids it is given — so a genuinely
+    authenticated approval would have authorized a single-model review."""
+    solo = ["gpt-5.6-sol"]
+    envelope = _pin_envelope(
+        model_ids=solo,
+        pins={**_valid_pins(),
+              "VERIFIER_REASONING_EFFORT_BY_MODEL": {"gpt-5.6-sol": "high"}},
+        typed_payload=_typed_payload(authzenvelope.PIN_PREREQUISITE,
+                                     model_ids=solo))
+    # Individually authentic: the envelope verifies on its own.
+    assert _verifier().verify_pin_authorization(envelope).promoted[
+        "authority_class"] == "VERIFIED_OPERATOR_PIN_AUTHORIZATION"
+    # It is the SET that knows the panel is governed policy.
+    claims = [envelope if e["header"]["prerequisite_key"]
+              == authzenvelope.PIN_PREREQUISITE else e
+              for e in _authenticated_claims("D1")]
+    with _refusal("pin_authorization_names_a_different_model_panel"):
+        trustedverifier.authenticate_record_set(
+            claims, verifier=_lane_verifier(), phase="D1")
+
+
+def test_two_digests_for_one_capability_policy_block():
+    """"The capability policy" appears in two envelopes. Two digests for one
+    thing is how the two copies end up disagreeing."""
+    claims = [_mint("authorize_capability_policy",
+                    typed_payload=_typed_payload("authorize_capability_policy",
+                                                 capability_policy_sha256="1" * 64))
+              if e["header"]["prerequisite_key"] == "authorize_capability_policy"
+              else e
+              for e in _authenticated_claims("D1")]
+    with _refusal("capability_policy_digest_disagrees_across_authorizations"):
+        trustedverifier.authenticate_record_set(
+            claims, verifier=_lane_verifier(), phase="D1")
+
+
+def test_deleting_one_run_and_observing_another_blocks():
+    """Two halves of one fact. Different run ids means run A was deleted and
+    run B answers 404, which proves neither."""
+    claims = [_mint("verify_run_404",
+                    typed_payload=_typed_payload("verify_run_404",
+                                                 run_id=30214247763))
+              if e["header"]["prerequisite_key"] == "verify_run_404" else e
+              for e in _authenticated_claims("D1")]
+    with _refusal("run_deletion_and_observation_name_different_runs"):
+        trustedverifier.authenticate_record_set(
+            claims, verifier=_lane_verifier(), phase="D1")
+
+
+@pytest.mark.parametrize("field", ["authorized_target_base_sha",
+                                   "authorized_diff_base_sha",
+                                   "authorized_head_sha"])
+def test_a_payload_range_that_disagrees_with_its_own_header_blocks(field):
+    """A schema cannot say "and it must be the same range". The payload
+    restates what the header binds, so the restatement is compared."""
+    envelope = _mint("approve_count_spending",
+                     typed_payload=_typed_payload("approve_count_spending",
+                                                  **{field: SHA_C}))
+    with _refusal("typed_payload_range_disagrees_with_header"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="approve_count_spending")
+
+
+def test_a_payload_repository_that_disagrees_with_its_own_header_blocks():
+    envelope = _mint("delete_failed_run",
+                     typed_payload=_typed_payload("delete_failed_run",
+                                                  repository_numeric_id=42))
+    with _refusal("typed_payload_repository_disagrees_with_header"):
+        _verifier().authenticate_typed(envelope,
+                                       prerequisite_key="delete_failed_run")
+
+
+def test_a_key_usage_window_that_ends_before_it_starts_blocks():
+    envelope = _mint("review_key_usage",
+                     typed_payload=_typed_payload(
+                         "review_key_usage",
+                         usage_window_start="2026-06-30T00:00:00Z",
+                         usage_window_end="2026-05-01T00:00:00Z"))
+    with _refusal("timestamps_out_of_order"):
+        _verifier().authenticate_typed(envelope,
+                                       prerequisite_key="review_key_usage")
+
+
+def test_a_signed_but_malformed_policy_digest_block_is_refused():
+    """`policy_digests` is inside the MAC, which makes it tamper-EVIDENT and
+    not well-formed. A signed field nothing validates is a place to put
+    arbitrary structure."""
+    with _refusal("typed_payload_field_not_sha256"):
+        _verifier().authenticate_typed(
+            _mint("authorize_capability_policy",
+                  policy_digests={"review_request_policy": "not-a-digest"}),
+            prerequisite_key="authorize_capability_policy")
+    with _refusal("authorization_policy_digests_not_an_object"):
+        _verifier().authenticate_typed(
+            _tampered(_mint("authorize_capability_policy"),
+                      "header.policy_digests", []),
+            prerequisite_key="authorize_capability_policy")
+
+
+def test_an_envelope_that_disagrees_with_its_own_header_schema_is_refused():
+    """Two places record the schema, so they can disagree. An unknown version
+    on the ENVELOPE is refused outright; a header that names a different one
+    from the envelope wrapping it is refused as the disagreement it is, before
+    any digest is recomputed over bytes whose meaning is in dispute."""
+    with _refusal("authorization_envelope_schema_unknown"):
+        _verifier().authenticate_typed(
+            _tampered(_mint("authorize_capability_policy"), "schema_version",
+                      "operator-authorization-envelope-v0"),
+            prerequisite_key="authorize_capability_policy")
+    with _refusal("authorization_envelope_schema_version_disagrees"):
+        _verifier().authenticate_typed(
+            _tampered(_mint("authorize_capability_policy"),
+                      "header.schema_version",
+                      "operator-authorization-envelope-v0"),
+            prerequisite_key="authorize_capability_policy")
+
+
+def test_members_on_an_envelope_that_does_not_bind_them_are_refused():
+    """`member_envelopes` is outside the header, so it is outside the MAC. A
+    literal SET binds its members by digest through the typed payload; every
+    other kind reads the field not at all, and a field the schema permits and
+    no check reads is where a difference hides."""
+    envelope = dict(_mint("authorize_capability_policy"),
+                    member_envelopes=[_literal_member()])
+    with _refusal("authorization_envelope_carries_unread_members"):
+        _verifier().authenticate_typed(
+            envelope, prerequisite_key="authorize_capability_policy")
+
+
+@pytest.mark.parametrize("field", sorted(authzenvelope.ENVELOPE_FIELDS))
+def test_the_envelope_field_set_is_closed_both_ways(field):
+    envelope = _mint("authorize_capability_policy")
+    with _refusal("authorization_envelope_incomplete"):
+        _verifier().authenticate_typed(
+            {k: v for k, v in envelope.items() if k != field},
+            prerequisite_key="authorize_capability_policy")
+    with _refusal("authorization_envelope_unknown_fields"):
+        _verifier().authenticate_typed(
+            dict(envelope, extra_field="anything"),
+            prerequisite_key="authorize_capability_policy")
+
+
+# ---- the acceptance condition, over the envelope refusals ------------------
+
+
+@pytest.mark.parametrize("label,mutate", [
+    ("tampered header",
+     lambda c: [_tampered(e, "header.expires_at", "2099-01-01T00:00:00Z")
+                for e in c]),
+    ("tampered typed payload",
+     lambda c: [_tampered(e, "typed_payload.max_input_tokens", 10 ** 9)
+                if e["header"]["prerequisite_key"] == "approve_count_spending"
+                else e for e in c]),
+    ("borrowed mac key id",
+     lambda c: [_tampered(e, "authenticator.mac_key_id", "not-the-operator")
+                for e in c]),
+    ("pins for a one-model panel",
+     lambda c: [_pin_envelope(
+         model_ids=["gpt-5.6-sol"],
+         pins={**_valid_pins(),
+               "VERIFIER_REASONING_EFFORT_BY_MODEL": {"gpt-5.6-sol": "high"}},
+         typed_payload=_typed_payload(authzenvelope.PIN_PREREQUISITE,
+                                      model_ids=["gpt-5.6-sol"]))
+         if e["header"]["prerequisite_key"] == authzenvelope.PIN_PREREQUISITE
+         else e for e in c]),
+    ("a literal set that approves a different occurrence",
+     lambda c: [_literal_set([_literal_member(occurrence_index=2)],
+                             declared_members=[_literal_member(
+                                 occurrence_index=5)])
+                if e["header"]["prerequisite_key"]
+                == authzenvelope.LITERAL_PREREQUISITE else e for e in c]),
+])
+def test_every_envelope_refusal_makes_zero_provider_attempts(d1_engine, label,
+                                                             mutate):
+    """§7's condition on every one of the twenty-three: not "refuses
+    somewhere", but refuses before any request reaches the transport, so
+    nothing was spent finding out.
+
+    Count and generation are asserted separately because they are separately
+    approved: D1 must make zero of both, and a run that generated nothing while
+    counting something has still spent money nobody authorized."""
+    count_calls, generation_calls = [], []
+
+    def opener(method, url, headers, body):
+        (generation_calls if url.endswith("/responses") else count_calls
+         ).append(url)
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": 10}).encode()
+
+    with pytest.raises(errors.LaneRefusal):
+        d1runtime.run(**_d1_kwargs(
+            operator_claims=mutate(_authenticated_claims("D1")),
+            opener=opener))
+    assert count_calls == [], f"{label}: {len(count_calls)} count attempt(s)"
+    assert generation_calls == [], f"{label}: generation attempt(s)"
+
+
+def test_the_envelope_evidence_record_is_inert():
+    """It retains all five things §3 requires and reconstructs none of them."""
+    verified = _verifier().verify_pin_authorization(_pin_envelope())
+    record = verified.to_record()
+    assert json.loads(json.dumps(record)) == record
+    assert record["candidate_claim_self_sha256"] == (
+        verified.candidate_claim_self_sha256)
+    assert record["envelope_header_sha256"] == verified.envelope_header_sha256
+    assert record["authorization_subject_sha256"] == (
+        verified.authorization_subject_sha256)
+    assert record["authenticator_algorithm"] == "HMAC_SHA256_V1"
+    assert "mac" not in record
+    assert "candidate_claim" not in record
+
+
+# --------------------------------------------------------------------------
+# EX4-R01 wiring. The authenticator existed at 212b0c1 but D1/D2 still consumed
+# `operatorrecord.verify_records` — implemented, not wired. These are the
+# conditions the integration addendum sets for closing it.
+# --------------------------------------------------------------------------
+
+CREDENTIAL_BEARING_MODULES = ("d1runtime.py", "d2runtime.py", "d1cli.py",
+                              "d2cli.py", "countledger.py")
+
+
+@pytest.mark.parametrize("name", CREDENTIAL_BEARING_MODULES)
+def test_no_credential_bearing_module_uses_the_parsed_authority_path(name):
+    """The source guard. `operatorrecord.verify_records` reports
+    `authorized: False` in its own return payload; it is a claim PARSER. A
+    credential-bearing module that consults it as its authority decision is the
+    defect this finding names, and it must not come back by an innocent-looking
+    edit."""
+    tree = ast.parse((LANE_DIR / name).read_text(encoding="utf-8"))
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                called.add(func.attr)
+            elif isinstance(func, ast.Name):
+                called.add(func.id)
+    assert "verify_records" not in called, (
+        f"{name} calls verify_records, which authenticates nothing")
+
+
+@pytest.mark.parametrize("name", CREDENTIAL_BEARING_MODULES)
+def test_no_credential_bearing_module_imports_the_claim_parser(name):
+    """Stronger than the call check: importing it is how it gets called.
+
+    Checked by AST rather than by grepping the text. Both of these modules
+    MENTION `operatorrecord.verify_records` in a comment explaining why they no
+    longer use it, and a text scan flags that explanation — asking whether a
+    string appears rather than whether the module depends on it. The comment is
+    the record of the fix; removing it to satisfy a grep would delete the one
+    thing that stops the path being reintroduced by someone who never knew it
+    was wrong."""
+    imported = _imported_names(LANE_DIR / name)
+    offending = sorted(n for n in imported if n.endswith("operatorrecord"))
+    assert offending == [], f"{name} imports {offending}"
+    # A deferred import inside a function is still an import; `_imported_names`
+    # walks the whole tree, so this is covered by the assertion above.
+
+
+def test_the_authenticated_set_is_a_type_not_a_label():
+    """A branch-supplied class label must never satisfy the check. Writing
+    `authority_class: VERIFIED_...` is free; passing isinstance is not."""
+    impostor = {"authority_class": "VERIFIED_OPERATOR_RECORD_SET",
+                "records": {}, "covered": [], "executable_authority": True}
+    with _refusal("operator_authority_not_authenticated"):
+        trustedverifier.assert_authenticated(impostor, phase="D1")
+    with _refusal("operator_authority_not_authenticated"):
+        countledger.authorize(record_set=impostor)
+
+
+def test_d1_requires_all_fifteen_prerequisites():
+    assert len(trustedverifier.D1_PREREQUISITES) == 15
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        trustedverifier.authenticate_record_set(
+            _authenticated_claims("D1", omit="approve_engine_identity"),
+            verifier=_lane_verifier(), phase="D1")
+    assert "operator_prerequisites_outstanding" in excinfo.value.reason
+    # Named, not counted: "15 of 16" does not tell an operator what to sign.
+    assert "approve_engine_identity" in excinfo.value.reason
+
+
+def test_d2_requires_the_same_fifteen_plus_the_sixteenth():
+    assert len(trustedverifier.D2_PREREQUISITES) == 16
+    assert set(trustedverifier.D1_PREREQUISITES) < set(
+        trustedverifier.D2_PREREQUISITES)
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        trustedverifier.authenticate_record_set(
+            _authenticated_claims("D1"), verifier=_lane_verifier(), phase="D2")
+    assert "approve_generation_separately" in excinfo.value.reason
+
+
+def test_a_duplicated_prerequisite_is_refused():
+    claims = _authenticated_claims("D1")
+    with _refusal("operator_claim_duplicated"):
+        trustedverifier.authenticate_record_set(
+            [*claims, claims[0]], verifier=_lane_verifier(), phase="D1")
+
+
+def test_an_empty_claim_set_does_not_read_as_covering_everything():
+    with _refusal("operator_claims_empty"):
+        trustedverifier.authenticate_record_set(
+            [], verifier=_lane_verifier(), phase="D1")
+
+
+# ---- the acceptance condition: every invalid record -> zero attempts -------
+
+
+def _attempt_counting_opener(calls):
+    def opener(method, url, headers, body):
+        calls.append(url)
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": 10}).encode()
+    return opener
+
+
+@pytest.mark.parametrize("label,mutate", [
+    ("shaped but unauthenticated",
+     lambda c: [_tampered(e, "authenticator.mac", "0" * 64) for e in c]),
+    ("authenticated by the wrong key",
+     lambda c: _authenticated_claims("D1", key_hex=OTHER_KEY_HEX)),
+    ("for a different head",
+     lambda c: _authenticated_claims("D1", head=SHA_C)),
+    ("candidate claim pre-labelled verified",
+     lambda c: [_tampered(e, "candidate_claim.authority_class",
+                          "VERIFIED_OPERATOR_PIN_AUTHORIZATION")
+                if e["header"]["claim_kind"] == authzenvelope.PIN_CLAIM else e
+                for e in c]),
+    ("one prerequisite absent", lambda c: c[:-1]),
+])
+def test_an_unauthenticated_record_causes_zero_provider_attempts(
+        d1_engine, label, mutate):
+    """The acceptance condition. Not 'refuses somewhere' — refuses BEFORE any
+    request reaches the transport, so nothing was spent finding out."""
+    calls = []
+    with pytest.raises(errors.LaneRefusal):
+        d1runtime.run(**_d1_kwargs(
+            operator_claims=mutate(_authenticated_claims("D1")),
+            opener=_attempt_counting_opener(calls)))
+    assert calls == [], f"{label}: {len(calls)} provider attempt(s) were made"
+
+
+@pytest.mark.parametrize("label,kwargs", [
+    ("expired", {"lane_verifier": None}),
+    ("revoked", {"lane_verifier": None}),
+])
+def test_a_stale_or_revoked_record_causes_zero_provider_attempts(
+        d1_engine, label, kwargs):
+    claims = _authenticated_claims("D1")
+    verifier = (_lane_verifier(observed_now="2027-01-01T00:00:00Z")
+                if label == "expired" else
+                _lane_verifier(revocations=[
+                    {"authorization_subject_sha256":
+                     claims[0]["authorization_subject_sha256"]}]))
+    calls = []
+    with pytest.raises(errors.LaneRefusal):
+        d1runtime.run(**_d1_kwargs(operator_claims=claims,
+                                   lane_verifier=verifier,
+                                   opener=_attempt_counting_opener(calls)))
+    assert calls == [], f"{label}: {len(calls)} provider attempt(s)"
+
+
+def test_d2_without_prerequisite_sixteen_makes_zero_generation_attempts(
+        d1_engine):
+    calls = []
+
+    def opener(method, url, headers, body):
+        calls.append(url)
+        raise AssertionError("unreachable")
+
+    with _refusal("operator_prerequisites_outstanding"):
+        d2runtime.run(**_d2_kwargs(
+            operator_claims=_d1_claims(phase="D1",
+                                       observation=_d2_observations()),
+            opener=opener))
+    assert calls == []
+
+
+# --------------------------------------------------------------------------
+# SLICE 1 — a real engine artifact built from exact Git blobs, and the REAL
+# planner imported out of it.
+#
+# `scripts/verifier` does not exist on main, which is the whole reason the
+# artifact has to carry both roles. These tests build one from the object
+# database at two different commits, extract it, and import through the bridge.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def engine_artifact():
+    """A genuine artifact: verifier/ from the candidate head, trustedlane/ from
+    this branch, every byte read from git objects.
+
+    ONE per session, shared with `_engine()`. Building a second identical
+    artifact at a second root and calling `load_engine` on it reddens by
+    design: `import verifier` returns whatever is already in `sys.modules`, so
+    the modules would come from the first root while the origin check compared
+    them to the second. That refusal is the check working — one process loads
+    one approved engine — so the fixture stops creating the situation rather
+    than the check stopping reporting it."""
+    _engine()
+    return {"record": _ENGINE_CACHE["record"],
+            "root": _ENGINE_CACHE["artifact"]["root"]}
+
+
+def test_the_artifact_carries_both_engine_roles(engine_artifact):
+    """An artifact with only `verifier` plans and decides with no trusted lane
+    in it; one with only `trustedlane` fails at the first engine call with the
+    credential already read."""
+    assert engine_artifact["record"]["packages"] == ["trustedlane", "verifier"]
+    for package in enginebridge.ENGINE_PACKAGES:
+        assert (Path(engine_artifact["root"]) / package).is_dir()
+
+
+def test_the_artifact_digest_is_a_function_of_the_source_commits_alone(
+        tmp_path, engine_roles):
+    """An operator approves a digest. One that moves when nothing moved cannot
+    be approved.
+
+    Two defects showed up here and neither was visible by reading the code:
+    `tarfile.open(mode="w:gz")` stamps the current time into the gzip header,
+    and GzipFile derives a stored FILENAME from the output path — so builds to
+    two different temporary paths differed at byte 10 while the tar payload was
+    byte-identical."""
+    first = enginesource.build_engine_artifact(
+        roles=engine_roles, destination=str(tmp_path / "first.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    nested = tmp_path / "deeper"
+    nested.mkdir()
+    second = enginesource.build_engine_artifact(
+        roles=engine_roles, destination=str(nested / "second-name.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    assert (first["engine_artifact_sha256"]
+            == second["engine_artifact_sha256"]), "digest moved with the path"
+
+
+def test_the_artifact_digest_moves_when_a_source_commit_moves(
+        tmp_path, engine_roles):
+    here = enginesource.build_engine_artifact(
+        roles=engine_roles, destination=str(tmp_path / "a.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    older = enginesource.build_engine_artifact(
+        roles=dict(engine_roles, protected_trusted_lane=_rev("origin/main~1")),
+        destination=str(tmp_path / "b.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    assert here["engine_artifact_sha256"] != older["engine_artifact_sha256"]
+
+
+def test_the_bridge_imports_the_real_planner_from_the_artifact(engine_artifact):
+    """EX4-R05. The previous CLI imported `verifier.plan.build_review_skeleton`,
+    which does not exist, and called it with a signature that is not
+    `build_skeleton`'s either — so the D1 path could never have run once."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    planner = getattr(engine["modules"]["verifier.plan"],
+                      enginebridge.PLANNER_FUNCTION)
+    assert callable(planner)
+    assert not hasattr(engine["modules"]["verifier.plan"],
+                       "build_review_skeleton")
+    signature = inspect.signature(planner)
+    assert list(signature.parameters) == ["target_base_ref", "head_ref", "cwd",
+                                          "budget"]
+
+
+def test_the_bridge_reads_governed_policy_from_the_engine_not_a_local_copy(
+        engine_artifact):
+    """The panel, the required approver and the twelve PINs are governed
+    policy. A trusted-lane copy of any of them is a second source of truth."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    assert enginebridge.model_panel(engine) == (
+        "gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini")
+    assert enginebridge.required_approver(engine) == "gpt-5.6-sol"
+    assert len(enginebridge.pin_names(engine)) == 12
+
+
+def test_every_engine_module_is_proved_to_come_from_the_artifact(
+        engine_artifact):
+    """A name check cannot distinguish the approved tarball from the candidate
+    clone on the same disk, and in D1 both are present."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    root = os.path.realpath(engine_artifact["root"])
+    for name, module in engine["modules"].items():
+        origin = getattr(module, "__file__", None)
+        assert origin is not None, name
+        assert os.path.realpath(origin).startswith(root + os.sep), name
+
+
+def test_a_module_loaded_from_outside_the_artifact_is_refused(engine_artifact):
+    import types
+
+    outsider = types.ModuleType("verifier.plan")
+    outsider.__file__ = "/somewhere/else/verifier/plan.py"
+    with _refusal("engine_module_loaded_outside_the_artifact"):
+        enginebridge.assert_module_loaded_from(
+            outsider, root=os.path.realpath(engine_artifact["root"]),
+            name="verifier.plan")
+
+
+@pytest.mark.parametrize("package", sorted(enginebridge.ENGINE_PACKAGES))
+def test_an_artifact_missing_a_role_is_refused(tmp_path, package):
+    root = tmp_path / "partial"
+    for present in enginebridge.ENGINE_PACKAGES:
+        if present != package:
+            (root / present).mkdir(parents=True)
+    root.mkdir(exist_ok=True)
+    with _refusal("engine_artifact_missing_packages"):
+        enginebridge.assert_layout(str(root))
+
+
+def test_a_structurally_blocked_skeleton_is_refused_rather_than_reviewed(
+        engine_artifact):
+    """`build_skeleton` reports ordinary policy blocks in DATA and sets
+    `structurally_clean=False`; it does not raise. A caller that only catches
+    exceptions reviews a plan the planner refused."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    blocked = {"blocking_reasons": [{"code": "CONTENT_POLICY_BLOCKED",
+                                     "reason": "x"}],
+               "structurally_clean": False,
+               "requested_model_ids": list(enginebridge.model_panel(engine))}
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        enginebridge.assert_skeleton_is_usable(blocked, engine=engine)
+    assert "candidate_is_structurally_blocked" in excinfo.value.reason
+    assert "CONTENT_POLICY_BLOCKED" in excinfo.value.reason
+
+
+def test_a_skeleton_naming_a_different_panel_is_refused(engine_artifact):
+    """The panel is governed policy; a skeleton naming another one is not the
+    review that was approved."""
+    engine = enginebridge.load_engine(engine_artifact["root"])
+    with _refusal("skeleton_model_panel_mismatch"):
+        enginebridge.assert_skeleton_is_usable(
+            {"blocking_reasons": [], "structurally_clean": True,
+             "requested_model_ids": ["gpt-5.6-sol"]}, engine=engine)
+
+
+def test_the_bridge_is_the_only_lane_entry_into_the_verifier_package():
+    """One seam, so there is one place to audit for the trusted side reaching
+    into candidate internals."""
+    offenders = []
+    for path in _lane_sources():
+        if path.name == "enginebridge.py":
+            continue
+        for name in _imported_names(path):
+            if name == "verifier" or name.startswith("verifier."):
+                offenders.append(f"{path.name}:{name}")
+    assert offenders == [], offenders
+
+
+# --------------------------------------------------------------------------
+# SLICE 2 — the lane counts through the ENGINE, not through a second engine.
+#
+# The lane used to build its own count requests, send them, and keep its own
+# ledger. That was a parallel, weaker implementation of what
+# `verifier.counting2` already does properly, and a parallel implementation is
+# how a "preflight" that only checked a budget got as far as it did.
+#
+# So `prepare_review_plan_core` does the review semantics and the lane supplies
+# only what the engine cannot have: an authenticated PIN record, a verified
+# literal set, a real transport, and an unpredictable challenge. These tests
+# run that whole path against a fake server, in D0, with no credential.
+# --------------------------------------------------------------------------
+
+def _counting_opener(calls, *, tokens_per_4_bytes=True):
+    """A fake provider that answers the count endpoint and records every call.
+
+    Deliberately arithmetic rather than constant: a constant reply would make
+    "the challenge reached the bytes" untestable, because every request would
+    count the same."""
+    def opener(method, url, headers, body):
+        calls.append({"method": method, "url": url, "bytes": len(body),
+                      "has_credential": "authorization" in
+                      {k.lower() for k in headers}})
+        tokens = -(-len(body) // 4) if tokens_per_4_bytes else 10
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": tokens}).encode()
+    return opener
+
+
+@pytest.fixture(scope="module")
+def engine_clone(tmp_path_factory):
+    for sha in (PR25_BASE, SHA_A):
+        if subprocess.run(["git", "cat-file", "-e", sha],  # noqa: S603
+                          cwd=str(ROOT), capture_output=True).returncode:
+            pytest.skip(f"object {sha[:12]} absent in this checkout")
+    destination = tmp_path_factory.mktemp("engine-clone") / "candidate"
+    subprocess.run(["git", "clone", "-q", "--no-local", str(ROOT),  # noqa: S603
+                    str(destination)], check=True, capture_output=True)
+    return str(destination)
+
+
+@pytest.fixture(scope="module")
+def real_skeleton(engine_clone):
+    """A skeleton built by the REAL planner, through the bridge."""
+    return enginebridge.build_skeleton(
+        _engine(), target_base_sha=PR25_BASE, candidate_head_sha=SHA_A,
+        repository_path=engine_clone)
+
+
+def _trusted_pins():
+    """Twelve PINs with headroom for the whole PR25 range."""
+    return {**_valid_pins(), "VERIFIER_MAX_REVIEW_UNITS": 200,
+            "VERIFIER_MAX_GENERATION_CALLS": 200,
+            "VERIFIER_MAX_COUNT_CALLS": 2000,
+            "VERIFIER_COST_CAP_MICRO_USD": 50_000_000}
+
+
+def _authenticated_for_the_real_range(engine_clone, *, ceiling=10 ** 9):
+    """A record set minted for the range the skeleton actually covers."""
+    occurrence = {"repository_identity": CANONICAL_REPOSITORY,
+                  "target_base_sha": PR25_BASE, "diff_base_sha": PR25_BASE,
+                  "head_sha": SHA_A,
+                  "repository_numeric_id": REPOSITORY_NUMERIC_ID}
+    envelope = _pin_envelope(occurrence=occurrence, pins=_trusted_pins())
+    count = _mint("approve_count_spending", occurrence=occurrence,
+                  typed_payload=_typed_payload(
+                      "approve_count_spending", max_input_tokens=ceiling,
+                      authorized_target_base_sha=PR25_BASE,
+                      authorized_diff_base_sha=PR25_BASE,
+                      authorized_head_sha=SHA_A))
+    verifier = _verifier(occurrence=occurrence)
+    return (verifier.verify_pin_authorization(envelope),
+            verifier.authenticate_typed(
+                count, prerequisite_key="approve_count_spending"))
+
+
+def _run_challenge(seed=b"\x01" * 32, unit=0):
+    """A challenge of the shape the lane actually mints.
+
+    Not a hand-picked literal. The first version of these tests used a
+    descriptive prefix followed by a run of interleaved letters and digits, and
+    the engine's global preflight refused every request: that shape is exactly
+    what a real key looks like, and a literal in verifier-written scaffolding
+    has no reviewed source occurrence, so it can never be cleared.
+
+    The string is not reproduced here. It tripped this repository's own secret
+    gate for the same reason it tripped the engine's — which is the two
+    scanners agreeing, and a reasonable thing to let them do."""
+    return challenge.token_for_unit(
+        seed=seed, unit_sha256=f"{unit:064x}", candidate_head_sha=SHA_A,
+        trusted_run_id=55, trusted_run_attempt=1)
+
+
+def _core_through_the_lane(engine_clone, skeleton, *, calls,
+                           challenge=None,
+                           ceiling=10 ** 9, authorizations=None):
+    challenge = challenge if challenge is not None else _run_challenge()
+    pin_envelope, count_envelope = _authenticated_for_the_real_range(
+        engine_clone, ceiling=ceiling)
+    transport = counttransport.bind(
+        _engine(), opener=_counting_opener(calls), credential=FAKE_CREDENTIAL,
+        phase=phases.D1,
+        authorized_input_tokens=count_envelope.require_typed(
+            "max_input_tokens"))
+    core = enginebridge.prepare_review_plan_core(
+        _engine(), skeleton=skeleton, repository_path=engine_clone,
+        pin_record=pin_envelope.promoted, transport=transport,
+        authorizations=authorizations, challenge=challenge)
+    return core, transport
+
+
+class TestTheLaneCountsThroughTheEngine:
+    def test_the_engine_core_runs_end_to_end_through_the_lane_transport(
+            self, engine_clone, real_skeleton):
+        """The acceptance condition for Slice 2: a real skeleton, the real
+        core, the lane's transport, a fake server — and the PIN record the core
+        used is the one `promote_pin_authorization` returned."""
+        calls = []
+        core, transport = _core_through_the_lane(
+            engine_clone, real_skeleton, calls=calls,
+            authorizations=_unverified_local_authorizations(engine_clone,
+                                                            real_skeleton))
+        assert core["core_version"] == "prepare-review-plan-core-v1"
+        assert core["final_units"] and core["batches"]
+        assert core["generation_calls_performed"] == 0
+        assert core["transport_source"] == "PROVIDER"
+        assert core["operator_pin_record"]["authority_class"] == (
+            "VERIFIED_OPERATOR_PIN_AUTHORIZATION")
+        # Every socket went to the count endpoint, and every one carried the
+        # credential — joined inside `exchange`, never in the request record.
+        assert calls and len(calls) == transport.calls
+        assert {c["url"] for c in calls} == {
+            f"{transport_module_base()}/responses/input_tokens"}
+        assert all(c["has_credential"] for c in calls)
+
+    def test_the_lane_does_not_carry_a_second_implementation(self):
+        """The rule this slice exists to enforce. The lane's own counting
+        module may hold accounting and endpoint policy; it must not hold
+        request assembly, preflight, batching or splitting — those are the
+        engine's, and a second copy is how the two versions end up disagreeing
+        about what was reviewed.
+
+        By AST, not by substring. The first version of this test grepped for
+        "instructions" and reddened on the docstring sentence explaining that
+        this module takes no instructions — asking whether a string appears
+        rather than whether an implementation exists, which is the same proxy
+        defect this suite keeps finding elsewhere."""
+        tree = ast.parse((LANE_DIR / "counttransport.py").read_text(
+            encoding="utf-8"))
+        defined = {n.name for n in ast.walk(tree)
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef))}
+        for forbidden in ("assemble_request", "scan_text", "pack_batches",
+                          "split_unit", "build_units", "count_input_tokens",
+                          "PreflightGenerationManifest", "CountLedger"):
+            assert forbidden not in defined, forbidden
+        # And it builds no request payload of its own: the engine hands over
+        # exact bytes it has already assembled, scanned and hashed.
+        assert "json" not in {n.names[0].name for n in ast.walk(tree)
+                              if isinstance(n, ast.Import)}
+        keys = {n.value for n in ast.walk(tree)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        for payload_field in ("instructions", "input", "model", "truncation"):
+            assert payload_field not in keys, payload_field
+
+    def test_the_transport_refuses_any_path_but_the_count_endpoint(self):
+        """Refused before the URL is built, so a caller that got the path wrong
+        never reaches the code where a credential is in scope."""
+        calls = []
+        transport = counttransport.bind(
+            _engine(), opener=_counting_opener(calls),
+            credential=FAKE_CREDENTIAL, phase=phases.D1,
+            authorized_input_tokens=1000)
+        with _refusal("count_transport_path_not_permitted"):
+            transport.post("/v1/responses", b"{}")
+        assert calls == []
+
+    def test_a_transport_built_without_an_authorized_ceiling_is_refused(self):
+        for ceiling in (0, -1, None, True, "1000"):
+            with _refusal("count_transport_ceiling_not_a_positive_integer"):
+                counttransport.bind(
+                    _engine(), opener=lambda *a: None,
+                    credential=FAKE_CREDENTIAL, phase=phases.D1,
+                    authorized_input_tokens=ceiling)
+
+    def test_the_operator_ceiling_is_applied_to_what_was_actually_counted(
+            self, engine_clone, real_skeleton):
+        """The engine's caps are on ATTEMPTS and cost. This is the input-token
+        total the operator wrote, and nothing else in the run compares against
+        it."""
+        calls = []
+        _core, transport = _core_through_the_lane(
+            engine_clone, real_skeleton, calls=calls,
+            authorizations=_unverified_local_authorizations(engine_clone,
+                                                            real_skeleton))
+        assert transport.assert_within_authorized_tokens(1000)["headroom"] > 0
+        with _refusal("authorized_input_tokens_would_be_exceeded"):
+            transport.assert_within_authorized_tokens(
+                transport.authorized_input_tokens + 1)
+        assert transport.assert_zero_generation()["generation_calls"] == 0
+
+    def test_the_challenge_reaches_the_bytes_that_were_counted(
+            self, engine_clone, real_skeleton):
+        """A challenge the lane passes and the engine never transmits would be
+        a parameter, not a challenge. The fake server counts BYTES, so two runs
+        differing only in the challenge must produce different request
+        hashes."""
+        authorizations = _unverified_local_authorizations(engine_clone,
+                                                          real_skeleton)
+        first, _ = _core_through_the_lane(
+            engine_clone, real_skeleton, calls=[],
+            challenge=_run_challenge(seed=b"\x01" * 32),
+            authorizations=authorizations)
+        second, _ = _core_through_the_lane(
+            engine_clone, real_skeleton, calls=[],
+            challenge=_run_challenge(seed=b"\x02" * 32),
+            authorizations=authorizations)
+        assert [b["unit_sha256_in_order"] for b in first["batches"]] == [
+            b["unit_sha256_in_order"] for b in second["batches"]]
+        assert [b["request_hashes_by_model"] for b in first["batches"]] != [
+            b["request_hashes_by_model"] for b in second["batches"]]
+
+    def test_a_guessable_challenge_is_refused_at_the_seam(self, engine_clone,
+                                                          real_skeleton):
+        """`finalize_mock` defaults the challenge to a constant, which is
+        correct for a mock report and fatal for a trusted one. The bridge
+        refuses a short one rather than passing it through."""
+        for guessable in ("", "short", "LOCAL-MOCK-CHALLENGE"[:15], None):
+            with _refusal("trusted_challenge_too_short"):
+                enginebridge.prepare_review_plan_core(
+                    _engine(), skeleton=real_skeleton,
+                    repository_path=engine_clone, pin_record={},
+                    transport=None, authorizations=None, challenge=guessable)
+
+    def test_the_bridge_refuses_a_core_that_decided_evidence(self):
+        """Checked on the RESULT, not trusted from a docstring. If a future
+        edit made the core emit `executable` or an evidence class, this lane
+        would be signing a trust conclusion drawn inside the artifact under
+        review."""
+        engine = _engine()
+        version = engine["modules"]["verifier.finalize"].PREPARE_CORE_VERSION
+        neutral = {"core_version": version, "generation_calls_performed": 0}
+        assert enginebridge.assert_core_is_evidence_neutral(
+            neutral, engine=engine) is neutral
+        for field in enginebridge.FORBIDDEN_CORE_FIELDS:
+            with _refusal("engine_core_decided_evidence"):
+                enginebridge.assert_core_is_evidence_neutral(
+                    {**neutral, field: "anything"}, engine=engine)
+        with _refusal("engine_core_version_mismatch"):
+            enginebridge.assert_core_is_evidence_neutral(
+                {**neutral, "core_version": "prepare-review-plan-core-v0"},
+                engine=engine)
+        with _refusal("engine_core_made_a_generation_call"):
+            enginebridge.assert_core_is_evidence_neutral(
+                {**neutral, "generation_calls_performed": 1}, engine=engine)
+
+    def test_the_minted_challenge_never_trips_the_engine_scanner(self):
+        """Found by this slice, and it would have been fatal in production.
+
+        The challenge is transmitted inside verifier-written SCAFFOLDING, and
+        the engine clears a literal only when it maps to an exact reviewed
+        SOURCE occurrence — scaffolding has none, by design. So a challenge the
+        scanner classifies as a secret makes global preflight refuse every
+        request in the run, and no earlier test would show it: the lane's own
+        suite never runs the engine's preflight, and the engine's suite never
+        sees the lane's token.
+
+        The real 32-hex token passes. This asserts it keeps passing, over
+        enough distinct tokens that a format change is caught rather than
+        sampled around."""
+        preflight = _module("verifier.preflight")
+        flagged = []
+        for index in range(200):
+            token = challenge.token_for_unit(
+                seed=bytes([index % 256]) * 32, unit_sha256=f"{index:064x}",
+                candidate_head_sha=SHA_A, trusted_run_id=55,
+                trusted_run_attempt=1)
+            if preflight.scan_text(challenge.instruction_line(token)):
+                flagged.append(token)
+        assert flagged == [], (
+            f"{len(flagged)}/200 minted challenges would make the engine "
+            "refuse every request in the run")
+
+    def test_a_source_rename_in_the_engine_is_a_named_refusal(self):
+        """The engine treats an UNDECLARED transport as not-the-provider, which
+        is fail-closed but undiagnosable. This says which spelling
+        disagreed."""
+        class Renamed:
+            source = "PROVIDER_V2"
+
+        with _refusal("count_transport_source_disagrees_with_engine"):
+            counttransport.assert_source_agrees_with_engine(Renamed(),
+                                                            engine=_engine())
+
+
+def transport_module_base():
+    return transport.BASE_URL
+
+
+def _unverified_local_authorizations(engine_clone, skeleton):
+    """The candidate's own fixture clearances, for the paths that carry test
+    literals in this range.
+
+    Used ONLY to get past preflight in these transport tests. They are
+    TEST_FIXTURE_UNAUTHORIZED and `confers_real_call_authority` is False, so
+    nothing here can be mistaken for the trusted set — that is
+    `VerifiedLiteralAuthorizationSet`, and a separate test proves the trusted
+    path requires it."""
+    engine = _engine()
+    authority = engine["modules"]["verifier.authority"]
+    finalize = engine["modules"]["verifier.finalize"]
+    import verifier.unitpayload
+
+    atom_map = finalize.atom_texts(skeleton, cwd=engine_clone)
+    return authority.propose_local_fixture_authorizations(
+        skeleton, atom_map, verifier.unitpayload.index_atom_records(skeleton),
+        repository_identity=CANONICAL_REPOSITORY)
+
+
+# --------------------------------------------------------------------------
+# The templates and the CLIs must agree about the environment.
+#
+# Nothing bound them, which is how they drifted: `TRUSTED_MODEL_ID` stayed in
+# both templates after the CLIs stopped reading it, and
+# `TRUSTED_REVOCATION_LIST_PATH` was added to the CLIs while no template set
+# it. Either direction is a lane that refuses on a real runner for a reason no
+# test reproduces — the D0 suite never runs the template.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("module_name,template_name", [
+    ("d1cli", "d1-trusted-count.yml.template"),
+    ("d2cli", "d2-trusted-generation.yml.template"),
+])
+def test_every_required_environment_variable_is_set_by_its_template(
+        module_name, template_name):
+    module = {"d1cli": d1cli, "d2cli": d2cli}[module_name]
+    text = (LANE_DIR / "workflow" / template_name).read_text(encoding="utf-8")
+    document = yaml.safe_load(text)
+    supplied = set()
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            supplied |= set(step.get("env", {}) or {})
+            # `export NAME=` inside the step script counts, and the first
+            # version of this test said it did not — my own proxy question.
+            # `TRUSTED_OBSERVED_NOW` is exported from the runner's CLOCK
+            # precisely because it must not be an `env:` entry: it was a `vars.`
+            # repository variable, which is a fixed string, so operator-record
+            # expiry was compared against the same frozen instant on every
+            # future run. Asking "is it in an env: mapping" would have marked
+            # the better source as the missing one.
+            supplied |= set(re.findall(r"^\s*export\s+([A-Z0-9_]+)=",
+                                       str(step.get("run") or ""),
+                                       flags=re.MULTILINE))
+        supplied |= set(job.get("env", {}) or {})
+    supplied |= set(document.get("env", {}) or {})
+
+    missing = sorted(set(module.REQUIRED_ENV) - supplied)
+    assert missing == [], (
+        f"{template_name} does not set {missing}; the lane would refuse on a "
+        "real runner with `environment_incomplete` and no test would show it")
+
+
+@pytest.mark.parametrize("module_name,template_name", [
+    ("d1cli", "d1-trusted-count.yml.template"),
+    ("d2cli", "d2-trusted-generation.yml.template"),
+])
+def test_no_template_still_sets_a_retired_environment_variable(module_name,
+                                                               template_name):
+    """A retired variable left in a template is worse than a missing one.
+
+    `TRUSTED_MODEL_ID` named ONE model. After the panel moved to governed
+    policy the CLIs stopped reading it — but the templates went on setting it
+    from a repository variable, which reads to an operator as "this is how you
+    choose the model" long after it stopped being true."""
+    module = {"d1cli": d1cli, "d2cli": d2cli}[module_name]
+    text = (LANE_DIR / "workflow" / template_name).read_text(encoding="utf-8")
+    document = yaml.safe_load(text)
+    assigned = set()
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            assigned |= set(step.get("env", {}) or {})
+        assigned |= set(job.get("env", {}) or {})
+    for retired in module.RETIRED_ENV:
+        assert retired not in assigned, (
+            f"{template_name} still assigns {retired}, which nothing reads")
+
+
+def test_the_trust_store_is_an_environment_secret_in_both_templates():
+    """It decides what counts as an operator authorization, so it is exactly as
+    dangerous as the provider credential and gets the same containment: an
+    environment secret, never a repository or organization one."""
+    for template_name in ("d1-trusted-count.yml.template",
+                          "d2-trusted-generation.yml.template"):
+        text = (LANE_DIR / "workflow" / template_name).read_text(
+            encoding="utf-8")
+        assert "secrets.TRUSTED_OPERATOR_TRUST_STORE" in text, template_name
+        # Never through the repository- or organization-level fallbacks the
+        # secret gate exists to forbid.
+        assert "vars.TRUSTED_OPERATOR_TRUST_STORE" not in text
+        assert "|| secrets.TRUSTED_OPERATOR_TRUST_STORE" not in text
+
+
+# --------------------------------------------------------------------------
+# EX4-R11 — readiness before the credential, in the CLI as well as the runtime.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("module_name", ["d1cli", "d2cli"])
+def test_the_cli_establishes_readiness_before_obtaining_any_capability(
+        module_name):
+    """`run` asserting protected state as step 1 was true and did not help.
+
+    The CLI read the credential three lines above the observation, so a run on
+    an unprotected ref pulled the provider key into the process and only then
+    asked whether a key was allowed to be there. By the time step 1 refused,
+    the secret was in the environment of a process the refusal does not unwind.
+
+    Checked by AST over statement ORDER, not by reading the source: the point
+    is which call happens first, and a comment saying so is not the check."""
+    module = {"d1cli": d1cli, "d2cli": d2cli}[module_name]
+    tree = ast.parse((LANE_DIR / f"{module_name}.py").read_text(
+        encoding="utf-8"))
+    function = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+
+    order = []
+    for index, statement in enumerate(function.body):
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "attr", getattr(node.func, "id", ""))
+                if name in ("assert_ready_for_credential", "read_credential",
+                            "open_https", "read_signing_key",
+                            "load_trust_store"):
+                    order.append((index, name))
+    names = [name for _index, name in order]
+    assert "assert_ready_for_credential" in names, (
+        f"{module_name}.main never establishes readiness itself")
+    readiness = names.index("assert_ready_for_credential")
+    for capability in ("read_credential", "open_https", "read_signing_key",
+                       "load_trust_store"):
+        if capability in names:
+            assert names.index(capability) > readiness, (
+                f"{module_name}.main obtains {capability} before protected "
+                "state is established")
+    # And the runtime still asserts it: the CLI having checked is not
+    # something `run` may depend on, because `run` takes the capabilities as
+    # parameters and a different caller could supply them unchecked.
+    runtime = {"d1cli": "d1runtime.py", "d2cli": "d2runtime.py"}[module_name]
+    assert "assert_ready_for_credential" in (
+        LANE_DIR / runtime).read_text(encoding="utf-8")
+    assert module.REQUIRED_ENV
+
+
+# --------------------------------------------------------------------------
+# EX4-R18 — the anti-copy tripwire, and it is the engine's.
+# --------------------------------------------------------------------------
+
+
+def test_d2_refuses_a_panel_that_returned_one_canned_sentence(d1_engine):
+    """Three models returning the same reasoning is one review reported three
+    times, and it would otherwise read as three corroborations.
+
+    This is not hypothetical: the first version of the D2 fixture returned
+    `"reason": "checked"` for every model, and wiring the gate refused the very
+    first run."""
+    result = d2runtime.run(**_d2_kwargs(
+        opener=_engine_generation_opener(identical_reasons=True)))
+    payload = result["payload"]
+    # NOT a refusal. `execute_batch` deliberately does not raise for a
+    # validated verdict — a well-formed finding must survive as evidence before
+    # it stops the process — so a canned panel becomes a BLOCK, and the unit is
+    # not approved. The old lane version raised, and the finding it raised
+    # about left no durable record.
+    assert payload["all_approved"] is False
+    # The engine raises `PROVIDER_RESPONSE_INVALID` for this, the same code it
+    # uses for a malformed reply. That is the engine's own vocabulary and this
+    # lane does not relabel it: a lane-side translation would be a second
+    # opinion about what the engine decided. It IS worth naming as a limit —
+    # the block code alone does not distinguish "the panel was canned" from
+    # "the provider sent garbage", and only the engine's private message does.
+    assert {b["code"] for b in payload["unit_blocks"]} == {
+        "PROVIDER_RESPONSE_INVALID"}
+
+
+def test_d2_does_not_apply_the_tripwire_to_refutations(d1_engine):
+    """A refutation is a FINDING. Two models independently describing the same
+    real defect in the same words is agreement, not collusion — blocking it
+    would penalise the case the panel exists to catch.
+
+    Both flags at once: every model refutes every unit AND every reason is the
+    same sentence. If the tripwire applied to refutations, this would block on
+    distinctness instead of reporting the veto."""
+    result = d2runtime.run(**_d2_kwargs(
+        opener=_engine_generation_opener(
+            refute=_refute_for(enginebridge.model_panel(_engine())),
+            identical_reasons=True)))
+    payload = result["payload"]
+    assert payload["all_approved"] is False
+    assert set(payload["decisions"].values()) == {"reject"}
+    codes = {b["code"] for b in payload["unit_blocks"]}
+    assert codes == {"REQUIRED_APPROVER_REFUTED"}, (
+        "a refutation was blocked for saying the same thing as another "
+        "refutation, which penalises the case the panel exists to catch")
+
+
+def test_the_lane_does_not_carry_its_own_similarity_scoring(d1_engine):
+    """Similarity scoring, Unicode folding, the charset policy and the governed
+    threshold live in `verifier.verdicts`. A lane-side second version is the
+    duplication that produced a length check standing in for this gate the
+    first time."""
+    tree = ast.parse((LANE_DIR / "d2runtime.py").read_text(encoding="utf-8"))
+    defined = {n.name for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    for forbidden in ("similarity_bp", "normalize_reason",
+                      "assert_reason_charset"):
+        assert forbidden not in defined, forbidden
+    called = {getattr(n.func, "attr", getattr(n.func, "id", ""))
+              for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    # The lane no longer calls `assert_distinct_reasoning` itself, and that is
+    # a step further in the same direction rather than a regression: the gate
+    # now runs inside `executor._decide_unit`, which the lane reaches through
+    # `execute_review_plan`. Asserting the direct call would now be asserting
+    # that the lane still drives the panel loop, which is what §7.4 forbids.
+    assert "execute_review_plan" in called
+    assert not (called & {"assert_distinct_reasoning", "validate_verdicts",
+                          "decide_unit_or_block", "synthesize"}), (
+        "the lane is calling the engine's per-verdict machinery directly "
+        "again; the executor drives it, and a caller that reaches past "
+        "`execute_review_plan` can reach past its ordering too")
+
+
+# --------------------------------------------------------------------------
+# EX5-R21 — a valid MAC does not prove the runtime used what was signed.
+#
+# Every envelope below is genuinely minted with the operator key and passes
+# `authenticate_record_set` completely. Each authorizes something OTHER than
+# what the run is about to do. Before this gate, each one would have been spent
+# on.
+# --------------------------------------------------------------------------
+
+
+def _d1_claims_with(key, **payload_over):
+    """A complete D1 set in which ONE prerequisite's payload is changed.
+
+    Genuinely re-minted, not tampered: the point is that the operator really
+    did authenticate this, and it is still wrong for this run."""
+    payload = _runtime_bound_payload(key, D1_OCCURRENCE, pins=_trusted_pins(),
+                                     ceiling=10 ** 9)
+    payload.update(payload_over)
+    return [_mint(key, typed_payload=payload, occurrence=D1_OCCURRENCE)
+            if e["header"]["prerequisite_key"] == key else e
+            for e in _d1_claims()]
+
+
+def _attempts_for(claims, **over):
+    """Run D1 with these claims and return every provider URL it reached."""
+    calls = []
+
+    def opener(method, url, headers, body):
+        calls.append(url)
+        return 200, json.dumps({"object": "response.input_tokens",
+                                "input_tokens": 10}).encode()
+
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        d1runtime.run(**_d1_kwargs(operator_claims=claims, opener=opener,
+                                   **over))
+    return calls, excinfo.value.reason
+
+
+@pytest.mark.parametrize("key", ["delete_failed_run", "verify_run_404"])
+def test_a_validly_signed_deletion_pair_for_another_run_blocks(d1_engine, key):
+    """Test 1. The typed schema accepts any positive `run_id`, and the
+    cross-record check only required the two halves to AGREE. A validly MAC'd
+    pair for run 1 satisfied prerequisites 1 and 2 while workflow run
+    30214247762 — the one whose logs are believed to hold probe output — was
+    still there."""
+    both = _d1_claims()
+    for other in ("delete_failed_run", "verify_run_404"):
+        payload = _runtime_bound_payload(other, D1_OCCURRENCE,
+                                         pins=_trusted_pins(), ceiling=10 ** 9)
+        payload["run_id"] = 1
+        both = [_mint(other, typed_payload=payload, occurrence=D1_OCCURRENCE)
+                if e["header"]["prerequisite_key"] == other else e
+                for e in both]
+    # Internally consistent: both halves name run 1, so the cross-record check
+    # that used to be the only one is satisfied.
+    calls, reason = _attempts_for(both)
+    assert "authorization_does_not_match_the_runtime" in reason
+    assert "run_id" in reason
+    assert calls == []
+    assert runtimebinding.INCIDENT_RUN_ID == 30214247762
+
+
+def test_an_engine_approval_for_a_different_artifact_blocks(d1_engine):
+    """Test 2. D1 verifies the artifact against `expected_sha256`; the operator
+    approves five digests. Nothing compared the two, so an operator could
+    approve engine A while the run loaded engine B."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_engine_identity",
+                        engine_artifact_sha256="9" * 64))
+    assert "prerequisite=approve_engine_identity" in reason
+    assert "engine_artifact_sha256" in reason
+    assert calls == []
+
+
+def test_a_protection_approval_for_a_different_observation_blocks(d1_engine):
+    """Test 3. The operator approves an observation digest; D1 evaluates an
+    observation document. Nothing required them to be the same observation."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("protected_trusted_environment",
+                        protection_observation_sha256="8" * 64))
+    assert "protection_observation_sha256" in reason
+    assert calls == []
+
+
+def test_a_capability_policy_digest_mismatch_blocks(d1_engine):
+    """Test 4."""
+    claims = _d1_claims_with("authorize_capability_policy",
+                             capability_policy_sha256="7" * 64)
+    calls, reason = _attempts_for(claims)
+    # The cross-envelope check fires first — the PIN envelope names the policy
+    # its twelve values were validated against — and it is the same defect
+    # reported one layer earlier.
+    assert ("capability_policy" in reason)
+    assert calls == []
+
+
+def test_a_review_request_policy_digest_mismatch_blocks(d1_engine):
+    """Test 5."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_review_request_policy_v2",
+                        review_request_policy_sha256="6" * 64))
+    assert "review_request_policy_sha256" in reason
+    assert calls == []
+
+
+def test_a_bootstrap_head_mismatch_blocks(d1_engine):
+    """Test 6. An approval of bootstrap A while bootstrap B is deployed."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_bootstrap_branch", branch_head_sha=SHA_C))
+    assert "branch_head_sha" in reason
+    assert calls == []
+    # And an edited workflow file changes the policy digest, so an approval of
+    # the old policy no longer matches.
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_bootstrap_branch",
+                        bootstrap_policy_sha256="5" * 64))
+    assert "bootstrap_policy_sha256" in reason
+    assert calls == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("environment_name", "some-other-environment"),
+    ("secret_name", "OPENAI_API_KEY"),   # pragma: allowlist secret
+])
+def test_an_environment_or_secret_name_mismatch_blocks(d1_engine, field, value):
+    """Test 7. Prerequisite 5 says the replacement key exists ONLY as an
+    environment secret. An approval naming a different environment approves a
+    different containment, and one naming a different secret approves a
+    different key."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("install_environment_key", **{field: value}))
+    assert field in reason
+    assert calls == []
+
+
+@pytest.mark.parametrize("field,pin", [
+    ("count_attempt_cap", "VERIFIER_MAX_COUNT_CALLS"),
+    ("micro_usd_cap", "VERIFIER_COST_CAP_MICRO_USD"),
+])
+def test_a_spending_cap_that_is_not_the_active_pin_blocks(d1_engine, field, pin):
+    """Test 8. The caps live in two places by design — the PIN record is what
+    the engine enforces, the spending envelope is what the operator agreed to.
+    Two numbers for one budget is how the two copies end up disagreeing."""
+    calls, reason = _attempts_for(
+        _d1_claims_with("approve_count_spending",
+                        **{field: _trusted_pins()[pin] + 1}))
+    assert field in reason
+    assert calls == []
+
+
+def test_a_generation_approval_naming_another_plan_makes_zero_calls(d1_engine):
+    """Test 9. Prerequisite 16 names WHICH plan. An approval to generate is not
+    an approval to generate anything."""
+    calls = []
+
+    def opener(method, url, headers, body):
+        calls.append(url)
+        raise AssertionError("unreachable")
+
+    claims = _d1_claims(phase="D2", observation=_d2_observations(),
+                        executable_plan_sha256="4" * 64)
+    with _refusal("executable_plan_sha256"):
+        d2runtime.run(**_d2_kwargs(operator_claims=claims,
+                                   opener=opener))
+    assert calls == []
+
+
+def test_the_count_phase_refuses_to_be_handed_an_executable_plan():
+    """D1 PRODUCES the plan. A D1 run handed one is being asked to count
+    something it did not derive."""
+    with _refusal("count_phase_given_an_executable_plan"):
+        runtimebinding.assert_authorizations_match_runtime(
+            _RecordSetStub(), phase="D1", observation={}, engine_identity={},
+            capability_policy_sha256="", review_request_policy_sha256="",
+            bootstrap={}, pin_values={}, candidate_range={},
+            executable_plan_sha256="3" * 64)
+
+
+class _RecordSetStub:
+    """Enough of a record set to reach the phase check and no further."""
+
+    def require(self, key):
+        raise AssertionError(f"reached {key} before the phase check")
+
+
+def test_every_runtime_bound_prerequisite_is_actually_compared():
+    """The table is data so this can hold it to the code.
+
+    A binding that exists in the module docstring and not in the function is a
+    binding nothing performs, and the difference is invisible from the
+    outside."""
+    import inspect
+
+    source = inspect.getsource(
+        runtimebinding.assert_authorizations_match_runtime)
+    for key in runtimebinding.RUNTIME_BOUND_PREREQUISITES:
+        assert f'"{key}"' in source, key
+    # And every bound key is a real prerequisite.
+    assert set(runtimebinding.RUNTIME_BOUND_PREREQUISITES) <= set(
+        trustedverifier.D2_PREREQUISITES)
+
+
+def test_the_runtime_binding_gate_runs_before_the_credential_is_spent(d1_engine):
+    """Structural. The gate's value is entirely that a mismatch costs zero
+    provider attempts, which is only true if it runs before the transport
+    exists."""
+    tree = ast.parse((LANE_DIR / "d1runtime.py").read_text(encoding="utf-8"))
+    function = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "run")
+    order = []
+    for index, statement in enumerate(function.body):
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, "attr", getattr(node.func, "id", ""))
+                if name in ("assert_authorizations_match_runtime", "bind",
+                            "prepare_review_plan_core"):
+                    order.append((index, name))
+    names = [name for _index, name in order]
+    assert "assert_authorizations_match_runtime" in names
+    gate = names.index("assert_authorizations_match_runtime")
+    assert names.index("prepare_review_plan_core") > gate
+
+
+# --------------------------------------------------------------------------
+# EX5-R22 — a clean range needs zero clearances, and could not say so.
+#
+# The protected schema required a positive count and non-empty member lists, so
+# the lane could not represent "exact approved literal authorization set =
+# empty". An operator facing a clean range therefore had to approve a FAKE
+# literal to satisfy prerequisite 10 — a real authorization for something
+# nobody looked at, which is worse than the hole it was meant to close.
+# --------------------------------------------------------------------------
+
+
+def _empty_literal_set(*, occurrence=None, scanner_policy=None, **over):
+    """The authenticated empty set. Still range-bound, still policy-bound,
+    still present — it clears nothing, which is different from every
+    neighbouring state."""
+    return _literal_set([], declared_members=[], expected_count=0,
+                        occurrence=occurrence, scanner_policy=scanner_policy,
+                        **over)
+
+
+def test_an_authenticated_empty_literal_set_is_representable():
+    """Test 1. The set envelope authenticates, and the adapter it produces
+    clears nothing rather than everything."""
+    envelope, authorizations = trustedverifier._authenticate_literal_set(
+        _empty_literal_set(), verifier=_verifier())
+    assert envelope.prerequisite_key == "approve_literal_authorizations"
+    assert envelope.typed_payload["expected_occurrence_count"] == 0
+    assert envelope.typed_payload["member_claim_self_sha256_in_order"] == []
+    assert envelope.typed_payload["member_subject_sha256_in_order"] == []
+    assert authorizations.is_empty is True
+    assert authorizations.confers_real_call_authority is True
+    assert authorizations.record()["clears_nothing"] is True
+    # It clears nothing. Not "everything", and not "whatever it is asked".
+    assert not authorizations.clears_occurrence(
+        literal_sha256=_literal_digest(), path_bytes_b64=LITERAL_PATH_B64,
+        atom_id="atom-0001", occurrence_index=0,
+        literal_categories=REVIEWED_CATEGORIES)
+    assert not authorizations.clears_occurrence(
+        literal_sha256="0" * 64, path_bytes_b64="anything",
+        atom_id=None, occurrence_index=0)
+
+
+def test_a_clean_range_completes_d1_under_an_empty_set(d1_engine):
+    """Test 6. The whole point: a range with no findings must not require a
+    fake authorization to be counted.
+
+    Driven through the real engine preflight over a synthetic clean skeleton —
+    the PR25 range has real occurrences, so it is the wrong fixture for
+    'clean'."""
+    engine = _engine()
+    finalize = engine["modules"]["verifier.finalize"]
+    preflight = engine["modules"]["verifier.preflight"]
+    import verifier.unitpayload
+
+    skeleton = _d1_skeleton()
+    atom_map = finalize.atom_texts(skeleton, cwd=_d1_clone())
+    verifier.unitpayload.index_atom_records(skeleton)
+    findings = sum(len(list(preflight.occurrence_index_map(text)))
+                   for text in atom_map.values())
+    # This range is NOT clean, which is why the empty set must block it — and
+    # why the positive half of this test is the adapter-level one above.
+    assert findings > 0
+    _envelope, authorizations = trustedverifier._authenticate_literal_set(
+        _empty_literal_set(occurrence=D1_OCCURRENCE,
+                           scanner_policy=_scanner_policy()),
+        verifier=_verifier(occurrence=D1_OCCURRENCE))
+    assert authorizations.is_empty is True
+
+
+def test_one_finding_under_an_empty_set_blocks(d1_engine):
+    """Test 2. An empty exact set clears nothing, so a range with even one
+    finding refuses — with the engine's own `occurrence_not_authorized`, not
+    with a lane-invented category."""
+    claims = [_empty_literal_set(occurrence=D1_OCCURRENCE,
+                                scanner_policy=_scanner_policy())
+              if e["header"]["prerequisite_key"]
+              == authzenvelope.LITERAL_PREREQUISITE else e
+              for e in _d1_claims()]
+    calls, reason = _attempts_for(claims)
+    # The engine's own fail-closed stop, translated at the seam. Its CODE is
+    # reported and its message is not: the message can carry a path, an atom id
+    # or a fragment of the payload the preflight just refused to transmit.
+    assert "engine_refused" in reason
+    assert "SECRET_PREFLIGHT_FAILED" in reason
+    assert calls == []
+
+
+def test_a_missing_literal_prerequisite_still_blocks(d1_engine):
+    """Test 3. Empty is not absent. `assert_authenticated` requires
+    `approve_literal_authorizations` by name, so making an empty set
+    expressible did not make the prerequisite optional."""
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        trustedverifier.authenticate_record_set(
+            _d1_claims(omit="approve_literal_authorizations"),
+            verifier=_verifier(occurrence=D1_OCCURRENCE), phase="D1")
+    assert "operator_prerequisites_outstanding" in excinfo.value.reason
+    assert "approve_literal_authorizations" in excinfo.value.reason
+
+
+def test_an_empty_set_under_the_wrong_scanner_policy_blocks():
+    """Test 4. The empty set is still bound to the policy it was issued under:
+    'nothing needed clearing' is a statement about a specific scanner, and a
+    different pattern set is a different statement."""
+    envelope = _empty_literal_set(scanner_policy="7" * 64)
+    _verified, authorizations = trustedverifier._authenticate_literal_set(
+        envelope, verifier=_verifier())
+    assert authorizations.is_empty is True
+    # The adapter carries the policy it was approved under, so a caller that
+    # built it against this run's policy would refuse.
+    assert authorizations.record()["scanner_policy_sha256"] == "7" * 64
+    with _refusal("literal_authorization_set_digest_mismatch"):
+        trustedverifier._authenticate_literal_set(
+            _literal_set([], declared_members=[], expected_count=0,
+                         scanner_policy="7" * 64,
+                         set_digest=authzenvelope.literal_set_digest(
+                             expected_occurrence_count=0,
+                             member_claim_self_sha256_in_order=[],
+                             member_subject_sha256_in_order=[],
+                             scanner_policy_sha256=_scanner_policy())),
+            verifier=_verifier())
+
+
+def test_adding_one_member_to_an_empty_set_changes_its_digest_and_blocks():
+    """Test 5. The set digest covers the count and both member lists, so a
+    member smuggled into an approved-empty set is refused."""
+    smuggled = _literal_member()
+    envelope = _literal_set([smuggled], declared_members=[], expected_count=0)
+    with _refusal("literal_set_member_claims_do_not_match"):
+        trustedverifier._authenticate_literal_set(envelope,
+                                                  verifier=_verifier())
+    # And the digest of the empty set is not the digest of the one-member set.
+    assert authzenvelope.literal_set_digest(
+        expected_occurrence_count=0, member_claim_self_sha256_in_order=[],
+        member_subject_sha256_in_order=[],
+        scanner_policy_sha256=_scanner_policy()) != (
+        authzenvelope.literal_set_digest(
+            expected_occurrence_count=1,
+            member_claim_self_sha256_in_order=[
+                smuggled["candidate_claim_self_sha256"]],
+            member_subject_sha256_in_order=[
+                smuggled["authorization_subject_sha256"]],
+            scanner_policy_sha256=_scanner_policy()))
+
+
+def test_an_empty_set_is_not_a_wildcard_or_a_file_wide_authorization():
+    """The four neighbouring states are all distinct, and each distinction is
+    a different refusal rather than the same one wearing different words."""
+    _envelope, empty = trustedverifier._authenticate_literal_set(
+        _empty_literal_set(), verifier=_verifier())
+    assert empty.is_empty
+    # A file-wide record is refused at construction, empty set or not.
+    promoted = _verifier().verify_literal_authorization(
+        _literal_member()).promoted
+    with _refusal("literal_authorization_not_usable_for_real_call"):
+        trustedverifier.VerifiedLiteralAuthorizationSet(
+            [{**promoted, "atom_id": None}], engine=_engine(),
+            occurrence=_OCCURRENCE, expected_occurrence_count=1,
+            scanner_policy_sha256=_scanner_policy(), set_sha256="0" * 64)
+    # And an empty list with a positive approved count is a set that lost its
+    # members, which is not the same as one that never had any.
+    with _refusal("literal_authorization_set_empty"):
+        trustedverifier.VerifiedLiteralAuthorizationSet(
+            [], engine=_engine(), occurrence=_OCCURRENCE,
+            expected_occurrence_count=2,
+            scanner_policy_sha256=_scanner_policy(), set_sha256="0" * 64)
+
+
+def test_an_engine_refusal_becomes_a_lane_refusal_and_publishes_failure(
+        d1_engine):
+    """Found by the EX5-R22 tests, and it was a live defect.
+
+    `BlockingError` is the engine's fail-closed stop and it is CORRECT for it
+    to raise. But it is not a `LaneRefusal`, so it escaped D1's
+    `except LaneRefusal` handler: the pending status stayed on the pull request
+    forever, no failure was ever published, and `laneentry` reported a crash
+    rather than a refusal. The lane's whole error contract is that the two are
+    distinguishable without reading a traceback."""
+    published = []
+    claims = [_empty_literal_set(occurrence=D1_OCCURRENCE,
+                                scanner_policy=_scanner_policy())
+              if e["header"]["prerequisite_key"]
+              == authzenvelope.LITERAL_PREREQUISITE else e
+              for e in _d1_claims()]
+    with pytest.raises(errors.LaneRefusal) as excinfo:
+        d1runtime.run(**_d1_kwargs(operator_claims=claims,
+                                   publisher=published.append))
+    assert "engine_refused" in excinfo.value.reason
+    assert [p["state"] for p in published] == ["pending", "failure"]
+    # The engine's message never reaches the status description.
+    assert "atom" not in published[-1]["description"]
+
+
+def test_the_seam_translates_every_engine_entry_point(d1_engine):
+    """Both engine calls that can raise are wrapped. A wrapped planner and an
+    unwrapped core would leave exactly one path that crashes."""
+    tree = ast.parse((LANE_DIR / "enginebridge.py").read_text(encoding="utf-8"))
+
+    # Derived, not enumerated. The first version of this test compared the set
+    # of `where=` labels against a literal `{"build_skeleton",
+    # "prepare_review_plan_core"}`, which passed while the bridge had two
+    # engine calls and had to be edited every time one was added — a test that
+    # must be updated to stay green is a test that stops being a check. The
+    # question is: is there an engine call NOT inside `engine_refusals`.
+    engine_names = set()
+    for node in ast.walk(tree):
+        # `executor = engine["modules"]["verifier.executor"]`
+        if isinstance(node, ast.Assign) and isinstance(node.value,
+                                                       ast.Subscript):
+            inner = node.value.value
+            if (isinstance(inner, ast.Subscript)
+                    and isinstance(inner.slice, ast.Constant)
+                    and inner.slice.value == "modules"):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        engine_names.add(target.id)
+    assert engine_names, "no engine module binding found; the probe is blind"
+
+    def engine_calls(node):
+        return {n for n in ast.walk(node) if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and isinstance(n.func.value, ast.Name)
+                and n.func.value.id in engine_names}
+
+    guarded, labels = set(), set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if getattr(getattr(call, "func", None), "id",
+                       "") != "engine_refusals":
+                continue
+            for keyword in call.keywords:
+                if keyword.arg == "where":
+                    labels.add(keyword.value.value)
+            for body_node in node.body:
+                guarded |= engine_calls(body_node)
+
+    # Attribute READS are not calls and cannot raise the engine's
+    # `BlockingError`; `model_panel` and `pin_names` read tuples. Only calls
+    # are in scope, and every one of them must be guarded.
+    unguarded = sorted(node.func.attr for node in engine_calls(tree)
+                       if node not in guarded)
+    assert unguarded == [], (
+        f"enginebridge calls {unguarded} outside `engine_refusals`; an "
+        "unwrapped engine call escapes as a crash, so the lane publishes no "
+        "failure status and the pull request stays pending forever")
+    assert {"build_skeleton", "prepare_review_plan_core"} <= labels
+
+
+# --------------------------------------------------------------------------
+# R06 — every input the lane reads has a step that produces it.
+#
+# The finding was total and invisible: both templates named
+# `${{ runner.temp }}/operator-records.json` and nothing in either file ever
+# wrote one. Every consumer was correct, every path was spelled right, and on a
+# real runner D1 would have refused on `d1_input_unreadable` forever. No test
+# showed it, because every test hands the runtime its documents directly.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("template,module_name", [
+    (D1_TEMPLATE, "d1cli"), (D2_TEMPLATE, "d2cli")],
+    ids=lambda v: getattr(v, "name", v))
+def test_every_consumed_path_has_a_producer_step_before_the_lane(
+        template, module_name):
+    """The graph, over the parsed workflow and over the producer table.
+
+    Not "does this step look like it writes a file" — that is a proxy for the
+    question, and the real one has an exact answer: does a step call the
+    function (or use the action) that writes this path, strictly before the
+    step that calls `laneentry.main`."""
+    module = {"d1cli": d1cli, "d2cli": d2cli}[module_name]
+    document = yaml.safe_load(template.read_text(encoding="utf-8"))
+    record = inputmaterial.assert_producer_consumer_graph(
+        document, required_env=module.REQUIRED_ENV)
+    assert record["consumed_paths"], "the probe found nothing to check"
+    assert record["findings"] == [], (
+        f"{template.name}: {record['findings']} — a path the lane reads with "
+        "no earlier producer is a file that does not exist on a runner, and "
+        "the refusal would look like operator error forever")
+
+
+def test_the_graph_check_reddens_when_a_producer_is_removed():
+    """The mutation. A check nothing reddens for is a check that is not there."""
+    document = yaml.safe_load(D1_TEMPLATE.read_text(encoding="utf-8"))
+    job = document["jobs"]["trusted-verifier-count"]
+    job["steps"] = [s for s in job["steps"]
+                    if "write_secret_documents" not in str(s.get("run") or "")]
+    record = inputmaterial.assert_producer_consumer_graph(
+        document, required_env=d1cli.REQUIRED_ENV)
+    assert {f["variable"] for f in record["findings"]} == set(
+        inputmaterial.SECRET_DOCUMENTS)
+
+
+def test_the_graph_check_reddens_when_a_producer_runs_after_the_lane():
+    """Order is checked as order. A producer after the consumer is a consumer
+    reading a file that does not exist yet, and both steps are present."""
+    document = yaml.safe_load(D2_TEMPLATE.read_text(encoding="utf-8"))
+    job = document["jobs"]["trusted-cross-vendor-review"]
+    moved = [s for s in job["steps"]
+             if "write_secret_documents" in str(s.get("run") or "")]
+    job["steps"] = [s for s in job["steps"] if s not in moved] + moved
+    record = inputmaterial.assert_producer_consumer_graph(
+        document, required_env=d2cli.REQUIRED_ENV)
+    assert {f["problem"] for f in record["findings"]} == {
+        "producer runs after the lane"}
+
+
+def test_a_consumed_path_with_no_named_producer_is_refused():
+    """A path the lane reads and no function writes cannot be checked for, so
+    it would be missing on a runner and present in every test."""
+    document = yaml.safe_load(D1_TEMPLATE.read_text(encoding="utf-8"))
+    with _refusal("consumed_path_has_no_named_producer"):
+        inputmaterial.assert_producer_consumer_graph(
+            document, required_env=(*d1cli.REQUIRED_ENV, "TRUSTED_INVENTED_PATH"))
+
+
+def test_every_action_the_templates_use_is_an_approved_pin():
+    """Two actions were added for R06. Adding one to a credential-bearing lane
+    is a deliberate edit to `actionpolicy`, and both SHAs were resolved against
+    upstream with a concrete release tag."""
+    for template in (D1_TEMPLATE, D2_TEMPLATE):
+        document = yaml.safe_load(template.read_text(encoding="utf-8"))
+        seen = 0
+        for job in document["jobs"].values():
+            for step in job.get("steps", []):
+                if "uses" in step:
+                    actionpolicy.assert_pinned(step["uses"],
+                                               where=template.name)
+                    seen += 1
+        assert seen >= 4, f"{template.name}: too few pinned actions to check"
+
+
+def test_the_operator_documents_are_written_from_secrets(tmp_path):
+    environ = {
+        "TRUSTED_PROTECTED_STATE_OBSERVATION": json.dumps({"a": 1}),
+        "TRUSTED_OPERATOR_RECORDS": json.dumps([{"b": 2}]),
+        "TRUSTED_OPERATOR_REVOCATIONS": json.dumps({"revoked": []}),
+        "TRUSTED_OBSERVATION_PATH": str(tmp_path / "protected-state.json"),
+        "TRUSTED_OPERATOR_RECORDS_PATH": str(tmp_path / "operator-records.json"),
+        "TRUSTED_REVOCATION_LIST_PATH": str(tmp_path / "revocations.json"),
+    }
+    record = inputmaterial.write_secret_documents(
+        environ, destination_dir=str(tmp_path))
+    assert set(record["materialized"]) == set(inputmaterial.SECRET_DOCUMENTS)
+    assert json.loads((tmp_path / "operator-records.json").read_text()) == [
+        {"b": 2}]
+    # The digests are of the DOCUMENTS, and nothing else about them is logged.
+    assert all(len(v["document_sha256"]) == 64
+               for v in record["materialized"].values())
+
+
+def test_an_absent_revocation_list_is_not_an_empty_one(tmp_path):
+    """The case that matters most. A lane that reads a missing list as no
+    revocations cannot be told to stop."""
+    environ = {
+        "TRUSTED_PROTECTED_STATE_OBSERVATION": "{}",
+        "TRUSTED_OPERATOR_RECORDS": "[]",
+        "TRUSTED_OBSERVATION_PATH": str(tmp_path / "a.json"),
+        "TRUSTED_OPERATOR_RECORDS_PATH": str(tmp_path / "b.json"),
+        "TRUSTED_REVOCATION_LIST_PATH": str(tmp_path / "c.json"),
+    }
+    with _refusal("trusted_input_secret_absent"):
+        inputmaterial.write_secret_documents(environ,
+                                             destination_dir=str(tmp_path))
+
+
+def test_a_secret_document_that_is_not_json_does_not_reach_the_log(tmp_path):
+    environ = {
+        "TRUSTED_PROTECTED_STATE_OBSERVATION": "not json at all",
+        "TRUSTED_OPERATOR_RECORDS": "[]",
+        "TRUSTED_OPERATOR_REVOCATIONS": "{}",
+        "TRUSTED_OBSERVATION_PATH": str(tmp_path / "a.json"),
+        "TRUSTED_OPERATOR_RECORDS_PATH": str(tmp_path / "b.json"),
+        "TRUSTED_REVOCATION_LIST_PATH": str(tmp_path / "c.json"),
+    }
+    with pytest.raises(errors.LaneRefusal) as caught:
+        inputmaterial.write_secret_documents(environ,
+                                             destination_dir=str(tmp_path))
+    assert "not json at all" not in caught.value.reason
+    assert "exception_class=JSONDecodeError" in caught.value.reason
+
+
+def test_a_materialized_path_outside_the_destination_is_refused(tmp_path):
+    """The path reaches `open(..., "w")`. A destination the caller picks is a
+    caller choosing where the lane writes."""
+    environ = {
+        "TRUSTED_PROTECTED_STATE_OBSERVATION": "{}",
+        "TRUSTED_OPERATOR_RECORDS": "[]",
+        "TRUSTED_OPERATOR_REVOCATIONS": "{}",
+        "TRUSTED_OBSERVATION_PATH": str(tmp_path / ".." / "escaped.json"),
+        "TRUSTED_OPERATOR_RECORDS_PATH": str(tmp_path / "b.json"),
+        "TRUSTED_REVOCATION_LIST_PATH": str(tmp_path / "c.json"),
+    }
+    with _refusal("trusted_input_path_outside_destination"):
+        inputmaterial.write_secret_documents(environ,
+                                             destination_dir=str(tmp_path))
+
+
+@pytest.mark.parametrize("tag", ["v1/../../other", "../etc", "a b", "", "x" * 80])
+def test_a_release_tag_that_names_a_location_is_refused(tag):
+    with _refusal("engine_release_tag_not_permitted"):
+        inputmaterial.release_url(api_url="https://api.github.com",
+                                  repository="mglaeser/bubble-regime-monitor",
+                                  tag=tag)
+
+
+def test_the_release_url_is_built_from_checked_parts():
+    assert inputmaterial.release_url(
+        api_url="https://api.github.com",
+        repository="mglaeser/bubble-regime-monitor",
+        tag="trusted-engine-v1.0.0") == (
+        "https://api.github.com/repos/mglaeser/bubble-regime-monitor"
+        "/releases/tags/trusted-engine-v1.0.0")
+    with _refusal("engine_release_api_not_https"):
+        inputmaterial.release_url(api_url="http://api.github.com",
+                                  repository="a/b", tag="v1")
+
+
+def test_two_assets_with_one_name_is_a_refusal_not_a_first_match():
+    """Which bytes arrive would otherwise depend on API ordering."""
+    release = {"assets": [{"name": "engine.tar.gz", "url": "https://a/1"},
+                          {"name": "engine.tar.gz", "url": "https://a/2"}]}
+    with _refusal("engine_release_asset_duplicated"):
+        inputmaterial.select_asset(release, name="engine.tar.gz")
+    with _refusal("engine_release_asset_absent"):
+        inputmaterial.select_asset({"assets": []}, name="engine.tar.gz")
+
+
+def test_the_engine_release_is_verified_against_the_operators_digest(tmp_path):
+    """The release supplies the bytes and a repository variable supplies the
+    number they are checked against. A release that supplied both would be
+    checking itself."""
+    artifact = b"engine bytes"
+    identity = json.dumps({"engine_artifact_sha256": "a" * 64}).encode()
+    release = json.dumps({"assets": [
+        {"name": "engine.tar.gz", "url": "https://api/assets/1"},
+        {"name": "engine-identity.json", "url": "https://api/assets/2"}]})
+
+    def fetch(url, *, accept):
+        return {"https://api/assets/1": artifact,
+                "https://api/assets/2": identity}.get(url, release.encode())
+
+    environ = {
+        "GITHUB_API_URL": "https://api.github.com",
+        "GITHUB_REPOSITORY": "mglaeser/bubble-regime-monitor",
+        "TRUSTED_ENGINE_RELEASE_TAG": "trusted-engine-v1",
+        "TRUSTED_ENGINE_DIGEST": hashlib.sha256(artifact).hexdigest(),
+        "TRUSTED_ENGINE_ARTIFACT_PATH": str(tmp_path / "engine.tar.gz"),
+        "TRUSTED_ENGINE_IDENTITY_PATH": str(tmp_path / "engine-identity.json"),
+    }
+    record = inputmaterial.fetch_engine_release(
+        environ, destination_dir=str(tmp_path), fetch=fetch)
+    assert (tmp_path / "engine.tar.gz").read_bytes() == artifact
+    assert record["materialized"]["TRUSTED_ENGINE_ARTIFACT_PATH"][
+        "sha256"] == environ["TRUSTED_ENGINE_DIGEST"]
+
+    with _refusal("engine_release_artifact_digest_mismatch"):
+        inputmaterial.fetch_engine_release(
+            {**environ, "TRUSTED_ENGINE_DIGEST": "f" * 64},
+            destination_dir=str(tmp_path), fetch=fetch)
+
+
+def test_the_engine_release_refuses_when_no_digest_is_configured(tmp_path):
+    with _refusal("engine_artifact_digest_not_configured"):
+        inputmaterial.fetch_engine_release(
+            {"TRUSTED_ENGINE_RELEASE_TAG": "v1"},
+            destination_dir=str(tmp_path), fetch=lambda url, *, accept: b"{}")
+
+
+def test_the_candidate_plan_is_read_from_the_inert_clone(tmp_path):
+    """`git cat-file` reads committed bytes without a working tree, which is
+    what lets the fetch stay `--no-checkout`. The template used to point this
+    path INSIDE that clone, where by construction no file exists."""
+    plan = json.dumps({"units": []}).encode()
+    seen = {}
+
+    def read_blob(sha, path, *, cwd):
+        seen.update({"sha": sha, "path": path, "cwd": cwd})
+        return plan
+
+    environ = {"CANDIDATE_HEAD_SHA": SHA_A,
+               "TRUSTED_CANDIDATE_PLAN_PATH": str(tmp_path / "plan.json")}
+    record = inputmaterial.write_candidate_plan(
+        environ, destination_dir=str(tmp_path), clone_dir="/clone",
+        read_blob=read_blob)
+    assert seen == {"sha": SHA_A, "cwd": "/clone",
+                    "path": inputmaterial.CANDIDATE_PLAN_REPO_PATH}
+    assert (tmp_path / "plan.json").read_bytes() == plan
+    assert record["TRUSTED_CANDIDATE_PLAN_PATH"]["sha256"] == hashlib.sha256(
+        plan).hexdigest()
+
+
+def test_a_candidate_plan_that_is_not_json_does_not_reach_the_log(tmp_path):
+    environ = {"CANDIDATE_HEAD_SHA": SHA_A,
+               "TRUSTED_CANDIDATE_PLAN_PATH": str(tmp_path / "plan.json")}
+    with pytest.raises(errors.LaneRefusal) as caught:
+        inputmaterial.write_candidate_plan(
+            environ, destination_dir=str(tmp_path), clone_dir="/clone",
+            read_blob=lambda sha, path, *, cwd: b"secret-looking candidate text")
+    assert "candidate text" not in caught.value.reason
+
+
+def test_the_candidate_plan_path_is_not_inside_the_no_checkout_clone():
+    """The exact defect, as its own assertion. A `--no-checkout` clone has no
+    working tree, so a path inside it can never resolve."""
+    document = yaml.safe_load(D1_TEMPLATE.read_text(encoding="utf-8"))
+    values = {}
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            values.update(step.get("env", {}) or {})
+    plan_path = values["TRUSTED_CANDIDATE_PLAN_PATH"]
+    checkout = values["TRUSTED_CANDIDATE_CHECKOUT"]
+    assert not plan_path.startswith(checkout + "/"), (
+        "the candidate plan is read from inside the inert clone, which has no "
+        "working tree; the path could never exist")
+
+
+def test_d1_retains_both_signed_documents_for_d2(tmp_path):
+    """D1's two signed documents are written as ENVELOPE plus PAYLOAD pairs.
+
+    Both halves, because the envelope carries `payload_sha256` and not the
+    payload: an envelope alone is a signature over bytes nobody kept."""
+    result = _d1_result()
+    values = {"TRUSTED_PLAN_OUTPUT_PATH": str(tmp_path / "plan.json"),
+              "TRUSTED_COUNT_EVIDENCE_OUTPUT_PATH": str(tmp_path / "ev.json")}
+    d1cli.write_signed_documents(result, values)
+    for name in ("plan.json", "ev.json"):
+        document = json.loads((tmp_path / name).read_text())
+        assert set(document) == {"envelope", "payload"}
+        evidencewire.assert_payload_matches(document["envelope"],
+                                            document["payload"])
+    plan = json.loads((tmp_path / "plan.json").read_text())
+    assert plan["envelope"]["evidence_class"] == executableplan.PLAN_CLASS
+
+
+def test_d1_writes_nothing_when_the_run_produced_no_document(tmp_path):
+    """A refusal must leave no file a retain step would upload under a name
+    meaning "D1 counted this"."""
+    values = {"TRUSTED_PLAN_OUTPUT_PATH": str(tmp_path / "plan.json"),
+              "TRUSTED_COUNT_EVIDENCE_OUTPUT_PATH": str(tmp_path / "ev.json")}
+    with _refusal("signed_document_missing"):
+        d1cli.write_signed_documents({"payload": {}}, values)
+    assert not (tmp_path / "plan.json").exists()
+
+
+def test_the_two_d1_documents_carry_different_evidence_classes():
+    """Nothing in either envelope used to say which was which, so the only
+    thing separating them was the argument slot D2 received them in — and the
+    slot is chosen by the caller."""
+    d1 = _d1_result()
+    assert d1["executable_plan"]["envelope"]["evidence_class"] == (
+        executableplan.PLAN_CLASS)
+    assert d1["count_evidence"]["envelope"]["evidence_class"] == (
+        "TRUSTED_COUNT_EVIDENCE")
+    assert executableplan.PLAN_CLASS in evidencewire.TRUSTED_CLASSES
+    assert executableplan.PLAN_CLASS in evidencewire.PRIVATE_ONLY_CLASSES
+
+
+def test_d2_refuses_a_count_evidence_document_in_the_plan_slot(d1_engine):
+    """Handing D2 the same signed document twice. Caught by the class, which is
+    what the class is for."""
+    d1 = _d1_result()
+    with _refusal("d1_document_is_the_wrong_class"):
+        d2runtime.run(**_d2_kwargs(signed_plan=d1["count_evidence"]))
+
+
+def test_the_engine_identity_must_describe_the_artifact_this_run_verified():
+    """EX5-R21's missing link. `runtimebinding` compares the operator's five
+    approved digests against the identity record, and `inspect_archive`
+    verifies the artifact against its own expected digest — and nothing
+    required the two artifact digests to be the same number."""
+    artifact = _engine_artifact_argument()
+    identity = _engine_identity()
+    record = enginebridge.assert_identity_is_this_engine(
+        identity, engine_artifact=artifact)
+    assert record["engine_artifact_sha256"] == artifact["expected_sha256"]
+    with _refusal("engine_identity_is_for_a_different_artifact"):
+        enginebridge.assert_identity_is_this_engine(
+            {**identity, "engine_artifact_sha256": "d" * 64},
+            engine_artifact=artifact)
+    for field in enginebridge.ENGINE_IDENTITY_FIELDS:
+        with _refusal("engine_identity_incomplete"):
+            enginebridge.assert_identity_is_this_engine(
+                {k: v for k, v in identity.items() if k != field},
+                engine_artifact=artifact)
+
+
+def test_the_output_privacy_scan_reads_the_key_the_engine_emits():
+    """The defect this closes was one `.get` with a default.
+
+    `result.get("evidence_records", [])` named a key the engine has never
+    emitted, so the scan received an empty list, scanned nothing, and returned
+    a record saying so — and every test asserting "the output was scanned"
+    passed."""
+    assert enginebridge.EVIDENCE_RECORDS_KEY == "per_model_verdict_evidence"
+    executor = _module("verifier.executor")
+    source = inspect.getsource(executor.execute_batch)
+    assert f'"{enginebridge.EVIDENCE_RECORDS_KEY}"' in source, (
+        "the engine renamed the key the privacy scan reads")
+
+
+def test_d2_scans_every_provider_written_field_before_persisting(d1_engine):
+    result = d2runtime.run(**_d2_kwargs())
+    privacy = result["payload"]["output_privacy"]
+    panel = enginebridge.model_panel(_engine())
+    plan = _d1_result()["executable_plan"]["payload"]
+    # reason + proof_of_check + one entry per checked category, per unit, per
+    # model. The floor is the two scalar fields.
+    assert privacy["scanned_field_count"] >= 2 * len(panel) * len(
+        plan["final_units"])
+    assert set(privacy["scanned_fields"]) >= {"reason", "proof_of_check",
+                                              "checked_categories"}
+
+
+# --------------------------------------------------------------------------
+# R10 — the protected engine build, which is the only thing that can produce
+# the two files R06 materializes.
+#
+# `enginebuild.candidate_package` could honestly compute three of the five
+# approved digests and had to leave the rest empty. That is correct and it also
+# means the operator had nothing to approve and `runtimebinding` had nothing to
+# compare against.
+# --------------------------------------------------------------------------
+
+#: The SOURCE of truth, beside D0 and the two templates. The deployed copy in
+#: `.github/workflows/` must be byte-identical — a test below checks it, the
+#: same way D0's two copies are kept in step.
+ENGINE_BUILD_WORKFLOW = LANE_DIR / "workflow" / "trusted-engine-build.yml"
+DEPLOYED_ENGINE_BUILD = (ROOT / ".github" / "workflows"
+                         / "trusted-engine-build.yml")
+
+
+def _build_context(**over):
+    return {"build_workflow_run_id": 4242,
+            "build_workflow_run_attempt": 1,
+            "build_ref": "refs/heads/main",
+            "build_head_sha": SHA_A,
+            "runner_image_digest": "Linux-X64-github-hosted",
+            "repository_numeric_id": REPOSITORY_NUMERIC_ID, **over}
+
+
+def _build_roles():
+    return {"protected_trusted_lane": _rev("origin/main"),
+            "candidate_verifier": _rev("origin/fix/verifier-intra-file-review-plan")}
+
+
+def test_the_built_package_carries_all_five_approved_digests():
+    """The producer half of `enginebridge.ENGINE_IDENTITY_FIELDS`. A build that
+    emitted four of five would make the fifth unapprovable and the failure look
+    like operator error."""
+    record = enginebuild.built_package(
+        roles=_build_roles(), repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        artifact_sha256="a" * 64, context=_build_context(), cwd=str(ROOT))
+    assert set(enginebuild.BUILT_IDENTITY_FIELDS) == set(
+        enginebridge.ENGINE_IDENTITY_FIELDS)
+    assert all(len(record[f]) == 64
+               for f in enginebuild.BUILT_IDENTITY_FIELDS)
+    assert record["state"] == enginebuild.BUILT_STATE
+    # And it is exactly what the consumer reads.
+    assert enginebridge.assert_identity_is_this_engine(
+        record, engine_artifact={"expected_sha256": "a" * 64})
+
+
+def test_the_built_record_is_what_the_cli_will_accept(tmp_path):
+    """Producer and consumer, joined. `d1cli.load_engine_identity` reads the
+    file this build writes, and a shape either side invents alone is a shape
+    the other rejects on a runner."""
+    record = enginebuild.built_package(
+        roles=_build_roles(), repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        artifact_sha256="b" * 64, context=_build_context(), cwd=str(ROOT))
+    path = tmp_path / "engine-identity.json"
+    path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    loaded = d1cli.load_engine_identity(str(path))
+    assert loaded == {f: record[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS}
+
+
+def test_the_provenance_names_the_run_and_the_source_commits():
+    """A provenance that named only the run would be satisfied by any artifact
+    that run produced."""
+    roles = _build_roles()
+    record = enginebuild.provenance_record(_build_context(), roles=roles)
+    assert record["source_roles"] == dict(sorted(roles.items()))
+    assert record["build_workflow_run_id"] == 4242
+    # A different candidate commit is a different provenance.
+    other = enginebuild.provenance_record(
+        _build_context(), roles={**roles, "candidate_verifier": SHA_C})
+    assert other["provenance_sha256"] != record["provenance_sha256"]
+    # And so is a different run.
+    rerun = enginebuild.provenance_record(
+        _build_context(build_workflow_run_attempt=2), roles=roles)
+    assert rerun["provenance_sha256"] != record["provenance_sha256"]
+
+
+@pytest.mark.parametrize("field", enginebuild.PROVENANCE_FIELDS)
+def test_a_provenance_with_a_hole_in_it_is_refused(field):
+    """A builder declining to say which build this was."""
+    context = {k: v for k, v in _build_context().items() if k != field}
+    with _refusal("build_context_incomplete"):
+        enginebuild.provenance_record(context, roles=_build_roles())
+
+
+def test_the_engine_may_not_be_built_from_a_tag():
+    """A tag can be moved to a different commit without changing its name."""
+    with _refusal("build_ref_not_a_branch"):
+        enginebuild.provenance_record(
+            _build_context(build_ref="refs/tags/v1"), roles=_build_roles())
+
+
+def test_a_built_record_missing_a_digest_is_refused():
+    record = enginebuild.built_package(
+        roles=_build_roles(), repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        artifact_sha256="c" * 64, context=_build_context(), cwd=str(ROOT))
+    for field in enginebuild.BUILT_IDENTITY_FIELDS:
+        with _refusal("engine_identity_incomplete"):
+            enginebuild.assert_built_record({**record, field: None})
+    with _refusal("engine_identity_wrong_state"):
+        enginebuild.assert_built_record({**record, "state": "APPROVED"})
+    with _refusal("engine_provenance_digest_mismatch"):
+        enginebuild.assert_built_record({**record,
+                                         "provenance_sha256": "d" * 64})
+
+
+def test_the_build_refuses_to_run_holding_a_capability():
+    """The workflow that produces what the lane trusts is the one whose
+    compromise is worth the most."""
+    clean = enginebuild.assert_build_holds_no_provider_secret(
+        {"PATH": "/usr/bin", "GITHUB_REF": "refs/heads/main"})
+    assert clean["provider_secret_present"] is False
+    for name in ("TRUSTED_VERIFIER_OPENAI_KEY", "TRUSTED_EVIDENCE_SIGNING_KEY",
+                 "TRUSTED_OPERATOR_TRUST_STORE"):
+        with _refusal("engine_build_holds_a_capability"):
+            enginebuild.assert_build_holds_no_provider_secret({name: "x"})
+    # And an EMPTY value is not "present": an unset secret expands to "" in a
+    # workflow, and refusing that would refuse every correct run.
+    assert enginebuild.assert_build_holds_no_provider_secret(
+        {"TRUSTED_VERIFIER_OPENAI_KEY": ""})["provider_secret_present"] is False
+
+
+def test_the_engine_build_workflow_names_no_secret_and_no_environment():
+    """The containment, read off the file rather than asserted about it."""
+    text = ENGINE_BUILD_WORKFLOW.read_text(encoding="utf-8")
+    document = yaml.safe_load(text)
+    for job_name, job in document["jobs"].items():
+        assert "environment" not in job, (
+            f"{job_name} declares an environment; that is how a secret becomes "
+            "reachable, and this build must not be able to reach one")
+        assert job.get("permissions") == {"contents": "read"}, (
+            f"{job_name}: a build that can write to the repository can move "
+            "the tag it publishes under")
+    # Over the VALUES, not the raw text. The blunt version — `"secrets." not
+    # in text` — was written first and it failed on this workflow's own header,
+    # which explains that the file names no secret. Asking whether the string
+    # appears is a proxy for the question that matters, which is whether any
+    # value the runner expands references one.
+    def values(node):
+        if isinstance(node, dict):
+            for key, item in node.items():
+                yield str(key)
+                yield from values(item)
+        elif isinstance(node, list):
+            for item in node:
+                yield from values(item)
+        elif node is not None:
+            yield str(node)
+
+    referenced = [v for v in values(document) if "secrets." in v]
+    assert referenced == [], f"the build references {referenced}"
+    assert document["permissions"] == {"contents": "read"}
+
+
+def test_the_engine_build_uses_no_forbidden_trigger():
+    document = yaml.safe_load(ENGINE_BUILD_WORKFLOW.read_text(encoding="utf-8"))
+    triggers = set(document[True] if True in document else document["on"])
+    assert triggers == {"workflow_dispatch"}
+    assert not (triggers & set(workflowpolicy.FORBIDDEN_TRIGGERS))
+
+
+def test_the_engine_build_pins_every_action():
+    document = yaml.safe_load(ENGINE_BUILD_WORKFLOW.read_text(encoding="utf-8"))
+    seen = 0
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            if "uses" in step:
+                actionpolicy.assert_pinned(step["uses"],
+                                           where="trusted-engine-build.yml")
+                seen += 1
+    assert seen >= 3
+
+
+def test_the_engine_build_proves_determinism_before_it_retains():
+    """An operator cannot approve a digest that moves when nothing moved: they
+    would approve one and the lane would open another. `gzip` stamping the
+    current time caused exactly this."""
+    document = yaml.safe_load(ENGINE_BUILD_WORKFLOW.read_text(encoding="utf-8"))
+    steps = document["jobs"]["build-engine"]["steps"]
+    determinism = next(i for i, s in enumerate(steps)
+                       if "deterministic" in str(s.get("name", "")).lower())
+    retain = next(i for i, s in enumerate(steps)
+                  if "upload-artifact" in str(s.get("uses", "")))
+    assert determinism < retain, (
+        "the artifact is retained before its determinism is proved, so a "
+        "non-reproducible build would still publish a digest")
+
+
+def test_the_engine_build_is_part_of_the_approved_bootstrap_policy():
+    """A build workflow edited after the operator approved the bootstrap builds
+    a different engine, and prerequisite 15 is the approval that should stop
+    being valid when it does."""
+    assert "trusted-engine-build.yml" in bootstrapstate.BOOTSTRAP_POLICY_FILES
+    # Deployed as a `.yml`, not a template — it holds no credential, which is
+    # the whole reason it can be. D1 and D2 stay templates until activation,
+    # so the digest is computed over a directory carrying both forms.
+    assert "trusted-engine-build.yml" not in (
+        bootstrapstate.BOOTSTRAP_POLICY_ALTERNATES)
+    assert DEPLOYED_ENGINE_BUILD.is_file()
+    # The deployed copy must be the reviewed one. Two files with one name that
+    # differ means the bootstrap policy digest describes a workflow other than
+    # the one that runs — which is the exact thing prerequisite 15 approves.
+    assert DEPLOYED_ENGINE_BUILD.read_bytes() == (
+        ENGINE_BUILD_WORKFLOW.read_bytes())
+
+
+def test_editing_the_build_workflow_changes_the_bootstrap_policy_digest(
+        tmp_path):
+    """The mutation. A digest nothing moves is a digest that checks nothing."""
+    for name in bootstrapstate.BOOTSTRAP_POLICY_FILES:
+        source = LANE_DIR / "workflow" / name
+        if source.exists():
+            (tmp_path / name).write_bytes(source.read_bytes())
+        else:
+            # D1/D2 are deployed as templates before activation.
+            (tmp_path / (name + ".template")).write_bytes(
+                (LANE_DIR / "workflow" / (name + ".template")).read_bytes())
+    original = bootstrapstate.policy_digest(
+        workflow_dir=str(tmp_path), implemented_phase=phases.IMPLEMENTED_PHASE)
+    build = tmp_path / "trusted-engine-build.yml"
+    build.write_bytes(build.read_bytes() + b"\n# an edit after approval\n")
+    edited = bootstrapstate.policy_digest(
+        workflow_dir=str(tmp_path), implemented_phase=phases.IMPLEMENTED_PHASE)
+    assert edited["policy_sha256"] != original["policy_sha256"]
+
+
+def test_the_candidate_package_still_refuses_to_fill_in_the_built_fields():
+    """R10 adds a producer for the fields the candidate leaves empty; it must
+    not make the candidate able to fill them. A value there would be the
+    reviewed branch attesting itself."""
+    record = enginebuild.candidate_package(
+        roles=_build_roles(), repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        cwd=str(ROOT))
+    assert enginebuild.assert_is_only_a_candidate(record)["unlocks_d1"] is False
+    with _refusal("engine_candidate_claims_unavailable_fields"):
+        enginebuild.assert_is_only_a_candidate(
+            {**record, "artifact_sha256": "e" * 64})
+
+
+# --------------------------------------------------------------------------
+# R07/R20 — the status publisher is real.
+#
+# `statuspublish.publish` refused, and the refusal named a genuine operator
+# dependency: publishing needs an installation token a reviewed branch must not
+# hold. It was also standing in for code that did not exist, and only the first
+# half of that is legitimate. Everything except OBTAINING the token is below,
+# driven against a fake server exactly as the provider transport is.
+# --------------------------------------------------------------------------
+
+FAKE_STATUS_TOKEN = "ghs-not-a-real-token-000000000"  # pragma: allowlist secret
+
+
+def _status_request(**over):
+    return statuspublish.status_request(**{
+        "repository_numeric_id": REPOSITORY_NUMERIC_ID,
+        "candidate_head_sha": SHA_A,
+        "context": "trusted-verifier-count",
+        "state": "pending",
+        "description": "trusted count in progress",
+        "target_url": "https://github.com/x/y/actions/runs/77",
+        "trusted_run_id": 77,
+        "trusted_run_attempt": 1, **over})
+
+
+def _status_server(status=201, record=None, body=b'{"id":1}'):
+    def opener(method, url, headers, payload):
+        if record is not None:
+            record.append({"method": method, "url": url, "headers": headers,
+                           "body": payload})
+        return status, body
+
+    return opener
+
+
+def test_the_status_token_is_never_read_in_d0():
+    """The phase gate, driven rather than grepped."""
+    with _refusal("phase_not_deployed"):
+        statustransport.read_installation_token(
+            phase=phases.D1, environ={statustransport.TOKEN_ENV: "x" * 40})
+    with _refusal("status_token_phase_not_permitted"):
+        statustransport.read_installation_token(phase="D0")
+
+
+@pytest.mark.parametrize("value,category", [
+    (" " + "x" * 40, "status_token_has_surrounding_whitespace"),
+    ("x" * 40 + "\n", "status_token_has_surrounding_whitespace"),
+    ("x" * 5, "status_token_too_short"),
+    ("xx xx" + "y" * 40, "status_token_contains_whitespace"),
+    (None, "status_token_not_a_string"),
+])
+def test_a_malformed_status_token_is_refused(value, category):
+    """Shape checks live outside the phase gate so they are reachable in D0.
+    Inside it they would only be provable by grepping the source, and a test
+    that greps source asks whether a string is present rather than whether a
+    value is refused."""
+    with _refusal(category):
+        statustransport.assert_token_shape(value)
+
+
+def test_the_publisher_posts_to_the_exact_candidate_head():
+    """Not a ref. A status on a branch name follows the branch, and the whole
+    point of R20 is that a trusted green names the commit that was reviewed."""
+    seen = []
+    publisher = statustransport.bind(opener=_status_server(record=seen),
+                                     token=FAKE_STATUS_TOKEN, phase="D1")
+    record = publisher(_status_request())
+    assert seen[0]["url"] == (
+        f"https://api.github.com/repos/{CANONICAL_REPOSITORY}/statuses/{SHA_A}")
+    assert seen[0]["method"] == "POST"
+    assert record["candidate_head_sha"] == SHA_A
+    assert record["http_status"] == 201
+
+
+def test_the_status_post_record_carries_no_token():
+    """The token is joined to a COPY of the headers inside `send`, so the
+    record a caller holds and digests never held it."""
+    seen = []
+    post = statustransport.build_post(_status_request(),
+                                      repository=CANONICAL_REPOSITORY)
+    assert post["carries_credential"] is False
+    assert FAKE_STATUS_TOKEN not in json.dumps(post, default=str)
+    publisher = statustransport.bind(opener=_status_server(record=seen),
+                                     token=FAKE_STATUS_TOKEN, phase="D1")
+    publisher(_status_request())
+    # It DID reach the wire — that is the transport's job.
+    assert any("authorization" in {k.lower() for k in call["headers"]}
+               for call in seen)
+    assert FAKE_STATUS_TOKEN not in json.dumps(publisher.record(), default=str)
+
+
+def test_the_publisher_refuses_a_repository_it_was_handed():
+    """A caller-supplied repository is a caller choosing which pull request
+    gets a green trusted status."""
+    with _refusal("status_repository_not_canonical"):
+        statustransport.build_post(_status_request(), repository="evil/repo")
+
+
+def test_the_publisher_refuses_a_request_that_did_not_go_through_validation():
+    with _refusal("status_request_not_validated"):
+        statustransport.build_post({"state": "success"},
+                                   repository=CANONICAL_REPOSITORY)
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.github.com/repos/mglaeser/bubble-regime-monitor/issues/1",
+    "https://evil.example/repos/mglaeser/bubble-regime-monitor/statuses/" + SHA_A,
+    "https://api.github.com/repos/other/repo/statuses/" + SHA_A,
+])
+def test_the_endpoint_gate_refuses_a_url_the_publisher_did_not_build(url):
+    """The mirror of the count and generation endpoint gates. This token cannot
+    spend money, but it can mark a pull request green."""
+    with _refusal("status_endpoint_not_permitted"):
+        statustransport.assert_request_is_a_status_post(
+            {"method": "POST", "url": url}, repository=CANONICAL_REPOSITORY)
+
+
+def test_the_endpoint_gate_refuses_a_ref_in_the_url():
+    """`/statuses/main` is accepted by the API and is exactly the thing that
+    must not happen: it resolves to whatever main points at now."""
+    with _refusal("candidate_sha_not_a_commit_sha"):
+        statustransport.assert_request_is_a_status_post(
+            {"method": "POST",
+             "url": f"https://api.github.com/repos/{CANONICAL_REPOSITORY}"
+                    "/statuses/main"},
+            repository=CANONICAL_REPOSITORY)
+
+
+def test_a_rejected_publication_reports_the_code_and_never_the_body():
+    """A GitHub error body echoes the description and the target URL, and on an
+    auth failure it can echo request headers."""
+    publisher = statustransport.bind(
+        opener=_status_server(status=403,
+                              body=b'{"message":"Bad credentials Bearer ghs_x"}'),
+        token=FAKE_STATUS_TOKEN, phase="D1")
+    with pytest.raises(errors.LaneRefusal) as caught:
+        publisher(_status_request())
+    assert "http_status=403" in caught.value.reason
+    assert "Bearer" not in caught.value.reason
+    assert "Bad credentials" not in caught.value.reason
+
+
+def test_a_transport_failure_reports_the_class_and_never_the_text():
+    """A transport error can carry the whole Authorization header."""
+    def exploding(method, url, headers, body):
+        raise OSError(f"connection failed: {headers.get('authorization')}")
+
+    publisher = statustransport.bind(opener=exploding, token=FAKE_STATUS_TOKEN,
+                                     phase="D1")
+    with pytest.raises(errors.LaneRefusal) as caught:
+        publisher(_status_request())
+    assert "exception_class=OSError" in caught.value.reason
+    assert FAKE_STATUS_TOKEN not in caught.value.reason
+
+
+def test_an_oversized_status_response_is_refused():
+    publisher = statustransport.bind(
+        opener=_status_server(
+            body=b"x" * (statustransport.MAX_RESPONSE_BYTES + 1)),
+        token=FAKE_STATUS_TOKEN, phase="D1")
+    with _refusal("status_response_too_large"):
+        publisher(_status_request())
+
+
+def test_the_publisher_bounds_how_many_statuses_one_run_may_set():
+    """A run publishes pending plus one terminal. A loop that republished on
+    every retry would spam the timeline, and the ordering rules alone would not
+    stop it."""
+    publisher = statustransport.TrustedStatusPublisher(
+        opener=_status_server(), token=FAKE_STATUS_TOKEN,
+        repository=CANONICAL_REPOSITORY, phase="D1", max_publications=2)
+    publisher(_status_request())
+    publisher(_status_request(state="success", evidence_sha256="a" * 64,
+                              description="done"))
+    with _refusal("status_publication_cap_reached"):
+        publisher(_status_request())
+
+
+def test_a_success_without_evidence_never_reaches_the_publisher():
+    """The decision lives in `status_request`, which is what makes it checkable
+    without a token — the publisher never sees an unvalidated request."""
+    with _refusal("success_without_evidence"):
+        _status_request(state="success", description="all good")
+
+
+def test_only_a_trusted_context_may_be_published():
+    """R20. An ordinary green and a trusted green must stay distinguishable,
+    and the publisher is one of the two things that keeps them apart."""
+    for context in ("test (3.12)", "d0-containment", "build-engine",
+                    "independent-verify-inactive"):
+        with _refusal("context_not_publishable"):
+            _status_request(context=context)
+    for context in statusnames.TRUSTED_STATUSES:
+        assert _status_request(context=context)["context"] == context
+
+
+def test_d1_and_d2_publish_through_the_real_publisher_now():
+    """Both CLIs used to pass `statuspublish.publish`, which refuses. The
+    refusal was honest about the token and was also standing in for code that
+    did not exist."""
+    for module in (d1cli, d2cli):
+        source = inspect.getsource(module.main)
+        assert "statustransport.bind" in source
+        assert "publisher=statuspublish.publish" not in source
+
+
+def test_the_refusing_stub_still_refuses_for_a_caller_that_has_no_token():
+    """`statuspublish.publish` stays, and stays refusing. A lane handed no
+    publisher must not silently publish nothing — it must say so."""
+    with _refusal("status_publication_not_available_in_D0"):
+        statuspublish.publish(_status_request())

@@ -1,0 +1,208 @@
+# R10 — the protected engine build. NO SECRET, NO PROVIDER CALL.
+#
+# This produces the two files D1 and D2 read: `engine.tar.gz` and
+# `engine-identity.json`, published together on one release tag. Until it
+# existed, `enginebuild.candidate_package` could honestly compute three of the
+# five approved digests and had to leave the other two empty — which is correct
+# and also means the operator had nothing to approve and the lane's runtime
+# binding gate had nothing to compare against.
+#
+# WHAT MAKES THIS BUILD TRUSTWORTHY, precisely. It is NOT that it runs
+# different code: `enginesource.build_engine_artifact` is the same
+# deterministic function anyone can run, and the artifact is a pure function of
+# the two source commits — fixed member order, fixed mode, zero mtime — so
+# anybody with those commits can rebuild it and get the same digest. That is
+# reproducibility, and reproducibility is not authority.
+#
+# What it adds is three things a reproduction cannot:
+#
+#   * it runs from a PROTECTED ref, so the source commits it names are commits
+#     that survived branch protection;
+#   * it holds NO credential. No `environment:`, no `secrets.` reference
+#     anywhere in this file, and `assert_build_holds_no_provider_secret`
+#     re-checks the names at runtime. A build that could reach the provider is
+#     a build whose compromise is worth more than the lane's;
+#   * it records WHICH run produced the bytes, so the provenance is a statement
+#     by a builder rather than a claim by whoever is holding the file.
+#
+# The five digests still mean nothing until an operator approves them out of
+# band. That approval is prerequisite 14, and `runtimebinding` compares it to
+# the artifact the run actually opened.
+#
+# Action pins (immutable SHAs; mapping in scripts/trustedlane/actionpolicy.py):
+#   actions/checkout        11d5960a326750d5838078e36cf38b85af677262  (v4.4.0)
+#   actions/setup-python    a26af69be951a213d495a4c3e4e4022e16d87065  (v5.6.0)
+#   actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02  (v4.6.2)
+
+name: trusted-engine-build
+
+# `workflow_dispatch` only, and it takes no ref-selecting input: if the caller
+# picks the ref, the caller picks the code. Deliberately absent:
+# `pull_request_target`, `issue_comment`, `workflow_run` — every one of them
+# runs the base definition against a head someone else controls, and
+# `workflowpolicy.FORBIDDEN_TRIGGERS` refuses all three.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_verifier_sha:
+        description: Commit of the candidate verifier package to build from
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-engine:
+    runs-on: ubuntu-latest
+    # NO `environment:`. That absence is the containment: an environment is
+    # how a secret becomes reachable, and this job must not be able to reach
+    # one even by accident.
+    permissions:
+      contents: read
+    outputs:
+      artifact_sha256: ${{ steps.build.outputs.artifact_sha256 }}
+    steps:
+      - name: Check out the protected ref only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          # Full history: the artifact is built from git BLOBS at two exact
+          # commits, and a shallow clone would make a missing object look like
+          # a missing file.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the hash-locked runtime
+        run: |
+          python -m pip install --require-hashes --no-deps \
+            -r requirements-trusted-runtime.txt
+
+      - name: Containment invariants
+        env:
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          OBSERVED_REF: ${{ github.ref }}
+        run: |
+          python - <<'PROBE'
+          import json, os, sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import enginebuild, identity
+          identity.assert_repository_numeric_id(
+              int(os.environ["EVENT_REPOSITORY_ID"]))
+          identity.assert_allowed_default_ref(os.environ["OBSERVED_REF"])
+          print(json.dumps(
+              enginebuild.assert_build_holds_no_provider_secret(os.environ)))
+          PROBE
+
+      - name: Build the engine artifact and its identity record
+        id: build
+        env:
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          BUILD_REF: ${{ github.ref }}
+          BUILD_HEAD_SHA: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CANDIDATE_VERIFIER_SHA: ${{ inputs.candidate_verifier_sha }}
+          RUNNER_IMAGE_DIGEST: ${{ runner.os }}-${{ runner.arch }}-${{ runner.environment }}
+          ENGINE_ARTIFACT_PATH: ${{ runner.temp }}/engine.tar.gz
+          ENGINE_IDENTITY_PATH: ${{ runner.temp }}/engine-identity.json
+        run: |
+          python - <<'PROBE'
+          import json, os, sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import enginebuild, enginesource
+
+          repository_numeric_id = int(os.environ["EVENT_REPOSITORY_ID"])
+          # The protected lane comes from the ref this build is running from;
+          # the candidate verifier package comes from the commit the operator
+          # named. They are different commits in the general case, which is
+          # why `roles` is a mapping rather than one SHA.
+          roles = {"protected_trusted_lane": os.environ["BUILD_HEAD_SHA"],
+                   "candidate_verifier": os.environ["CANDIDATE_VERIFIER_SHA"]}
+
+          artifact = enginesource.build_engine_artifact(
+              roles=roles, destination=os.environ["ENGINE_ARTIFACT_PATH"],
+              repository_numeric_id=repository_numeric_id)
+
+          identity = enginebuild.built_package(
+              roles=roles, repository_numeric_id=repository_numeric_id,
+              artifact_sha256=artifact["engine_artifact_sha256"],
+              context={
+                  "build_workflow_run_id": int(os.environ["BUILD_RUN_ID"]),
+                  "build_workflow_run_attempt":
+                      int(os.environ["BUILD_RUN_ATTEMPT"]),
+                  "build_ref": os.environ["BUILD_REF"],
+                  "build_head_sha": os.environ["BUILD_HEAD_SHA"],
+                  "runner_image_digest": os.environ["RUNNER_IMAGE_DIGEST"],
+                  "repository_numeric_id": repository_numeric_id,
+              })
+          with open(os.environ["ENGINE_IDENTITY_PATH"], "w",
+                    encoding="utf-8") as handle:
+              json.dump(identity, handle, sort_keys=True, indent=2)
+
+          # The digest goes to the step summary and the job output so an
+          # operator can read it without downloading anything. It is the number
+          # they set `TRUSTED_ENGINE_ARTIFACT_SHA256` to.
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"artifact_sha256={identity['engine_artifact_sha256']}\n")
+          print(json.dumps({k: identity[k]
+                            for k in enginebuild.BUILT_IDENTITY_FIELDS},
+                           indent=2))
+          PROBE
+
+      # Rebuilt a second time, from the same commits, and the digests compared.
+      # A build that is not deterministic produces a different number every run,
+      # and an operator cannot approve a digest that moves when nothing moved —
+      # they would approve one and the lane would open another. `gzip` stamping
+      # the current time into its header caused exactly this, and this step is
+      # what would catch it coming back.
+      - name: Prove the artifact is deterministic
+        env:
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          BUILD_HEAD_SHA: ${{ github.sha }}
+          CANDIDATE_VERIFIER_SHA: ${{ inputs.candidate_verifier_sha }}
+          ENGINE_ARTIFACT_PATH: ${{ runner.temp }}/engine.tar.gz
+          REBUILD_PATH: ${{ runner.temp }}/engine-rebuild.tar.gz
+        run: |
+          python - <<'PROBE'
+          import hashlib, json, os, sys
+          sys.path.insert(0, "scripts")
+          from trustedlane import enginesource
+
+          again = enginesource.build_engine_artifact(
+              roles={"protected_trusted_lane": os.environ["BUILD_HEAD_SHA"],
+                     "candidate_verifier": os.environ["CANDIDATE_VERIFIER_SHA"]},
+              destination=os.environ["REBUILD_PATH"],
+              repository_numeric_id=int(os.environ["EVENT_REPOSITORY_ID"]))
+          with open(os.environ["ENGINE_ARTIFACT_PATH"], "rb") as handle:
+              first = hashlib.sha256(handle.read()).hexdigest()
+          if first != again["engine_artifact_sha256"]:
+              raise SystemExit(
+                  "the artifact is not deterministic: two builds of the same "
+                  "commits produced different digests, so no digest an "
+                  "operator approves would survive the next build")
+          print(json.dumps({"deterministic": True, "sha256": first}))
+          PROBE
+
+      # Retained rather than released. Publishing needs `contents: write`, and
+      # this job holds `contents: read` on purpose — a build that can write to
+      # the repository is a build that can move the tag it publishes under.
+      # The operator downloads these two files and creates the release, which
+      # is also where the out-of-band approval of the five digests belongs.
+      - name: Retain the engine artifact and its identity record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: trusted-engine
+          path: |
+            ${{ runner.temp }}/engine.tar.gz
+            ${{ runner.temp }}/engine-identity.json
+          if-no-files-found: error
+          retention-days: 30

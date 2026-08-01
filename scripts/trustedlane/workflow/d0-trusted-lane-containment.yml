@@ -43,6 +43,17 @@ on:
     paths:
       - 'scripts/trustedlane/**'
       - 'tests/test_trusted_lane_bootstrap.py'
+      # The lane asserts against these three too, and D0 did not re-run when
+      # they changed — so HOSTED_D0_CONTAINMENT_EVIDENCE went stale silently
+      # while the PR body and the exchange report cited it.
+      #
+      # `.github/workflows/**` is the V-TRUST ratchet's own subject:
+      # livepolicy.validate_live_workflows reads this directory. The checks
+      # still ran via ci.yml, which has no path filter — so this is about which
+      # evidence gets regenerated, not about whether the ratchet fires.
+      - '.github/workflows/**'
+      - 'requirements-trusted-runtime.txt'
+      - 'docs/TRUSTED_LANE_OPERATOR_ACTIONS.md'
       - '.github/workflows/d0-trusted-lane-containment.yml'
 
 permissions:
