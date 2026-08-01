@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _SPEC = importlib.util.spec_from_file_location(
     "independent_verify", Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
 iv = importlib.util.module_from_spec(_SPEC)
@@ -205,12 +207,31 @@ class TestPanelFindingsOnItself:
         assert "ok" in out and "bad" in out       # invalid UTF-8 visible, not vanished
         assert "�" in out
 
-    def test_round6_diff_error_blocks_main(self, monkeypatch):
+    def test_round6_diff_error_blocks_main(self, monkeypatch, capsys):
+        # WRONG-REASON FIX (panel review P1.5-a): this monkeypatched
+        # `build_diff`, which main() no longer calls — main() moved to
+        # build_diff_chunks. The patched boom was never invoked, so main()
+        # returned 1 for an unrelated reason (the coverage gate blocking on the
+        # real repo diff), and the test would pass even if the DiffError guard
+        # were deleted. Patch the function main ACTUALLY calls, and assert the
+        # return came via the DiffError branch, not some other block.
         monkeypatch.setattr(iv, "KEY", "fake-key-for-test")
-        def boom():
+
+        def boom(*a, **k):
             raise iv.DiffError("git exploded")
-        monkeypatch.setattr(iv, "build_diff", boom)
+        monkeypatch.setattr(iv, "build_diff_chunks", boom)
         assert iv.main() == 1
+        assert "diff assembly failed" in capsys.readouterr().err
+
+    def test_round6_diff_error_guard_is_load_bearing(self, monkeypatch, capsys):
+        # prove the guard is what blocks: with build_diff_chunks returning a
+        # clean empty diff instead of raising, main() takes the "No diff" green
+        # path (return 0) — so the return-1 above is caused by the DiffError,
+        # not by anything downstream.
+        monkeypatch.setattr(iv, "KEY", "fake-key-for-test")
+        monkeypatch.setattr(iv, "build_diff_chunks", lambda *a, **k: ([], []))
+        assert iv.main() == 0
+        assert "No diff to review" in capsys.readouterr().out
 
     def test_round7_merge_base_failure_blocks_not_narrows(self, monkeypatch):
         import pytest as _pytest
@@ -245,3 +266,637 @@ class TestPanelFindingsOnItself:
         votes = [canned_approve, sol_good, low_ref]
         assert iv.require_approvals(votes, models, "gpt-5.6-sol", 1, ch)["block"] is False
         assert iv.attest_reasons(votes, 3)["block"] is True   # the conjunctive gate catches it
+
+
+class TestRiskOrderedReviewPacking:
+    """PR #23 finding: `git diff` emits paths ALPHABETICALLY, so bulk
+    `audit/*.json` consumed the body budget and the panel approved the mandate
+    gate having never seen it ("gate implementation truncated"). Review order
+    must be risk-driven, and any omission must stay visible."""
+
+    def test_gate_and_code_outrank_docs_and_data(self):
+        # ORDERING invariants, not absolute ranks (ranks get renumbered as
+        # classes are inserted; the relations are what the gate depends on)
+        r = iv.path_risk
+        assert r("scripts/mandate_gate.py") == 0 == r(".github/workflows/ci.yml")
+        # the law + attestations outrank app code, which outranks tests
+        assert r("governance/mandate/manifest.json") < r("app/services/compute.py")
+        assert r("governance/constitution.md") < r("app/services/compute.py")
+        assert r("app/services/compute.py") < r("tests/test_x.py")
+        assert r("frozen_methodology.json") < r("tests/test_x.py")
+        # docs/records rank last — they may be truncated, code may not
+        assert r("audit/03-findings.json") > r("app/x.py")
+        assert r("README.md") > r("scripts/x.py")
+        # governance prose still ranks above ordinary records
+
+    def test_is_code_distinguishes_real_gaps_from_records(self):
+        assert iv.is_code("scripts/mandate_gate.py")
+        assert iv.is_code("app/db.py")
+        assert iv.is_code("tests/test_y.py")
+        assert not iv.is_code("audit/03-findings.json")
+        assert not iv.is_code("docs/GOVERNANCE_FREEZE_RULE.md")
+
+    def test_high_risk_file_lands_in_first_chunk_despite_alphabetical_order(self):
+        # the exact failure: a huge 'audit/...' file sorts BEFORE 'scripts/...'
+        files = [("audit/03-findings.json", "A" * 900),
+                 ("scripts/mandate_gate.py", "GATEBODY")]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert "GATEBODY" in chunks[0]
+        assert omitted == []
+
+    def test_oversized_NON_control_file_is_truncated_with_marker(self):
+        files = [("docs/huge.md", "X" * 5000)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert omitted == []
+        assert "TRUNCATED" in chunks[0]          # the cut is visible
+
+    def test_oversized_CONTROL_file_is_reported_omitted_not_truncated(self):
+        # found independently by this repo's own sweep and by the panel
+        # (round 20): truncating a control file in place left its tail unread
+        # while the run greened, because only `omitted` reaches the gate
+        files = [("scripts/huge_gate.py", "X" * 5000)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert omitted == ["scripts/huge_gate.py"]
+        assert "X" * 5000 not in "".join(chunks)
+
+    def test_chunk_cap_bounds_cost_and_reports_what_it_dropped(self):
+        # cost control: never unbounded fan-out; whatever does not fit is
+        # returned as omitted rather than silently discarded
+        files = [(f"app/mod{i}.py", "Y" * 800) for i in range(10)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert len(chunks) == 2
+        assert omitted                            # the rest is accounted for
+        assert all(p.startswith("app/") for p in omitted)
+
+    def test_everything_fits_stays_a_single_chunk(self):
+        # the common case must NOT multiply panel cost
+        files = [("app/a.py", "a" * 100), ("audit/b.json", "b" * 100)]
+        chunks, omitted = iv.pack_by_risk(files, budget=10_000, max_chunks=2)
+        assert len(chunks) == 1
+        assert omitted == []
+
+
+class TestChunkingAdversarialFixes:
+    """Findings from the internal adversarial pass on the chunking change
+    itself (2026-07-25). Each test pins a hole that pass opened or found."""
+
+    def test_quoted_and_non_ascii_paths_are_parsed(self):
+        # CRITICAL: without -z, git C-quotes these and the per-file diff
+        # matched nothing — the file was reviewed by nobody, silently.
+        raw = "A\0app/café_backdoor.py\0M\0app/normal.py\0"
+        assert iv.parse_name_status_z(raw) == ["app/café_backdoor.py",
+                                               "app/normal.py"]
+
+    def test_rename_records_yield_the_new_path(self):
+        raw = "R089\0scripts/old_gate.py\0scripts/new_gate.py\0M\0app/x.py\0"
+        assert iv.parse_name_status_z(raw) == ["scripts/new_gate.py", "app/x.py"]
+
+    def test_truncated_record_fails_closed(self):
+        # Not inventing a path was only half of it: returning the SHORT list
+        # dropped every remaining file from review silently — no warning, no
+        # coverage block (panel round 26, second reviewer). An unparseable
+        # changed-file stream is now a blocking DiffError.
+        with pytest.raises(iv.DiffError):
+            iv.parse_name_status_z("R100\0only_old_path\0")
+        with pytest.raises(iv.DiffError):
+            iv.parse_name_status_z("M\0")
+        # BOTH SIDES: genuinely empty output is not truncation, it is "no
+        # changed files", and must stay a clean empty result
+        assert iv.parse_name_status_z("") == []
+        assert iv.parse_name_status_z("\0\0") == []
+
+    def test_is_code_covers_executable_content_outside_app_and_scripts(self):
+        # HIGH: tier-based is_code() called these "not code", so dropping them
+        # produced no warning at all — a backdoor in conftest.py runs in CI.
+        for path in ("conftest.py", "Makefile", "Dockerfile", "alembic.ini",
+                     "docs/harnesses/alfred_vintage_harness.py",
+                     "deploy/deploy-watch.sh", "r/gsadf.R",
+                     "deploy/systemd/bubblegauge.service", "evil.py"):
+            assert iv.is_code(path), path
+        for path in ("README.md", "audit/03-findings.json", "docs/NOTES.md"):
+            assert not iv.is_code(path), path
+
+    def test_capped_packing_never_admits_lower_risk_over_higher(self):
+        # HIGH: the gate file that missed the last chunk was dropped while a
+        # small tests/ file that happened to fit was admitted.
+        files = [("scripts/a_gate.py", "A" * 49_000),
+                 ("scripts/b_gate.py", "B" * 49_000),
+                 ("scripts/c_mandate_gate.py", "C" * 49_000),
+                 ("app/tiny.py", "d" * 500),
+                 ("tests/t.py", "e" * 400)]
+        chunks, omitted = iv.pack_by_risk(files, budget=50_000, max_chunks=2)
+        body = "\n".join(chunks)
+        assert "scripts/c_mandate_gate.py" in omitted
+        # once the cap forces an omission, nothing lower-risk sneaks in
+        assert "d" * 500 not in body
+        assert "e" * 400 not in body
+        assert set(omitted) == {"scripts/c_mandate_gate.py", "app/tiny.py",
+                                "tests/t.py"}
+
+    def test_excluded_content_only_change_still_gets_a_payload(self):
+        # CRITICAL: per-file assembly made an all-excluded PR produce zero
+        # payloads -> "No diff to review. Green." with no votes at all.
+        payload = iv.header_only("A\tdata/seed.sql\nA\tdata/config.csv\n",
+                                 " data/seed.sql | 10 +\n")
+        assert "data/seed.sql" in payload
+        assert "NONE SHOWN" in payload
+        assert "judge the change from the paths" in payload
+
+
+class TestControlBearingCoverage:
+    """Panel findings on the chunking change itself (PR #23, part 1): omitted
+    non-code CONTROL files and privacy-excluded code were both discarded with
+    no warning and no block."""
+
+    def test_law_and_gate_config_are_control_bearing(self):
+        for path in ("governance/constitution.md",
+                     "governance/accepted-residuals.json",
+                     ".github/CODEOWNERS", ".github/workflows/ci.yml",
+                     "scripts/mandate_gate.py", "conftest.py"):
+            assert iv.is_control_bearing(path), path
+
+    def test_no_path_is_exempt_from_control_bearing_review(self):
+        # the exemption is gone; law is control-bearing whatever its status
+        for path in ("governance/mandate.md", "governance/mandate/part1.md"):
+            assert iv.is_control_bearing(path, "A"), path
+            assert iv.is_control_bearing(path, "M"), path
+
+    def test_ordinary_docs_and_records_are_not_control_bearing(self):
+        for path in ("README.md", "audit/03-findings.json", "docs/NOTES.md"):
+            assert not iv.is_control_bearing(path), path
+
+
+class TestNoReviewExemptionsExist:
+    """The mandate text exemption was removed entirely: the 556KB spec is no
+    longer committed here (manifest mandate_text_status), so every
+    control-bearing path is reviewed or blocks, with no carve-outs."""
+
+    def test_module_defines_no_exemption_list(self):
+        assert not hasattr(iv, "_IMMUTABLE_TEXT")
+
+    def test_governance_paths_are_control_bearing_at_every_status(self):
+        for status in ("A", "M", "D", "R100"):
+            assert iv.is_control_bearing("governance/mandate.md", status)
+            assert iv.is_control_bearing("governance/constitution.md", status)
+            assert iv.is_control_bearing("governance/mandate/part1.md", status)
+
+
+class TestControlDataFiles:
+    """Panel finding (PR #23 round 7): 'it's only JSON, not code' let the
+    scored artifact and the gate's own thresholds be omitted from review with
+    no deterministic block."""
+
+    def test_scored_artifact_and_thresholds_are_control_bearing(self):
+        for path in ("frozen_methodology.json", "audit/ratchet-baselines.json",
+                     ".secrets.baseline"):
+            assert iv.is_control_bearing(path, "M"), path
+
+    def test_control_data_is_ranked_for_early_review(self):
+        # small files that must never be crowded out by bulk records
+        for path in ("frozen_methodology.json", "audit/ratchet-baselines.json"):
+            assert iv.path_risk(path) < iv.path_risk("app/x.py"), path
+            assert iv.path_risk(path) < iv.path_risk("audit/03-findings.json")
+
+    def test_bulk_records_rely_on_the_deterministic_gate_not_the_panel(self):
+        # documented scope: these carry no panel-review requirement because
+        # mandate_gate validates them semantically on every run (set equality,
+        # canonical verdicts, standing controls, computed-status drift)
+        for path in ("audit/03-findings.json", "audit/engagement-status.json",
+                     "audit/00-check-catalogue.json"):
+            assert not iv.is_control_bearing(path, "M"), path
+
+    def test_a_lowered_ratchet_floor_would_be_reviewed(self):
+        # the concrete attack: measured >= lowered floor still satisfies the
+        # ratchet, so only a reader catches it — hence it must reach the panel
+        assert iv.is_control_bearing("audit/ratchet-baselines.json", "M")
+
+
+class TestChunkCapClamp:
+    """The cap is the direct cost lever: each part is a full panel pass."""
+
+    def test_full_coverage_is_reachable_for_a_large_governance_pr(self, tmp_path):
+        # operator decision 2026-07-25: the ceiling moved 6 -> 8 because the
+        # panel refuses partial coverage, and a PR of this size needs more
+        # than 6 parts to show every file.
+        files = [(f"app/mod{i}.py", "Y" * 49_000) for i in range(8)]
+        chunks, omitted = iv.pack_by_risk(files, budget=50_000, max_chunks=8)
+        assert len(chunks) == 8
+        assert omitted == []
+
+    def test_cap_still_bounds_cost(self):
+        files = [(f"app/mod{i}.py", "Y" * 49_000) for i in range(20)]
+        chunks, omitted = iv.pack_by_risk(files, budget=50_000, max_chunks=8)
+        assert len(chunks) == 8          # never unbounded fan-out
+        assert omitted                    # the rest is accounted, not hidden
+
+
+class TestRenameLaundering:
+    """Panel finding (PR #23 round 10): keeping only the NEW path of a rename
+    let a control file be laundered out of its classification, so budget
+    eviction dropped the REMOVAL of a gate with no coverage block."""
+
+    def test_rename_origins_are_recovered(self):
+        raw = ("R100\0scripts/mandate_gate.py\0docs/old_notes.txt\0"
+               "M\0app/x.py\0A\0app/y.py\0")
+        assert iv.parse_rename_origins_z(raw) == {
+            "docs/old_notes.txt": "scripts/mandate_gate.py"}
+
+    def test_non_rename_records_have_no_origin(self):
+        assert iv.parse_rename_origins_z("M\0app/x.py\0A\0app/y.py\0") == {}
+
+    def test_truncated_rename_record_fails_closed(self):
+        with pytest.raises(iv.DiffError):
+            iv.parse_rename_origins_z("R100\0only_old\0")
+        with pytest.raises(iv.DiffError):
+            iv.parse_status_map_z("R100\0only_old\0")
+        assert iv.parse_rename_origins_z("") == {}
+
+    def test_gate_renamed_to_docs_is_still_control_bearing(self):
+        # the laundering attack: the destination alone looks harmless
+        assert not iv.is_control_bearing("docs/old_notes.txt", "R100")
+        assert iv.is_control_bearing("scripts/mandate_gate.py", "R100")
+
+    def test_renamed_control_file_is_ranked_by_its_strongest_endpoint(self):
+        # a renamed gate must still be reviewed EARLY, not sink to docs rank
+        assert iv.path_risk("scripts/mandate_gate.py") < iv.path_risk("docs/old_notes.txt")
+        strongest = min(iv.path_risk("docs/old_notes.txt"),
+                        iv.path_risk("scripts/mandate_gate.py"))
+        assert strongest == iv.path_risk("scripts/mandate_gate.py")
+
+    def test_pack_by_risk_honours_a_custom_rank_function(self):
+        files = [("docs/old_notes.txt", "LAUNDERED" * 100),
+                 ("audit/bulk.json", "B" * 900)]
+        # without the override the docs path sorts by its own (low) risk
+        chunks, _ = iv.pack_by_risk(files, budget=1000, max_chunks=2,
+                                    risk_of=lambda p: 0 if "old_notes" in p else 9)
+        assert "LAUNDERED" in chunks[0]
+
+
+class TestCodeClassifierBreadth:
+    """Panel round 15 + own sweep: the classifier missed extensionless files,
+    most common languages, systemd units, and matched suffixes case-sensitively
+    while the privacy excludes are icase — so `.SQL` was excluded from the body
+    AND from the coverage block simultaneously."""
+
+    @pytest.mark.parametrize("path", [
+        "deploy/systemd/bubblegauge-deploy.path",   # arms host auto-deploy
+        "deploy/systemd/bubblegauge.service",
+        "scripts/entrypoint",                       # extensionless script
+        "hooks/pre-commit",
+        "app/migrate.SQL",                          # icase
+        "web/app.ts", "web/app.js", "svc/main.go", "lib/thing.rb",
+        "lib/thing.rs", "src/Main.java", "infra/main.tf", "build.gradle",
+    ])
+    def test_executable_and_automation_paths_are_code(self, path):
+        assert iv.is_code(path), path
+
+    @pytest.mark.parametrize("path", [
+        "LICENSE", "README", "CHANGELOG", "NOTICE", "VERSION",
+        "docs/NOTES.md", "audit/03-findings.json",
+    ])
+    def test_text_artifacts_are_not_code(self, path):
+        assert not iv.is_code(path), path
+
+    def test_extensionless_defaults_to_code_fail_closed(self):
+        # an unknown extensionless file must be treated as code, not as prose
+        assert iv.is_code("bin/some-new-entrypoint")
+        assert iv.is_control_bearing("bin/some-new-entrypoint", "A")
+
+
+class TestExecutableManifests:
+    """Panel round 19: `.json` reads as data, but an executable manifest runs
+    code at install/build time — a package.json lifecycle-script edit could be
+    omitted from review with no coverage block."""
+
+    @pytest.mark.parametrize("path", [
+        "package.json", "frontend/package.json", "package-lock.json",
+        "yarn.lock", "pnpm-lock.yaml", "Gemfile", "Cargo.toml", "go.mod",
+        "poetry.lock", "Procfile", "renovate.json", ".npmrc",
+    ])
+    def test_executable_manifests_are_control_bearing(self, path):
+        assert iv.is_code(path), path
+        assert iv.is_control_bearing(path, "M"), path
+
+    @pytest.mark.parametrize("path", ["docs/data.json", "audit/03-findings.json"])
+    def test_ordinary_json_is_still_data(self, path):
+        assert not iv.is_code(path), path
+
+
+class TestPartBudget:
+    """The per-part budget must exceed the LARGEST control file's diff, not
+    the average: a control file above it cannot be reviewed in full."""
+
+    def test_default_budget_exceeds_this_repos_largest_control_file(self):
+        # regression: at 50k, tests/test_mandate_gate.py (54k) blocked
+        assert iv.DEFAULT_PART_BUDGET >= 90_000
+
+    def test_budget_is_env_tunable_within_sane_bounds(self, monkeypatch):
+        import importlib
+        for raw, expected in (("", iv.DEFAULT_PART_BUDGET),
+                              ("nonsense", iv.DEFAULT_PART_BUDGET),
+                              ("5", iv.DEFAULT_PART_BUDGET),        # too small
+                              ("999999", iv.DEFAULT_PART_BUDGET),   # too large
+                              ("120000", 120000)):
+            try:
+                pb = int(raw)
+                got = pb if 20_000 <= pb <= 200_000 else iv.DEFAULT_PART_BUDGET
+            except ValueError:
+                got = iv.DEFAULT_PART_BUDGET
+            assert got == expected, raw
+        assert importlib
+
+
+class TestRenamedOversizeControl:
+    """Round 22: the oversized-control check used the NEW path only, so a
+    renamed control file above budget was truncated rather than omitted."""
+
+    def test_control_classifier_is_injectable_for_rename_origins(self):
+        files = [("docs/old_notes.txt", "X" * 5000)]
+        # destination alone looks harmless -> truncated
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=2)
+        assert omitted == []
+        # with origin awareness the same file is a control -> omitted
+        chunks, omitted = iv.pack_by_risk(
+            files, budget=1000, max_chunks=2,
+            control_of=lambda p: p == "docs/old_notes.txt")
+        assert omitted == ["docs/old_notes.txt"]
+        assert "X" * 5000 not in "".join(chunks)
+
+
+class TestPathspecMagicInFilenames:
+    """Panel round 26 (Sol). `--` stops OPTION parsing, not PATHSPEC MAGIC, so
+    a changed file whose own NAME is a pathspec rewrites the query meant to
+    fetch it. Reproduced against a real git repository before the fix."""
+
+    def _repo(self, tmp_path):
+        import subprocess
+
+        def git(*a):
+            return subprocess.run(["git", *a], cwd=tmp_path, check=True,
+                                  capture_output=True, text=True)
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / "README.md").write_text("# doc\n")
+        git("add", "-A")
+        git("commit", "-qm", "base")
+        # a .py file whose NAME excludes every .py file — itself included
+        (tmp_path / ":(exclude)*.py").write_text("GATE_BACKDOOR = True\n")
+        (tmp_path / "README.md").write_text("# doc\nmore\n")
+        git("add", "-A")
+        git("commit", "-qm", "change")
+        # build_diff_chunks bases the diff on origin/<base>, so give the
+        # fixture a real remote-tracking ref pointing at the parent commit
+        git("update-ref", "refs/remotes/origin/main", "HEAD~1")
+        return git
+
+    def test_magic_named_file_hijacks_the_unprotected_query(self, tmp_path):
+        # THE EXPLOIT, shown at the git level: without :(literal) the per-file
+        # query for the backdoor returns SOME OTHER FILE's diff. Non-empty, so
+        # the entry was filed as reviewed, the backdoor body reached no model,
+        # and omitted_code stayed empty — the coverage gate greened.
+        import subprocess
+        self._repo(tmp_path)
+        bad = subprocess.run(
+            ["git", "diff", "HEAD~1...HEAD", "--", ":(exclude)*.py"],
+            cwd=tmp_path, capture_output=True, text=True).stdout
+        assert "GATE_BACKDOOR" not in bad
+        assert "README.md" in bad          # someone else's diff entirely
+
+    def test_literal_pathspec_returns_the_file_itself(self, tmp_path):
+        import subprocess
+        self._repo(tmp_path)
+        good = subprocess.run(
+            ["git", "diff", "HEAD~1...HEAD", "--", ":(literal):(exclude)*.py"],
+            cwd=tmp_path, capture_output=True, text=True).stdout
+        assert "GATE_BACKDOOR" in good
+        assert "README.md" not in good
+
+    def test_build_diff_chunks_shows_the_backdoor_body(self, tmp_path,
+                                                       monkeypatch):
+        # end to end through the real function: the backdoor must appear in a
+        # payload, or be declared omitted — never silently swapped for another
+        # file's content
+        self._repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "base_branch", lambda: "main")
+        monkeypatch.setattr(iv, "_sh", _sh_rebased(tmp_path))
+        payloads, omitted_code = iv.build_diff_chunks(budget=90_000,
+                                                      max_chunks=8)
+        body = "".join(payloads)
+        assert "GATE_BACKDOOR" in body or ":(exclude)*.py" in omitted_code
+
+    def test_misattributed_body_is_refused_even_if_magic_were_reintroduced(
+            self, tmp_path, monkeypatch):
+        # the identity proof does not depend on WHY the body is wrong: if a
+        # per-file query ever returns another path's content again, the run
+        # blocks rather than filing it under the wrong name
+        def wrong_names(args, *, required=False):
+            if "--name-only" in args and "--name-status" not in args:
+                return "some/other/file.py\0"
+            return _sh_rebased(tmp_path)(args, required=required)
+        self._repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "base_branch", lambda: "main")
+        monkeypatch.setattr(iv, "_sh", wrong_names)
+        with pytest.raises(iv.DiffError):
+            iv.build_diff_chunks(budget=90_000, max_chunks=8)
+
+
+def _sh_rebased(root):
+    """iv._sh with cwd pinned to the fixture repo."""
+    import subprocess
+
+    def _sh(args, *, required=False):
+        proc = subprocess.run(args, cwd=root, capture_output=True, timeout=120)
+        out = proc.stdout.decode("utf-8", errors="replace")
+        if required and proc.returncode != 0:
+            raise iv.DiffError(f"{args[:3]} exited {proc.returncode}")
+        return out
+    return _sh
+
+
+class TestRound26ClaimsRefuted:
+    """Two claims from the round-26 panel that the code already handles. The
+    house rule is to refute with a test that demonstrates the claimed failure
+    cannot occur, never with argument alone."""
+
+    def test_oversize_control_file_is_omitted_not_truncated(self):
+        # claim: "control-bearing file truncation silently turns fail-closed
+        # to fail-open". It is not truncated — it is omitted, and omitted is
+        # exactly what reaches the coverage gate and blocks.
+        files = [("scripts/mandate_gate.py", "G" * 5000),
+                 ("README.md", "r" * 100)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=3)
+        assert omitted == ["scripts/mandate_gate.py"]
+        assert "G" * 200 not in "".join(chunks)   # no partial tail shown
+        assert "TRUNCATED" not in "".join(chunks)
+
+    def test_is_code_is_case_insensitive_on_every_suffix(self):
+        # claim: "risk order check incomplete for suffix-casing mismatch in
+        # is_code"
+        for path in ("app/BACKDOOR.PY", "deploy/Run.SH", "ci/Job.YML",
+                     "unit/Timer.SERVICE", "lib/Mod.Ts", "q/Query.SQL"):
+            assert iv.is_code(path), path
+            assert iv.is_control_bearing(path, "A"), path
+
+    def test_control_bearing_omission_blocks_the_run(self):
+        # claim: "omission reported but only as warning". The warning is for
+        # the humans; the block comes from omitted_code, which is returned to
+        # main and fails the run.
+        files = [("scripts/mandate_gate.py", "G" * 5000)]
+        _, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=3)
+        assert [p for p in omitted if iv.is_control_bearing(p, "M")]
+
+
+class TestCodeownersDerivedControl:
+    """Panel round 30. CODEOWNERS is the repository's own declaration of which
+    paths are governing — it routes them to the operator precisely because a
+    code-writing identity must not change them alone. The panel kept a SECOND,
+    hand-written list, and the two had drifted: seven owner-routed paths,
+    CLAUDE.md among them, were not control-bearing, so budget eviction could
+    drop them with no coverage block."""
+
+    def test_every_owner_routed_path_is_control_bearing(self):
+        import pathlib
+        owned = [ln.split()[0] for ln in
+                 pathlib.Path(".github/CODEOWNERS").read_text().splitlines()
+                 if ln.split("#", 1)[0].strip()]
+        assert owned, "CODEOWNERS parsed to nothing — the check would be vacuous"
+        for pattern in owned:
+            probe = pattern.lstrip("/")
+            probe = probe + "probe.md" if probe.endswith("/") else probe
+            if probe in iv._CODEOWNERS_EXEMPT:
+                continue
+            assert iv.is_control_bearing(probe, "M"), pattern
+
+    def test_the_standing_law_for_ai_sessions_blocks_when_unreviewed(self):
+        # the reported instance: CLAUDE.md governs every future change made
+        # in this repository by an AI session
+        assert iv.is_control_bearing("CLAUDE.md", "M")
+        files = [("CLAUDE.md", "C" * 5000), ("README.md", "r" * 50)]
+        chunks, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=3)
+        assert omitted == ["CLAUDE.md"]          # omitted, never truncated
+        assert "TRUNCATED" not in "".join(chunks)
+
+    def test_ordinary_docs_are_still_not_control_bearing(self):
+        # BOTH SIDES: reading CODEOWNERS must not sweep the whole repo in
+        for path in ("README.md", "CHANGELOG.md", "docs/AUTO_DEPLOY.md"):
+            assert not iv.is_control_bearing(path, "M"), path
+
+    def test_the_documented_audit_exemption_is_preserved(self):
+        # the bulk machine registers keep their documented status; whether the
+        # deterministic gate suffices for their free text is an OPERATOR
+        # decision recorded in audit/10, not something settled as a side
+        # effect of reading CODEOWNERS
+        for path in iv._CODEOWNERS_EXEMPT:
+            assert not iv.is_control_bearing(path, "M"), path
+
+    def test_an_unreadable_codeowners_never_narrows_the_classification(
+            self, monkeypatch):
+        # fail-safe direction: losing the declaration must not silently
+        # declassify code, governance or .github
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", "does/not/exist")
+        assert iv.codeowners_patterns() == []
+        assert iv.is_control_bearing("scripts/mandate_gate.py", "M")
+        assert iv.is_control_bearing("governance/constitution.md", "M")
+        assert iv.is_control_bearing(".github/workflows/ci.yml", "M")
+
+    def test_a_newly_owned_path_is_covered_without_touching_this_module(
+            self, tmp_path, monkeypatch):
+        # the point of deriving rather than paraphrasing: adding a path to
+        # CODEOWNERS covers it the same day
+        co = tmp_path / "CODEOWNERS"
+        co.write_text("# comment\n/newly_governed.md   @operator\n"
+                      "/policy/                @operator\n")
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", str(co))
+        assert iv.is_control_bearing("newly_governed.md", "M")
+        assert iv.is_control_bearing("policy/anything.txt", "M")
+        assert not iv.is_control_bearing("unrelated.md", "M")
+
+    def test_glob_patterns_match_path_and_basename(self, tmp_path, monkeypatch):
+        co = tmp_path / "CODEOWNERS"
+        co.write_text("*.pem      @operator\ndeploy/*.env   @operator\n")
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", str(co))
+        assert iv.is_control_bearing("secrets/server.pem", "M")
+        assert iv.is_control_bearing("deploy/prod.env", "M")
+        assert not iv.is_control_bearing("notes.txt", "M")
+
+
+class TestCodeownersCannotBeSelfRepealed:
+    """Panel round 31, a defect in round 30's own fix. Reading CODEOWNERS at
+    HEAD let the change under review decide what counts as governed: delete
+    the owner rule for a non-code file in the same commit that rewrites and
+    pads it, and it is no longer control-bearing, so it drops out of
+    omitted_code and the coverage gate stops blocking."""
+
+    def _repo(self, tmp_path, head_codeowners):
+        import subprocess
+
+        def git(*a):
+            return subprocess.run(["git", *a], cwd=tmp_path, check=True,
+                                  capture_output=True, text=True)
+        git("init", "-q")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (tmp_path / ".github").mkdir()
+        (tmp_path / ".github" / "CODEOWNERS").write_text(
+            "/.github/     @owner\n/scripts/     @owner\n/CLAUDE.md    @owner\n")
+        (tmp_path / "CLAUDE.md").write_text("standing law\n")
+        git("add", "-A")
+        git("commit", "-qm", "base")
+        git("update-ref", "refs/remotes/origin/main", "HEAD")
+        # THE EXPLOIT: repeal the rule and rewrite the file it protected
+        (tmp_path / ".github" / "CODEOWNERS").write_text(
+            "/.github/     @owner\n/scripts/     @owner\n")
+        (tmp_path / "CLAUDE.md").write_text("weakened law\n" + "pad\n" * 4000)
+        git("add", "-A")
+        git("commit", "-qm", "repeal")
+        return git
+
+    def test_a_repealed_rule_still_governs_this_change(
+            self, tmp_path, monkeypatch):
+        self._repo(tmp_path, head_codeowners=None)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "base_branch", lambda: "main")
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", ".github/CODEOWNERS")
+        assert "/CLAUDE.md" in iv.codeowners_patterns()
+        assert iv.is_control_bearing("CLAUDE.md", "M")
+
+    def test_head_only_reading_would_have_declassified_it(self, tmp_path,
+                                                          monkeypatch):
+        # pins WHY the union is needed: at HEAD alone the rule is simply gone
+        self._repo(tmp_path, head_codeowners=None)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", ".github/CODEOWNERS")
+        head_only = iv._parse_codeowners(iv._codeowners_at(None))
+        assert "/CLAUDE.md" not in head_only
+
+    def test_a_newly_added_rule_takes_effect_immediately(self, tmp_path,
+                                                         monkeypatch):
+        # BOTH SIDES: the union includes HEAD, so tightening is never deferred
+        self._repo(tmp_path, head_codeowners=None)
+        (tmp_path / ".github" / "CODEOWNERS").write_text(
+            "/.github/  @owner\n/brand_new_policy.md   @owner\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "base_branch", lambda: "main")
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", ".github/CODEOWNERS")
+        assert iv.is_control_bearing("brand_new_policy.md", "M")
+
+    def test_an_unresolvable_base_never_narrows_the_set(self, tmp_path,
+                                                        monkeypatch):
+        self._repo(tmp_path, head_codeowners=None)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(iv, "merge_base_rev", lambda: None)
+        monkeypatch.setattr(iv, "_CODEOWNERS_PATH", ".github/CODEOWNERS")
+        # HEAD rules still apply, and the standing rules are untouched
+        assert iv.is_control_bearing("scripts/mandate_gate.py", "M")
+        assert iv.is_control_bearing(".github/CODEOWNERS", "M")
+
+    def test_the_repeal_itself_is_always_reviewed(self):
+        # defence in depth: CODEOWNERS is control-bearing by two independent
+        # rules, so the deleting hunk cannot itself be evicted unseen
+        assert iv.is_control_bearing(".github/CODEOWNERS", "M")
+        files = [(".github/CODEOWNERS", "c" * 5000)]
+        _, omitted = iv.pack_by_risk(files, budget=1000, max_chunks=3)
+        assert omitted == [".github/CODEOWNERS"]

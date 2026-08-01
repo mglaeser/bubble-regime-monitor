@@ -59,6 +59,7 @@ Usage:
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -68,6 +69,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 KEY = os.environ.get("SECOND_VENDOR_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -315,6 +317,95 @@ def diff_commands(merge_base: str) -> dict[str, list[str]]:
     }
 
 
+_TRUNCATED = (
+    "git diff --name-status -z ended mid-record (dangling {status!r} entry) — "
+    "the changed-file list is incomplete. Returning the short list would drop "
+    "the remaining files from review silently, with no warning and no "
+    "coverage block, so an unparseable stream fails closed instead."
+)
+
+
+def parse_name_status_z(raw: str) -> list[str]:
+    """Paths from `git diff --name-status -z`.
+
+    `-z` is mandatory (adversarial audit 2026-07-25): without it git C-quotes
+    any path containing non-ASCII, a quote or a backslash, so
+    `app/caf\303\251_backdoor.py` was passed to `git diff` verbatim, matched
+    nothing, produced an empty body, and the file was reviewed by NOBODY —
+    with no warning, because an empty diff never reaches the omitted list.
+    Rename/copy records carry two paths; the NEW path is the reviewed one."""
+    parts = raw.split("\0")
+    paths: list[str] = []
+    i = 0
+    while i < len(parts):
+        status = parts[i]
+        if not status:
+            i += 1
+            continue
+        if status[0] in ("R", "C"):      # status, old, new
+            if i + 2 >= len(parts) or not parts[i + 2]:
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
+            paths.append(parts[i + 2])
+            i += 3
+        else:                            # status, path
+            if i + 1 >= len(parts) or not parts[i + 1]:
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
+            paths.append(parts[i + 1])
+            i += 2
+    return paths
+
+
+def parse_rename_origins_z(raw: str) -> dict[str, str]:
+    """{new_path: old_path} for rename/copy records.
+
+    Panel finding (PR #23 round 10): keeping only the NEW path let a rename
+    launder a control file out of its classification —
+    `git mv scripts/mandate_gate.py docs/old_notes.txt` makes the entry
+    non-control, so budget eviction dropped it with no coverage block and the
+    REMOVAL of a gate went unreviewed. Both endpoints must be classified."""
+    parts = raw.split("\0")
+    out: dict[str, str] = {}
+    i = 0
+    while i < len(parts):
+        status = parts[i]
+        if not status:
+            i += 1
+            continue
+        if status[0] in ("R", "C"):
+            if i + 2 >= len(parts) or not parts[i + 2] or not parts[i + 1]:
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
+            out[parts[i + 2]] = parts[i + 1]
+            i += 3
+        else:
+            if i + 1 >= len(parts) or not parts[i + 1]:
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
+            i += 2
+    return out
+
+
+def parse_status_map_z(raw: str) -> dict[str, str]:
+    """{path: git status letter} from `--name-status -z` (A/M/D/R###/C###)."""
+    parts = raw.split("\0")
+    out: dict[str, str] = {}
+    i = 0
+    while i < len(parts):
+        status = parts[i]
+        if not status:
+            i += 1
+            continue
+        if status[0] in ("R", "C"):
+            if i + 2 >= len(parts) or not parts[i + 2]:
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
+            out[parts[i + 2]] = status
+            i += 3
+        else:
+            if i + 1 >= len(parts) or not parts[i + 1]:
+                raise DiffError(_TRUNCATED.format(status=status[:8]))
+            out[parts[i + 1]] = status
+            i += 2
+    return out
+
+
 def truncate_marked(text: str, cap: int, label: str) -> str:
     """Cap text with an EXPLICIT marker — silent truncation let unreviewed
     changes green (panel round-3 finding); a cut must be visible to reviewers."""
@@ -322,6 +413,423 @@ def truncate_marked(text: str, cap: int, label: str) -> str:
         return text
     return (text[:cap] +
             f"\n[{label} TRUNCATED — {len(text) - cap} of {len(text)} bytes omitted]")
+
+
+# Risk order for review packing (PR #23 finding: `git diff` emits paths
+# ALPHABETICALLY, so bulk `audit/*.json` consumed the whole body budget and
+# the panel never saw `scripts/mandate_gate.py` — it approved with
+# "gate implementation truncated". Content-blind truncation means the
+# highest-risk file in a change can be the one nobody reviews.)
+_RISK_ORDER: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (0, (".github/", "scripts/")),        # the gate and the panel itself
+    (1, ("governance/constitution.md", "governance/accepted-residuals.json",
+         "governance/mandate/manifest.json",
+         "frozen_methodology.json", "audit/ratchet-baselines.json",
+         ".secrets.baseline")),                  # the law + the attestations:
+    #      small, control-bearing, and previously ranked BELOW tests, so the
+    #      hash manifest fell out of budget (panel finding, PR #23 part 1)
+    (2, ("app/",)),                       # production code
+    (3, ("migrations/", "Containerfile", "compose.yml", "deploy.sh",
+         "pyproject.toml")),              # runtime/build surface
+    (4, ("frozen_methodology.json",)),    # the scored artifact
+    (5, ("tests/",)),                     # test code
+    (6, ("governance/",)),                # remaining law prose
+)
+_RISK_DEFAULT = 7                          # docs, audit records, data blobs
+
+
+def path_risk(path: str) -> int:
+    """Lower = reviewed earlier. Ties keep git's own ordering (deterministic)."""
+    for rank, prefixes in _RISK_ORDER:
+        if any(path.startswith(pfx) for pfx in prefixes):
+            return rank
+    return _RISK_DEFAULT
+
+
+# Matched case-INSENSITIVELY (own sweep: the privacy excludes are icase while
+# this was case-sensitive, so `.SQL` was privacy-excluded AND classified
+# non-code — excluded from the body and from the coverage block at once).
+_CODE_SUFFIXES = (
+    ".py", ".pyi", ".sh", ".bash", ".zsh", ".r", ".sql", ".yml", ".yaml",
+    ".toml", ".ini", ".cfg", ".conf", ".mk", ".make", ".cmake", ".gradle",
+    ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".rb", ".rs", ".c",
+    ".h", ".cc", ".cpp", ".hpp", ".java", ".kt", ".cs", ".php", ".pl", ".lua",
+    ".ps1", ".bat", ".cmd", ".tf", ".tfvars", ".nix", ".sql", ".proto",
+    # systemd/init units arm host automation exactly like a script does
+    ".service", ".timer", ".path", ".socket", ".mount", ".target")
+
+# Extensionless files are treated as CODE by default (fail-closed): entrypoint
+# scripts, hooks and unit files routinely have no suffix, and misclassifying
+# one hides it from the coverage block. Only these well-known text artifacts
+# are exempt.
+_EXTENSIONLESS_NON_CODE = frozenset({
+    "LICENSE", "LICENCE", "NOTICE", "AUTHORS", "CONTRIBUTORS", "COPYRIGHT",
+    "CHANGELOG", "README", "VERSION", "MANIFEST", ".gitignore",
+    ".gitattributes", ".dockerignore", ".secrets.baseline"})
+_CODE_NAMES = ("Makefile", "Dockerfile", "Containerfile", "compose.yml",
+               "requirements.txt", "alembic.ini", ".pre-commit-config.yaml",
+               # Executable manifests: these carry lifecycle scripts and
+               # dependency resolution, so a change to one runs code at
+               # install/build time exactly like a script does (round 19:
+               # a package.json lifecycle-script edit could be omitted from
+               # review because ".json" reads as data).
+               "package.json", "package-lock.json", "pnpm-lock.yaml",
+               "yarn.lock", "composer.json", "Gemfile", "Gemfile.lock",
+               "Cargo.toml", "Cargo.lock", "go.mod", "go.sum",
+               "poetry.lock", "uv.lock", "Pipfile", "Pipfile.lock",
+               "Procfile", "Justfile", "justfile", "Rakefile", "renovate.json",
+               ".npmrc", ".nvmrc", ".tool-versions")
+
+
+# Not code, but load-bearing: the scored artifact and the gate's thresholds,
+# verdicts and computed state. Changing any of these changes what the system
+# scores or what the gate permits.
+# Scope note: the bulk audit records (03-findings.json, engagement-status.json,
+# 00-check-catalogue.json) are deliberately NOT here. They are hash-attested in
+# the manifest AND semantically validated every CI run by mandate_gate
+# (findings/catalogue set-equality, canonical verdicts, PASS standing controls,
+# accepted-residuals reconciliation, computed-status drift) — a deterministic
+# control that does not depend on a model reading 94KB of JSON. The files below
+# have NO such semantic check: a lowered ratchet floor still satisfies the
+# ratchet (measured >= floor), and the scored artifact and secret baseline are
+# trusted inputs, so these must be read by the panel.
+_CONTROL_DATA = ("frozen_methodology.json",
+                 "audit/ratchet-baselines.json",
+                 ".secrets.baseline")
+
+
+def is_control_bearing(path: str, status: str = "M") -> bool:
+    """Files whose UNREVIEWED omission must block, beyond executable code.
+
+    Panel finding (PR #23, part 1): omissions of `governance/*.md` and
+    `.github/CODEOWNERS` were discarded with no warning and no block, so a
+    padded diff could rewrite the law or the write-separation rules while
+    every part greened. The mandate TEXT is exempt: it is immutable and
+    hash-pinned in the manifest, and the manifest IS reviewed — so a change
+    to it cannot pass unnoticed even when its body does not fit."""
+    # NOTE: there is deliberately NO exemption here. An earlier revision
+    # exempted the 556KB operator-supplied mandate text so it could not
+    # permanently block the budget; the panel refused that twice, correctly —
+    # a hash written by the same change proves bytes, not legitimacy. The
+    # resolution was to stop committing that prose to this repository at all
+    # (see governance/mandate/manifest.json mandate_text_status), which
+    # removes the conflict instead of arguing it. Every control-bearing path
+    # is now reviewed or blocks, with no carve-outs.
+    # Data files that ARE controls (panel finding, PR #23 round 7): these
+    # carry the scored artifact and the gate's own thresholds, so "it's only
+    # JSON, not code" is exactly the reasoning an attacker wants — a loosened
+    # ratchet floor or an edited scored artifact could be omitted from review
+    # with no deterministic block.
+    if path in _CONTROL_DATA:
+        return True
+    if path in _CODEOWNERS_EXEMPT:
+        return False
+    return (is_code(path)
+            or path.startswith("governance/")
+            or path.startswith(".github/")
+            or path.rsplit("/", 1)[-1] == "CODEOWNERS"
+            or owned_by_codeowners(path))
+
+
+# The repository already declares which paths are governing: CODEOWNERS routes
+# them to the operator precisely because a code-writing identity must not
+# change them alone. Maintaining a SECOND hand-written list here is the
+# "which paths did we remember" failure that keeps recurring — CLAUDE.md (the
+# standing law for every AI session), GOVERNANCE_FREEZE_RULE.md and the three
+# PIN evidence packs were all owner-routed and none was control-bearing, so
+# budget eviction could drop them with no coverage block (panel round 30).
+# Reading the declaration instead of paraphrasing it keeps the two in step by
+# construction: a path added to CODEOWNERS is covered the same day.
+_CODEOWNERS_PATH = ".github/CODEOWNERS"
+
+# ONE documented exception, carried over rather than silently dropped: the bulk
+# machine registers under audit/ are validated semantically by mandate_gate on
+# every run (id-set equality, canonical verdicts, standing controls, weakening
+# records, computed-status drift). Whether that is sufficient for their FREE
+# TEXT is an open operator decision recorded in audit/10 — it is not settled
+# here as a side effect of reading CODEOWNERS.
+_CODEOWNERS_EXEMPT = ("audit/03-findings.json",
+                      "audit/00-check-catalogue.json",
+                      "audit/engagement-status.json")
+
+
+def _parse_codeowners(raw: str) -> list[str]:
+    """Path patterns from CODEOWNERS text."""
+    out = []
+    for line in raw.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        pattern = line.split()[0]
+        if pattern:
+            out.append(pattern)
+    return out
+
+
+def _codeowners_at(rev: str | None) -> str:
+    """CODEOWNERS as of `rev` (None = the working tree)."""
+    if rev is None:
+        try:
+            return Path(_CODEOWNERS_PATH).read_text(errors="replace")
+        except OSError:
+            return ""
+    return _sh(["git", "show", f"{rev}:{_CODEOWNERS_PATH}"])
+
+
+def codeowners_patterns() -> list[str]:
+    """Owner-routed patterns: the UNION of the merge base and HEAD.
+
+    Reading HEAD alone (round 30) meant the pull request under review chose
+    its own reviewability: delete `/CLAUDE.md @owner` in the same change that
+    rewrites CLAUDE.md, and the file is no longer control-bearing, so padding
+    it out of the budget drops it from omitted_code and the coverage gate
+    stops blocking (panel round 31).
+
+    A rule that existed at the comparison point governs THIS change, whatever
+    the change does to it — the same principle the mandate gate applies to
+    every register it reads. Adding a rule still takes effect immediately,
+    since the union includes HEAD; only removal is deferred, and the removal
+    itself is reviewed because CODEOWNERS is control-bearing on both counts.
+    An unreadable base cannot narrow anything: the union only ever adds."""
+    seen, out = set(), []
+    for rev in (merge_base_rev(), None):
+        for pattern in _parse_codeowners(_codeowners_at(rev)):
+            if pattern not in seen:
+                seen.add(pattern)
+                out.append(pattern)
+    return out
+
+
+def merge_base_rev() -> str | None:
+    """The comparison point, or None when it cannot be resolved."""
+    try:
+        mb = _sh(["git", "merge-base", f"origin/{base_branch()}", "HEAD"]).strip()
+    except Exception:
+        return None
+    return mb or None
+
+
+def owned_by_codeowners(path: str) -> bool:
+    """True when CODEOWNERS routes `path` to an owner.
+
+    gitignore-style semantics for the forms CODEOWNERS actually uses; anything
+    unrecognised is treated as MATCHING, because failing toward "this is
+    governed" is the safe direction for a review-coverage gate."""
+    for pattern in codeowners_patterns():
+        p = pattern.lstrip("/")
+        if p.endswith("/"):                       # /governance/ -> a subtree
+            if path.startswith(p):
+                return True
+        elif "*" in p or "?" in p or "[" in p:    # glob: whole path or basename
+            if fnmatch.fnmatch(path, p) or fnmatch.fnmatch(
+                    path.rsplit("/", 1)[-1], p):
+                return True
+        elif path == p or path.startswith(p + "/"):
+            return True
+    return False
+
+
+def is_code(path: str) -> bool:
+    """Paths whose omission from review is a real gap.
+
+    Adversarial audit (2026-07-25) on THIS change: keying "is it code?" off the
+    directory tier declared Makefile, conftest.py, docs/harnesses/*.py, *.R,
+    deploy/*.sh and every new top-level *.py to be non-code — so dropping them
+    produced NO warning anywhere. Executable content is code wherever it sits;
+    a backdoor in conftest.py runs in CI exactly like one in app/."""
+    base = path.rsplit("/", 1)[-1]
+    if base in _CODE_NAMES or base.startswith("Dockerfile"):
+        return True
+    if "." not in base.lstrip("."):        # extensionless -> code (fail-closed)
+        return base not in _EXTENSIONLESS_NON_CODE
+    if base in _EXTENSIONLESS_NON_CODE:
+        return False
+    return base.lower().endswith(_CODE_SUFFIXES)
+
+
+def pack_by_risk(file_diffs: list[tuple[str, str]], budget: int,
+                 max_chunks: int, risk_of=None,
+                 control_of=None) -> tuple[list[str], list[str]]:
+    """Pack per-file diffs into at most `max_chunks` bodies of ~`budget` chars,
+    highest-risk first. Returns (chunks, omitted_paths).
+
+    A single NON-control file larger than the budget is truncated with its
+    marker rather than dropped silently (round-3 finding). A CONTROL-BEARING
+    file larger than the budget is reported as omitted instead: its tail
+    cannot be reviewed, and a partially-read control is an unreviewed one."""
+    rank = risk_of or path_risk
+    # control_of carries rename ORIGINS: a renamed control file above the
+    # budget was classified by its destination only, so
+    # scripts/mandate_gate.py -> docs/old_notes.txt got truncated rather than
+    # omitted and its tail went unreviewed (round 22).
+    is_control = control_of or (lambda p: is_control_bearing(p))
+    ordered = sorted(file_diffs, key=lambda fd: rank(fd[0]))
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    omitted: list[str] = []
+    capped = False
+    for path, text in ordered:
+        # A control-bearing file too large for the budget CANNOT be reviewed
+        # in full. Truncating it in place left the tail unread while the run
+        # greened, because only `omitted` reaches the coverage gate (found
+        # independently by this repo's own sweep and by the panel, round 20).
+        # Non-control content may still be truncated with its marker.
+        if len(text) > budget and is_control(path):
+            omitted.append(path)
+            continue
+        if capped:
+            # Risk ordering must govern EVICTION too, not just arrival
+            # (adversarial audit 2026-07-25: a 49k gate file that missed the
+            # last chunk was dropped while a 500-byte tests/ file that fit was
+            # admitted — the attacker picks the sizes). Once the budget is
+            # spent, everything remaining is omitted in risk order.
+            omitted.append(path)
+            continue
+        if len(text) > budget:
+            text = truncate_marked(text, budget, f"FILE {path}")
+        if cur_len + len(text) > budget and cur:
+            if len(chunks) + 1 >= max_chunks:
+                omitted.append(path)
+                capped = True
+                continue
+            chunks.append("\n".join(cur))
+            cur, cur_len = [], 0
+        cur.append(text)
+        cur_len += len(text)
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks, omitted
+
+
+def header_only(names: str, stat: str) -> str:
+    """Review payload carrying the authoritative file list and diffstat but no
+    body — used when every changed file's CONTENT is privacy-excluded."""
+    return (_payload_header(names, stat) +
+            "# Code changes: NONE SHOWN — every changed file's CONTENT falls "
+            "into a privacy-excluded class (data/binaries/assets). The FILE "
+            "LIST above is complete and authoritative: judge the change from "
+            "the paths, and refute if a path implies a risk you cannot rule "
+            "out without seeing its contents.\n")
+
+
+def _payload_header(names: str, stat: str) -> str:
+    return (
+        f"# COMPLETE changed-file list (authoritative — ALL changed paths, "
+        f"including files whose CONTENT is privacy-excluded; contents of "
+        f"excluded classes are never sent):\n"
+        f"{truncate_marked(names, 100_000, 'FILE LIST')}\n\n"
+        f"# Diffstat:\n{truncate_marked(stat, 8_000, 'DIFFSTAT')}\n\n")
+
+
+# Per-part content budget in characters (~1/4 that in tokens). 50k was a
+# conservative first guess and is now too small for this repo's own control
+# files: a single file above the budget cannot be reviewed in full, so the
+# budget must exceed the largest control file's diff, not merely the average.
+# Larger parts also mean FEWER parts, i.e. fewer panel passes.
+DEFAULT_PART_BUDGET = 90_000
+
+
+def build_diff_chunks(budget: int = DEFAULT_PART_BUDGET, max_chunks: int = 2
+                      ) -> tuple[list[str], list[str]]:
+    """Review payloads in RISK ORDER, so the gate is never the part that gets
+    truncated away. Each payload repeats the COMPLETE file list and diffstat;
+    only the code body is split. Returns (payloads, omitted_code_paths)."""
+    mb = _sh(["git", "merge-base", f"origin/{base_branch()}", "HEAD"],
+             required=True).strip()
+    if not mb:
+        raise DiffError(f"empty merge-base for origin/{base_branch()}...HEAD")
+    cmds = diff_commands(mb)
+    names = _sh(cmds["names"], required=True)
+    stat = _sh(cmds["stat"], required=True)
+    if not names.strip():
+        body_probe = _sh(cmds["body"], required=True)
+        if not body_probe.strip():
+            return [], []
+    names_z = _sh(["git", "diff", "--name-status", "-z", f"{mb}...HEAD"],
+                  required=True)
+    paths = parse_name_status_z(names_z)
+    statuses = parse_status_map_z(names_z)
+    origins = parse_rename_origins_z(names_z)
+
+    def _control(path: str) -> bool:
+        # EITHER endpoint of a rename being control-bearing makes the change
+        # control-bearing: renaming a gate to a docs path must not launder it
+        status = statuses.get(path, "M")
+        if is_control_bearing(path, status):
+            return True
+        old = origins.get(path)
+        return bool(old and is_control_bearing(old, status))
+
+    def _rank(path: str) -> int:
+        old = origins.get(path)
+        return min(path_risk(path), path_risk(old)) if old else path_risk(path)
+    file_diffs: list[tuple[str, str]] = []
+    excluded_content: list[str] = []
+    for path in paths:
+        # required=True (round-6 finding, re-opened by this change): a git
+        # failure or timeout must BLOCK, never silently drop a file from review
+        #
+        # :(literal) — panel round 26. `--` stops OPTION parsing but not
+        # PATHSPEC MAGIC, so a changed file whose own NAME is a pathspec
+        # rewrote the query that was supposed to fetch it. A file named
+        # `:(exclude)*.py` excludes every .py file — itself included — and the
+        # command returns some other file's diff instead: non-empty, so the
+        # entry was recorded as reviewed with a body that was never its own,
+        # its real content reached no model, and omitted_code stayed empty so
+        # the coverage gate greened. Reproduced end-to-end before this fix.
+        spec = f":(literal){path}"
+        text = _sh(["git", "diff", f"{mb}...HEAD", "--", spec] + _EXCLUDES,
+                   required=True)
+        # ...and PROVE the body belongs to the path it is filed under. Pathspec
+        # magic is one way for that to break; this guard does not care which
+        # way it broke. git reports the names for the very same query, NUL
+        # separated so no quoting or escaping is involved.
+        if text.strip():
+            got = [p for p in _sh(
+                ["git", "diff", "--name-only", "-z", f"{mb}...HEAD",
+                 "--", spec] + _EXCLUDES, required=True).split("\0") if p]
+            if got != [path]:
+                raise DiffError(
+                    f"per-file diff for {path!r} returned content for "
+                    f"{got!r} — the body does not belong to the path it "
+                    "would be filed under; refusing to present a "
+                    "misattributed diff as reviewed")
+            file_diffs.append((path, text))
+        else:
+            # Panel finding (PR #23): a path whose CONTENT is privacy-excluded
+            # produced no body AND appeared in no omission list — reviewed by
+            # nobody, reported to nobody. Now it is always declared.
+            excluded_content.append(path)
+    if not file_diffs:
+        # Every changed file's CONTENT is privacy-excluded, but the change is
+        # real: the panel still reviews the complete file list (round-4
+        # finding — an excluded-only PR must never auto-green with zero votes).
+        return ([header_only(names, stat)],
+                [p for p in excluded_content if _control(p)])
+    chunks, omitted = pack_by_risk(file_diffs, budget, max_chunks,
+                                   risk_of=_rank, control_of=_control)
+    unreviewed = omitted + excluded_content
+    omitted_code = [p for p in unreviewed if _control(p)]
+    header = _payload_header(names, stat)
+    warn = ""
+    if unreviewed:
+        warn = ("\n# WARNING — the following changed files are NOT shown below "
+                "(they did not fit the review budget, or their CONTENT is in a "
+                "privacy-excluded class). Nothing here was reviewed by any "
+                "model; unreviewed changes to a gate, a control, the law or a "
+                "scored value are grounds for refutation:\n"
+                + "".join(f"#   {p}\n" for p in unreviewed) + "\n")
+    payloads = []
+    for i, body in enumerate(chunks, 1):
+        part = (f"# REVIEW PART {i} of {len(chunks)} — files are ordered "
+                f"HIGHEST-RISK FIRST (gate/panel, then app code, then the rest). "
+                f"Other parts are reviewed in separate passes of this same "
+                f"panel; judge THIS part on its own merits.\n\n"
+                if len(chunks) > 1 else "")
+        payloads.append(header + part + warn +
+                        f"# Code changes (binaries/assets/data excluded):\n{body}")
+    return payloads, omitted_code
 
 
 def build_diff() -> str:
@@ -658,12 +1166,32 @@ def main() -> int:
               "  secret (see docs/INDEPENDENT_REVIEW_PANEL.md).")
         return 0   # same-repo only: no fake block; the residual is documented and visible
 
+    # Bounded cost: each part is a full panel pass, so the worst case is
+    # max_chunks x today's spend. Risk ordering means one part covers the
+    # gate/app code on virtually every real PR.
     try:
-        d = build_diff()
+        pb = int(os.environ.get("VERIFIER_PART_BUDGET", ""))
+        part_budget = pb if 20_000 <= pb <= 200_000 else DEFAULT_PART_BUDGET
+    except ValueError:
+        part_budget = DEFAULT_PART_BUDGET
+    try:
+        mc = int(os.environ.get("VERIFIER_MAX_CHUNKS", ""))
+        # floor 2: max_chunks=1 makes pack_by_risk drop everything past the
+        # first budget with no second part to catch it (audit 2026-07-25).
+        # ceiling 8 (operator decision 2026-07-25): a governance PR of this
+        # size needs 8 parts for FULL coverage, and the panel refuses partial
+        # coverage. Each part is a full panel pass, so this is the direct cost
+        # lever — 8 is the deliberate maximum, not a default.
+        max_chunks = mc if 2 <= mc <= 8 else 2
+    except ValueError:
+        max_chunks = 2
+    try:
+        payloads, omitted_code = build_diff_chunks(budget=part_budget,
+                                                   max_chunks=max_chunks)
     except DiffError as exc:
         print(f"BLOCK diff assembly failed — cannot review, fail-closed: {exc}", file=sys.stderr)
         return 1
-    if not d.strip():
+    if not payloads:
         print("[independent-verify] No diff to review. Green.")
         return 0
 
@@ -689,41 +1217,71 @@ def main() -> int:
           + (" (VERIFIER_MODEL pinned)" if os.environ.get("VERIFIER_MODEL") else ""))
     print(f'[independent-verify] Required approver: "{required_approver}" must approve + >= {min_others} other(s).')
 
-    challenge = secrets.token_hex(9)   # fresh 18-hex challenge per run
-    sys_base = build_system_prompt(challenge)
-    user_prompt = "DIFF (overview + code excerpt):\n\n" + d
-
-    votes = [verify_once(models[i], sys_base + LENSES[i % len(LENSES)], user_prompt)
-             for i in range(panel)]
-    for i, x in enumerate(votes):
-        if not x.get("ok"):
-            print(f"  Verifier {i + 1}/{panel} ({models[i]}): error ({x.get('reason')})")
-            continue
-        v = x.get("v") or {}
-        # json.dumps escapes all control chars -> single-line, injection-safe log
-        reason = json.dumps(v.get("reason"))[:1000] if v.get("reason") else '"(no reason given)"'
-        print(f"  Verifier {i + 1}/{panel} ({models[i]}): refuted={v.get('refuted')} "
-              f"confidence={v.get('confidence')} — reason: {reason}")
-
-    verdict = require_approvals(votes, models, required_approver, min_others, challenge)
-    if verdict["block"]:
-        print(f"BLOCK required-approver gate: {verdict['reason']}", file=sys.stderr)
+    if omitted_code:
+        # Adversarial audit 2026-07-25: warning-only meant an attacker could
+        # pad the diff until the malicious file fell out of the budget and
+        # still green. Unreviewed code is unreviewed — fail closed.
+        print("BLOCK review-coverage gate: "
+              f"{len(omitted_code)} control-bearing file(s) (code, gate config, "
+              f"or governance) were reviewed by NO model — they did not fit "
+              f"the budget or their content is privacy-excluded: "
+              f"{', '.join(omitted_code[:8])}"
+              + (" …" if len(omitted_code) > 8 else "")
+              + f". Raise VERIFIER_MAX_CHUNKS (currently {max_chunks}) or split "
+              "the pull request.", file=sys.stderr)
         return 1
-    if (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes"):
-        strict = strict_any_refutation(votes, models)
-        if strict["block"]:
-            print(f"BLOCK strict-mode gate: {strict['reason']}", file=sys.stderr)
+    if len(payloads) > 1:
+        print(f"[independent-verify] Diff split into {len(payloads)} risk-ordered "
+              f"parts (cap {max_chunks}); EVERY part must pass — green requires "
+              "green on all of them.")
+
+    run_challenge = secrets.token_hex(9)   # fresh 18-hex challenge per run
+
+    # Every part runs the full gate set; the FIRST block anywhere ends the run
+    # (fail-closed: a later green can never overwrite an earlier refutation).
+    for part, payload in enumerate(payloads, 1):
+        label = f" [part {part}/{len(payloads)}]" if len(payloads) > 1 else ""
+        # PER-PART challenge (adversarial audit 2026-07-25): one challenge for
+        # all parts made a byte-identical response set valid for every part,
+        # so a cache or a stateful endpoint could turn N reviews into one.
+        challenge = (run_challenge if len(payloads) == 1
+                     else f"{run_challenge}p{part}")
+        sys_base = build_system_prompt(challenge)
+        user_prompt = "DIFF (overview + code excerpt):\n\n" + payload
+        votes = [verify_once(models[i], sys_base + LENSES[i % len(LENSES)], user_prompt)
+                 for i in range(panel)]
+        for i, x in enumerate(votes):
+            if not x.get("ok"):
+                print(f"  Verifier {i + 1}/{panel}{label} ({models[i]}): error ({x.get('reason')})")
+                continue
+            v = x.get("v") or {}
+            # json.dumps escapes all control chars -> single-line, injection-safe log
+            reason = json.dumps(v.get("reason"))[:1000] if v.get("reason") else '"(no reason given)"'
+            print(f"  Verifier {i + 1}/{panel}{label} ({models[i]}): refuted={v.get('refuted')} "
+                  f"confidence={v.get('confidence')} — reason: {reason}")
+
+        verdict = require_approvals(votes, models, required_approver, min_others, challenge)
+        if verdict["block"]:
+            print(f"BLOCK required-approver gate{label}: {verdict['reason']}", file=sys.stderr)
             return 1
-    attest = attest_reasons(votes, panel)
-    if attest["block"]:
-        print(f"BLOCK integrity gate (sham green): {attest['reason']}", file=sys.stderr)
-        return 1
-    proof = attest_proof(votes, challenge, panel)
-    if proof["block"]:
-        print(f"BLOCK proof-of-check gate: {proof['reason']}", file=sys.stderr)
-        return 1
-    print(f"[independent-verify] Cross-vendor panel confirms (required approver: {verdict['reason']}; "
-          f"{attest['reason']}; {proof['reason']}). Green.")
+        if (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes"):
+            strict = strict_any_refutation(votes, models)
+            if strict["block"]:
+                print(f"BLOCK strict-mode gate{label}: {strict['reason']}", file=sys.stderr)
+                return 1
+        attest = attest_reasons(votes, panel)
+        if attest["block"]:
+            print(f"BLOCK integrity gate (sham green){label}: {attest['reason']}", file=sys.stderr)
+            return 1
+        proof = attest_proof(votes, challenge, panel)
+        if proof["block"]:
+            print(f"BLOCK proof-of-check gate{label}: {proof['reason']}", file=sys.stderr)
+            return 1
+        print(f"[independent-verify] Part {part}/{len(payloads)} confirms "
+              f"(required approver: {verdict['reason']}; {attest['reason']}; "
+              f"{proof['reason']}).")
+    print(f"[independent-verify] Cross-vendor panel confirms all "
+          f"{len(payloads)} part(s). Green.")
     return 0
 
 

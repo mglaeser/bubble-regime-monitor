@@ -45,7 +45,7 @@ Each repair executed test-first: a test derived from the frozen spec/invariants 
 - **Correction (2026-07-15):** the 2026-07-15 host deploy **failed on this change** — under rootless Podman the `/data` bind mount is owned by the invoking host user, and container-uid 10001 maps to a subordinate uid with no write access (`sqlite3.OperationalError: attempt to write a readonly database` on the WAL pragma). The deploy-time health-check **auto-rollback fired as designed** and prod stayed on the prior image. `USER` was reverted with a written rationale (container-root under rootless Podman maps to the *unprivileged* host user, so the escape blast radius is unchanged); the defence-in-depth is now `--cap-drop=ALL --security-opt no-new-privileges` at run time (deploy.sh + compose.yml), which does not conflict with bind-mount ownership. Honest verdict: the first fix was verified by *build*, not by *deploy* — the gap between those two is exactly what the health-check caught.
 
 ### A-01 / A-08 / A-13 / B-01 / B-35 — the gate rebuild
-- **Change:** `.github/workflows/ci.yml` rewritten: blocking `ruff` (incl. `S`), blocking `pip-audit`, blocking `detect-secrets` (baseline `.secrets.baseline`), blocking `pytest`; deps aligned to `pyproject` (+`anthropic`,`xlrd`); `lppls` best-effort (suite self-skips); `setuptools>=83` upgrade; the deceptive `mypy … || true` replaced with an **honestly-labelled advisory** `continue-on-error` step (43 tracked type errors, A-13).
+- **Change:** `.github/workflows/ci.yml` rewritten: blocking `ruff` (incl. `S`), blocking `pip-audit`, blocking `detect-secrets` (baseline `.secrets.baseline`), blocking `pytest`; deps aligned to `pyproject` (+`anthropic`,`xlrd`); `lppls` best-effort (suite self-skips); `setuptools>=83` upgrade; the deceptive `mypy … || true` replaced with an **honestly-labelled advisory** `continue-on-error` step (43 tracked type errors at that date, A-13; the count has since grown — measured in CI, not pinned).
 - **Locally verified:** `ruff` clean; `pytest` green (171); `pip-audit` clean; `detect-secrets --baseline` exits 0. **Not verifiable from here:** that the GitHub-hosted runner builds `lppls`/`exuber` and that the `image` job goes green — recorded honestly.
 - **Still required (not code):** mark `test` a **required status check with no bypass** (branch protection) so a red build cannot merge — an operator/repo-settings action (B-35), carried in `audit/06`.
 
@@ -60,3 +60,87 @@ An independent adversarial agent was tasked to **break** the five code fixes (no
 ## A correction, recorded honestly (CI cannot run in this environment)
 
 An initial reconstruction blamed the red CI on the install list omitting `lppls`. **Job-timing evidence refutes that:** every CI job — pre-audit and audit alike — "completes" in ~3 seconds with no downloadable logs, i.e. **no runner executes it** (the git remote here is a local proxy; Actions execution is not wired up). See `audit/evidence/ci-runs.md`. Consequence: the rebuilt gate is verified **GREEN LOCALLY ONLY** (all four gate commands pass here); it **cannot be confirmed green on a runner** in this environment. A functioning CI executor (or a pre-push executor on the deploy host) is therefore a prerequisite carried in `audit/06`.
+
+## Addendum — 2026-07-25 independent re-audit and tamper verification
+
+Executed on the operator's "check and ensure thoroughly" directive by three
+independent agent sessions (same-vendor limitation disclosed — the
+cross-vendor panel additionally reviews the resulting PR):
+
+**Verdict-sample re-audit (the §9.8 audit-of-the-audit).** Two conformance
+agents re-examined the engagement record against the mandate text
+independently (§5 schema, Phases 2–7, §8 deliverables, §6.5, §7).
+Disagreements with the standing record — i.e. findings against the audit
+itself — and their resolutions:
+
+1. **Blocker gate fail-open on free-text escalation bands** (A-01's
+   `escalated_band` matched no band constant and escaped the gate/counts/
+   register). FIXED: `effective_band()` parses fail-closed; unparseable
+   bands fail the build; regression-tested.
+2. `engagement-status.json` part statuses were asserted, and
+   `pending_check_ids` was missing. FIXED: both computed.
+3. PASS standing controls were free-text without `demonstrated`. FIXED: all
+   10 structured with real demonstrations; the gate now enforces the shape.
+4. Structural ledger (§6.5.6), canonical `governance/mandate.md`, manifest
+   structure, scope-labelled executive summary — all missing. FIXED.
+5. Hand-loosened ratchet baseline passed silently (tamper test #1). FIXED:
+   baselines + accepted-residuals register joined the attested hash set.
+6. Non-retrofittable gaps (founding record schema subset, Part 2 text,
+   quantitative catch-rate SLI, autonomous fleet) recorded as explicit
+   deviations in `governance/accepted-residuals.json` — not papered over.
+
+**Tamper verification.** 12 adversarial tampers against the gate in an
+isolated worktree: 11 failed closed with the exact expected error; 1
+fail-open (above, fixed and re-proven). CLI edge cases exit nonzero. The
+ungated-amendment refusals are logged in
+`audit/evidence/amendment-refusal-2026-07-25.md`.
+
+**CI-runner proof.** The first push of the enforcement commit FAILED on the
+real runner (detect-secrets flagged the manifest's own attestation hashes —
+the gate blocking its own installer until the baseline was audited), which
+is the enforcement demonstrating itself; subsequently green.
+
+## Addendum 2 — 2026-07-25 pre-PR adversarial pass (the process, now standard)
+
+Run on the operator's directive to audit the enforcement layer itself
+adversarially before any PR. Two independent agents with falsifying
+objectives (break the gate logic / find the false claim), following the
+12-tamper pass. Findings and dispositions:
+
+**Gate logic (6 fail-opens, all closed):**
+1. **CRITICAL** — no canonical-verdict whitelist: a verdict of `"Fail"`,
+   `null` or `"WAIVED"` fell out of the open-blocker loop, the PASS-control
+   check and the N/A check simultaneously, making a STOP-SHIP invisible to
+   every gate. Closed: `CANONICAL_VERDICTS` fails the build on any unknown
+   verdict; five parametrised regression tests.
+2. `03-findings.json` and `00-check-catalogue.json` were unattested, so a
+   verdict edit + `status --write` laundered itself past the drift check.
+   Closed: both joined the attested hash set.
+3. The audit denominator was self-reported by the catalogue; a matched-pair
+   deletion could shrink the universe. Closed: the manifest's
+   `required_check_ids` now pins it (previously dead data).
+4. Vacuous `standing_control` (whitespace, `true`, `1`) satisfied the PASS
+   gate. Closed: substantive-string requirement.
+5. Credential scanner missed hyphen-less UUIDs, base64 tokens, provider PATs
+   and `auth`/`bearer`/`cookie` names. Closed: widened denylist + entropy
+   check on assignment right-hand sides; five bypass payloads now caught with
+   zero false positives on live source (XBRL tags, regex patterns, URLs).
+6. Import scan missed function-local and `app*`-prefixed hallucinated
+   packages, and read docstring prose as imports. Closed: AST-based scan,
+   with pyproject-declared modules treated as environment gaps rather than
+   hallucinations.
+
+**Claims (8 findings, all corrected):** Part 2 scope overstated as fully
+audited; the panel described as fail-closed on every PR when it is
+PR-only, key-dependent and config-driven; the constitution masthead listing
+CODEOWNERS as *enforced* when it is advisory pending branch protection; the
+"dead-man switch" naming (a stopped GitHub schedule emits no signal and
+auto-disables after 60 days — now recorded as an open gap, not a wired
+control); stale test-count baselines (385/395 vs the enforced 399); the
+STOP-SHIP count discrepancy; the weekly heartbeat described as the "full
+stack"; and unusable branch-protection check names.
+
+**Process outcome:** 22 issues found and resolved internally, before any
+external panel round. This pass is now a required step of constitution
+Article III and `audit/08` — with an explicit one-round panel target,
+because each round makes paid calls to three external models.
