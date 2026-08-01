@@ -89,6 +89,42 @@ from trustedlane import (  # noqa: E402
 )
 
 LANE_DIR = ROOT / "scripts" / "trustedlane"
+
+
+@pytest.fixture(autouse=True)
+def _no_candidate_verifier_in_sys_modules():
+    """Every lane test starts with no `verifier` module loaded from the
+    checkout, and leaves none behind.
+
+    On THIS branch — and only on this branch — `scripts/verifier` and the
+    trusted lane are on one disk for the first time, and
+    `tests/test_verifier_plan.py` imports the package directly, which is what
+    it is for. `enginepolicy.assert_no_candidate_import` then refuses every
+    lane test that loads an engine, because it compares each loaded `verifier`
+    module's file against the artifact root and finds the checkout.
+
+    That refusal is CORRECT and must not be relaxed: in production, a
+    `verifier` importable from the candidate checkout on the machine holding
+    the provider key is precisely the finding it exists to catch. What is
+    wrong is the shared process. Production has one — the lane runs with no
+    candidate checkout on `sys.path` — and a single pytest process does not,
+    so the isolation is restored here rather than by weakening the check.
+
+    Both directions, because pytest ordering is not fixed: purging only before
+    would leave the artifact's modules loaded for a verifier test that runs
+    after, which is the same defect pointed the other way."""
+    import sys
+
+    def purge():
+        for name in [n for n in sys.modules
+                     if n == "verifier" or n.startswith("verifier.")]:
+            del sys.modules[name]
+
+    purge()
+    try:
+        yield
+    finally:
+        purge()
 # Real commit SHAs from this repository's history: protected main, the reviewed
 # candidate head, and PR #23's frozen head. Public git identities, not
 # credentials — hence the allowlist pragmas the secret gate requires for any
