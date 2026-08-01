@@ -80,6 +80,91 @@ def assert_branch_rules_observed(observed) -> dict:
     return {"rules_enforced": list(REQUIRED_BRANCH_RULES), "bypass_actors": 0}
 
 
+def assert_required_contexts_observed(observed, *, expected_contexts,
+                                      expected_app_id=None) -> dict:
+    """The required-status list, checked by name and by publisher.
+
+    `"protected": true` plus review rules says a pull request is needed. It says
+    nothing about whether anything must PASS. A branch can be protected, require
+    a review, block force pushes — and still merge a change to the trusted lane
+    with a red test suite, because no status was ever required.
+
+    Two halves, and the second is the one that is easy to forget:
+
+    * the exact contexts must be present, and nothing non-requirable may be
+      among them (statusnames decides which is which);
+    * for the trusted contexts, the PUBLISHER must be pinned. A required context
+      that any source may publish is a required context the candidate's own
+      workflow can publish, which turns the trusted gate into a self-signed
+      claim. GitHub's `checks` ruleset entries carry an `integration_id`; where
+      it is absent the operator must say so explicitly rather than the lane
+      assuming any publisher is fine.
+
+    `strict` (up-to-date-before-merge) is required too: a status earned against
+    an older base is a status about code that is not what merges."""
+    from .statusnames import TRUSTED_STATUSES, assert_only_requirable_statuses
+
+    if observed is None:
+        refuse("category=required_status_checks_not_observed — nobody asked the "
+               "API which statuses are required; a protected branch with no "
+               "required check merges a red suite")
+    if not isinstance(observed, dict):
+        refuse("category=required_status_checks_not_object")
+
+    if observed.get("strict") is not True:
+        refuse("category=required_checks_not_strict — without "
+               "up-to-date-before-merge, a status earned against an older base "
+               "is a status about code that is not what merges")
+
+    checks = observed.get("checks")
+    if checks is None:
+        refuse("category=required_check_list_not_observed")
+    if not isinstance(checks, (list, tuple)):
+        refuse("category=required_check_list_not_a_sequence")
+
+    by_context = {}
+    for entry in checks:
+        if isinstance(entry, str):
+            by_context[entry] = None
+        elif isinstance(entry, dict) and entry.get("context"):
+            by_context[str(entry["context"])] = entry.get("app_id")
+        else:
+            refuse(f"category=required_check_entry_unreadable entry={entry!r}")
+
+    # Nothing non-requirable may be configured, whatever else is right.
+    assert_only_requirable_statuses(sorted(by_context))
+
+    expected = [str(c) for c in expected_contexts]
+    missing = sorted(set(expected) - set(by_context))
+    if missing:
+        refuse(f"category=required_context_missing contexts={missing} "
+               f"observed={sorted(by_context)} — the branch is protected and "
+               "these are not required, so a change can merge without them")
+
+    pinned = {}
+    for context in expected:
+        if context not in TRUSTED_STATUSES:
+            continue
+        app_id = by_context[context]
+        if app_id is None:
+            refuse(f"category=trusted_context_publisher_not_pinned "
+                   f"context={context} — a required trusted context that any "
+                   "source may publish can be published by the candidate's own "
+                   "workflow, which makes the trusted gate a self-signed claim")
+        if expected_app_id is None:
+            refuse(f"category=expected_publisher_not_supplied context={context} "
+                   "— the observation pins an app_id but the caller named no "
+                   "expected one, so there is nothing to compare it against")
+        if int(app_id) != int(expected_app_id):
+            refuse(f"category=trusted_context_publisher_mismatch "
+                   f"context={context} observed_app_id={app_id} "
+                   f"expected_app_id={expected_app_id}")
+        pinned[context] = int(app_id)
+
+    return {"required_contexts": sorted(by_context), "strict": True,
+            "publisher_pinned_contexts": pinned}
+
+
 def assert_environment_admits_only_protected_ref(observed, *,
                                                  expected_name: str) -> dict:
     """The deployment-branch policy is what makes an environment secret safe."""
@@ -164,7 +249,10 @@ def assert_ready_for_credential(*, observed_ref: str, branch_record,
                                 branch_rules, environment_record,
                                 environment_name: str, secret_name: str,
                                 repository_secret_names,
-                                organization_secret_names) -> dict:
+                                organization_secret_names,
+                                required_status_checks,
+                                expected_contexts,
+                                expected_app_id=None) -> dict:
     """The full conjunction, in order, before any credential is reachable.
 
     One entry point rather than five call sites, because the failure this
@@ -176,6 +264,9 @@ def assert_ready_for_credential(*, observed_ref: str, branch_record,
     assert_allowed_default_ref(observed_ref)
     protection = assert_branch_protection_observed(branch_record)
     rules = assert_branch_rules_observed(branch_rules)
+    contexts = assert_required_contexts_observed(
+        required_status_checks, expected_contexts=expected_contexts,
+        expected_app_id=expected_app_id)
     environment = assert_environment_admits_only_protected_ref(
         environment_record, expected_name=environment_name)
     shadow = assert_no_shadowing_secret(
@@ -186,6 +277,7 @@ def assert_ready_for_credential(*, observed_ref: str, branch_record,
         "ref": observed_ref,
         **protection,
         **rules,
+        **contexts,
         **environment,
         **shadow,
         "credential_may_be_reachable": True,

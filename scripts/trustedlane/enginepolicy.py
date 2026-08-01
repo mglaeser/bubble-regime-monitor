@@ -95,28 +95,74 @@ def _reachable_candidate_packages(search_path) -> list:
     return hits
 
 
-def assert_no_candidate_import(*, modules=None, search_path=None) -> dict:
-    """Refuse if the candidate package is imported, or merely importable.
+def _module_locations(module) -> list:
+    origin = getattr(module, "__file__", None)
+    if origin:
+        return [origin]
+    return list(getattr(module, "__path__", []) or [])
+
+
+def assert_no_candidate_import(*, modules=None, search_path=None,
+                               engine_root=None) -> dict:
+    """Refuse if the CANDIDATE package is imported, or merely importable.
 
     Checked at runtime rather than by reading the source: a transitive import,
     a `conftest.py`, or a stray `sys.path` entry can pull the candidate in
     without any line of this module mentioning it.
 
+    **`engine_root` is the distinction this function used to miss.** It refused
+    any module named `verifier*`, full stop — a name check standing in for an
+    origin question. That was right while the lane carried its own parallel
+    review engine and never loaded the candidate package at all. Under the
+    integration addendum the engine IS `scripts/verifier`, delivered inside the
+    operator-approved artifact, so D1 must import it: `verifier.pins` builds the
+    PIN claim the operator authorized, and `verifier.authority` owns the
+    promotion seam. Keeping the name check would have meant either that D1 could
+    never authenticate a real record, or that this check got deleted.
+
+    So the question is restated as the one that was always meant: is any
+    `verifier` module loaded from somewhere OTHER than the approved engine root.
+    With no `engine_root` — D0, and the pre-load step of D1/D2 — nothing named
+    `verifier` may be loaded at all, which is the original behaviour unchanged.
+
     `modules`/`search_path` exist so the refusals can be driven deterministically
     from a test instead of depending on the ambient interpreter. The trusted
-    runner calls this with no arguments, so what it inspects is the real process;
-    the parameters let trusted code describe a hypothetical, they do not let
-    untrusted code describe itself as clean."""
+    runner calls this with the real process, and `engine_root` comes from the
+    artifact it verified by digest — the parameters let trusted code describe a
+    hypothetical, they do not let untrusted code describe itself as clean."""
     modules = sys.modules if modules is None else modules
     search_path = sys.path if search_path is None else search_path
+    approved = None
+    if engine_root:
+        # An "approved root" inside the candidate checkout approves nothing.
+        assert_not_candidate_checkout(engine_root)
+        approved = os.path.realpath(engine_root) + os.sep
+
     imported = sorted(
         name for name in modules
         if any(name == p or name.startswith(p + ".")
                for p in CANDIDATE_PACKAGE_NAMES))
-    if imported:
+    if imported and approved is None:
         refuse(f"category=candidate_module_imported count={len(imported)} — "
                "the candidate package is loaded in this process; a "
                "credential-bearing run must not be able to call it")
+    outside = []
+    for name in imported:
+        locations = _module_locations(modules[name])
+        if not locations:
+            refuse(f"category=candidate_module_origin_unknown module={name} — a "
+                   "loaded module with no file and no search path cannot be "
+                   "traced to the approved engine, and untraceable is refused "
+                   "rather than assumed approved")
+        if any(not os.path.realpath(p).startswith(approved) for p in locations):
+            outside.append(name)
+    if outside:
+        refuse(f"category=candidate_module_imported_from_outside_the_engine "
+               f"count={len(outside)} — a `verifier` module in this process "
+               "came from somewhere other than the approved artifact, and the "
+               "same import name means opposite things depending on where it "
+               "was loaded from")
+
     on_path = [entry for entry in search_path
                if any(marker in os.path.normpath(entry or ".")
                       for marker in CANDIDATE_PATH_MARKERS)]
@@ -124,7 +170,9 @@ def assert_no_candidate_import(*, modules=None, search_path=None) -> dict:
         refuse(f"category=candidate_path_importable count={len(on_path)} — "
                "the candidate package is on sys.path, so any import could "
                "reach it")
-    reachable = _reachable_candidate_packages(search_path)
+    reachable = [p for p in _reachable_candidate_packages(search_path)
+                 if approved is None
+                 or not os.path.realpath(p).startswith(approved)]
     if reachable:
         # The paths are named. They are the lane's own filesystem, not candidate
         # content, and an unnamed count is undiagnosable: the first real hit was
@@ -136,6 +184,8 @@ def assert_no_candidate_import(*, modules=None, search_path=None) -> dict:
                "candidate package is on sys.path, so `import verifier` would "
                "load the artifact under review")
     return {"candidate_isolated": True,
+            "engine_root_supplied": approved is not None,
+            "engine_modules_loaded": len(imported),
             "checked": ["sys.modules", "sys.path", "package_reachability"]}
 
 

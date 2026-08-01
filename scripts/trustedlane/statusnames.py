@@ -39,8 +39,20 @@ from .errors import refuse
 #: merge authority while the trusted lane is inactive.
 ORDINARY_STATUSES = ("test (3.12)", "image")
 
-#: D0. Proves containment on the allowed default ref; holds no credential, casts
-#: no vote, and reviews nothing. Safe to require, but it is not a review.
+#: D0. Proves containment on the allowed default ref; holds no credential and
+#: reviews nothing.
+#:
+#: NOT candidate-requirable, and the reason is mechanical rather than a matter of
+#: trust: D0 triggers on `workflow_dispatch` and `push` to main under path
+#: filters. It never runs on `pull_request`, so it never reports a status on a
+#: candidate head. Requiring it would leave every PR waiting forever for a check
+#: that cannot arrive — the same end state as requiring the dispatch-only
+#: `probe`, reached from a different direction.
+#:
+#: The first version of this file classified it CONTAINMENT and put it in
+#: `require_now` with the comment "safe to require". Safe, and useless: a status
+#: that never reports is not a gate, it is a deadlock. D0 remains valuable as
+#: protected-ref evidence; it is simply not a PR check.
 CONTAINMENT_STATUSES = ("d0-containment",)
 
 #: Runs and reports a documented residual. Requiring one of these would make a
@@ -66,6 +78,21 @@ TRUSTED_CONTAINMENT_STATUSES = ("d1-containment-gate", "d2-containment-gate")
 #: reports at all.
 DIAGNOSTIC_STATUSES = ("probe",)
 
+#: R10. The protected engine build, which produces what the trusted lane
+#: trusts. Its own class rather than DIAGNOSTIC: a diagnostic reports on
+#: something, and this one MAKES the artifact and the identity record D1 and D2
+#: read. Never requirable for the same mechanical reason as the others — it is
+#: `workflow_dispatch` only, so it never reports on a candidate head, and
+#: requiring it would leave every pull request waiting on a check that cannot
+#: start.
+#:
+#: There is a second reason worth stating, because it is the one a reader
+#: would otherwise supply for themselves and get wrong: a green build says the
+#: artifact was PRODUCED, not that anyone approved it. Approval of the five
+#: digests is operator prerequisite 14, out of band, and `runtimebinding`
+#: compares it to the artifact the run opened.
+BUILD_STATUSES = ("build-engine",)
+
 STATUS_CLASSES = {
     "ORDINARY": ORDINARY_STATUSES,
     "CONTAINMENT": CONTAINMENT_STATUSES,
@@ -73,12 +100,25 @@ STATUS_CLASSES = {
     "TRUSTED": TRUSTED_STATUSES,
     "TRUSTED_CONTAINMENT": TRUSTED_CONTAINMENT_STATUSES,
     "DIAGNOSTIC": DIAGNOSTIC_STATUSES,
+    "BUILD": BUILD_STATUSES,
 }
 
-#: Classes an operator may configure as a required status once the corresponding
-#: phase is live. INACTIVE and DIAGNOSTIC are deliberately absent, and those
-#: absences are the point.
-REQUIRABLE_CLASSES = ("ORDINARY", "CONTAINMENT", "TRUSTED", "TRUSTED_CONTAINMENT")
+#: Classes an operator may configure as a required status ON A CANDIDATE PULL
+#: REQUEST once the corresponding phase is live.
+#:
+#: Only two, and every exclusion is mechanical:
+#:   INACTIVE            reports success having reviewed nothing
+#:   DIAGNOSTIC          dispatch-only, never reports on a PR head
+#:   CONTAINMENT         D0: push/dispatch only, never reports on a PR head
+#:   BUILD               dispatch-only, and a green build is production, not
+#:                       approval
+#:   TRUSTED_CONTAINMENT internal jobs of a main-dispatched trusted run; their
+#:                       checks land on main's commit, not the candidate head
+#:
+#: TRUSTED is requirable only because D1/D2 publish those contexts EXPLICITLY on
+#: the candidate SHA (see statuspublish.py). The workflow job's own check lands
+#: on main and would never satisfy a PR — reserving a job name is not enough.
+REQUIRABLE_CLASSES = ("ORDINARY", "TRUSTED")
 
 #: Everything that must never appear in a required-status list, for either
 #: reason. Derived rather than written out, so adding a class cannot forget it.
@@ -137,40 +177,47 @@ def assert_inactive_and_trusted_never_collide() -> dict:
             "trusted": list(TRUSTED_STATUSES), "collisions": 0}
 
 
-def assert_no_inactive_status_is_required(required) -> dict:
-    """Refuse a required-status list that includes an inactive check.
+def assert_only_requirable_statuses(required) -> dict:
+    """Refuse any status whose class is not candidate-requirable.
 
-    Takes the list an operator configured (or proposes to configure). The lane
-    cannot read branch-protection settings without a credential, so this is a
-    checkable function over an observed value rather than something it enforces
-    on its own — and the operator packet says so rather than implying the code
-    guarantees it."""
+    Derived from REQUIRABLE_CLASSES rather than enumerating the bad classes.
+    The first version checked INACTIVE and DIAGNOSTIC by name, so when D0 moved
+    out of the requirable set it kept accepting `d0-containment` — the
+    enumerate-the-hazards mistake, committed inside the module written to stop
+    committing it. Every non-requirable class is now refused because it is not
+    on the allowlist, and the message says which class and why.
+
+    Takes the list an operator configured or proposes to configure. The lane
+    holds no credential and cannot read branch protection, so this is a check
+    over an observed value, not an enforcement — and the operator packet says so
+    rather than implying the code guarantees it."""
     if required is None:
         refuse("category=required_status_list_not_observed — nobody supplied "
                "the configured list; the lane must not assume it is clean")
     if isinstance(required, str) or not hasattr(required, "__iter__"):
         refuse("category=required_status_list_not_a_sequence")
     names = [str(n) for n in required]
-    inactive = sorted(set(names) & set(INACTIVE_STATUSES))
-    if inactive:
-        refuse(f"category=inactive_status_is_required statuses={inactive} — "
-               "these jobs run, report a documented residual and cast zero "
-               "votes; requiring one makes a no-review success satisfy a review "
-               f"requirement. Require {list(TRUSTED_STATUSES)} instead, once the "
-               "corresponding phase is deployed and approved")
-    diagnostic = sorted(set(names) & set(DIAGNOSTIC_STATUSES))
-    if diagnostic:
-        refuse(f"category=diagnostic_status_is_required statuses={diagnostic} — "
-               "these run only on workflow_dispatch, so they never report on a "
-               "pull request; requiring one leaves every PR pending forever on "
-               "a check that cannot start")
+
     unknown = sorted(n for n in names if class_of(n) is None)
     if unknown:
         refuse(f"category=required_status_not_in_registry statuses={unknown} — "
                "a required status this policy does not know about is a status "
                "nobody classified; add it to STATUS_CLASSES first")
+
+    why = branch_protection_instructions()["why_never"]
+    offenders = [(n, class_of(n)) for n in names
+                 if class_of(n) not in REQUIRABLE_CLASSES]
+    if offenders:
+        detail = "; ".join(f"{n} ({cls}): {why.get(n, 'not candidate-requirable')}"
+                           for n, cls in sorted(offenders))
+        refuse(f"category=status_is_not_candidate_requirable "
+               f"statuses={sorted(n for n, _ in offenders)} — {detail}")
     return {"required": sorted(names),
             "classes": sorted({class_of(n) for n in names})}
+
+
+#: Kept as the historical name; the check is now class-derived.
+assert_no_inactive_status_is_required = assert_only_requirable_statuses
 
 
 def _matrix_suffixes(job: dict, *, where: str) -> list:
@@ -276,14 +323,38 @@ def branch_protection_instructions() -> dict:
     A description ("require the cross-vendor review") is what produced this
     defect. These are literals, generated from the same constants the code
     asserts on, so the instruction cannot drift from the policy."""
+    never = sorted({n for c in NEVER_REQUIRABLE_CLASSES
+                    for n in STATUS_CLASSES[c]})
     return {
-        "require_now": list(ORDINARY_STATUSES) + list(CONTAINMENT_STATUSES),
-        "require_after_d1": [TRUSTED_STATUSES[0], TRUSTED_CONTAINMENT_STATUSES[0]],
-        "require_after_d2": [TRUSTED_STATUSES[1], TRUSTED_CONTAINMENT_STATUSES[1]],
-        "never_require": list(INACTIVE_STATUSES),
-        "why_never": ("these jobs report a documented residual and cast zero "
-                      "votes; requiring one makes a no-review success satisfy a "
-                      "review requirement"),
+        "require_now": list(ORDINARY_STATUSES),
+        "require_after_d1": [TRUSTED_STATUSES[0]],
+        "require_after_d2": [TRUSTED_STATUSES[1]],
+        "never_require": never,
+        "why_never": {
+            "independent-verify-inactive":
+                "reports a documented residual having cast zero votes; "
+                "requiring it makes a no-review success satisfy a review "
+                "requirement",
+            "d0-containment":
+                "triggers on push and workflow_dispatch only, never on "
+                "pull_request, so it never reports on a candidate head; "
+                "requiring it deadlocks every PR",
+            "probe":
+                "workflow_dispatch only, so it never reports on a candidate "
+                "head; requiring it deadlocks every PR",
+            "d1-containment-gate":
+                "internal job of a main-dispatched trusted run; its check "
+                "lands on main's commit, not on a candidate head",
+            "d2-containment-gate":
+                "internal job of a main-dispatched trusted run; its check "
+                "lands on main's commit, not on a candidate head",
+            "build-engine":
+                "workflow_dispatch only, so it never reports on a candidate "
+                "head; and a green build says the engine artifact was "
+                "PRODUCED, never that anyone approved it — approval of its "
+                "five digests is operator prerequisite 14, out of band",
+        },
+        "trusted_contexts_must_be_published_on_the_candidate_sha": True,
         "honest_scope": ("this is the instruction, not the enforcement — the "
                          "lane holds no credential and cannot read or set "
                          "branch protection; pass the configured list to "
