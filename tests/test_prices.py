@@ -20,7 +20,7 @@ from app.sources.stooq import StooqPoWChallenge, detect_pow, solve_pow
 STOOQ_POW_BODY = (
     '<!DOCTYPE html><html><head></head><body>'
     '<noscript>This site requires JavaScript to verify your browser...</noscript>'
-    '<script nonce="x">(async()=>{const c="AAAAAGpSuLcEAnbV8FVT4wjT5XZmTwe_",'
+    '<script nonce="x">(async()=>{const c="AAAAAGpSuLcEAnbV8FVT4wjT5XZmTwe_",'  # pragma: allowlist secret -- throwaway test fixture
     'd=4,t="0".repeat(d);let n=0;while(1){/* ... */}'
     'const r=await fetch("/__verify",{method:"POST"});})();</script></body></html>'
 )

@@ -612,11 +612,20 @@ class TestSecretBaselineIsUntouched:
         # top-level key cannot smuggle a filter past the loop above.
         assert set(ours) - {"results"} == set(base) - {"results"}
 
-    def test_no_baseline_entry_was_removed(self):
-        """Growth is dispositioned; SHRINKAGE is never legitimate here — a
-        dropped entry means either the finding is gone (then the entry should
-        be removed in the same change that removes it) or the file stopped
-        being scanned."""
+    def test_no_entry_disappeared_for_a_file_that_did_not_change(self):
+        """Shrinkage is legitimate ONLY alongside an edit to the file.
+
+        The first version of this asserted no entry may ever disappear, on the
+        reasoning that a dropped entry means the file stopped being scanned.
+        Package 2 of the PR #23 stack disproved it immediately: PR #23 adds
+        in-line `pragma: allowlist secret` markers to `test_audit_v331.py` and
+        `test_auto_deploy.py`, which is STRICTLY BETTER than a baseline entry —
+        the justification sits on the line it justifies — and it shrinks the
+        baseline as a result.
+
+        So the question is the one that was always meant: did an entry vanish
+        for a file nobody touched. That is the case where the finding did not
+        go away and only the record of it did."""
         ours = json.loads((ROOT / ".secrets.baseline").read_text())["results"]
         theirs = subprocess.run(
             ["git", "show", f"{MAIN}:.secrets.baseline"], cwd=ROOT,
@@ -624,9 +633,19 @@ class TestSecretBaselineIsUntouched:
         if theirs.returncode != 0:
             pytest.skip("main baseline unavailable")
         base = json.loads(theirs.stdout)["results"]
-        lost = {p: len(v) for p, v in base.items()
-                if len(ours.get(p, [])) < len(v)}
-        assert lost == {}, f"baseline entries disappeared for {lost}"
+        unexplained = {}
+        for path, entries in base.items():
+            if len(ours.get(path, [])) >= len(entries):
+                continue
+            changed = subprocess.run(
+                ["git", "diff", "--quiet", MAIN, "--", path],
+                cwd=ROOT, capture_output=True)
+            if changed.returncode == 0:            # 0 == no difference
+                unexplained[path] = len(entries) - len(ours.get(path, []))
+        assert unexplained == {}, (
+            f"baseline entries disappeared for unchanged files: {unexplained}. "
+            "An entry may go when the file it describes is edited to carry an "
+            "in-line pragma; it may not go on its own")
 
 
 # ---------------------------------------------------------- fixtures ---------

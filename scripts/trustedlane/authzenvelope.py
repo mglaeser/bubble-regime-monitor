@@ -75,7 +75,7 @@ LITERAL_SET_LABEL = b"operator-literal-authorization-set-v1"
 #: Honest naming (§1C). An HMAC is a symmetric tag: whoever verifies it could
 #: also have produced it. "signature" would imply an asymmetric key and
 #: non-repudiation, and this construction has neither.
-AUTHENTICATOR_ALGORITHM = "HMAC_SHA256_V1"
+AUTHENTICATOR_ALGORITHM = "HMAC_SHA256_V1"  # pragma: allowlist secret -- an algorithm NAME
 MAC_DOMAIN = "trusted-lane-operator-authorization-mac-v1"
 
 #: The one anchor kind this lane can actually verify. The other two in

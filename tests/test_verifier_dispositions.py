@@ -182,7 +182,7 @@ class TestContextIsStructuralFactsOnly:
     def test_unit_record_has_no_raw_context_text(self):
         from verifier import atoms as A
         from verifier import units
-        secret = b"# SECRET sk-proj-abcdef123456 heading"
+        secret = b"# SECRET sk-proj-abcdef123456 heading"  # pragma: allowlist secret -- planted fixture
         body = (b"@@ -0,0 +1,2 @@\n+" + secret + b"\n+body line\n")
         got, contents = A._extract_content_atoms(
             body, path=b"doc.md", original_path=None, git_status="M",

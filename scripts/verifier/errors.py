@@ -80,10 +80,10 @@ MODEL_CONTEXT_EXCEEDED_UNSPLITTABLE = "MODEL_CONTEXT_EXCEEDED_UNSPLITTABLE"
 # They are blocking-category identifiers whose value is their own name; no
 # credential is involved. Suppressed per-line rather than by relaxing S105 for
 # the module, so a genuine hardcoded secret added here would still be caught.
-TOKEN_COUNT_ENDPOINT_UNAVAILABLE = "TOKEN_COUNT_ENDPOINT_UNAVAILABLE"  # noqa: S105 -- error code, not a credential
-TOKEN_COUNT_RESPONSE_INVALID = "TOKEN_COUNT_RESPONSE_INVALID"  # noqa: S105 -- error code, not a credential
-TOKEN_COUNT_RETRY_EXHAUSTED = "TOKEN_COUNT_RETRY_EXHAUSTED"  # noqa: S105 -- error code, not a credential
-TOKEN_COUNT_DRIFT = "TOKEN_COUNT_DRIFT"  # noqa: S105 -- error code, not a credential
+TOKEN_COUNT_ENDPOINT_UNAVAILABLE = "TOKEN_COUNT_ENDPOINT_UNAVAILABLE"  # noqa: S105 -- error code, not a credential; pragma: allowlist secret
+TOKEN_COUNT_RESPONSE_INVALID = "TOKEN_COUNT_RESPONSE_INVALID"  # noqa: S105 -- error code, not a credential; pragma: allowlist secret
+TOKEN_COUNT_RETRY_EXHAUSTED = "TOKEN_COUNT_RETRY_EXHAUSTED"  # noqa: S105 -- error code, not a credential; pragma: allowlist secret
+TOKEN_COUNT_DRIFT = "TOKEN_COUNT_DRIFT"  # noqa: S105 -- error code, not a credential; pragma: allowlist secret
 
 # --- execution ---
 SECRET_PREFLIGHT_FAILED = "SECRET_PREFLIGHT_FAILED"  # noqa: S105 -- error code, not a credential  # pragma: allowlist secret

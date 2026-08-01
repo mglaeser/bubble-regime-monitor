@@ -65,7 +65,7 @@ TRUSTED_GENERATION_ENVIRONMENT_NAME = "trusted-verifier-generation"
 #: constant whose name ends in KEY usually holds one; here it holds the
 #: identifier prerequisite 5 approves, and the lane refuses to read the value at
 #: all outside D1/D2.
-PROVIDER_SECRET_NAME = (
+PROVIDER_SECRET_NAME = (  # pragma: allowlist secret -- a variable NAME
     "TRUSTED_VERIFIER_OPENAI_KEY"  # noqa: S105 - a NAME; pragma: allowlist secret
 )
 

@@ -129,7 +129,7 @@ class TestRejectedShapes:
                            + O2.encode() + b" M\0a\0")
 
     def test_error_carries_no_raw_bytes(self):
-        secret = b"sk-proj-abcdef123456"
+        secret = b"sk-proj-abcdef123456"  # pragma: allowlist secret -- planted fixture
         msg = self.assert_blocks(rec("100644", "100644", O1, O2, "U", secret))
         assert "sk-proj" not in msg
 

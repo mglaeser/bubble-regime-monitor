@@ -371,7 +371,7 @@ IN_METADATA = "in_verifier_metadata"
 SERIALIZATION_ARTEFACT = "created_by_serialization"
 NO_SOURCE_OCCURRENCE = "no_exact_source_occurrence"
 CATEGORY_SET_MISMATCH = "transmitted_category_set_differs_from_source"
-UNAUTHORIZED_OCCURRENCE = "occurrence_not_authorized"
+UNAUTHORIZED_OCCURRENCE = "occurrence_not_authorized"  # pragma: allowlist secret -- an error CODE
 
 _KIND_REFUSALS = {
     SCAFFOLDING: IN_SCAFFOLDING,

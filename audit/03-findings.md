@@ -1027,3 +1027,18 @@ No AI management system is claimed, so lifecycle/vocabulary-standard alignment i
 Societal/environmental impact is immaterial for a single-operator research heuristic.
 
 - **N/A basis:** No high-impact use case (no decisions about people, no scaled deployment); environmental footprint is negligible (A-40). Documented immaterial.
+
+---
+
+## Addendum — 2026-07-25 reconciliation (see audit/05 addendum for the audit)
+
+Evidence-backed verdict updates applied to `03-findings.json` (the operative
+record): **A-39 FAIL→PASS** (cross-vendor verifier live, 16 veto rounds),
+**A-25 FAIL→PASS** (red→green + bypass closed, tests in blocking CI),
+**A-01, A-08, B-01 FAIL→PARTIAL** (gates demonstrably execute and block on
+real runners; branch protection remains open), A-01's void free-text
+escalation cleared (A-39 no longer fails; the free-text band also exposed a
+gate fail-open, fixed). All 10 PASS records now carry structured
+standing_control objects with non-null `demonstrated`. Founding records
+otherwise unchanged; schema deviation recorded in
+`governance/accepted-residuals.json`.
