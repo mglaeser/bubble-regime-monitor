@@ -289,6 +289,22 @@ which is PR #29's current head. This is the evidence the mandate asked for and
 the only kind it accepts: a hosted full-suite run **on the current head**. No
 earlier green head is cited anywhere in this report or in the PR body.
 
+### One thing that looks like a contradiction and is not
+
+`GET /repos/.../commits/c8ba2a72…/status` — the legacy **combined status**
+endpoint — reports `"state": "pending"` with `"total_count": 0`. That is not CI
+still running, and this report does not read it as such. It is the *statuses*
+API, which is a different surface from *check runs*; zero statuses exist on this
+commit, and the endpoint's documented behaviour for an empty set is `pending`.
+
+The distinction matters here more than it usually would, because the statuses
+API is precisely where the trusted lane publishes `trusted-verifier-count` and
+`trusted-cross-vendor-review`. An empty combined status is therefore the
+*expected* reading of "zero votes cast" — the same fact §11 states — and the
+green above comes from check runs and workflow-run conclusions, each cited by
+run and job id. Anyone configuring a required status should note that this
+endpoint is empty today and that the inactive check must never be added to it.
+
 The hosted failure that opened Exchange 7 —
 `tests/test_verifier_mc4_passc.py::TestPassEAuthorizationScopeIsBound::test_a_swapped_scope_cannot_be_assembled_at_all`,
 run `30704574124` job `91381354081` — is gone from this run.
