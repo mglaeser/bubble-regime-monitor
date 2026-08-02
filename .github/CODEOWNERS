@@ -22,3 +22,11 @@
 /docs/PINS_DECISION_MEMO.md         @mglaeser
 /docs/PIN_EVIDENCE_PACK.md          @mglaeser
 /docs/PIN_EVIDENCE_PACK_2.md        @mglaeser
+
+# The constitution, the mandate, and the engagement evidence (B-35, Articles
+# II/XI/XIII): no code-writing identity may alter the law it runs under or
+# the record it is judged by without the operator's distinct sign-off. The
+# mandate gate additionally hash-attests governance/ on every CI run.
+/governance/            @mglaeser
+/audit/                 @mglaeser
+/CLAUDE.md              @mglaeser

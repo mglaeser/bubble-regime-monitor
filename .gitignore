@@ -12,7 +12,4 @@ data/snapshots/*
 dist/
 build/
 *.egg-info/
-
-# MC3 private verifier artifacts: publication_class=private, regenerate via the manifest
-artifacts/verifier/mc3/*-skeleton.json
-artifacts/verifier/mc3/*-plan.json
+governance/mandate/part2.md

@@ -24,7 +24,7 @@ Every change must pass `.github/workflows/ci.yml`, which is **blocking**:
 - `detect-secrets` (no new secrets)
 - `pytest` (must be green; the suite is hermetic — LPPLS/R paths self-skip when the engine is absent)
 
-Type-checking (`mypy app`) is **advisory** today (43 tracked errors, audit A-13) — driving it to zero and making it blocking is a tracked task. A change is not done until CI is green.
+Type-checking (`mypy app`) is **advisory** today (tracked errors, audit A-13) — driving it to zero and making it blocking is a tracked task. A change is not done until CI is green.
 
 ### Verification tier by change class (audit A-14/C-33)
 

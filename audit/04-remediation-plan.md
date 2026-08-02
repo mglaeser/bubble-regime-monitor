@@ -35,3 +35,26 @@ The remainder, each scheduled against the owning role with the residual-risk reg
 ## What this engagement executed (see `audit/05`)
 
 Given single-maintainer scope and the "small, atomic, reversible, test-first" rule, this engagement executed the **highest blast-radius, lowest-risk** repairs with red→green tests: the `/history` 500 (A-25), the admin-key fail-closed guard (B-06/C-01), the CI-gate rebuild (A-01/A-08/A-13/B-01), the swallowed-handler lint + annotations (A-26), the citation-flag clearance (C-38/A-16), the non-root container (B-12), the numbers-only-prompt regression test (C-07/C-08), and the governance artifacts (SECURITY.md, AGENTS.md, LICENSE, threat model, matrices, AI-BOM). Credential **rotation** (B-06) is an operator action the engagement cannot perform on the providers and is carried as the top residual risk.
+
+## Addendum — §6.5.6 structural ledger (reconstructed 2026-07-25)
+
+The founding engagement did not record the structural-vs-policing decision
+per check; this ledger reconstructs it from what verifiably exists in the
+repository. Where the structural fix (S13) was taken, the standing control
+shrinks to the re-validation that the structure still holds; where policing
+was chosen, the permanent cost is named. Non-reconstructed detail (§6.5 door
+membership per check) is NOT fabricated — see
+`governance/accepted-residuals.json` `recorded_deviations`.
+
+| Defect class | Structural fix taken? | Mechanism | Residual standing control |
+|---|---|---|---|
+| Un-pinned methodology constants | **YES (S13)** | `frozen_methodology.json` + loader rejecting `<PIN>` outside `_meta`; byte-guard test on the scored tree | hash test in blocking CI (cheap lint-class) |
+| Falsification history rewrite | **YES (S13)** | DB-level append-only triggers incl. the INSERT-OR-REPLACE guard + `recursive_triggers=ON` | trigger tests in blocking CI |
+| Untrusted text → tool call | **YES (by architecture)** | no tool surface exists; LLM path passes no `tools=` | calibration class 5 re-validates absence every run |
+| Cross-tenant access | **YES (by architecture)** | single-tenant; no per-user objects | calibration class 6 re-validates absence every run |
+| Placeholder admin key | **YES (fail-closed by construction)** | 503 before compare on placeholder/empty key | rejection tests in blocking CI |
+| Secret in source | **POLICED** (cost accepted) | detect-secrets + the gate's credential-shape scanner | every change + weekly; corpus-calibrated |
+| Swallowed exceptions | **POLICED** (cost accepted) | ruff S110 blocking; existing swallows annotated | every change; noqa ceiling ratcheted |
+| Hallucinated dependency | **POLICED** (cost accepted) | import-resolution check in mandate gate | every change; corpus-calibrated |
+| Vacuous test assertions | **POLICED** (cost accepted) | dedicated scanner (S101 exempts tests/) | every change; corpus-calibrated |
+| Gate self-edit | **PARTIAL structural** | CODEOWNERS write separation + manifest hash attestation | full S13 requires branch protection (operator) |
