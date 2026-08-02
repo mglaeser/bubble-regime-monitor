@@ -254,6 +254,16 @@ coming back.
 | 3 | package 2 `bddce32` | `pytest tests/` | 2708 passed, 5 skipped, 1 xfailed |
 | 4 | package 3 `387b85c` | `pytest tests/` | 2708 passed, 5 skipped, 1 xfailed |
 | 5 | package 3 `f982dba` | `pytest tests/ -p no:randomly` | 2710 passed, 5 skipped, 1 xfailed |
+| 6 | package 0 `13a7b0e` | `pytest tests/ -p no:randomly` | 2468 passed, 5 skipped, 1 xfailed |
+| 7 | package 1 `73178c3` | `pytest tests/ -p no:randomly` | 2470 passed, 5 skipped, 1 xfailed |
+
+Runs 6 and 7 were added after a re-read of the terminal condition. Packages 0
+and 1 had only **targeted** runs recorded — 84 and 131 tests — and "green
+against its predecessor" is a claim about the whole suite, not about the tests
+one expects to be affected. A targeted run cannot see a regression somewhere
+nobody thought to look, which is the only kind worth running a suite for. Both
+are now full-suite green against their actual predecessor, so all four packages
+carry the same class of evidence.
 
 Python 3.11.15 locally; hosted CI is 3.12. `python3.12` exists on this container
 but has no pytest and the runtime lock is hash-pinned, so a second local
@@ -308,6 +318,35 @@ inputs — seven environment secrets and two repository variables.
 | 15 | `approve_bootstrap_branch` | D1 |
 | 16 | `approve_generation_separately` | **D2** |
 
+### The engine release candidate — **BUILT this exchange**
+
+`trusted-engine-build` had **never been run** (`total_count: 0`). That was found
+by checking rather than by assuming, and it mattered: without it the operator
+had nothing to approve as prerequisite 14, and `runtimebinding` had no number to
+compare against — exactly the gap the workflow's own header describes.
+
+It is dispatch-only, holds no credential, has no `environment:`, and runs at
+`contents: read`, so dispatching it is model-controlled work rather than an
+operator act. Run [30726616936](https://github.com/mglaeser/bubble-regime-monitor/actions/runs/30726616936), job `91439406317`, **success**, all eight steps.
+
+| field | value |
+|---|---|
+| `engine_artifact_sha256` | `e79b296519e8a2478da23eb58e77e71c66b3bef33bf1cc98a5464f84d3ef192e` |
+| `engine_source_sha256` | `d08e613747ec0c9a7b8562f8fc0b4409e9de98fc4c441faa1d8310eda809e308` |
+| `runtime_lock_sha256` | `18ed511e512d4277869206b909f0b9cfbc0485e0241ec0931d463d20babefc2d` |
+| `sbom_sha256` | `f66788ce3de3e7c7e7535003b6e8fcb2354e33034a97f656632e41318fc4accb` |
+| `provenance_sha256` | `bc8617807226cfe34d5d1cec75ce67a63f025239dd4845698a2f7e67f32d720b` |
+
+Determinism was **proven, not asserted**: the second build of the same two
+commits produced `e79b2965…` again. Artifact `trusted-engine` id `8826565614`,
+345666 bytes, 30-day retention.
+
+**No trust claim.** A produced artifact is not an approved one. Prerequisite 14
+(`approve_engine_identity`) is still `OPEN_BLOCKING`, the release is not
+created, and both repository variables are unset — all three need a console.
+The digests above are build output an operator can independently reproduce, not
+trust material, and this report does not treat them as any part of a review.
+
 ## 11. D1/D2 activation — **exact block**
 
 Not activated. `phases.IMPLEMENTED_PHASE` is `D0_NO_SECRET_BOOTSTRAP`.
@@ -340,8 +379,8 @@ Rewritten this exchange and now authoritative:
 
 | package | head | base | full suite |
 |---|---|---|---|
-| 0 `remediation/pr23-00-judgment-kwargs` | `13a7b0e` | `c8ba2a7` (sim final) | 84 targeted passed |
-| 1 `remediation/pr23-01-governance-source` | `73178c3` | package 0 | 131 targeted passed |
+| 0 `remediation/pr23-00-judgment-kwargs` | `13a7b0e` | `c8ba2a7` (sim final) | **2468 passed, 5 skipped, 1 xfailed, 0 failed** (84 targeted also passed) |
+| 1 `remediation/pr23-01-governance-source` | `73178c3` | package 0 | **2470 passed, 5 skipped, 1 xfailed, 0 failed** (131 targeted also passed) |
 | 2 `remediation/pr23-02-mandate-gate` | `bddce32` | package 1 | **2708 passed, 0 failed** |
 | 3 `remediation/pr23-03-audit-record` | `f982dba` | package 2 | **2710 passed, 5 skipped, 1 xfailed, 0 failed** |
 
@@ -425,7 +464,9 @@ about a run that has completed, not as a prediction about one that is pending �
 the distinction the Exchange-6 review was made of.
 
 Operator-controlled, in order: the sixteen prerequisites → trust store and
-environment secrets → engine release and approval → D1 activation → D1 on PR #29
+environment secrets → **create the release from the already-built artifact**
+(run `30726616936`, digests in §10) and approve its five digests as
+prerequisite 14, then set the two repository variables → D1 activation → D1 on PR #29
 → fix trusted findings → D2 → merge PR #29 → rebase the stack onto real main →
 trusted review of PR #23 → defect register → merge the stack.
 

@@ -191,6 +191,46 @@ determinism by rebuilding and comparing, and retains `engine.tar.gz` plus
 `engine-identity.json`. Download both, create the release, set the two variables
 above, and approve the five digests in the identity record as prerequisite 14.
 
+#### It has been run — the candidate exists
+
+| fact | value |
+|---|---|
+| run | [30726616936](https://github.com/mglaeser/bubble-regime-monitor/actions/runs/30726616936) · job `91439406317` · **success** |
+| dispatched from | `refs/heads/main` @ `409cc5d8d9c2687e228db98cee0fad096fe523c3` |
+| `candidate_verifier_sha` | `c8ba2a727d46347904ed072422a11ab68c5b2e74` (PR #29's green head) |
+| retained artifact | `trusted-engine` · id `8826565614` · 345666 bytes · **30-day retention** |
+| determinism | **proven** — rebuild from the same two commits produced the same digest |
+
+The five digests in `engine-identity.json`, which are what prerequisite 14
+approves:
+
+| field | value |
+|---|---|
+| `engine_artifact_sha256` | `e79b296519e8a2478da23eb58e77e71c66b3bef33bf1cc98a5464f84d3ef192e` |
+| `engine_source_sha256` | `d08e613747ec0c9a7b8562f8fc0b4409e9de98fc4c441faa1d8310eda809e308` |
+| `runtime_lock_sha256` | `18ed511e512d4277869206b909f0b9cfbc0485e0241ec0931d463d20babefc2d` |
+| `sbom_sha256` | `f66788ce3de3e7c7e7535003b6e8fcb2354e33034a97f656632e41318fc4accb` |
+| `provenance_sha256` | `bc8617807226cfe34d5d1cec75ce67a63f025239dd4845698a2f7e67f32d720b` |
+
+`TRUSTED_ENGINE_ARTIFACT_SHA256` is the first of those.
+
+**This is a produced artifact, not an approved one.** The workflow's own header
+says it: a green `build-engine` says the bytes were produced, and says nothing
+about anyone having approved them. Prerequisite 14 is still `OPEN_BLOCKING` and
+still yours. Two further cautions:
+
+* the artifact expires in **30 days** (retained, not released, because
+  publishing needs `contents: write` and a build that can write to the
+  repository can move the tag it publishes under). Re-dispatch is cheap and
+  deterministic — the same two commits give the same digest — so an expiry is
+  not a loss of anything but time;
+* it was built against PR #29's head **while that PR is still a draft**. If the
+  precursor merges and the candidate head moves, re-dispatch with the new
+  `candidate_verifier_sha` and approve the new digests. Approving the digests
+  above and then merging a different candidate would leave the runtime binding
+  gate comparing an approved number to an artifact nobody approved — which it
+  would refuse, correctly, and confusingly.
+
 The build **retains rather than releases** on purpose: publishing needs
 `contents: write`, and a build that can write to the repository can move the tag
 it publishes under.
