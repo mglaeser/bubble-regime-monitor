@@ -1,0 +1,306 @@
+# The mid-term single-repository review panel. HOLDS A PROVIDER SECRET.
+#
+# This is the only workflow in the repository that both holds a provider
+# credential and runs automatically in response to a pull request. Everything
+# about its shape is load-bearing, and `scripts/midtermpanel/privilegedworkflow.py`
+# asserts every one of the properties below over this file in ordinary CI. Read
+# that module before editing this one; a change here that it does not permit will
+# fail the suite rather than ship.
+#
+# ## Why `workflow_run` and not `pull_request`
+#
+# `livepolicy.py` refuses any secret in a `pull_request`-triggered workflow,
+# because such a workflow runs code the pull request author wrote. Its refusal
+# message names this exact remedy: "Move it to a workflow_run job that checks out
+# trusted code and takes the candidate as data." That is what this file is.
+#
+# A `workflow_run` workflow is taken from the DEFAULT BRANCH, not from the pull
+# request. The pull request cannot edit the file that reviews it. That is the
+# entire safety argument, and it survives only while the two rules below hold.
+#
+# ## The two rules
+#
+#   1. The candidate's tree is never materialised. Candidate commits arrive as
+#      inert git OBJECTS via `git fetch --no-checkout`; nothing checks them out,
+#      unpacks them, installs them or imports them. No `ref:` on any checkout, no
+#      `download-artifact`, no `cache`, no `git checkout` in any `run:`.
+#
+#   2. The secret is scoped to the two jobs that spend it. `preflight` decides
+#      whether the run may proceed and `finalize` runs on every failure path;
+#      neither has a credential in scope while doing so.
+#
+# ## The accepted residual, stated where it applies
+#
+# The key is a PERSISTENT REPOSITORY-level Actions secret, because GitHub Free
+# private repositories have no environment-scoped secret boundary. A pull request
+# that adds or edits a `pull_request` workflow may be able to reference it. This
+# workflow cannot prevent that — no workflow can. The operator accepts the
+# residual; the panel flags every workflow-changing PR as HIGH_RISK_WORKFLOW_CHANGE
+# so the human merge gate can require a source review of the diff.
+#
+# Nothing here is write-separated. Nothing here may publish a `trusted-*` status
+# or emit a `TRUSTED_*` evidence class.
+#
+# Action pins (immutable SHAs; mapping in scripts/trustedlane/actionpolicy.py):
+#   actions/checkout        11d5960a326750d5838078e36cf38b85af677262  (v4.4.0)
+#   actions/setup-python    a26af69be951a213d495a4c3e4e4022e16d87065  (v5.6.0)
+#   actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02  (v4.6.2)
+
+name: midterm-panel-review
+
+on:
+  # Fires when ordinary CI completes. Filtered to `ci` by name: an unfiltered
+  # workflow_run fires on the completion of EVERY workflow including one a pull
+  # request just added, which would let the candidate choose when the privileged
+  # run starts and what event payload it reads.
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+  # Controlled rerun. `approval_phrase` is required so a dispatch is a deliberate
+  # act rather than a mis-click; it selects nothing and reaches no code.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: string
+      candidate_head_sha:
+        description: Exact candidate head SHA the result will be published on
+        required: true
+        type: string
+      approval_phrase:
+        description: Type REVIEW to confirm a deliberate provider spend
+        required: true
+        type: string
+
+# `statuses: write` is the only write scope, and it exists solely to publish
+# `midterm-panel-count` / `midterm-panel-review` onto the exact candidate head.
+# An unset block would inherit the repository default, which may be write-all.
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  statuses: write
+
+defaults:
+  run:
+    shell: bash
+
+# One panel per candidate head. A rerun of CI on the same head must not buy a
+# second panel; `midtermpanel.dedupe` additionally binds reuse to the engine,
+# policy and request-semantics digests, because "same SHA" is not the same claim
+# as "same review".
+concurrency:
+  group: midterm-panel-${{ github.event.workflow_run.head_sha || inputs.candidate_head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------- preflight
+  # NO SECRET IN SCOPE. This job decides whether the run may proceed, and a
+  # decision made in a process holding a credential is a decision whose failure
+  # modes include leaking it.
+  preflight:
+    name: midterm-preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      proceed: ${{ steps.decide.outputs.proceed }}
+      pr_number: ${{ steps.decide.outputs.pr_number }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+      base_sha: ${{ steps.decide.outputs.base_sha }}
+      high_risk: ${{ steps.decide.outputs.high_risk }}
+    steps:
+      # No `ref:`. For a workflow_run event the default checkout is the
+      # default-branch commit this workflow definition came from, which is
+      # exactly what a privileged job wants. Naming a ref could only move it
+      # toward candidate-controlled code.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the hash-locked runtime
+        run: |
+          python -m pip install --require-hashes --no-deps \
+            -r requirements-trusted-runtime.txt
+
+      - name: Re-verify this workflow against its own static policy
+        # The validator runs in ordinary CI too. Running it again HERE, from the
+        # default-branch checkout, is the difference between "the file was
+        # correct when someone last ran the suite" and "the file that is
+        # executing right now is correct".
+        run: |
+          python - <<'PROBE'
+          import json, sys
+          sys.path.insert(0, "scripts")
+          from midtermpanel import privilegedworkflow
+          print(json.dumps(privilegedworkflow.validate(root="."), indent=2)[:2000])
+          PROBE
+
+      - name: Identify the exact candidate and verify ordinary CI
+        id: decide
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          OBSERVED_REF: ${{ github.ref }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+          RUN_WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          DISPATCH_PR_NUMBER: ${{ inputs.pr_number }}
+          DISPATCH_HEAD_SHA: ${{ inputs.candidate_head_sha }}
+          DISPATCH_APPROVAL: ${{ inputs.approval_phrase }}
+        run: |
+          python -m midtermpanel.preflightcli
+
+  # -------------------------------------------------------------------- count
+  # FIRST job permitted to reference the provider secret.
+  count:
+    name: midterm-count
+    needs: preflight
+    if: needs.preflight.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the hash-locked runtime
+        run: |
+          python -m pip install --require-hashes --no-deps \
+            -r requirements-trusted-runtime.txt
+
+      - name: Count every governed model and batch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MIDTERM_PANEL_PROVIDER_KEY: ${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          CANDIDATE_PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+          CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          CANDIDATE_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
+        run: |
+          python -m midtermpanel.countcli
+
+      - name: Retain count evidence and the private plan
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: midterm-count-${{ needs.preflight.outputs.head_sha }}
+          path: |
+            ${{ runner.temp }}/midterm/count-evidence.json
+            ${{ runner.temp }}/midterm/executable-plan.json
+          if-no-files-found: warn
+          retention-days: 3
+
+  # -------------------------------------------------------------------- panel
+  panel:
+    name: midterm-panel
+    needs: [preflight, count]
+    if: needs.preflight.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the hash-locked runtime
+        run: |
+          python -m pip install --require-hashes --no-deps \
+            -r requirements-trusted-runtime.txt
+
+      # NOTE: the plan is NOT downloaded via download-artifact. Consuming an
+      # artifact is refused by the static policy — the triggering run is the
+      # candidate's CI, and a check that allowed "artifacts from our own run"
+      # would be one event-payload confusion away from allowing theirs. The
+      # panel rebuilds the plan from the same inputs and compares digests.
+      - name: Execute the governed panel
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MIDTERM_PANEL_PROVIDER_KEY: ${{ secrets.TRUSTED_VERIFIER_OPENAI_KEY }}
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          CANDIDATE_PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+          CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          CANDIDATE_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
+          HIGH_RISK_WORKFLOW_CHANGE: ${{ needs.preflight.outputs.high_risk }}
+        run: |
+          python -m midtermpanel.panelcli
+
+      - name: Retain private verdict evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: midterm-panel-${{ needs.preflight.outputs.head_sha }}
+          path: ${{ runner.temp }}/midterm/panel-evidence.json
+          if-no-files-found: warn
+          retention-days: 3
+
+  # ----------------------------------------------------------------- finalize
+  # Runs on EVERY path, including cancellation. NO SECRET IN SCOPE: this job
+  # exists to make sure no status was left pending, and the one thing it must
+  # never do is fail in a way that leaves a credential in a log.
+  finalize:
+    name: midterm-finalize
+    needs: [preflight, count, panel]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the hash-locked runtime
+        run: |
+          python -m pip install --require-hashes --no-deps \
+            -r requirements-trusted-runtime.txt
+
+      - name: Close out every status and write the summary
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          CANDIDATE_PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+          CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          HIGH_RISK_WORKFLOW_CHANGE: ${{ needs.preflight.outputs.high_risk }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          COUNT_RESULT: ${{ needs.count.result }}
+          PANEL_RESULT: ${{ needs.panel.result }}
+        run: |
+          python -m midtermpanel.finalizecli
