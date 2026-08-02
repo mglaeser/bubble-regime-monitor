@@ -1,172 +1,217 @@
-# PR #23 — integration simulation and remediation-stack topology
+# PR #23 — remediation stack topology (four packages)
 
-Contract §5.5–§5.7. Everything here was produced by a **disposable local
-integration**, never pushed. PR #23's branch
-(`claude/bubblegauge-build-spec-fzthju`) is untouched and still at
-`a9062aa656a5a6f3dbe5991d16ce9c218aad0454`.
+**Supersedes the seven-area topology (EX6-R05).** That document was static
+analysis and said so: "a proposal for Exchange 4 to implement, not an approved
+plan." Exchange 6 implemented it and the implementation disagreed with the
+proposal; Exchange 7 rebuilt it on current main and it disagreed again, in three
+more places. This is the corrected authority. The original findings F-01 to F-05
+are retained at the end, because they are still true and still load-bearing.
 
-**No trusted claim is made anywhere in this document.** Every finding below is
-`DETERMINISTIC_STATIC_ANALYSIS` — reproducible by running the quoted command. No
-model has reviewed PR #23; D1 and D2 are not active.
+PR #23's branch (`claude/bubblegauge-build-spec-fzthju`) is **untouched** and
+still at `a9062aa656a5a6f3dbe5991d16ce9c218aad0454`.
 
-## Simulation identities
+**No trusted claim is made anywhere in this document.** No model has reviewed
+any of it. D1 and D2 are not active. Every package being green is
+`MOCK_TEST_EVIDENCE` produced by the branch being reviewed.
 
-| thing | value |
+---
+
+## The base, and why it moved
+
+The Exchange-6 stack forked at `f4dae803` and was **26 commits behind** main
+`409cc5d`. Its green results proved compatibility with a tree that no longer
+exists — which is EX6-R04, and rebuilding on the current tree found five real
+incompatibilities the old base could not show.
+
+```
+simulated final base = main 409cc5d
+                     + the green precursor head (PR #29)
+                     = c8ba2a727d46347904ed072422a11ab68c5b2e74
+```
+
+It is **disposable**: a prediction of what main will be after PR #29 merges, not
+a claim about what main is. After PR #29 actually merges, the stack is rebased
+once more onto the real new main and the mapping recorded again.
+
+### Old → new commit mapping
+
+| package | Exchange-6 head | Exchange-7 head | archive branch |
+|---|---|---|---|
+| 0 | `6881d750eeee9372a3ed3a5f69860f42affb0882` | `13a7b0e0ecea6d1cc93ec42999fcacfd5d2ebcec` | `archive/ex6-remediation-pr23-00-judgment-kwargs` |
+| 1 | `bb3a6b00817c93ad10b0caf6eda66ed40fa53b7b` | `73178c3d51981ea407b60df91770ab85c0c67f9c` | `archive/ex6-remediation-pr23-01-governance-source` |
+| 2 | `a0d44d39bd005e9e1011e5b64b70860b54ed787e` | `bddce3223094c0436bde0d00158c3defc7a7462d` | `archive/ex6-remediation-pr23-02-mandate-gate` |
+| 3 | `37d8cae3026f04001daed69ab08cbc4ab598cd3c` | `387b85c2fbf39a83554f587e94eadf9c02c35c7d` | `archive/ex6-remediation-pr23-03-audit-record` |
+
+Tags could not be pushed (the git proxy returns 403 on tag refs), so the
+archives are branches. They are byte-identical to the Exchange-6 heads.
+
+---
+
+## Why four and not seven
+
+The seven-area split was right about which FILES depend on which. It was wrong
+about where a **reviewable boundary** can fall. Both Exchange-6 corrections were
+found by running the proposed stack, not by re-reading it.
+
+**Correction 1 — the gate cannot be separated from its calibration inputs.**
+With only items 1 and 2 present, 15 of the gate's 238 tests fail, each naming
+the file it is missing:
+
+| failing test | needs |
 |---|---|
-| base `main` | `112e29d34f4d094a3fa2747c6af2e66c10c0b255` |
-| simulated precursor-main | `26818e9f13bd334ed57cc9262c199be2c6e97167` |
-| simulated integration commit | `7802e16d7e7074e9ae87f18f92e0c0543c857273` |
-| simulated integration **tree** | `774b0f87554ee32c988e39091a16ec563330d515` |
-| PR #23 head (frozen, unmodified) | `a9062aa656a5a6f3dbe5991d16ce9c218aad0454` |
+| `test_live_app_passes_model_keywords_explicitly` | package 0 (`judgment.py`) |
+| `test_live_gate_passes_end_to_end` | `audit/ratchet-baselines.json` |
+| `test_removing_a_ratchet_entirely_blocks` | `audit/ratchet-baselines.json` |
+| `test_live_surface_matches_the_repository` | `audit/00-audit-surface.json` |
+| `test_f03_egress_lists_twelvedata_and_polygon` | `audit/00-audit-surface.json` |
+| `test_the_live_tests_tree_is_clean_under_the_scanner` | the scanner-clean test files |
 
-The precursor merged into `main` **cleanly, no conflicts**.
+The gate is **self-checking**: its value is that it re-proves it still catches
+its seeded defect. `MANDATE-GATE FAIL: seeded-defect calibration (S12)` is what
+it says when it cannot. A package in which that cannot run is not reviewable.
 
-## Conflict register — exactly four files
+**Correction 2 — CODEOWNERS cannot be separated from what derives from it.**
+`independent_verify.is_control_bearing` DERIVES control-bearing status from
+`.github/CODEOWNERS` rather than listing it, so `CLAUDE.md` becomes
+control-bearing only once CODEOWNERS routes it. Split apart,
+`test_the_standing_law_for_ai_sessions_blocks_when_unreviewed` fails — and in the
+direction that matters: an unreviewed change to the standing law would **not**
+have blocked.
 
-Only PR #23 conflicts, and every conflict is with a file Exchange 2 changed:
+Neither is a preference. In both cases the smaller package leaves a test that
+cannot run, which is the same defect class as a check that passes vacuously.
 
-| file | why it conflicts | resolution taken in the simulation |
+---
+
+## The four packages
+
+Each is **cumulative**: package N's base is package N−1's head, so a reviewer
+reads N's delta against N−1 and a merge lands them in order. Reconstructed **by
+file**, never by commit — see F-04.
+
+### Package 0 — `remediation/pr23-00-judgment-kwargs` · `13a7b0e`
+
+| | |
+|---|---|
+| base | simulated final base `c8ba2a7` |
+| depends on | nothing |
+| delta | `app/engine/judgment.py` |
+| generated / authored | authored |
+| baseline entries | none |
+| targeted test | `pytest tests/ -k "judgment or status"` → 84 passed |
+| full suite | `pytest tests/` |
+| revert consequence | the C-06/C-07 no-tool invariant stops being source-checkable; nothing else moves |
+| trusted-review status | **NOT REVIEWED** |
+
+`client.messages.create(**base)` built its keywords in a dict — ordinary Python,
+and the wrong shape here: the no-tool invariant is checked by scanning source
+for `tools`, and a dynamically-built kwarg could enable tool use without the
+literal ever appearing. The invariant would still hold or not, but nothing could
+tell which.
+
+### Package 1 — `remediation/pr23-01-governance-source` · `73178c3`
+
+| | |
+|---|---|
+| base | package 0 |
+| depends on | 0 |
+| delta | `governance/` (5 files), `.secrets.baseline`, `.secrets-baseline-dispositions.json`, and two ratchet corrections in `tests/test_secret_gate_policy.py` + `tests/test_verifier_mc4_passc.py` |
+| generated / authored | `mandate.md` generated from `part1.md`; the rest authored |
+| baseline entries | **+7**, all `governance/mandate/manifest.json` |
+| targeted test | `pytest tests/test_secret_gate_policy.py tests/test_verifier_mc4_passc.py tests/test_verifier_mc4_passe.py` → 131 passed |
+| full suite | `pytest tests/` |
+| revert consequence | package 2's gate loses every file it attests and fails closed, which is the gate working |
+| trusted-review status | **NOT REVIEWED** |
+
+The governance files are inert: nothing reads them until package 2 lands the
+gate. **The ratchet corrections are not.** See EX7-F01/F02 in the Exchange-7
+report — two merged gates forbade every legitimate baseline addition in order to
+forbid the illegitimate one, and each is narrowed to what its own stated reason
+asks for. That is a change to merged gates made from a candidate branch, and it
+is stated rather than slipped in.
+
+### Package 2 — `remediation/pr23-02-mandate-gate` · `bddce32`
+
+| | |
+|---|---|
+| base | package 1 |
+| depends on | 0, 1 |
+| delta | the gate + its four test modules, `audit/03-findings.*`, `audit/00-check-catalogue.json`, `audit/03b-coverage-ledger.md`, `audit/ratchet-baselines.json`, `audit/00-audit-surface.json`, `audit/engagement-status.json`, `app/config.py`, three scanner-clean test files, `pyproject.toml`, `.secrets.baseline`, and ten in-line pragmas on the live tree |
+| generated / authored | `00-audit-surface.json`, `00-check-catalogue.json` generated; rest authored |
+| baseline entries | **+2** (`tests/test_mandate_gate.py`); `test_audit_v331.py` 4→2 and `test_auto_deploy.py` removed, both because PR #23 marks those fixtures in-line instead |
+| targeted test | `pytest tests/test_mandate_gate*.py` → **238 passed** |
+| full suite | `pytest tests/` → **2708 passed, 5 skipped, 1 xfailed, 0 failed** |
+| revert consequence | the mandate stops being enforced; package 1's governance text becomes documentation nobody checks |
+| trusted-review status | **NOT REVIEWED** |
+
+`pyproject.toml` scopes S603/S607 to `scripts/mandate_gate.py`, which invokes
+fixed argv (ruff, git, pytest) to re-prove the other gates — the rationale
+already recorded for `gsadf_runner.py` and `d4_lppls.py`. **This is the only
+part of the old item 6 that is taken.**
+
+### Package 3 — `remediation/pr23-03-audit-record` · `387b85c`
+
+| | |
+|---|---|
+| base | package 2 |
+| depends on | 0, 1, 2 |
+| delta | `.github/CODEOWNERS`, `CLAUDE.md`, `AGENTS.md`, `audit/04`–`audit/13`, `audit/evidence/…`, `.gitignore` |
+| generated / authored | authored |
+| baseline entries | **none** — nothing added, grown or removed |
+| targeted test | `pytest tests/test_independent_verify.py` |
+| full suite | `pytest tests/` → **2708 passed, 5 skipped, 1 xfailed, 0 failed** |
+| revert consequence | control-bearing derivation reverts to main's; the standing-regime records disappear |
+| trusted-review status | **NOT REVIEWED** |
+
+---
+
+## What is deliberately NOT transplanted
+
+| PR #23 file | disposition | why |
 |---|---|---|
-| `.github/workflows/independent-verify.yml` | PR #23 predates the V-TRUST fix | **take `main`** — see F-01 |
-| `.github/workflows/ci.yml` | PR #23 predates the SHA action pins | **take `main`** |
-| `.gitignore` | independent edits | take PR #23 |
-| `pyproject.toml` | independent edits | take PR #23 |
+| `.github/workflows/independent-verify.yml` | **DROPPED** | pre-Exchange-2. Injects a provider credential into a job running PR-controlled code — V-TRUST, reintroduced. |
+| `.github/workflows/ci.yml` | **DROPPED** | pre-Exchange-2. Unpins both actions to moving tags; carries the inactive job under its old `cross-vendor` name. |
+| `scripts/independent_verify.py` | **DROPPED (new in Exchange 7)** | PR #23's version predates PR #29's `--plan` CLI and does not carry it. Transplanted wholesale it REVERTS a working entry point: `--plan` exits 0 on an unknown base because the flag is not implemented there. Five tests catch it. Recorded as EX7-F03; reconciling the two is a merge, not a copy. |
+| `tests/test_independent_verify.py` | **DROPPED** | tests the version above. |
 
-Two of the four are security-bearing. A resolution that takes "theirs" on either
-one reverts an Exchange-2 fix.
+Verified: no package's delta touches any file under `.github/workflows/`.
 
-## Changed-file universe — 41 files
+---
 
-`git diff --name-status 26818e9f 7802e16d` → **22 added, 1 deleted, 18 modified**
+## Secret-baseline disposition, per entry
 
-| area | count |
-|---|---|
-| `audit/` | 17 |
-| `tests/` | 8 |
-| `governance/` | 5 |
-| `scripts/` | 2 |
-| `app/` | 2 |
-| root/config (`pyproject.toml`, `.gitignore`, `.secrets.baseline`, `CLAUDE.md`, `AGENTS.md`, `.github/CODEOWNERS`) | 6 |
-| `.github/workflows/` | 1 |
+PR #23's own baseline grows by 74 lines in one diff (F-03: "needs review not
+rejection"). Split per package, each line is reviewable.
 
-## Deterministic findings
+| package | file | Δ | what they are | disposition |
+|---|---|---|---|---|
+| 1 | `governance/mandate/manifest.json` | +7 | sha256 content digests of committed governance documents | **accept** — each recomputable by `sha256sum` from a file in this repository; JSON carries no comments, so the in-line pragma used elsewhere is unavailable. Registered in `.secrets-baseline-dispositions.json`. |
+| 2 | `tests/test_mandate_gate.py` | +2 | the gate's planted calibration material | **accept** — removing them makes the gate unable to demonstrate it catches its seeded defect. Registered. |
+| 2 | `tests/test_audit_v331.py` | 4→2 | — | **accept shrinkage** — PR #23 marks these in-line instead, which is strictly better: the justification sits on the line it justifies |
+| 2 | `tests/test_auto_deploy.py` | removed | — | same |
+| 3 | — | none | — | — |
+
+Verified by diffing the baseline before and after each package.
+
+---
+
+## Retained findings from the original analysis
 
 ### F-01 — PR #23 reintroduces V-TRUST · **P0**
-
-`git show a9062aa:.github/workflows/independent-verify.yml` lines 35–36:
-
-```yaml
-SECOND_VENDOR_API_KEY: ${{ secrets.SECOND_VENDOR_API_KEY }}
-OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-```
-
-in a job that is `on: pull_request`, checks out the PR ref, and runs
-`python scripts/independent_verify.py` from that checkout. That is the exact
-defect Exchange 2 closed. The job is also still named `cross-vendor`, the
-inactive-but-authoritative-sounding name EX2-F02 renamed.
-
-**A naive "accept theirs" conflict resolution reintroduces it.**
-
-Guarded: feeding that blob to the merged ratchet refuses —
-
-```
-category=pr_controlled_workflow_reaches_a_secret name=independent-verify.yml
-count=2 classes=['PROVIDER_CLASS'] triggers=['pull_request','workflow_dispatch']
-```
-
-so CI would go red rather than shipping it. The guard is the reason this is
-recoverable, not the reason it is unimportant.
+Its `independent-verify.yml` injects a provider credential into a job running
+PR-controlled code. `livepolicy.py` is a merged ratchet refusing reintroduction.
 
 ### F-02 — PR #23 unpins both actions · **P1**
-
-`actions/checkout@v4` and `actions/setup-python@v5`. Same conflict, same
-resolution: take `main`, which carries the approved SHA pins.
+Moving tags in a credential-bearing lane. Main pins immutable SHAs recorded in
+`scripts/trustedlane/actionpolicy.py`.
 
 ### F-03 — `.secrets.baseline` more than doubles · **P1, needs review not rejection**
+Resolved by the per-entry table above.
 
-| branch | files | entries |
-|---|---|---|
-| `main` | 2 | 5 |
-| PR #23 | 3 | 11 |
-
-A baseline is an allowlist. Six added entries are six things the secret scanner
-will stop reporting. Each needs to be looked at individually before merge; this
-analysis does not claim any of them is wrong, only that a doubling is not a
-detail.
-
-### F-04 — commits do not map to stack areas · **structural, drives the decision below**
-
-45 commits. Sampling the twelve most recent, each touches **5–8 top-level
-areas**:
-
-```
-2d1049e -> .secrets.baseline,audit,governance,scripts,tests
-dc6beec -> .github,.secrets.baseline,audit,governance,scripts,tests
-6b90277 -> .github,.secrets.baseline,AGENTS.md,app,audit,governance,scripts,tests
-```
-
-They are **review rounds**, not feature units — "Close iteration-3 fail-opens",
-"Work the branch-wide review", "Fix 7 confirmed items, rebut 5". Therefore
-**cherry-picking by commit is not viable**. A stack has to be reconstructed
-by *file*.
+### F-04 — commits do not map to stack areas · structural
+PR #23's 45 commits each span five to eight areas, so nothing there is
+cherry-pickable as a commit. Every package is reconstructed by file, and the
+reconstruction cost is the same whatever the split — which is what made a
+four-package split affordable.
 
 ### F-05 — the integration tree is otherwise clean · nonblocking
-
-On the resolved integration: `ruff check app tests scripts` passes; the
-live-workflow policy, status-name policy, lane workflow validators and the
-deployed-D0 byte-identity check all pass. An earlier run of the full suite on
-the equivalent tree gave **1733 passed, 1 xfailed**.
-
-## Remediation-stack topology
-
-Dependencies are real: `scripts/mandate_gate.py` hard-references **13**
-`governance/` paths, so the gate cannot land before the files it attests. `app/`
-imports nothing from the gate, so it is independent.
-
-| # | stack item | source files | depends on | merge order | exercised by | cherry-pick? |
-|---|---|---|---|---|---|---|
-| 1 | **Governance source & manifest** | `governance/mandate.md`, `governance/mandate/part1.md`, `governance/mandate/manifest.json`, `governance/constitution.md`, `governance/accepted-residuals.json` | — | 1st | none yet (inert data until item 2) | **yes** — additive, no imports |
-| 2 | **Mandate gate & verification machinery** | `scripts/mandate_gate.py`, `tests/mandate_gate_support.py`, `tests/test_mandate_gate.py`, `tests/test_mandate_gate_calibration.py`, `tests/test_mandate_gate_registers.py` | 1 (13 hard path references) | 2nd | `test (3.12)` | **yes**, but only after 1 |
-| 3 | **Findings / catalogue / transitions** | `audit/03-findings.json`, `audit/03-findings.md`, `audit/00-check-catalogue.json`, `audit/03b-coverage-ledger.md`, `audit/ratchet-baselines.json` | 2 (the gate validates consistency) | 3rd | `test (3.12)` | **yes** |
-| 4 | **Secret / history controls** | `.secrets.baseline`, `app/config.py` (allowlist pragma on the placeholder default) | — | any, but **review F-03 first** | secret-scan step | **yes**, one file at a time |
-| 5 | **Audit-surface derivation** | `audit/00-audit-surface.json`, `audit/engagement-status.json`, `audit/05-08…`, `audit/09`–`audit/13`, `audit/evidence/…` | 2, 3 | 4th | `test (3.12)` | **yes** — but 17 files; split by generated-vs-authored |
-| 6 | **Supply-chain / CI controls** | `.github/workflows/independent-verify.yml`, `.github/workflows/ci.yml`, `.github/CODEOWNERS`, `pyproject.toml` | — | **DROP the two workflow files** | `test (3.12)`, live-workflow policy | **NO — needs redesign** |
-| 7 | **Deployment / production-eligibility semantics** | `audit/engagement-status.json` (`production_eligible`), `audit/08-standing-regime.md`, `audit/06-residual-risk-register.md`, `CLAUDE.md`, `AGENTS.md` | 1, 2, 3, 5 | last | `test (3.12)` | **yes** |
-| — | **`app/engine/judgment.py`** | explicit-kwargs change (no `**` expansion, so the no-tool invariant stays source-checkable) | — | independent | `test (3.12)` | **yes** — smallest, safest, lands first |
-
-**Item 6 is the one that needs redesign, not transplant.** Its two workflow
-files are precisely the Exchange-2 fixes; PR #23's versions are strictly worse
-(V-TRUST live, actions unpinned, inactive job misnamed). The correct move is to
-drop them from the stack entirely and keep `main`'s, taking only `CODEOWNERS`
-and `pyproject.toml` from PR #23.
-
-## One PR or a stack?
-
-**A stack — six or seven PRs.** The reasoning that actually drives it:
-
-1. **Blast radius is not uniform.** Item 6 contains a live credential-exposure
-   regression; items 1 and 3 are inert data. Reviewing them under one approval
-   means the riskiest change is approved by whoever got tired around file 30.
-2. **Independent revertibility.** If the gate (item 2) turns out to fail closed
-   on something legitimate, reverting it should not also revert the governance
-   text it attests. As one PR, it cannot.
-3. **F-04 forces reconstruction anyway.** Commits span 5–8 areas each, so
-   nobody is going to cherry-pick this by commit whatever they decide. Once the
-   stack is being rebuilt by file, building it as several PRs costs almost
-   nothing extra.
-4. **The trusted review is metered.** D1 counts input tokens and D2 spends on
-   generation. A 41-file, ~12k-line single review is one enormous batch whose
-   cost is hard to predict and whose failure is total. Six smaller reviews fail
-   independently and can be re-run individually.
-
-The counter-argument, stated fairly: the 45 commits contain interdependent
-review-round fixes, and splitting risks landing a partial fix. That is real, and
-it is why item ordering above is dependency-driven rather than convenience-driven
-— nothing lands before what it references.
-
-## What this is not
-
-No model reviewed anything. No count and no generation has occurred. The
-findings above are static analysis a reader can reproduce with the quoted
-commands, and the stack is a proposal for Exchange 4 to implement, not an
-approved plan.
