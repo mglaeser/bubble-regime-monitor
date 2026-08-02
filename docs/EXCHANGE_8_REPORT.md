@@ -2,6 +2,26 @@
 
 **RELEASE_EXECUTION_CONTRACT_v1.** Exchange 8 is terminal. There is no Exchange 9.
 
+> **External review decision — ACCEPTED.** This disposition was accepted on
+> external review of commit `1ea3697`. The review added two qualifications that
+> narrow how two phrases in this report may be read, and a fourth merge
+> precondition. Both are applied below rather than appended, so no reader
+> reaches the loose wording first.
+>
+> **A. "Nothing model-controlled remains" is narrow.** It means: *nothing
+> model-controlled remains that can convert the current Path-B blocked state
+> into an approved release without operator activation.* It does **not** mean
+> that no technical work will be required after activation. Conditional
+> technical and merge work is recorded in §16, §20 M-1…M-4 and §20c.
+>
+> **B. "0 surviving OPEN_BLOCKING_TECHNICAL" is scoped** to the current,
+> deliberately inactive Path-B snapshot. Before any D1/D2 activation or any
+> remediation merge, the gates in §20 M-1…M-4 and the rechecks in §20c become
+> blocking.
+>
+> The engineering contract terminates here. What follows is an operator-controlled
+> activation and merge programme, not a further exchange.
+
 ---
 
 ## 1. Exchange
@@ -30,9 +50,15 @@ call was made in this exchange.
 FINAL_RELEASE_DISPOSITION: BLOCKED_EXTERNAL_OPERATOR_ACTION
 ```
 
-Nothing model-controlled remains, and no `OPEN_BLOCKING_TECHNICAL` finding
-survived verification. The block is entirely operator authority, protected
-settings, trust material and environment credentials.
+Nothing model-controlled remains **that could convert this blocked state into an
+approved release without operator activation**, and no `OPEN_BLOCKING_TECHNICAL`
+finding survived verification **against the current inactive snapshot**. The
+block is entirely operator authority, protected settings, trust material and
+environment credentials.
+
+Neither clause is a statement about the post-activation world. Technical work
+that becomes load-bearing the moment the lane is activated or a package is
+merged is enumerated in §20 (M-1…M-4) and §20c, and it is not small.
 
 **This is not a claim that the system is trustworthy.** It is a claim that the
 remaining distance is not code. No trusted review has ever run in this
@@ -429,14 +455,20 @@ instructed to refute it and to default to refuted when uncertain.
 | **surviving after verification** | **0** |
 
 ```
-OPEN_BLOCKING_TECHNICAL: none
+OPEN_BLOCKING_TECHNICAL: none  (scoped to the current inactive Path-B snapshot)
 ```
+
+**Read that scope literally.** It is a statement about a repository in which D1
+and D2 are inactive, no credential is reachable, no trusted evidence exists and
+nothing is merging. It is *not* a clean bill of health for the activated system.
+The gates below (M-1…M-4) and the rechecks in §20c are non-blocking **only**
+because the things they would block are not happening.
 
 The single candidate was refuted to `DEFERRED_NONBLOCKING` — mechanics
 confirmed, disposition-relevance refuted. It is nonetheless the most important
 thing in this section, so it is stated in full rather than buried.
 
-### The three conditions an operator must clear before ANY merge
+### The four conditions an operator must clear before ANY merge
 
 These are `DEFERRED_NONBLOCKING` for the *terminal disposition* — nothing is
 being released or merged, so none of them can make this report's answer wrong —
@@ -491,6 +523,16 @@ in §16: a single branch can add a live credential, its baseline entry and a
 disposition calling it harmless, and the whole ordinary gate — `ruff` **and**
 `detect-secrets-hook` — exits 0. Requires trusted review (A) or an externally
 bound disposition record (B) before package 1 merges.
+
+**M-4 · The engine's source refs are not durable across the precursor merge.**
+Promoted to a named merge precondition on external review; the evidence is the
+harness section immediately below. `_engine()` resolves the engine's two source
+roles from *branch names*, and `origin/fix/verifier-intra-file-review-plan` is
+deleted by a normal merge. Required **before** PR #29 merges or its branch is
+deleted: re-point the resolution at a durable pinned SHA or the precursor merge
+commit, and prove the lane suite passes in a **fresh clone after the candidate
+branch is gone**. Doing this after the merge means doing it while the suite is
+already broken.
 
 ### Audit-harness precondition — read this before re-running anything
 
@@ -591,11 +633,49 @@ say `cross-vendor` / `independent-verify-inactive` must **never** be required.
 | 13 | **M-1** `audit/` unscanned | operator | decide: narrow the exclusion, or accept it in writing before packages 2–3 merge | `audit/` files scanned, or a signed acceptance |
 | 14 | **M-2** manifest attestations false at package 1 | operator | do not merge package 1 alone; merge 1+2+3 together, or correct the manifest | recomputed digests match at the merged head |
 | 15 | **M-3** disposition register self-attested | operator | trusted review of every baseline entry, or an externally bound disposition record | (A) or (B) of §16 |
-| 16 | lane suite ref-sensitivity | model, post-release | re-point `_engine()` at pinned SHAs or the merge commit | suite green in a fresh clone with no manual ref surgery |
+| 16 | **M-4** engine source refs not durable | model, **before** the precursor merge | re-point `_engine()` at a pinned SHA or the merge commit | suite green in a fresh clone **after the candidate branch is deleted** |
+| 17 | activation-time rechecks R-1…R-12 | model, **before** D1/D2 activation | resolve each item in §20c | each recheck closed against the activated configuration |
 
-Blocks 1–12 are `EXTERNALLY_BLOCKED`. Blocks 13–16 are `DEFERRED_NONBLOCKING`
-technically and **merge preconditions** practically; none of them changes the
-terminal disposition, and all four would change what a merge means.
+Blocks 1–12 are `EXTERNALLY_BLOCKED`. Blocks 13–17 are `DEFERRED_NONBLOCKING`
+**against the current inactive snapshot** and become blocking the moment a merge
+or an activation is attempted. None changes the terminal disposition; every one
+changes what a merge or an activation means.
+
+M-4 is the one with an ordering trap: it must be done **before** the precursor
+merge deletes the branch it depends on, not after.
+
+---
+
+## 20c. Activation-time technical rechecks
+
+Required by the accepted external review. Every item below is `DEFERRED_NONBLOCKING`
+**today** and becomes load-bearing **before D1/D2 activation**, because each one
+can affect trust or evidence once a credential is actually reachable. They are
+the §20 "other findings" list re-sorted by what activation makes real, with the
+dimension that found each.
+
+| # | recheck | where | dim |
+|---|---|---|---|
+| R-1 | revocation-list **schema** validation and fail-closed behaviour — a malformed list currently revokes nothing while reporting `revocation_checked: True` | `authzenvelope.assert_not_revoked` | D |
+| R-2 | bind `approve_artifact_retention` to the actual runtime retention policy — it is authenticated but compared to nothing | `runtimebinding.RUNTIME_BOUND_PREREQUISITES` | D |
+| R-3 | derive the imported engine root from the **verified** artifact inside the same run that imports it | `d1runtime` step `engine_artifact` / `d1cli.load_engine` | E |
+| R-4 | `runtime_lock_sha256` origin and source binding — the only digest read from disk, over a file outside both source roles | `enginebuild.built_package` | E |
+| R-5 | apply the two operator timeout PINs to actual sockets — currently accepted, digested, reported, never applied | `generationtransport.TrustedGenerationTransport.post` | F |
+| R-6 | apply the response-normalization adapter in D2, or stop naming it in signed evidence | `d2runtime.run` vs `adapter.normalize` | F |
+| R-7 | output privacy/path-identity **parity** with the input preflight | `verifier/executor._path_identities` | F |
+| R-8 | stop the retry loop laundering a hard-cap refusal into a retryable transport error | `verifier/executor._post_with_retries` | F |
+| R-9 | `generation_calls` evidence schema — currently the list of attempt records, not a count | `d2runtime._finalize_from_engine` | F |
+| R-10 | governance records that claim a live review authority, or instruct the operator to require an obsolete/inactive status name | `audit/03-findings.json` A-39 (pkg 2); `audit/08-standing-regime.md` (pkg 3) | H |
+| R-11 | `livepolicy` severity ordering across files — a lower-severity refusal in an alphabetically earlier workflow can mask the credential-reach refusal | `livepolicy.validate_live_workflows` | C |
+| R-12 | the `IMPLEMENTED_PHASE` docstrings that overclaim the gate is not editable | `phases.py`, `transport.py` | C |
+
+R-10 deserves emphasis: it is the only item on this list that would actively
+mislead the operator *while they are following the activation order*. Package 3's
+`audit/08-standing-regime.md` tells them to require `cross-vendor` as a branch
+protection check. §17 of this report and §7.2 of the operator packet both say
+that check must **never** be required — it reports success having cast zero
+votes. Those documents are not on `main`, so the contradiction is harmless today
+and becomes live the moment package 3 merges.
 
 ---
 
@@ -681,12 +761,22 @@ terminal disposition, and all four would change what a merge means.
     "trusted_review_authority": "INACTIVE_OPEN_BLOCKING"
   },
   "production_eligible": false,
+  "terminal_disposition_accepted": true,
+  "accepted_on_review_of": "1ea369749d0f68995091485624e465b735d1e50f",
   "final_audit": {
     "dimensions_completed": "8/8", "raw_findings": 31, "confirmations": 154,
-    "open_blocking_technical": 0
+    "open_blocking_technical": 0,
+    "open_blocking_technical_scope": "current inactive Path-B snapshot only"
   },
-  "merge_preconditions": ["M-1 audit/ unscanned", "M-2 manifest false at package 1",
-                          "M-3 disposition register self-attested"],
+  "nothing_model_controlled_remains_scope": "only that nothing model-controlled can convert this blocked state into an approved release without operator activation; post-activation technical work is required",
+  "conditional_merge_preconditions": [
+    "M-1 audit tree secret-scan coverage or signed acceptance",
+    "M-2 package-1 manifest/package-order correction",
+    "M-3 external authorization of baseline dispositions",
+    "M-4 durable engine source ref before candidate branch deletion"
+  ],
+  "activation_time_rechecks": ["R-1","R-2","R-3","R-4","R-5","R-6",
+                               "R-7","R-8","R-9","R-10","R-11","R-12"],
   "next_operator_action": "Delete workflow run 30214247762 and confirm GET /repos/mglaeser/bubble-regime-monitor/actions/runs/30214247762 returns 404.",
   "trusted_review_occurred": false
 }
@@ -697,8 +787,26 @@ terminal disposition, and all four would change what a merge means.
 ## 21. Confirmation
 
 **There is no Exchange 9.** This is the terminal report of
-RELEASE_EXECUTION_CONTRACT_v1. No further engineering exchange is requested and
-none is available. The remaining work is owned by the operator and is enumerated
-in §9, §13, §14, §16 and §20.
+RELEASE_EXECUTION_CONTRACT_v1, accepted on external review of `1ea3697`. No
+further engineering exchange is requested and none is available.
 
-No trusted review occurred in this programme.
+The contract terminates with an **evidence-backed blocked state**. What follows
+is an operator-controlled activation and merge programme — it is not an
+additional exchange under this contract.
+
+The remaining work is enumerated in §9 (sixteen prerequisites), §13, §14, §16,
+§20 (blocks 1–17, including merge preconditions M-1…M-4) and §20c (activation
+rechecks R-1…R-12).
+
+**First operator action:** delete workflow run `30214247762`, then confirm
+`GET /repos/mglaeser/bubble-regime-monitor/actions/runs/30214247762` returns
+**404**. Do not install a provider key or begin activation until the incident
+sequence is complete and recorded.
+
+Two sentences that must survive being quoted out of this document:
+
+* the accepted `BLOCKED_EXTERNAL_OPERATOR_ACTION` disposition describes a
+  repository that is **deliberately inactive**, not one that has been shown safe
+  to activate;
+* **no trusted review occurred in this programme** — no count, no generation,
+  zero votes cast, and nothing in this report is review evidence.
