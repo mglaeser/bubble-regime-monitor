@@ -295,14 +295,30 @@ run `30704574124` job `91381354081` — is gone from this run.
 
 ## 10. Operator prerequisite table
 
-All sixteen `OPEN_BLOCKING`. None recorded. Full detail in
+All sixteen `OPEN_BLOCKING`. None recorded.
+
+**Three are now open by observation rather than by absence of a record** — the
+mandate permits verifying API-visible state, and an unrecorded prerequisite and
+a demonstrably-undone one are different facts:
+
+| # | observed | call |
+|---|---|---|
+| 1 | run `30214247762` **still exists** — `GET .../actions/runs/30214247762` returns **200**, `conclusion: failure`, created 2026-07-26. Its logs are the ones believed to carry probe output | `actions_get: get_workflow_run` |
+| 2 | therefore `verify_run_404` **fails today**. It is the only prerequisite verifiable by code, and the code's answer is no | same call |
+| 7 | `main` reports `"protected": false` | `GET /repos/.../branches` |
+
+Deleting run `30214247762` is irreversible and is an operator action in the
+Actions console. It was not taken here, and no report in this programme should
+ever claim it was.
+
+Full detail in
 `docs/TRUSTED_LANE_OPERATOR_ACTIONS.md`, which also carries the Group-6 runner
 inputs — seven environment secrets and two repository variables.
 
 | # | key | gates |
 |---|---|---|
-| 1 | `delete_failed_run` | D1 |
-| 2 | `verify_run_404` | D1 — the only one verifiable by code |
+| 1 | `delete_failed_run` | D1 — **contradicted by observation**: run `30214247762` still returns 200 |
+| 2 | `verify_run_404` | D1 — the only one verifiable by code, and it **fails**: the run is not 404 |
 | 3 | `rotate_probe_key` | D1 |
 | 4 | `review_key_usage` | D1 |
 | 5 | `install_environment_key` | D1 |

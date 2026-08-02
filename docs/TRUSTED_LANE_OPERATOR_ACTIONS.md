@@ -32,6 +32,15 @@ Items 1 and 2 concern workflow run `30214247762`, whose logs are believed to
 contain probe output that should not persist. Deleting a run is irreversible
 and is an operator action in the Actions console.
 
+**Checked 2026-08-02: the run still exists.**
+`GET /repos/mglaeser/bubble-regime-monitor/actions/runs/30214247762` returns
+**200** — `OpenAI verifier capability probe`, `conclusion: failure`, created
+2026-07-26T18:13:09Z, head `75a093de`. So item 1 is not merely unrecorded, it is
+undone, and item 2 — the only prerequisite verifiable by code — fails today.
+
+This was verified, not assumed. It was not acted on: deleting the run is
+irreversible and belongs to whoever owns the console.
+
 | # | Key | Action | Verifiable by the lane | Blocks |
 |---|-----|--------|------------------------|--------|
 | 1 | `delete_failed_run` | Delete workflow run `30214247762`. | No | D1 |
