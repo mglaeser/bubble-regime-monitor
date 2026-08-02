@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import midtermpanel as mp  # noqa: E402
-from midtermpanel import privilegedworkflow, statuspublish, transport  # noqa: E402
+from midtermpanel import privilegedworkflow, transport  # noqa: E402
+from midtermpanel import status as statuspublish  # noqa: E402
 from midtermpanel.errors import PanelRefusal  # noqa: E402
 from trustedlane import statusnames  # noqa: E402
 from trustedlane.errors import LaneRefusal  # noqa: E402
@@ -498,8 +499,7 @@ class TestTheTrustedLaneIsUntouched:
         import ast
 
         forbidden = {"read_credential", "read_signing_key",
-                     "read_installation_token", "IMPLEMENTED_PHASE",
-                     "assert_phase_permitted"}
+                     "read_installation_token", "assert_phase_permitted"}
         offenders = []
         for path in sorted((ROOT / "scripts" / "midtermpanel").glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -511,6 +511,60 @@ class TestTheTrustedLaneIsUntouched:
                         if alias.name in forbidden:
                             offenders.append(f"{path.name}:import:{alias.name}")
         assert offenders == [], offenders
+
+    def test_the_package_never_assigns_the_trusted_phase(self):
+        """READING `IMPLEMENTED_PHASE` is required; WRITING it is the hazard.
+
+        The first version of the test above forbade the name entirely and caught
+        `policystate.assert_trusted_lane_is_locked`, which reads the constant in
+        order to verify it is still `D0`. That is the mode lock doing its job —
+        the exact opposite of raising the phase — and forbidding it would have
+        meant deleting the check that keeps D1/D2 shut.
+
+        So the two are separated. Reading is allowed anywhere. Assigning to it,
+        anywhere in this package, is refused: that is the single edit that would
+        activate a credential-bearing lane whose sixteen preconditions are all
+        still open."""
+        import ast
+
+        offenders = []
+        for path in sorted((ROOT / "scripts" / "midtermpanel").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                targets = []
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                    targets = [node.target]
+                for target in targets:
+                    name = getattr(target, "attr", None) or getattr(
+                        target, "id", None)
+                    if name == "IMPLEMENTED_PHASE":
+                        offenders.append(f"{path.name}:assigns:{name}")
+        assert offenders == [], offenders
+
+    def test_the_mode_lock_reads_the_phase_and_would_refuse_a_raised_one(self):
+        """The lock is live, and it is not vacuous.
+
+        Asserting only that it passes today would pass equally well if it never
+        checked anything. This drives the refusing branch with a stubbed phase,
+        so the test fails if the comparison is ever removed."""
+        from midtermpanel import policystate
+        from trustedlane import phases
+
+        record = policystate.assert_trusted_lane_is_locked(root=str(ROOT))
+        assert record["trusted_lane_locked"] is True
+        assert record["implemented_phase"] == phases.D0
+
+        original = phases.IMPLEMENTED_PHASE
+        try:
+            phases.IMPLEMENTED_PHASE = phases.D1
+            with pytest.raises(PanelRefusal) as caught:
+                policystate.assert_trusted_lane_is_locked(root=str(ROOT))
+            assert "persistent_secret_mode" in caught.value.reason
+        finally:
+            phases.IMPLEMENTED_PHASE = original
+        assert phases.IMPLEMENTED_PHASE == phases.D0
 
     def test_d1_and_d2_are_still_templates(self):
         live = {p.name for p in (ROOT / ".github" / "workflows").glob("*.yml")}

@@ -98,12 +98,44 @@ PERMITTED_TRIGGERS = ("workflow_run", "workflow_dispatch")
 #: failure, which is the worst place for a key to be in scope.
 SECRET_BEARING_JOBS = ("count", "panel")
 
-#: Actions that hand this job content produced by the triggering (candidate) run.
+#: Actions that hand this job content produced by some other run.
+#:
+#: `actions/download-artifact` is on this list AND has a single narrow exception
+#: below. That is not a contradiction, it is the whole design: the default is
+#: refusal, and the one permitted shape is enumerated so precisely that widening
+#: it requires editing a constant a reviewer will see.
 FORBIDDEN_ACTION_PREFIXES = (
     "actions/download-artifact",
     "actions/cache",
     "actions/upload-pages-artifact",
     "dawidd6/action-download-artifact",
+)
+
+#: The ONE artifact download this workflow may perform.
+#:
+#: The panel job must execute the plan the count job actually produced. Rebuilding
+#: it independently and comparing digests cannot work: the plan contains the
+#: provider's COUNTS, and a rebuild without calling the provider has nothing to
+#: compare. So the artifact has to cross from count to panel, and the question
+#: becomes which download is safe.
+#:
+#: Exactly one is: a same-run download. `actions/download-artifact` scopes itself
+#: to the current workflow run unless it is given a `run-id` (and a
+#: `github-token` to authorise reaching that run). Omitting those inputs is not a
+#: stylistic choice — it is what makes the action unable to reach the candidate's
+#: CI run, whose artifacts a pull request authored.
+#:
+#: So the permitted shape is defined by what it must NOT specify. Each forbidden
+#: input is a different way of turning a same-run read into a cross-run one:
+#:   run-id / github-token  name another run and authorise reaching it
+#:   repository             another repository entirely
+#:   pattern / merge-multiple  match more than the one artifact, including any
+#:                          future artifact whose name happens to fit
+ARTIFACT_DOWNLOAD_ACTION = "actions/download-artifact"
+ARTIFACT_DOWNLOAD_JOB = "panel"
+ARTIFACT_NAME_PREFIX = "midterm-count-"
+ARTIFACT_DOWNLOAD_FORBIDDEN_INPUTS = (
+    "github-token", "repository", "run-id", "pattern", "merge-multiple",
 )
 
 #: Shell that materialises a tree, in a job whose whole safety argument is that
@@ -254,27 +286,84 @@ def assert_no_candidate_checkout(document: dict) -> dict:
     return {"checkout_steps": checked}
 
 
-def assert_no_candidate_artifacts_or_cache(document: dict) -> dict:
-    """The triggering run's artifacts and cache are candidate-authored bytes.
+def _is_permitted_same_run_download(job_id: str, step: dict) -> bool:
+    """Exactly the one shape described at `ARTIFACT_DOWNLOAD_ACTION`.
 
-    The classic `workflow_run` escalation: privileged workflow downloads the
+    Every clause is load-bearing, and the function returns False rather than
+    refusing so that the caller can report the step as a forbidden artifact
+    consumer with the ordinary message — a near-miss on this shape IS a
+    forbidden download, not a special case."""
+    from trustedlane import actionpolicy
+
+    uses = str(step.get("uses") or "")
+    if not uses.startswith(ARTIFACT_DOWNLOAD_ACTION + "@"):
+        return False
+    if job_id != ARTIFACT_DOWNLOAD_JOB:
+        return False
+    try:
+        actionpolicy.assert_pinned(uses, where=f"{job_id}:download-artifact")
+    except Exception:
+        return False
+    with_block = step.get("with") or {}
+    if any(key in with_block for key in ARTIFACT_DOWNLOAD_FORBIDDEN_INPUTS):
+        return False
+    name = str(with_block.get("name") or "")
+    if not name.startswith(ARTIFACT_NAME_PREFIX):
+        return False
+    # The destination must be inside the runner's temp area. A download into the
+    # workspace puts candidate-derived bytes next to the code that is about to
+    # run, which is the adjacency this whole module exists to prevent.
+    path = str(with_block.get("path") or "")
+    if "runner.temp" not in path:
+        return False
+    return True
+
+
+def assert_no_candidate_artifacts_or_cache(document: dict) -> dict:
+    """No artifact or cache consumption, except one same-run download in `panel`.
+
+    The classic `workflow_run` escalation: the privileged workflow downloads the
     artifact the PR's CI uploaded, unzips it, and runs or trusts what is inside.
     A zip is a tree, and a restored cache is a tree whose contents someone else
-    chose. Both are refused by action name, and `gh run download` is refused in
-    `assert_no_tree_materialisation` because it is the same act in shell."""
+    chose.
+
+    The single exception exists because the panel MUST execute the plan the count
+    job produced, and that plan contains provider counts which cannot be
+    rebuilt without calling the provider again. The exception is narrowed to a
+    same-run download in one named job, with the cross-run selectors absent —
+    see `ARTIFACT_DOWNLOAD_ACTION` for why each absent input is what makes it
+    same-run.
+
+    Caches remain refused outright. A cache has no same-run meaning here: it is
+    populated by whichever run got there first, which for a pull request is the
+    candidate's own CI."""
     offenders = []
+    permitted = []
     for job_id, index, step in _steps(document):
         uses = str(step.get("uses") or "")
-        for prefix in FORBIDDEN_ACTION_PREFIXES:
-            if uses.startswith(prefix):
-                offenders.append(f"{job_id}.steps[{index}] uses={uses}")
+        if not any(uses.startswith(p) for p in FORBIDDEN_ACTION_PREFIXES):
+            continue
+        if _is_permitted_same_run_download(job_id, step):
+            permitted.append(f"{job_id}.steps[{index}]")
+            continue
+        offenders.append(f"{job_id}.steps[{index}] uses={uses}")
     if offenders:
         refuse(f"category=privileged_workflow_consumes_candidate_artifacts "
-               f"found={offenders} — the triggering run is the candidate's CI; "
-               "its artifacts and its cache are content a pull request authored, "
-               "and unpacking either of them into a job that holds a provider "
-               "key is the canonical workflow_run escalation")
-    return {"artifact_or_cache_steps": 0}
+               f"found={offenders} permitted_shape="
+               f"'{ARTIFACT_DOWNLOAD_ACTION}@<approved pin> in job "
+               f"{ARTIFACT_DOWNLOAD_JOB} with name {ARTIFACT_NAME_PREFIX}*, "
+               f"path under runner.temp, and none of "
+               f"{list(ARTIFACT_DOWNLOAD_FORBIDDEN_INPUTS)}' — the triggering "
+               "run is the candidate's CI; its artifacts and its cache are "
+               "content a pull request authored, and unpacking either into a job "
+               "that holds a provider key is the canonical workflow_run "
+               "escalation")
+    if len(permitted) > 1:
+        refuse(f"category=more_than_one_artifact_download found={permitted} — "
+               "the count-to-panel handoff is one artifact; a second download "
+               "is a second thing to validate that nothing validates")
+    return {"artifact_or_cache_steps": 0,
+            "permitted_same_run_downloads": permitted}
 
 
 def assert_no_local_or_unpinned_actions(document: dict) -> dict:

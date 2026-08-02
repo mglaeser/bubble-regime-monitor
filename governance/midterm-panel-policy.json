@@ -15,9 +15,8 @@
     "Nothing produced under this policy may be labelled TRUSTED_*, independent,",
     "or third-party attested."
   ],
-
   "architecture": {
-    "ci_operational_state": "MIDTERM_SINGLE_REPO_PANEL_ACTIVE",
+    "ci_operational_state": "MIDTERM_SINGLE_REPO_PANEL_IMPLEMENTATION_IN_PROGRESS",
     "repository_plan": "GITHUB_FREE_PRIVATE",
     "native_branch_protection": "UNAVAILABLE_ACCEPTED_RESIDUAL",
     "native_environment_secret_isolation_available": false,
@@ -27,9 +26,13 @@
     "panel_review_trigger": "WORKFLOW_RUN_AFTER_CI",
     "write_separated": false,
     "trusted_review_authority": "NOT_WRITE_SEPARATED",
-    "production_eligible": false
+    "production_eligible": false,
+    "state_note": [
+      "The workflow has never run and no provider-backed panel has completed.",
+      "ACTIVE is reachable only through STAGED_NO_PROVIDER_SECRET, and",
+      "`policystate.assert_transition` refuses the direct jump."
+    ]
   },
-
   "secret": {
     "name": "TRUSTED_VERIFIER_OPENAI_KEY",
     "scope": "repository",
@@ -53,11 +56,17 @@
       "a maintainer account compromise",
       "an engine or workflow security defect"
     ],
-    "routine_rotation_days": [30, 90]
+    "routine_rotation_days": [
+      30,
+      90
+    ],
+    "persistent_repository_secret_mode": true
   },
-
   "statuses": {
-    "published_on_candidate_head": ["midterm-panel-count", "midterm-panel-review"],
+    "published_on_candidate_head": [
+      "midterm-panel-count",
+      "midterm-panel-review"
+    ],
     "never_publish": [
       "cross-vendor",
       "independent-verify-inactive",
@@ -65,10 +74,12 @@
       "trusted-cross-vendor-review"
     ],
     "job_checks_land_on_default_branch_not_candidate": [
-      "midterm-preflight", "midterm-count", "midterm-panel", "midterm-finalize"
+      "midterm-preflight",
+      "midterm-count",
+      "midterm-panel",
+      "midterm-finalize"
     ]
   },
-
   "evidence": {
     "may_emit": [
       "ORDINARY_CI_EVIDENCE",
@@ -83,9 +94,12 @@
       "INDEPENDENT_THIRD_PARTY_ATTESTATION"
     ]
   },
-
   "panel": {
-    "models": ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"],
+    "models": [
+      "gpt-5.3-codex",
+      "gpt-5.6-sol",
+      "gpt-4.1-mini"
+    ],
     "required_approver": "gpt-5.6-sol",
     "min_distinct_other_approvals": 1,
     "strict_any_refutation": true,
@@ -98,16 +112,23 @@
     ],
     "synthesis_may_override_refutation": false
   },
-
   "triggers": {
     "automatic": {
       "event": "workflow_run",
-      "workflows": ["ci"],
-      "types": ["completed"]
+      "workflows": [
+        "ci"
+      ],
+      "types": [
+        "completed"
+      ]
     },
     "manual": {
       "event": "workflow_dispatch",
-      "inputs": ["pr_number", "candidate_head_sha", "approval_phrase"]
+      "inputs": [
+        "pr_number",
+        "candidate_head_sha",
+        "approval_phrase"
+      ]
     },
     "proceed_only_when": [
       "triggering workflow name == ci",
@@ -121,7 +142,6 @@
       "image is success on the exact head"
     ]
   },
-
   "candidate_is_inert_data": {
     "allowed_inputs": [
       "exact head and base SHAs",
@@ -147,14 +167,12 @@
       "candidate-provided paths used as executable paths"
     ]
   },
-
   "permissions": {
     "contents": "read",
     "actions": "read",
     "pull-requests": "read",
     "statuses": "write"
   },
-
   "high_risk_workflow_change": {
     "path_prefixes": [
       ".github/workflows/",
@@ -175,7 +193,6 @@
       "updating a workflow-changing PR."
     ]
   },
-
   "accepted_residual": {
     "statement": [
       "A repository-level Actions secret is accessible to workflows in the",

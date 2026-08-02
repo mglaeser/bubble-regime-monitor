@@ -86,6 +86,15 @@ defaults:
   run:
     shell: bash
 
+# `pyproject` installs only `app*`, so `midtermpanel` is not an installed
+# package and `python -m midtermpanel...` from the repository root does not
+# resolve. The import root is stated explicitly here rather than by installing
+# the whole repository, so which module gets imported cannot change silently
+# when packaging does. `tests/test_midterm_panel.py` proves both directions:
+# the command works with this variable and fails without it.
+env:
+  PYTHONPATH: ${{ github.workspace }}/scripts
+
 # One panel per candidate head. A rerun of CI on the same head must not buy a
 # second panel; `midtermpanel.dedupe` additionally binds reuse to the engine,
 # policy and request-semantics digests, because "same SHA" is not the same claim
@@ -198,6 +207,10 @@ jobs:
           CANDIDATE_PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
           CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
           CANDIDATE_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
+          MIDTERM_ENGINE_DIGEST: ${{ needs.preflight.outputs.engine_digest }}
+          MIDTERM_POLICY_DIGEST: ${{ needs.preflight.outputs.policy_digest }}
+          MIDTERM_ENGINE_PROTECTED_SHA: ${{ github.sha }}
+          MIDTERM_ENGINE_CANDIDATE_SHA: ${{ needs.preflight.outputs.head_sha }}
         run: |
           python -m midtermpanel.countcli
 
@@ -238,11 +251,20 @@ jobs:
           python -m pip install --require-hashes --no-deps \
             -r requirements-trusted-runtime.txt
 
-      # NOTE: the plan is NOT downloaded via download-artifact. Consuming an
-      # artifact is refused by the static policy — the triggering run is the
-      # candidate's CI, and a check that allowed "artifacts from our own run"
-      # would be one event-payload confusion away from allowing theirs. The
-      # panel rebuilds the plan from the same inputs and compares digests.
+      # The ONE permitted artifact download. It is same-run: no `run-id` and no
+      # `github-token`, which is what makes `actions/download-artifact` unable
+      # to reach any run but this one — in particular the candidate's CI run,
+      # whose artifacts a pull request authored. `privilegedworkflow.py` permits
+      # exactly this shape in exactly this job and refuses every other download.
+      #
+      # Rebuilding the plan instead is not an option: the plan carries the
+      # provider's COUNTS, and a rebuild that does not call the provider has
+      # nothing to compare them against.
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5.0.0
+        with:
+          name: midterm-count-${{ needs.preflight.outputs.head_sha }}
+          path: ${{ runner.temp }}/midterm/count-input
+
       - name: Execute the governed panel
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -252,6 +274,10 @@ jobs:
           CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
           CANDIDATE_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
           HIGH_RISK_WORKFLOW_CHANGE: ${{ needs.preflight.outputs.high_risk }}
+          MIDTERM_ENGINE_DIGEST: ${{ needs.preflight.outputs.engine_digest }}
+          MIDTERM_POLICY_DIGEST: ${{ needs.preflight.outputs.policy_digest }}
+          MIDTERM_ENGINE_PROTECTED_SHA: ${{ github.sha }}
+          MIDTERM_ENGINE_CANDIDATE_SHA: ${{ needs.preflight.outputs.head_sha }}
         run: |
           python -m midtermpanel.panelcli
 
