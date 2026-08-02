@@ -143,9 +143,43 @@ Evidence that it is not a product defect:
 `pytest-randomly` is **not installed**, so collection order is deterministic and
 shuffling was never a candidate — that hypothesis is excluded, not assumed away.
 
-The ordered-prefix binary search the mandate asks for was run against the *real*
-hosted failure instead, which is the one that existed: the minimal contaminating
-predecessor is a single node id, and the two-test command in §5 is it.
+### The ordered-prefix binary search (EX6-R03), run against the real failure
+
+The 245-figure has no tree to bisect. The search was therefore run against the
+failure that *did* exist, over the collected node-ID list in default order,
+against a frozen clone of `5f23381`:
+
+| prefix | result |
+|---|---|
+| 0 predecessors (target alone) | passes |
+| 1 predecessor: `tests/test_trusted_lane_bootstrap.py::test_lane_has_sources` | **target fails** |
+
+**One node is provably minimal**, since zero passes. Paste-able:
+
+```
+git clone /path/to/repo /tmp/frozen && cd /tmp/frozen && git checkout 5f23381
+PYTHONDONTWRITEBYTECODE=1 python -m pytest \
+  "tests/test_trusted_lane_bootstrap.py::test_lane_has_sources" \
+  "tests/test_verifier_mc4_passc.py::TestPassEAuthorizationScopeIsBound::\
+   test_a_swapped_scope_cannot_be_assembled_at_all" -q
+→ 1 failed, 1 passed
+```
+
+`test_lane_has_sources` does nothing but count files. It contaminates because
+the module-scoped engine fixture is set up for the first lane node collected,
+whatever that node does — which is the same fixture-ordering fact as §5, reached
+from the other end.
+
+### The contamination reproduced itself during this exchange
+
+The diagnostic agents I ran in parallel executed their own `pytest tests/` while
+I was mid-edit in the same worktree, and reported **111 failed** — 109 of them
+one `NameError: name 'verifier' is not defined` at
+`test_trusted_lane_bootstrap.py:7114`, a line I was in the middle of changing.
+
+Three independent observers, three different failure counts, one cause. That is
+the strongest evidence available that the number was never a property of the
+code, and it is why the rule below is stated as a rule.
 
 **Standing rule recorded:** never run a full suite in the background while doing
 branch work in the same worktree. It produces failure counts that describe the
