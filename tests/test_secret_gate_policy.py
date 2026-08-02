@@ -38,6 +38,13 @@ PROTECTED_PREFIXES = ("artifacts", "verifier", "governance", "audit")
 REQUIRED_EXCLUSIONS = (".venv/", "__pycache__/", ".git/", ".mypy_cache/",
                        ".pytest_cache/", ".ruff_cache/")
 
+# Two fixed commits this file compares against. They are git object ids, and a
+# bare 40-hex literal is indistinguishable from a token to an entropy detector
+# — which is the correct default, so the pragma states what they are rather
+# than the baseline growing to accommodate them.
+MAIN = "409cc5d8d9c2687e228db98cee0fad096fe523c3"  # pragma: allowlist secret
+PR23 = "a9062aa656a5a6f3dbe5991d16ce9c218aad0454"  # pragma: allowlist secret
+
 def _hook() -> Path | None:
     """The gate binary: PATH first, then the local virtualenv.
 
@@ -314,3 +321,71 @@ class TestPublicArtifactsCarryNoFreeText:
                 "does_not_prove", "fallback_position", "resolution_method",
                 "fallback_policy", "money_unit",
             ), f"unexpected long string at {where}"
+
+
+class TestPr23UnsafeWorkflowsAreNotTransplanted:
+    """Topology F-01/F-02, as a gate rather than as a note.
+
+    PR #23 carries two workflow files from before Exchange 2:
+
+      .github/workflows/independent-verify.yml   injects a provider credential
+                                                 into a job running PR-controlled
+                                                 code — V-TRUST, reintroduced
+      .github/workflows/ci.yml                   unpins both actions to moving
+                                                 tags and carries the inactive
+                                                 job under its old name
+
+    The remediation stack drops both and keeps main's. That decision lives in a
+    document, and a document is not enforcement — the next person rebuilding the
+    stack has no way to discover it except by reading prose. This is the same
+    finding stated in a way that fails.
+    """
+
+    UNSAFE = ("independent-verify.yml", "ci.yml")
+
+    def _at(self, ref, path):
+        got = subprocess.run(["git", "show", f"{ref}:{path}"], cwd=ROOT,
+                             capture_output=True)
+        return got.stdout if got.returncode == 0 else None
+
+    def test_no_package_moved_a_workflow_away_from_mains_version(self):
+        """Byte-identical to main, for both files, on this branch.
+
+        Not 'the file is absent' — it must be PRESENT and it must be MAIN's.
+        An absent `ci.yml` would also pass an absence check and would be a
+        repository with no CI.
+
+        No skip guard, deliberately. This is the load-bearing half, and a gate
+        that excuses itself when its reference object is missing is a gate any
+        shallow clone switches off — the failure mode reads as green. `test`
+        checks out at `fetch-depth: 0`, so main is always reachable there; if
+        it is ever not, that is worth a red rather than a silent pass."""
+        for name in self.UNSAFE:
+            path = f".github/workflows/{name}"
+            ours = (ROOT / path).read_bytes()
+            theirs = self._at(MAIN, path)
+            assert theirs is not None, (
+                f"{path} is not readable at main ({MAIN[:12]}…). Either the "
+                "clone is too shallow for this gate to run, or main no longer "
+                "carries the file this branch is being held to")
+            assert ours == theirs, (
+                f"{path} differs from main's. PR #23's version reintroduces "
+                "V-TRUST and unpins both actions; the stack keeps main's")
+
+    def test_the_pr23_versions_really_are_the_ones_being_refused(self):
+        """The probe would be worthless if PR #23's files happened to equal
+        main's — the test above would pass by coincidence. This asserts they
+        genuinely differ, so the check above has something to catch.
+
+        This half may skip where the other may not: it reads PR #23's head,
+        which is optional history rather than the merge base. The reason string
+        is the one `test_f3b`'s register already declares, and `test_f3c`
+        already proves it does not fire under `fetch-depth: 0` — a second
+        near-identical wording would have been a second thing to keep true."""
+        if self._at(PR23, ".github/workflows/ci.yml") is None:
+            pytest.skip("PR23 objects absent")
+        for name in self.UNSAFE:
+            path = f".github/workflows/{name}"
+            assert self._at(PR23, path) != (ROOT / path).read_bytes(), (
+                f"PR #23's {path} is identical to ours, so the retention "
+                "check above proves nothing")
