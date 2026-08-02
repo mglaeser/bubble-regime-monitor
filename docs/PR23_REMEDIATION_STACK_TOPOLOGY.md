@@ -40,7 +40,7 @@ once more onto the real new main and the mapping recorded again.
 | 0 | `6881d750eeee9372a3ed3a5f69860f42affb0882` | `13a7b0e0ecea6d1cc93ec42999fcacfd5d2ebcec` | `archive/ex6-remediation-pr23-00-judgment-kwargs` |
 | 1 | `bb3a6b00817c93ad10b0caf6eda66ed40fa53b7b` | `73178c3d51981ea407b60df91770ab85c0c67f9c` | `archive/ex6-remediation-pr23-01-governance-source` |
 | 2 | `a0d44d39bd005e9e1011e5b64b70860b54ed787e` | `bddce3223094c0436bde0d00158c3defc7a7462d` | `archive/ex6-remediation-pr23-02-mandate-gate` |
-| 3 | `37d8cae3026f04001daed69ab08cbc4ab598cd3c` | `387b85c2fbf39a83554f587e94eadf9c02c35c7d` | `archive/ex6-remediation-pr23-03-audit-record` |
+| 3 | `37d8cae3026f04001daed69ab08cbc4ab598cd3c` | `f982dba` (was `387b85c`, +1 commit) | `archive/ex6-remediation-pr23-03-audit-record` |
 
 Tags could not be pushed (the git proxy returns 403 on tag refs), so the
 archives are branches. They are byte-identical to the Exchange-6 heads.
@@ -149,17 +149,17 @@ fixed argv (ruff, git, pytest) to re-prove the other gates — the rationale
 already recorded for `gsadf_runner.py` and `d4_lppls.py`. **This is the only
 part of the old item 6 that is taken.**
 
-### Package 3 — `remediation/pr23-03-audit-record` · `387b85c`
+### Package 3 — `remediation/pr23-03-audit-record` · `f982dba`
 
 | | |
 |---|---|
 | base | package 2 |
 | depends on | 0, 1, 2 |
-| delta | `.github/CODEOWNERS`, `CLAUDE.md`, `AGENTS.md`, `audit/04`–`audit/13`, `audit/evidence/…`, `.gitignore` |
+| delta | `.github/CODEOWNERS`, `CLAUDE.md`, `AGENTS.md`, `audit/04`–`audit/13`, `audit/evidence/…`, `.gitignore`, `tests/test_secret_gate_policy.py` (workflow-retention gate) |
 | generated / authored | authored |
-| baseline entries | **none** — nothing added, grown or removed |
-| targeted test | `pytest tests/test_independent_verify.py` |
-| full suite | `pytest tests/` → **2708 passed, 5 skipped, 1 xfailed, 0 failed** |
+| baseline entries | **none** — nothing added, grown or removed; the two commit ids the retention gate compares against carry in-line pragmas rather than baseline entries |
+| targeted test | `pytest tests/test_independent_verify.py tests/test_secret_gate_policy.py` |
+| full suite | `pytest tests/` → **2710 passed, 5 skipped, 1 xfailed, 0 failed** |
 | revert consequence | control-bearing derivation reverts to main's; the standing-regime records disappear |
 | trusted-review status | **NOT REVIEWED** |
 
@@ -175,6 +175,24 @@ part of the old item 6 that is taken.**
 | `tests/test_independent_verify.py` | **DROPPED** | tests the version above. |
 
 Verified: no package's delta touches any file under `.github/workflows/`.
+
+**This is now enforced, not merely recorded.** The paragraph above is a
+decision written in prose, and prose does not fail — the next person rebuilding
+this stack has no way to discover it except by opening a document they have no
+reason to open. `tests/test_secret_gate_policy.py::TestPr23UnsafeWorkflowsAreNotTransplanted`
+states it as a gate, in two halves:
+
+* `test_no_package_moved_a_workflow_away_from_mains_version` — both files are
+  **present and byte-identical to main's**. Not "absent": an absent `ci.yml`
+  passes an absence check too, and that repository has no CI. This half has no
+  skip guard, deliberately — it reads the merge base, `test` checks out at
+  `fetch-depth: 0`, and a gate that excuses itself when its reference object is
+  missing is one any shallow clone switches off with a green result.
+* `test_the_pr23_versions_really_are_the_ones_being_refused` — PR #23's blobs
+  genuinely differ from ours, so the check above has something to catch. It may
+  skip, because it reads PR #23's head rather than the merge base; the reason
+  string is the one `test_f3b`'s register already declares and `test_f3c`
+  already proves does not fire under `fetch-depth: 0`.
 
 ---
 

@@ -11,7 +11,10 @@ its predecessor. What remains needs a console this branch must not have.
 
 The Exchange-6 report claimed this classification while PR #29 was red. It was
 wrong to, and the review said so. This one is claimed with two identical clean
-full-suite runs and a hosted run on the current head — see §8 and §9.
+full-suite runs and a **completed, green hosted run on the current head** — see
+§8 and §9. The mandate's disqualifying condition ("a report with unresolved test
+failures is not an accepted `EXTERNAL_BLOCK`") does not hold: there are none,
+locally or hosted.
 
 ## 2. Fixed ledger: 7 of 8
 
@@ -30,12 +33,14 @@ was merged to main in Exchange 7.
 | previous head | `5f233816e69b2f992bc4cee750d1110fe0666344` |
 | state | **draft**, `do-not-merge` label retained |
 | local full suite | **2468 passed, 5 skipped, 1 xfailed, 0 failed** — twice, identically |
-| body | corrected to "ordinary CI RED" at the start of the exchange (EX6-R01), before any fix |
+| **hosted ordinary CI** | **GREEN on this head** — `test (3.12)`, `image`, `independent-verify-inactive` all `success`; runs `30725061270` / `30725060123`, completed 2026-08-02T00:27Z |
+| body | corrected to "ordinary CI RED" at the start of the exchange (EX6-R01), before any fix; updated to green only after the run above landed |
 | trusted review | absent |
 
-The body was corrected *first*, while the statement was still true, and names
-the exact run, job and failing test. It will say "green" again only when a
-hosted run on the then-current head is.
+The body was corrected *first*, while the statement was still true, and named
+the exact run, job and failing test. It says "green" only now, and cites the
+run that proved it **on this head** — `head_sha` `c8ba2a72…` as reported by the
+run object itself, not an earlier green head.
 
 ## 5. The original hosted failure — disposition: **CLOSED**
 
@@ -213,6 +218,33 @@ it from becoming a way of passing by pretending: the real view is asserted to
 refuse, and the runtime is asserted to read the real process by default. The
 subprocess test is the only evidence in the file that depends on no model at all.
 
+### The root cause is earlier than fixture scope
+
+An independent instrumented diagnosis run over the **pre-fix** head `5f23381`
+strengthens the finding rather than merely confirming it. Two things it
+established that the original account understated:
+
+1. **No fixture-based purge could ever have worked, at any scope.** pytest
+   imports every selected test module during *collection*, before the first
+   fixture of any scope is set up. A `pytest_collection_finish` probe on the
+   pristine pre-fix clone reports **34 checkout `verifier` modules already in
+   `sys.modules`** at that point. "The purge was function-scoped and ran too
+   late" was true but too kind to it: rescoping it to session would not have
+   helped either. Only not needing a purge does — which is what the namespace
+   fix delivers.
+2. **The failure was order-independent.** Swapping the two node IDs on the
+   command line reproduces the identical `LaneRefusal`, because collection, not
+   run order, is what seeds `sys.modules`. This rules out the reading that some
+   particular test "poisoned" a later one.
+
+It also recorded that in the failing reproducer the purge fixture **never ran at
+all** — the module-scoped `engine_artifact` errored during setup, so pytest
+never reached the function-scoped autouse fixture. Both defects are now moot:
+the purge is deleted and `sys.path` is untouched. The finding is kept because it
+is the reason the repair had to be architectural, and because
+`test_no_lane_test_purges_sys_modules` exists to stop the discarded approach
+coming back.
+
 ## 8. Repeated full-suite evidence
 
 | # | branch | command | result |
@@ -221,6 +253,7 @@ subprocess test is the only evidence in the file that depends on no model at all
 | 2 | PR #29 `c8ba2a7` | `pytest tests/` | 2468 passed, 5 skipped, 1 xfailed |
 | 3 | package 2 `bddce32` | `pytest tests/` | 2708 passed, 5 skipped, 1 xfailed |
 | 4 | package 3 `387b85c` | `pytest tests/` | 2708 passed, 5 skipped, 1 xfailed |
+| 5 | package 3 `f982dba` | `pytest tests/ -p no:randomly` | 2710 passed, 5 skipped, 1 xfailed |
 
 Python 3.11.15 locally; hosted CI is 3.12. `python3.12` exists on this container
 but has no pytest and the runtime lock is hash-pinned, so a second local
@@ -229,12 +262,26 @@ the hosted run in §9, which is the interpreter that matters.
 
 `ruff check .` clean. `detect-secrets-hook` over every tracked file clean.
 
-## 9. Current hosted run
+## 9. Current hosted run — disposition: **GREEN**
 
-Pushed `c8ba2a7`; runs `30725060123` / `30725061270`.
-`independent-verify-inactive` already succeeded. `test (3.12)` and `image` were
-still executing when this report was written — the disposition is recorded
-against them in §12, and the PR body is not updated to "green" until they land.
+Pushed `c8ba2a7`. Both runs completed `success`.
+
+| run | job | id | conclusion |
+|---|---|---|---|
+| `30725061270` (`ci`, `pull_request`) | `test (3.12)` | `91435068216` | **success** |
+| `30725061270` | `image` | `91435068247` | **success** |
+| `30725060123` (`ci`, `push`) | `test (3.12)` | `91435064812` | **success** |
+| `30725060123` | `image` | `91435064830` | **success** |
+| `30725061249` (`independent-verify`) | `independent-verify-inactive` | `91435068108` | **success** |
+
+The run object reports `head_sha` = `c8ba2a727d46347904ed072422a11ab68c5b2e74`,
+which is PR #29's current head. This is the evidence the mandate asked for and
+the only kind it accepts: a hosted full-suite run **on the current head**. No
+earlier green head is cited anywhere in this report or in the PR body.
+
+The hosted failure that opened Exchange 7 —
+`tests/test_verifier_mc4_passc.py::TestPassEAuthorizationScopeIsBound::test_a_swapped_scope_cannot_be_assembled_at_all`,
+run `30704574124` job `91381354081` — is gone from this run.
 
 ## 10. Operator prerequisite table
 
@@ -296,7 +343,11 @@ Rewritten this exchange and now authoritative:
 | 0 `remediation/pr23-00-judgment-kwargs` | `13a7b0e` | `c8ba2a7` (sim final) | 84 targeted passed |
 | 1 `remediation/pr23-01-governance-source` | `73178c3` | package 0 | 131 targeted passed |
 | 2 `remediation/pr23-02-mandate-gate` | `bddce32` | package 1 | **2708 passed, 0 failed** |
-| 3 `remediation/pr23-03-audit-record` | `387b85c` | package 2 | **2708 passed, 0 failed** |
+| 3 `remediation/pr23-03-audit-record` | `f982dba` | package 2 | **2710 passed, 5 skipped, 1 xfailed, 0 failed** |
+
+Package 3 gained one commit after the table above was first written: the
+workflow-retention decision (F-01/F-02) was stated as a gate rather than left
+in prose. `387b85c` → `f982dba`.
 
 ### New findings from rebasing on current main (EX6-R04 confirmed)
 
@@ -368,8 +419,10 @@ Total across the stack: **+9** entries, **−5** (replaced by in-line pragmas).
 
 ## 19. Remaining Exchange-8 work
 
-Model-controlled, if the hosted run in §9 is not green: fix whatever it reports
-and re-run. Nothing else model-controlled remains.
+Model-controlled: **none.** The hosted run in §9 landed green on the current
+head, which was the last open model-controlled item. This is stated as a fact
+about a run that has completed, not as a prediction about one that is pending —
+the distinction the Exchange-6 review was made of.
 
 Operator-controlled, in order: the sixteen prerequisites → trust store and
 environment secrets → engine release and approval → D1 activation → D1 on PR #29
