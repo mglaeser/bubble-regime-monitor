@@ -1140,3 +1140,129 @@ class TestRuntimeProvenance:
             engine.assert_no_module_came_from_candidate_data(
                 candidate_paths="/some/path")
         assert "candidate_paths_not_a_sequence" in caught.value.reason
+
+
+class TestEveryCountInputHasAWorkflowProducer:
+    """§5. The previous wiring passed `environ["MIDTERM_SKELETON_PATH"]` into a
+    parameter that takes a skeleton dict, and no workflow step wrote a file at
+    that path or exported that variable. The count job could not have run once,
+    and it would have failed inside the engine rather than at the seam."""
+
+    def _count_job_env_and_steps(self):
+        document = _document()
+        job = document["jobs"]["count"]
+        rendered = yaml.safe_dump(job)
+        return job, rendered
+
+    def test_every_required_input_is_exported_by_a_step(self):
+        from midtermpanel import inputs
+        _, rendered = self._count_job_env_and_steps()
+        for spec in inputs.COUNT_INPUTS:
+            if not spec["required"]:
+                continue
+            assert f"{spec['variable']}=" in rendered, (
+                f"{spec['variable']} has no producer; its declared one is "
+                f"{spec['producer']!r}")
+
+    def test_the_named_producer_step_exists(self):
+        from midtermpanel import inputs
+        job, _ = self._count_job_env_and_steps()
+        names = {str(step.get("name") or "").lower() for step in job["steps"]}
+        for spec in inputs.COUNT_INPUTS:
+            if not spec["required"]:
+                continue
+            _, _, step_name = spec["producer"].partition("/")
+            assert any(step_name.strip().lower() in name for name in names), (
+                f"no step named like {spec['producer']!r}: {sorted(names)}")
+
+    def test_the_repository_is_fetched_as_objects_never_checked_out(self):
+        """The object/worktree distinction is the safety argument, so the
+        producer step has to be the one shape that keeps it."""
+        job, rendered = self._count_job_env_and_steps()
+        assert "git fetch --no-checkout origin" in rendered
+        assert "git checkout" not in rendered
+        assert "git merge" not in rendered
+
+    def test_the_challenge_is_a_file_and_not_an_exported_value(self):
+        """A challenge in the environment of every later step is a challenge a
+        `set -x` can print, and a printed challenge can be replayed."""
+        _, rendered = self._count_job_env_and_steps()
+        assert "MIDTERM_CHALLENGE_PATH=" in rendered
+        assert "MIDTERM_CHALLENGE=" not in rendered
+
+    def test_the_retired_engine_variables_appear_in_no_job(self):
+        document = _document()
+        for name, job in document["jobs"].items():
+            rendered = yaml.safe_dump(job)
+            for retired in ("MIDTERM_ENGINE_CANDIDATE_SHA:",
+                            "MIDTERM_ENGINE_PROTECTED_SHA:"):
+                assert retired not in rendered, f"{name} still sets {retired}"
+
+    def test_the_engine_release_is_read_from_governance_not_the_candidate(self):
+        document = _document()
+        for job in ("preflight", "count", "panel"):
+            rendered = yaml.safe_dump(document["jobs"][job])
+            assert "governance/midterm-panel-engine-release.json" in rendered, job
+            assert "MIDTERM_APPROVED_ENGINE_SOURCE_SHA" in rendered, job
+
+    def test_the_governance_documents_parse_and_declare_their_authority(self):
+        release = json.loads(
+            (ROOT / "governance" / "midterm-panel-engine-release.json")
+            .read_text(encoding="utf-8"))
+        pins = json.loads(
+            (ROOT / "governance" / "midterm-panel-pins.json")
+            .read_text(encoding="utf-8"))
+        assert release["approved_engine_artifact_sha256"] is None
+        assert release["approved_engine_release_tag"] is None
+        assert engine.provenance_of(release) == engine.REBUILT_TEST_ONLY
+        assert pins["authority_class"] == (
+            "REPOSITORY_AUTHORED_NOT_OPERATOR_APPROVED")
+        assert len(pins["pins"]) == 12
+
+    def test_the_pinned_engine_source_is_not_this_branchs_head(self, tmp_path):
+        """The document that decides who reviews must not name the thing being
+        reviewed. Checked against the real file, not a fixture."""
+        import subprocess
+        release = json.loads(
+            (ROOT / "governance" / "midterm-panel-engine-release.json")
+            .read_text(encoding="utf-8"))
+        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                              text=True, check=True, cwd=str(ROOT)).stdout.strip()
+        assert release["approved_engine_source_sha"] != head
+        assert release["approved_engine_protected_sha"] != head
+
+    def test_all_inputs_missing_reports_the_whole_set_at_once(self):
+        """One refusal per attempt turns a misconfigured workflow into as many
+        failed runs as there are missing inputs, each costing a job that may
+        hold a credential."""
+        from midtermpanel import inputs
+        with pytest.raises(PanelRefusal) as caught:
+            inputs.assert_all_present({})
+        for spec in inputs.COUNT_INPUTS:
+            if spec["required"]:
+                assert spec["variable"] in caught.value.reason
+
+    def test_a_short_challenge_is_refused_by_name(self, tmp_path):
+        from midtermpanel import inputs
+        path = tmp_path / "challenge.txt"
+        path.write_text("tooshort\n", encoding="utf-8")
+        with pytest.raises(PanelRefusal) as caught:
+            inputs.load_challenge({"MIDTERM_CHALLENGE_PATH": str(path)})
+        assert "challenge_too_short" in caught.value.reason
+
+    def test_a_directory_that_is_not_a_repository_is_refused(self, tmp_path):
+        from midtermpanel import inputs
+        with pytest.raises(PanelRefusal) as caught:
+            inputs.load_repository_path(
+                {"MIDTERM_REPOSITORY_PATH": str(tmp_path)})
+        assert "not_a_git_repository" in caught.value.reason
+
+    def test_absent_authorizations_are_recorded_as_absent(self):
+        """Not synthesised. A locally built set would let the preflight manifest
+        record a clearance nobody authorized."""
+        from midtermpanel import inputs
+        loaded, record = inputs.load_authorizations({}, engine=None,
+                                                    skeleton=None)
+        assert loaded is None
+        assert record["confers_real_call_authority"] is False
+        assert "no operator envelope authority" in record["honest_scope"]

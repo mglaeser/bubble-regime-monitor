@@ -164,6 +164,29 @@ jobs:
           print(json.dumps(privilegedworkflow.validate(root="."), indent=2)[:2000])
           PROBE
 
+      - name: Materialise the approved engine release
+        # §4. Preflight publishes `engine_digest`, and it must be the APPROVED
+        # engine's digest. It used to be derived from `MIDTERM_ENGINE_*`, which
+        # the workflow set to the candidate head — so the identity changed with
+        # every push to the pull request and the dedupe binding tracked the
+        # candidate rather than the reviewer.
+        run: |
+          python - >> "$GITHUB_ENV" <<'PROBE'
+          import json
+          doc = json.load(open("governance/midterm-panel-engine-release.json"))
+          for key, variable in (
+                  ("approved_engine_source_sha",
+                   "MIDTERM_APPROVED_ENGINE_SOURCE_SHA"),
+                  ("approved_engine_protected_sha",
+                   "MIDTERM_APPROVED_ENGINE_PROTECTED_SHA"),
+                  ("approved_engine_artifact_sha256",
+                   "MIDTERM_APPROVED_ENGINE_ARTIFACT_SHA256"),
+                  ("approved_engine_release_tag",
+                   "MIDTERM_APPROVED_ENGINE_RELEASE_TAG")):
+              if doc.get(key):
+                  print(f"{variable}={doc[key]}")
+          PROBE
+
       - name: Identify the exact candidate and verify ordinary CI
         id: decide
         env:
@@ -209,6 +232,61 @@ jobs:
           python -m pip install --require-hashes --no-deps \
             -r requirements-trusted-runtime.txt
 
+      - name: Materialise the approved engine release
+        id: release
+        # The engine's identity, from a committed governance document. NOT from
+        # the head under review: the reviewer must not be the reviewed, and
+        # `engine.resolve_release_config` refuses the retired
+        # `MIDTERM_ENGINE_CANDIDATE_SHA` outright rather than ignoring it, so a
+        # workflow that still exported it would fail here rather than quietly
+        # reviewing a pull request with its own edited code.
+        run: |
+          python - >> "$GITHUB_ENV" <<'PROBE'
+          import json
+          doc = json.load(open("governance/midterm-panel-engine-release.json"))
+          for key, variable in (
+                  ("approved_engine_source_sha",
+                   "MIDTERM_APPROVED_ENGINE_SOURCE_SHA"),
+                  ("approved_engine_protected_sha",
+                   "MIDTERM_APPROVED_ENGINE_PROTECTED_SHA"),
+                  ("approved_engine_artifact_sha256",
+                   "MIDTERM_APPROVED_ENGINE_ARTIFACT_SHA256"),
+                  ("approved_engine_release_tag",
+                   "MIDTERM_APPROVED_ENGINE_RELEASE_TAG")):
+              if doc.get(key):
+                  print(f"{variable}={doc[key]}")
+          PROBE
+
+      - name: Materialise the repository with the candidate as OBJECTS
+        # `--no-checkout`. The candidate's commits move into `.git` as inert
+        # data and no worktree is produced; the engine reads them with git
+        # plumbing. That object/worktree distinction IS the safety argument, and
+        # `privilegedworkflow` refuses any step that would cross it.
+        env:
+          CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+        run: |
+          git fetch --no-checkout origin "$CANDIDATE_HEAD_SHA"
+          echo "MIDTERM_REPOSITORY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Materialise the operator PIN record
+        run: |
+          mkdir -p "$RUNNER_TEMP/midterm/inputs"
+          cp governance/midterm-panel-pins.json \
+            "$RUNNER_TEMP/midterm/inputs/pins.json"
+          echo "MIDTERM_PIN_RECORD_PATH=$RUNNER_TEMP/midterm/inputs/pins.json" \
+            >> "$GITHUB_ENV"
+
+      - name: Materialise the run challenge
+        # Written to a file rather than exported as a value, so it does not sit
+        # in the environment of every later step. A challenge a later step could
+        # print is a challenge that can be replayed.
+        run: |
+          mkdir -p "$RUNNER_TEMP/midterm/inputs"
+          python -c "import secrets;print(secrets.token_hex(32))" \
+            > "$RUNNER_TEMP/midterm/inputs/challenge.txt"
+          echo "MIDTERM_CHALLENGE_PATH=$RUNNER_TEMP/midterm/inputs/challenge.txt" \
+            >> "$GITHUB_ENV"
+
       - name: Count every governed model and batch
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -219,8 +297,7 @@ jobs:
           CANDIDATE_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
           MIDTERM_ENGINE_DIGEST: ${{ needs.preflight.outputs.engine_digest }}
           MIDTERM_POLICY_DIGEST: ${{ needs.preflight.outputs.policy_digest }}
-          MIDTERM_ENGINE_PROTECTED_SHA: ${{ github.sha }}
-          MIDTERM_ENGINE_CANDIDATE_SHA: ${{ needs.preflight.outputs.head_sha }}
+          MIDTERM_AUTHORIZED_INPUT_TOKENS: '2000000'
         run: |
           python -m midtermpanel.countcli
 
@@ -275,6 +352,35 @@ jobs:
           name: midterm-count-${{ needs.preflight.outputs.head_sha }}
           path: ${{ runner.temp }}/midterm/count-input
 
+      - name: Materialise the approved engine release
+        # The same governance document the count job read. The panel rebuilds
+        # Stage 1 and `execute_review_plan` refuses when the rebuilt skeleton's
+        # digest differs from the plan's — which is the check that catches a
+        # candidate that moved between the two jobs.
+        run: |
+          python - >> "$GITHUB_ENV" <<'PROBE'
+          import json
+          doc = json.load(open("governance/midterm-panel-engine-release.json"))
+          for key, variable in (
+                  ("approved_engine_source_sha",
+                   "MIDTERM_APPROVED_ENGINE_SOURCE_SHA"),
+                  ("approved_engine_protected_sha",
+                   "MIDTERM_APPROVED_ENGINE_PROTECTED_SHA"),
+                  ("approved_engine_artifact_sha256",
+                   "MIDTERM_APPROVED_ENGINE_ARTIFACT_SHA256"),
+                  ("approved_engine_release_tag",
+                   "MIDTERM_APPROVED_ENGINE_RELEASE_TAG")):
+              if doc.get(key):
+                  print(f"{variable}={doc[key]}")
+          PROBE
+
+      - name: Materialise the repository with the candidate as OBJECTS
+        env:
+          CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+        run: |
+          git fetch --no-checkout origin "$CANDIDATE_HEAD_SHA"
+          echo "MIDTERM_REPOSITORY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
       - name: Execute the governed panel
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -286,8 +392,7 @@ jobs:
           HIGH_RISK_WORKFLOW_CHANGE: ${{ needs.preflight.outputs.high_risk }}
           MIDTERM_ENGINE_DIGEST: ${{ needs.preflight.outputs.engine_digest }}
           MIDTERM_POLICY_DIGEST: ${{ needs.preflight.outputs.policy_digest }}
-          MIDTERM_ENGINE_PROTECTED_SHA: ${{ github.sha }}
-          MIDTERM_ENGINE_CANDIDATE_SHA: ${{ needs.preflight.outputs.head_sha }}
+          MIDTERM_GENERATION_ATTEMPT_CAP: '60'
         run: |
           python -m midtermpanel.panelcli
 

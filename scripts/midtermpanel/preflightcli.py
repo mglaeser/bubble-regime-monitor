@@ -100,7 +100,21 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
             refuse("category=dispatch_pr_number_does_not_match_resolved_pr")
 
     risk = classify_changed_files(api.changed_files(pull["pr_number"]))
-    from .engine import engine_digest
+    # §4. The engine's identity comes from the APPROVED RELEASE, not from the
+    # candidate head this function just resolved and not from a `MIDTERM_ENGINE_*`
+    # variable. `engine_digest(root=...)` used to read the retired variables,
+    # which the workflow set to `head_sha` — so preflight published an engine
+    # identity that changed with every push to the pull request, and the count
+    # job's dedupe binding tracked the candidate instead of the reviewer.
+    from .engine import (
+        assert_engine_source_is_not_the_reviewed_candidate,
+        engine_digest,
+        resolve_release_config,
+        source_roles,
+    )
+    release = resolve_release_config(environ)
+    assert_engine_source_is_not_the_reviewed_candidate(
+        release=release, reviewed_candidate_head_sha=pull["head_sha"])
 
     return {
         "proceed": True,
@@ -109,7 +123,7 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
         "base_sha": pull["base_sha"],
         "high_risk": risk["high_risk"],
         "workflow_change": bool(risk["high_risk_paths"]),
-        "engine_digest": engine_digest(root=root),
+        "engine_digest": engine_digest(roles=source_roles(release)),
         "policy_digest": _policy_digest(root),
         "_trigger": run_record,
         "_risk": risk,

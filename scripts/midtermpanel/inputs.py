@@ -150,23 +150,44 @@ def load_repository_path(environ: dict) -> str:
     return path
 
 
-def load_pin_record(environ: dict) -> dict:
-    """The operator's twelve PINs, as the engine expects them.
+def load_pin_values(environ: dict) -> dict:
+    """The twelve PIN VALUES, read but not judged.
 
-    Validated only for the shape this lane depends on — `pins` present and a
-    mapping. Every individual PIN's range is the engine's own rule, checked by
-    `verifier.pins`, and a second range table here would be a second opinion
-    about numbers the operator approved once."""
-    record = _read_json(environ["MIDTERM_PIN_RECORD_PATH"], what="pin_record")
-    if not isinstance(record, dict):
+    Every individual PIN's range, type and per-model reasoning-effort support
+    is `verifier.pins.validate_pins`' rule, and a second range table here would
+    be a second opinion about numbers the operator approved once. So this reads
+    the file and checks only that there is a mapping in it."""
+    document = _read_json(environ["MIDTERM_PIN_RECORD_PATH"], what="pin_record")
+    if not isinstance(document, dict):
         refuse("category=pin_record_not_an_object")
-    pins = record.get("pins")
+    pins = document.get("pins")
     if not isinstance(pins, dict) or not pins:
         refuse("category=pin_record_has_no_pins — the engine reads "
                "`record['pins']`; a record without them would reach "
                "`verifier.pins` as an empty mapping and refuse there, in the "
                "job holding the credential")
-    return record
+    return pins
+
+
+def build_pin_record(*, engine: dict, pins: dict) -> dict:
+    """The PIN record, built by the ENGINE's own honest constructor.
+
+    `verifier.pins.test_pin_record` validates the values and labels the result
+    `TEST_FIXTURE_UNAUTHORIZED` with `executable_authority=False` — which is
+    exactly true of PIN values this repository authored and no operator
+    approved.
+
+    Deliberately not `operator_pin_claim`: that one carries a repository
+    identity, an operator identity and an external anchor, and filling those in
+    from values nobody signed would be this lane asserting an approval it does
+    not have. The engine's own docstring makes the distinction — validation
+    proves the values are internally coherent and proves nothing about who
+    chose them — and the honest label is the one that says so."""
+    from trustedlane import enginebridge
+    model_ids = list(enginebridge.model_panel(engine))
+    with enginebridge.engine_refusals(engine, where="build_pin_record"):
+        return engine["modules"]["verifier.pins"].test_pin_record(
+            pins, model_ids)
 
 
 def load_challenge(environ: dict) -> str:
@@ -236,5 +257,5 @@ def load_count_inputs(environ: dict) -> dict:
     """Everything the count path needs that is not the engine. One call."""
     assert_all_present(environ)
     return {"repository_path": load_repository_path(environ),
-            "pin_record": load_pin_record(environ),
+            "pin_values": load_pin_values(environ),
             "challenge": load_challenge(environ)}

@@ -335,7 +335,7 @@ def build_pinned_artifact(*, destination: str, release: dict,
         repository_numeric_id=repository_numeric_id, cwd=cwd)
     provenance = release.get("provenance") or provenance_of(release)
     approved = release.get("approved_engine_artifact_sha256")
-    observed = record.get("artifact_sha256") or record.get("sha256")
+    observed = record["engine_artifact_sha256"]
     if approved and observed and approved != observed:
         refuse(f"category=rebuilt_artifact_is_not_the_approved_one "
                f"approved={approved[:16]} observed={str(observed)[:16]} — the "
@@ -360,6 +360,10 @@ def open_engine(artifact_path: str, *, destination: str,
     get to repeat it."""
     from trustedlane import artifactload, enginebridge
     assert_not_the_github_zip_digest(artifact_path=artifact_path)
+    # `extract` requires the destination to exist and be a directory; it
+    # deliberately does not create one, because a function that creates its own
+    # extraction root cannot be pointed at a prepared, empty, private one.
+    os.makedirs(destination, exist_ok=True)
     artifactload.extract(artifact_path, destination=destination,
                          expected_sha256=expected_sha256)
     return enginebridge.load_engine(destination)
@@ -388,7 +392,12 @@ def load_engine_for_mode(*, mode: str, release: dict,
     built = build_pinned_artifact(
         destination=artifact_path, release=release,
         repository_numeric_id=repository_numeric_id, cwd=cwd)
-    artifact_sha256 = built.get("artifact_sha256") or built.get("sha256")
+    # By exact key, with no fallback. `.get("artifact_sha256") or
+    # .get("sha256")` — neither of which `build_engine_artifact` returns —
+    # produced `None`, and `artifactload.extract` then refused with
+    # "expected_engine_digest_malformed", which reads as an operator mistake
+    # and was a caller mistake.
+    artifact_sha256 = built["engine_artifact_sha256"]
     engine = open_engine(artifact_path, destination=extract_to,
                          expected_sha256=artifact_sha256)
     assert_no_module_came_from_candidate_data(candidate_paths=candidate_paths)

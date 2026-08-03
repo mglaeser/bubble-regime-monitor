@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "document_class": "MIDTERM_PANEL_PIN_VALUES",
+  "money_unit": "integer micro-USD",
+  "authority_class": "REPOSITORY_AUTHORED_NOT_OPERATOR_APPROVED",
+  "honest_scope": "These are PIN VALUES this repository authored. No operator approved them, no envelope signs them, and `verifier.pins.test_pin_record` is what the lane passes them through - it labels the result TEST_FIXTURE_UNAUTHORIZED with executable_authority=false, which is exactly true of them. Replacing this file with an authenticated operator record is an operator action, not a code change.",
+  "pins": {
+    "VERIFIER_MAX_OUTPUT_TOKENS": 8192,
+    "VERIFIER_CONTEXT_MARGIN_TOKENS": 8192,
+    "VERIFIER_COST_CAP_MICRO_USD": 2000000,
+    "VERIFIER_REASONING_EFFORT_BY_MODEL": {
+      "gpt-5.3-codex": "medium",
+      "gpt-5.6-sol": "medium",
+      "gpt-4.1-mini": null
+    },
+    "VERIFIER_MAX_REVIEW_UNITS": 400,
+    "VERIFIER_MAX_GENERATION_CALLS": 60,
+    "VERIFIER_MAX_COUNT_CALLS": 60,
+    "VERIFIER_COUNT_TIMEOUT_SECONDS": 60,
+    "VERIFIER_COUNT_MAX_RETRIES": 2,
+    "VERIFIER_GENERATION_TIMEOUT_SECONDS": 300,
+    "VERIFIER_GENERATION_MAX_RETRIES": 2,
+    "VERIFIER_TOKEN_DRIFT_TOLERANCE": 64
+  }
+}

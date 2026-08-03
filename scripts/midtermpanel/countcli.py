@@ -8,6 +8,7 @@ state on every path out.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -150,8 +151,13 @@ def count_through_engine(environ: dict, *, mode: str, opener,
     opened = load_engine_for_mode(
         mode=mode, release=release,
         reviewed_candidate_head_sha=environ["CANDIDATE_HEAD_SHA"],
-        artifact_path=os.path.join(temp, "midterm", "engine.tar.gz"),
-        extract_to=os.path.join(temp, "midterm", "engine"),
+        artifact_path=os.path.join(temp, "midterm", "engine-count.tar.gz"),
+        # Job-specific. `artifactload.extract` refuses a non-empty destination,
+        # and it is right to: a mixture of an approved engine and whatever a
+        # previous job left there is not one. Two jobs sharing a directory
+        # would have worked on separate runners and failed the moment anything
+        # ran them in one place — which is exactly what the vertical does.
+        extract_to=os.path.join(temp, "midterm", "engine-count"),
         repository_numeric_id=REPOSITORY_NUMERIC_ID,
         candidate_paths=[loaded["repository_path"]], cwd=workspace)
     engine = opened["engine"]
@@ -165,9 +171,13 @@ def count_through_engine(environ: dict, *, mode: str, opener,
         repository_path=loaded["repository_path"])
     authorizations, authorization_record = inputs.load_authorizations(
         environ, engine=engine, skeleton=skeleton)
+    # The engine's own honest constructor, which labels values this repository
+    # authored as TEST_FIXTURE_UNAUTHORIZED rather than as an approval.
+    pin_record = inputs.build_pin_record(engine=engine,
+                                         pins=loaded["pin_values"])
 
     governed = enginebridge.governed_policy_digests(
-        engine, pin_values=loaded["pin_record"]["pins"])
+        engine, pin_values=pin_record["pins"])
 
     # ONE transport, for the whole count path. §8: the previous version built a
     # fresh one for the core and another for the accounting, so the totals the
@@ -176,7 +186,7 @@ def count_through_engine(environ: dict, *, mode: str, opener,
     transport = transport_factory(engine)
     core = enginebridge.prepare_review_plan_core(
         engine, skeleton=skeleton, repository_path=loaded["repository_path"],
-        pin_record=loaded["pin_record"], transport=transport,
+        pin_record=pin_record, transport=transport,
         authorizations=authorizations, challenge=loaded["challenge"])
     governed_match = enginebridge.assert_core_used_the_governed_policies(
         core, governed=governed)
@@ -195,10 +205,33 @@ def main() -> None:
     `perform` stays drivable by a stand-in provider and a fake opener."""
     import urllib.request
 
-    from .engine import MODE_PROVIDER
+    from . import dryrun
+    from .engine import MODE_DRY_RUN, MODE_PROVIDER
     from .transport import live_count_transport, read_provider_key
 
     environ = dict(os.environ)
+
+    if dryrun.is_dry_run(environ):
+        # The SAME function, the same engine, the same core call. Two objects
+        # differ: a stand-in transport that cannot reach a socket, and a status
+        # opener that writes a file. Everything the provider path does between
+        # them is the code that runs here.
+        dryrun.assert_no_credential_is_present(environ)
+        sink = dryrun.status_sink(environ)
+        counted = count_through_engine(
+            environ, mode=MODE_DRY_RUN, opener=sink,
+            transport_factory=dryrun.count_transport_factory(environ))
+        environ.setdefault("MIDTERM_ENGINE_DIGEST",
+                           counted["engine_identity"]["engine_source_digest"])
+        outcome = perform(environ, **counted)
+        proof = dryrun.record(environ, sink=sink,
+                              transport=counted["transport"])
+        print(json.dumps({"dry_run": proof,
+                          "counted": outcome["counted"],
+                          "plan_sha256": outcome["plan"]["plan_sha256"]},
+                         indent=2, sort_keys=True, default=str))
+        return
+
     key = read_provider_key(environ)
     ceiling = require_positive_int(environ, "MIDTERM_AUTHORIZED_INPUT_TOKENS")
 

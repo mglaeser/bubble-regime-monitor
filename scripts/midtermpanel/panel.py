@@ -159,7 +159,12 @@ def execute(*, engine: dict, plan: dict, skeleton: dict, transport,
             "generation_ledger": result["generation_ledger"],
             "execution_preflight": result["execution_preflight"],
             "output_privacy": result["output_privacy"],
-            "provider_calls": int(getattr(transport, "call_count", 0) or 0)}
+            # Named for what they are. Every call this transport can make goes
+            # to the generation endpoint — the path allowlist is what makes
+            # that true rather than a convention — so "provider calls" and
+            # "generation calls" are the same number, and the evidence uses the
+            # narrower name because it says more.
+            "generation_calls": int(getattr(transport, "call_count", 0) or 0)}
 
 
 def assert_every_batch_and_model_was_executed(result: dict, *,
@@ -201,30 +206,67 @@ def assert_every_batch_and_model_was_executed(result: dict, *,
             "models_per_batch": expected_models}
 
 
-def aggregate(*, votes: list, challenge: str = None) -> dict:
-    """Apply the panel rules. Refutations are never softened.
+def aggregate(*, votes: list, synthesis: dict, challenge: str = None) -> dict:
+    """The engine's decision, plus the one rule this lane adds.
 
-    Delegates to `independent_verify`, then applies the mid-term strict rule on
-    top. The order matters: role gate first (was the required approver resolved
-    and did it approve, with a distinct corroborator), then strict refutation
-    (did ANY valid voice refute). A green from the first is not a green overall."""
-    upstream = _upstream()
-    models = [v["model"] for v in votes]
-    role = upstream.require_approvals(
-        votes, models, REQUIRED_APPROVER,
-        min_others=MIN_DISTINCT_OTHER_APPROVALS, challenge=challenge)
+    ## Where the role gate lives
 
-    strict = {"block": False, "reason": "strict mode disabled"}
-    if STRICT_ANY_REFUTATION:
-        strict = upstream.strict_any_refutation(votes, models)
+    Not here. `executor.decide_unit_or_block` already applies it, per unit,
+    from `review_request_policy`: the required approver must have a VALID vote
+    that explicitly approves, a refutation of any confidence is a veto, and at
+    least `minimum_other_approvers` DISTINCT other models must approve. Then
+    `synthesize` intersects across batches so a unit any panelist refuted stays
+    refuted. Every one of those is the same rule `independent_verify` states.
 
-    blocked = bool(role.get("block")) or bool(strict.get("block"))
+    The first version of this function ran `require_approvals` over the
+    engine's evidence anyway. That was a second implementation of a rule the
+    engine owns, and it did not merely duplicate — it disagreed. The engine
+    emits ONE `verdict_evidence` record per model per batch, carrying
+    `verdicts_by_unit`; `require_approvals` expects one flat vote per model
+    with a boolean `refuted` and an `ok` flag. So `_is_valid` was false for
+    every record, and the gate blocked EVERY review with "required approver
+    without a valid vote (error/unparsable) -> fail-closed" — a fail-closed
+    default doing exactly what it should, over a shape mismatch, reporting a
+    refusal the models never made.
+
+    ## What this lane genuinely adds
+
+    `strict_any_refutation`. It is OPT-IN and OFF by default upstream, because
+    the reference mechanism greens on "approver plus one corroborator" even
+    when a third voice refutes. Mid-term policy requires ANY valid refutation
+    to block, so this reads the engine's own per-model records and blocks on a
+    refuted unit from any governed voice — including one the engine's per-unit
+    decision resolved in favour of approval.
+    """
+    del challenge  # the engine bound it into every request and checked it back
+    engine_blocked = not synthesis["overall_approved"]
+
+    refuting = sorted({vote["model"] for vote in votes
+                       if (vote["v"] or {}).get("refuted_count", 0)})
+    strict_blocked = bool(STRICT_ANY_REFUTATION and refuting)
+
+    blocked = engine_blocked or strict_blocked
     return {
         "decision": "blocked" if blocked else "approved",
-        "role_gate": role,
-        "strict_gate": strict,
+        "engine_gate": {
+            "block": engine_blocked,
+            "reason": ("the engine's synthesis refuted "
+                       f"{synthesis['refuted_unit_count']} unit(s)"
+                       if engine_blocked else
+                       "every unit approved under the governed role gate"),
+            "refuted_unit_count": synthesis["refuted_unit_count"],
+            "approved_unit_count": synthesis["approved_unit_count"],
+            "synthesis_sha256": synthesis["synthesis_sha256"],
+        },
+        "strict_gate": {
+            "block": strict_blocked,
+            "reason": (f"strict mode: refuted by {refuting}" if strict_blocked
+                       else "strict mode: no model refuted any unit"),
+            "refuting_models": refuting,
+        },
         "models_voting": sorted({v["model"] for v in votes}),
         "required_approver": REQUIRED_APPROVER,
+        "minimum_other_approvers": MIN_DISTINCT_OTHER_APPROVALS,
         "strict_any_refutation": STRICT_ANY_REFUTATION,
         "votes": len(votes),
     }
@@ -255,15 +297,25 @@ def anti_copy_tripwire(votes: list) -> dict:
     upstream = _upstream()
     normalised = {}
     for vote in votes:
-        reason = upstream.norm_reason((vote.get("v") or {}).get("reason"))
-        if len(reason) < 24:
-            continue
-        normalised.setdefault(reason, set()).add(vote["model"])
+        # The engine's record is per model per BATCH and carries every unit's
+        # verdict under `verdicts_by_unit`. Reading `vote["v"]["reason"]` found
+        # nothing there and normalised `None` to the empty string for every
+        # voice, so the tripwire reported zero collisions over zero reasons and
+        # every test that asserted "no collusion detected" passed.
+        for unit_hash, verdict in sorted(
+                ((vote.get("v") or {}).get("verdicts_by_unit") or {}).items()):
+            reason = upstream.norm_reason(verdict.get("reason"))
+            if len(reason) < 24:
+                continue
+            normalised.setdefault((unit_hash, reason), set()).add(vote["model"])
     collisions = sorted(
-        {"reason_sha256": digest_of({"r": reason})[:16],
+        {"unit_sha256": unit_hash[:16],
+         "reason_sha256": digest_of({"r": reason})[:16],
          "models": sorted(models)}.__repr__()
-        for reason, models in normalised.items() if len(models) > 1)
+        for (unit_hash, reason), models in normalised.items()
+        if len(models) > 1)
     return {"identical_reason_groups": len(collisions),
+            "reasons_examined": len(normalised),
             "collisions": collisions,
             "honest_scope": ("agreement is not collusion; this is a signal for "
                              "a human, not a verdict")}

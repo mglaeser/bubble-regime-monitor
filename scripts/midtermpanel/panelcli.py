@@ -18,7 +18,7 @@ from . import (
 )
 from .clibase import require_env, run, self_test_report, self_test_requested
 from .count import assert_plan_is_executable
-from .errors import PanelRefusal
+from .errors import PanelRefusal, refuse
 from .evidence import panel_evidence, strict_load, write_atomic
 from .panel import (
     aggregate,
@@ -99,6 +99,7 @@ def perform(environ: dict, *, execute_fn, opener) -> dict:
 
     executed = execute_fn(plan=plan)
     verdict = aggregate(votes=executed["votes"],
+                        synthesis=executed["synthesis"],
                         challenge=plan["execution_challenge"])
     tripwire = anti_copy_tripwire(executed["votes"])
 
@@ -116,6 +117,10 @@ def perform(environ: dict, *, execute_fn, opener) -> dict:
               "strict_any_refutation": verdict["strict_any_refutation"],
               "votes": verdict["votes"],
               "generation_calls": executed["generation_calls"],
+              "coverage": executed["coverage"],
+              "output_privacy": executed["output_privacy"],
+              "generation_ledger_sha256": executed["generation_ledger"].get(
+                  "generation_ledger_sha256"),
               "anti_copy": tripwire,
               "plan_sha256": plan["plan_sha256"]})
     write_atomic(record, os.path.join(_runner_temp(environ),
@@ -136,6 +141,21 @@ def perform(environ: dict, *, execute_fn, opener) -> dict:
                      "(mid-term, not write-separated)"),
         target_url=target, run_id=run_id, run_attempt=attempt),
         opener=opener, token=env["GITHUB_TOKEN"]))
+
+    # After the status is published and the evidence is on disk, and only then.
+    # A blocked review that returns normally leaves the panel JOB green while
+    # the commit status is red — and the job is what a person glances at, what
+    # a branch rule can be pointed at, and what `finalize` reports. The order
+    # is the whole point: refusing first would lose both the published refusal
+    # and the evidence that explains it, which is the failure mode the engine's
+    # own `decide_unit_or_block` was rewritten to avoid.
+    if verdict["decision"] != "approved":
+        refuse(f"category=panel_blocked decision={verdict['decision']} "
+               f"engine_gate={verdict['engine_gate']['reason']!r} "
+               f"strict_gate={verdict['strict_gate']['reason']!r} "
+               f"evidence_sha256={record['evidence_sha256'][:16]} — the full "
+               "per-model verdicts are retained in the private evidence; this "
+               "refusal is the process exit, not the finding")
     return {"published": published, "verdict": verdict, "evidence": record}
 
 
@@ -159,8 +179,13 @@ def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
     opened = load_engine_for_mode(
         mode=mode, release=release,
         reviewed_candidate_head_sha=environ["CANDIDATE_HEAD_SHA"],
-        artifact_path=os.path.join(temp, "midterm", "engine.tar.gz"),
-        extract_to=os.path.join(temp, "midterm", "engine"),
+        artifact_path=os.path.join(temp, "midterm", "engine-panel.tar.gz"),
+        # Job-specific. `artifactload.extract` refuses a non-empty destination,
+        # and it is right to: a mixture of an approved engine and whatever a
+        # previous job left there is not one. Two jobs sharing a directory
+        # would have worked on separate runners and failed the moment anything
+        # ran them in one place — which is exactly what the vertical does.
+        extract_to=os.path.join(temp, "midterm", "engine-panel"),
         repository_numeric_id=REPOSITORY_NUMERIC_ID,
         candidate_paths=[repository_path],
         cwd=environ.get("GITHUB_WORKSPACE", "."))
@@ -183,13 +208,30 @@ def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
 
 
 def main() -> None:
+    import json
     import urllib.request
 
+    from . import dryrun
     from .countcli import require_positive_int
-    from .engine import MODE_PROVIDER
+    from .engine import MODE_DRY_RUN, MODE_PROVIDER
     from .transport import live_generation_transport, read_provider_key
 
     environ = dict(os.environ)
+
+    if dryrun.is_dry_run(environ):
+        dryrun.assert_no_credential_is_present(environ)
+        sink = dryrun.status_sink(environ)
+        prepared = panel_execution(
+            environ, mode=MODE_DRY_RUN,
+            transport_factory=dryrun.generation_transport_factory(environ))
+        outcome = perform(environ, execute_fn=prepared["execute_fn"],
+                          opener=sink)
+        proof = dryrun.record(environ, sink=sink,
+                              transport=prepared["transport"])
+        print(json.dumps({"dry_run": proof, "verdict": outcome["verdict"]},
+                         indent=2, sort_keys=True, default=str))
+        return
+
     key = read_provider_key(environ)
     cap = require_positive_int(environ, "MIDTERM_GENERATION_ATTEMPT_CAP")
 

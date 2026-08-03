@@ -283,7 +283,13 @@ def executable_plan(*, counted: dict, core: dict, skeleton: dict,
         "trusted_evidence_claim": False,
     }
     plan["plan_sha256"] = digest_of(plan)
-    return assert_plan_is_executable(plan)
+    # Validated here, returned as the PLAN. `return assert_plan_is_executable(
+    # plan)` returned the validator's four-field summary instead, and `perform`
+    # wrote that to disk as the executable plan — so the panel job read a
+    # document with no batches, no challenge and no policy, and reported a
+    # self-digest mismatch, which reads as tampering and was a return value.
+    assert_plan_is_executable(plan)
+    return plan
 
 
 def assert_plan_is_executable(plan: dict) -> dict:
