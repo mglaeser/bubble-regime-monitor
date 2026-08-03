@@ -48,13 +48,20 @@ def artifact_paths(temp: str) -> dict:
             "plan": os.path.join(base, "executable-plan.json")}
 
 
-def perform(environ: dict, *, core, transport, opener, root: str = ".") -> dict:
+def perform(environ: dict, *, core, transport, opener, engine=None,
+            engine_identity=None, skeleton=None, governed_policies=None,
+            authorizations=None, challenge: str = None,
+            repository_path: str = None) -> dict:
     """Package the engine's core result, persist it, publish terminal status.
 
     `core` is what `enginebridge.prepare_review_plan_core` returned. This
     function does not count — it packages what the engine counted. See the
     module docstring of `midtermpanel.count` for why that separation is the
-    whole point."""
+    whole point.
+
+    Takes the whole result of `count_through_engine` so the CLI can hand it
+    over verbatim; the extra members travel into the evidence rather than being
+    re-derived here."""
     env = require_env(environ, REQUIRED, where="countcli")
     head, base = env["CANDIDATE_HEAD_SHA"], env["CANDIDATE_BASE_SHA"]
     run_id, attempt = int(env["GITHUB_RUN_ID"]), int(env["GITHUB_RUN_ATTEMPT"])
@@ -69,12 +76,12 @@ def perform(environ: dict, *, core, transport, opener, root: str = ".") -> dict:
         opener=opener, token=env["GITHUB_TOKEN"]))
 
     counted = counted_from_core(core, policy_digest=env["MIDTERM_POLICY_DIGEST"],
-                                transport=transport)
+                                transport=transport, engine=engine)
     plan = executable_plan(
-        counted=counted, core=core,
+        counted=counted, core=core, skeleton=skeleton,
         repository_numeric_id=REPOSITORY_NUMERIC_ID, candidate_head_sha=head,
         candidate_base_sha=base, engine_digest=env["MIDTERM_ENGINE_DIGEST"],
-        policy_digest=env["MIDTERM_POLICY_DIGEST"])
+        policy_digest=env["MIDTERM_POLICY_DIGEST"], challenge=challenge)
 
     record = count_evidence(
         repository_numeric_id=REPOSITORY_NUMERIC_ID, candidate_head_sha=head,
@@ -82,9 +89,22 @@ def perform(environ: dict, *, core, transport, opener, root: str = ".") -> dict:
         policy_digest=env["MIDTERM_POLICY_DIGEST"], run_id=run_id,
         run_attempt=attempt,
         body={"request_semantics_digest": counted["request_semantics_digest"],
-              "units": counted["units"], "batches": counted["batches"],
+              "final_units": counted["final_units"],
+              "batches": counted["batches"],
+              "total_input_tokens": counted["total_input_tokens"],
               "provider_calls": counted["provider_calls"],
               "generation_calls": 0,
+              "transport_source": counted["transport_source"],
+              "count_ledger_sha256": counted["count_ledger_sha256"],
+              "preflight_manifest_sha256":
+                  counted["preflight_manifest_sha256"],
+              "engine_provenance": (engine_identity or {}).get("provenance"),
+              "engine_artifact_sha256":
+                  (engine_identity or {}).get("engine_artifact_sha256"),
+              "approved_engine_source_sha":
+                  (engine_identity or {}).get("approved_engine_source_sha"),
+              "governed_policies": governed_policies,
+              "literal_authorizations": authorizations,
               "plan_sha256": plan["plan_sha256"]})
 
     paths = artifact_paths(_runner_temp(environ))
@@ -98,63 +118,113 @@ def perform(environ: dict, *, core, transport, opener, root: str = ".") -> dict:
     published.append(publish(status_request(
         repository_numeric_id=REPOSITORY_NUMERIC_ID, candidate_head_sha=head,
         context=COUNT_STATUS, state="success",
-        description=(f"counted {counted['units']} units in "
+        description=(f"counted {counted['final_units']} units in "
                      f"{counted['batches']} batches across 3 models "
                      "(mid-term, not write-separated)"),
         target_url=target, run_id=run_id, run_attempt=attempt,
         evidence_sha256=record["evidence_sha256"]),
         opener=opener, token=env["GITHUB_TOKEN"]))
     return {"published": published, "evidence": record, "plan": plan,
-            "counted": counted, "paths": paths}
+            "counted": counted, "paths": paths, "skeleton": skeleton,
+            "repository_path": repository_path}
+
+
+def count_through_engine(environ: dict, *, mode: str, opener,
+                         transport_factory) -> dict:
+    """Load the approved engine, build the skeleton, count. One transport.
+
+    Written as one function taking its capabilities as parameters so the
+    fake-provider vertical runs THIS code rather than a copy of it. The only
+    difference between a dry run and a provider-backed run is `mode` and what
+    `transport_factory` returns."""
+    from trustedlane import enginebridge
+
+    from . import inputs
+    from .engine import load_engine_for_mode, resolve_release_config
+
+    release = resolve_release_config(environ)
+    loaded = inputs.load_count_inputs(environ)
+    temp = _runner_temp(environ)
+    workspace = environ.get("GITHUB_WORKSPACE", ".")
+
+    opened = load_engine_for_mode(
+        mode=mode, release=release,
+        reviewed_candidate_head_sha=environ["CANDIDATE_HEAD_SHA"],
+        artifact_path=os.path.join(temp, "midterm", "engine.tar.gz"),
+        extract_to=os.path.join(temp, "midterm", "engine"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        candidate_paths=[loaded["repository_path"]], cwd=workspace)
+    engine = opened["engine"]
+
+    # Stage 1 in the ENGINE, from the repository's objects. The skeleton is
+    # produced here rather than handed in: a skeleton from outside describes a
+    # candidate nobody in this job derived.
+    skeleton = enginebridge.build_skeleton(
+        engine, target_base_sha=environ["CANDIDATE_BASE_SHA"],
+        candidate_head_sha=environ["CANDIDATE_HEAD_SHA"],
+        repository_path=loaded["repository_path"])
+    authorizations, authorization_record = inputs.load_authorizations(
+        environ, engine=engine, skeleton=skeleton)
+
+    governed = enginebridge.governed_policy_digests(
+        engine, pin_values=loaded["pin_record"]["pins"])
+
+    # ONE transport, for the whole count path. §8: the previous version built a
+    # fresh one for the core and another for the accounting, so the totals the
+    # evidence reported were a different object's totals from the ones that were
+    # spent — and they agreed with each other, which is why nothing noticed.
+    transport = transport_factory(engine)
+    core = enginebridge.prepare_review_plan_core(
+        engine, skeleton=skeleton, repository_path=loaded["repository_path"],
+        pin_record=loaded["pin_record"], transport=transport,
+        authorizations=authorizations, challenge=loaded["challenge"])
+    governed_match = enginebridge.assert_core_used_the_governed_policies(
+        core, governed=governed)
+    return {"engine": engine, "engine_identity": opened, "core": core,
+            "skeleton": skeleton, "transport": transport,
+            "governed_policies": governed_match,
+            "authorizations": authorization_record,
+            "challenge": loaded["challenge"],
+            "repository_path": loaded["repository_path"], "opener": opener}
 
 
 def main() -> None:
     """Obtain the engine, count through it, package the result.
 
     Every dangerous capability is obtained here and injected downward, so
-    `perform` stays drivable by a fake provider and a fake opener."""
+    `perform` stays drivable by a stand-in provider and a fake opener."""
     import urllib.request
 
-    from trustedlane import enginebridge
-
-    from .engine import (
-        assert_provenance_permits_real_panel,
-        build_test_only_artifact,
-        engine_digest,
-        open_engine,
-    )
-    from .transport import LiveProviderTransport, read_provider_key
+    from .engine import MODE_PROVIDER
+    from .transport import live_count_transport, read_provider_key
 
     environ = dict(os.environ)
     key = read_provider_key(environ)
-    roles = {"protected_trusted_lane": environ["MIDTERM_ENGINE_PROTECTED_SHA"],
-             "candidate_verifier": environ["MIDTERM_ENGINE_CANDIDATE_SHA"]}
-    environ.setdefault("MIDTERM_ENGINE_DIGEST", engine_digest(roles=roles))
+    ceiling = require_positive_int(environ, "MIDTERM_AUTHORIZED_INPUT_TOKENS")
 
-    temp = _runner_temp(environ)
-    built = build_test_only_artifact(
-        destination=os.path.join(temp, "midterm", "engine.tar.gz"), roles=roles,
-        repository_numeric_id=REPOSITORY_NUMERIC_ID,
-        cwd=environ.get("GITHUB_WORKSPACE", "."))
-    # A locally rebuilt artifact is reproducible and approved by nobody. It may
-    # back a dry run; it may not back a run that spends money.
-    assert_provenance_permits_real_panel(built["provenance"])
+    counted = count_through_engine(
+        environ, mode=MODE_PROVIDER, opener=urllib.request.urlopen,
+        transport_factory=lambda engine: live_count_transport(
+            engine, opener=urllib.request.urlopen, key=key,
+            authorized_input_tokens=ceiling))
+    environ.setdefault("MIDTERM_ENGINE_DIGEST",
+                       counted["engine_identity"]["engine_source_digest"])
+    perform(environ, **counted)
 
-    engine = open_engine(
-        os.path.join(temp, "midterm", "engine.tar.gz"),
-        destination=os.path.join(temp, "midterm", "engine"),
-        expected_sha256=built["engine_artifact_sha256"])
-    core = enginebridge.prepare_review_plan_core(
-        engine, skeleton=environ["MIDTERM_SKELETON_PATH"],
-        repository_path=environ.get("GITHUB_WORKSPACE", "."),
-        pin_record=environ["MIDTERM_PIN_RECORD"],
-        transport=LiveProviderTransport(key=key),
-        authorizations=environ.get("MIDTERM_AUTHORIZATIONS"),
-        challenge=environ["MIDTERM_CHALLENGE"])
-    perform(environ, core=core,
-            transport=LiveProviderTransport(key=key),
-            opener=urllib.request.urlopen,
-            root=environ.get("GITHUB_WORKSPACE", "."))
+
+def require_positive_int(environ: dict, name: str) -> int:
+    """The operator's ceiling, as an integer, or a named refusal.
+
+    `int(environ[name])` would raise `KeyError` or `ValueError` in the job
+    holding the credential, and neither says which variable or who writes it."""
+    raw = str(environ.get(name) or "").strip()
+    if not raw.isdigit() or int(raw) < 1:
+        raise PanelRefusal(
+            "MIDTERM_PANEL_REFUSED",
+            f"category=ceiling_not_a_positive_integer variable={name} — the "
+            "count transport refuses to exist without one, because a transport "
+            "with no budget spends against a number nobody approved")
+    return int(raw)
 
 
 def _self_test() -> int:

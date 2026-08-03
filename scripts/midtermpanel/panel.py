@@ -83,12 +83,21 @@ def verify_handoff(*, count_record: dict, plan: dict, expected_head: str,
                 f"expected={str(expected)[:16]}")
     if count_record.get("candidate_head_sha") != expected_head:
         mismatches.append("count_evidence.candidate_head_sha")
-    counted_semantics = (count_record.get("body") or {}).get(
-        "request_semantics_digest")
-    if counted_semantics != plan.get("request_semantics_digest"):
+    body = count_record.get("body") or {}
+    if body.get("request_semantics_digest") != plan.get(
+            "request_semantics_digest"):
         mismatches.append(
             "request_semantics_digest: the plan describes different requests "
             "than the count evidence recorded")
+    # THE plan, not a plan. The count evidence is published (its digest goes
+    # into the status); the plan is private. Comparing only the semantics
+    # digest would accept any plan asking the same questions under a different
+    # challenge or a different pin record — and the challenge is what proves a
+    # verdict was written for this run.
+    if body.get("plan_sha256") != plan.get("plan_sha256"):
+        mismatches.append(
+            "plan_sha256: the count evidence identifies a different plan than "
+            "the one handed to the panel")
     if mismatches:
         refuse(f"category=count_to_panel_handoff_mismatch found={mismatches} — "
                "the panel must execute the plan this run counted; anything else "
@@ -96,54 +105,100 @@ def verify_handoff(*, count_record: dict, plan: dict, expected_head: str,
                "as if they were the same")
     return {"handoff": "verified",
             "plan_sha256": plan["plan_sha256"],
-            "execution_requests": len(plan["execution_requests"])}
+            "execution_requests": len(plan["execution_request_hashes"])}
 
 
-def execute(*, engine: dict, plan: dict, transport, **engine_kwargs) -> dict:
-    """Execute through the ENGINE's executor. This module runs no request loop.
+def execute(*, engine: dict, plan: dict, skeleton: dict, transport,
+            repository_path: str, authorizations=None) -> dict:
+    """Execute through the ENGINE's Stage 3. One operation, not a loop.
 
-    `verifier.executor.execute_batch` already implements retries, attempt
-    ledgering, usage-token drift, response-envelope validation, the anti-copy
-    tripwire, output secret scanning and per-model verdict evidence. Every one
-    of those is a rule; re-running them from here would be a second set of the
-    same rules that could disagree.
+    `enginebridge.execute_review_plan` is the whole of D2 and it is already
+    correct: it rebuilds every payload from the commits, hash-checks each
+    assembled request against the plan, scans EVERY execution payload before
+    any is sent, runs the panel through `execute_batch` with the operator's
+    retry policy, synthesises additively so a refutation survives, and scans
+    the provider's own returned text before it is persisted.
 
-    What this function contributes is the binding: it refuses to execute
-    anything whose request hash is not in the counted plan. The engine decides
-    HOW a request is executed; the plan decides WHICH requests exist."""
+    The previous version called `executor.execute_batch(transport=transport,
+    **engine_kwargs)` with no batch, no policy, no ledger and no assemblies —
+    a signature that has never existed — and then compared a `request_hashes`
+    key the engine has never emitted. Both would have surfaced in the job
+    holding the credential.
+
+    What this function contributes is the binding either side of that call: the
+    plan decides WHICH requests exist, and the engine decides HOW each is
+    executed."""
     from trustedlane import enginebridge
 
     permitted = set(plan["execution_request_hashes"])
     if not permitted:
         refuse("category=plan_has_no_execution_requests")
 
-    with enginebridge.engine_refusals(engine, where="execute_batch"):
-        result = engine["modules"]["verifier.executor"].execute_batch(
-            transport=transport, **engine_kwargs)
+    result = enginebridge.execute_review_plan(
+        engine, skeleton=skeleton, plan=plan,
+        repository_path=repository_path, transport=transport,
+        authorizations=authorizations, challenge=plan["execution_challenge"])
 
-    executed = {str(h) for h in (result.get("request_hashes") or [])}
-    unexpected = sorted(executed - permitted)
-    if unexpected:
-        refuse(f"category=executed_a_request_that_was_never_counted "
-               f"hashes={[h[:16] for h in unexpected]} — the panel executed a "
-               "request the count job did not produce; its tokens were never "
-               "counted and its content was never in the plan")
-    missing = sorted(permitted - executed)
-    if missing:
-        refuse(f"category=counted_request_was_not_executed "
-               f"hashes={[h[:16] for h in missing]} — a plan partially executed "
-               "and reported whole is a review with a hole in it")
+    coverage = assert_every_batch_and_model_was_executed(result, plan=plan)
 
-    evidence = result.get(enginebridge.EVIDENCE_RECORDS_KEY) or []
-    votes = [{"model": record.get("model"), "v": record}
-             for record in evidence]
-    for vote in votes:
-        if vote["model"] not in PANEL_MODELS:
-            refuse(f"category=engine_returned_an_ungoverned_model "
-                   f"model={vote['model']!r}")
+    votes = []
+    for batch in result["batch_results"]:
+        for record in batch[enginebridge.EVIDENCE_RECORDS_KEY]:
+            model = record.get("model") or record.get("model_id")
+            if model not in PANEL_MODELS:
+                refuse(f"category=engine_returned_an_ungoverned_model "
+                       f"model={model!r}")
+            votes.append({"model": model, "v": record})
+    if not votes:
+        refuse("category=panel_produced_no_verdicts — an empty vote set "
+               "aggregates to green, which is the one thing a review that "
+               "reached nobody must not do")
     return {"votes": votes,
-            "generation_calls": int(getattr(transport, "call_count", 0) or 0),
-            "engine_result_keys": sorted(result)}
+            "coverage": coverage,
+            "synthesis": result["synthesis"],
+            "generation_ledger": result["generation_ledger"],
+            "execution_preflight": result["execution_preflight"],
+            "output_privacy": result["output_privacy"],
+            "provider_calls": int(getattr(transport, "call_count", 0) or 0)}
+
+
+def assert_every_batch_and_model_was_executed(result: dict, *,
+                                              plan: dict) -> dict:
+    """Every planned batch produced a result, and every model voted in each.
+
+    Deliberately NOT a re-check that each executed request's hash is in the
+    plan: `executor.assert_request_matches_plan` already requires hash equality
+    for every assembled request before any is sent, and the engine refuses on
+    mismatch. A second copy here would be a second opinion about a rule the
+    engine owns — and the first version of this function was worse than that,
+    because it read a `request_hashes` key the engine has never emitted, so it
+    compared an empty set and reported that everything matched.
+
+    What the engine does NOT assert is the shape this lane depends on: that the
+    loop ran to the end. A run that executed two of three batches and returned
+    would satisfy every per-request check and aggregate over a review with a
+    hole in it."""
+    results = result["batch_results"]
+    planned = [batch["batch_id"] for batch in plan["batches"]]
+    observed = [batch["batch_id"] for batch in results]
+    if sorted(observed) != sorted(planned):
+        refuse(f"category=planned_batches_were_not_all_executed "
+               f"planned={len(planned)} executed={len(observed)} "
+               f"missing={sorted(set(planned) - set(observed))} — a plan "
+               "partially executed and reported whole is a review with a hole "
+               "in it")
+    expected_models = sorted(plan["review_request_policy"]["model_ids"])
+    for batch in results:
+        voted = sorted({record.get("model") or record.get("model_id")
+                        for record in batch["per_model_verdict_evidence"]})
+        if voted != expected_models:
+            refuse(f"category=batch_missing_a_models_verdict "
+                   f"batch={batch['batch_id']!r} voted={voted} "
+                   f"expected={expected_models} — a missing voice is a voice "
+                   "that cannot refute, and the aggregate would green on the "
+                   "remaining ones")
+    return {"batches_planned": len(planned), "batches_executed": len(observed),
+            "models_per_batch": expected_models}
 
 
 def aggregate(*, votes: list, challenge: str = None) -> dict:

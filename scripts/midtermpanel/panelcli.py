@@ -61,8 +61,14 @@ def input_paths(temp: str) -> dict:
             "plan": os.path.join(base, "executable-plan.json")}
 
 
-def perform(environ: dict, *, execute_fn, opener, votes_challenge=None) -> dict:
-    """Verify the handoff, execute, aggregate, publish. Injected seams only."""
+def perform(environ: dict, *, execute_fn, opener) -> dict:
+    """Verify the handoff, execute, aggregate, publish. Injected seams only.
+
+    The challenge comes from the PLAN, not from the environment. It is what the
+    count job actually counted, and `require_approvals` uses it to check that
+    each verdict was written for this run — so reading it from a variable that
+    the panel job sets independently would let the two disagree while every
+    check still passed."""
     import json
 
     env = require_env(environ, REQUIRED, where="panelcli")
@@ -92,7 +98,8 @@ def perform(environ: dict, *, execute_fn, opener, votes_challenge=None) -> dict:
         opener=opener, token=env["GITHUB_TOKEN"])]
 
     executed = execute_fn(plan=plan)
-    verdict = aggregate(votes=executed["votes"], challenge=votes_challenge)
+    verdict = aggregate(votes=executed["votes"],
+                        challenge=plan["execution_challenge"])
     tripwire = anti_copy_tripwire(executed["votes"])
 
     state = "success" if verdict["decision"] == "approved" else "failure"
@@ -132,39 +139,67 @@ def perform(environ: dict, *, execute_fn, opener, votes_challenge=None) -> dict:
     return {"published": published, "verdict": verdict, "evidence": record}
 
 
+def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
+    """Load the approved engine, rebuild Stage 1, and return the executor.
+
+    The skeleton is REBUILT here rather than carried over from the count job.
+    That is `execute_review_plan`'s own requirement — it refuses when the
+    rebuilt skeleton's digest differs from the plan's — and it is the check
+    that catches a candidate that moved between the two jobs."""
+    from trustedlane import enginebridge
+
+    from . import inputs
+    from .engine import load_engine_for_mode, resolve_release_config
+    from .panel import execute
+
+    release = resolve_release_config(environ)
+    repository_path = inputs.load_repository_path(environ)
+    temp = _runner_temp(environ)
+
+    opened = load_engine_for_mode(
+        mode=mode, release=release,
+        reviewed_candidate_head_sha=environ["CANDIDATE_HEAD_SHA"],
+        artifact_path=os.path.join(temp, "midterm", "engine.tar.gz"),
+        extract_to=os.path.join(temp, "midterm", "engine"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID,
+        candidate_paths=[repository_path],
+        cwd=environ.get("GITHUB_WORKSPACE", "."))
+    engine = opened["engine"]
+    skeleton = enginebridge.build_skeleton(
+        engine, target_base_sha=environ["CANDIDATE_BASE_SHA"],
+        candidate_head_sha=environ["CANDIDATE_HEAD_SHA"],
+        repository_path=repository_path)
+    authorizations, _ = inputs.load_authorizations(
+        environ, engine=engine, skeleton=skeleton)
+    transport = transport_factory(engine)
+
+    def execute_fn(*, plan):
+        return execute(engine=engine, plan=plan, skeleton=skeleton,
+                       transport=transport, repository_path=repository_path,
+                       authorizations=authorizations)
+
+    return {"execute_fn": execute_fn, "engine_identity": opened,
+            "transport": transport}
+
+
 def main() -> None:
     import urllib.request
 
-    from trustedlane import enginebridge
-
-    from .engine import (
-        assert_provenance_permits_real_panel,
-        build_test_only_artifact,
-        open_engine,
-    )
-    from .panel import execute
-    from .transport import LiveProviderTransport, read_provider_key
+    from .countcli import require_positive_int
+    from .engine import MODE_PROVIDER
+    from .transport import live_generation_transport, read_provider_key
 
     environ = dict(os.environ)
     key = read_provider_key(environ)
-    roles = {"protected_trusted_lane": environ["MIDTERM_ENGINE_PROTECTED_SHA"],
-             "candidate_verifier": environ["MIDTERM_ENGINE_CANDIDATE_SHA"]}
-    temp = _runner_temp(environ)
-    built = build_test_only_artifact(
-        destination=os.path.join(temp, "midterm", "engine.tar.gz"), roles=roles,
-        repository_numeric_id=REPOSITORY_NUMERIC_ID,
-        cwd=environ.get("GITHUB_WORKSPACE", "."))
-    assert_provenance_permits_real_panel(built["provenance"])
-    engine = open_engine(os.path.join(temp, "midterm", "engine.tar.gz"),
-                         destination=os.path.join(temp, "midterm", "engine"),
-                         expected_sha256=built["engine_artifact_sha256"])
-    transport = LiveProviderTransport(key=key)
-    perform(environ,
-            execute_fn=lambda *, plan: execute(engine=engine, plan=plan,
-                                               transport=transport),
-            opener=urllib.request.urlopen,
-            votes_challenge=environ.get("MIDTERM_CHALLENGE"))
-    _ = enginebridge
+    cap = require_positive_int(environ, "MIDTERM_GENERATION_ATTEMPT_CAP")
+
+    prepared = panel_execution(
+        environ, mode=MODE_PROVIDER,
+        transport_factory=lambda engine: live_generation_transport(
+            engine, opener=urllib.request.urlopen, key=key,
+            generation_attempt_cap=cap))
+    perform(environ, execute_fn=prepared["execute_fn"],
+            opener=urllib.request.urlopen)
 
 
 def _self_test() -> int:

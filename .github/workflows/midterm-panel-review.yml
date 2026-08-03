@@ -116,12 +116,22 @@ jobs:
       actions: read
       pull-requests: read
       statuses: write
+    # Every output `preflight` emits is declared here, including the ones only
+    # the count and panel jobs read. An undeclared output does not error — it
+    # resolves to the EMPTY STRING, so `engine_digest` and `policy_digest` were
+    # silently arriving blank in both credential-bearing jobs.
+    # `tests/test_midterm_panel.py::TestWorkflowOutputsHaveProducers` walks the
+    # workflow's own expressions and reddens if a consumed output loses its
+    # declaration again.
     outputs:
       proceed: ${{ steps.decide.outputs.proceed }}
       pr_number: ${{ steps.decide.outputs.pr_number }}
       head_sha: ${{ steps.decide.outputs.head_sha }}
       base_sha: ${{ steps.decide.outputs.base_sha }}
       high_risk: ${{ steps.decide.outputs.high_risk }}
+      workflow_change: ${{ steps.decide.outputs.workflow_change }}
+      engine_digest: ${{ steps.decide.outputs.engine_digest }}
+      policy_digest: ${{ steps.decide.outputs.policy_digest }}
     steps:
       # No `ref:`. For a workflow_run event the default checkout is the
       # default-branch commit this workflow definition came from, which is

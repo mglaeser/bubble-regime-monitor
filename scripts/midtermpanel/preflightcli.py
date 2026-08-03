@@ -41,6 +41,16 @@ WORKFLOW_RUN_ENV = ("RUN_WORKFLOW_NAME", "RUN_EVENT", "RUN_CONCLUSION",
                     "RUN_HEAD_SHA", "RUN_ID")
 DISPATCH_ENV = ("DISPATCH_PR_NUMBER", "DISPATCH_HEAD_SHA", "DISPATCH_APPROVAL")
 
+#: The job outputs this CLI emits, as a named constant.
+#:
+#: Named rather than implicit so the workflow's `outputs:` block can be compared
+#: against it by test. An output the workflow declares but the CLI never emits
+#: resolves to the empty string at run time, and nothing in GitHub Actions treats
+#: that as an error — which is how two digests arrived blank in credential-bearing
+#: jobs while every test passed.
+PUBLIC_OUTPUTS = ("proceed", "pr_number", "head_sha", "base_sha", "high_risk",
+                  "workflow_change", "engine_digest", "policy_digest")
+
 
 def _policy_digest(root: str) -> str:
     from .evidence import digest_of

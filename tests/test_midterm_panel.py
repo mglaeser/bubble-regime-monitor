@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import midtermpanel as mp  # noqa: E402
-from midtermpanel import privilegedworkflow, transport  # noqa: E402
+from midtermpanel import engine, privilegedworkflow, transport  # noqa: E402
 from midtermpanel import status as statuspublish  # noqa: E402
 from midtermpanel.errors import PanelRefusal  # noqa: E402
 from trustedlane import statusnames  # noqa: E402
@@ -355,14 +355,15 @@ class TestTheProviderSeam:
         """Phase A's proof: not 'no call was made' but 'no call could be'."""
         no_provider = transport.NoProviderTransport()
         with pytest.raises(PanelRefusal) as caught:
-            no_provider.post(model="gpt-5.6-sol", system="s", user="u")
+            no_provider.post(transport.COUNT_PATH, b"{}")
         assert "provider_call_attempted_in_no_provider_mode" in caught.value.reason
-        assert no_provider.attempts == ["gpt-5.6-sol"]
+        assert no_provider.attempts == [{"path": transport.COUNT_PATH,
+                                         "bytes": 2}]
 
     def test_zero_call_assertion_catches_the_attempt(self):
         no_provider = transport.NoProviderTransport()
         with pytest.raises(PanelRefusal):
-            no_provider.post(model="gpt-5.6-sol", system="s", user="u")
+            no_provider.post(transport.GENERATION_PATH, b"{}")
         with pytest.raises(PanelRefusal) as caught:
             transport.assert_no_provider_calls(no_provider)
         assert "provider_calls_were_made" in caught.value.reason
@@ -380,12 +381,266 @@ class TestTheProviderSeam:
             transport.assert_no_provider_calls(Opaque())
         assert "cannot_account_for_calls" in caught.value.reason
 
-    def test_the_fake_transport_opens_no_socket_and_counts(self):
-        fake = transport.FakeProviderTransport()
-        for model in mp.PANEL_MODELS:
-            fake.post(model=model, system="s", user="u")
-        assert fake.call_count == 3
-        assert fake.models_called() == sorted(mp.PANEL_MODELS)
+
+class TestCountingAndGeneratingAreDifferentCapabilities:
+    """§7. Counting and generating are separately approved and separately
+    priced, so the object that can do one may not do the other.
+
+    The live halves are the trusted lane's own transports — the mid-term lane
+    binds them rather than writing a second pair. These tests therefore drive
+    the wrapper against a stand-in inner, and a separate test proves the real
+    binders hand back the real classes."""
+
+    class Inner:
+        """Shaped exactly like the trusted transports: engine signature,
+        declared source, its own record()."""
+
+        source = transport.SOURCE_PROVIDER
+
+        def __init__(self, permitted, *, reply=(200, b"{}")):
+            self.permitted = permitted
+            self.reply = reply
+            self.seen = []
+            self.gate_calls = []
+
+        def post(self, path, body, *, timeout=None):
+            if path != self.permitted:
+                raise AssertionError("the wrapper must refuse before this")
+            self.seen.append((path, timeout))
+            return self.reply
+
+        def record(self):
+            return {"transport_class": "TRUSTED_LANE_COUNT_TRANSPORT",
+                    "count_attempts": len(self.seen)}
+
+        def assert_zero_generation(self):
+            self.gate_calls.append("assert_zero_generation")
+            return {"generation_calls": 0}
+
+    def _count(self, **kwargs):
+        return transport.MidtermProviderTransport(
+            self.Inner(transport.COUNT_PATH, **kwargs),
+            capability="COUNT_TRANSPORT",
+            permitted_paths=(transport.COUNT_PATH,))
+
+    def _generation(self, **kwargs):
+        return transport.MidtermProviderTransport(
+            self.Inner(transport.GENERATION_PATH, **kwargs),
+            capability="GENERATION_TRANSPORT",
+            permitted_paths=(transport.GENERATION_PATH,))
+
+    def test_the_count_transport_cannot_reach_the_generation_endpoint(self):
+        live = self._count()
+        with pytest.raises(PanelRefusal) as caught:
+            live.post(transport.GENERATION_PATH, b"{}")
+        assert "transport_path_not_permitted" in caught.value.reason
+        assert live._inner.seen == [], "the refusal must precede the send"
+
+    def test_the_generation_transport_cannot_reach_the_count_endpoint(self):
+        live = self._generation()
+        with pytest.raises(PanelRefusal) as caught:
+            live.post(transport.COUNT_PATH, b"{}")
+        assert "transport_path_not_permitted" in caught.value.reason
+        assert live._inner.seen == []
+
+    def test_the_allowlist_is_exact_and_not_a_prefix(self):
+        """`/v1/responses/input_tokens` starts with `/v1/responses`, so a prefix
+        test on the count transport would permit the endpoint that costs."""
+        assert transport.COUNT_PATH.startswith(transport.GENERATION_PATH)
+        with pytest.raises(PanelRefusal):
+            self._count().post(transport.GENERATION_PATH, b"{}")
+
+    def test_each_transport_reaches_its_own_endpoint_and_accounts(self):
+        for live, path in ((self._count(), transport.COUNT_PATH),
+                           (self._generation(), transport.GENERATION_PATH)):
+            assert live.post(path, b"{}", timeout=7) == (200, b"{}")
+            assert live._inner.seen == [(path, 7)]
+            assert live.call_count == 1
+            assert live.paths_called() == [path]
+
+    def test_the_engine_signature_is_what_is_implemented(self):
+        """The engine calls `post(path, body, timeout=...)` positionally and
+        reads `.source`. A transport with a different shape fails at the first
+        real call, in the job holding the credential."""
+        import inspect
+        for cls in (transport.MidtermProviderTransport,
+                    transport.NoProviderTransport,
+                    transport.EngineStandInTransport):
+            parameters = list(
+                inspect.signature(cls.post).parameters.values())[1:]
+            assert [p.name for p in parameters] == ["path", "body", "timeout"]
+            assert parameters[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+            assert parameters[2].kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_the_trusted_transports_have_the_same_signature(self):
+        """The wrapper delegates positionally, so a trusted-lane rename would
+        otherwise surface as a TypeError inside the job holding the key."""
+        import inspect
+
+        from trustedlane.counttransport import TrustedCountTransport
+        from trustedlane.generationtransport import TrustedGenerationTransport
+        for cls in (TrustedCountTransport, TrustedGenerationTransport):
+            parameters = list(
+                inspect.signature(cls.post).parameters.values())[1:]
+            assert [p.name for p in parameters] == ["path", "body", "timeout"]
+
+    def test_every_transport_declares_a_source_the_engine_accepts(self):
+        for cls in (transport.MidtermProviderTransport,
+                    transport.NoProviderTransport,
+                    transport.EngineStandInTransport):
+            assert cls.source in (transport.SOURCE_PROVIDER,
+                                  transport.SOURCE_MOCK)
+        assert (transport.MidtermProviderTransport.source
+                == transport.SOURCE_PROVIDER)
+        assert transport.NoProviderTransport.source == transport.SOURCE_MOCK
+
+    def _engine_stub(self, *, count_path=None, generation_path=None,
+                     provider="PROVIDER", mock="MOCK_NOT_PROVIDER"):
+        class Counting:
+            COUNT_PATH = count_path or transport.COUNT_PATH
+            SOURCE_PROVIDER = provider
+            SOURCE_MOCK = mock
+
+        class Executor:
+            GENERATION_PATH = generation_path or transport.GENERATION_PATH
+
+        return {"modules": {"verifier.counting": Counting,
+                            "verifier.executor": Executor}}
+
+    def test_the_paths_are_checked_against_the_loaded_engine(self):
+        """A lane constant that has drifted does not fail loudly: the allowlist
+        would permit a path the engine never sends and refuse the one it does,
+        which reads as a transport error rather than a configuration mistake."""
+        assert transport.assert_paths_match_engine(
+            self._engine_stub())["paths_match_engine"] is True
+        for drift in ({"count_path": "/v2/count"},
+                      {"generation_path": "/v2/responses"}):
+            with pytest.raises(PanelRefusal) as caught:
+                transport.assert_paths_match_engine(self._engine_stub(**drift))
+            assert "paths_disagree_with_engine" in caught.value.reason
+
+    def test_the_source_labels_are_checked_against_the_loaded_engine(self):
+        """The engine decides what may be represented as provider evidence by
+        comparing these exact strings."""
+        with pytest.raises(PanelRefusal) as caught:
+            transport.assert_paths_match_engine(
+                self._engine_stub(provider="PROVIDER_BACKED"))
+        assert "source_labels_disagree_with_engine" in caught.value.reason
+
+    def test_the_lane_labels_are_the_real_engines_labels(self):
+        """Against the engine source this lane is pinned to, not a stub."""
+        import subprocess
+        source = subprocess.run(
+            ["git", "show", f"{HEAD}:scripts/verifier/counting.py"],
+            capture_output=True, text=True, check=True, cwd=str(ROOT)).stdout
+        assert f'SOURCE_PROVIDER = "{transport.SOURCE_PROVIDER}"' in source
+        assert f'SOURCE_MOCK = "{transport.SOURCE_MOCK}"' in source
+        assert f'COUNT_PATH = "{transport.COUNT_PATH}"' in source
+
+    def test_a_non_bytes_body_is_refused(self):
+        """The engine hashes the exact bytes it counted and re-sends those
+        bytes; encoding at the transport would make the two differ."""
+        with pytest.raises(PanelRefusal) as caught:
+            self._count().post(transport.COUNT_PATH, "{}")
+        assert "transport_body_not_bytes" in caught.value.reason
+
+    def test_an_inner_that_does_not_declare_provider_is_refused(self):
+        class Undeclared:
+            def post(self, path, body, *, timeout=None):
+                return 200, b"{}"
+
+        with pytest.raises(PanelRefusal) as caught:
+            transport.MidtermProviderTransport(
+                Undeclared(), capability="COUNT_TRANSPORT",
+                permitted_paths=(transport.COUNT_PATH,))
+        assert "does_not_declare_provider" in caught.value.reason
+
+    def test_the_record_never_says_trusted(self):
+        """A mid-term run writing `TRUSTED_LANE_*` into evidence would be
+        claiming a lane whose operator prerequisites are unrecorded."""
+        live = self._count()
+        live.post(transport.COUNT_PATH, b"{}")
+        record = live.record()
+        assert record["transport_class"] == "MIDTERM_SINGLE_REPO_COUNT_TRANSPORT"
+        assert record["wrapped_transport_class"] == "Inner"
+        assert record["provider_calls"] == 1
+        assert "not a trusted-lane phase" in record["honest_scope"]
+        assert not str(record["transport_class"]).startswith("TRUSTED")
+
+    def test_the_wrapped_gates_are_forwarded_not_reimplemented(self):
+        """`assert_zero_generation` and `assert_within_authorized_tokens` live
+        on the trusted class; a second copy here is a second opinion."""
+        live = self._count()
+        assert live.assert_zero_generation() == {"generation_calls": 0}
+        assert live._inner.gate_calls == ["assert_zero_generation"]
+        assert not hasattr(transport.MidtermProviderTransport,
+                           "assert_zero_generation")
+
+    def test_the_phase_label_is_not_a_trusted_lane_phase(self):
+        from trustedlane import phases
+        assert transport.PHASE_LABEL not in (phases.D0, phases.D1, phases.D2)
+        assert transport.PHASE_LABEL.startswith("MIDTERM")
+
+    def test_a_stand_in_that_declares_provider_is_refused(self):
+        """A wrapper cannot make an undeclared transport safe."""
+        class Pretender:
+            source = transport.SOURCE_PROVIDER
+
+            def post(self, path, body, *, timeout=None):
+                return 200, b"{}"
+
+        with pytest.raises(PanelRefusal) as caught:
+            transport.EngineStandInTransport(
+                Pretender(), permitted_paths=(transport.COUNT_PATH,))
+        assert "stand_in_transport_not_declared_mock" in caught.value.reason
+
+    def test_the_stand_in_wrapper_restricts_paths_and_accounts(self):
+        class Inner:
+            source = transport.SOURCE_MOCK
+
+            def __init__(self):
+                self.seen = []
+
+            def post(self, path, body, *, timeout=None):
+                self.seen.append(path)
+                return 200, transport.scripted_count_body(11)
+
+        inner = Inner()
+        wrapped = transport.EngineStandInTransport(
+            inner, permitted_paths=(transport.COUNT_PATH,))
+        status, body = wrapped.post(transport.COUNT_PATH, b"{}")
+        assert (status, json.loads(body)["input_tokens"]) == (200, 11)
+        with pytest.raises(PanelRefusal):
+            wrapped.post(transport.GENERATION_PATH, b"{}")
+        assert inner.seen == [transport.COUNT_PATH]
+        assert wrapped.call_count == 1
+        assert wrapped.paths_called() == [transport.COUNT_PATH]
+
+    def test_accounting_refuses_a_bare_count(self):
+        class BareCount:
+            calls = 4
+
+        with pytest.raises(PanelRefusal) as caught:
+            transport.assert_provider_calls_all_went_through(
+                BareCount(), expected_paths=(transport.COUNT_PATH,))
+        assert "accounting_is_a_bare_count" in caught.value.reason
+
+    def test_accounting_refuses_a_call_on_an_unexpected_path(self):
+        live = self._generation()
+        live.post(transport.GENERATION_PATH, b"{}")
+        with pytest.raises(PanelRefusal) as caught:
+            transport.assert_provider_calls_all_went_through(
+                live, expected_paths=(transport.COUNT_PATH,))
+        assert "provider_calls_on_unexpected_paths" in caught.value.reason
+
+    def test_accounting_accepts_the_expected_path(self):
+        live = self._count()
+        live.post(transport.COUNT_PATH, b"{}")
+        record = transport.assert_provider_calls_all_went_through(
+            live, expected_paths=(transport.COUNT_PATH,))
+        assert record == {"provider_calls": 1,
+                          "paths": [transport.COUNT_PATH],
+                          "declared_source": transport.SOURCE_PROVIDER}
 
 
 class TestNamingCannotDrift:
@@ -569,3 +824,319 @@ class TestTheTrustedLaneIsUntouched:
     def test_d1_and_d2_are_still_templates(self):
         live = {p.name for p in (ROOT / ".github" / "workflows").glob("*.yml")}
         assert not any(n.startswith("d1-") or n.startswith("d2-") for n in live)
+
+
+class TestWorkflowOutputsHaveProducers:
+    """Every value the workflow reads is a value the workflow declares.
+
+    GitHub does not error on an undeclared job output. `needs.preflight.outputs.x`
+    where `x` was never declared resolves to the EMPTY STRING, and the step
+    receives `x=""` and carries on. That is how `engine_digest` and
+    `policy_digest` came to be arriving blank in both credential-bearing jobs
+    while every test passed: nothing in the system treats a silent empty as an
+    error, so the only way to catch it is to compare the two sets directly.
+    """
+
+    @staticmethod
+    def _text() -> str:
+        return WORKFLOW.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _declared() -> set:
+        document = _document()
+        declared = set()
+        for job in (document.get("jobs") or {}).values():
+            for name in ((job or {}).get("outputs") or {}):
+                declared.add(str(name))
+        return declared
+
+    def _consumed(self) -> set:
+        import re
+        return set(re.findall(r"needs\.\w+\.outputs\.(\w+)", self._text()))
+
+    def test_every_consumed_output_is_declared(self):
+        missing = sorted(self._consumed() - self._declared())
+        assert missing == [], (
+            f"consumed but never declared: {missing} — these resolve to the "
+            "empty string at run time, silently")
+
+    def test_every_step_output_reference_has_a_producing_step(self):
+        """A job output must name a step id that exists in that job."""
+        import re
+        document = _document()
+        offenders = []
+        for job_id, job in (document.get("jobs") or {}).items():
+            step_ids = {str(s.get("id")) for s in ((job or {}).get("steps") or [])
+                        if isinstance(s, dict) and s.get("id")}
+            for name, expression in (((job or {}).get("outputs")) or {}).items():
+                for referenced in re.findall(r"steps\.(\w+)\.outputs",
+                                             str(expression)):
+                    if referenced not in step_ids:
+                        offenders.append(f"{job_id}.{name} -> steps.{referenced}")
+        assert offenders == [], offenders
+
+    def test_the_cli_emits_exactly_what_the_workflow_declares(self):
+        """The producer side, checked against the consumer side.
+
+        `preflightcli.decide()` builds the dict that becomes the job outputs.
+        If it stops emitting one the workflow declares, the declaration silently
+        yields empty — the same failure from the other end."""
+        from midtermpanel import preflightcli
+        emitted = set(preflightcli.PUBLIC_OUTPUTS)
+        declared = self._declared()
+        assert self._consumed() <= emitted, sorted(self._consumed() - emitted)
+        assert declared <= emitted, sorted(declared - emitted)
+
+    def test_deleting_a_declaration_would_redden_this(self):
+        """The guard is not vacuous.
+
+        Asserting a subset relation passes trivially when the consumed set is
+        empty. This proves the consumed set is real and that the comparison has
+        something to catch."""
+        consumed = self._consumed()
+        assert "engine_digest" in consumed
+        assert "policy_digest" in consumed
+        assert len(consumed) >= 7
+
+
+class TestTheReviewerIsNotTheReviewed:
+    """§2. The previous wiring resolved the engine's source from
+    `MIDTERM_ENGINE_CANDIDATE_SHA`, which the workflow set to the head of the
+    pull request under review — so a pull request could edit `scripts/verifier`
+    and its own edited code would be the code that reviewed it, in a job holding
+    the provider key."""
+
+    HEAD = "1111111111111111111111111111111111111111"   # pragma: allowlist secret
+    ENGINE = "2222222222222222222222222222222222222222"  # pragma: allowlist secret
+    LANE = "3333333333333333333333333333333333333333"    # pragma: allowlist secret
+
+    def _release(self, **overrides):
+        release = {"approved_engine_source_sha": self.ENGINE,
+                   "approved_engine_protected_sha": self.LANE,
+                   "approved_engine_artifact_sha256": None,
+                   "approved_engine_release_tag": None}
+        release.update(overrides)
+        release["provenance"] = engine.provenance_of(release)
+        return release
+
+    def test_the_engine_source_may_not_be_the_reviewed_head(self):
+        with pytest.raises(PanelRefusal) as caught:
+            engine.assert_engine_source_is_not_the_reviewed_candidate(
+                release=self._release(approved_engine_source_sha=self.HEAD),
+                reviewed_candidate_head_sha=self.HEAD)
+        assert "engine_source_is_the_reviewed_candidate" in caught.value.reason
+        assert "approved_engine_source_sha" in caught.value.reason
+
+    def test_the_protected_half_may_not_be_the_reviewed_head_either(self):
+        """An engine whose `trustedlane` source came from the head under review
+        is just as much candidate code holding the credential."""
+        with pytest.raises(PanelRefusal) as caught:
+            engine.assert_engine_source_is_not_the_reviewed_candidate(
+                release=self._release(approved_engine_protected_sha=self.HEAD),
+                reviewed_candidate_head_sha=self.HEAD)
+        assert "approved_engine_protected_sha" in caught.value.reason
+
+    def test_distinct_identities_are_permitted_and_reported_separately(self):
+        record = engine.assert_engine_source_is_not_the_reviewed_candidate(
+            release=self._release(), reviewed_candidate_head_sha=self.HEAD)
+        assert record["reviewed_candidate_head_sha"] == self.HEAD
+        assert record["approved_engine_source_sha"] == self.ENGINE
+        assert record["approved_engine_protected_sha"] == self.LANE
+        assert record["identities_are_distinct"] is True
+
+    def test_the_retired_candidate_variable_is_refused_not_ignored(self):
+        """A workflow still exporting it is a workflow that still believes the
+        head selects the engine; reading a different variable silently would
+        leave that belief shipping and passing."""
+        with pytest.raises(PanelRefusal) as caught:
+            engine.resolve_release_config({
+                "MIDTERM_ENGINE_CANDIDATE_SHA": self.HEAD,
+                engine.ENGINE_SOURCE_ENV: self.ENGINE,
+                engine.ENGINE_PROTECTED_ENV: self.LANE})
+        assert "retired_engine_variables_present" in caught.value.reason
+        assert "MIDTERM_ENGINE_CANDIDATE_SHA" in caught.value.reason
+
+    def test_there_is_no_default_engine(self):
+        with pytest.raises(PanelRefusal) as caught:
+            engine.resolve_release_config({})
+        assert "approved_engine_release_not_configured" in caught.value.reason
+
+    def test_the_engine_digest_has_no_environment_fallback(self, monkeypatch):
+        """The old signature defaulted `roles` to a value read from
+        `MIDTERM_ENGINE_*`, so a caller could get a digest for an engine it had
+        never chosen and would never load."""
+        monkeypatch.setenv("MIDTERM_ENGINE_CANDIDATE_SHA", self.HEAD)
+        monkeypatch.setenv("MIDTERM_ENGINE_PROTECTED_SHA", self.LANE)
+        with pytest.raises(TypeError):
+            engine.engine_digest()
+        with pytest.raises(PanelRefusal):
+            engine.engine_digest(roles={"whatever": self.ENGINE})
+
+    def test_the_digest_is_over_the_two_approved_commits(self):
+        release = self._release()
+        first = engine.engine_digest(roles=engine.source_roles(release))
+        second = engine.engine_digest(roles=engine.source_roles(release))
+        other = engine.engine_digest(roles=engine.source_roles(
+            self._release(approved_engine_source_sha=self.HEAD)))
+        assert first == second != other
+
+    def test_no_module_still_reads_the_retired_variable(self):
+        """AST, not grep: the docstrings name these variables in order to
+        explain that they are no longer read, and a text search would count
+        that explanation as the defect it describes."""
+        import ast
+        offenders = []
+        for path in sorted(Path("scripts/midtermpanel").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(
+                        node.value, str) and node.value in (
+                            "MIDTERM_ENGINE_CANDIDATE_SHA",
+                            "MIDTERM_ENGINE_PROTECTED_SHA"):
+                    if path.name != "engine.py":
+                        offenders.append(f"{path.name}:{node.lineno}")
+        assert offenders == [], (
+            "only engine.py may name the retired variables, and only to refuse "
+            f"them: {offenders}")
+
+
+class TestModeSelectsWhichWayTheGatesPoint:
+    """§6. Provider mode refuses an unapproved artifact; dry-run mode refuses a
+    transport that could spend. Neither can be satisfied by inspecting the
+    environment harder, because the environment is what the caller controls."""
+
+    def test_provider_mode_refuses_a_rebuilt_artifact(self):
+        with pytest.raises(PanelRefusal) as caught:
+            engine.assert_provenance_permits(engine.REBUILT_TEST_ONLY,
+                                             mode=engine.MODE_PROVIDER)
+        assert "engine_provenance_is_test_only" in caught.value.reason
+
+    def test_a_dry_run_may_use_a_rebuilt_artifact(self):
+        assert engine.assert_provenance_permits(
+            engine.REBUILT_TEST_ONLY,
+            mode=engine.MODE_DRY_RUN) == engine.REBUILT_TEST_ONLY
+
+    def test_an_unknown_provenance_is_refused_in_both_modes(self):
+        for mode in engine.MODES:
+            with pytest.raises(PanelRefusal) as caught:
+                engine.assert_provenance_permits("LOOKS_FINE", mode=mode)
+            assert "engine_provenance_unknown" in caught.value.reason
+
+    def test_an_unknown_mode_is_refused_rather_than_defaulted(self):
+        with pytest.raises(PanelRefusal) as caught:
+            engine.assert_mode("PROVIDER")
+        assert "engine_mode_unknown" in caught.value.reason
+
+    def test_approved_needs_both_the_bytes_and_the_release(self):
+        """A digest without a tag is a digest somebody computed; a tag without a
+        digest is a name with no bytes behind it."""
+        digest = "a" * 64
+        assert engine.provenance_of(
+            {"approved_engine_artifact_sha256": digest,
+             "approved_engine_release_tag": "v1"}) == engine.APPROVED_RELEASE
+        for partial in ({"approved_engine_artifact_sha256": digest},
+                        {"approved_engine_release_tag": "v1"}, {}):
+            assert engine.provenance_of(partial) == engine.REBUILT_TEST_ONLY
+
+    def _live(self, capability="COUNT_TRANSPORT", path=None):
+        class Inner:
+            source = transport.SOURCE_PROVIDER
+
+            def post(self, path, body, *, timeout=None):
+                return 200, b"{}"
+
+        return transport.MidtermProviderTransport(
+            Inner(), capability=capability,
+            permitted_paths=(path or transport.COUNT_PATH,))
+
+    def test_a_dry_run_may_not_hold_a_transport_that_could_spend(self):
+        live = self._live("GENERATION_TRANSPORT", transport.GENERATION_PATH)
+        with pytest.raises(PanelRefusal) as caught:
+            engine.assert_transport_suits_mode(live, mode=engine.MODE_DRY_RUN)
+        assert "dry_run_holds_a_provider_transport" in caught.value.reason
+
+    def test_provider_mode_may_not_hold_a_stand_in(self):
+        """Evidence that reads as a real panel and is not one."""
+        with pytest.raises(PanelRefusal) as caught:
+            engine.assert_transport_suits_mode(transport.NoProviderTransport(),
+                                               mode=engine.MODE_PROVIDER)
+        assert "provider_mode_holds_a_stand_in_transport" in caught.value.reason
+
+    def test_each_mode_accepts_its_own_transport(self):
+        live = self._live()
+        assert engine.assert_transport_suits_mode(
+            live, mode=engine.MODE_PROVIDER)["declared_source"] == "PROVIDER"
+        assert engine.assert_transport_suits_mode(
+            transport.NoProviderTransport(),
+            mode=engine.MODE_DRY_RUN)["mode"] == engine.MODE_DRY_RUN
+
+    def test_a_source_download_is_not_an_engine_artifact(self):
+        for path in ("/tmp/repo-main.zip", "https://codeload.github.com/x/y",
+                     "/runner/_temp/zipball/head"):
+            with pytest.raises(PanelRefusal) as caught:
+                engine.assert_not_the_github_zip_digest(artifact_path=path)
+            assert "looks_like_a_source_download" in caught.value.reason
+        assert engine.assert_not_the_github_zip_digest(
+            artifact_path="/runner/_temp/engine.tar.gz")
+
+
+class TestRuntimeProvenance:
+    """§12. The static controls prove the workflow never checks the candidate
+    out. These prove it from the interpreter's own bookkeeping, because the
+    static argument is about a file and the thing that matters is a process."""
+
+    def test_a_candidate_directory_on_sys_path_is_refused(self, tmp_path,
+                                                          monkeypatch):
+        candidate = tmp_path / "candidate"
+        (candidate / "pkg").mkdir(parents=True)
+        monkeypatch.syspath_prepend(str(candidate))
+        with pytest.raises(PanelRefusal) as caught:
+            engine.assert_no_candidate_path_is_importable(
+                candidate_paths=[str(candidate)])
+        assert "candidate_path_is_importable" in caught.value.reason
+
+    def test_a_clean_sys_path_passes_and_says_what_it_checked(self, tmp_path):
+        record = engine.assert_no_candidate_path_is_importable(
+            candidate_paths=[str(tmp_path / "absent")])
+        assert record["sys_path_clean"] is True
+        assert record["sys_path_entries_checked"] >= 1
+
+    def test_a_module_loaded_from_candidate_bytes_is_refused(self, tmp_path):
+        candidate = tmp_path / "candidate"
+        candidate.mkdir()
+        planted = candidate / "planted_module.py"
+        planted.write_text("VALUE = 1\n", encoding="utf-8")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("planted_module",
+                                                      str(planted))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules["planted_module"] = module
+        try:
+            with pytest.raises(PanelRefusal) as caught:
+                engine.assert_no_module_came_from_candidate_data(
+                    candidate_paths=[str(candidate)])
+            assert "module_loaded_from_candidate_data" in caught.value.reason
+            assert "planted_module" in caught.value.reason
+        finally:
+            del sys.modules["planted_module"]
+
+    def test_a_clean_process_passes_and_counts_what_it_looked_at(self, tmp_path):
+        record = engine.assert_no_module_came_from_candidate_data(
+            candidate_paths=[str(tmp_path / "candidate")])
+        assert record["modules_from_candidate"] == []
+        assert record["modules_with_a_file_checked"] > 10
+
+    def test_a_sibling_directory_is_not_treated_as_inside(self, tmp_path):
+        """`/a/bcd` does not live under `/a/bc`; an unanchored prefix test would
+        say it does and block a run for no reason."""
+        assert engine._is_within(str(tmp_path / "bc"), str(tmp_path / "bc"))
+        assert not engine._is_within(str(tmp_path / "bcd"),
+                                     str(tmp_path / "bc"))
+
+    def test_a_bare_string_of_paths_is_refused(self):
+        """Iterated character by character, it would check nothing."""
+        with pytest.raises(PanelRefusal) as caught:
+            engine.assert_no_module_came_from_candidate_data(
+                candidate_paths="/some/path")
+        assert "candidate_paths_not_a_sequence" in caught.value.reason
