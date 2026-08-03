@@ -230,6 +230,16 @@ token" rather than "did a person decide".
 **success**, commit `d148ddd`. `permissions: contents: read`, no `secrets.`
 anywhere.
 
+Its job was first named `fake-provider vertical (no key)`, and
+`statusnames.assert_workflow_statuses_are_registered` refused it as an
+unregistered check name — this repository's own guard, doing exactly what it
+exists for. The name matters because it becomes a check on the commit, and that
+one reads on a checks tab like a verdict about the candidate. It is now
+`midterm-panel-selftest`, registered ORDINARY rather than MIDTERM_JOB because it
+runs on `pull_request` against the candidate head and can therefore be required
+meaningfully. What requiring it means is narrow and the name now says so: the
+panel's own suites pass on this head. No model saw the change.
+
 Three things it does that a plain `pytest` step would not: `fetch-depth: 0`,
 because a shallow clone would make the suite **skip** — the one outcome worse
 than failing, because it reads as a pass; an explicit no-credential check

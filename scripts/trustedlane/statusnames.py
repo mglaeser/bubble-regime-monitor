@@ -37,7 +37,19 @@ from .errors import refuse
 
 #: The deterministic gate. Authoritative for ordinary correctness, and the sole
 #: merge authority while the trusted lane is inactive.
-ORDINARY_STATUSES = ("test (3.12)", "image")
+#: `midterm-panel-selftest` is ORDINARY and not MIDTERM_JOB, and the distinction
+#: is the trigger rather than the subject. The MIDTERM_JOB checks come from the
+#: privileged `workflow_run` panel, so they land on main's commit and can never
+#: satisfy a pull request. This one runs on `pull_request` against the candidate
+#: head, like any other test job, and requiring it is meaningful.
+#:
+#: What requiring it means is narrow, and the NAME has to carry that: the panel's
+#: own suites — including the whole no-key vertical — pass on this head. It is
+#: not a review of the change and no model saw the change. The job was first
+#: called `fake-provider vertical (no key)`, which reads on a checks tab like a
+#: verdict about the candidate; `assert_workflow_statuses_are_registered` caught
+#: it as unregistered, which is this registry doing exactly what it is for.
+ORDINARY_STATUSES = ("test (3.12)", "image", "midterm-panel-selftest")
 
 #: D0. Proves containment on the allowed default ref; holds no credential and
 #: reviews nothing.
