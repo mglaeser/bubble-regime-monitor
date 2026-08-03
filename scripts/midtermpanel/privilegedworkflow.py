@@ -87,7 +87,7 @@ from .errors import refuse
 #: An allowlist, not a denylist of the scary ones. `issue_comment`,
 #: `pull_request_target` and `repository_dispatch` are all obviously wrong here,
 #: and enumerating them would leave whatever GitHub ships next quietly permitted.
-PERMITTED_TRIGGERS = ("workflow_run", "workflow_dispatch")
+PERMITTED_TRIGGERS = ("workflow_run",)
 
 #: Jobs permitted to reference the provider secret.
 #:

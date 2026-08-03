@@ -1,0 +1,64 @@
+name: midterm-panel-rerun
+
+# Controlled rerun, with no provider secret anywhere near it.
+#
+# The privileged panel workflow has exactly one trigger — `workflow_run` on
+# ordinary CI — because a `workflow_dispatch` there would run against a SELECTED
+# REF, and its checkouts deliberately omit `ref:`. Under `workflow_run` that
+# omission means the default branch; under a dispatch it would mean whichever
+# branch was chosen, with the key in scope.
+#
+# So the rerun lives here instead. This workflow asks ORDINARY CI to run again
+# on a pull request. CI completing is what starts the panel, through the one
+# trigger that is safe. Nothing here references the provider secret, and nothing
+# here executes any panel code.
+#
+# It is dispatch-only and holds `actions: write` for exactly one call. If this
+# file ever needs a secret, that is the signal that the rerun has grown into
+# something it should not be.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number whose CI should be re-run
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: read
+
+jobs:
+  rerun-ci:
+    name: midterm-panel-rerun
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Re-run ordinary CI for the pull request's current head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          head=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
+          echo "current head: $head"
+          run_id=$(gh run list --workflow ci.yml --commit "$head" \
+            --limit 1 --json databaseId -q '.[0].databaseId')
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "no ci run found for $head; push or re-open the PR first" >&2
+            exit 1
+          fi
+          echo "re-running ci run $run_id"
+          gh run rerun "$run_id"
+
+      - name: Say what this did and did not do
+        run: |
+          echo "Ordinary CI was re-run. If it completes successfully, the"
+          echo "privileged panel workflow starts from its own workflow_run"
+          echo "trigger, on the default branch's copy of the definition."
+          echo "This job held no provider secret and executed no panel code."

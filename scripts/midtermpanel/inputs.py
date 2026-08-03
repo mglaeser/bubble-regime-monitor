@@ -150,13 +150,27 @@ def load_repository_path(environ: dict) -> str:
     return path
 
 
+#: The environment variable naming which cost profile this run may spend under.
+#: Deliberately required rather than defaulted: a default profile is a default
+#: budget, and the three profiles differ by a factor of twelve.
+REVIEW_TARGET_ENV = "MIDTERM_REVIEW_TARGET"
+
+
 def load_pin_values(environ: dict) -> dict:
-    """The twelve PIN VALUES, read but not judged.
+    """The twelve PIN VALUES for THIS review target, read but not judged.
 
     Every individual PIN's range, type and per-model reasoning-effort support
     is `verifier.pins.validate_pins`' rule, and a second range table here would
     be a second opinion about numbers the operator approved once. So this reads
-    the file and checks only that there is a mapping in it."""
+    the file, selects the profile, and checks only that there is a mapping.
+
+    ## Why profiles rather than one global cap
+
+    The operator approved different call and cost ceilings for different review
+    targets — a synthetic range that must never generate at all, PR #29, and
+    the much larger PR #23. A single global cap has to be the largest of them
+    to let the largest run finish, which means every smaller run is protected
+    by a number chosen for a bigger one."""
     document = _read_json(environ["MIDTERM_PIN_RECORD_PATH"], what="pin_record")
     if not isinstance(document, dict):
         refuse("category=pin_record_not_an_object")
@@ -166,7 +180,58 @@ def load_pin_values(environ: dict) -> dict:
                "`record['pins']`; a record without them would reach "
                "`verifier.pins` as an empty mapping and refuse there, in the "
                "job holding the credential")
-    return pins
+    selected, profile = select_profile(document, environ=environ)
+    return {"pins": selected, "profile": profile,
+            "authority_class": document.get("authority_class"),
+            "approved_by": document.get("approved_by"),
+            "approved_at": document.get("approved_at")}
+
+
+def select_profile(document: dict, *, environ: dict) -> tuple:
+    """The exact profile for this review target, from an allowlist.
+
+    The target must be NAMED in a profile's `review_targets`. Matching by
+    substring or falling back to the largest profile would make "which budget
+    applies" a property of spelling."""
+    target = str(environ.get(REVIEW_TARGET_ENV) or "").strip().lower()
+    profiles = document.get("profiles")
+    if not isinstance(profiles, dict) or not profiles:
+        refuse("category=pin_record_has_no_profiles")
+    if not target:
+        refuse(f"category=review_target_not_named variable={REVIEW_TARGET_ENV} "
+               f"permitted={sorted(profiles)} — the profiles differ by more "
+               "than an order of magnitude in cost cap; there is no safe "
+               "default")
+    matched = [name for name, profile in sorted(profiles.items())
+               if target in [str(t).lower()
+                             for t in (profile.get("review_targets") or [])]]
+    if len(matched) != 1:
+        refuse(f"category=review_target_not_uniquely_allowlisted "
+               f"target={target!r} matched={matched} "
+               f"permitted={sorted(profiles)}")
+    name = matched[0]
+    overridden = document.get("profile_overridden_pins") or []
+    pins = dict(document["pins"])
+    for key in overridden:
+        if key not in profiles[name]:
+            refuse(f"category=profile_missing_an_overridden_pin "
+                   f"profile={name!r} pin={key} — the document declares this "
+                   "pin profile-specific and this profile does not set it, so "
+                   "the run would silently spend under another profile's cap")
+        pins[key] = profiles[name][key]
+    from .evidence import digest_of
+    return pins, {
+        "profile": name,
+        "review_target": target,
+        "overridden_pins": sorted(overridden),
+        "max_count_calls": pins["VERIFIER_MAX_COUNT_CALLS"],
+        "max_generation_calls": pins["VERIFIER_MAX_GENERATION_CALLS"],
+        "cost_cap_micro_usd": pins["VERIFIER_COST_CAP_MICRO_USD"],
+        # Bound into the evidence, so "which budget did this run spend under"
+        # is answerable from the record rather than from the file as it stands
+        # today.
+        "profile_digest": digest_of({"profile": name, "pins": pins}),
+    }
 
 
 def build_pin_record(*, engine: dict, pins: dict) -> dict:
@@ -256,6 +321,10 @@ def load_authorizations(environ: dict, *, engine: dict, skeleton: dict):
 def load_count_inputs(environ: dict) -> dict:
     """Everything the count path needs that is not the engine. One call."""
     assert_all_present(environ)
+    loaded = load_pin_values(environ)
     return {"repository_path": load_repository_path(environ),
-            "pin_values": load_pin_values(environ),
+            "pin_values": loaded["pins"],
+            "pin_profile": loaded["profile"],
+            "pin_authority": {k: loaded[k] for k in
+                              ("authority_class", "approved_by", "approved_at")},
             "challenge": load_challenge(environ)}

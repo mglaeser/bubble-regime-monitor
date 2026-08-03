@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-from . import CI_WORKFLOW_NAME, REPOSITORY_NUMERIC_ID
+from . import REPOSITORY_NUMERIC_ID
 from .clibase import (
     emit_outputs,
     require_env,
@@ -27,7 +27,6 @@ from .errors import refuse
 from .githubapi import ReadOnlyGitHub
 from .policystate import assert_state_is_consistent_with_reality, current_state
 from .preflight import (
-    assert_approval_phrase,
     assert_base_is_current,
     assert_head_is_unmoved,
     assert_ordinary_checks_green,
@@ -35,11 +34,11 @@ from .preflight import (
     classify_changed_files,
     resolve_pull_request,
 )
+from .privilegedworkflow import PERMITTED_TRIGGERS
 from .privilegedworkflow import validate as validate_workflow
 
 WORKFLOW_RUN_ENV = ("RUN_WORKFLOW_NAME", "RUN_EVENT", "RUN_CONCLUSION",
                     "RUN_HEAD_SHA", "RUN_ID")
-DISPATCH_ENV = ("DISPATCH_PR_NUMBER", "DISPATCH_HEAD_SHA", "DISPATCH_APPROVAL")
 
 #: The job outputs this CLI emits, as a named constant.
 #:
@@ -61,8 +60,25 @@ def _policy_digest(root: str) -> str:
 def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
     """The whole decision, as data. No I/O beyond the injected client."""
     trigger = str(environ.get("TRIGGER_EVENT") or "")
-    if trigger not in ("workflow_run", "workflow_dispatch"):
-        refuse(f"category=preflight_unexpected_trigger event={trigger!r}")
+    # ONE trigger. `workflow_dispatch` was removed from the privileged workflow
+    # by external review: a dispatched run executes against a SELECTED REF, and
+    # the checkouts deliberately omit `ref:`, so a dispatch against a branch
+    # would run that branch's `midtermpanel` code with the provider key in
+    # scope. The approval phrase authenticated the candidate under review; it
+    # never authenticated the ref supplying the reviewer.
+    #
+    # Refused here as well as removed there. A dispatch path that still worked
+    # is a path somebody could re-enable in the workflow without noticing that
+    # the code was ready to serve it.
+    if trigger == "workflow_dispatch":
+        refuse("category=preflight_dispatch_trigger_removed — the privileged "
+               "workflow accepts `workflow_run` only, because a dispatch runs "
+               "from a ref the dispatcher chooses and these checkouts name no "
+               "ref. Re-run ordinary CI, or use `midterm-panel-rerun.yml`, "
+               "which holds no secret")
+    if trigger not in PERMITTED_TRIGGERS:
+        refuse(f"category=preflight_unexpected_trigger event={trigger!r} "
+               f"permitted={list(PERMITTED_TRIGGERS)}")
 
     # The privileged workflow re-validates itself from the default-branch
     # checkout. Validating in ordinary CI proves the file was correct when the
@@ -70,17 +86,11 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
     validate_workflow(root=root)
     assert_state_is_consistent_with_reality(root=root)
 
-    if trigger == "workflow_run":
-        env = require_env(environ, WORKFLOW_RUN_ENV, where="workflow_run")
-        run_record = assert_triggering_run({
-            "name": env["RUN_WORKFLOW_NAME"], "event": env["RUN_EVENT"],
-            "conclusion": env["RUN_CONCLUSION"], "head_sha": env["RUN_HEAD_SHA"]})
-        run_head = run_record["head_sha"]
-    else:
-        env = require_env(environ, DISPATCH_ENV, where="workflow_dispatch")
-        run_head = env["DISPATCH_HEAD_SHA"]
-        run_record = {"workflow": CI_WORKFLOW_NAME, "event": "workflow_dispatch",
-                      "conclusion": "n/a", "head_sha": run_head}
+    env = require_env(environ, WORKFLOW_RUN_ENV, where="workflow_run")
+    run_record = assert_triggering_run({
+        "name": env["RUN_WORKFLOW_NAME"], "event": env["RUN_EVENT"],
+        "conclusion": env["RUN_CONCLUSION"], "head_sha": env["RUN_HEAD_SHA"]})
+    run_head = run_record["head_sha"]
 
     pull = resolve_pull_request(api.open_pull_requests(), run_head_sha=run_head)
     assert_head_is_unmoved(run_head_sha=run_head,
@@ -89,15 +99,6 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
                            main_head_sha=api.default_branch_head())
     assert_ordinary_checks_green(api.check_runs(pull["head_sha"]),
                                  head_sha=pull["head_sha"])
-
-    if trigger == "workflow_dispatch":
-        # Bound to the head this run RESOLVED, not to the head the dispatcher
-        # typed. An approval for an earlier head must fail here, before the
-        # count job is ever reached.
-        assert_approval_phrase(environ.get("DISPATCH_APPROVAL"),
-                               pull["head_sha"])
-        if int(environ.get("DISPATCH_PR_NUMBER") or 0) != pull["pr_number"]:
-            refuse("category=dispatch_pr_number_does_not_match_resolved_pr")
 
     risk = classify_changed_files(api.changed_files(pull["pr_number"]))
     # §4. The engine's identity comes from the APPROVED RELEASE, not from the

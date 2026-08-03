@@ -65,16 +65,43 @@ The gate refuses to print or validate a command containing either.
 2. **Read the panel's evidence.** The run summary carries the count evidence
    digest, the engine provenance, and the per-model decision. Note the head sha
    it ran on.
-3. **Run the gate**, passing the sha you actually read:
+3. **Run the gate**, passing what you actually read and retained:
 
    ```
    GITHUB_TOKEN=<a read token> \
-     python scripts/human_merge_gate.py --pr <N> --reviewed-head <sha>
+     python scripts/human_merge_gate.py \
+       --pr <N> \
+       --reviewed-head <sha> \
+       --expected-base <base sha the panel counted against> \
+       --panel-run-id <Actions run id of the privileged panel run> \
+       --count-evidence-sha256 <digest of the count evidence you kept> \
+       --panel-evidence-sha256 <digest of the panel evidence you kept> \
+       [--human-approval <path>]
    ```
 
    It checks, in order: the pull request is open and not a draft; the head has
-   not moved since you read it; both named statuses are `success` **in their
-   latest state** on that exact commit; and no status overclaims.
+   not moved since you read it; the base has not moved and `main` is still
+   where the panel counted against; the merge is clean; **ordinary CI** —
+   `test (3.12)`, `image` and `midterm-panel-selftest` — is green in its latest
+   attempt on that exact commit; both panel statuses are `success` in their
+   latest state; no status overclaims; and then the part that makes the rest
+   mean something.
+
+   **Why the run id and the digests.** A commit status is not
+   self-authenticating. In a one-repository architecture any workflow holding
+   `statuses: write` can post `midterm-panel-count = success`, and the creator
+   still shows as `github-actions[bot]`. So the gate resolves the run you name
+   and requires it to be the deployed `midterm-panel-review.yml`, triggered by
+   `workflow_run`, **from the default branch** — the three facts that make its
+   definition and checkout trusted — with both credential-bearing jobs
+   successful; it requires each green status to point at that run; and it
+   requires the statuses to name the evidence digests you actually hold.
+
+   `--human-approval` is required when the pull request touches
+   `.github/workflows/`, `.github/actions/`, `scripts/trustedlane/` or
+   `scripts/midtermpanel/`. The record must assert
+   `workflow_security_review_completed`, name **this** head, and carry a
+   reviewer and a timestamp.
 
 4. **Run the command it prints.** Yourself. The gate does not merge — that
    keeps the decision and the credential with you.

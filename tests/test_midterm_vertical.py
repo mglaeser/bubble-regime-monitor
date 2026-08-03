@@ -143,6 +143,16 @@ class Vertical:
             "GITHUB_TOKEN": "not-a-real-token",  # noqa: S106
             "MIDTERM_POLICY_DIGEST": "p" * 64,
             "MIDTERM_ENGINE_DIGEST": "e" * 64,
+            # The cost profile is required, never defaulted: the three
+            # profiles differ by more than an order of magnitude.
+            #
+            # `pr-29` rather than `synthetic`, and the reason is what each one
+            # is FOR. The operator approved `synthetic` with zero generation
+            # calls — it counts and never spends on a verdict — so a vertical
+            # run under it could not exercise the panel at all. `pr-29` is the
+            # intended first real target, so the vertical runs the profile the
+            # first real run will run.
+            "MIDTERM_REVIEW_TARGET": "pr-29",
             "MIDTERM_PANEL_MODE": dryrun.DRY_RUN,
         }
         for key, value in overrides.items():

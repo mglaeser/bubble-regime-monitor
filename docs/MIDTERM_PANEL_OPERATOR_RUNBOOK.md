@@ -52,6 +52,18 @@ Every one of these must hold. The key must not be installed until they do.
 | 5 | the merge guard and this runbook have been read | `docs/HUMAN_MERGE_PROTOCOL.md` |
 | 6 | you have inspected the live workflow source on the default branch | read `.github/workflows/midterm-panel-review.yml` as it exists on `main`, not as it exists in a pull request |
 
+## 2b. Reruns
+
+The privileged workflow has **exactly one trigger**, `workflow_run` on ordinary
+CI. `workflow_dispatch` was removed: a dispatched run executes against a ref the
+dispatcher selects, and the privileged checkouts deliberately name no ref, so a
+dispatch against a branch would run that branch's panel code with the key in
+scope.
+
+To re-run a review: re-run ordinary CI on the same head, or dispatch
+`.github/workflows/midterm-panel-rerun.yml`, which holds no secret, executes no
+panel code, and only asks CI to run again.
+
 ## 3. Running the lane without a key
 
 The whole vertical runs on the engine's own labelled stand-ins:
@@ -100,15 +112,36 @@ call site:
   count transport refuses to exist without one.
 - `MIDTERM_GENERATION_ATTEMPT_CAP` — the panel job's attempt cap.
 
-Twelve further PINs (max output tokens, cost cap in integer micro-USD, retries,
-timeouts, drift tolerance) live in `governance/midterm-panel-pins.json` and are
-validated by the engine's own `verifier.pins`.
+Twelve PINs live in `governance/midterm-panel-pins.json`, validated by the
+engine's own `verifier.pins`, and recorded as
+`OPERATOR_APPROVED_MIDTERM_POLICY_ATTESTATION`. That is honest in both
+directions: stronger than the repository-authored label it replaced, which
+understated the operator's authority; weaker than the trusted lane's
+`VERIFIED_OPERATOR_PIN_AUTHORIZATION`, because nothing here is cryptographically
+signed and no external verifier promoted it.
 
-Those PIN values are **repository-authored, not operator-approved**. The lane
-passes them through the engine's `test_pin_record`, which labels the result
-`TEST_FIXTURE_UNAUTHORIZED` with `executable_authority=false` — which is exactly
-true of them. Replacing that file with an authenticated operator record is an
-operator action, not a code change.
+### Cost profiles
+
+Three of the twelve — count calls, generation calls and the cost cap — are
+**per review target**, because a single global cap has to be the largest of them
+to let the largest run finish, which means every smaller run is protected by a
+number chosen for a bigger one.
+
+| target | count calls | generation calls | cost cap |
+| --- | --- | --- | --- |
+| `synthetic` (and PR #25) | 100 | **0** | $5 |
+| `pr-29` | 1200 | 80 | $25 |
+| `pr-23` | 2500 | 200 | $60 |
+
+`MIDTERM_REVIEW_TARGET` selects one, against an allowlist, with **no default** —
+the profiles differ by more than an order of magnitude. Matching is exact, so
+`pr-2` does not select `pr-29`'s budget. The selected profile and its digest go
+into the count evidence, so "which budget did this run spend under" is
+answerable from the record rather than from the file as it stands today.
+
+`synthetic` cannot generate at all: zero generation calls means the engine
+refuses to plan a verdict under it. That is the profile working as approved, and
+it is why the fake-provider vertical runs under `pr-29` instead.
 
 ## 6. Common refusals
 

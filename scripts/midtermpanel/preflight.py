@@ -43,7 +43,15 @@ from .errors import refuse
 from .status import assert_candidate_sha
 
 #: The ordinary checks that must be green on the exact candidate head.
-REQUIRED_ORDINARY_CHECKS = ("test (3.12)", "image")
+#: The ordinary checks that must be green on the candidate head before a
+#: provider-backed run starts, and before a human merges.
+#:
+#: `midterm-panel-selftest` joined them on external review. It runs on
+#: `pull_request` against the candidate head like the other two, and what
+#: requiring it means is narrow and worth requiring: the panel's own suites,
+#: including the whole no-key vertical, pass on this head. Leaving it out let a
+#: pull request that broke the panel's own tests still reach the provider.
+REQUIRED_ORDINARY_CHECKS = ("test (3.12)", "image", "midterm-panel-selftest")
 
 #: Manual dispatch must name the head it is authorising.
 APPROVAL_PREFIX = "REVIEW_EXACT_HEAD_"
@@ -231,33 +239,17 @@ def assert_ordinary_checks_green(check_runs, *, head_sha: str) -> dict:
 
     The legacy combined-status endpoint is deliberately not used: it reports
     `pending` with `total_count: 0` when no legacy statuses exist, which is the
-    normal state here and reads as 'still running' to anything that trusts it."""
-    if not isinstance(check_runs, list):
-        refuse("category=check_runs_not_a_list")
-    outcome = {}
-    for run in check_runs:
-        if not isinstance(run, dict):
-            continue
-        if str(run.get("head_sha") or head_sha) != head_sha:
-            continue
-        name = str(run.get("name") or "")
-        if str(run.get("status")) != "completed":
-            outcome.setdefault(name, "incomplete")
-            continue
-        # Last completed wins; a rerun that turned red must not be masked by an
-        # earlier green with the same name.
-        outcome[name] = str(run.get("conclusion") or "")
-    missing = [c for c in REQUIRED_ORDINARY_CHECKS if c not in outcome]
-    if missing:
-        refuse(f"category=ordinary_check_absent_on_head checks={missing} "
-               f"head={head_sha[:12]} observed={sorted(outcome)}")
-    bad = sorted(f"{c}={outcome[c]}" for c in REQUIRED_ORDINARY_CHECKS
-                 if outcome[c] != "success")
-    if bad:
-        refuse(f"category=ordinary_check_not_successful checks={bad} "
-               f"head={head_sha[:12]}")
-    return {"checks": {c: outcome[c] for c in REQUIRED_ORDINARY_CHECKS},
-            "head_sha": head_sha}
+    normal state here and reads as 'still running' to anything that trusts it.
+
+    Selection is `checkruns.assert_contexts_are_green`, shared with the human
+    merge gate. It used to be inline, and it said "last completed wins" while
+    implementing that as an overwrite in whatever order the API returned —
+    which is not a rule, it is a restatement of the ordering, and the direction
+    that matters is the one where a stale green masks a fresh red."""
+    from .checkruns import assert_contexts_are_green
+    return assert_contexts_are_green(check_runs, head_sha=head_sha,
+                                     contexts=REQUIRED_ORDINARY_CHECKS,
+                                     where="preflight")
 
 
 def classify_changed_files(paths) -> dict:

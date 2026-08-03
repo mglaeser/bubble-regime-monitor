@@ -52,7 +52,8 @@ def artifact_paths(temp: str) -> dict:
 def perform(environ: dict, *, core, transport, opener, engine=None,
             engine_identity=None, skeleton=None, governed_policies=None,
             authorizations=None, challenge: str = None,
-            repository_path: str = None) -> dict:
+            repository_path: str = None, pin_profile=None,
+            pin_authority=None) -> dict:
     """Package the engine's core result, persist it, publish terminal status.
 
     `core` is what `enginebridge.prepare_review_plan_core` returned. This
@@ -105,6 +106,9 @@ def perform(environ: dict, *, core, transport, opener, engine=None,
               "approved_engine_source_sha":
                   (engine_identity or {}).get("approved_engine_source_sha"),
               "governed_policies": governed_policies,
+              # Which budget this run spent under, and on whose authority.
+              "pin_profile": pin_profile,
+              "pin_authority": pin_authority,
               "literal_authorizations": authorizations,
               "plan_sha256": plan["plan_sha256"]})
 
@@ -191,6 +195,8 @@ def count_through_engine(environ: dict, *, mode: str, opener,
     governed_match = enginebridge.assert_core_used_the_governed_policies(
         core, governed=governed)
     return {"engine": engine, "engine_identity": opened, "core": core,
+            "pin_profile": loaded["pin_profile"],
+            "pin_authority": loaded["pin_authority"],
             "skeleton": skeleton, "transport": transport,
             "governed_policies": governed_match,
             "authorizations": authorization_record,

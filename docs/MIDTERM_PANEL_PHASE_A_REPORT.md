@@ -1,12 +1,14 @@
 # Mid-Term Panel — Phase A terminal report
 
 **Branch:** `feat/midterm-panel-review` · **Disposition:**
-`PHASE_A_COMPLETE_AWAITING_OPERATOR_KEY_INSTALLATION`
+`PHASE_A_HARDENED_PRE_KEY_NOT_YET_MERGEABLE`
 
-The package is runnable, the vertical is green on a hosted runner with no
-credential, and the API key is **not** installed. It must not be installed until
-§16's preconditions are met; §14 below states which of them this work closed and
-which remain the operator's.
+An external review of the first Phase-A package found concrete pre-key blockers.
+They are closed below in §17. The key is still **not** installed, this branch is
+**not** merged, and the policy state remains
+`MIDTERM_SINGLE_REPO_PANEL_IMPLEMENTATION_IN_PROGRESS` — `STAGED_NO_PROVIDER_SECRET`
+means "merged and dry-run green", and declaring it before the merge would be a
+claim about a state this repository is not in.
 
 ---
 
@@ -280,3 +282,125 @@ decision is a human's.
 my own earlier work were removed — the live transports and the role gate); the
 real key is absent; PR #29 is unmerged; PR #23 is untouched; no active or trusted
 review is claimed anywhere.
+
+
+---
+
+## 17. External review, and what it found
+
+The first Phase-A package was reviewed externally and returned with pre-key
+blockers. Each is closed here. Two of them were things my own green suites could
+not have caught, and those are the ones worth stating plainly.
+
+### 17.1 The privileged workflow could be dispatched against any ref (P0)
+
+`workflow_dispatch` sat beside `workflow_run`, and I had defended it in a
+comment: its inputs "select nothing and reach no code". That is true of the
+inputs and beside the point. A dispatched run executes against a **selected
+ref**, and every checkout in that file deliberately omits `ref:`. Under
+`workflow_run` the omission is the safety property — definition and checkout
+both come from the default branch. Under a dispatch it becomes the hazard: the
+checkout takes the dispatched ref, so once the key existed, a dispatch against a
+branch carrying modified `scripts/midtermpanel` would run that branch's code in
+`count` and `panel` with the credential in scope.
+
+The runtime approval phrase authenticated the candidate under review. It never
+authenticated the ref supplying the reviewer.
+
+`PERMITTED_TRIGGERS` is now `("workflow_run",)`, the trigger is gone from the
+file, `preflight` refuses `workflow_dispatch` outright so a re-added trigger
+finds no code willing to serve it, and controlled reruns go through
+`.github/workflows/midterm-panel-rerun.yml` — no secret, no panel code, one
+call that asks CI to run again.
+
+### 17.2 `git fetch --no-checkout` is not a git command (P0)
+
+Both secret-bearing jobs ran it. It exits **129** with `unknown option`;
+`--no-checkout` belongs to clone. The first real run would have failed in the
+count job and again in the panel job.
+
+The fake-provider vertical was green throughout, because it is handed
+`MIDTERM_REPOSITORY_PATH` and never executes the workflow's shell. A unit test
+asserted `"git fetch --no-checkout origin" in rendered` and passed — proving the
+literal was present, which is all a string assertion can prove.
+
+The command is now `git fetch --no-tags --no-recurse-submodules origin
+<sha>:refs/midterm/candidate/<sha>`, followed by a `cat-file -e` that the object
+arrived. `tests/test_midterm_fetch_shell.py` **extracts the committed command
+from the workflow file** and runs it against a real temporary repository: it
+succeeds, the candidate commit becomes readable through plumbing, no candidate
+file reaches the worktree, `HEAD` does not move, and the invalid form really
+does fail. The hosted dry run executes that suite too.
+
+### 17.3 The merge gate accepted spoofable evidence (P0)
+
+It checked the two panel statuses and the exact head, and stopped. It did not
+check ordinary CI at all, so a pull request with red tests satisfied it as long
+as the panel had approved the diff — which is not the operator's rule.
+
+Worse, a commit status is not self-authenticating: in a one-repository
+architecture anything holding `statuses: write` can post
+`midterm-panel-count = success`, and the creator still reads
+`github-actions[bot]`.
+
+The gate now additionally requires: latest `test (3.12)`, `image` and
+`midterm-panel-selftest` on the exact head; the base unmoved and `main` still
+where the panel counted against; a clean merge; **a named Actions run** proved
+to be the deployed `midterm-panel-review.yml`, event `workflow_run`, head branch
+`main`, with both credential-bearing jobs successful; every green status
+pointing at that run; the retained evidence digests matching what the statuses
+published; and, for changes under `.github/workflows/`, `.github/actions/`,
+`scripts/trustedlane/` or `scripts/midtermpanel/`, a human security-review
+record naming this head.
+
+### 17.4 Latest-check selection was order-dependent (P0/P1)
+
+"Last completed wins" was implemented by overwriting a dict entry in whatever
+order the API returned. That is a restatement of the ordering, not a rule.
+
+`scripts/midtermpanel/checkruns.py` now selects by `completed_at`, then run
+attempt, then check-run id; refuses unparseable timestamps rather than sorting
+them to an end; refuses a still-running newest attempt rather than falling back
+to an older green; and refuses an identical pair that disagrees. Preflight and
+the merge gate share it. The test feeds every permutation of three records and
+requires one answer.
+
+### 17.5 The PIN file misstated the operator's authority and its values (P0)
+
+It was labelled `REPOSITORY_AUTHORED_NOT_OPERATOR_APPROVED` and carried numbers
+the operator had not chosen. Both directions were wrong: it understated the
+authority and used limits likely to block the first real PR #29 run.
+
+It is now `OPERATOR_APPROVED_MIDTERM_POLICY_ATTESTATION` with the approved
+values (output 8000, margin 4000, units 512, count 30s/2, generation 180s/1,
+drift 64, reasoning medium/medium/null) and three per-target cost profiles —
+`synthetic` 100/0/$5, `pr-29` 1200/80/$25, `pr-23` 2500/200/$60. Not called
+cryptographically authenticated, because it is not.
+
+`MIDTERM_REVIEW_TARGET` selects one against an allowlist with **no default**;
+matching is exact, so `pr-2` cannot draw `pr-29`'s budget. The profile and its
+digest are bound into the count evidence.
+
+`synthetic`'s zero generation budget is real: the engine refuses to plan a
+verdict under it. That is why the vertical runs `pr-29` — the profile the first
+real run will use.
+
+### 17.6 A count that emitted nothing warned and continued (P1)
+
+`if-no-files-found: warn` → `error`, on both uploads.
+
+### 17.7 The engine release cannot review PR #29 as configured
+
+Recorded rather than "fixed", because it is not a code defect. Both engine
+sources are pinned to `c8ba2a7`, which is also PR #29's current head, so
+`assert_engine_source_is_not_the_reviewed_candidate` must refuse — the guard
+working. The activation sequence in §16 and the runbook is the resolution:
+merge this implementation, let PR #29 take a new head, then pin and approve an
+engine whose sources differ from it.
+
+### 17.8 What is still outstanding
+
+The final hosted evidence is on the corrected head, not on `d148ddd`. This
+package has not been merged and no draft PR has been opened; those, and the
+engine rebuild and release that follow them, remain the operator's steps in the
+order the review sets out.

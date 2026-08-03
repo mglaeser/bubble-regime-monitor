@@ -1,25 +1,56 @@
 {
-  "schema_version": 1,
-  "document_class": "MIDTERM_PANEL_PIN_VALUES",
+  "schema_version": 2,
+  "document_class": "MIDTERM_PANEL_OPERATOR_APPROVED_POLICY",
   "money_unit": "integer micro-USD",
-  "authority_class": "REPOSITORY_AUTHORED_NOT_OPERATOR_APPROVED",
-  "honest_scope": "These are PIN VALUES this repository authored. No operator approved them, no envelope signs them, and `verifier.pins.test_pin_record` is what the lane passes them through - it labels the result TEST_FIXTURE_UNAUTHORIZED with executable_authority=false, which is exactly true of them. Replacing this file with an authenticated operator record is an operator action, not a code change.",
+  "authority_class": "OPERATOR_APPROVED_MIDTERM_POLICY_ATTESTATION",
+  "write_separated": false,
+  "approved_by": "mglaeser",
+  "approved_at": "2026-08-03T00:00:00Z",
+  "approval_source": "operator conversation; recorded as an attestation, transcribed by the implementing agent",
+  "honest_scope": "These values are the operator's approved mid-term policy, recorded as an attestation. That is a stronger claim than the previous REPOSITORY_AUTHORED_NOT_OPERATOR_APPROVED label, which understated the operator's authority, and a weaker one than the trusted lane's VERIFIED_OPERATOR_PIN_AUTHORIZATION: nothing here is cryptographically signed, no external verifier promoted it, and the lane is not write-separated. The engine's `verifier.pins.validate_pins` checks that the values are internally coherent; it proves nothing about who chose them, and this block is what says who did.",
   "pins": {
-    "VERIFIER_MAX_OUTPUT_TOKENS": 8192,
-    "VERIFIER_CONTEXT_MARGIN_TOKENS": 8192,
-    "VERIFIER_COST_CAP_MICRO_USD": 2000000,
+    "VERIFIER_MAX_OUTPUT_TOKENS": 8000,
+    "VERIFIER_CONTEXT_MARGIN_TOKENS": 4000,
+    "VERIFIER_COST_CAP_MICRO_USD": 25000000,
     "VERIFIER_REASONING_EFFORT_BY_MODEL": {
       "gpt-5.3-codex": "medium",
       "gpt-5.6-sol": "medium",
       "gpt-4.1-mini": null
     },
-    "VERIFIER_MAX_REVIEW_UNITS": 400,
-    "VERIFIER_MAX_GENERATION_CALLS": 60,
-    "VERIFIER_MAX_COUNT_CALLS": 60,
-    "VERIFIER_COUNT_TIMEOUT_SECONDS": 60,
+    "VERIFIER_MAX_REVIEW_UNITS": 512,
+    "VERIFIER_MAX_GENERATION_CALLS": 80,
+    "VERIFIER_MAX_COUNT_CALLS": 1200,
+    "VERIFIER_COUNT_TIMEOUT_SECONDS": 30,
     "VERIFIER_COUNT_MAX_RETRIES": 2,
-    "VERIFIER_GENERATION_TIMEOUT_SECONDS": 300,
-    "VERIFIER_GENERATION_MAX_RETRIES": 2,
+    "VERIFIER_GENERATION_TIMEOUT_SECONDS": 180,
+    "VERIFIER_GENERATION_MAX_RETRIES": 1,
     "VERIFIER_TOKEN_DRIFT_TOLERANCE": 64
+  },
+  "profile_note": "The twelve `pins` above carry the review-target-independent values. The call and cost caps in `pins` are the PR29 profile, because the engine requires one complete record and PR29 is the first intended target; `profiles` below is what preflight selects from, and the selected profile's caps overwrite the three fields named in `profile_overridden_pins` before the record reaches the engine.",
+  "profile_overridden_pins": [
+    "VERIFIER_MAX_COUNT_CALLS",
+    "VERIFIER_MAX_GENERATION_CALLS",
+    "VERIFIER_COST_CAP_MICRO_USD"
+  ],
+  "profiles": {
+    "synthetic": {
+      "review_targets": ["synthetic", "pr-25"],
+      "VERIFIER_MAX_COUNT_CALLS": 100,
+      "VERIFIER_MAX_GENERATION_CALLS": 0,
+      "VERIFIER_COST_CAP_MICRO_USD": 5000000,
+      "honest_scope": "zero generation calls: this profile counts and never spends on a verdict"
+    },
+    "pr-29": {
+      "review_targets": ["pr-29"],
+      "VERIFIER_MAX_COUNT_CALLS": 1200,
+      "VERIFIER_MAX_GENERATION_CALLS": 80,
+      "VERIFIER_COST_CAP_MICRO_USD": 25000000
+    },
+    "pr-23": {
+      "review_targets": ["pr-23"],
+      "VERIFIER_MAX_COUNT_CALLS": 2500,
+      "VERIFIER_MAX_GENERATION_CALLS": 200,
+      "VERIFIER_COST_CAP_MICRO_USD": 60000000
+    }
   }
 }

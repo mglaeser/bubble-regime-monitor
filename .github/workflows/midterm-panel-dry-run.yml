@@ -98,6 +98,16 @@ jobs:
           python -m pytest tests/test_midterm_vertical.py -v \
             --no-header -p no:randomly
 
+      - name: Run the fetch shell against a real repository
+        # The vertical is handed a repository path and never executes the
+        # workflow's own shell, which is how `git fetch --no-checkout` — not a
+        # git command, exit 129 — survived a green vertical. This runs the
+        # committed command.
+        env:
+          PYTHONPATH: ${{ github.workspace }}/scripts
+        run: |
+          python -m pytest tests/test_midterm_fetch_shell.py -q
+
       - name: Refuse a skipped vertical
         # `pytest` exits 0 when every test is skipped, and this suite skips
         # itself when the pinned engine commits are absent. A skip that reported
@@ -120,4 +130,4 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/scripts
         run: |
           python -m pytest tests/test_midterm_panel.py \
-            tests/test_human_merge_gate.py -q
+            tests/test_human_merge_gate.py tests/test_checkruns.py -q

@@ -1175,13 +1175,36 @@ class TestEveryCountInputHasAWorkflowProducer:
             assert any(step_name.strip().lower() in name for name in names), (
                 f"no step named like {spec['producer']!r}: {sorted(names)}")
 
-    def test_the_repository_is_fetched_as_objects_never_checked_out(self):
+    def test_the_repository_step_produces_no_worktree(self):
         """The object/worktree distinction is the safety argument, so the
-        producer step has to be the one shape that keeps it."""
+        producer step has to be the one shape that keeps it.
+
+        This is the STRING-level half. It is deliberately negative — it says
+        which commands must not appear — because the positive half ("the fetch
+        works") cannot be established by looking at a string, and the previous
+        version of this test tried to. It asserted
+        `"git fetch --no-checkout origin" in rendered`, which passed, while the
+        command it pinned exits 129 with "unknown option". A test that asserts
+        a literal proves the literal is present.
+
+        `tests/test_midterm_fetch_shell.py` runs the command."""
         job, rendered = self._count_job_env_and_steps()
-        assert "git fetch --no-checkout origin" in rendered
-        assert "git checkout" not in rendered
-        assert "git merge" not in rendered
+        assert "git fetch" in rendered
+        for producing in ("git checkout", "git merge", "git switch",
+                          "git worktree", "git apply"):
+            assert producing not in rendered, producing
+
+    def test_the_invalid_fetch_option_is_gone_from_every_workflow(self):
+        """`--no-checkout` is a clone option. `git fetch` refuses it."""
+        for path in sorted(
+                (ROOT / ".github" / "workflows").glob("midterm-*.yml")):
+            text = path.read_text(encoding="utf-8")
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue    # the comment explaining the removal may name it
+                assert "fetch --no-checkout" not in stripped, (
+                    f"{path.name}: {stripped}")
 
     def test_the_challenge_is_a_file_and_not_an_exported_value(self):
         """A challenge in the environment of every later step is a challenge a
@@ -1216,8 +1239,11 @@ class TestEveryCountInputHasAWorkflowProducer:
         assert release["approved_engine_release_tag"] is None
         assert engine.provenance_of(release) == engine.REBUILT_TEST_ONLY
         assert pins["authority_class"] == (
-            "REPOSITORY_AUTHORED_NOT_OPERATOR_APPROVED")
+            "OPERATOR_APPROVED_MIDTERM_POLICY_ATTESTATION")
+        assert pins["write_separated"] is False
+        assert pins["approved_by"] and pins["approved_at"]
         assert len(pins["pins"]) == 12
+        assert sorted(pins["profiles"]) == ["pr-23", "pr-29", "synthetic"]
 
     def test_the_pinned_engine_source_is_not_this_branchs_head(self, tmp_path):
         """The document that decides who reviews must not name the thing being
@@ -1266,3 +1292,130 @@ class TestEveryCountInputHasAWorkflowProducer:
         assert loaded is None
         assert record["confers_real_call_authority"] is False
         assert "no operator envelope authority" in record["honest_scope"]
+
+
+class TestThePrivilegedWorkflowHasOneTrigger:
+    """External review, finding 1. A manually dispatched workflow runs against
+    a SELECTED REF, and every checkout here omits `ref:`. Under `workflow_run`
+    that omission means the default branch; under a dispatch it would mean
+    whichever branch was chosen, with the provider key in scope."""
+
+    def test_only_workflow_run_is_declared(self):
+        triggers = sorted(_on(_document()))
+        assert triggers == ["workflow_run"]
+
+    def test_the_policy_constant_permits_only_workflow_run(self):
+        assert privilegedworkflow.PERMITTED_TRIGGERS == ("workflow_run",)
+
+    def test_adding_a_dispatch_trigger_reddens(self, tmp_path):
+        document = _document()
+        _on(document)["workflow_dispatch"] = {"inputs": {}}
+        with pytest.raises(PanelRefusal) as caught:
+            _validate(document, tmp_path)
+        assert "trigger" in caught.value.reason
+
+    def test_preflight_refuses_a_dispatch_even_if_one_reappeared(self):
+        """Refused in code as well as removed from the file. A dispatch path
+        that still worked is a path somebody could re-enable in the workflow
+        without noticing the code was ready to serve it."""
+        from midtermpanel import preflightcli
+        with pytest.raises(PanelRefusal) as caught:
+            preflightcli.decide({"TRIGGER_EVENT": "workflow_dispatch"},
+                                api=None, root=str(ROOT))
+        assert "dispatch_trigger_removed" in caught.value.reason
+
+    def test_the_rerun_dispatcher_holds_no_secret_and_runs_no_panel_code(self):
+        path = ROOT / ".github" / "workflows" / "midterm-panel-rerun.yml"
+        text = path.read_text(encoding="utf-8")
+        assert "secrets." not in text
+        assert "midtermpanel" not in text.replace(
+            "midterm-panel-rerun", "").replace("midterm-panel-review", "")
+        document = yaml.safe_load(text)
+        assert sorted(_on(document)) == ["workflow_dispatch"]
+        assert document["permissions"]["contents"] == "read"
+
+    def test_the_policy_document_records_the_removal_and_why(self):
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        assert policy["triggers"]["permitted_events"] == ["workflow_run"]
+        manual = policy["triggers"]["manual"]
+        assert manual["event"] is None
+        assert "SELECTED REF" in " ".join(manual["why"])
+
+
+class TestTheCostProfileIsSelectedNotDefaulted:
+    """External review, finding 5. The three profiles differ by more than an
+    order of magnitude in cost cap."""
+
+    def _document(self):
+        return json.loads(
+            (ROOT / "governance" / "midterm-panel-pins.json")
+            .read_text(encoding="utf-8"))
+
+    def test_an_unnamed_review_target_is_refused(self):
+        from midtermpanel import inputs
+        with pytest.raises(PanelRefusal) as caught:
+            inputs.select_profile(self._document(), environ={})
+        assert "review_target_not_named" in caught.value.reason
+
+    def test_a_target_outside_the_allowlist_is_refused(self):
+        from midtermpanel import inputs
+        with pytest.raises(PanelRefusal) as caught:
+            inputs.select_profile(self._document(),
+                                  environ={"MIDTERM_REVIEW_TARGET": "pr-99"})
+        assert "not_uniquely_allowlisted" in caught.value.reason
+
+    def test_matching_is_exact_and_not_substring(self):
+        """`pr-2` must not select `pr-29`'s budget."""
+        from midtermpanel import inputs
+        with pytest.raises(PanelRefusal):
+            inputs.select_profile(self._document(),
+                                  environ={"MIDTERM_REVIEW_TARGET": "pr-2"})
+
+    def test_each_profile_selects_its_own_caps(self):
+        from midtermpanel import inputs
+        expected = {"synthetic": (100, 0, 5000000),
+                    "pr-29": (1200, 80, 25000000),
+                    "pr-23": (2500, 200, 60000000)}
+        for target, (count, generation, cost) in expected.items():
+            pins, profile = inputs.select_profile(
+                self._document(),
+                environ={"MIDTERM_REVIEW_TARGET": target})
+            assert pins["VERIFIER_MAX_COUNT_CALLS"] == count, target
+            assert pins["VERIFIER_MAX_GENERATION_CALLS"] == generation, target
+            assert pins["VERIFIER_COST_CAP_MICRO_USD"] == cost, target
+            assert profile["profile_digest"]
+
+    def test_the_synthetic_profile_cannot_generate_at_all(self):
+        from midtermpanel import inputs
+        pins, _ = inputs.select_profile(
+            self._document(),
+            environ={"MIDTERM_REVIEW_TARGET": "synthetic"})
+        assert pins["VERIFIER_MAX_GENERATION_CALLS"] == 0
+
+    def test_a_profile_missing_an_overridden_pin_is_refused(self):
+        """Otherwise the run silently spends under another profile's cap."""
+        from midtermpanel import inputs
+        document = self._document()
+        del document["profiles"]["pr-29"]["VERIFIER_COST_CAP_MICRO_USD"]
+        with pytest.raises(PanelRefusal) as caught:
+            inputs.select_profile(document,
+                                  environ={"MIDTERM_REVIEW_TARGET": "pr-29"})
+        assert "profile_missing_an_overridden_pin" in caught.value.reason
+
+    def test_the_operator_approved_values_are_the_ones_recorded(self):
+        pins = self._document()["pins"]
+        assert pins["VERIFIER_MAX_OUTPUT_TOKENS"] == 8000
+        assert pins["VERIFIER_CONTEXT_MARGIN_TOKENS"] == 4000
+        assert pins["VERIFIER_MAX_REVIEW_UNITS"] == 512
+        assert pins["VERIFIER_COUNT_TIMEOUT_SECONDS"] == 30
+        assert pins["VERIFIER_COUNT_MAX_RETRIES"] == 2
+        assert pins["VERIFIER_GENERATION_TIMEOUT_SECONDS"] == 180
+        assert pins["VERIFIER_GENERATION_MAX_RETRIES"] == 1
+        assert pins["VERIFIER_TOKEN_DRIFT_TOLERANCE"] == 64
+        assert pins["VERIFIER_REASONING_EFFORT_BY_MODEL"] == {
+            "gpt-5.3-codex": "medium", "gpt-5.6-sol": "medium",
+            "gpt-4.1-mini": None}
+
+    def test_the_workflow_names_a_review_target(self):
+        rendered = yaml.safe_dump(_document()["jobs"]["count"])
+        assert "MIDTERM_REVIEW_TARGET" in rendered

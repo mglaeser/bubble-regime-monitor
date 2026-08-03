@@ -21,7 +21,8 @@
 # ## The two rules
 #
 #   1. The candidate's tree is never materialised. Candidate commits arrive as
-#      inert git OBJECTS via `git fetch --no-checkout`; nothing checks them out,
+#      inert git OBJECTS via a plain `git fetch`, which never produces a
+#      worktree; nothing checks them out,
 #      unpacks them, installs them or imports them. No `ref:` on any checkout, no
 #      `download-artifact`, no `cache`, no `git checkout` in any `run:`.
 #
@@ -49,29 +50,33 @@
 name: midterm-panel-review
 
 on:
+  # EXACTLY ONE TRIGGER, and the reason is the checkout.
+  #
   # Fires when ordinary CI completes. Filtered to `ci` by name: an unfiltered
   # workflow_run fires on the completion of EVERY workflow including one a pull
   # request just added, which would let the candidate choose when the privileged
   # run starts and what event payload it reads.
+  #
+  # `workflow_dispatch` USED TO BE HERE and was removed by external review. The
+  # argument for keeping it was that its inputs "select nothing and reach no
+  # code" — which is true of the inputs and beside the point. A manually
+  # dispatched workflow runs against a SELECTED REF, and every checkout in this
+  # file deliberately omits `ref:`. Under `workflow_run` that omission is the
+  # safety property: the definition and the checkout both come from the default
+  # branch. Under `workflow_dispatch` it becomes the hazard: the checkout takes
+  # the dispatched ref, so a dispatch against a branch carrying modified
+  # `scripts/midtermpanel` executes that branch's code in `count` and `panel`
+  # with the provider key in scope.
+  #
+  # The runtime approval phrase authenticated the CANDIDATE being reviewed. It
+  # never authenticated the ref supplying the reviewer.
+  #
+  # Controlled reruns go through `midterm-panel-rerun.yml`, which holds no
+  # secret and only asks CI to run again.
   workflow_run:
     workflows: ["ci"]
     types: [completed]
-  # Controlled rerun. `approval_phrase` is required so a dispatch is a deliberate
-  # act rather than a mis-click; it selects nothing and reaches no code.
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: Pull request number to review
-        required: true
-        type: string
-      candidate_head_sha:
-        description: Exact candidate head SHA the result will be published on
-        required: true
-        type: string
-      approval_phrase:
-        description: Type REVIEW to confirm a deliberate provider spend
-        required: true
-        type: string
+
 
 # `statuses: write` is the only write scope, and it exists solely to publish
 # `midterm-panel-count` / `midterm-panel-review` onto the exact candidate head.
@@ -258,14 +263,26 @@ jobs:
           PROBE
 
       - name: Materialise the repository with the candidate as OBJECTS
-        # `--no-checkout`. The candidate's commits move into `.git` as inert
-        # data and no worktree is produced; the engine reads them with git
-        # plumbing. That object/worktree distinction IS the safety argument, and
-        # `privilegedworkflow` refuses any step that would cross it.
+        # `git fetch` NEVER produces a worktree — that is the point, and it is
+        # why no flag is needed to prevent one. The previous version passed
+        # `--no-checkout`, which `git fetch` does not accept: it exits 129 with
+        # "unknown option", so this step would have failed on the first real run
+        # in both secret-bearing jobs. `--no-checkout` belongs to clone.
+        #
+        # The candidate lands under its own ref namespace so later git plumbing
+        # has a name to read, and `--no-tags --no-recurse-submodules` keeps the
+        # fetch to exactly the objects that commit needs.
+        #
+        # `tests/test_midterm_fetch_shell.py` runs THIS EXACT command in a real
+        # temporary repository and proves no candidate file reaches the
+        # worktree. The vertical could not have caught the broken form: it is
+        # handed a repository path and never executes the workflow's shell.
         env:
           CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
         run: |
-          git fetch --no-checkout origin "$CANDIDATE_HEAD_SHA"
+          git fetch --no-tags --no-recurse-submodules origin \
+            "$CANDIDATE_HEAD_SHA:refs/midterm/candidate/$CANDIDATE_HEAD_SHA"
+          git cat-file -e "$CANDIDATE_HEAD_SHA^{commit}"
           echo "MIDTERM_REPOSITORY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
       - name: Materialise the operator PIN record
@@ -298,6 +315,10 @@ jobs:
           MIDTERM_ENGINE_DIGEST: ${{ needs.preflight.outputs.engine_digest }}
           MIDTERM_POLICY_DIGEST: ${{ needs.preflight.outputs.policy_digest }}
           MIDTERM_AUTHORIZED_INPUT_TOKENS: '2000000'
+          # Which operator-approved cost profile this run may spend under.
+          # `governance/midterm-panel-pins.json` allowlists the targets; there
+          # is deliberately no default.
+          MIDTERM_REVIEW_TARGET: pr-${{ needs.preflight.outputs.pr_number }}
         run: |
           python -m midtermpanel.countcli
 
@@ -309,7 +330,10 @@ jobs:
           path: |
             ${{ runner.temp }}/midterm/count-evidence.json
             ${{ runner.temp }}/midterm/executable-plan.json
-          if-no-files-found: warn
+          # A count job that emitted no private plan must not
+          # leave a warning and let the panel proceed to a
+          # download that finds nothing.
+          if-no-files-found: error
           retention-days: 3
 
   # -------------------------------------------------------------------- panel
@@ -375,10 +399,13 @@ jobs:
           PROBE
 
       - name: Materialise the repository with the candidate as OBJECTS
+        # Same valid inert fetch as the count job. See its comment.
         env:
           CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
         run: |
-          git fetch --no-checkout origin "$CANDIDATE_HEAD_SHA"
+          git fetch --no-tags --no-recurse-submodules origin \
+            "$CANDIDATE_HEAD_SHA:refs/midterm/candidate/$CANDIDATE_HEAD_SHA"
+          git cat-file -e "$CANDIDATE_HEAD_SHA^{commit}"
           echo "MIDTERM_REPOSITORY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
       - name: Execute the governed panel
@@ -402,7 +429,10 @@ jobs:
         with:
           name: midterm-panel-${{ needs.preflight.outputs.head_sha }}
           path: ${{ runner.temp }}/midterm/panel-evidence.json
-          if-no-files-found: warn
+          # A count job that emitted no private plan must not
+          # leave a warning and let the panel proceed to a
+          # download that finds nothing.
+          if-no-files-found: error
           retention-days: 3
 
   # ----------------------------------------------------------------- finalize

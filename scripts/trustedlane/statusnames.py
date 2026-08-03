@@ -115,7 +115,17 @@ MIDTERM_JOB_STATUSES = ("midterm-preflight", "midterm-count",
 #: a check that cannot start. Not requirable for a different reason than
 #: INACTIVE: an inactive check passes when it should not, a diagnostic never
 #: reports at all.
-DIAGNOSTIC_STATUSES = ("probe",)
+#: `midterm-panel-rerun` is DIAGNOSTIC for the same mechanical reason as
+#: `probe`, not because of anything about trust: it is `workflow_dispatch` only,
+#: so it never runs on a pull request and never reports a status on a candidate
+#: head. Requiring it would leave every PR permanently pending on a check that
+#: cannot start.
+#:
+#: It exists because the PRIVILEGED workflow may not have a dispatch trigger at
+#: all — a dispatched run executes against a selected ref, and that workflow's
+#: checkouts name no ref. This one holds no secret and only asks CI to run
+#: again, which is what starts a panel through the one safe trigger.
+DIAGNOSTIC_STATUSES = ("probe", "midterm-panel-rerun")
 
 #: R10. The protected engine build, which produces what the trusted lane
 #: trusts. Its own class rather than DIAGNOSTIC: a diagnostic reports on
@@ -419,6 +429,14 @@ def branch_protection_instructions() -> dict:
             "probe":
                 "workflow_dispatch only, so it never reports on a candidate "
                 "head; requiring it deadlocks every PR",
+            "midterm-panel-rerun":
+                "workflow_dispatch only, so it never reports on a candidate "
+                "head; requiring it deadlocks every PR. It exists because the "
+                "PRIVILEGED panel workflow may not have a dispatch trigger at "
+                "all — a dispatched run executes against a ref the dispatcher "
+                "selects, and that workflow's checkouts name no ref — so the "
+                "rerun lives in a workflow that holds no secret and only asks "
+                "ordinary CI to run again",
             "d1-containment-gate":
                 "internal job of a main-dispatched trusted run; its check "
                 "lands on main's commit, not on a candidate head",
