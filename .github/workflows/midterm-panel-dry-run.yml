@@ -1,0 +1,123 @@
+name: midterm-panel-dry-run
+
+# The hosted no-key proof.
+#
+# The mid-term panel's privileged workflow cannot be exercised before an
+# operator installs a provider secret, and installing one before the lane is
+# known to work is the wrong order. So this runs the WHOLE vertical — the
+# approved engine built from its pinned commits and loaded, Stage 1 derived
+# from a real repository's objects, every governed model and batch counted, the
+# plan written and re-read across an artifact boundary, the panel executed
+# through the engine's Stage 3, and the decision published — with the engine's
+# own labelled stand-ins at the end of the wire.
+#
+# It is the same code path. `MIDTERM_PANEL_MODE=DRY_RUN_NO_PROVIDER` changes
+# exactly two objects: a transport that cannot reach a socket, and a status
+# opener that writes a file.
+#
+# ## Why this workflow holds no secrets and needs none
+#
+# `permissions: contents: read` and no `secrets.` anywhere. `dryrun.py` refuses
+# to run if a credential is present under EITHER the lane's own variable or the
+# trusted-lane secret name, so a future edit that pulled one in would turn this
+# job red rather than quietly making it a live run.
+#
+# ## What a green run here proves, and what it does not
+#
+# It proves the lane works end to end on a hosted runner, from a clean clone,
+# on the Python this repository pins. Every verdict it produces is
+# MOCK_NOT_PROVIDER. It says nothing about what three real models would say,
+# and it is not a substitute for operator prerequisite 14.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: midterm-dry-run-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vertical:
+    name: fake-provider vertical (no key)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          # The vertical builds the engine artifact from two pinned commits by
+          # reading git blobs out of the object database. A shallow clone does
+          # not carry them and the suite would skip rather than run — which is
+          # the one outcome worse than failing, because it reads as a pass.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the hash-locked runtime
+        run: |
+          python -m pip install --require-hashes --no-deps \
+            -r requirements-trusted-runtime.txt
+          python -m pip install pytest pyyaml
+
+      - name: Fetch the pinned engine commits
+        # Named explicitly rather than assumed present. The release document is
+        # the single place these live; a re-pin moves one file and this follows.
+        run: |
+          python - <<'PROBE' > /tmp/engine-refs.txt
+          import json
+          doc = json.load(open("governance/midterm-panel-engine-release.json"))
+          print(doc["approved_engine_source_sha"])
+          print(doc["approved_engine_protected_sha"])
+          PROBE
+          while read -r sha; do
+            git cat-file -e "$sha^{commit}" 2>/dev/null \
+              || git fetch --no-tags origin "$sha"
+          done < /tmp/engine-refs.txt
+
+      - name: Prove no provider credential is in scope
+        # Before the vertical, not after. A job that discovered a credential
+        # halfway through would already have run half of a live lane.
+        run: |
+          python - <<'PROBE'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          from midtermpanel import dryrun
+          print(dryrun.assert_no_credential_is_present(dict(os.environ)))
+          PROBE
+
+      - name: Run the whole vertical
+        env:
+          PYTHONPATH: ${{ github.workspace }}/scripts
+        run: |
+          python -m pytest tests/test_midterm_vertical.py -v \
+            --no-header -p no:randomly
+
+      - name: Refuse a skipped vertical
+        # `pytest` exits 0 when every test is skipped, and this suite skips
+        # itself when the pinned engine commits are absent. A skip that reported
+        # success would be this workflow claiming a proof it did not produce.
+        run: |
+          python -m pytest tests/test_midterm_vertical.py -q \
+            --collect-only > /tmp/collected.txt
+          python - <<'PROBE'
+          import re, sys
+          text = open("/tmp/collected.txt").read()
+          match = re.search(r"(\d+) tests? collected", text)
+          if not match or int(match.group(1)) < 1:
+              sys.exit("the vertical collected no tests; a suite that did not "
+                       "run is not a suite that passed")
+          print(f"collected {match.group(1)} vertical tests")
+          PROBE
+
+      - name: Run the panel's unit and merge-gate suites
+        env:
+          PYTHONPATH: ${{ github.workspace }}/scripts
+        run: |
+          python -m pytest tests/test_midterm_panel.py \
+            tests/test_human_merge_gate.py -q
