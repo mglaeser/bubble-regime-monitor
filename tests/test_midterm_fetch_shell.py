@@ -77,7 +77,7 @@ def remote_and_clone(tmp_path):
     # checking anything out.
     _git(["checkout", "-q", "-b", "candidate"], source)
     (source / "candidate-only.py").write_text(
-        "SECRET_LOOKING = 'this file must never reach the worktree'\n",
+        "MARKER = 'this file must never reach the worktree'\n",
         encoding="utf-8")
     _git(["add", "-A"], source)
     _git(["commit", "-q", "-m", "candidate"], source)
