@@ -138,3 +138,92 @@ the process exit, not the finding.
 Merge on a green check without reading the change. That is the failure this
 whole architecture is arranged around: the reviewer holds a provider credential,
 so the reviewer is not trusted to be the last word. You are.
+
+## 7. The one-time bootstrap merge
+
+§4 cannot be followed for the pull request that **installs** the panel.
+
+The gate requires two `midterm-panel-*` statuses and the Actions run id of a
+privileged panel run, and requires that run to be the deployed
+`midterm-panel-review.yml` triggered by `workflow_run` from the default branch.
+None of that can exist for the pull request that adds the workflow: the key is
+not installed, and the workflow that would review the change is the workflow the
+change introduces. Running the gate against it would refuse, correctly.
+
+So this one merge is made against a different, explicitly weaker record. It is
+weaker in a stated way rather than in a quiet one, and it is the **only** merge
+in this repository permitted without panel statuses. The next pull request —
+including a follow-up to this one — goes through §4.
+
+### 7.1 What must be true instead
+
+On the **exact head being merged**, and read by the operator rather than
+reported by the author:
+
+1. `ci` is green: `test (3.12)` and `image`, including the blocking secret scan;
+2. `midterm-panel-selftest` (the no-key hosted dry run) is green, and its
+   candidate-object step reports proof strength `STRONG`;
+3. the operator has read the diff as a **source review**, not as a summary.
+   This pull request edits `.github/workflows/` and `scripts/midtermpanel/`,
+   which is exactly the high-risk class §4 requires a human review for, and
+   there is no panel to offer a second opinion;
+4. no provider secret is installed at merge time. The lane is inert until the
+   operator adds one deliberately, as a separate step;
+5. the merge names the exact head.
+
+### 7.2 The record
+
+Written locally by the operator — not committed, because a record that names
+the head it approves cannot live in the commit it names:
+
+```json
+{
+  "record": "MIDTERM_PANEL_BOOTSTRAP_MERGE_APPROVAL",
+  "workflow_security_review_completed": true,
+  "reviewed_head_sha": "<the exact head>",
+  "reviewer": "mglaeser",
+  "reviewed_at": "<ISO 8601 UTC>",
+  "panel_review_available": false,
+  "why_no_panel_review": "this pull request installs the panel; no provider key exists and the workflow that would review it is the one being added",
+  "ordinary_ci_run_id": "<run id>",
+  "hosted_dry_run_id": "<run id>",
+  "provider_key_installed_at_merge_time": false
+}
+```
+
+`panel_review_available: false` is the field that matters. It states what this
+record is not, so nobody later mistakes a bootstrap merge for a reviewed one.
+
+### 7.3 The merge
+
+```
+gh pr ready 34
+gh pr merge 34 --match-head-commit <the exact head> --squash
+```
+
+`--match-head-commit` still applies, and for the same reason: it is the head the
+operator read, and the server refuses if it moved. `--admin` and `--auto` remain
+forbidden (§3).
+
+### 7.4 What merging does not do
+
+It does not install the key, does not activate the panel, and does not change
+`trustedlane.phases.IMPLEMENTED_PHASE`, which stays `D0`.
+
+**Expect red panel statuses.** After the merge the privileged workflow exists on
+the default branch and fires on the next pull request whose CI succeeds. It will
+publish `midterm-panel-count = pending` — that happens before any capability
+that could spend — and then `count` calls `read_provider_key`, finds
+`MIDTERM_PANEL_PROVIDER_KEY` empty, and refuses with
+`midterm_provider_key_absent`. `finalize` closes the status out. So every pull
+request will carry a **red** `midterm-panel-count` until the operator installs
+`TRUSTED_VERIFIER_OPENAI_KEY`.
+
+That is deliberate and it is the safer default: `read_provider_key` refuses
+rather than degrading to a mode that reports success having called nothing,
+which is the inactive-check defect `statusnames.py` exists for, reached from a
+different direction. A red check that says "no key" is honest; a green one that
+reviewed nothing is not.
+
+Installing the key is a separate, deliberate step, and the operator prerequisite
+list in the runbook is what governs it.

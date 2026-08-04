@@ -112,16 +112,21 @@ jobs:
         #   pull_request  the pull request's head sha. For a PR the checkout
         #                 takes `refs/pull/N/merge`, so the branch head is a
         #                 different commit — exactly the object the count and
-        #                 panel jobs must reach. This is the real proof.
+        #                 panel jobs must reach. This is the real proof, it is
+        #                 REQUIRED, and a fork or a head that turns out to be
+        #                 HEAD fails the step.
         #   push          there is no pull request, so the tip of `main` stands
-        #                 in: on a feature branch it is a commit on another
-        #                 branch, present for the same reason. Weaker, and
-        #                 labelled as such rather than reported as the same
-        #                 thing.
+        #                 in: on a feature branch that is a commit on another
+        #                 branch, present for the same reason. Labelled WEAK
+        #                 rather than reported as the same thing.
+        #   push to main  `origin/main` IS the checked-out commit, so there is
+        #                 nothing here that proves anything. The step says
+        #                 exactly that and exits 0. It does not invent a proof,
+        #                 and it does not turn every post-merge run red.
         #
-        # A run that ends up with nothing to check FAILS. A proof step that
-        # could pass without proving anything is the failure mode this lane
-        # keeps finding.
+        # So a green from this step means "proved" only when it printed a
+        # strength. `docs/HUMAN_MERGE_PROTOCOL.md` §7.1 requires the STRONG
+        # line from the pull_request run, not merely a green check.
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -149,15 +154,22 @@ jobs:
             fi
             candidate="$PR_HEAD_SHA"
             strength="STRONG"
+            if [ "$candidate" = "$before_head" ]; then
+              echo "::error::the pull request head is the checked-out commit," \
+                   "so its presence says nothing about fetch-depth: 0. A" \
+                   "pull_request checkout should be refs/pull/N/merge." >&2
+              exit 1
+            fi
           else
             candidate=$(git rev-parse origin/main)
-          fi
-
-          if [ "$candidate" = "$before_head" ]; then
-            echo "::error::the commit under test is HEAD itself, so its" \
-                 "presence says nothing about fetch-depth: 0. Refusing to" \
-                 "report a proof this run did not produce." >&2
-            exit 1
+            if [ "$candidate" = "$before_head" ]; then
+              echo "PROOF NOT APPLICABLE: this is a push to the default" \
+                   "branch, so origin/main IS the checked-out commit and" \
+                   "its presence demonstrates nothing. The proof runs on" \
+                   "pull_request events, where the head is a different" \
+                   "object from the merge ref that was checked out."
+              exit 0
+            fi
           fi
 
           echo "candidate object under test: $candidate (proof strength: $strength)"

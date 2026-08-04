@@ -631,3 +631,109 @@ Whole repository: 1935 passed, 5 skipped. `ruff` clean over `app/`, `scripts/`,
 
 `trustedlane.phases.IMPLEMENTED_PHASE` is still `D0`. This lane is not the
 trusted lane, is not write-separated, and holds no operator envelope authority.
+
+### 19.8 What the hosted runs found, including a red one
+
+Three heads, and the middle one is worth recording rather than tidying away.
+
+**`e4d946b4` — the correction.** All green.
+
+| run | job | result |
+|---|---|---|
+| `30941775675` (`ci`) | `92101707037` `test (3.12)` | success |
+| `30941775675` (`ci`) | `92101706939` `image` | success |
+| `30941776076` (dry run) | `92101708533` `midterm-panel-selftest` | success |
+
+**`fda815d9` — hardening the hosted proof step, and a RED `test (3.12)`.**
+
+Running the step exposed three ways it could have gone green without proving
+anything: a fork `exit 0`'d with an explanation, the push path tested
+`github.sha` — which *is* the checked-out commit — and `git ls-tree | head -3`
+under `set -o pipefail` could fail by SIGPIPE. All three were fixed, and a test
+class was added that runs every branch of the committed step.
+
+That test class then failed in ordinary CI, and it was the test that was wrong:
+
+```
+::error::a git credential is persisted in this checkout
+```
+
+`ci.yml` checks out **without** `persist-credentials: false` — it is not a
+key-bearing job and does not need that boundary — so a token genuinely is
+persisted in its workspace, as its own post-job cleanup shows
+(`git config --local --unset-all http.https://github.com/.extraheader`). The
+test ran a step written for a credential-free workspace inside one that
+legitimately has a credential. **The step was right and the test's environment
+assumption was wrong.** The tests now build their own credential-free clone, and
+one of them asserts the refusal on purpose.
+
+The same run also surfaced a real defect in the step: on a push to `main`,
+`origin/main` **is** the checked-out commit, so the "commit under test is HEAD"
+guard would have turned every post-merge dry run red. The step now reports
+`PROOF NOT APPLICABLE` and exits 0 for exactly that case — without printing a
+strength, which is what keeps a green from being read as a proof.
+
+Everything else on `fda815d9` was green, including both blocking gates in
+`test (3.12)` before the test step: `ruff`, the dependency audit, and
+`detect-secrets-hook` over every tracked file. Jobs: `30942199497`/`92103168688`
+(`image`, success), `30942199505`/`92103168768` (`midterm-panel-selftest`,
+success), `30942199355`/`92103168573` (`independent-verify-inactive`, success),
+`30942199497`/`92103168670` (`test (3.12)`, **failure**).
+
+**The candidate-object proof, from the runner's own log** (job `92103168768`,
+git 2.54.0, after a real `persist-credentials: false` checkout of this private
+repository):
+
+```
+candidate object under test: fda815d9fc6a9015cd2e2941300e9584f3457431 (proof strength: STRONG)
+checked-out HEAD:            7144763281c7a7bc3f54ad095c7158d7f74fe302
+present in the object database, and it is not HEAD
+no persisted git credential; no fetch attempted; HEAD and worktree unchanged
+```
+
+The two shas differ because a `pull_request` checkout takes
+`refs/pull/N/merge`. So the commit proved present is genuinely **not** the one
+the checkout produced — it is there because `fetch-depth: 0` brought the branch
+in, which is exactly the claim the count and panel jobs now depend on. Same job,
+before the vertical:
+
+```
+{'credential_variables_checked': ['MIDTERM_PANEL_PROVIDER_KEY',
+                                  'TRUSTED_VERIFIER_OPENAI_KEY'],
+ 'credential_present': False}
+```
+
+**Provider calls: 0. Generation calls: 0. `TRUSTED_VERIFIER_OPENAI_KEY` is not
+installed.** Every verdict the vertical produced is `MOCK_NOT_PROVIDER`.
+
+The final head's run and job ids are in the operator handoff for this round;
+they are not written here, because a document cannot record the id of a run
+triggered by the commit that adds it.
+
+### 19.9 One measurement this evidence does not extend
+
+The short-circuit table in §19.2 was measured on **git 2.43.0**, locally. The
+hosted runner has **git 2.54.0**, and the behaviour was not re-measured there.
+
+It does not need to be. The conclusion the lane depends on is that no
+post-checkout authenticated git command is required — and the committed step
+runs none, on either version, which the hosted log above shows directly. The
+short-circuit finding matters for a different reason: it explains why the
+empirical "needs no network" test cannot be the control against a reintroduced
+fetch, and that argument is conservative in the right direction. If 2.54.0 did
+NOT short-circuit, the removed fetch would simply have failed outright rather
+than silently no-opped, which is the weaker hazard.
+
+### 19.10 The merge
+
+This pull request installs the panel, so the panel cannot review it and
+`human_merge_gate.py` cannot run against it: there are no panel statuses and no
+privileged run to name. `docs/HUMAN_MERGE_PROTOCOL.md` §7 records the one-time
+bootstrap merge that substitutes — ordinary CI, the hosted no-key dry run, a
+human source review of the diff, and an exact-head merge — and states that it is
+the only merge in this repository permitted without panel statuses.
+
+After the merge, and until the operator installs the key, every pull request
+will carry a **red** `midterm-panel-count`: `read_provider_key` refuses rather
+than degrading to a review that reports success having called nothing. That is
+the intended state, and §7.4 says so where an operator will meet it.

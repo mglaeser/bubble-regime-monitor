@@ -418,78 +418,144 @@ def hosted_proof_script() -> str:
     raise AssertionError(f"no step named {HOSTED_PROOF_STEP!r}")
 
 
+
+
+@pytest.fixture
+def dry_run_workspace(tmp_path):
+    """A workspace shaped like the dry run's checkout, WITHOUT a credential.
+
+    Deliberately not this repository's own checkout. The first version of these
+    tests ran the step against `ROOT` and went red in ordinary CI — because
+    `ci.yml` checks out WITHOUT `persist-credentials: false`, so a token really
+    is persisted there, and the step correctly refused. That was the step
+    working and the test's environment assumption being wrong: it ran a step
+    written for a credential-free workspace inside one that legitimately has a
+    credential.
+
+    `scripts` is symlinked rather than copied so `$GITHUB_WORKSPACE` keeps the
+    single meaning it has on a runner — the workspace root, which is both the
+    git repository and the import root."""
+    source = tmp_path / "origin"
+    source.mkdir()
+    _git(["init", "-q", "-b", "main", "."], source)
+    _git(["config", "user.email", "hosted@example.invalid"], source)
+    _git(["config", "user.name", "hosted"], source)
+    (source / "main.txt").write_text("main\n", encoding="utf-8")
+    _git(["add", "-A"], source)
+    _git(["commit", "-q", "-m", "main"], source)
+    main_tip = _git(["rev-parse", "HEAD"], source).stdout.strip()
+
+    _git(["checkout", "-q", "-b", "candidate"], source)
+    (source / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    _git(["add", "-A"], source)
+    _git(["commit", "-q", "-m", "candidate"], source)
+    candidate_tip = _git(["rev-parse", "HEAD"], source).stdout.strip()
+    _git(["checkout", "-q", "main"], source)
+
+    workspace = tmp_path / "workspace"
+    _git(["clone", "-q", "--no-single-branch", str(source), str(workspace)],
+         tmp_path)
+    (workspace / "scripts").symlink_to(ROOT / "scripts")
+    return {"workspace": workspace, "main_tip": main_tip,
+            "candidate_tip": candidate_tip}
+
+
 class TestTheHostedProofStepCannotPassWithoutProving:
     """The hosted step in `midterm-panel-dry-run.yml`, run here.
 
     It is the §2.3 evidence that the acquisition model holds on a runner, so
-    the one thing it must never do is go green having checked nothing. Every
-    branch is exercised against this repository's real object database."""
+    the one thing it must never do is go green having checked nothing — and the
+    one thing it must never do EITHER is go red on a state that is fine."""
 
-    def _run(self, **env):
+    def _run(self, world, **env):
         environ = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                   "HOME": os.environ.get("HOME", "/root"),
-                   "GITHUB_WORKSPACE": str(ROOT),
+                   "HOME": str(world["workspace"]),
+                   "GITHUB_WORKSPACE": str(world["workspace"]),
                    "EVENT_NAME": "push", "PR_HEAD_SHA": "",
                    "PR_HEAD_REPO_ID": ""}
         environ.update(env)
         return subprocess.run(["bash", "-c", hosted_proof_script()],
-                              cwd=str(ROOT), capture_output=True, text=True,
-                              env=environ)
+                              cwd=str(world["workspace"]), capture_output=True,
+                              text=True, env=environ)
 
     def _repository_id(self) -> str:
         import midtermpanel
         return str(midtermpanel.REPOSITORY_NUMERIC_ID)
 
-    def _a_commit_that_is_not_head(self) -> str:
-        for ref in ("origin/main", "main", "HEAD~1"):
-            got = _git(["rev-parse", "--verify", f"{ref}^{{commit}}"], ROOT,
-                       check=False)
-            if got.returncode == 0:
-                sha = got.stdout.strip()
-                if sha != _git(["rev-parse", "HEAD"], ROOT).stdout.strip():
-                    return sha
-        pytest.skip("no commit other than HEAD is available to test with")
+    def _on_candidate_branch(self, world):
+        """HEAD on a non-default branch, the way a push to a feature branch
+        arrives."""
+        _git(["checkout", "-q", "candidate"], world["workspace"])
+        return world
 
-    def test_a_same_repository_pull_request_proves_it_strongly(self):
-        result = self._run(EVENT_NAME="pull_request",
-                           PR_HEAD_SHA=self._a_commit_that_is_not_head(),
+    def test_a_same_repository_pull_request_proves_it_strongly(self,
+                                                               dry_run_workspace):
+        result = self._run(dry_run_workspace, EVENT_NAME="pull_request",
+                           PR_HEAD_SHA=dry_run_workspace["candidate_tip"],
                            PR_HEAD_REPO_ID=self._repository_id())
         assert result.returncode == 0, result.stderr
         assert "proof strength: STRONG" in result.stdout
         assert "present in the object database, and it is not HEAD" in \
             result.stdout
 
-    def test_a_push_labels_its_weaker_proof_as_weak(self):
+    def test_a_push_to_a_feature_branch_labels_its_proof_weak(
+            self, dry_run_workspace):
         """Honest labelling, not a silent downgrade. On a push there is no
         pull request head, so `main`'s tip stands in — a real commit on another
         branch, but not the object the count job would actually need."""
-        result = self._run()
-        if "no commit other than HEAD" in result.stderr:
-            pytest.skip("single-commit checkout")
+        result = self._run(self._on_candidate_branch(dry_run_workspace))
         assert result.returncode == 0, result.stderr
         assert "proof strength: WEAK" in result.stdout
 
-    def test_a_fork_fails_rather_than_reporting_a_pass(self):
-        """The case that used to `exit 0` with an explanation.
+    def test_a_push_to_the_default_branch_says_it_proves_nothing(
+            self, dry_run_workspace):
+        """The case that would otherwise turn every post-merge run red.
 
-        Exiting 0 made a green step mean either "proved" or "had nothing to
-        prove", and nothing downstream could tell which. Forks are refused by
-        preflight anyway, so a fork reaching here is a state worth failing on."""
-        result = self._run(EVENT_NAME="pull_request",
+        On a push to `main`, `origin/main` IS the checked-out commit. There is
+        no proof available and there is also nothing wrong. The step says so
+        and exits 0 — which is only acceptable because it never prints a
+        strength, and §7.1 of the merge protocol requires the STRONG line
+        rather than a green check."""
+        result = self._run(dry_run_workspace)
+        assert result.returncode == 0, result.stderr
+        assert "PROOF NOT APPLICABLE" in result.stdout
+        assert "proof strength" not in result.stdout
+
+    def test_a_fork_fails_rather_than_reporting_a_pass(self, dry_run_workspace):
+        """Exiting 0 here would make a green step mean either "proved" or "had
+        nothing to prove", and nothing downstream could tell which."""
+        result = self._run(dry_run_workspace, EVENT_NAME="pull_request",
                            PR_HEAD_SHA="a" * 40, PR_HEAD_REPO_ID="999999")
         assert result.returncode != 0
         assert "same-repository pull requests only" in result.stderr
 
-    def test_testing_head_against_itself_fails(self):
+    def test_a_pull_request_head_equal_to_head_fails(self, dry_run_workspace):
         """`git cat-file -e HEAD` proves nothing: HEAD is what checkout made.
 
         This is the mutation that would turn the whole step into a tautology,
         and it is the one a well-meaning simplification would introduce."""
-        head = _git(["rev-parse", "HEAD"], ROOT).stdout.strip()
-        result = self._run(EVENT_NAME="pull_request", PR_HEAD_SHA=head,
+        head = _git(["rev-parse", "HEAD"],
+                    dry_run_workspace["workspace"]).stdout.strip()
+        result = self._run(dry_run_workspace, EVENT_NAME="pull_request",
+                           PR_HEAD_SHA=head,
                            PR_HEAD_REPO_ID=self._repository_id())
         assert result.returncode != 0
         assert "says nothing about fetch-depth" in result.stderr
+
+    def test_a_persisted_credential_fails_the_step(self, dry_run_workspace):
+        """The check that reddened this suite the first time, asserted on
+        purpose.
+
+        A workspace holding `http.*.extraheader` is a workspace where a later
+        step could act as the repository. That is fine in ordinary CI and is
+        exactly what the privileged jobs exclude, so the dry run — which
+        mirrors their checkout — must refuse it."""
+        world = self._on_candidate_branch(dry_run_workspace)
+        _git(["config", "--local", "http.https://example.invalid/.extraheader",
+              "AUTHORIZATION: basic Zm9v"], world["workspace"])
+        result = self._run(world)
+        assert result.returncode != 0
+        assert "credential is persisted" in result.stderr
 
     def test_the_step_runs_no_network_git_command(self):
         from midtermpanel.privilegedworkflow import (
