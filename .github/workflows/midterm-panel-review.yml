@@ -137,6 +137,11 @@ jobs:
       workflow_change: ${{ steps.decide.outputs.workflow_change }}
       engine_digest: ${{ steps.decide.outputs.engine_digest }}
       policy_digest: ${{ steps.decide.outputs.policy_digest }}
+      review_class: ${{ steps.decide.outputs.review_class }}
+      triggering_ci_run_id: ${{ steps.decide.outputs.triggering_ci_run_id }}
+      triggering_ci_run_attempt: ${{ steps.decide.outputs.triggering_ci_run_attempt }}
+      tested_base_sha: ${{ steps.decide.outputs.tested_base_sha }}
+      tested_head_sha: ${{ steps.decide.outputs.tested_head_sha }}
     steps:
       # No `ref:`. For a workflow_run event the default checkout is the
       # default-branch commit this workflow definition came from, which is
@@ -314,11 +319,19 @@ jobs:
           CANDIDATE_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
           MIDTERM_ENGINE_DIGEST: ${{ needs.preflight.outputs.engine_digest }}
           MIDTERM_POLICY_DIGEST: ${{ needs.preflight.outputs.policy_digest }}
-          MIDTERM_AUTHORIZED_INPUT_TOKENS: '2000000'
-          # Which operator-approved cost profile this run may spend under.
-          # `governance/midterm-panel-pins.json` allowlists the targets; there
-          # is deliberately no default.
-          MIDTERM_REVIEW_TARGET: pr-${{ needs.preflight.outputs.pr_number }}
+          # The review CLASS preflight derived from the pull-request number,
+          # against a closed rule in trusted code. The two transport ceilings
+          # that used to sit here as literals now live in the selected profile:
+          # `MIDTERM_GENERATION_ATTEMPT_CAP: '60'` silently contradicted the
+          # operator-approved cap of 80, so a plan priced for 80 attempts would
+          # have stopped at 60 under a limit nobody wrote.
+          MIDTERM_REVIEW_CLASS: ${{ needs.preflight.outputs.review_class }}
+          # Bound into the evidence so the merge gate can prove the panel
+          # reviewed what ordinary CI actually tested.
+          MIDTERM_TRIGGERING_CI_RUN_ID: ${{ needs.preflight.outputs.triggering_ci_run_id }}
+          MIDTERM_TRIGGERING_CI_RUN_ATTEMPT: ${{ needs.preflight.outputs.triggering_ci_run_attempt }}
+          MIDTERM_TESTED_BASE_SHA: ${{ needs.preflight.outputs.tested_base_sha }}
+          MIDTERM_TESTED_HEAD_SHA: ${{ needs.preflight.outputs.tested_head_sha }}
         run: |
           python -m midtermpanel.countcli
 
@@ -419,7 +432,11 @@ jobs:
           HIGH_RISK_WORKFLOW_CHANGE: ${{ needs.preflight.outputs.high_risk }}
           MIDTERM_ENGINE_DIGEST: ${{ needs.preflight.outputs.engine_digest }}
           MIDTERM_POLICY_DIGEST: ${{ needs.preflight.outputs.policy_digest }}
-          MIDTERM_GENERATION_ATTEMPT_CAP: '60'
+          MIDTERM_REVIEW_CLASS: ${{ needs.preflight.outputs.review_class }}
+          MIDTERM_TRIGGERING_CI_RUN_ID: ${{ needs.preflight.outputs.triggering_ci_run_id }}
+          MIDTERM_TRIGGERING_CI_RUN_ATTEMPT: ${{ needs.preflight.outputs.triggering_ci_run_attempt }}
+          MIDTERM_TESTED_BASE_SHA: ${{ needs.preflight.outputs.tested_base_sha }}
+          MIDTERM_TESTED_HEAD_SHA: ${{ needs.preflight.outputs.tested_head_sha }}
         run: |
           python -m midtermpanel.panelcli
 

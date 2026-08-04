@@ -1243,7 +1243,8 @@ class TestEveryCountInputHasAWorkflowProducer:
         assert pins["write_separated"] is False
         assert pins["approved_by"] and pins["approved_at"]
         assert len(pins["pins"]) == 12
-        assert sorted(pins["profiles"]) == ["pr-23", "pr-29", "synthetic"]
+        assert sorted(pins["profiles"]) == [
+            "HISTORICAL_PR25", "LARGE_PR23", "ROUTINE_PR", "SYNTHETIC"]
 
     def test_the_pinned_engine_source_is_not_this_branchs_head(self, tmp_path):
         """The document that decides who reviews must not name the thing being
@@ -1324,15 +1325,45 @@ class TestThePrivilegedWorkflowHasOneTrigger:
                                 api=None, root=str(ROOT))
         assert "dispatch_trigger_removed" in caught.value.reason
 
-    def test_the_rerun_dispatcher_holds_no_secret_and_runs_no_panel_code(self):
-        path = ROOT / ".github" / "workflows" / "midterm-panel-rerun.yml"
-        text = path.read_text(encoding="utf-8")
-        assert "secrets." not in text
-        assert "midtermpanel" not in text.replace(
-            "midterm-panel-rerun", "").replace("midterm-panel-review", "")
-        document = yaml.safe_load(text)
-        assert sorted(_on(document)) == ["workflow_dispatch"]
-        assert document["permissions"]["contents"] == "read"
+    def test_no_midterm_workflow_can_be_dispatched(self):
+        """F-07. The convenience rerun workflow is gone.
+
+        It held no secret in its committed form and only asked ordinary CI to
+        run again. But a `workflow_dispatch` workflow runs a BRANCH-SELECTED
+        copy, so with a persistent repository secret in the repository, a
+        branch version of it could reference that secret — the same selected-ref
+        hazard that removed the dispatch trigger from the privileged panel,
+        reached through a convenience.
+
+        Rerunning ordinary CI through the Actions UI, or `gh run rerun`, needs
+        no repository workflow at all."""
+        workflows = ROOT / ".github" / "workflows"
+        assert not (workflows / "midterm-panel-rerun.yml").exists()
+        for path in sorted(workflows.glob("midterm-*.yml")):
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            triggers = sorted(_on(document))
+            if path.name == "midterm-panel-dry-run.yml":
+                # The no-key self-test may be dispatched: it holds no secret,
+                # refuses to run if one is present under either name, and its
+                # branch copy could not obtain a credential to misuse.
+                #
+                # Checked on the PARSED jobs, not on the file's text: the text
+                # contains the words `secrets.` inside the comment explaining
+                # that it uses none, and a grep would count that explanation as
+                # the thing it describes.
+                assert "workflow_dispatch" in triggers
+                assert "secrets." not in yaml.safe_dump(document["jobs"])
+                continue
+            assert "workflow_dispatch" not in triggers, path.name
+
+    def test_no_workflow_holds_actions_write(self):
+        """`actions: write` was the removed dispatcher's one elevated scope.
+        Nothing in this lane needs it."""
+        for path in sorted(
+                (ROOT / ".github" / "workflows").glob("midterm-*.yml")):
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for scope in (document.get("permissions") or {},):
+                assert scope.get("actions") != "write", path.name
 
     def test_the_policy_document_records_the_removal_and_why(self):
         policy = json.loads(POLICY.read_text(encoding="utf-8"))
@@ -1342,80 +1373,301 @@ class TestThePrivilegedWorkflowHasOneTrigger:
         assert "SELECTED REF" in " ".join(manual["why"])
 
 
-class TestTheCostProfileIsSelectedNotDefaulted:
-    """External review, finding 5. The three profiles differ by more than an
-    order of magnitude in cost cap."""
+class TestTheReviewClassIsClosedAndTotal:
+    """F-05. The previous design allowlisted `pr-23`, `pr-25` and `pr-29` while
+    the workflow emitted `pr-<number>`, so PR #35 and every routine pull request
+    after it would have refused before a panel could run — which contradicts the
+    requirement this lane exists for."""
 
     def _document(self):
         return json.loads(
             (ROOT / "governance" / "midterm-panel-pins.json")
             .read_text(encoding="utf-8"))
 
-    def test_an_unnamed_review_target_is_refused(self):
+    def test_every_pull_request_number_maps_to_a_class(self):
+        """Total. A new pull request reviews rather than refusing."""
+        from midtermpanel.preflight import REVIEW_CLASSES, review_class_for
+        for number in (1, 23, 25, 29, 35, 100, 99999):
+            assert review_class_for(number) in REVIEW_CLASSES, number
+
+    def test_the_two_special_pull_requests_keep_their_own_classes(self):
+        from midtermpanel.preflight import review_class_for
+        assert review_class_for(25) == "HISTORICAL_PR25"
+        assert review_class_for(23) == "LARGE_PR23"
+
+    def test_everything_else_is_routine(self):
+        from midtermpanel.preflight import review_class_for
+        assert review_class_for(29) == "ROUTINE_PR"
+        assert review_class_for(35) == "ROUTINE_PR"
+
+    def test_a_malformed_pull_request_number_is_refused(self):
+        from midtermpanel.preflight import review_class_for
+        for bad in (0, -1, True, "29", None):
+            with pytest.raises(PanelRefusal) as caught:
+                review_class_for(bad)
+            assert "not_a_positive_integer" in caught.value.reason
+
+    def test_every_class_the_code_can_produce_has_a_profile(self):
+        """Otherwise a real pull request refuses at spend time."""
+        from midtermpanel.preflight import REVIEW_CLASSES
+        assert sorted(self._document()["profiles"]) == sorted(REVIEW_CLASSES)
+
+    def test_an_unnamed_class_is_refused(self):
         from midtermpanel import inputs
         with pytest.raises(PanelRefusal) as caught:
             inputs.select_profile(self._document(), environ={})
-        assert "review_target_not_named" in caught.value.reason
+        assert "review_class_not_named" in caught.value.reason
 
-    def test_a_target_outside_the_allowlist_is_refused(self):
+    def test_a_class_that_is_not_one_of_the_four_is_refused(self):
         from midtermpanel import inputs
         with pytest.raises(PanelRefusal) as caught:
-            inputs.select_profile(self._document(),
-                                  environ={"MIDTERM_REVIEW_TARGET": "pr-99"})
-        assert "not_uniquely_allowlisted" in caught.value.reason
-
-    def test_matching_is_exact_and_not_substring(self):
-        """`pr-2` must not select `pr-29`'s budget."""
-        from midtermpanel import inputs
-        with pytest.raises(PanelRefusal):
-            inputs.select_profile(self._document(),
-                                  environ={"MIDTERM_REVIEW_TARGET": "pr-2"})
-
-    def test_each_profile_selects_its_own_caps(self):
-        from midtermpanel import inputs
-        expected = {"synthetic": (100, 0, 5000000),
-                    "pr-29": (1200, 80, 25000000),
-                    "pr-23": (2500, 200, 60000000)}
-        for target, (count, generation, cost) in expected.items():
-            pins, profile = inputs.select_profile(
+            inputs.select_profile(
                 self._document(),
-                environ={"MIDTERM_REVIEW_TARGET": target})
-            assert pins["VERIFIER_MAX_COUNT_CALLS"] == count, target
-            assert pins["VERIFIER_MAX_GENERATION_CALLS"] == generation, target
-            assert pins["VERIFIER_COST_CAP_MICRO_USD"] == cost, target
+                environ={"MIDTERM_REVIEW_CLASS": "GENEROUS_PR"})
+        assert "review_class_unknown" in caught.value.reason
+
+    def test_each_class_selects_its_own_caps(self):
+        from midtermpanel import inputs
+        expected = {"SYNTHETIC": (100, 0, 5000000),
+                    "HISTORICAL_PR25": (100, 0, 5000000),
+                    "ROUTINE_PR": (1200, 80, 25000000),
+                    "LARGE_PR23": (2500, 200, 60000000)}
+        for name, (count, generation, cost) in expected.items():
+            pins, profile = inputs.select_profile(
+                self._document(), environ={"MIDTERM_REVIEW_CLASS": name})
+            assert pins["VERIFIER_MAX_COUNT_CALLS"] == count, name
+            assert pins["VERIFIER_MAX_GENERATION_CALLS"] == generation, name
+            assert pins["VERIFIER_COST_CAP_MICRO_USD"] == cost, name
             assert profile["profile_digest"]
 
-    def test_the_synthetic_profile_cannot_generate_at_all(self):
+    def test_the_routine_profile_is_operator_approved(self):
+        """It authorises spend on every future pull request, so it may not be
+        a value this repository chose for itself."""
+        routine = self._document()["profiles"]["ROUTINE_PR"]
+        assert routine["approved_by"] == "mglaeser"
+        assert routine["approved_at"]
+        assert routine["VERIFIER_MAX_COUNT_CALLS"] == 1200
+        assert routine["VERIFIER_MAX_GENERATION_CALLS"] == 80
+        assert routine["VERIFIER_COST_CAP_MICRO_USD"] == 25000000
+        assert routine["authorized_total_input_tokens"] == 2000000
+
+    def test_the_synthetic_class_cannot_generate_at_all(self):
         from midtermpanel import inputs
         pins, _ = inputs.select_profile(
-            self._document(),
-            environ={"MIDTERM_REVIEW_TARGET": "synthetic"})
+            self._document(), environ={"MIDTERM_REVIEW_CLASS": "SYNTHETIC"})
         assert pins["VERIFIER_MAX_GENERATION_CALLS"] == 0
 
     def test_a_profile_missing_an_overridden_pin_is_refused(self):
-        """Otherwise the run silently spends under another profile's cap."""
         from midtermpanel import inputs
         document = self._document()
-        del document["profiles"]["pr-29"]["VERIFIER_COST_CAP_MICRO_USD"]
+        del document["profiles"]["ROUTINE_PR"]["VERIFIER_COST_CAP_MICRO_USD"]
         with pytest.raises(PanelRefusal) as caught:
-            inputs.select_profile(document,
-                                  environ={"MIDTERM_REVIEW_TARGET": "pr-29"})
+            inputs.select_profile(
+                document, environ={"MIDTERM_REVIEW_CLASS": "ROUTINE_PR"})
         assert "profile_missing_an_overridden_pin" in caught.value.reason
 
-    def test_the_operator_approved_values_are_the_ones_recorded(self):
-        pins = self._document()["pins"]
-        assert pins["VERIFIER_MAX_OUTPUT_TOKENS"] == 8000
-        assert pins["VERIFIER_CONTEXT_MARGIN_TOKENS"] == 4000
-        assert pins["VERIFIER_MAX_REVIEW_UNITS"] == 512
-        assert pins["VERIFIER_COUNT_TIMEOUT_SECONDS"] == 30
-        assert pins["VERIFIER_COUNT_MAX_RETRIES"] == 2
-        assert pins["VERIFIER_GENERATION_TIMEOUT_SECONDS"] == 180
-        assert pins["VERIFIER_GENERATION_MAX_RETRIES"] == 1
-        assert pins["VERIFIER_TOKEN_DRIFT_TOLERANCE"] == 64
-        assert pins["VERIFIER_REASONING_EFFORT_BY_MODEL"] == {
-            "gpt-5.3-codex": "medium", "gpt-5.6-sol": "medium",
-            "gpt-4.1-mini": None}
 
-    def test_the_workflow_names_a_review_target(self):
+class TestTransportCeilingsLiveInTheProfile:
+    """F-06. `MIDTERM_GENERATION_ATTEMPT_CAP=60` was a free-standing workflow
+    literal that contradicted the approved cap of 80. A PR-29 plan projecting
+    ~78 attempts would have been priced for 80 and stopped at 60, under a limit
+    no operator wrote, reported as an exhausted budget."""
+
+    def _document(self):
+        return json.loads(
+            (ROOT / "governance" / "midterm-panel-pins.json")
+            .read_text(encoding="utf-8"))
+
+    def test_the_ceilings_come_from_the_selected_profile(self):
+        from midtermpanel import inputs
+        _, profile = inputs.select_profile(
+            self._document(), environ={"MIDTERM_REVIEW_CLASS": "ROUTINE_PR"})
+        assert profile["generation_attempt_cap"] == 80
+        assert profile["authorized_total_input_tokens"] == 2000000
+
+    def test_a_cap_below_the_approved_generation_calls_is_refused(self):
+        """The exact defect: priced for 80, stopped at 60."""
+        from midtermpanel import inputs
+        document = self._document()
+        document["profiles"]["ROUTINE_PR"]["generation_attempt_cap"] = 60
+        with pytest.raises(PanelRefusal) as caught:
+            inputs.select_profile(
+                document, environ={"MIDTERM_REVIEW_CLASS": "ROUTINE_PR"})
+        assert "transport_cap_below_approved_generation_calls" in \
+            caught.value.reason
+        assert "attempt_cap=60" in caught.value.reason
+        assert "approved_calls=80" in caught.value.reason
+
+    def test_a_missing_ceiling_is_refused(self):
+        from midtermpanel import inputs
+        document = self._document()
+        del document["profiles"]["ROUTINE_PR"]["authorized_total_input_tokens"]
+        with pytest.raises(PanelRefusal) as caught:
+            inputs.select_profile(
+                document, environ={"MIDTERM_REVIEW_CLASS": "ROUTINE_PR"})
+        assert "profile_transport_ceiling_missing_or_invalid" in \
+            caught.value.reason
+
+    def test_a_zero_generation_profile_may_have_a_positive_cap(self):
+        """The one permitted asymmetry, in the safe direction: zero approved
+        calls can never generate whatever the transport allows."""
+        from midtermpanel import inputs
+        _, profile = inputs.select_profile(
+            self._document(), environ={"MIDTERM_REVIEW_CLASS": "SYNTHETIC"})
+        assert profile["max_generation_calls"] == 0
+        assert profile["generation_attempt_cap"] >= 1
+
+    def test_the_workflow_carries_no_budget_literals(self):
+        rendered = yaml.safe_dump(_document()["jobs"])
+        for retired in ("MIDTERM_AUTHORIZED_INPUT_TOKENS:",
+                        "MIDTERM_GENERATION_ATTEMPT_CAP:"):
+            assert retired not in rendered, retired
+
+    def test_the_workflow_passes_the_review_class_preflight_derived(self):
         rendered = yaml.safe_dump(_document()["jobs"]["count"])
-        assert "MIDTERM_REVIEW_TARGET" in rendered
+        assert "MIDTERM_REVIEW_CLASS" in rendered
+        assert "review_class" in rendered
+
+
+class TestOrdinaryCIMustHaveTestedThisExactCombination:
+    """F-01. The previous check was `assert_base_is_current(pr_base_sha=...,
+    main_head_sha=...)` and its docstring said "main must not have moved past
+    the base ordinary CI actually tested" — while reading neither. Both values
+    described the world now: the PR object's `base.sha` tracks the branch, so
+    when main advanced from B1 to B2 the PR's base became B2, current main was
+    B2, and the comparison passed. The scenario it was written to catch was the
+    one scenario it could not catch."""
+
+    RUN_ID = 30857566024
+    HEAD_A = "a" * 40
+    BASE_1 = "1" * 40
+    BASE_2 = "2" * 40
+
+    def _run(self, **overrides):
+        run = {"id": self.RUN_ID, "name": "ci", "event": "pull_request",
+               "conclusion": "success", "run_attempt": 1,
+               "pull_requests": [{"head": {"sha": self.HEAD_A},
+                                  "base": {"sha": self.BASE_1}}]}
+        run.update(overrides)
+        return run
+
+    def _jobs(self, **conclusions):
+        return [{"name": name, "status": "completed",
+                 "conclusion": conclusions.get(name, "success")}
+                for name in ("test (3.12)", "image")]
+
+    def _assert(self, run=None, jobs=None, **overrides):
+        from midtermpanel.preflight import (
+            assert_triggering_ci_tested_this_exact_combination,
+        )
+        arguments = {"event_run_id": self.RUN_ID,
+                     "event_head_sha": self.HEAD_A,
+                     "current_head_sha": self.HEAD_A,
+                     "current_base_sha": self.BASE_1,
+                     "main_head_sha": self.BASE_1}
+        arguments.update(overrides)
+        return assert_triggering_ci_tested_this_exact_combination(
+            run if run is not None else self._run(),
+            jobs if jobs is not None else self._jobs(), **arguments)
+
+    def test_the_matching_combination_passes_and_reports_what_was_tested(self):
+        record = self._assert()
+        assert record["tested_head_sha"] == self.HEAD_A
+        assert record["tested_base_sha"] == self.BASE_1
+        assert record["triggering_ci_run_id"] == self.RUN_ID
+        assert record["triggering_ci_run_attempt"] == 1
+
+    def test_main_moving_after_ci_blocks_even_though_both_now_agree(self):
+        """The exact defect. CI tested B1; main is B2; the PR object's base has
+        followed main to B2. The old check compared B2 to B2 and passed."""
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(current_base_sha=self.BASE_2,
+                         main_head_sha=self.BASE_2)
+        assert "ordinary_ci_tested_a_different_combination" in \
+            caught.value.reason
+        assert "tested_base" in caught.value.reason
+
+    def test_main_moving_while_the_pr_base_lags_also_blocks(self):
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(main_head_sha=self.BASE_2)
+        assert "ordinary_ci_tested_a_different_combination" in \
+            caught.value.reason
+
+    def test_a_push_since_ci_blocks(self):
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(current_head_sha="b" * 40)
+        assert "ordinary_ci_tested_a_different_combination" in \
+            caught.value.reason
+
+    def test_the_run_read_must_be_the_run_that_fired(self):
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(run=self._run(id=999))
+        assert "triggering_run_id_mismatch" in caught.value.reason
+
+    def test_a_run_for_another_pull_request_blocks(self):
+        other = self._run(pull_requests=[{"head": {"sha": "c" * 40},
+                                          "base": {"sha": self.BASE_1}}])
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(run=other)
+        assert "ordinary_ci_tested_a_different_combination" in \
+            caught.value.reason
+
+    def test_a_run_belonging_to_no_pull_request_blocks(self):
+        """Zero means the tested base cannot be recovered at all."""
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(run=self._run(pull_requests=[]))
+        assert "pull_request_not_unique" in caught.value.reason
+
+    def test_a_run_belonging_to_several_pull_requests_blocks(self):
+        pulls = [{"head": {"sha": self.HEAD_A}, "base": {"sha": self.BASE_1}},
+                 {"head": {"sha": self.HEAD_A}, "base": {"sha": self.BASE_2}}]
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(run=self._run(pull_requests=pulls))
+        assert "pull_request_not_unique" in caught.value.reason
+
+    def test_a_push_event_run_blocks(self):
+        """A push run tests the branch tip, not the merge a pull request would
+        produce."""
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(run=self._run(event="push"))
+        assert "triggering_run_wrong_event" in caught.value.reason
+
+    def test_a_run_of_another_workflow_blocks(self):
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(run=self._run(name="something-else"))
+        assert "triggering_run_wrong_workflow" in caught.value.reason
+
+    def test_a_failed_ci_run_blocks(self):
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(run=self._run(conclusion="failure"))
+        assert "triggering_run_not_successful" in caught.value.reason
+
+    def test_test_green_but_image_red_blocks(self):
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(jobs=self._jobs(image="failure"))
+        assert "triggering_run_job_not_successful" in caught.value.reason
+
+    def test_test_green_but_image_absent_blocks(self):
+        only_test = [j for j in self._jobs() if j["name"] == "test (3.12)"]
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(jobs=only_test)
+        assert "triggering_run_missing_required_job" in caught.value.reason
+
+    def test_an_incomplete_job_is_not_a_green_one(self):
+        jobs = self._jobs()
+        jobs[0]["status"] = "in_progress"
+        jobs[0]["conclusion"] = None
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(jobs=jobs)
+        assert "triggering_run_job_not_successful" in caught.value.reason
+
+    def test_the_workflow_publishes_what_ci_tested(self):
+        document = _document()
+        outputs = document["jobs"]["preflight"]["outputs"]
+        for name in ("triggering_ci_run_id", "triggering_ci_run_attempt",
+                     "tested_base_sha", "tested_head_sha", "review_class"):
+            assert name in outputs, name
+        for job in ("count", "panel"):
+            rendered = yaml.safe_dump(document["jobs"][job])
+            assert "MIDTERM_TESTED_BASE_SHA" in rendered, job
+            assert "MIDTERM_TRIGGERING_CI_RUN_ID" in rendered, job

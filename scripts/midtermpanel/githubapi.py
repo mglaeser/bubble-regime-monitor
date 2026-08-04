@@ -91,6 +91,32 @@ class ReadOnlyGitHub:
         return [str(entry.get("filename") or "") for entry in got
                 if isinstance(entry, dict)]
 
+    def workflow_run(self, run_id: int) -> dict:
+        """The triggering run itself, by exact id.
+
+        Read because the `workflow_run` event payload says what completed but
+        the RUN says what it tested. A pull-request CI run checks out a
+        generated `refs/pull/N/merge` commit, so its green is evidence about a
+        merge of the candidate with a specific base — and that base is a fact
+        about the past, recoverable only from the run."""
+        got = self._get(f"/actions/runs/{int(run_id)}", where="workflow-run")
+        if not isinstance(got, dict):
+            refuse("category=workflow_run_response_not_an_object")
+        return got
+
+    def workflow_run_jobs(self, run_id: int) -> list:
+        """That run's own jobs, so 'CI was green' is about THIS run.
+
+        The exact-head check-run query stays as a second control, but it
+        answers a different question: it says some run reported green on this
+        commit, not that the run which triggered this panel did."""
+        got = self._get(f"/actions/runs/{int(run_id)}/jobs?per_page=100",
+                        where="workflow-run-jobs")
+        jobs = (got or {}).get("jobs")
+        if not isinstance(jobs, list):
+            refuse("category=workflow_run_jobs_response_malformed")
+        return jobs
+
     def commit_statuses(self, head_sha: str) -> list:
         """Published commit statuses on the exact head.
 

@@ -27,12 +27,13 @@ from .errors import refuse
 from .githubapi import ReadOnlyGitHub
 from .policystate import assert_state_is_consistent_with_reality, current_state
 from .preflight import (
-    assert_base_is_current,
     assert_head_is_unmoved,
     assert_ordinary_checks_green,
+    assert_triggering_ci_tested_this_exact_combination,
     assert_triggering_run,
     classify_changed_files,
     resolve_pull_request,
+    review_class_for,
 )
 from .privilegedworkflow import PERMITTED_TRIGGERS
 from .privilegedworkflow import validate as validate_workflow
@@ -48,7 +49,9 @@ WORKFLOW_RUN_ENV = ("RUN_WORKFLOW_NAME", "RUN_EVENT", "RUN_CONCLUSION",
 #: that as an error — which is how two digests arrived blank in credential-bearing
 #: jobs while every test passed.
 PUBLIC_OUTPUTS = ("proceed", "pr_number", "head_sha", "base_sha", "high_risk",
-                  "workflow_change", "engine_digest", "policy_digest")
+                  "workflow_change", "engine_digest", "policy_digest",
+                  "triggering_ci_run_id", "triggering_ci_run_attempt",
+                  "tested_base_sha", "tested_head_sha", "review_class")
 
 
 def _policy_digest(root: str) -> str:
@@ -95,8 +98,18 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
     pull = resolve_pull_request(api.open_pull_requests(), run_head_sha=run_head)
     assert_head_is_unmoved(run_head_sha=run_head,
                            current_head_sha=pull["head_sha"])
-    assert_base_is_current(pr_base_sha=pull["base_sha"],
-                           main_head_sha=api.default_branch_head())
+    # F-01. Read what ordinary CI ACTUALLY tested, out of the triggering run,
+    # rather than comparing two values that both track the branch and therefore
+    # move together.
+    tested = assert_triggering_ci_tested_this_exact_combination(
+        api.workflow_run(int(env["RUN_ID"])),
+        api.workflow_run_jobs(int(env["RUN_ID"])),
+        event_run_id=int(env["RUN_ID"]), event_head_sha=run_head,
+        current_head_sha=pull["head_sha"], current_base_sha=pull["base_sha"],
+        main_head_sha=api.default_branch_head())
+    # Second, independent control: some run reported green on this exact
+    # commit. A different question from "the run that triggered this panel was
+    # green", and worth both.
     assert_ordinary_checks_green(api.check_runs(pull["head_sha"]),
                                  head_sha=pull["head_sha"])
 
@@ -126,6 +139,13 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
         "workflow_change": bool(risk["high_risk_paths"]),
         "engine_digest": engine_digest(roles=source_roles(release)),
         "policy_digest": _policy_digest(root),
+        # Published so the count and panel jobs can bind them into evidence and
+        # the human merge gate can compare them to the world at merge time.
+        "triggering_ci_run_id": tested["triggering_ci_run_id"],
+        "triggering_ci_run_attempt": tested["triggering_ci_run_attempt"],
+        "tested_base_sha": tested["tested_base_sha"],
+        "tested_head_sha": tested["tested_head_sha"],
+        "review_class": review_class_for(pull["pr_number"]),
         "_trigger": run_record,
         "_risk": risk,
         "_state": current_state(root=root),
@@ -171,9 +191,13 @@ def _self_test() -> int:
         "does not import the provider transport": not imports_transport,
         "emits the eight required outputs": set(
             ["proceed", "pr_number", "head_sha", "base_sha", "high_risk",
-             "workflow_change", "engine_digest", "policy_digest"]) <= set(
+             "workflow_change", "engine_digest", "policy_digest",
+             "triggering_ci_run_id", "triggering_ci_run_attempt",
+             "tested_base_sha", "tested_head_sha", "review_class"]) <= set(
             ["proceed", "pr_number", "head_sha", "base_sha", "high_risk",
-             "workflow_change", "engine_digest", "policy_digest"]),
+             "workflow_change", "engine_digest", "policy_digest",
+             "triggering_ci_run_id", "triggering_ci_run_attempt",
+             "tested_base_sha", "tested_head_sha", "review_class"]),
     })
 
 

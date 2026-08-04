@@ -115,17 +115,13 @@ MIDTERM_JOB_STATUSES = ("midterm-preflight", "midterm-count",
 #: a check that cannot start. Not requirable for a different reason than
 #: INACTIVE: an inactive check passes when it should not, a diagnostic never
 #: reports at all.
-#: `midterm-panel-rerun` is DIAGNOSTIC for the same mechanical reason as
-#: `probe`, not because of anything about trust: it is `workflow_dispatch` only,
-#: so it never runs on a pull request and never reports a status on a candidate
-#: head. Requiring it would leave every PR permanently pending on a check that
-#: cannot start.
-#:
-#: It exists because the PRIVILEGED workflow may not have a dispatch trigger at
-#: all — a dispatched run executes against a selected ref, and that workflow's
-#: checkouts name no ref. This one holds no secret and only asks CI to run
-#: again, which is what starts a panel through the one safe trigger.
-DIAGNOSTIC_STATUSES = ("probe", "midterm-panel-rerun")
+#: `midterm-panel-rerun` was registered here and has been REMOVED along with
+#: its workflow. It was dispatch-only and held no secret in its committed form,
+#: but a workflow_dispatch workflow runs a BRANCH-SELECTED copy — so once a
+#: persistent repository secret exists, a branch version of it could reference
+#: that secret. Reruns go through ordinary CI instead, which needs no
+#: repository workflow at all.
+DIAGNOSTIC_STATUSES = ("probe",)
 
 #: R10. The protected engine build, which produces what the trusted lane
 #: trusts. Its own class rather than DIAGNOSTIC: a diagnostic reports on
@@ -429,14 +425,6 @@ def branch_protection_instructions() -> dict:
             "probe":
                 "workflow_dispatch only, so it never reports on a candidate "
                 "head; requiring it deadlocks every PR",
-            "midterm-panel-rerun":
-                "workflow_dispatch only, so it never reports on a candidate "
-                "head; requiring it deadlocks every PR. It exists because the "
-                "PRIVILEGED panel workflow may not have a dispatch trigger at "
-                "all — a dispatched run executes against a ref the dispatcher "
-                "selects, and that workflow's checkouts name no ref — so the "
-                "rerun lives in a workflow that holds no secret and only asks "
-                "ordinary CI to run again",
             "d1-containment-gate":
                 "internal job of a main-dispatched trusted run; its check "
                 "lands on main's commit, not on a candidate head",

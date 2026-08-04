@@ -150,14 +150,17 @@ def load_repository_path(environ: dict) -> str:
     return path
 
 
-#: The environment variable naming which cost profile this run may spend under.
-#: Deliberately required rather than defaulted: a default profile is a default
-#: budget, and the three profiles differ by a factor of twelve.
-REVIEW_TARGET_ENV = "MIDTERM_REVIEW_TARGET"
+#: The environment variable carrying the review CLASS preflight derived.
+#:
+#: A class name, not a free-form target, and preflight is what produces it —
+#: `preflight.review_class_for` maps a pull-request number to exactly one of
+#: four. Required rather than defaulted: the profiles differ by more than an
+#: order of magnitude in cost cap, so a default profile is a default budget.
+REVIEW_CLASS_ENV = "MIDTERM_REVIEW_CLASS"
 
 
 def load_pin_values(environ: dict) -> dict:
-    """The twelve PIN VALUES for THIS review target, read but not judged.
+    """The twelve PIN VALUES and the two transport ceilings for THIS class.
 
     Every individual PIN's range, type and per-model reasoning-effort support
     is `verifier.pins.validate_pins`' rule, and a second range table here would
@@ -166,11 +169,10 @@ def load_pin_values(environ: dict) -> dict:
 
     ## Why profiles rather than one global cap
 
-    The operator approved different call and cost ceilings for different review
-    targets — a synthetic range that must never generate at all, PR #29, and
-    the much larger PR #23. A single global cap has to be the largest of them
-    to let the largest run finish, which means every smaller run is protected
-    by a number chosen for a bigger one."""
+    The operator approved different ceilings for different kinds of review. A
+    single global cap has to be the largest of them to let the largest run
+    finish, which means every smaller run is protected by a number chosen for a
+    bigger one."""
     document = _read_json(environ["MIDTERM_PIN_RECORD_PATH"], what="pin_record")
     if not isinstance(document, dict):
         refuse("category=pin_record_not_an_object")
@@ -188,50 +190,96 @@ def load_pin_values(environ: dict) -> dict:
 
 
 def select_profile(document: dict, *, environ: dict) -> tuple:
-    """The exact profile for this review target, from an allowlist.
+    """The exact profile for this review class, by exact name.
 
-    The target must be NAMED in a profile's `review_targets`. Matching by
-    substring or falling back to the largest profile would make "which budget
-    applies" a property of spelling."""
-    target = str(environ.get(REVIEW_TARGET_ENV) or "").strip().lower()
+    The class must BE a profile key. No substring matching, no fallback to the
+    largest: both would make "which budget applies" a property of spelling."""
+    from .preflight import REVIEW_CLASSES
+    name = str(environ.get(REVIEW_CLASS_ENV) or "").strip()
     profiles = document.get("profiles")
     if not isinstance(profiles, dict) or not profiles:
         refuse("category=pin_record_has_no_profiles")
-    if not target:
-        refuse(f"category=review_target_not_named variable={REVIEW_TARGET_ENV} "
+    if not name:
+        refuse(f"category=review_class_not_named variable={REVIEW_CLASS_ENV} "
                f"permitted={sorted(profiles)} — the profiles differ by more "
                "than an order of magnitude in cost cap; there is no safe "
                "default")
-    matched = [name for name, profile in sorted(profiles.items())
-               if target in [str(t).lower()
-                             for t in (profile.get("review_targets") or [])]]
-    if len(matched) != 1:
-        refuse(f"category=review_target_not_uniquely_allowlisted "
-               f"target={target!r} matched={matched} "
-               f"permitted={sorted(profiles)}")
-    name = matched[0]
+    if name not in REVIEW_CLASSES:
+        refuse(f"category=review_class_unknown class={name!r} "
+               f"permitted={sorted(REVIEW_CLASSES)} — the class is derived by "
+               "preflight from the pull-request number; a name that is not one "
+               "of the four did not come from there")
+    if name not in profiles:
+        refuse(f"category=review_class_has_no_profile class={name!r} "
+               f"profiles={sorted(profiles)} — the governance document must "
+               "carry a profile for every class the code can produce, or a "
+               "real pull request refuses at spend time")
+
     overridden = document.get("profile_overridden_pins") or []
-    pins = dict(document["pins"])
+    ceilings = document.get("profile_transport_ceilings") or []
+    selected = dict(document["pins"])
     for key in overridden:
         if key not in profiles[name]:
             refuse(f"category=profile_missing_an_overridden_pin "
                    f"profile={name!r} pin={key} — the document declares this "
                    "pin profile-specific and this profile does not set it, so "
                    "the run would silently spend under another profile's cap")
-        pins[key] = profiles[name][key]
+        selected[key] = profiles[name][key]
+
+    transport = {}
+    for key in ceilings:
+        value = profiles[name].get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            refuse(f"category=profile_transport_ceiling_missing_or_invalid "
+                   f"profile={name!r} ceiling={key} observed={value!r} — these "
+                   "used to be free-standing workflow literals, and one of "
+                   "them contradicted the approved generation cap. They live "
+                   "in the profile now precisely so they cannot disagree with "
+                   "it silently")
+        transport[key] = value
+
+    _assert_transport_ceilings_agree_with_pins(selected, transport, name=name)
+
     from .evidence import digest_of
-    return pins, {
-        "profile": name,
-        "review_target": target,
+    return selected, {
+        "review_class": name,
         "overridden_pins": sorted(overridden),
-        "max_count_calls": pins["VERIFIER_MAX_COUNT_CALLS"],
-        "max_generation_calls": pins["VERIFIER_MAX_GENERATION_CALLS"],
-        "cost_cap_micro_usd": pins["VERIFIER_COST_CAP_MICRO_USD"],
+        "max_count_calls": selected["VERIFIER_MAX_COUNT_CALLS"],
+        "max_generation_calls": selected["VERIFIER_MAX_GENERATION_CALLS"],
+        "cost_cap_micro_usd": selected["VERIFIER_COST_CAP_MICRO_USD"],
+        "authorized_total_input_tokens":
+            transport["authorized_total_input_tokens"],
+        "generation_attempt_cap": transport["generation_attempt_cap"],
+        "approved_by": profiles[name].get("approved_by"),
         # Bound into the evidence, so "which budget did this run spend under"
         # is answerable from the record rather than from the file as it stands
         # today.
-        "profile_digest": digest_of({"profile": name, "pins": pins}),
+        "profile_digest": digest_of({"review_class": name, "pins": selected,
+                                     "transport": transport}),
     }
+
+
+def _assert_transport_ceilings_agree_with_pins(pins: dict, transport: dict, *,
+                                               name: str) -> None:
+    """The transport may not be allowed fewer attempts than the approved calls.
+
+    This is the check that would have caught `MIDTERM_GENERATION_ATTEMPT_CAP=60`
+    against an approved `VERIFIER_MAX_GENERATION_CALLS=80`: the plan would have
+    been priced for 80 and the panel would have stopped at 60, under a limit
+    nobody approved, reported as an exhausted budget.
+
+    A profile that forbids generating entirely is the one permitted asymmetry,
+    and it is permitted in the safe direction: zero approved calls with a
+    positive attempt cap can still never generate, because the engine refuses
+    to plan a call it has no budget for."""
+    approved_calls = pins["VERIFIER_MAX_GENERATION_CALLS"]
+    cap = transport["generation_attempt_cap"]
+    if approved_calls and cap < approved_calls:
+        refuse(f"category=transport_cap_below_approved_generation_calls "
+               f"profile={name!r} attempt_cap={cap} "
+               f"approved_calls={approved_calls} — the plan would be priced "
+               "for the approved number and the panel would stop at the lower "
+               "one, under a limit no operator wrote")
 
 
 def build_pin_record(*, engine: dict, pins: dict) -> dict:
@@ -325,6 +373,11 @@ def load_count_inputs(environ: dict) -> dict:
     return {"repository_path": load_repository_path(environ),
             "pin_values": loaded["pins"],
             "pin_profile": loaded["profile"],
+            "transport_ceilings": {
+                "authorized_total_input_tokens":
+                    loaded["profile"]["authorized_total_input_tokens"],
+                "generation_attempt_cap":
+                    loaded["profile"]["generation_attempt_cap"]},
             "pin_authority": {k: loaded[k] for k in
                               ("authority_class", "approved_by", "approved_at")},
             "challenge": load_challenge(environ)}

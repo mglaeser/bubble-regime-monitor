@@ -47,6 +47,13 @@ from . import (
     REVIEW_STATUS,
 )
 from .errors import refuse
+from .evidence import public_digest_marker
+
+#: GitHub truncates status descriptions past this length. Refused rather than
+#: truncated here: a description trimmed by the API could lose the `ev=` marker
+#: the merge gate reads, and the gate would then block a legitimate run for a
+#: reason nobody could see from the outside.
+MAX_DESCRIPTION_CHARS = 140
 
 #: Commit-status states GitHub accepts.
 STATES = ("pending", "success", "failure", "error")
@@ -202,10 +209,26 @@ def publish(request: dict, *, opener, token: str) -> dict:
     url = (f"https://api.github.com/repositories/"
            f"{request['repository_numeric_id']}/statuses/"
            f"{request['candidate_head_sha']}")
+    # The description is the ONLY field GitHub will show a human, and it is the
+    # only place a digest can travel. `status_request` has always accepted an
+    # `evidence_sha256`; this used to drop it, so the digest existed inside the
+    # process and nowhere a reader could see it — and the human merge gate then
+    # searched the published description for a string nothing had put there,
+    # which meant a real successful run could not pass its own gate.
+    description = request["description"]
+    if request.get("evidence_sha256"):
+        marker = public_digest_marker(request["evidence_sha256"])
+        if marker not in description:
+            description = f"{description} {marker}"
+    if len(description) > MAX_DESCRIPTION_CHARS:
+        refuse(f"category=status_description_too_long chars={len(description)} "
+               f"limit={MAX_DESCRIPTION_CHARS} — GitHub truncates, and a "
+               "truncated description can lose the evidence marker the merge "
+               "gate reads")
     body = json.dumps({
         "state": request["state"],
         "context": request["context"],
-        "description": request["description"],
+        "description": description,
         "target_url": request["target_url"],
     }).encode("utf-8")
     # S310: the URL is not caller-supplied. It is an f-string over a fixed
@@ -232,6 +255,8 @@ def publish(request: dict, *, opener, token: str) -> dict:
         refuse(f"category=status_publish_unexpected_code http_status={code}")
     return {"context": request["context"], "state": request["state"],
             "candidate_head_sha": request["candidate_head_sha"],
+            "description": description,
+            "evidence_sha256": request.get("evidence_sha256"),
             "http_status": code}
 
 

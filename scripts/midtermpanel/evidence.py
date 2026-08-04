@@ -238,3 +238,92 @@ def count_evidence(**kwargs) -> dict:
 
 def panel_evidence(**kwargs) -> dict:
     return build(evidence_class=PANEL_EVIDENCE_CLASS, **kwargs)
+
+
+#: How much of the evidence self-digest travels in the public status
+#: description. Sixteen hex characters: enough that a human comparing it to a
+#: retained file is not guessing, short enough to leave room for a description
+#: that still reads as English.
+PUBLIC_DIGEST_PREFIX_CHARS = 16
+PUBLIC_DIGEST_MARKER = "ev="
+
+#: Largest private plan or evidence document these loaders will parse. The real
+#: plan carries every final unit and batch, so this is generous; it exists so a
+#: pathological file is a named refusal rather than a memory event in a job
+#: holding a credential.
+MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
+
+
+def public_digest_marker(evidence_sha256: str) -> str:
+    """The `ev=<16 hex>` fragment a terminal status carries.
+
+    Without this the merge gate's evidence binding could not succeed at all:
+    `status_request` accepted an `evidence_sha256` and `publish` never sent it,
+    so the digest existed inside the process and nowhere a reader could see it.
+    The gate then searched the published description for a string that was
+    never put there, which meant a real successful run could not pass its own
+    merge gate."""
+    if not isinstance(evidence_sha256, str) or len(evidence_sha256) != 64:
+        refuse("category=public_digest_marker_needs_a_full_digest")
+    return f"{PUBLIC_DIGEST_MARKER}{evidence_sha256[:PUBLIC_DIGEST_PREFIX_CHARS]}"
+
+
+def strict_load_plan(path: str, *, expected_head: str = None,
+                     expected_base: str = None,
+                     expected_engine_digest: str = None,
+                     expected_policy_digest: str = None) -> dict:
+    """The private executable plan, loaded with the same strictness as evidence.
+
+    The plan was read with a plain `json.loads` and then validated as a mapping.
+    Ordinary `json.loads` accepts duplicate keys and keeps the last, so a plan
+    declaring `execution_challenge` twice — or `human_merge_required` twice —
+    parses, validates, and carries whichever copy came last. Every field in this
+    document is security-relevant: it decides which requests are sent, under
+    whose challenge, against which pins.
+
+    `count.assert_plan_is_executable` still owns the semantic rules. This owns
+    getting the bytes into a mapping without losing anything on the way."""
+    if not os.path.exists(path):
+        refuse(f"category=plan_missing path={os.path.basename(path)}")
+
+    def _no_duplicates(pairs):
+        seen = {}
+        for key, value in pairs:
+            if key in seen:
+                refuse(f"category=plan_duplicate_key key={key!r} — the plan "
+                       "decides which requests are sent and under whose "
+                       "challenge; a document declaring a field twice parses "
+                       "and silently keeps the last one")
+            seen[key] = value
+        return seen
+
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        refuse(f"category=plan_unreadable path={os.path.basename(path)} "
+               f"exception_class={type(exc).__name__}")
+    if len(raw) > MAX_EVIDENCE_BYTES:
+        refuse(f"category=plan_oversized bytes={len(raw)} "
+               f"limit={MAX_EVIDENCE_BYTES}")
+    try:
+        plan = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates)
+    except UnicodeDecodeError:
+        refuse("category=plan_not_utf8")
+    except json.JSONDecodeError as exc:
+        refuse(f"category=plan_not_json line={exc.lineno} column={exc.colno}")
+
+    from .count import assert_plan_is_executable
+    assert_plan_is_executable(plan)
+
+    mismatches = []
+    for field, expected in (("candidate_head_sha", expected_head),
+                            ("candidate_base_sha", expected_base),
+                            ("engine_digest", expected_engine_digest),
+                            ("policy_digest", expected_policy_digest)):
+        if expected is not None and plan.get(field) != expected:
+            mismatches.append(f"{field}: plan={str(plan.get(field))[:16]} "
+                              f"expected={str(expected)[:16]}")
+    if mismatches:
+        refuse(f"category=plan_is_for_another_review found={mismatches}")
+    return plan

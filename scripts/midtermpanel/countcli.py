@@ -53,7 +53,7 @@ def perform(environ: dict, *, core, transport, opener, engine=None,
             engine_identity=None, skeleton=None, governed_policies=None,
             authorizations=None, challenge: str = None,
             repository_path: str = None, pin_profile=None,
-            pin_authority=None) -> dict:
+            pin_authority=None, already_published=None) -> dict:
     """Package the engine's core result, persist it, publish terminal status.
 
     `core` is what `enginebridge.prepare_review_plan_core` returned. This
@@ -71,11 +71,13 @@ def perform(environ: dict, *, core, transport, opener, engine=None,
         "https://github.com/mglaeser/bubble-regime-monitor/actions/runs/"
         f"{run_id}")
 
-    published = []
-    published.append(publish(
-        pending(candidate_head_sha=head, context=COUNT_STATUS,
-                target_url=target, run_id=run_id, run_attempt=attempt),
-        opener=opener, token=env["GITHUB_TOKEN"]))
+    # `pending` is NOT published here. `main` publishes it before the first
+    # provider-capable operation, and this function runs after the count. The
+    # module docstring used to claim pending came first while the executable
+    # order was the reverse: a timeout during the first count left no visible
+    # unfinished check, and money could be spent before the pull request said
+    # counting had begun.
+    published = list(already_published or ())
 
     counted = counted_from_core(core, policy_digest=env["MIDTERM_POLICY_DIGEST"],
                                 transport=transport, engine=engine)
@@ -109,6 +111,17 @@ def perform(environ: dict, *, core, transport, opener, engine=None,
               # Which budget this run spent under, and on whose authority.
               "pin_profile": pin_profile,
               "pin_authority": pin_authority,
+              # What ordinary CI actually tested, carried from preflight. The
+              # merge gate compares these to the world at merge time, so a
+              # panel that reviewed a combination CI never ran cannot be
+              # merged on its own green.
+              "triggering_ci_run_id": environ.get("MIDTERM_TRIGGERING_CI_RUN_ID"),
+              "triggering_ci_run_attempt":
+                  environ.get("MIDTERM_TRIGGERING_CI_RUN_ATTEMPT"),
+              "tested_base_sha": environ.get("MIDTERM_TESTED_BASE_SHA"),
+              "tested_head_sha": environ.get("MIDTERM_TESTED_HEAD_SHA"),
+              "panel_run_id": run_id,
+              "panel_run_attempt": attempt,
               "literal_authorizations": authorizations,
               "plan_sha256": plan["plan_sha256"]})
 
@@ -134,14 +147,16 @@ def perform(environ: dict, *, core, transport, opener, engine=None,
             "repository_path": repository_path}
 
 
-def count_through_engine(environ: dict, *, mode: str, opener,
-                         transport_factory) -> dict:
-    """Load the approved engine, build the skeleton, count. One transport.
+def prepare_count_context(environ: dict, *, mode: str) -> dict:
+    """Everything before the first provider-capable operation. NO transport.
 
-    Written as one function taking its capabilities as parameters so the
-    fake-provider vertical runs THIS code rather than a copy of it. The only
-    difference between a dry run and a provider-backed run is `mode` and what
-    `transport_factory` returns."""
+    Split out of the old `count_through_engine` so that
+    `midterm-panel-count = pending` can be published between preparation and
+    the first count call. Nothing in here can reach a socket: the engine is
+    built from local git objects, the skeleton is derived from the repository,
+    and the policy digests are pure functions of the panel and the pins.
+
+    That split is the whole point of the split — see `main`."""
     from trustedlane import enginebridge
 
     from . import inputs
@@ -179,36 +194,80 @@ def count_through_engine(environ: dict, *, mode: str, opener,
     # authored as TEST_FIXTURE_UNAUTHORIZED rather than as an approval.
     pin_record = inputs.build_pin_record(engine=engine,
                                          pins=loaded["pin_values"])
-
     governed = enginebridge.governed_policy_digests(
         engine, pin_values=pin_record["pins"])
 
-    # ONE transport, for the whole count path. §8: the previous version built a
-    # fresh one for the core and another for the accounting, so the totals the
-    # evidence reported were a different object's totals from the ones that were
-    # spent — and they agreed with each other, which is why nothing noticed.
-    transport = transport_factory(engine)
-    core = enginebridge.prepare_review_plan_core(
-        engine, skeleton=skeleton, repository_path=loaded["repository_path"],
-        pin_record=pin_record, transport=transport,
-        authorizations=authorizations, challenge=loaded["challenge"])
-    governed_match = enginebridge.assert_core_used_the_governed_policies(
-        core, governed=governed)
-    return {"engine": engine, "engine_identity": opened, "core": core,
+    return {"engine": engine, "engine_identity": opened, "skeleton": skeleton,
+            "pin_record": pin_record, "governed": governed,
+            "authorizations": authorizations,
+            "authorization_record": authorization_record,
             "pin_profile": loaded["pin_profile"],
             "pin_authority": loaded["pin_authority"],
-            "skeleton": skeleton, "transport": transport,
-            "governed_policies": governed_match,
-            "authorizations": authorization_record,
+            "transport_ceilings": loaded["transport_ceilings"],
             "challenge": loaded["challenge"],
-            "repository_path": loaded["repository_path"], "opener": opener}
+            "repository_path": loaded["repository_path"]}
+
+
+def execute_count_context(context: dict, *, transport_factory) -> dict:
+    """The first provider-capable operation, and the only one in the count job.
+
+    ONE transport, for the whole count path: an earlier version built a fresh
+    one for the core and another for the accounting, so the totals the evidence
+    reported were a different object's totals from the ones that were spent —
+    and they agreed with each other, which is why nothing noticed."""
+    from trustedlane import enginebridge
+
+    transport = transport_factory(context["engine"])
+    core = enginebridge.prepare_review_plan_core(
+        context["engine"], skeleton=context["skeleton"],
+        repository_path=context["repository_path"],
+        pin_record=context["pin_record"], transport=transport,
+        authorizations=context["authorizations"],
+        challenge=context["challenge"])
+    governed_match = enginebridge.assert_core_used_the_governed_policies(
+        core, governed=context["governed"])
+    return {"engine": context["engine"],
+            "engine_identity": context["engine_identity"],
+            "core": core, "skeleton": context["skeleton"],
+            "transport": transport, "governed_policies": governed_match,
+            "authorizations": context["authorization_record"],
+            "pin_profile": context["pin_profile"],
+            "pin_authority": context["pin_authority"],
+            "challenge": context["challenge"],
+            "repository_path": context["repository_path"]}
+
+
+def count_through_engine(environ: dict, *, mode: str, opener,
+                         transport_factory) -> dict:
+    """Prepare, then execute. Kept for callers that do not publish a status.
+
+    `opener` is accepted and returned so the CLI can hand the whole result to
+    `perform` verbatim; nothing here uses it."""
+    context = prepare_count_context(environ, mode=mode)
+    return {**execute_count_context(context,
+                                    transport_factory=transport_factory),
+            "opener": opener}
 
 
 def main() -> None:
     """Obtain the engine, count through it, package the result.
 
-    Every dangerous capability is obtained here and injected downward, so
-    `perform` stays drivable by a stand-in provider and a fake opener."""
+    The ORDER is the finding this function exists to fix. Every dangerous
+    capability is still obtained here and injected downward, but `pending` is
+    now published between preparation and the first provider-capable operation:
+
+        validate env and identity
+        prepare (engine, skeleton, pins, policies — no transport)
+        PUBLISH count pending
+        obtain the credential
+        first provider count
+        write and validate plan and evidence
+        publish count terminal
+
+    Before this, `perform` published pending after the engine had already
+    counted. A timeout during the first count therefore left no visible
+    unfinished check, and money could be spent before the pull request said
+    counting had begun."""
     import urllib.request
 
     from . import dryrun
@@ -216,39 +275,60 @@ def main() -> None:
     from .transport import live_count_transport, read_provider_key
 
     environ = dict(os.environ)
-
-    if dryrun.is_dry_run(environ):
-        # The SAME function, the same engine, the same core call. Two objects
-        # differ: a stand-in transport that cannot reach a socket, and a status
-        # opener that writes a file. Everything the provider path does between
-        # them is the code that runs here.
+    dry = dryrun.is_dry_run(environ)
+    mode = MODE_DRY_RUN if dry else MODE_PROVIDER
+    if dry:
         dryrun.assert_no_credential_is_present(environ)
         sink = dryrun.status_sink(environ)
-        counted = count_through_engine(
-            environ, mode=MODE_DRY_RUN, opener=sink,
-            transport_factory=dryrun.count_transport_factory(environ))
-        environ.setdefault("MIDTERM_ENGINE_DIGEST",
-                           counted["engine_identity"]["engine_source_digest"])
-        outcome = perform(environ, **counted)
+        opener = sink
+    else:
+        sink = None
+        opener = urllib.request.urlopen
+
+    # 1. Everything local. Nothing here can reach a socket.
+    context = prepare_count_context(environ, mode=mode)
+    environ.setdefault("MIDTERM_ENGINE_DIGEST",
+                       context["engine_identity"]["engine_source_digest"])
+
+    # 2. Pending, BEFORE any capability that could spend.
+    env = require_env(environ, REQUIRED, where="countcli")
+    head = env["CANDIDATE_HEAD_SHA"]
+    run_id = int(env["GITHUB_RUN_ID"])
+    attempt = int(env["GITHUB_RUN_ATTEMPT"])
+    target = environ.get("MIDTERM_RUN_URL") or (
+        "https://github.com/mglaeser/bubble-regime-monitor/actions/runs/"
+        f"{run_id}")
+    published = [publish(
+        pending(candidate_head_sha=head, context=COUNT_STATUS,
+                target_url=target, run_id=run_id, run_attempt=attempt),
+        opener=opener, token=env["GITHUB_TOKEN"])]
+
+    # 3. Only now is a provider-capable transport constructed. The ceilings
+    #    come from the selected operator profile, never from a workflow literal.
+    ceilings = context["transport_ceilings"]
+    if dry:
+        factory = dryrun.count_transport_factory(environ)
+    else:
+        key = read_provider_key(environ)
+
+        def factory(engine):
+            return live_count_transport(
+                engine, opener=urllib.request.urlopen, key=key,
+                authorized_input_tokens=ceilings[
+                    "authorized_total_input_tokens"])
+
+    counted = execute_count_context(context, transport_factory=factory)
+    outcome = perform(environ, opener=opener, already_published=published,
+                      **counted)
+
+    if dry:
         proof = dryrun.record(environ, sink=sink,
                               transport=counted["transport"])
         print(json.dumps({"dry_run": proof,
                           "counted": outcome["counted"],
+                          "pin_profile": context["pin_profile"],
                           "plan_sha256": outcome["plan"]["plan_sha256"]},
                          indent=2, sort_keys=True, default=str))
-        return
-
-    key = read_provider_key(environ)
-    ceiling = require_positive_int(environ, "MIDTERM_AUTHORIZED_INPUT_TOKENS")
-
-    counted = count_through_engine(
-        environ, mode=MODE_PROVIDER, opener=urllib.request.urlopen,
-        transport_factory=lambda engine: live_count_transport(
-            engine, opener=urllib.request.urlopen, key=key,
-            authorized_input_tokens=ceiling))
-    environ.setdefault("MIDTERM_ENGINE_DIGEST",
-                       counted["engine_identity"]["engine_source_digest"])
-    perform(environ, **counted)
 
 
 def require_positive_int(environ: dict, name: str) -> int:

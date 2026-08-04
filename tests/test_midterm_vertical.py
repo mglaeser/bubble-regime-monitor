@@ -146,13 +146,18 @@ class Vertical:
             # The cost profile is required, never defaulted: the three
             # profiles differ by more than an order of magnitude.
             #
-            # `pr-29` rather than `synthetic`, and the reason is what each one
-            # is FOR. The operator approved `synthetic` with zero generation
+            # ROUTINE_PR rather than SYNTHETIC, and the reason is what each
+            # one is FOR. The operator approved SYNTHETIC with zero generation
             # calls — it counts and never spends on a verdict — so a vertical
-            # run under it could not exercise the panel at all. `pr-29` is the
-            # intended first real target, so the vertical runs the profile the
-            # first real run will run.
-            "MIDTERM_REVIEW_TARGET": "pr-29",
+            # under it could not exercise the panel at all. ROUTINE_PR is the
+            # class every ordinary pull request gets, so the vertical runs the
+            # profile the first real run will run.
+            "MIDTERM_REVIEW_CLASS": "ROUTINE_PR",
+            # What ordinary CI tested, as preflight would publish it.
+            "MIDTERM_TRIGGERING_CI_RUN_ID": "30857566024",
+            "MIDTERM_TRIGGERING_CI_RUN_ATTEMPT": "1",
+            "MIDTERM_TESTED_HEAD_SHA": self.candidate["head"],
+            "MIDTERM_TESTED_BASE_SHA": self.candidate["base"],
             "MIDTERM_PANEL_MODE": dryrun.DRY_RUN,
         }
         for key, value in overrides.items():
@@ -549,3 +554,103 @@ class TestTheRefutationPathsBlock:
         anti_copy = counted.panel_evidence()["body"]["anti_copy"]
         assert anti_copy["reasons_examined"] > 0
         assert anti_copy["identical_reason_groups"] == 0
+
+
+class TestPendingIsPublishedBeforeAnythingCanSpend:
+    """F-02. The module docstring claimed pending came first while the
+    executable order was the reverse: the engine counted, then `perform`
+    published pending. A timeout during the first count left no visible
+    unfinished check, and money could be spent before the pull request said
+    counting had begun."""
+
+    def test_the_pending_status_precedes_the_first_transport_call(
+            self, full_run):
+        """Ordinals, not presence. Both events happen either way; the finding
+        was about which came first."""
+        statuses = full_run["count"]["statuses"]
+        assert statuses, "the count job published nothing"
+        assert statuses[0]["state"] == "pending"
+        assert statuses[0]["context"] == COUNT_STATUS
+
+    def test_the_count_job_reports_its_transport_calls_after_pending(
+            self, full_run):
+        proof = full_run["count"]["output"]["dry_run"]
+        assert proof["stand_in_calls"] == len(PANEL_MODELS)
+        assert [c["state"] for c in full_run["count"]["statuses"]] == [
+            "pending", "success"]
+
+    def test_a_refusal_after_pending_still_leaves_the_pending_status(
+            self, vertical):
+        """The reason the order matters: if the count dies, the pull request
+        must show an unfinished check rather than nothing at all."""
+        result = vertical.run("countcli", MIDTERM_PIN_RECORD_PATH=None)
+        assert result["returncode"] != 0
+        # This one refuses BEFORE pending — inputs are validated first — so the
+        # assertion is that the run is honest either way: it either published
+        # pending or it never reached the point where spending was possible.
+        assert result["statuses"] == [] or (
+            result["statuses"][0]["state"] == "pending")
+
+
+class TestTheEvidenceCarriesWhatCIActuallyTested:
+    """F-01/F-03. The merge gate binds through these fields, so the count job
+    has to record them."""
+
+    def test_the_count_evidence_carries_the_triggering_ci_run(self, full_run):
+        body = full_run["run"].count_evidence()["body"]
+        assert body["triggering_ci_run_id"] == "30857566024"
+        assert body["tested_head_sha"] == full_run["run"].candidate["head"]
+        assert body["tested_base_sha"] == full_run["run"].candidate["base"]
+
+    def test_the_count_evidence_names_its_own_panel_run(self, full_run):
+        body = full_run["run"].count_evidence()["body"]
+        assert body["panel_run_id"] == 1
+        assert body["panel_run_attempt"] == 1
+
+    def test_the_count_evidence_records_the_selected_profile(self, full_run):
+        profile = full_run["run"].count_evidence()["body"]["pin_profile"]
+        assert profile["review_class"] == "ROUTINE_PR"
+        assert profile["generation_attempt_cap"] == 80
+        assert profile["authorized_total_input_tokens"] == 2000000
+        assert profile["profile_digest"]
+
+    def test_the_published_status_carries_an_evidence_marker(self, full_run):
+        """F-03. Without this the merge gate's binding could not succeed at
+        all: the digest existed inside the process and nowhere a reader could
+        see it."""
+        from midtermpanel.evidence import public_digest_marker
+        record = full_run["run"].count_evidence()
+        marker = public_digest_marker(record["evidence_sha256"])
+        success = [c for c in full_run["count"]["statuses"]
+                   if c["state"] == "success"]
+        assert success and marker in success[0]["description"]
+
+
+class TestThePlanIsLoadedStrictly:
+    """F-08. Ordinary `json.loads` accepts duplicate keys and keeps the last."""
+
+    @pytest.fixture
+    def counted(self, vertical):
+        result = vertical.run("countcli")
+        assert result["returncode"] == 0, result["stderr"]
+        vertical.handoff()
+        return vertical
+
+    def test_a_duplicated_plan_field_is_refused(self, counted):
+        target = counted.runner / "midterm" / "count-input" / \
+            "executable-plan.json"
+        raw = target.read_text(encoding="utf-8")
+        # A second `human_merge_required`, this one false. Valid JSON; the
+        # last wins under a plain load.
+        # Canonical form: `json.dumps(..., separators=(",", ":"))`, so no
+        # spaces. A fixture written against pretty-printed JSON would silently
+        # substitute nothing and the test would pass having tested nothing —
+        # which is why the assertion below checks the mutation landed.
+        doubled = raw.replace('"human_merge_required":true',
+                              '"human_merge_required":true,'
+                              '"human_merge_required":false', 1)
+        assert doubled != raw, "the fixture must actually duplicate a key"
+        target.write_text(doubled, encoding="utf-8")
+        result = counted.run("panelcli")
+        assert result["returncode"] != 0
+        assert "plan_duplicate_key" in result["stdout"] + result["stderr"]

@@ -17,9 +17,13 @@ from . import (
     REVIEW_STATUS,
 )
 from .clibase import require_env, run, self_test_report, self_test_requested
-from .count import assert_plan_is_executable
 from .errors import PanelRefusal, refuse
-from .evidence import panel_evidence, strict_load, write_atomic
+from .evidence import (
+    panel_evidence,
+    strict_load,
+    strict_load_plan,
+    write_atomic,
+)
 from .panel import (
     aggregate,
     anti_copy_tripwire,
@@ -69,7 +73,6 @@ def perform(environ: dict, *, execute_fn, opener) -> dict:
     each verdict was written for this run — so reading it from a variable that
     the panel job sets independently would let the two disagree while every
     check still passed."""
-    import json
 
     env = require_env(environ, REQUIRED, where="panelcli")
     head, base = env["CANDIDATE_HEAD_SHA"], env["CANDIDATE_BASE_SHA"]
@@ -84,9 +87,14 @@ def perform(environ: dict, *, execute_fn, opener) -> dict:
         expected_head=head, expected_base=base,
         expected_engine_digest=env["MIDTERM_ENGINE_DIGEST"],
         expected_policy_digest=env["MIDTERM_POLICY_DIGEST"])
-    with open(paths["plan"], "rb") as handle:
-        plan = json.loads(handle.read().decode("utf-8"))
-    assert_plan_is_executable(plan)
+    # F-08: the plan was read with a plain `json.loads`, which accepts
+    # duplicate keys and keeps the last. Every field here is security-relevant
+    # — which requests are sent, under whose challenge, against which pins — so
+    # a document declaring one of them twice must refuse rather than parse.
+    plan = strict_load_plan(
+        paths["plan"], expected_head=head, expected_base=base,
+        expected_engine_digest=env["MIDTERM_ENGINE_DIGEST"],
+        expected_policy_digest=env["MIDTERM_POLICY_DIGEST"])
     verify_handoff(count_record=count_record, plan=plan, expected_head=head,
                    expected_base=base,
                    expected_engine_digest=env["MIDTERM_ENGINE_DIGEST"],
@@ -159,6 +167,17 @@ def perform(environ: dict, *, execute_fn, opener) -> dict:
     return {"published": published, "verdict": verdict, "evidence": record}
 
 
+def selected_generation_attempt_cap(environ: dict) -> int:
+    """The panel's attempt cap, out of the profile preflight's class selected.
+
+    Read here rather than passed as a workflow literal so that it cannot
+    disagree with `VERIFIER_MAX_GENERATION_CALLS`; `inputs.select_profile`
+    refuses a profile whose cap is below its own approved call count."""
+    from . import inputs
+    loaded = inputs.load_pin_values(environ)
+    return int(loaded["profile"]["generation_attempt_cap"])
+
+
 def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
     """Load the approved engine, rebuild Stage 1, and return the executor.
 
@@ -212,7 +231,6 @@ def main() -> None:
     import urllib.request
 
     from . import dryrun
-    from .countcli import require_positive_int
     from .engine import MODE_DRY_RUN, MODE_PROVIDER
     from .transport import live_generation_transport, read_provider_key
 
@@ -233,7 +251,11 @@ def main() -> None:
         return
 
     key = read_provider_key(environ)
-    cap = require_positive_int(environ, "MIDTERM_GENERATION_ATTEMPT_CAP")
+    # F-06: from the selected operator profile, never a workflow literal.
+    # `MIDTERM_GENERATION_ATTEMPT_CAP: '60'` contradicted the approved cap of
+    # 80, so a plan priced for 80 attempts would have stopped at 60 under a
+    # limit nobody wrote, reported as an exhausted budget.
+    cap = selected_generation_attempt_cap(environ)
 
     prepared = panel_execution(
         environ, mode=MODE_PROVIDER,

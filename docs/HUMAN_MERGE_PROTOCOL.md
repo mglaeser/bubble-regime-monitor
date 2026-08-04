@@ -74,8 +74,9 @@ The gate refuses to print or validate a command containing either.
        --reviewed-head <sha> \
        --expected-base <base sha the panel counted against> \
        --panel-run-id <Actions run id of the privileged panel run> \
-       --count-evidence-sha256 <digest of the count evidence you kept> \
-       --panel-evidence-sha256 <digest of the panel evidence you kept> \
+       --count-evidence <path to the count-evidence.json you kept> \
+       --executable-plan <path to the executable-plan.json you kept> \
+       --panel-evidence <path to the panel-evidence.json you kept> \
        [--human-approval <path>]
    ```
 
@@ -96,6 +97,19 @@ The gate refuses to print or validate a command containing either.
    definition and checkout trusted — with both credential-bearing jobs
    successful; it requires each green status to point at that run; and it
    requires the statuses to name the evidence digests you actually hold.
+
+   **Why files and not digests.** An earlier version took two digest strings
+   and searched the status descriptions for them. It could never have passed:
+   `publish` dropped the digest, so nothing was ever published to find. And
+   even published, a typed hex string proves you can type a digest, not that
+   you hold the record. The gate now strict-loads the actual files —
+   duplicate-key rejection, self-digest recomputed — and compares the `ev=`
+   marker each status published against what it recomputed from your copy.
+
+   **What the binding chain proves.** panel run → count evidence → panel
+   evidence → triggering CI run → the base and head CI actually tested → the
+   base and head being merged. A break anywhere means the review being merged
+   is not the review that was run.
 
    `--human-approval` is required when the pull request touches
    `.github/workflows/`, `.github/actions/`, `scripts/trustedlane/` or

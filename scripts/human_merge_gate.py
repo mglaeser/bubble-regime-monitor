@@ -227,23 +227,30 @@ def assert_ordinary_checks_are_green(head_sha: str, *, token: str,
         refuse(exc.reason)
 
 
-def assert_panel_run_is_real(run_id: int, *, head_sha: str, base_sha: str,
-                             token: str, opener=None) -> dict:
-    """A privileged run, from the default branch, that produced these statuses.
+def assert_panel_run_is_real(run_id: int, *, token: str,
+                             opener=None) -> dict:
+    """A privileged run, from the default branch, that could have produced these
+    statuses.
 
     ## Why a green status is not enough
 
     A commit status is not self-authenticating. In a one-repository
     architecture any workflow holding `statuses: write` can post
     `midterm-panel-count = success`, and the creator still shows as
-    `github-actions[bot]`. The old gate accepted exactly that.
+    `github-actions[bot]`.
 
-    So the human names the run, and this proves the run is the privileged
-    workflow: its path is the deployed file, its event is `workflow_run` (the
-    only trigger that workflow now has), and its head branch is the default
-    branch — which is what makes its definition and checkout trusted. A run of
-    the same name from a pull-request branch fails all three.
-    """
+    ## What this deliberately no longer does
+
+    It used to accept `head_sha` and `base_sha` and return them as
+    `expected_head_sha` / `expected_base_sha` — restating caller input under
+    names that read like observations. The run cannot confirm them anyway: a
+    `workflow_run` panel runs on MAIN, so its own `head_sha` is main's commit,
+    not the candidate's. Candidate identity is proved from the run's EVIDENCE,
+    in `load_and_bind_evidence`.
+
+    It also reported `triggering_actor.id` under the name `triggering_run_id`.
+    That is a user id. A field named for one kind of thing while holding
+    another is worse than a missing field, because it reads as a check."""
     run = _get(f"/repositories/{REPOSITORY_NUMERIC_ID}/actions/runs/{run_id}",
                token=token, opener=opener)
     problems = []
@@ -282,15 +289,16 @@ def assert_panel_run_is_real(run_id: int, *, head_sha: str, base_sha: str,
             refuse(f"category=panel_run_job_not_successful job={name!r} "
                    f"conclusion={job.get('conclusion')!r} run_id={run_id}")
 
-    # The statuses must point AT this run. A status whose target_url names a
-    # different run is a status somebody else posted about somebody else's work.
+    attempt = run.get("run_attempt")
     return {"run_id": run_id, "path": run.get("path"),
             "event": run.get("event"), "head_branch": run.get("head_branch"),
-            "run_attempt": run.get("run_attempt"),
-            "triggering_run_id": (run.get("triggering_actor") or {}).get("id"),
+            "run_attempt": attempt if isinstance(attempt, int) else 1,
             "jobs": {name: by_name[name].get("conclusion")
                      for name in REQUIRED_PANEL_JOBS},
-            "expected_head_sha": head_sha, "expected_base_sha": base_sha}
+            "observed": ("workflow path, event, head branch and job "
+                         "conclusions, read from the run. Candidate identity "
+                         "is not observable here — a workflow_run panel runs "
+                         "on main — and is proved from the evidence instead")}
 
 
 def assert_statuses_point_at_the_run(statuses: dict, *, run_id: int) -> dict:
@@ -311,36 +319,112 @@ def assert_statuses_point_at_the_run(statuses: dict, *, run_id: int) -> dict:
     return {"statuses_point_at_run": run_id}
 
 
-def assert_evidence_digests_match(statuses: dict, *, count_evidence_sha256: str,
-                                  panel_evidence_sha256: str) -> dict:
-    """The published statuses must name the evidence the operator retained.
+def load_and_bind_evidence(*, count_evidence_path: str, plan_path: str,
+                           panel_evidence_path: str, head_sha: str,
+                           base_sha: str, panel_run: dict,
+                           statuses: dict) -> dict:
+    """Strict-load the real records and bind every identity through them.
 
-    The count status carries its evidence digest; the panel status carries its
-    own. Comparing them to the files the operator actually has is what binds
-    "a run happened" to "this is what it produced"."""
-    expected = {COUNT_STATUS: assert_artifact_digest(count_evidence_sha256,
-                                                     field="--count-evidence-sha256"),
-                REVIEW_STATUS: assert_artifact_digest(panel_evidence_sha256,
-                                                      field="--panel-evidence-sha256")}
-    mismatched = {}
-    for name, digest in expected.items():
-        description = str((statuses.get(name) or {}).get("description") or "")
-        if digest[:16] not in description and digest not in description:
-            mismatched[name] = description[:80]
-    if mismatched:
-        refuse(f"category=evidence_digest_not_in_status statuses={mismatched} "
-               "— the operator's retained evidence is not the evidence these "
-               "statuses were published for")
-    return {"count_evidence_sha256": expected[COUNT_STATUS],
-            "panel_evidence_sha256": expected[REVIEW_STATUS]}
+    ## Why files rather than digest strings
 
+    The previous gate took `--count-evidence-sha256` and searched the published
+    status descriptions for that string. Two things were wrong. The
+    descriptions never carried a digest at all — `publish` dropped the field —
+    so a real successful run could not pass its own gate. And even with the
+    digest published, accepting a caller-supplied hex string proves the caller
+    can type a digest, not that they hold or validated the record.
 
-def assert_artifact_digest(value, *, field: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-            c not in "0123456789abcdef" for c in value):
-        refuse(f"category=malformed_digest field={field} — expected 64 "
-               "lower-case hex characters")
-    return value
+    So the gate loads the actual files, recomputes their self-digests through
+    `evidence.strict_load` and `evidence.strict_load_plan`, and compares the
+    `ev=` marker in each published status against what it recomputed.
+
+    ## The binding chain
+
+        panel run id/attempt
+          -> count evidence run id/attempt
+          -> panel evidence run id/attempt
+          -> triggering CI run id/attempt
+          -> tested base/head
+          -> current PR base/head
+
+    Every link is an equality between two documents, and a break anywhere means
+    the review being merged is not the review that was run."""
+    from midtermpanel import COUNT_EVIDENCE_CLASS, PANEL_EVIDENCE_CLASS
+    from midtermpanel.evidence import (
+        public_digest_marker,
+        strict_load,
+        strict_load_plan,
+    )
+
+    try:
+        count = strict_load(count_evidence_path,
+                            expected_class=COUNT_EVIDENCE_CLASS,
+                            expected_head=head_sha, expected_base=base_sha)
+        panel = strict_load(panel_evidence_path,
+                            expected_class=PANEL_EVIDENCE_CLASS,
+                            expected_head=head_sha, expected_base=base_sha)
+        plan = strict_load_plan(plan_path, expected_head=head_sha,
+                                expected_base=base_sha)
+    except PanelRefusal as exc:
+        refuse(exc.reason)
+
+    count_body = count.get("body") or {}
+    panel_body = panel.get("body") or {}
+    problems = []
+
+    if count_body.get("plan_sha256") != plan["plan_sha256"]:
+        problems.append("count evidence names a different plan")
+    if panel_body.get("plan_sha256") != plan["plan_sha256"]:
+        problems.append("panel evidence names a different plan")
+
+    for label, body in (("count", count_body), ("panel", panel_body)):
+        if body.get("panel_run_id") != panel_run["run_id"]:
+            problems.append(f"{label} evidence run id "
+                            f"{body.get('panel_run_id')!r} != named run "
+                            f"{panel_run['run_id']}")
+        if body.get("panel_run_attempt") != panel_run["run_attempt"]:
+            problems.append(f"{label} evidence run attempt "
+                            f"{body.get('panel_run_attempt')!r} != "
+                            f"{panel_run['run_attempt']}")
+
+    for field in ("triggering_ci_run_id", "triggering_ci_run_attempt",
+                  "tested_base_sha", "tested_head_sha"):
+        if str(count_body.get(field)) != str(panel_body.get(field)):
+            problems.append(f"count and panel disagree about {field}")
+
+    if str(count_body.get("tested_head_sha")) != head_sha:
+        problems.append("tested head is not the head being merged")
+    if str(count_body.get("tested_base_sha")) != base_sha:
+        problems.append("tested base is not the base being merged")
+
+    if panel_body.get("decision") != "approved":
+        problems.append(f"panel decision {panel_body.get('decision')!r}")
+
+    for context, record in ((COUNT_STATUS, count), (REVIEW_STATUS, panel)):
+        marker = public_digest_marker(record["evidence_sha256"])
+        description = str((statuses.get(context) or {}).get("description") or "")
+        if marker not in description:
+            problems.append(f"{context} description does not carry {marker}")
+
+    if problems:
+        refuse(f"category=evidence_does_not_bind_this_review found={problems} "
+               "— the records loaded are not the records this merge would be "
+               "made on")
+    return {
+        "count_evidence_sha256": count["evidence_sha256"],
+        "panel_evidence_sha256": panel["evidence_sha256"],
+        "plan_sha256": plan["plan_sha256"],
+        "panel_run_id": panel_run["run_id"],
+        "panel_run_attempt": panel_run["run_attempt"],
+        "triggering_ci_run_id": count_body.get("triggering_ci_run_id"),
+        "triggering_ci_run_attempt":
+            count_body.get("triggering_ci_run_attempt"),
+        "tested_head_sha": count_body.get("tested_head_sha"),
+        "tested_base_sha": count_body.get("tested_base_sha"),
+        "review_class": (count_body.get("pin_profile") or {}).get(
+            "review_class"),
+        "decision": panel_body.get("decision"),
+    }
 
 
 def assert_base_and_mergeability(pull: dict, *, expected_base: str,
@@ -484,15 +568,14 @@ def assert_command_is_permitted(command: str) -> str:
 
 
 def check(pr_number: int, *, reviewed_sha: str, expected_base: str,
-          panel_run_id: int, count_evidence_sha256: str,
-          panel_evidence_sha256: str, human_approval=None, token: str,
+          panel_run_id: int, count_evidence_path: str, plan_path: str,
+          panel_evidence_path: str, human_approval=None, token: str,
           opener=None) -> dict:
     """Every gate, in order, then the command.
 
-    The order is deliberate: identity before anything expensive, then the
-    cheap green checks, then the run that proves the greens were produced by
-    the privileged workflow rather than posted by anything with
-    `statuses: write`."""
+    The order is deliberate: identity before anything expensive, then the cheap
+    green checks, then the run that proves the greens came from the privileged
+    workflow, then the records that prove what that run actually reviewed."""
     pull = resolve_head(pr_number, token=token, opener=opener)
     head = pull["head_sha"]
     identity = assert_reviewer_read_this_head(head, reviewed_sha=reviewed_sha)
@@ -502,13 +585,13 @@ def check(pr_number: int, *, reviewed_sha: str, expected_base: str,
                                                 opener=opener)
     statuses = assert_panel_is_green(head, token=token, opener=opener)
     claims = assert_no_forbidden_claim(statuses)
-    run = assert_panel_run_is_real(panel_run_id, head_sha=head,
-                                   base_sha=base["base_sha"], token=token,
-                                   opener=opener)
+    panel_run = assert_panel_run_is_real(panel_run_id, token=token,
+                                         opener=opener)
     pointing = assert_statuses_point_at_the_run(statuses, run_id=panel_run_id)
-    evidence = assert_evidence_digests_match(
-        statuses, count_evidence_sha256=count_evidence_sha256,
-        panel_evidence_sha256=panel_evidence_sha256)
+    evidence = load_and_bind_evidence(
+        count_evidence_path=count_evidence_path, plan_path=plan_path,
+        panel_evidence_path=panel_evidence_path, head_sha=head,
+        base_sha=base["base_sha"], panel_run=panel_run, statuses=statuses)
     high_risk = assert_high_risk_review_when_required(
         pull, head_sha=head, approval_path=human_approval, token=token,
         opener=opener)
@@ -522,7 +605,7 @@ def check(pr_number: int, *, reviewed_sha: str, expected_base: str,
         "ordinary_checks": ordinary,
         "statuses": statuses,
         "claims": claims,
-        "panel_run": run,
+        "panel_run": panel_run,
         "status_provenance": pointing,
         "evidence": evidence,
         "high_risk": high_risk,
@@ -530,14 +613,16 @@ def check(pr_number: int, *, reviewed_sha: str, expected_base: str,
         "honest_scope": (
             "ordinary CI and both mid-term panel statuses are green on this "
             "exact commit; the greens were produced by a real privileged "
-            "`workflow_run` of the deployed workflow from the default branch, "
-            "not merely posted onto the commit; the base has not moved and the "
-            "merge is clean; the retained evidence digests are the ones the "
-            "statuses were published for; and, where the change touches the "
-            "panel's own machinery, a human recorded a security review of this "
-            "head. This says nothing about whether the panel's verdict was "
-            "RIGHT: three models approved a diff, which is evidence and not "
-            "proof. The person running this is the reviewer of last resort"),
+            "`workflow_run` of the deployed workflow from the default branch; "
+            "the retained count evidence, executable plan and panel evidence "
+            "strict-load, bind to that run, and agree about the CI run and the "
+            "base and head it tested, which are the base and head being "
+            "merged; the base has not moved and the merge is clean; and, where "
+            "the change touches the panel's own machinery, a human recorded a "
+            "security review of this head. This says nothing about whether the "
+            "panel's verdict was RIGHT: three models approved a diff, which is "
+            "evidence and not proof. The person running this is the reviewer "
+            "of last resort"),
     }
 
 
@@ -555,10 +640,12 @@ def main(argv=None) -> int:
                         help="the 40-hex base sha the panel counted against")
     parser.add_argument("--panel-run-id", type=int, required=False,
                         help="the Actions run id of the privileged panel run")
-    parser.add_argument("--count-evidence-sha256", required=False,
-                        help="digest of the count evidence you retained")
-    parser.add_argument("--panel-evidence-sha256", required=False,
-                        help="digest of the panel evidence you retained")
+    parser.add_argument("--count-evidence", required=False,
+                        help="path to the retained count-evidence.json")
+    parser.add_argument("--executable-plan", required=False,
+                        help="path to the retained executable-plan.json")
+    parser.add_argument("--panel-evidence", required=False,
+                        help="path to the retained panel-evidence.json")
     parser.add_argument("--human-approval", default=None,
                         help="path to a workflow security review record; "
                              "required when the PR touches workflows, actions, "
@@ -580,13 +667,16 @@ def main(argv=None) -> int:
         missing = [name for name, value in (
             ("--expected-base", arguments.expected_base),
             ("--panel-run-id", arguments.panel_run_id),
-            ("--count-evidence-sha256", arguments.count_evidence_sha256),
-            ("--panel-evidence-sha256", arguments.panel_evidence_sha256))
+            ("--count-evidence", arguments.count_evidence),
+            ("--executable-plan", arguments.executable_plan),
+            ("--panel-evidence", arguments.panel_evidence))
             if value in (None, "")]
         if missing:
             refuse(f"category=merge_gate_evidence_missing arguments={missing} "
                    "— two green statuses are not evidence that a privileged "
-                   "run produced them; the gate needs the run and the digests")
+                   "run produced them. The gate needs the run and the actual "
+                   "records: a digest string proves the caller can type a "
+                   "digest, not that they hold the evidence")
         token = os.environ.get("GITHUB_TOKEN")
         if not token:
             refuse("category=github_token_absent variable=GITHUB_TOKEN — this "
@@ -595,8 +685,9 @@ def main(argv=None) -> int:
         result = check(arguments.pr, reviewed_sha=arguments.reviewed_head,
                        expected_base=arguments.expected_base,
                        panel_run_id=arguments.panel_run_id,
-                       count_evidence_sha256=arguments.count_evidence_sha256,
-                       panel_evidence_sha256=arguments.panel_evidence_sha256,
+                       count_evidence_path=arguments.count_evidence,
+                       plan_path=arguments.executable_plan,
+                       panel_evidence_path=arguments.panel_evidence,
                        human_approval=arguments.human_approval, token=token)
     except MergeGateRefusal as exc:
         print(f"MERGE_GATE_REFUSED: {exc.reason}", file=sys.stderr)

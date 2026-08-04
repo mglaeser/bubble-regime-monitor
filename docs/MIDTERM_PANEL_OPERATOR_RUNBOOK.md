@@ -60,9 +60,19 @@ dispatcher selects, and the privileged checkouts deliberately name no ref, so a
 dispatch against a branch would run that branch's panel code with the key in
 scope.
 
-To re-run a review: re-run ordinary CI on the same head, or dispatch
-`.github/workflows/midterm-panel-rerun.yml`, which holds no secret, executes no
-panel code, and only asks CI to run again.
+To re-run a review, re-run **ordinary CI** on the same head:
+
+- Actions UI → the `ci` run → *Re-run all jobs*; or
+- `gh run rerun <CI_RUN_ID> --repo mglaeser/bubble-regime-monitor`
+
+CI completing is what starts the panel, through the one trigger that is safe.
+
+A convenience workflow that did this used to exist and was **removed**. It held
+no secret in its committed form, but a `workflow_dispatch` workflow runs a
+*branch-selected copy* — so once the persistent repository secret exists, a
+branch version of it could reference that secret. That is the same selected-ref
+hazard that removed the dispatch trigger from the privileged panel, reached
+through a convenience. Rerunning CI needs no repository workflow at all.
 
 ## 3. Running the lane without a key
 
@@ -120,28 +130,40 @@ understated the operator's authority; weaker than the trusted lane's
 `VERIFIED_OPERATOR_PIN_AUTHORIZATION`, because nothing here is cryptographically
 signed and no external verifier promoted it.
 
-### Cost profiles
+### Cost profiles, by review CLASS
 
-Three of the twelve — count calls, generation calls and the cost cap — are
-**per review target**, because a single global cap has to be the largest of them
-to let the largest run finish, which means every smaller run is protected by a
-number chosen for a bigger one.
+Five values are per-class — count calls, generation calls, the cost cap, and
+the two transport ceilings — because a single global cap has to be the largest
+of them to let the largest run finish, which means every smaller run is
+protected by a number chosen for a bigger one.
 
-| target | count calls | generation calls | cost cap |
-| --- | --- | --- | --- |
-| `synthetic` (and PR #25) | 100 | **0** | $5 |
-| `pr-29` | 1200 | 80 | $25 |
-| `pr-23` | 2500 | 200 | $60 |
+| class | applies to | count calls | generation calls | cost cap | input tokens |
+| --- | --- | --- | --- | --- | --- |
+| `SYNTHETIC` | explicit test target | 100 | **0** | $5 | 500,000 |
+| `HISTORICAL_PR25` | PR #25 | 100 | **0** | $5 | 500,000 |
+| `ROUTINE_PR` | **every other pull request** | 1200 | 80 | $25 | 2,000,000 |
+| `LARGE_PR23` | PR #23 | 2500 | 200 | $60 | 5,000,000 |
 
-`MIDTERM_REVIEW_TARGET` selects one, against an allowlist, with **no default** —
-the profiles differ by more than an order of magnitude. Matching is exact, so
-`pr-2` does not select `pr-29`'s budget. The selected profile and its digest go
-into the count evidence, so "which budget did this run spend under" is
-answerable from the record rather than from the file as it stands today.
+The class is a **closed rule** in `preflight.review_class_for`, derived from the
+pull-request number. It is not a per-PR allowlist: the previous design listed
+`pr-23`, `pr-25` and `pr-29` while the workflow emitted `pr-<number>`, so PR #35
+and every routine pull request after it would have refused before a panel could
+run — which contradicts the point of the lane. Nothing a job exports can select
+a bigger budget.
 
-`synthetic` cannot generate at all: zero generation calls means the engine
-refuses to plan a verdict under it. That is the profile working as approved, and
-it is why the fake-provider vertical runs under `pr-29` instead.
+The selected class and its profile digest go into the count evidence, so "which
+budget did this run spend under" is answerable from the record.
+
+`SYNTHETIC` and `HISTORICAL_PR25` cannot generate at all: zero generation calls
+means the engine refuses to plan a verdict. That is the profile working as
+approved, and it is why the fake-provider vertical runs `ROUTINE_PR`.
+
+**The two transport ceilings live in the profile too.** They used to be
+free-standing workflow literals, and `MIDTERM_GENERATION_ATTEMPT_CAP: '60'`
+silently contradicted the approved cap of 80 — a PR-29 plan projecting ~78
+attempts would have been priced for 80 and stopped at 60, under a limit nobody
+wrote, reported as an exhausted budget. `inputs.select_profile` now refuses a
+profile whose attempt cap is below its own approved call count.
 
 ## 6. Common refusals
 

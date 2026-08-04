@@ -53,6 +53,49 @@ from .status import assert_candidate_sha
 #: pull request that broke the panel's own tests still reach the provider.
 REQUIRED_ORDINARY_CHECKS = ("test (3.12)", "image", "midterm-panel-selftest")
 
+#: The jobs that must be green INSIDE the triggering CI run itself.
+#:
+#: A subset of `REQUIRED_ORDINARY_CHECKS`: `midterm-panel-selftest` is its own
+#: workflow, so it is not a job of the `ci` run and is covered by the exact-head
+#: check-run query instead. Listing it here would refuse every real run.
+REQUIRED_CI_JOBS = ("test (3.12)", "image")
+
+#: The four review classes, and the CLOSED rule that maps a pull request to
+#: exactly one of them.
+#:
+#: Not a per-PR allowlist. The previous design listed `pr-23`, `pr-25` and
+#: `pr-29` and the workflow emitted `pr-<number>`, so PR #35 — and every routine
+#: pull request after it — would have refused with
+#: `review_target_not_uniquely_allowlisted` before a panel could run. That
+#: contradicts the requirement this lane exists for: a review on EVERY pull
+#: request.
+#:
+#: The class is derived from the PR number here, in trusted code, and the caller
+#: supplies nothing. A free-form profile name from the environment would make
+#: "which budget applies" a property of spelling.
+SYNTHETIC = "SYNTHETIC"
+HISTORICAL_PR25 = "HISTORICAL_PR25"
+LARGE_PR23 = "LARGE_PR23"
+ROUTINE_PR = "ROUTINE_PR"
+REVIEW_CLASSES = (SYNTHETIC, HISTORICAL_PR25, LARGE_PR23, ROUTINE_PR)
+
+#: The two pull requests with their own operator-approved ceilings.
+CLASS_BY_PULL_REQUEST = {25: HISTORICAL_PR25, 23: LARGE_PR23}
+
+
+def review_class_for(pr_number) -> str:
+    """One class per pull request, total and closed.
+
+    Total: every integer maps somewhere, so a new pull request reviews rather
+    than refusing. Closed: the mapping is here and not in the environment, so
+    nothing a job exports can select a bigger budget."""
+    if isinstance(pr_number, bool) or not isinstance(pr_number, int) or \
+            pr_number < 1:
+        refuse(f"category=review_class_pull_request_not_a_positive_integer "
+               f"observed={pr_number!r} — the class decides the budget, and a "
+               "malformed number would decide it by accident")
+    return CLASS_BY_PULL_REQUEST.get(pr_number, ROUTINE_PR)
+
 #: Manual dispatch must name the head it is authorising.
 APPROVAL_PREFIX = "REVIEW_EXACT_HEAD_"
 
@@ -209,23 +252,137 @@ def assert_head_is_unmoved(*, run_head_sha: str, current_head_sha: str) -> dict:
     return {"head_sha": current_head_sha, "moved": False}
 
 
-def assert_base_is_current(*, pr_base_sha: str, main_head_sha: str) -> dict:
-    """Main must not have moved past the base ordinary CI actually tested.
+def assert_triggering_ci_tested_this_exact_combination(
+        run: dict, jobs, *, event_run_id: int, event_head_sha: str,
+        current_head_sha: str, current_base_sha: str,
+        main_head_sha: str) -> dict:
+    """The green that authorises this panel must be about THIS base and head.
 
-    This is the check that is easy to leave out and expensive to leave out.
-    `test (3.12)` ran against a merge of the candidate with main as it was. If
-    main has advanced, that green describes a combination that no longer exists,
-    and the panel would review a tree nobody ran the deterministic gate on.
+    ## The defect this replaces
 
-    Blocking and requiring a CI rerun is the honest answer. Reviewing the stale
-    combination and publishing a green check on it is how a merge happens on
-    evidence that was true about different code."""
-    if pr_base_sha != main_head_sha:
-        refuse(f"category=base_moved_since_ordinary_ci "
-               f"tested_base={pr_base_sha[:12]} current_main={main_head_sha[:12]} "
-               "— ordinary CI proved a combination that no longer exists; rerun "
-               "CI on the updated base rather than reviewing an untested tree")
-    return {"base_sha": pr_base_sha, "moved": False}
+    The previous check was `assert_base_is_current(pr_base_sha=...,
+    main_head_sha=...)`, and its docstring said "main must not have moved past
+    the base ordinary CI actually tested". It did not read what CI tested. Both
+    values came from the world as it is now: the PR object's `base.sha` tracks
+    the branch, so when main advances from B1 to B2 the PR's base becomes B2,
+    current main is B2, and the comparison passes.
+
+    The scenario it was written to catch was therefore the one scenario it
+    could not catch. CI proved a merge of the candidate with B1; the panel
+    would review `B2..head` and publish a status on a combination the
+    deterministic gate never ran.
+
+    ## What is read instead
+
+    The triggering run, by exact id, and its own jobs. A `pull_request` CI run
+    checks out a generated `refs/pull/N/merge` commit, and the run's
+    `pull_requests[0]` records the head and base that merge was built from.
+    That is a fact about the past and it does not move when main does.
+
+    Four equalities, and each one is a different way the chain can break:
+
+        tested head == event head          the payload describes this run
+        tested head == current PR head     the author has not pushed since
+        tested base == current PR base     the PR still targets what CI used
+        tested base == current main        main has not advanced underneath
+
+    The exact-head check-run query stays as a second, independent control. It
+    answers "did something report green on this commit", which is worth
+    knowing and is not the same question."""
+    if not isinstance(run, dict):
+        refuse("category=triggering_run_not_an_object")
+
+    observed_id = run.get("id")
+    if not isinstance(observed_id, int) or isinstance(observed_id, bool) or \
+            observed_id != int(event_run_id):
+        refuse(f"category=triggering_run_id_mismatch "
+               f"observed={observed_id!r} event={int(event_run_id)} — the run "
+               "that was read is not the run that fired this workflow")
+    if str(run.get("name")) != CI_WORKFLOW_NAME:
+        refuse(f"category=triggering_run_wrong_workflow "
+               f"name={run.get('name')!r} expected={CI_WORKFLOW_NAME!r}")
+    if str(run.get("event")) != "pull_request":
+        refuse(f"category=triggering_run_wrong_event "
+               f"event={run.get('event')!r} expected='pull_request' — a push "
+               "run tests the branch tip, not the merge a pull request would "
+               "produce, so its green is about a different tree")
+    if str(run.get("conclusion")) != "success":
+        refuse(f"category=triggering_run_not_successful "
+               f"conclusion={run.get('conclusion')!r}")
+
+    pulls = run.get("pull_requests")
+    if not isinstance(pulls, list) or len(pulls) != 1:
+        refuse(f"category=triggering_run_pull_request_not_unique "
+               f"count={len(pulls) if isinstance(pulls, list) else 'n/a'} — "
+               "the run must belong to exactly one pull request; zero means "
+               "the tested base cannot be recovered and more than one means it "
+               "is ambiguous")
+    pull = pulls[0]
+    tested_head = assert_candidate_sha(
+        ((pull or {}).get("head") or {}).get("sha"), field="tested_head_sha")
+    tested_base = assert_candidate_sha(
+        ((pull or {}).get("base") or {}).get("sha"), field="tested_base_sha")
+
+    mismatches = []
+    if tested_head != event_head_sha:
+        mismatches.append(f"tested_head={tested_head[:12]} "
+                          f"event_head={event_head_sha[:12]}")
+    if tested_head != current_head_sha:
+        mismatches.append(f"tested_head={tested_head[:12]} "
+                          f"current_head={current_head_sha[:12]}")
+    if tested_base != current_base_sha:
+        mismatches.append(f"tested_base={tested_base[:12]} "
+                          f"current_base={current_base_sha[:12]}")
+    if tested_base != main_head_sha:
+        mismatches.append(f"tested_base={tested_base[:12]} "
+                          f"current_main={main_head_sha[:12]}")
+    if mismatches:
+        refuse(f"category=ordinary_ci_tested_a_different_combination "
+               f"found={mismatches} — the deterministic gate proved a "
+               "combination that is not the one about to be reviewed. Rerun "
+               "ordinary CI on the current head and base")
+
+    assert_triggering_ci_jobs_are_green(jobs, run_id=int(event_run_id))
+    attempt = run.get("run_attempt")
+    return {"triggering_ci_run_id": int(event_run_id),
+            "triggering_ci_run_attempt": (attempt if isinstance(attempt, int)
+                                          and not isinstance(attempt, bool)
+                                          else 1),
+            "tested_head_sha": tested_head,
+            "tested_base_sha": tested_base,
+            "current_main_sha": main_head_sha}
+
+
+def assert_triggering_ci_jobs_are_green(jobs, *, run_id: int) -> dict:
+    """The required jobs, inside THIS run.
+
+    `image` is checked as well as `test (3.12)`, and by name. A run whose test
+    job passed while its image job was absent or red is a run that proved less
+    than the required set, and reading only the first would report the answer
+    the caller hoped for."""
+    if not isinstance(jobs, list):
+        refuse("category=triggering_run_jobs_not_a_list")
+    observed = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        name = str(job.get("name") or "")
+        if name in REQUIRED_CI_JOBS:
+            if str(job.get("status")) != "completed":
+                observed[name] = "incomplete"
+            else:
+                observed[name] = str(job.get("conclusion") or "")
+    missing = [name for name in REQUIRED_CI_JOBS if name not in observed]
+    if missing:
+        refuse(f"category=triggering_run_missing_required_job jobs={missing} "
+               f"run_id={run_id} observed={sorted(observed)}")
+    bad = sorted(f"{name}={observed[name]}" for name in REQUIRED_CI_JOBS
+                 if observed[name] != "success")
+    if bad:
+        refuse(f"category=triggering_run_job_not_successful jobs={bad} "
+               f"run_id={run_id}")
+    return {"jobs": {name: observed[name] for name in REQUIRED_CI_JOBS},
+            "run_id": run_id}
 
 
 def assert_ordinary_checks_green(check_runs, *, head_sha: str) -> dict:
