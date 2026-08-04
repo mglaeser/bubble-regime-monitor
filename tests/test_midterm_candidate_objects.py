@@ -14,9 +14,17 @@ the committed workflow — not a copy typed here, which would drift — and RUN 
 That caught the syntax. It could not catch the next defect, and said so: the
 fixture uses a FILESYSTEM remote, which needs no authentication. The corrected
 `git fetch --no-tags --no-recurse-submodules origin <sha>:<ref>` was valid
-shell, passed here, and would still have failed on the first real run —
-`actions/checkout` runs with `persist-credentials: false`, this repository is
-private, and an unauthenticated fetch against it cannot work.
+shell and passed here, while `actions/checkout` runs with
+`persist-credentials: false` and this repository is private — so it had no
+credential with which to reach origin.
+
+What it did instead was measured rather than assumed, and it is not "it would
+have failed on the first real run": `git fetch --no-tags origin <sha>`
+SHORT-CIRCUITS, exiting 0 without opening a transport, when the object is
+already present. Under `fetch-depth: 0` it always is. So the command silently
+did nothing and reported success, and failed only for a fork head or a head
+that appeared after the checkout — inside a job that had already read the
+provider key. `TestTheRecordOfWhatWasWrongBefore` pins all three behaviours.
 
 The fix removed the need rather than the boundary. `fetch-depth: 0` brings
 every branch's history in while the checkout still holds its own token; a
@@ -40,6 +48,7 @@ now ASSERTS presence instead of acquiring it.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -395,3 +404,96 @@ class TestTheRecordOfWhatWasWrongBefore:
                                  text=True, check=True).stdout.strip()
         sys.stderr.write(f"\n[candidate-object suite ran against {version}]\n")
         assert version.startswith("git version 2.")
+
+
+DRY_RUN = ROOT / ".github" / "workflows" / "midterm-panel-dry-run.yml"
+HOSTED_PROOF_STEP = "Prove the candidate object model works without a fetch"
+
+
+def hosted_proof_script() -> str:
+    document = yaml.safe_load(DRY_RUN.read_text(encoding="utf-8"))
+    for step in document["jobs"]["vertical"]["steps"]:
+        if step.get("name") == HOSTED_PROOF_STEP:
+            return step["run"]
+    raise AssertionError(f"no step named {HOSTED_PROOF_STEP!r}")
+
+
+class TestTheHostedProofStepCannotPassWithoutProving:
+    """The hosted step in `midterm-panel-dry-run.yml`, run here.
+
+    It is the §2.3 evidence that the acquisition model holds on a runner, so
+    the one thing it must never do is go green having checked nothing. Every
+    branch is exercised against this repository's real object database."""
+
+    def _run(self, **env):
+        environ = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                   "HOME": os.environ.get("HOME", "/root"),
+                   "GITHUB_WORKSPACE": str(ROOT),
+                   "EVENT_NAME": "push", "PR_HEAD_SHA": "",
+                   "PR_HEAD_REPO_ID": ""}
+        environ.update(env)
+        return subprocess.run(["bash", "-c", hosted_proof_script()],
+                              cwd=str(ROOT), capture_output=True, text=True,
+                              env=environ)
+
+    def _repository_id(self) -> str:
+        import midtermpanel
+        return str(midtermpanel.REPOSITORY_NUMERIC_ID)
+
+    def _a_commit_that_is_not_head(self) -> str:
+        for ref in ("origin/main", "main", "HEAD~1"):
+            got = _git(["rev-parse", "--verify", f"{ref}^{{commit}}"], ROOT,
+                       check=False)
+            if got.returncode == 0:
+                sha = got.stdout.strip()
+                if sha != _git(["rev-parse", "HEAD"], ROOT).stdout.strip():
+                    return sha
+        pytest.skip("no commit other than HEAD is available to test with")
+
+    def test_a_same_repository_pull_request_proves_it_strongly(self):
+        result = self._run(EVENT_NAME="pull_request",
+                           PR_HEAD_SHA=self._a_commit_that_is_not_head(),
+                           PR_HEAD_REPO_ID=self._repository_id())
+        assert result.returncode == 0, result.stderr
+        assert "proof strength: STRONG" in result.stdout
+        assert "present in the object database, and it is not HEAD" in \
+            result.stdout
+
+    def test_a_push_labels_its_weaker_proof_as_weak(self):
+        """Honest labelling, not a silent downgrade. On a push there is no
+        pull request head, so `main`'s tip stands in — a real commit on another
+        branch, but not the object the count job would actually need."""
+        result = self._run()
+        if "no commit other than HEAD" in result.stderr:
+            pytest.skip("single-commit checkout")
+        assert result.returncode == 0, result.stderr
+        assert "proof strength: WEAK" in result.stdout
+
+    def test_a_fork_fails_rather_than_reporting_a_pass(self):
+        """The case that used to `exit 0` with an explanation.
+
+        Exiting 0 made a green step mean either "proved" or "had nothing to
+        prove", and nothing downstream could tell which. Forks are refused by
+        preflight anyway, so a fork reaching here is a state worth failing on."""
+        result = self._run(EVENT_NAME="pull_request",
+                           PR_HEAD_SHA="a" * 40, PR_HEAD_REPO_ID="999999")
+        assert result.returncode != 0
+        assert "same-repository pull requests only" in result.stderr
+
+    def test_testing_head_against_itself_fails(self):
+        """`git cat-file -e HEAD` proves nothing: HEAD is what checkout made.
+
+        This is the mutation that would turn the whole step into a tautology,
+        and it is the one a well-meaning simplification would introduce."""
+        head = _git(["rev-parse", "HEAD"], ROOT).stdout.strip()
+        result = self._run(EVENT_NAME="pull_request", PR_HEAD_SHA=head,
+                           PR_HEAD_REPO_ID=self._repository_id())
+        assert result.returncode != 0
+        assert "says nothing about fetch-depth" in result.stderr
+
+    def test_the_step_runs_no_network_git_command(self):
+        from midtermpanel.privilegedworkflow import (
+            POST_CHECKOUT_NETWORK_COMMANDS,
+        )
+        script = hosted_proof_script()
+        assert [c for c in POST_CHECKOUT_NETWORK_COMMANDS if c in script] == []

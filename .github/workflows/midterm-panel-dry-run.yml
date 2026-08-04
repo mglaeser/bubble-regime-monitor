@@ -99,19 +99,33 @@ jobs:
       - name: Prove the candidate object model works without a fetch
         # §2.3. The hosted proof that the acquisition model this lane now
         # depends on actually holds ON A RUNNER, after a real
-        # `persist-credentials: false` checkout, against this private
+        # `persist-credentials: false` checkout, against this PRIVATE
         # repository.
         #
-        # For a pull_request event the API gives the real head; for a push there
-        # is no PR, so the run's own commit stands in — either way the claim
-        # under test is the same: the object is HERE, and no network fetch was
-        # needed to get it.
+        # ## The commit it tests, and why not just any commit
+        #
+        # `git cat-file -e HEAD` proves nothing: HEAD is what the checkout
+        # produced. The claim under test is that a commit which is NOT on the
+        # checked-out ref is nonetheless present, because `fetch-depth: 0`
+        # brought every branch in while the token still existed.
+        #
+        #   pull_request  the pull request's head sha. For a PR the checkout
+        #                 takes `refs/pull/N/merge`, so the branch head is a
+        #                 different commit — exactly the object the count and
+        #                 panel jobs must reach. This is the real proof.
+        #   push          there is no pull request, so the tip of `main` stands
+        #                 in: on a feature branch it is a commit on another
+        #                 branch, present for the same reason. Weaker, and
+        #                 labelled as such rather than reported as the same
+        #                 thing.
+        #
+        # A run that ends up with nothing to check FAILS. A proof step that
+        # could pass without proving anything is the failure mode this lane
+        # keeps finding.
         env:
-          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
-          THIS_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           before_head=$(git rev-parse HEAD)
@@ -123,25 +137,41 @@ jobs:
           expected_repository_id=$(PYTHONPATH="$GITHUB_WORKSPACE/scripts" \
             python -c 'import midtermpanel; print(midtermpanel.REPOSITORY_NUMERIC_ID)')
 
+          strength="WEAK"
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            candidate="$PR_HEAD_SHA"
             if [ "$PR_HEAD_REPO_ID" != "$expected_repository_id" ]; then
-              echo "fork pull request: preflight refuses these before any" \
-                   "credential is read, and the candidate object is not" \
-                   "expected to be present. Nothing to prove here."
-              exit 0
+              echo "::error::fork pull request (head repo ${PR_HEAD_REPO_ID}," \
+                   "expected ${expected_repository_id}). This lane reviews" \
+                   "same-repository pull requests only; preflight refuses" \
+                   "these before any credential is read. There is no candidate" \
+                   "object to prove, so this step cannot report a pass." >&2
+              exit 1
             fi
+            candidate="$PR_HEAD_SHA"
+            strength="STRONG"
           else
-            candidate="$THIS_SHA"
+            candidate=$(git rev-parse origin/main)
           fi
 
-          echo "candidate object under test: $candidate"
-          git cat-file -e "${candidate}^{commit}"
-          echo "present in the object database"
+          if [ "$candidate" = "$before_head" ]; then
+            echo "::error::the commit under test is HEAD itself, so its" \
+                 "presence says nothing about fetch-depth: 0. Refusing to" \
+                 "report a proof this run did not produce." >&2
+            exit 1
+          fi
 
-          # Readable through plumbing, with no worktree change.
+          echo "candidate object under test: $candidate (proof strength: $strength)"
+          echo "checked-out HEAD:            $before_head"
+          git cat-file -e "${candidate}^{commit}"
+          echo "present in the object database, and it is not HEAD"
+
+          # Readable through plumbing, with no worktree change. Written to a
+          # file rather than piped into `head`: under `set -o pipefail` a
+          # reader that exits early can SIGPIPE the writer and fail the step
+          # for a reason that has nothing to do with what it tests.
           git cat-file -t "${candidate}^{commit}"
-          git ls-tree --name-only "$candidate" | head -3
+          git ls-tree --name-only "$candidate" > /tmp/candidate-tree.txt
+          head -3 /tmp/candidate-tree.txt
 
           # Nothing moved.
           [ "$(git rev-parse HEAD)" = "$before_head" ] || {
