@@ -38,7 +38,12 @@ from __future__ import annotations
 import hmac
 import json
 
-from . import CI_WORKFLOW_NAME, HIGH_RISK_MARKER, HIGH_RISK_PATH_PREFIXES
+from . import (
+    CI_WORKFLOW_NAME,
+    HIGH_RISK_MARKER,
+    HIGH_RISK_PATH_PREFIXES,
+    REPOSITORY_NUMERIC_ID,
+)
 from .errors import refuse
 from .status import assert_candidate_sha
 
@@ -227,6 +232,7 @@ def resolve_pull_request(pulls, *, run_head_sha: str) -> dict:
     if str(base.get("ref")) != "main":
         refuse(f"category=pull_request_base_is_not_main "
                f"base={str(base.get('ref'))!r}")
+    same_repository = assert_candidate_is_same_repository(pull)
     return {
         "pr_number": int(pull.get("number")),
         "head_sha": assert_candidate_sha(str((pull.get("head") or {}).get("sha")),
@@ -234,7 +240,59 @@ def resolve_pull_request(pulls, *, run_head_sha: str) -> dict:
         "base_sha": assert_candidate_sha(str(base.get("sha") or ""),
                                          field="pull_request.base.sha"),
         "base_ref": str(base.get("ref")),
+        **same_repository,
     }
+
+
+def assert_candidate_is_same_repository(pull: dict) -> dict:
+    """The candidate branch must live in THIS repository. Forks are refused.
+
+    ## Why this is a precondition for the whole acquisition model
+
+    The privileged jobs check out with `persist-credentials: false`, which
+    deliberately removes the checkout token from every later git command. That
+    is the right boundary and it is not going to be weakened — but it means a
+    later `git fetch` that has to reach this PRIVATE origin cannot
+    authenticate.
+
+    So the candidate's objects have to be present already, and they are:
+    `fetch-depth: 0` makes `actions/checkout` fetch every branch's history
+    while it still holds its own token. A same-repository pull request's head
+    is a branch in origin, so its commit arrives with that checkout.
+
+    A FORK's head is not a branch in origin. `fetch-depth: 0` does not bring
+    it in, and fetching it would need exactly the authenticated round trip this
+    design removed — the one case where the old fetch really did have to talk
+    to the remote, and so the one case where it really would have failed.
+    Rather than silently half-support forks — a run that reaches the count job
+    and dies without a candidate — the lane refuses here, before any credential
+    is read.
+
+    Fork support is separate work with a separate design. Claiming it by not
+    mentioning it would be the more expensive mistake."""
+    head_repository = (pull.get("head") or {}).get("repo")
+    if not isinstance(head_repository, dict):
+        refuse("category=candidate_head_repository_absent — a pull request "
+               "whose head repository cannot be identified may be a fork whose "
+               "source was deleted; the candidate's objects cannot be assumed "
+               "present in this repository's checkout")
+    observed = head_repository.get("id")
+    if isinstance(observed, bool) or not isinstance(observed, int):
+        refuse(f"category=candidate_head_repository_id_malformed "
+               f"observed={observed!r} — matched by NUMERIC ID, never by name: "
+               "a repository can be renamed and a name can be reused, and the "
+               "id is what does not move")
+    if observed != REPOSITORY_NUMERIC_ID:
+        refuse(f"category=candidate_repository_not_the_reviewed_repository "
+               f"head_repository_id={observed} "
+               f"expected={REPOSITORY_NUMERIC_ID} — this mid-term lane reviews "
+               "same-repository pull requests only. A fork's head is not a "
+               "branch in this origin, so `fetch-depth: 0` does not bring its "
+               "objects in, and fetching them would need the authenticated "
+               "round trip that `persist-credentials: false` deliberately "
+               "removes. Fork support is separate work")
+    return {"candidate_repository_numeric_id": observed,
+            "candidate_is_same_repository": True}
 
 
 def assert_head_is_unmoved(*, run_head_sha: str, current_head_sha: str) -> dict:

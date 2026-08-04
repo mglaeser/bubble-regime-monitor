@@ -308,10 +308,16 @@ The runtime approval phrase authenticated the candidate under review. It never
 authenticated the ref supplying the reviewer.
 
 `PERMITTED_TRIGGERS` is now `("workflow_run",)`, the trigger is gone from the
-file, `preflight` refuses `workflow_dispatch` outright so a re-added trigger
-finds no code willing to serve it, and controlled reruns go through
-`.github/workflows/midterm-panel-rerun.yml` — no secret, no panel code, one
-call that asks CI to run again.
+file, and `preflight` refuses `workflow_dispatch` outright so a re-added
+trigger finds no code willing to serve it.
+
+A convenience rerun workflow was introduced here and then **removed** in the
+next review round (§18.7): a `workflow_dispatch` workflow runs a
+branch-selected copy of itself, so with a persistent repository secret in the
+repository, a branch version of that convenience could reference it — the same
+selected-ref hazard, reached through a smaller door. Controlled reruns use
+GitHub's "Re-run all jobs" on the ordinary CI run, or
+`gh run rerun <CI_RUN_ID>`, which needs no repository workflow at all.
 
 ### 17.2 `git fetch --no-checkout` is not a git command (P0)
 
@@ -324,13 +330,18 @@ The fake-provider vertical was green throughout, because it is handed
 asserted `"git fetch --no-checkout origin" in rendered` and passed — proving the
 literal was present, which is all a string assertion can prove.
 
-The command is now `git fetch --no-tags --no-recurse-submodules origin
+The command became `git fetch --no-tags --no-recurse-submodules origin
 <sha>:refs/midterm/candidate/<sha>`, followed by a `cat-file -e` that the object
-arrived. `tests/test_midterm_fetch_shell.py` **extracts the committed command
-from the workflow file** and runs it against a real temporary repository: it
-succeeds, the candidate commit becomes readable through plumbing, no candidate
-file reaches the worktree, `HEAD` does not move, and the invalid form really
-does fail. The hosted dry run executes that suite too.
+arrived, and a new test file **extracted the committed command from the workflow
+file** and ran it against a real temporary repository.
+
+That fixed the syntax and not the model. The replacement was itself removed in
+§19: the fetch could not authenticate against this private origin under
+`persist-credentials: false`, and — measured, not assumed — it silently
+short-circuited to success whenever the object was already present. The
+committed step now **asserts** the candidate's objects rather than acquiring
+them, and the test file is
+`tests/test_midterm_candidate_objects.py`. The hosted dry run executes it.
 
 ### 17.3 The merge gate accepted spoofable evidence (P0)
 
@@ -404,3 +415,219 @@ The final hosted evidence is on the corrected head, not on `d148ddd`. This
 package has not been merged and no draft PR has been opened; those, and the
 engine rebuild and release that follow them, remain the operator's steps in the
 order the review sets out.
+
+---
+
+## 18. Second external review — the pre-key review of PR #34
+
+Eight findings, F-01…F-08, plus one operator decision. All closed.
+
+### 18.1 F-01 — the base check compared two values that moved together
+
+`assert_base_is_current(pr_base_sha=…, main_head_sha=…)` claimed to enforce
+"main has not moved past the base ordinary CI actually tested", and read
+neither. Both arguments described the world *now*: when main advanced from B1 to
+B2, the pull request object's `base.sha` followed to B2, current main was B2,
+and the comparison passed. The one scenario it existed for was the one scenario
+it could not see.
+
+The replacement, `assert_triggering_ci_tested_this_exact_combination`, reads the
+**triggering run** — `GET /actions/runs/{id}` and its `/jobs` — because a
+pull-request CI run checks out a generated `refs/pull/N/merge` commit, so its
+green is evidence about a merge of a specific head with a specific base, and
+that base is a fact about the past recoverable only from the run. It also
+requires the run to be the one that fired the event, of workflow `ci`, on event
+`pull_request`, successful, and with `test (3.12)` and `image` both green **in
+that run**. `tested_base_sha` and `tested_head_sha` are published as job outputs
+and bound into the evidence, so the merge gate can compare them to the world at
+merge time.
+
+### 18.2 F-02 — the count published `pending` after its first provider call
+
+The status that tells a human "a paid review is running" was published after the
+money could already have been spent. `countcli` is now split into
+`prepare_count_context` (no transport constructed) and `execute_count_context`,
+with `main()` publishing `pending` between them.
+
+### 18.3 F-03 — the merge gate bound digest strings, not evidence
+
+`load_and_bind_evidence` received digests as arguments and compared them to
+themselves. It now takes three real file paths — count evidence, executable
+plan, panel evidence — strict-loads each, and binds what the files contain.
+
+### 18.4 F-04 — `assert_panel_run_is_real` echoed its caller
+
+It reported the run id it had been handed as though it had observed it. It now
+takes `token` and `opener`, reads the run, and reports what the API returned.
+
+### 18.5 F-05 — the review class allowlist could not classify a routine PR
+
+The workflow emitted `pr-<number>` while the policy allowlisted `pr-23`,
+`pr-25`, `pr-29` — so PR #35 and every routine pull request after it would have
+been refused before a panel could run, which contradicts the requirement this
+lane exists for. `review_class_for` is now **total and closed**: `SYNTHETIC`,
+`HISTORICAL_PR25`, `LARGE_PR23`, `ROUTINE_PR`.
+
+### 18.6 F-06 — transport ceilings sat in the workflow as literals
+
+`MIDTERM_GENERATION_ATTEMPT_CAP: '60'` silently contradicted the
+operator-approved cap of 80: a plan priced for 80 attempts would have stopped at
+60 under a limit nobody wrote. The ceilings moved into the selected class
+profile in `governance/midterm-panel-pins.json`, and
+`_assert_transport_ceilings_agree_with_pins` refuses a disagreement rather than
+picking one.
+
+**Operator decision (recorded):** the `ROUTINE_PR` profile is 1200 count calls,
+80 generation calls, a $25 cost cap and 2,000,000 max input tokens, approved by
+`mglaeser`.
+
+### 18.7 F-07 — the convenience rerun workflow was another selected-ref door
+
+`.github/workflows/midterm-panel-rerun.yml` held no secret in its committed form
+and only asked ordinary CI to run again. But a `workflow_dispatch` workflow runs
+a **branch-selected** copy of itself, so once a persistent repository secret
+exists, a branch version of that convenience could reference it. Removed. No
+midterm workflow other than the no-key dry run may be dispatched, and none holds
+`actions: write`.
+
+### 18.8 F-08 — plan loading accepted duplicate keys
+
+The executable plan is read back across an artifact boundary, and
+`json.loads` keeps the last of two identical keys. `strict_load_plan` refuses
+duplicates, caps size at 64 MiB, and is now called immediately after the plan is
+written — before the artifact upload — so a plan that cannot be strictly re-read
+fails in the job that produced it.
+
+---
+
+## 19. Third external review — the credential boundary (P0)
+
+One blocker, and it invalidated the acquisition model rather than a line of it.
+
+### 19.1 The finding
+
+The privileged jobs check out with `persist-credentials: false`. That is the
+right boundary: `actions/checkout` uses its token and then removes it, so no
+later step can act as the repository. This repository is **private**. A
+post-checkout `git fetch` against origin therefore has no credential — and both
+credential-bearing jobs ran one.
+
+### 19.2 What the fetch actually did, measured
+
+The correction was not "it would have failed on the first real run". That claim
+would have been convenient and it is not what git does. Against git 2.43.0, with
+`origin` pointed at a path that does not exist
+(`tests/test_midterm_candidate_objects.py`):
+
+| command | object present? | exit |
+|---|---|---|
+| `git fetch --no-tags origin <sha>` | yes | **0**, no transport opened |
+| `git fetch --no-tags --no-recurse-submodules origin <sha>:<ref>` | yes | **0**, no transport opened |
+| `git fetch --no-tags origin <sha>` | no | 128 |
+| `git fetch origin <sha>` (tags not suppressed) | yes | 128 |
+
+So under `fetch-depth: 0`, for a same-repository head, the removed command
+**silently did nothing and reported success**. It failed exactly in the cases it
+existed for — a fork head, or a head that appeared after the checkout — and it
+failed *inside a job that had already read the provider key*.
+
+A command that no-ops when it is unnecessary and dies mid-job when it is
+necessary is not an acquisition step. That is a stronger reason to remove it
+than certain failure would have been: a step that silently no-ops is a step
+whose green says nothing.
+
+### 19.3 The fix removes the need, not the boundary
+
+`fetch-depth: 0` makes the trusted checkout fetch every branch's history while
+it still holds its own token, and a same-repository pull request's head **is** a
+branch in origin. So the candidate's commits are already present, and the step
+now **asserts** them:
+
+```bash
+for sha in "$CANDIDATE_HEAD_SHA" "$CANDIDATE_BASE_SHA"; do
+  git cat-file -e "${sha}^{commit}" || exit 1
+done
+```
+
+A missing object is a named failure **before the provider key is read**, not an
+unauthenticated fetch dying mid-count. `git cat-file -e` reads the object
+database and touches no worktree — the object/worktree distinction that is this
+lane's whole safety argument.
+
+**No post-checkout authenticated git command is required anywhere in this lane.**
+
+### 19.4 Same-repository only, stated rather than implied
+
+A fork's head is not a branch in this origin, so `fetch-depth: 0` does not bring
+its objects in, and fetching them would need exactly the authenticated round
+trip this design removed. `preflight.assert_candidate_is_same_repository`
+refuses a fork by **numeric repository id** — a name can be transferred or
+reused, the id cannot — and it refuses on the first API read, before CI is
+queried, before changed files are read, and before any job holding the key
+starts. Three refusals are distinguished: head repository absent, id malformed,
+id not this repository.
+
+Fork support is separate work with a separate design. Not claiming it is part of
+the correction.
+
+### 19.5 Static guards, and the honest limit of the empirical one
+
+Two controls now sit over the privileged workflow:
+
+* `assert_no_post_checkout_network_git` — refuses `git fetch`, `git pull`,
+  `git remote add`, `git clone`, `git ls-remote`, `git submodule update`,
+  `git push` in any `run:`. Object reads (`git cat-file`, `git diff`,
+  `git show`, `git ls-tree`, `git rev-parse`) are deliberately absent from the
+  list: they are the capability the lane needs.
+* `assert_no_credential_reintroduction` — refuses credential helpers,
+  `http.extraheader`, askpass programs and `x-access-token` remote URLs. The
+  other half of the boundary, `persist-credentials: false` itself, is enforced
+  by `assert_no_candidate_checkout` and **only** there. A second copy was
+  written during this round and collapsed back into one before it shipped; a
+  test now asserts by AST that exactly one function in the module holds that
+  rule, because two copies of a rule are two things that can disagree, and this
+  lane has already shipped one of those.
+
+The shell suite's empirical check — point `origin` at nothing and require the
+committed step to still succeed — is **necessary but not sufficient**, and says
+so. The short-circuit in §19.2 means a reintroduced `--no-tags` fetch would keep
+it green. `TestTheseTestsWouldRedden` demonstrates that gap deliberately rather
+than papering over it; the static list is the control that closes it.
+
+### 19.6 Mutation coverage
+
+Every guard is disabled in turn and the forbidden shape is required to become
+acceptable — necessity, not just sufficiency:
+
+| mutation | must redden |
+|---|---|
+| head repository id check removed | fork accepted by `resolve_pull_request` |
+| `git fetch` reintroduced | `post_checkout_network_git_steps` guard |
+| checkout persistence enabled / key omitted / `with:` dropped | `assert_no_candidate_checkout` |
+| missing candidate object treated as a warning | committed shell exits 0 |
+| a fork pull request accepted | preflight ordering test |
+| credential markers list emptied | re-credentialled git accepted |
+
+A further guard was added after this round's own near-miss: renaming the shell
+test file left the dry-run workflow calling a path that no longer existed, and
+the local suite stayed green because nothing read workflow files looking for
+`pytest` targets. `TestEveryWorkflowStepNamesSomethingThatExists` now checks
+every referenced test file and governance document, and runs `bash -n` over
+every committed `run:` block.
+
+### 19.7 Test counts on the corrected head
+
+| suite | tests |
+|---|---|
+| `tests/test_midterm_panel.py` | 225 |
+| `tests/test_midterm_vertical.py` | 41 |
+| `tests/test_human_merge_gate.py` | 42 |
+| `tests/test_midterm_candidate_objects.py` | 25 |
+| `tests/test_checkruns.py` | 13 |
+| **mid-term lane total** | **346** |
+
+Whole repository: 1935 passed, 5 skipped. `ruff` clean over `app/`, `scripts/`,
+`tests/`. `detect-secrets-hook` over every tracked file: exit 0.
+
+`trustedlane.phases.IMPLEMENTED_PHASE` is still `D0`. This lane is not the
+trusted lane, is not write-separated, and holds no operator envelope authority.

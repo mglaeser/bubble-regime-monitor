@@ -25,9 +25,12 @@ pull request  ──▶  ordinary CI (PR-controlled, no secrets)
 ```
 
 **The one invariant everything rests on:** the candidate's tree is never
-materialised. Its commits are fetched as git **objects** (`git fetch
---no-checkout`) and read with git plumbing. No `checkout`, no `merge`, no
-`apply`, no artifact download from the candidate's run. `privilegedworkflow.py`
+materialised. Its commits are present as git **objects** — brought in by the
+trusted `fetch-depth: 0` checkout, asserted with `git cat-file -e`, and read
+with git plumbing. No `checkout`, no `merge`, no `apply`, no artifact download
+from the candidate's run, and no `git fetch` after checkout: the checkout drops
+its token on purpose, and this lane reviews same-repository pull requests only
+so it never needs one. `privilegedworkflow.py`
 enforces this statically and re-runs itself inside the privileged job, so the
 claim is about the file that is executing rather than about the file somebody
 last tested.

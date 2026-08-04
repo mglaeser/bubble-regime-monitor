@@ -16,7 +16,12 @@ from . import COUNT_EVIDENCE_CLASS, COUNT_STATUS, REPOSITORY_NUMERIC_ID
 from .clibase import require_env, run, self_test_report, self_test_requested
 from .count import counted_from_core, executable_plan
 from .errors import PanelRefusal
-from .evidence import count_evidence, strict_load, write_atomic
+from .evidence import (
+    count_evidence,
+    strict_load,
+    strict_load_plan,
+    write_atomic,
+)
 from .status import pending, publish, status_request
 
 REQUIRED = ("GITHUB_TOKEN", "CANDIDATE_HEAD_SHA", "CANDIDATE_BASE_SHA",
@@ -128,10 +133,15 @@ def perform(environ: dict, *, core, transport, opener, engine=None,
     paths = artifact_paths(_runner_temp(environ))
     write_atomic(record, paths["evidence"])
     write_atomic(plan, paths["plan"])
-    # Read back what was just written. A file that cannot be strict-loaded here
-    # is a handoff that fails in the panel job, and failing now costs nothing.
+    # Read BOTH back through the strict loaders, here, before the artifact is
+    # uploaded. A malformed count output should fail in the count job — where
+    # the cause is one step away — rather than in the panel job, where it looks
+    # like a corrupted handoff. Costs nothing: the bytes are in page cache.
     strict_load(paths["evidence"], expected_class=COUNT_EVIDENCE_CLASS,
                 expected_head=head, expected_base=base)
+    strict_load_plan(paths["plan"], expected_head=head, expected_base=base,
+                     expected_engine_digest=env["MIDTERM_ENGINE_DIGEST"],
+                     expected_policy_digest=env["MIDTERM_POLICY_DIGEST"])
 
     published.append(publish(status_request(
         repository_numeric_id=REPOSITORY_NUMERIC_ID, candidate_head_sha=head,

@@ -137,17 +137,30 @@ class TestTheCandidateTreeIsNeverMaterialised:
             _validate(document, tmp_path)
         assert "materialises_a_tree" in caught.value.reason
 
-    def test_git_fetch_stays_allowed(self, tmp_path):
+    @pytest.mark.parametrize("command", [
+        "git cat-file -e ${CANDIDATE_HEAD_SHA}^{commit}",
+        "git diff --name-only $CANDIDATE_BASE_SHA $CANDIDATE_HEAD_SHA",
+        "git show --stat $CANDIDATE_HEAD_SHA",
+        "git ls-tree -r $CANDIDATE_HEAD_SHA",
+        "git rev-parse $CANDIDATE_HEAD_SHA",
+    ])
+    def test_reading_candidate_objects_stays_allowed(self, command, tmp_path):
         """The object/worktree distinction IS the safety argument.
 
-        If fetching were refused too, the panel could not read the candidate at
-        all and the policy would have banned the architecture rather than the
-        hazard."""
+        These commands read the object database and produce no worktree, which
+        is exactly the capability the lane needs. If they were refused too, the
+        panel could not read the candidate at all and the policy would have
+        banned the architecture rather than the hazard.
+
+        (The previously permitted example here was `git fetch`. It is now
+        refused — see `TestTheCredentialBoundaryCannotBeEdittedAway` — because
+        the credential model, not the object model, ruled it out.)"""
         document = _document()
         document["jobs"]["count"]["steps"].append(
-            {"name": "fetch as inert objects",
-             "run": "git fetch --no-checkout origin $CANDIDATE_HEAD_SHA"})
-        assert _validate(document, tmp_path)["tree_materialising_steps"] == 0
+            {"name": "read the candidate as data", "run": command})
+        record = _validate(document, tmp_path)
+        assert record["tree_materialising_steps"] == 0
+        assert record["post_checkout_network_git_steps"] == 0
 
     @pytest.mark.parametrize("action", [
         "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
@@ -1179,20 +1192,21 @@ class TestEveryCountInputHasAWorkflowProducer:
         """The object/worktree distinction is the safety argument, so the
         producer step has to be the one shape that keeps it.
 
-        This is the STRING-level half. It is deliberately negative — it says
-        which commands must not appear — because the positive half ("the fetch
-        works") cannot be established by looking at a string, and the previous
-        version of this test tried to. It asserted
-        `"git fetch --no-checkout origin" in rendered`, which passed, while the
-        command it pinned exits 129 with "unknown option". A test that asserts
-        a literal proves the literal is present.
+        This is the STRING-level half, and it is deliberately negative: it says
+        which commands must not appear. The positive half — "the step actually
+        works" — cannot be established by looking at a string, and the version
+        of this test that tried asserted
+        `"git fetch --no-checkout origin" in rendered`. It passed, while the
+        command it pinned exits 129 with "unknown option".
 
-        `tests/test_midterm_fetch_shell.py` runs the command."""
+        `tests/test_midterm_candidate_objects.py` runs the committed step."""
         job, rendered = self._count_job_env_and_steps()
-        assert "git fetch" in rendered
+        assert "git cat-file -e" in rendered
         for producing in ("git checkout", "git merge", "git switch",
                           "git worktree", "git apply"):
             assert producing not in rendered, producing
+        for networked in ("git fetch", "git pull", "git clone", "git push"):
+            assert networked not in rendered, networked
 
     def test_the_invalid_fetch_option_is_gone_from_every_workflow(self):
         """`--no-checkout` is a clone option. `git fetch` refuses it."""
@@ -1671,3 +1685,542 @@ class TestOrdinaryCIMustHaveTestedThisExactCombination:
             rendered = yaml.safe_dump(document["jobs"][job])
             assert "MIDTERM_TESTED_BASE_SHA" in rendered, job
             assert "MIDTERM_TRIGGERING_CI_RUN_ID" in rendered, job
+
+
+# A commit id, not a credential — same reason as HEAD above.
+CANDIDATE_HEAD = "9" * 40
+CANDIDATE_BASE = "8" * 40
+APPROVED_SOURCE = "7" * 40
+APPROVED_PROTECTED = "6" * 40
+CI_RUN_ID = 30991234567
+
+
+def _pull(**overrides):
+    """An open, same-repository pull request as the API returns one."""
+    pull = {
+        "number": 34,
+        "state": "open",
+        "merged_at": None,
+        "head": {"sha": CANDIDATE_HEAD,
+                 "repo": {"id": mp.REPOSITORY_NUMERIC_ID,
+                          "full_name": "mglaeser/bubble-regime-monitor"}},
+        "base": {"ref": "main", "sha": CANDIDATE_BASE},
+    }
+    pull.update(overrides)
+    return pull
+
+
+class _RecordingApi:
+    """A read-only client that records WHICH reads happened, in order.
+
+    The order is the point. "The fork is refused" and "the fork is refused
+    before anything else is read" are different claims, and only the second one
+    says the refusal happens before the job that holds the provider key could
+    have started."""
+
+    def __init__(self, *, pulls=None, run=None, jobs=None, main_head=None,
+                 files=None):
+        self.calls = []
+        self._pulls = [_pull()] if pulls is None else pulls
+        self._run = run if run is not None else {
+            "id": CI_RUN_ID, "name": "ci", "event": "pull_request",
+            "conclusion": "success", "run_attempt": 1,
+            "pull_requests": [{"head": {"sha": CANDIDATE_HEAD},
+                               "base": {"sha": CANDIDATE_BASE}}]}
+        self._jobs = jobs if jobs is not None else [
+            {"name": name, "status": "completed", "conclusion": "success"}
+            for name in ("test (3.12)", "image")]
+        self._main_head = main_head or CANDIDATE_BASE
+        self._files = files if files is not None else ["app/compute.py"]
+
+    def open_pull_requests(self):
+        self.calls.append("pulls")
+        return self._pulls
+
+    def workflow_run(self, run_id):
+        self.calls.append("workflow-run")
+        return self._run
+
+    def workflow_run_jobs(self, run_id):
+        self.calls.append("workflow-run-jobs")
+        return self._jobs
+
+    def default_branch_head(self):
+        self.calls.append("branches/main")
+        return self._main_head
+
+    def check_runs(self, head_sha):
+        self.calls.append("check-runs")
+        from midtermpanel.preflight import REQUIRED_ORDINARY_CHECKS
+        return [{"name": name, "status": "completed", "conclusion": "success",
+                 "head_sha": head_sha, "id": 100 + index,
+                 "completed_at": f"2026-08-04T10:0{index}:00Z"}
+                for index, name in enumerate(REQUIRED_ORDINARY_CHECKS)]
+
+    def changed_files(self, pr_number):
+        self.calls.append("pull-files")
+        return self._files
+
+
+def _preflight_environ(**overrides):
+    environ = {
+        "TRIGGER_EVENT": "workflow_run",
+        "RUN_WORKFLOW_NAME": "ci",
+        "RUN_EVENT": "pull_request",
+        "RUN_CONCLUSION": "success",
+        "RUN_HEAD_SHA": CANDIDATE_HEAD,
+        "RUN_ID": str(CI_RUN_ID),
+        "MIDTERM_APPROVED_ENGINE_SOURCE_SHA": APPROVED_SOURCE,
+        "MIDTERM_APPROVED_ENGINE_PROTECTED_SHA": APPROVED_PROTECTED,
+    }
+    environ.update(overrides)
+    return environ
+
+
+class TestTheCandidateMustLiveInThisRepository:
+    """§2.1. The precondition the whole acquisition model rests on.
+
+    `persist-credentials: false` means no later step can authenticate to this
+    private origin, so the candidate's objects must already be present. They
+    are — `fetch-depth: 0` brings every BRANCH in — and a fork's head is not a
+    branch here. That gap is refused explicitly, in preflight, before any job
+    that holds the provider key starts, rather than being half-supported and
+    discovered by a count that dies with the key already read."""
+
+    def _assert(self, pull):
+        from midtermpanel.preflight import assert_candidate_is_same_repository
+        return assert_candidate_is_same_repository(pull)
+
+    def test_a_same_repository_pull_request_passes_and_names_the_id(self):
+        record = self._assert(_pull())
+        assert record["candidate_repository_numeric_id"] == \
+            mp.REPOSITORY_NUMERIC_ID
+        assert record["candidate_is_same_repository"] is True
+
+    def test_a_fork_is_refused(self):
+        forked = _pull(head={"sha": CANDIDATE_HEAD,
+                             "repo": {"id": 999999,
+                                      "full_name": "someone/fork"}})
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(forked)
+        assert "candidate_repository_not_the_reviewed_repository" in \
+            caught.value.reason
+
+    def test_a_matching_name_with_a_different_id_is_still_refused(self):
+        """The reason the check reads the NUMERIC id.
+
+        A repository can be renamed and the name reused, so a fork sitting at
+        `mglaeser/bubble-regime-monitor` is a thing that can exist. The id
+        cannot be reused, which is why the trusted lane pins it too."""
+        impostor = _pull(head={
+            "sha": CANDIDATE_HEAD,
+            "repo": {"id": mp.REPOSITORY_NUMERIC_ID + 1,
+                     "full_name": "mglaeser/bubble-regime-monitor"}})
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(impostor)
+        assert "candidate_repository_not_the_reviewed_repository" in \
+            caught.value.reason
+        assert str(mp.REPOSITORY_NUMERIC_ID) in caught.value.reason
+
+    @pytest.mark.parametrize("head", [
+        {"sha": CANDIDATE_HEAD},                       # no repo key at all
+        {"sha": CANDIDATE_HEAD, "repo": None},         # deleted fork source
+        {"sha": CANDIDATE_HEAD, "repo": "mglaeser/bubble-regime-monitor"},
+    ])
+    def test_an_unidentifiable_head_repository_is_refused(self, head):
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(_pull(head=head))
+        assert "candidate_head_repository_absent" in caught.value.reason
+
+    @pytest.mark.parametrize("bad_id", [
+        str(mp.REPOSITORY_NUMERIC_ID),   # the right value, wrong type
+        None,
+        True,                            # bool is an int in Python; not here
+        1.0,
+    ])
+    def test_a_malformed_repository_id_is_refused(self, bad_id):
+        """Refused rather than coerced. `int("1297332828")` would pass and
+        `int(True)` is 1, and a check that repairs its input is a check that
+        has stopped reading it."""
+        with pytest.raises(PanelRefusal) as caught:
+            self._assert(_pull(head={"sha": CANDIDATE_HEAD,
+                                     "repo": {"id": bad_id}}))
+        assert "candidate_head_repository_id_malformed" in caught.value.reason
+
+    def test_resolve_pull_request_publishes_the_repository_it_verified(self):
+        from midtermpanel.preflight import resolve_pull_request
+        record = resolve_pull_request([_pull()], run_head_sha=CANDIDATE_HEAD)
+        assert record["candidate_is_same_repository"] is True
+        assert record["candidate_repository_numeric_id"] == \
+            mp.REPOSITORY_NUMERIC_ID
+        assert record["head_sha"] == CANDIDATE_HEAD
+        assert record["base_sha"] == CANDIDATE_BASE
+
+    def test_resolve_pull_request_refuses_a_fork(self):
+        from midtermpanel.preflight import resolve_pull_request
+        forked = _pull(head={"sha": CANDIDATE_HEAD, "repo": {"id": 42}})
+        with pytest.raises(PanelRefusal):
+            resolve_pull_request([forked], run_head_sha=CANDIDATE_HEAD)
+
+
+class TestPreflightStillDecidesEverythingElseCorrectly:
+    """The identity check is new; it must not have displaced what was there."""
+
+    def test_the_happy_path_proceeds_and_publishes_what_ci_tested(self):
+        from midtermpanel import preflightcli
+        api = _RecordingApi()
+        decision = preflightcli.decide(_preflight_environ(), api=api,
+                                       root=str(ROOT))
+        assert decision["proceed"] is True
+        assert decision["pr_number"] == 34
+        assert decision["head_sha"] == CANDIDATE_HEAD
+        assert decision["base_sha"] == CANDIDATE_BASE
+        assert decision["tested_head_sha"] == CANDIDATE_HEAD
+        assert decision["tested_base_sha"] == CANDIDATE_BASE
+        assert decision["triggering_ci_run_id"] == CI_RUN_ID
+        assert decision["review_class"] == "ROUTINE_PR"
+
+    def test_every_declared_output_is_actually_produced(self):
+        """An undeclared output resolves to the empty string and errors
+        nothing. So does a declared one the CLI forgets to emit."""
+        from midtermpanel import preflightcli
+        decision = preflightcli.decide(_preflight_environ(),
+                                       api=_RecordingApi(), root=str(ROOT))
+        public = {k: v for k, v in decision.items() if not k.startswith("_")}
+        assert set(public) == set(preflightcli.PUBLIC_OUTPUTS)
+        for name, value in public.items():
+            assert value != "", name
+
+    def test_the_engine_identity_is_the_approved_release_not_the_candidate(self):
+        from midtermpanel import preflightcli
+        from midtermpanel.engine import engine_digest, source_roles
+        decision = preflightcli.decide(_preflight_environ(),
+                                       api=_RecordingApi(), root=str(ROOT))
+        assert decision["engine_digest"] == engine_digest(roles=source_roles({
+            "approved_engine_source_sha": APPROVED_SOURCE,
+            "approved_engine_protected_sha": APPROVED_PROTECTED}))
+
+    def test_an_engine_pinned_to_the_candidate_head_still_blocks(self):
+        from midtermpanel import preflightcli
+        with pytest.raises(PanelRefusal) as caught:
+            preflightcli.decide(
+                _preflight_environ(
+                    MIDTERM_APPROVED_ENGINE_SOURCE_SHA=CANDIDATE_HEAD),
+                api=_RecordingApi(), root=str(ROOT))
+        assert "engine_source_is_the_reviewed_candidate" in caught.value.reason
+
+
+class TestTheForkRefusalHappensBeforeAnyCredentialCouldBeRead:
+    """§2.1, the ordering half.
+
+    A refusal that happens after the count job started is not a refusal that
+    protects anything: by then the provider key has been read into a process."""
+
+    def _fork_api(self):
+        return _RecordingApi(pulls=[_pull(
+            head={"sha": CANDIDATE_HEAD,
+                  "repo": {"id": 24680, "full_name": "someone/fork"}})])
+
+    def test_the_decision_refuses(self):
+        from midtermpanel import preflightcli
+        with pytest.raises(PanelRefusal) as caught:
+            preflightcli.decide(_preflight_environ(), api=self._fork_api(),
+                                root=str(ROOT))
+        assert "candidate_repository_not_the_reviewed_repository" in \
+            caught.value.reason
+
+    def test_it_refuses_on_the_first_read_and_makes_no_others(self):
+        from midtermpanel import preflightcli
+        api = self._fork_api()
+        with pytest.raises(PanelRefusal):
+            preflightcli.decide(_preflight_environ(), api=api, root=str(ROOT))
+        assert api.calls == ["pulls"], (
+            "the fork must be refused as soon as the pull request is read, "
+            f"before CI or file reads: {api.calls}")
+
+    def test_the_deciding_job_holds_no_secret_at_all(self):
+        """Structural companion: the refusal ordering only matters because the
+        job it happens in never had a credential to lose."""
+        document = _document()
+        assert "secrets." not in yaml.safe_dump(document["jobs"]["preflight"])
+        record = privilegedworkflow.validate(root=str(ROOT))
+        assert record["secret_bearing_jobs"] == ["count", "panel"]
+
+
+class TestTheCredentialBoundaryCannotBeEdittedAway:
+    """§2.2. Static guards over the privileged workflow, each mutated INTO the
+    real file so the assertion is "the validator would notice", not "the
+    validator ran"."""
+
+    def test_the_committed_workflow_satisfies_both_new_guards(self):
+        record = privilegedworkflow.validate(root=str(ROOT))
+        assert record["post_checkout_network_git_steps"] == 0
+        assert record["checkouts_persisting_credentials"] == 0
+        assert record["credential_reintroduction_steps"] == 0
+
+    @pytest.mark.parametrize("command", [
+        'git fetch origin "$CANDIDATE_HEAD_SHA"',
+        "git fetch --no-tags --no-recurse-submodules origin $SHA:refs/x",
+        "git pull origin main",
+        "git clone https://github.com/mglaeser/bubble-regime-monitor /tmp/c",
+        "git remote add candidate https://example.invalid/x.git",
+        "git ls-remote origin",
+        "git submodule update --init",
+        "git push origin HEAD",
+    ])
+    def test_a_post_checkout_network_git_command_is_refused(self, command,
+                                                            tmp_path):
+        document = _document()
+        document["jobs"]["count"]["steps"].append(
+            {"name": "reach the network", "run": command})
+        with pytest.raises(PanelRefusal) as caught:
+            _validate(document, tmp_path)
+        assert "fetches_after_checkout" in caught.value.reason
+
+    @pytest.mark.parametrize("job", ["preflight", "count", "panel",
+                                     "finalize"])
+    def test_persisting_the_checkout_credential_is_refused(self, job,
+                                                           tmp_path):
+        document = _document()
+        document["jobs"][job]["steps"][0]["with"]["persist-credentials"] = True
+        with pytest.raises(PanelRefusal) as caught:
+            _validate(document, tmp_path)
+        assert "persists_credentials" in caught.value.reason
+
+    def test_omitting_persist_credentials_is_refused_too(self, tmp_path):
+        """The default is to KEEP the token, so silence is the hazard.
+
+        A guard that only rejected the literal `true` would pass a checkout
+        that simply stopped saying anything, which is the shape an edit
+        actually takes."""
+        document = _document()
+        document["jobs"]["count"]["steps"][0]["with"].pop("persist-credentials")
+        with pytest.raises(PanelRefusal) as caught:
+            _validate(document, tmp_path)
+        assert "persists_credentials" in caught.value.reason
+
+    def test_dropping_the_with_block_entirely_is_refused(self, tmp_path):
+        document = _document()
+        document["jobs"]["count"]["steps"][0].pop("with")
+        with pytest.raises(PanelRefusal) as caught:
+            _validate(document, tmp_path)
+        assert "persists_credentials" in caught.value.reason
+
+    @pytest.mark.parametrize("command", [
+        'git config --global credential.helper "!f() { echo password=$T; }; f"',
+        'git config http.extraheader "AUTHORIZATION: basic $B64"',
+        'git config --add http.https://github.com/.extraheader "x"',
+        'export GIT_ASKPASS=/tmp/askpass.sh',
+        'git remote set-url origin https://x-access-token:$T@github.com/o/r',
+    ])
+    def test_writing_a_credential_back_into_git_is_refused(self, command,
+                                                           tmp_path):
+        """The other way to get a usable token: not asking checkout to keep
+        one, but putting one back afterwards."""
+        document = _document()
+        document["jobs"]["panel"]["steps"].append(
+            {"name": "re-credential", "run": command})
+        with pytest.raises(PanelRefusal) as caught:
+            _validate(document, tmp_path)
+        assert ("reintroduces_a_git_credential" in caught.value.reason
+                or "fetches_after_checkout" in caught.value.reason)
+
+    @pytest.mark.parametrize("command", [
+        "git checkout $CANDIDATE_HEAD_SHA",
+        "git switch --detach $CANDIDATE_HEAD_SHA",
+        "git merge $CANDIDATE_HEAD_SHA",
+        "git worktree add /tmp/candidate $CANDIDATE_HEAD_SHA",
+        "git apply /tmp/candidate.patch",
+    ])
+    def test_turning_the_candidate_into_a_worktree_is_still_refused(
+            self, command, tmp_path):
+        document = _document()
+        document["jobs"]["count"]["steps"].append(
+            {"name": "materialise", "run": command})
+        with pytest.raises(PanelRefusal) as caught:
+            _validate(document, tmp_path)
+        assert "materialises_a_tree" in caught.value.reason
+
+    def test_the_guards_are_wired_into_validate_and_not_merely_defined(self):
+        """A written check nobody calls is the failure mode this whole lane
+        keeps finding. Asserted by AST over `validate()` rather than by
+        searching the file, because the module also NAMES these functions in
+        prose."""
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(privilegedworkflow.validate))
+        called = {node.func.id for node in ast.walk(tree)
+                  if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Name)}
+        assert "assert_no_post_checkout_network_git" in called
+        assert "assert_no_credential_reintroduction" in called
+
+
+class TestTheseGuardsWouldReddenIfRemoved:
+    """§2.4. Necessity, not just sufficiency: each guard is disabled and the
+    forbidden shape is shown to become acceptable.
+
+    Without this, a guard that silently stopped matching — a renamed key, a
+    tuple that lost an entry — would leave every test above green."""
+
+    def test_without_the_identity_check_a_fork_is_accepted(self, monkeypatch):
+        from midtermpanel import preflight
+        forked = _pull(head={"sha": CANDIDATE_HEAD,
+                             "repo": {"id": 13579, "full_name": "o/fork"}})
+        with pytest.raises(PanelRefusal):
+            preflight.resolve_pull_request([forked],
+                                           run_head_sha=CANDIDATE_HEAD)
+        monkeypatch.setattr(preflight, "assert_candidate_is_same_repository",
+                            lambda pull: {})
+        accepted = preflight.resolve_pull_request([forked],
+                                                  run_head_sha=CANDIDATE_HEAD)
+        assert accepted["head_sha"] == CANDIDATE_HEAD
+        assert "candidate_is_same_repository" not in accepted
+
+    def test_without_the_command_list_a_fetch_is_accepted(self, monkeypatch,
+                                                          tmp_path):
+        document = _document()
+        document["jobs"]["count"]["steps"].append(
+            {"name": "fetch", "run": 'git fetch origin "$SHA"'})
+        with pytest.raises(PanelRefusal):
+            _validate(document, tmp_path)
+        monkeypatch.setattr(privilegedworkflow,
+                            "POST_CHECKOUT_NETWORK_COMMANDS", ())
+        assert _validate(document, tmp_path)[
+            "post_checkout_network_git_steps"] == 0
+
+    def test_without_the_persistence_check_a_kept_token_is_accepted(
+            self, monkeypatch, tmp_path):
+        """Note WHICH function is disabled here: `assert_no_candidate_checkout`.
+
+        The persistence rule lives there, with the other rules about how a
+        checkout is shaped, and it lives there ONLY. This round nearly added a
+        second copy in a new function — a duplicated rule is a rule that can
+        disagree with itself, which is how the panel's `aggregate` once blocked
+        every review by contradicting the engine's role gate. Pointing this
+        test at the real owner is what keeps that collapse from silently
+        undoing itself."""
+        document = _document()
+        document["jobs"]["count"]["steps"][0]["with"]["persist-credentials"] = True
+        with pytest.raises(PanelRefusal):
+            _validate(document, tmp_path)
+        monkeypatch.setattr(privilegedworkflow, "assert_no_candidate_checkout",
+                            lambda document: {
+                                "checkout_steps": ["disabled"],
+                                "checkouts_persisting_credentials": 0})
+        assert _validate(document, tmp_path)[
+            "checkouts_persisting_credentials"] == 0
+
+    def test_the_persistence_rule_has_exactly_one_implementation(self):
+        """Stated as a test so the collapse cannot quietly reverse.
+
+        Counted over each function's non-docstring string literals, not over
+        the file's text and not over its whole AST: this module explains the
+        rule in prose in three places. A grep counts each explanation as
+        another implementation, and so does `ast.dump`, which includes the
+        docstring — the same "the comment describing the defect is read as the
+        defect" trap this lane keeps walking into."""
+        import ast
+        import inspect
+
+        def code_strings(function):
+            doc = None
+            first = function.body[0] if function.body else None
+            if (isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                doc = first.value
+            for node in ast.walk(function):
+                if (isinstance(node, ast.Constant)
+                        and isinstance(node.value, str)
+                        and node is not doc):
+                    yield node.value
+
+        tree = ast.parse(inspect.getsource(privilegedworkflow))
+        owners = [node.name for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef)
+                  and any("persist-credentials" in text
+                          for text in code_strings(node))]
+        assert owners == ["assert_no_candidate_checkout"], owners
+
+    def test_without_the_marker_list_a_re_credentialled_git_is_accepted(
+            self, monkeypatch, tmp_path):
+        document = _document()
+        document["jobs"]["panel"]["steps"].append(
+            {"name": "re-credential",
+             "run": 'git config http.extraheader "AUTHORIZATION: basic $B"'})
+        with pytest.raises(PanelRefusal):
+            _validate(document, tmp_path)
+        monkeypatch.setattr(privilegedworkflow,
+                            "CREDENTIAL_REINTRODUCTION_MARKERS", ())
+        assert _validate(document, tmp_path)[
+            "credential_reintroduction_steps"] == 0
+
+
+class TestEveryWorkflowStepNamesSomethingThatExists:
+    """A step that runs a file which is not there fails on the runner, minutes
+    into a job, for a reason that has nothing to do with what it was testing.
+
+    This exists because renaming `tests/test_midterm_fetch_shell.py` to
+    `tests/test_midterm_candidate_objects.py` left the dry-run workflow calling
+    the old path. The local suite stayed green — it does not read workflow
+    files looking for pytest invocations — and the break would have surfaced
+    only as a red hosted job."""
+
+    def _midterm_workflows(self):
+        return sorted((ROOT / ".github" / "workflows").glob("midterm-*.yml"))
+
+    def test_every_pytest_target_exists(self):
+        import re
+        pattern = re.compile(r"(tests/[\w./-]+\.py)")
+        seen = 0
+        for path in self._midterm_workflows():
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job in (document.get("jobs") or {}).values():
+                for step in (job or {}).get("steps") or []:
+                    for target in pattern.findall(str(step.get("run") or "")):
+                        seen += 1
+                        assert (ROOT / target).is_file(), (
+                            f"{path.name} runs {target}, which does not exist")
+        assert seen > 0, (
+            "no pytest target was found in any midterm workflow; this guard "
+            "must not be able to pass by covering nothing")
+
+    def test_every_referenced_governance_document_exists(self):
+        import re
+        pattern = re.compile(r"(governance/[\w./-]+\.json)")
+        seen = 0
+        for path in self._midterm_workflows():
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job in (document.get("jobs") or {}).values():
+                for step in (job or {}).get("steps") or []:
+                    for target in pattern.findall(str(step.get("run") or "")):
+                        seen += 1
+                        assert (ROOT / target).is_file(), (
+                            f"{path.name} reads {target}, which does not exist")
+        assert seen > 0
+
+    def test_every_run_block_is_valid_bash(self):
+        """Syntax, checked by bash itself.
+
+        `git fetch --no-checkout` was accepted by every reader in this
+        repository because it IS valid shell — but the class of defect it
+        belongs to (a committed command nobody executed) includes plain syntax
+        errors, and those cost a hosted run to discover."""
+        import subprocess
+        checked = 0
+        for path in self._midterm_workflows():
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job_id, job in (document.get("jobs") or {}).items():
+                for index, step in enumerate((job or {}).get("steps") or []):
+                    script = str(step.get("run") or "")
+                    if not script.strip():
+                        continue
+                    checked += 1
+                    result = subprocess.run(
+                        ["bash", "-n"], input=script, text=True,
+                        capture_output=True)
+                    assert result.returncode == 0, (
+                        f"{path.name}:{job_id}.steps[{index}] is not valid "
+                        f"bash:\n{result.stderr}")
+        assert checked > 0

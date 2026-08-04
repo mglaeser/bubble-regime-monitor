@@ -77,8 +77,9 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
         refuse("category=preflight_dispatch_trigger_removed — the privileged "
                "workflow accepts `workflow_run` only, because a dispatch runs "
                "from a ref the dispatcher chooses and these checkouts name no "
-               "ref. Re-run ordinary CI, or use `midterm-panel-rerun.yml`, "
-               "which holds no secret")
+               "ref. To re-run the panel, re-run ordinary CI: "
+               "`gh run rerun <CI_RUN_ID>`. The convenience workflow that did "
+               "this was removed for the same selected-ref reason")
     if trigger not in PERMITTED_TRIGGERS:
         refuse(f"category=preflight_unexpected_trigger event={trigger!r} "
                f"permitted={list(PERMITTED_TRIGGERS)}")

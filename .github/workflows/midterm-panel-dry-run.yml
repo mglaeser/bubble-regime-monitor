@@ -65,10 +65,21 @@ jobs:
             -r requirements-trusted-runtime.txt
           python -m pip install pytest pyyaml
 
-      - name: Fetch the pinned engine commits
-        # Named explicitly rather than assumed present. The release document is
-        # the single place these live; a re-pin moves one file and this follows.
+      - name: Assert the pinned engine commits are present
+        # ASSERT, not fetch. This step used to be
+        # `git cat-file -e ... || git fetch ...`, and on every hosted run so far
+        # the `cat-file` succeeded and the fetch never executed — the step
+        # completed in ZERO seconds, which is what proved it. So its green never
+        # demonstrated that an authenticated post-checkout fetch works here, and
+        # it could not have: `persist-credentials: false` removes the token and
+        # this repository is private.
+        #
+        # `fetch-depth: 0` is what makes the objects present. If a pinned engine
+        # commit is ever unreachable — its branch deleted, say — the honest
+        # outcome is a named failure telling the operator to re-pin, not a
+        # fetch that cannot authenticate.
         run: |
+          set -euo pipefail
           python - <<'PROBE' > /tmp/engine-refs.txt
           import json
           doc = json.load(open("governance/midterm-panel-engine-release.json"))
@@ -76,9 +87,74 @@ jobs:
           print(doc["approved_engine_protected_sha"])
           PROBE
           while read -r sha; do
-            git cat-file -e "$sha^{commit}" 2>/dev/null \
-              || git fetch --no-tags origin "$sha"
+            if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              echo "::error::pinned engine commit ${sha} is not reachable from" \
+                   "any branch in this repository. Re-pin the engine release to" \
+                   "a reachable commit; this lane never fetches after checkout." >&2
+              exit 1
+            fi
           done < /tmp/engine-refs.txt
+          echo "both pinned engine commits present in the checkout"
+
+      - name: Prove the candidate object model works without a fetch
+        # §2.3. The hosted proof that the acquisition model this lane now
+        # depends on actually holds ON A RUNNER, after a real
+        # `persist-credentials: false` checkout, against this private
+        # repository.
+        #
+        # For a pull_request event the API gives the real head; for a push there
+        # is no PR, so the run's own commit stands in — either way the claim
+        # under test is the same: the object is HERE, and no network fetch was
+        # needed to get it.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
+          THIS_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          before_head=$(git rev-parse HEAD)
+          before_status=$(git status --porcelain | wc -l)
+
+          # Read from the code that enforces it, not typed here. A second copy
+          # of the repository id is a second thing that can be wrong, and this
+          # one would be wrong in the direction of passing.
+          expected_repository_id=$(PYTHONPATH="$GITHUB_WORKSPACE/scripts" \
+            python -c 'import midtermpanel; print(midtermpanel.REPOSITORY_NUMERIC_ID)')
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            candidate="$PR_HEAD_SHA"
+            if [ "$PR_HEAD_REPO_ID" != "$expected_repository_id" ]; then
+              echo "fork pull request: preflight refuses these before any" \
+                   "credential is read, and the candidate object is not" \
+                   "expected to be present. Nothing to prove here."
+              exit 0
+            fi
+          else
+            candidate="$THIS_SHA"
+          fi
+
+          echo "candidate object under test: $candidate"
+          git cat-file -e "${candidate}^{commit}"
+          echo "present in the object database"
+
+          # Readable through plumbing, with no worktree change.
+          git cat-file -t "${candidate}^{commit}"
+          git ls-tree --name-only "$candidate" | head -3
+
+          # Nothing moved.
+          [ "$(git rev-parse HEAD)" = "$before_head" ] || {
+            echo "::error::HEAD moved" >&2; exit 1; }
+          [ "$(git status --porcelain | wc -l)" = "$before_status" ] || {
+            echo "::error::the worktree changed" >&2; exit 1; }
+
+          # And no credential was persisted for a fetch to have used.
+          if git config --local --get-regexp 'http\..*\.extraheader' >/dev/null 2>&1; then
+            echo "::error::a git credential is persisted in this checkout" >&2
+            exit 1
+          fi
+          echo "no persisted git credential; no fetch attempted; HEAD and worktree unchanged"
 
       - name: Prove no provider credential is in scope
         # Before the vertical, not after. A job that discovered a credential
@@ -98,15 +174,16 @@ jobs:
           python -m pytest tests/test_midterm_vertical.py -v \
             --no-header -p no:randomly
 
-      - name: Run the fetch shell against a real repository
+      - name: Run the candidate-object shell against a real repository
         # The vertical is handed a repository path and never executes the
         # workflow's own shell, which is how `git fetch --no-checkout` — not a
         # git command, exit 129 — survived a green vertical. This runs the
-        # committed command.
+        # committed command, including the mutation cases that prove those
+        # checks can still fail.
         env:
           PYTHONPATH: ${{ github.workspace }}/scripts
         run: |
-          python -m pytest tests/test_midterm_fetch_shell.py -q
+          python -m pytest tests/test_midterm_candidate_objects.py -q
 
       - name: Refuse a skipped vertical
         # `pytest` exits 0 when every test is skipped, and this suite skips

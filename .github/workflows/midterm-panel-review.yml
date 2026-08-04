@@ -21,8 +21,9 @@
 # ## The two rules
 #
 #   1. The candidate's tree is never materialised. Candidate commits arrive as
-#      inert git OBJECTS via a plain `git fetch`, which never produces a
-#      worktree; nothing checks them out,
+#      inert git OBJECTS the trusted `fetch-depth: 0` checkout already brought
+#      in — this lane never fetches after checkout, because the token is not
+#      persisted and the repository is private; nothing checks them out,
 #      unpacks them, installs them or imports them. No `ref:` on any checkout, no
 #      `download-artifact`, no `cache`, no `git checkout` in any `run:`.
 #
@@ -71,8 +72,11 @@ on:
   # The runtime approval phrase authenticated the CANDIDATE being reviewed. It
   # never authenticated the ref supplying the reviewer.
   #
-  # Controlled reruns go through `midterm-panel-rerun.yml`, which holds no
-  # secret and only asks CI to run again.
+  # Controlled reruns use GitHub's "Re-run all jobs" on the ordinary CI run,
+  # or `gh run rerun <CI_RUN_ID> --repo mglaeser/bubble-regime-monitor`. A
+  # convenience workflow that did this was removed: a workflow_dispatch
+  # workflow runs a branch-selected copy, so with a persistent repository
+  # secret a branch version could reference it.
   workflow_run:
     workflows: ["ci"]
     types: [completed]
@@ -105,7 +109,10 @@ env:
 # policy and request-semantics digests, because "same SHA" is not the same claim
 # as "same review".
 concurrency:
-  group: midterm-panel-${{ github.event.workflow_run.head_sha || inputs.candidate_head_sha }}
+  # `workflow_run` is the only trigger, so its head is the only
+  # identity. The `|| inputs.candidate_head_sha` fallback was left
+  # over from the removed dispatch trigger and could never resolve.
+  group: midterm-panel-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 jobs:
@@ -209,9 +216,9 @@ jobs:
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_ID: ${{ github.event.workflow_run.id }}
-          DISPATCH_PR_NUMBER: ${{ inputs.pr_number }}
-          DISPATCH_HEAD_SHA: ${{ inputs.candidate_head_sha }}
-          DISPATCH_APPROVAL: ${{ inputs.approval_phrase }}
+          # No DISPATCH_* variables. They were inputs of the removed
+          # workflow_dispatch trigger and could never resolve; `preflightcli`
+          # refuses a dispatch event outright.
         run: |
           python -m midtermpanel.preflightcli
 
@@ -267,27 +274,45 @@ jobs:
                   print(f"{variable}={doc[key]}")
           PROBE
 
-      - name: Materialise the repository with the candidate as OBJECTS
-        # `git fetch` NEVER produces a worktree — that is the point, and it is
-        # why no flag is needed to prevent one. The previous version passed
-        # `--no-checkout`, which `git fetch` does not accept: it exits 129 with
-        # "unknown option", so this step would have failed on the first real run
-        # in both secret-bearing jobs. `--no-checkout` belongs to clone.
+      - name: Assert the candidate is present as OBJECTS
+        # NO FETCH. `actions/checkout` runs with `persist-credentials: false`,
+        # which deliberately removes its token from every later git command —
+        # and this repository is PRIVATE, so a later `git fetch` that has to
+        # reach origin cannot authenticate.
         #
-        # The candidate lands under its own ref namespace so later git plumbing
-        # has a name to read, and `--no-tags --no-recurse-submodules` keeps the
-        # fetch to exactly the objects that commit needs.
+        # It does not need to. `fetch-depth: 0` makes the trusted checkout
+        # fetch every branch's history while it still holds its own token, and
+        # a same-repository pull request's head IS a branch in origin. Preflight
+        # refuses a fork before this point precisely because that assumption is
+        # what makes the objects present.
         #
-        # `tests/test_midterm_fetch_shell.py` runs THIS EXACT command in a real
-        # temporary repository and proves no candidate file reaches the
-        # worktree. The vertical could not have caught the broken form: it is
-        # handed a repository path and never executes the workflow's shell.
+        # The fetch this step replaced was measured, not guessed (git 2.43.0):
+        # `git fetch --no-tags origin <sha>` exits 0 WITHOUT contacting the
+        # remote when the object is already present, and exits 128 when it is
+        # not. So it was a silent no-op whenever it was unnecessary, and a
+        # mid-job failure — after the provider key had been read — in exactly
+        # the cases it existed for.
+        #
+        # So this ASSERTS rather than acquires. A missing object is a named
+        # failure here, before the provider key is read.
+        #
+        # `git cat-file -e` reads the object database and touches no worktree —
+        # the object/worktree distinction that is this lane's whole safety
+        # argument.
         env:
           CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          CANDIDATE_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
-          git fetch --no-tags --no-recurse-submodules origin \
-            "$CANDIDATE_HEAD_SHA:refs/midterm/candidate/$CANDIDATE_HEAD_SHA"
-          git cat-file -e "$CANDIDATE_HEAD_SHA^{commit}"
+          set -euo pipefail
+          for sha in "$CANDIDATE_HEAD_SHA" "$CANDIDATE_BASE_SHA"; do
+            if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              echo "::error::candidate commit ${sha} is absent from the" \
+                   "full-history checkout. This lane never fetches after" \
+                   "checkout: the token is not persisted and the repository" \
+                   "is private. A same-repository head should always be here." >&2
+              exit 1
+            fi
+          done
           echo "MIDTERM_REPOSITORY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
       - name: Materialise the operator PIN record
@@ -411,14 +436,45 @@ jobs:
                   print(f"{variable}={doc[key]}")
           PROBE
 
-      - name: Materialise the repository with the candidate as OBJECTS
-        # Same valid inert fetch as the count job. See its comment.
+      - name: Assert the candidate is present as OBJECTS
+        # NO FETCH. `actions/checkout` runs with `persist-credentials: false`,
+        # which deliberately removes its token from every later git command —
+        # and this repository is PRIVATE, so a later `git fetch` that has to
+        # reach origin cannot authenticate.
+        #
+        # It does not need to. `fetch-depth: 0` makes the trusted checkout
+        # fetch every branch's history while it still holds its own token, and
+        # a same-repository pull request's head IS a branch in origin. Preflight
+        # refuses a fork before this point precisely because that assumption is
+        # what makes the objects present.
+        #
+        # The fetch this step replaced was measured, not guessed (git 2.43.0):
+        # `git fetch --no-tags origin <sha>` exits 0 WITHOUT contacting the
+        # remote when the object is already present, and exits 128 when it is
+        # not. So it was a silent no-op whenever it was unnecessary, and a
+        # mid-job failure — after the provider key had been read — in exactly
+        # the cases it existed for.
+        #
+        # So this ASSERTS rather than acquires. A missing object is a named
+        # failure here, before the provider key is read.
+        #
+        # `git cat-file -e` reads the object database and touches no worktree —
+        # the object/worktree distinction that is this lane's whole safety
+        # argument.
         env:
           CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+          CANDIDATE_BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
-          git fetch --no-tags --no-recurse-submodules origin \
-            "$CANDIDATE_HEAD_SHA:refs/midterm/candidate/$CANDIDATE_HEAD_SHA"
-          git cat-file -e "$CANDIDATE_HEAD_SHA^{commit}"
+          set -euo pipefail
+          for sha in "$CANDIDATE_HEAD_SHA" "$CANDIDATE_BASE_SHA"; do
+            if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              echo "::error::candidate commit ${sha} is absent from the" \
+                   "full-history checkout. This lane never fetches after" \
+                   "checkout: the token is not persisted and the repository" \
+                   "is private. A same-repository head should always be here." >&2
+              exit 1
+            fi
+          done
           echo "MIDTERM_REPOSITORY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
       - name: Execute the governed panel

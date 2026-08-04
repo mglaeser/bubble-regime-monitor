@@ -61,7 +61,7 @@ COUNT_INPUTS = (
     {"name": "repository_path",
      "variable": "MIDTERM_REPOSITORY_PATH",
      "kind": "directory",
-     "producer": "count / materialise the repository",
+     "producer": "count / assert the candidate is present as OBJECTS",
      "required": True},
     {"name": "pin_record_path",
      "variable": "MIDTERM_PIN_RECORD_PATH",

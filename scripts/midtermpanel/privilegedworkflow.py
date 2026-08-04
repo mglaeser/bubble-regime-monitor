@@ -47,17 +47,22 @@ workflows:
   * job-level `uses:` — a whole reusable workflow that step-level pinning never
     walks.
 
-Fetching candidate commits as inert git OBJECTS is allowed and is the point:
-`git fetch --no-checkout` moves bytes into `.git` where nothing runs them. The
-distinction between an object and a worktree is the entire safety argument, so
-the checks are written to permit the first and refuse the second rather than to
-pattern-match on the word "candidate".
+Reading candidate commits as inert git OBJECTS is allowed and is the point:
+`git cat-file`, `git diff` and `git ls-tree` read `.git`, where nothing runs.
+The distinction between an object and a worktree is the entire safety argument,
+so the checks are written to permit the first and refuse the second rather than
+to pattern-match on the word "candidate".
+
+Those objects arrive with `fetch-depth: 0` on the trusted checkout, while it
+still holds its own token — NOT with a later fetch. The credential boundary
+(`assert_no_post_checkout_network_git`) explains why that distinction is not
+cosmetic.
 
 ## What is deliberately NOT refused
 
-The candidate head SHA. It has to flow — into API calls, into `git fetch`, into
-the status the panel publishes on that exact commit, into the evidence. A rule
-that banned the string would ban the architecture.
+The candidate head SHA. It has to flow — into API calls, into `git cat-file`,
+into the status the panel publishes on that exact commit, into the evidence. A
+rule that banned the string would ban the architecture.
 
 So the rule is POSITIONAL, not textual: a candidate SHA may appear anywhere that
 treats it as data, and nowhere that treats it as a selector for code. That is why
@@ -139,7 +144,11 @@ ARTIFACT_DOWNLOAD_FORBIDDEN_INPUTS = (
 )
 
 #: Shell that materialises a tree, in a job whose whole safety argument is that
-#: no tree is materialised. `git fetch` is absent deliberately — it is allowed.
+#: no tree is materialised. Object READS (`git cat-file`, `git diff`, `git show`,
+#: `git ls-tree`, `git rev-parse`) are absent deliberately — they are the
+#: capability this lane needs. `git fetch` is absent from THIS list too, and
+#: refused by `POST_CHECKOUT_NETWORK_COMMANDS` instead: it is not a tree
+#: hazard, it is a credential one.
 TREE_MATERIALISING_COMMANDS = (
     "git checkout",
     "git switch",
@@ -151,6 +160,44 @@ TREE_MATERIALISING_COMMANDS = (
     "git worktree add",
     "gh run download",
     "gh pr checkout",
+)
+
+#: Commands and settings that would give a privileged step an authenticated
+#: git capability after checkout — or make it need one.
+#:
+#: `persist-credentials: false` is the boundary: `actions/checkout` uses its
+#: token, then removes it, so no later step can act as the repository. That is
+#: what makes the workspace safe to hold a provider key in.
+#:
+#: A post-checkout `git fetch` that has to reach a PRIVATE origin cannot work
+#: under it — which was the whole defect: the command was valid and the
+#: authentication model was wrong. Re-adding one either fails, silently does
+#: nothing (see `assert_no_post_checkout_network_git` for the measured
+#: short-circuit), or worse, is "fixed" by persisting the credential and handing
+#: every later step the repository token.
+#:
+#: `git cat-file`, `git diff`, `git show`, `git ls-tree` and `git rev-parse`
+#: are deliberately absent: they read the object database and change no
+#: worktree, which is exactly the capability this lane needs.
+POST_CHECKOUT_NETWORK_COMMANDS = (
+    "git fetch",
+    "git pull",
+    "git remote add",
+    "git clone",
+    "git ls-remote",
+    "git submodule update",
+    "git push",
+)
+
+#: Ways to smuggle a credential back into git after checkout dropped it.
+CREDENTIAL_REINTRODUCTION_MARKERS = (
+    "credential.helper",
+    "http.extraheader",
+    "extraheader",
+    "GIT_ASKPASS",
+    "askpass",
+    "url.https://x-access-token",
+    "x-access-token:",
 )
 
 #: Executing, importing or installing from a candidate path.
@@ -201,7 +248,7 @@ def _steps(document: dict):
 
 
 def assert_triggers(document: dict) -> dict:
-    """Only `workflow_run` on completed `ci`, plus optional manual dispatch.
+    """Only `workflow_run` on completed `ci`. Nothing else, including dispatch.
 
     The `workflows:` filter is checked, not just the trigger name. A
     `workflow_run` with no filter fires on the completion of EVERY workflow in
@@ -215,7 +262,8 @@ def assert_triggers(document: dict) -> dict:
         refuse(f"category=privileged_workflow_trigger_not_permitted "
                f"triggers={forbidden} permitted={list(PERMITTED_TRIGGERS)} — a "
                "privileged workflow holding a repository secret may only be "
-               "started by the completion of trusted CI or by a human dispatch")
+               "started by the completion of trusted CI. A dispatch runs "
+               "against a SELECTED REF, and these checkouts name no ref")
     if "workflow_run" not in declared:
         refuse("category=privileged_workflow_has_no_workflow_run_trigger — "
                "without it the panel never runs automatically, which is the "
@@ -283,7 +331,14 @@ def assert_no_candidate_checkout(document: dict) -> dict:
                "that never checks out cannot have been checked for checking out "
                "the wrong thing; this guard exists so the check cannot silently "
                "cover nothing")
-    return {"checkout_steps": checked}
+    # Reported here, and only here. The credential-boundary round nearly added
+    # a second `persist-credentials` check in its own function — which would
+    # have been this module's third duplicated rule, and duplicated rules are
+    # how `aggregate` ended up disagreeing with the engine's role gate and
+    # blocking every review. `assert_no_credential_reintroduction` owns the
+    # other half of the boundary: putting a token back after checkout dropped
+    # it.
+    return {"checkout_steps": checked, "checkouts_persisting_credentials": 0}
 
 
 def _is_permitted_same_run_download(job_id: str, step: dict) -> bool:
@@ -398,11 +453,11 @@ def assert_no_local_or_unpinned_actions(document: dict) -> dict:
 def assert_no_tree_materialisation(document: dict) -> dict:
     """No `run:` may turn candidate objects into candidate files.
 
-    This is the check that makes `git fetch --no-checkout` meaningful. Fetching
-    is allowed — it moves bytes into `.git`, where nothing executes them. The
-    moment a step runs `git checkout`, `git merge`, `git apply` or
-    `gh run download`, those bytes become a worktree, and every other guarantee
-    in this module is about a workspace that no longer exists.
+    This is the check that makes the object model meaningful. The candidate's
+    commits sit in `.git`, where nothing executes them, and steps read them with
+    `git cat-file`. The moment a step runs `git checkout`, `git merge`,
+    `git apply` or `gh run download`, those bytes become a worktree, and every
+    other guarantee in this module is about a workspace that no longer exists.
 
     Deliberately matches on the COMMAND, not on whether a candidate SHA appears
     near it. `git checkout $SHA` and `git checkout FETCH_HEAD` are the same act,
@@ -420,6 +475,98 @@ def assert_no_tree_materialisation(document: dict) -> dict:
                "worktree turns reviewed data back into runnable code inside a "
                "job that holds a provider key")
     return {"tree_materialising_steps": 0}
+
+
+def assert_no_post_checkout_network_git(document: dict) -> dict:
+    """No privileged step may run an authenticated git command after checkout.
+
+    ## The defect this exists to keep out
+
+    Both credential-bearing jobs used to run
+    `git fetch --no-tags --no-recurse-submodules origin <sha>:<ref>` after a
+    checkout configured with `persist-credentials: false`. The syntax was valid
+    — an earlier review had already fixed an invalid `--no-checkout` — but the
+    AUTHENTICATION model was wrong: the checkout deliberately removes its
+    token, and this repository is private, so that command had no credential
+    with which to reach origin.
+
+    What it actually did is worse than plainly failing, and was measured rather
+    than assumed (git 2.43.0, `tests/test_midterm_candidate_objects.py`):
+
+      * `git fetch --no-tags origin <sha>` with the object ALREADY PRESENT
+        exits 0 without contacting the remote at all — proved against a remote
+        URL that does not exist. So under `fetch-depth: 0`, for a
+        same-repository head, the old command silently did nothing and
+        reported success.
+      * The same command with the object ABSENT exits 128. So it failed in
+        exactly the cases it was there to handle — a fork head, or a head that
+        appeared after the checkout — and it failed INSIDE a job that had
+        already read the provider key.
+      * Dropping `--no-tags` makes it contact the remote unconditionally, so
+        it fails always.
+
+    A command that is a no-op when it is unnecessary and a mid-job failure when
+    it is necessary is not an acquisition step. The local shell test could not
+    have separated those cases either: it used a filesystem remote, which needs
+    no authentication. It proved syntax, object/worktree separation and HEAD
+    stability, and it proved them correctly. It said nothing about talking to a
+    private GitHub origin.
+
+    The fix removes the need rather than the boundary. `fetch-depth: 0` on the
+    trusted checkout brings every branch's history in while the token is still
+    held, so a same-repository candidate is already present; preflight refuses
+    forks, for which that is not true; and the jobs ASSERT presence with
+    `git cat-file -e`.
+
+    So a re-added fetch is refused here — because the honest way to make one
+    work is to persist the credential, and that hands every later step in a
+    key-bearing job the repository token.
+
+    This static check is the load-bearing one, not the shell test's empirical
+    "the step needs no network". The short-circuit above means a reintroduced
+    `--no-tags` fetch would keep that empirical test green while restoring the
+    defect."""
+    offenders = []
+    for job_id, index, step in _steps(document):
+        script = str(step.get("run") or "")
+        hits = [c for c in POST_CHECKOUT_NETWORK_COMMANDS if c in script]
+        if hits:
+            offenders.append(f"{job_id}.steps[{index}]:{hits}")
+    if offenders:
+        refuse(f"category=privileged_workflow_fetches_after_checkout "
+               f"found={offenders} — the checkout token is not persisted and "
+               "this repository is private, so an authenticated git command "
+               "after checkout cannot work. The candidate's objects arrive "
+               "with `fetch-depth: 0`; assert them with `git cat-file -e`")
+    return {"post_checkout_network_git_steps": 0}
+
+
+def assert_no_credential_reintroduction(document: dict) -> dict:
+    """Nothing may write a git credential back after checkout dropped it.
+
+    The OTHER half of the credential boundary. `assert_no_candidate_checkout`
+    already requires `persist-credentials: false` on every checkout, and this
+    module deliberately does not check that twice: a second copy of a rule is a
+    second chance for the two copies to disagree, and this lane has already
+    shipped one of those.
+
+    What is left is the way around it — not asking `actions/checkout` to keep a
+    token, but installing one afterwards, through a credential helper, an
+    `http.extraheader`, an askpass program or an `x-access-token` remote URL.
+    Each of those restores exactly the capability the setting was chosen to
+    remove, without changing the setting that documents the choice."""
+    reintroduced = []
+    for job_id, index, step in _steps(document):
+        script = str(step.get("run") or "")
+        hits = [m for m in CREDENTIAL_REINTRODUCTION_MARKERS if m in script]
+        if hits:
+            reintroduced.append(f"{job_id}.steps[{index}]:{hits}")
+    if reintroduced:
+        refuse(f"category=privileged_workflow_reintroduces_a_git_credential "
+               f"found={reintroduced} — checkout dropped the token on purpose; "
+               "writing one back into git config undoes the boundary without "
+               "changing the setting that documents it")
+    return {"credential_reintroduction_steps": 0}
 
 
 def assert_no_candidate_execution(document: dict) -> dict:
@@ -584,6 +731,8 @@ def validate(*, root: str = ".") -> dict:
         **assert_secret_is_scoped(document),
         **assert_no_candidate_checkout(document),
         **assert_no_tree_materialisation(document),
+        **assert_no_post_checkout_network_git(document),
+        **assert_no_credential_reintroduction(document),
         **assert_no_candidate_artifacts_or_cache(document),
         **assert_no_candidate_execution(document),
         **assert_no_local_or_unpinned_actions(document),
