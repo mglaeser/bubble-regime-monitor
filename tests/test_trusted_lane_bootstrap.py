@@ -2892,6 +2892,17 @@ def test_f04_the_d0_push_filter_covers_the_suite_it_runs():
 # parameter, which is why the old bypass has no expression.
 # --------------------------------------------------------------------------
 
+def _git_in(directory, *args):
+    """Run git inside a constructed fixture repository.
+
+    Used by the empty-role test, which needs a commit whose tree genuinely
+    lacks the role rather than a claim about this repository's branches."""
+    out = subprocess.run(["git", *args], cwd=str(directory),  # noqa: S603
+                         capture_output=True, text=True)
+    assert out.returncode == 0, f"git {args}: {out.stderr}"
+    return out
+
+
 def _rev(ref):
     out = subprocess.run(["git", "rev-parse", ref], cwd=str(ROOT),  # noqa: S603
                          capture_output=True, text=True)
@@ -2949,12 +2960,52 @@ def test_r05_each_role_records_its_commit_and_its_tree(engine_roles):
         assert entry["mode"] in ("100644", "100755"), path
 
 
-def test_r05_a_role_that_is_empty_at_that_commit_is_refused():
-    """`scripts/verifier` does not exist on main. A digest over nothing matches
-    any engine, so it is refused rather than recorded as zero files."""
+def test_r05_a_role_that_is_empty_at_that_commit_is_refused(tmp_path):
+    """A digest over nothing matches any engine, so an empty role is refused.
+
+    Driven against a CONSTRUCTED repository whose single commit genuinely has
+    no `scripts/verifier`, rather than against `origin/main`.
+
+    The previous version asserted this by pointing at main and relying on the
+    historical claim that main carried no verifier package. Merging the
+    precursor (PR #29) put `scripts/verifier` on main and the test went red —
+    reporting a change in repository topology as if it were a failure of the
+    refusal. The rule under test is about an EMPTY ROLE, which is a property of
+    a commit, so the test now supplies a commit that has that property and will
+    keep having it however this repository's branches move."""
+    fixture = tmp_path / "empty-role"
+    fixture.mkdir()
+    _git_in(fixture, "init", "-q", "-b", "main", ".")
+    _git_in(fixture, "config", "user.email", "roles@example.invalid")
+    _git_in(fixture, "config", "user.name", "roles")
+    # Something committed, so the refusal is about the ROLE being empty rather
+    # than about an empty repository or a bad commit id.
+    (fixture / "README.md").write_text("no engine here\n", encoding="utf-8")
+    (fixture / "scripts").mkdir()
+    (fixture / "scripts" / "unrelated.py").write_text("X = 1\n",
+                                                      encoding="utf-8")
+    _git_in(fixture, "add", "-A")
+    _git_in(fixture, "commit", "-q", "-m", "a tree with no verifier package")
+    commit = _git_in(fixture, "rev-parse", "HEAD").stdout.strip()
+
     with _refusal("engine_role_empty"):
-        enginesource.role_digest(role="candidate_verifier",
-                                 commit=_rev("origin/main"), cwd=str(ROOT))
+        enginesource.role_digest(role="candidate_verifier", commit=commit,
+                                 cwd=str(fixture))
+
+
+def test_r05_current_main_carries_the_verifier_role():
+    """The companion topology fact, asserted rather than assumed.
+
+    Post-precursor `main` DOES contain `scripts/verifier`, so `role_digest` is
+    expected to succeed there and `engine_role_empty` must NOT fire. Stated as
+    its own test because the negative case above no longer touches main, and an
+    invariant nothing checks is an invariant that can quietly invert."""
+    record = enginesource.role_digest(role="candidate_verifier",
+                                      commit=_rev("origin/main"),
+                                      cwd=str(ROOT))
+    assert record["file_count"] > 0
+    assert len(record["role_sha256"]) == 64
+    assert all(p.startswith("scripts/verifier/") for p in record["files"])
 
 
 @pytest.mark.parametrize("commit", ["HEAD", "main", "abc", ""])

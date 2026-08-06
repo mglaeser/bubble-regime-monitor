@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+import tests.secretbaselineref as secretbaselineref
+
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / ".secrets.baseline"
 
@@ -114,17 +116,24 @@ class TestBaselineShape:
 
     def test_the_baseline_has_not_grown_against_main(self):
         # An unbounded baseline is a slow-motion wildcard exclusion.
-        main = subprocess.run(
-            ["git", "show",
-             "b08844a0755710035d62830faa84902d9d85d3fe:.secrets.baseline"],
-            cwd=ROOT, capture_output=True, text=True)
-        if main.returncode != 0:
-            pytest.skip("main baseline unavailable")
-        base = json.loads(main.stdout)
-        now = _baseline()
-        grew = sum(len(v) for v in now["results"].values()) - sum(
-            len(v) for v in base["results"].values())
-        assert grew <= 0, f"baseline grew by {grew} entries"
+        #
+        # The reference is a PINNED commit shared with
+        # `test_verifier_mc4_passc.py`, not a merge-base: a ratchet whose
+        # reference moves with the branches is not a ratchet. See
+        # `tests/secretbaselineref.py` for the accepted transition.
+        reference = secretbaselineref.reference_baseline_bytes(root=ROOT)
+        if reference is None:
+            pytest.skip("accepted baseline reference unavailable")
+        secretbaselineref.assert_has_not_grown(_baseline(),
+                                               json.loads(reference))
+
+    def test_the_baseline_scan_configuration_has_not_changed(self):
+        """Filters and plugins decide WHAT is scanned, so they ratchet too."""
+        reference = secretbaselineref.reference_baseline_bytes(root=ROOT)
+        if reference is None:
+            pytest.skip("accepted baseline reference unavailable")
+        secretbaselineref.assert_configuration_unchanged(
+            _baseline(), json.loads(reference))
 
 
 class TestGateStillDetects:

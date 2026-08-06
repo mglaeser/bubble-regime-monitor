@@ -1144,7 +1144,14 @@ class TestFamilyFHostedAndProcess:
         "nothing to mutate in this artifact",
         "no units",
         "no unit in this range carries a detected literal",
-        "main baseline unavailable",
+        # The secret-baseline reference, read out of a pinned commit. A shallow
+        # clone may not carry it; CI checks out with fetch-depth 0, so these do
+        # not fire there. `main baseline unavailable` was the retired form,
+        # emitted when the reference was resolved as a bare `main` pin.
+        "accepted baseline reference unavailable",
+        "accepted baseline reference unavailable in this checkout",
+        "accepted baseline reference unavailable in the clone",
+        "clone unavailable",
         "git supports --no-lazy-fetch; promisor is defended",
         # MODULE-WIDE, and therefore the highest blast radius in the suite:
         # `pytestmark` in test_verifier_generated.py silences all 17
@@ -1179,6 +1186,11 @@ class TestFamilyFHostedAndProcess:
         # hid the only two tests that prove the gate bites, on every hosted run.
         paths = sorted((ROOT / "tests").glob("test_verifier_*.py"))
         paths.append(ROOT / "tests" / "test_secret_gate_policy.py")
+        # The baseline-ratchet proofs are in scope for the same reason the
+        # gate-policy file is: they are the only tests that prove the baseline
+        # checks can FAIL, so a skip there removes the evidence that the
+        # ratchet works while leaving the ratchet apparently green.
+        paths.append(ROOT / "tests" / "test_secret_baseline_ratchet.py")
         for path in paths:
             tree = ast.parse(path.read_text(encoding="utf-8"),
                              filename=str(path))
