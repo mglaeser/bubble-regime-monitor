@@ -1,0 +1,261 @@
+{
+  "schema_version": 1,
+  "policy_id": "midterm-single-repo-panel-v1",
+  "what_this_is": [
+    "The machine-readable spine of the mid-term single-repository review panel.",
+    "Every constant here is cross-checked against scripts/midtermpanel/ by",
+    "`midtermpanel.policy.assert_matches_code`, so this document and the code",
+    "cannot drift apart without a test failing. A governance file that merely",
+    "describes what the code is supposed to do is a comment with a digest."
+  ],
+  "what_this_is_not": [
+    "This is NOT the trusted lane. It is not write-separated, it holds a",
+    "repository-scoped Actions secret in the repository it reviews, it rests on",
+    "no recorded operator prerequisite, and no protected environment gates it.",
+    "Nothing produced under this policy may be labelled TRUSTED_*, independent,",
+    "or third-party attested."
+  ],
+  "architecture": {
+    "ci_operational_state": "MIDTERM_SINGLE_REPO_PANEL_IMPLEMENTATION_IN_PROGRESS",
+    "repository_plan": "GITHUB_FREE_PRIVATE",
+    "native_branch_protection": "UNAVAILABLE_ACCEPTED_RESIDUAL",
+    "native_environment_secret_isolation_available": false,
+    "provider_secret_scope_is_repository_level": true,
+    "merge_enforcement": "HUMAN_EXACT_HEAD_PROTOCOL",
+    "panel_review_required_for_every_pr": true,
+    "panel_review_trigger": "WORKFLOW_RUN_AFTER_CI",
+    "write_separated": false,
+    "trusted_review_authority": "NOT_WRITE_SEPARATED",
+    "production_eligible": false,
+    "state_note": [
+      "The workflow has never run and no provider-backed panel has completed.",
+      "ACTIVE is reachable only through STAGED_NO_PROVIDER_SECRET, and",
+      "`policystate.assert_transition` refuses the direct jump."
+    ]
+  },
+  "secret": {
+    "name": "TRUSTED_VERIFIER_OPENAI_KEY",
+    "scope": "repository",
+    "collides_with_trusted_lane_prerequisite": 6,
+    "collision_note": [
+      "Trusted-lane operator prerequisite 6 (`no_repository_or_org_fallback`)",
+      "exists to forbid a repository-level secret of exactly this name, because",
+      "a repository secret is readable from any ref and silently defeats an",
+      "environment's deployment-branch policy. Installing this secret therefore",
+      "makes prerequisite 6 unsatisfiable until it is removed.",
+      "This is the operator's explicit, accepted choice. It is enforced rather",
+      "than merely recorded: while a repository-scoped secret of this name is in",
+      "use, D1/D2 activation must refuse."
+    ],
+    "rotation_triggers": [
+      "suspected workflow exfiltration",
+      "any unexpected provider usage",
+      "a workflow-changing PR with an unclear execution history",
+      "a secret-related failure or log anomaly",
+      "a permission or policy change",
+      "a maintainer account compromise",
+      "an engine or workflow security defect"
+    ],
+    "routine_rotation_days": [
+      30,
+      90
+    ],
+    "persistent_repository_secret_mode": true
+  },
+  "statuses": {
+    "published_on_candidate_head": [
+      "midterm-panel-count",
+      "midterm-panel-review"
+    ],
+    "never_publish": [
+      "cross-vendor",
+      "independent-verify-inactive",
+      "trusted-verifier-count",
+      "trusted-cross-vendor-review"
+    ],
+    "job_checks_land_on_default_branch_not_candidate": [
+      "midterm-preflight",
+      "midterm-count",
+      "midterm-panel",
+      "midterm-finalize"
+    ]
+  },
+  "evidence": {
+    "may_emit": [
+      "ORDINARY_CI_EVIDENCE",
+      "PRELIMINARY_NO_SECRET_CI_EVIDENCE",
+      "MIDTERM_SINGLE_REPO_COUNT_EVIDENCE",
+      "MIDTERM_SINGLE_REPO_PANEL_EVIDENCE"
+    ],
+    "may_never_emit": [
+      "TRUSTED_COUNT_EVIDENCE",
+      "TRUSTED_EXECUTION_EVIDENCE",
+      "WRITE_SEPARATED_REVIEW_EVIDENCE",
+      "INDEPENDENT_THIRD_PARTY_ATTESTATION"
+    ]
+  },
+  "panel": {
+    "models": [
+      "gpt-5.3-codex",
+      "gpt-5.6-sol",
+      "gpt-4.1-mini"
+    ],
+    "required_approver": "gpt-5.6-sol",
+    "min_distinct_other_approvals": 1,
+    "strict_any_refutation": true,
+    "strict_note": [
+      "`independent_verify.strict_any_refutation` is OPT-IN and OFF by default:",
+      "the reference mechanism greens on 'required approver + one corroborator'",
+      "even when a third voice refutes. Mid-term policy turns it ON, because the",
+      "plan requires that ANY valid refutation blocks. This differs from the",
+      "default on purpose and is recorded here so nobody has to infer it."
+    ],
+    "synthesis_may_override_refutation": false
+  },
+  "triggers": {
+    "automatic": {
+      "event": "workflow_run",
+      "workflows": [
+        "ci"
+      ],
+      "types": [
+        "completed"
+      ]
+    },
+    "manual": {
+      "event": null,
+      "removed_by": "external review, pre-key hardening",
+      "why": [
+        "A manually dispatched workflow runs against a SELECTED REF, and every",
+        "checkout in the privileged workflow deliberately omits `ref:`. Under",
+        "`workflow_run` that omission is the safety property: definition and",
+        "checkout both come from the default branch. Under `workflow_dispatch`",
+        "it becomes the hazard: the checkout takes the dispatched ref, so a",
+        "dispatch against a branch carrying modified `scripts/midtermpanel`",
+        "would execute that branch's code in the jobs holding the provider key.",
+        "The runtime approval phrase authenticated the CANDIDATE under review.",
+        "It never authenticated the ref supplying the reviewer."
+      ],
+      "controlled_rerun": "Re-run ordinary CI on the same head \u2014 Actions UI 'Re-run all jobs', or `gh run rerun <CI_RUN_ID>`. The convenience workflow that used to do this was REMOVED: a workflow_dispatch workflow runs a branch-selected copy, so with a persistent repository secret a branch version of it could reference that secret. That is the same selected-ref hazard that removed the dispatch trigger from the privileged panel, reached through a convenience. No repository workflow with `actions: write` is needed."
+    },
+    "proceed_only_when": [
+      "triggering workflow name == ci",
+      "triggering event == pull_request",
+      "triggering conclusion == success",
+      "exactly one open PR is identified",
+      "pr.head.sha == workflow_run.head_sha",
+      "pr.base.ref == main",
+      "pr is open and unmerged",
+      "test (3.12) is success on the exact head",
+      "image is success on the exact head"
+    ],
+    "permitted_events": [
+      "workflow_run"
+    ]
+  },
+  "candidate_is_inert_data": {
+    "allowed_inputs": [
+      "exact head and base SHAs",
+      "git objects fetched with --no-checkout",
+      "unified diff",
+      "changed atom text",
+      "path names treated as data",
+      "candidate plan read as data and independently rebuilt",
+      "metadata returned by the GitHub API"
+    ],
+    "prohibited_shapes": [
+      "checkout of the PR head or merge ref",
+      "any `ref:` on a checkout step",
+      "execution of PR source",
+      "running PR tests",
+      "installing dependencies from the PR",
+      "importing Python modules from a PR checkout",
+      "sourcing a PR shell script",
+      "a PR-controlled local action",
+      "a PR-controlled reusable workflow",
+      "downloading artifacts from the triggering CI run",
+      "restoring a cache written by the PR",
+      "candidate-provided paths used as executable paths"
+    ]
+  },
+  "permissions": {
+    "contents": "read",
+    "actions": "read",
+    "pull-requests": "read",
+    "statuses": "write"
+  },
+  "high_risk_workflow_change": {
+    "path_prefixes": [
+      ".github/workflows/",
+      ".github/actions/",
+      "scripts/trustedlane/",
+      "scripts/midtermpanel/"
+    ],
+    "marker": "HIGH_RISK_WORKFLOW_CHANGE",
+    "label": "workflow-secret-risk",
+    "requires_human_workflow_security_review": true,
+    "warning": [
+      "This PR changes GitHub Actions while a repository-scoped provider secret",
+      "exists. The panel review does not prevent the PR workflow itself from",
+      "referencing that secret."
+    ],
+    "recommendation": [
+      "Consider temporarily deleting the repository secret before opening or",
+      "updating a workflow-changing PR."
+    ]
+  },
+  "accepted_residual": {
+    "statement": [
+      "A repository-level Actions secret is accessible to workflows in the",
+      "repository. For same-repository pull requests, a PR author who can add or",
+      "change a `pull_request` workflow may be able to reference it.",
+      "The operator explicitly accepts this mid-term risk."
+    ],
+    "compensating_controls": [
+      "dedicated provider project and key for this panel only",
+      "restricted key endpoint and model permissions",
+      "low project rate and spend limits with alerts",
+      "the privileged panel runs only from a workflow_run workflow on the default branch",
+      "the panel never checks out or executes PR code",
+      "the panel never consumes PR-produced artifacts or caches",
+      "results are published to the exact PR head",
+      "a human exact-head merge gate",
+      "workflow-changing PRs are prominently flagged",
+      "key rotation after any workflow-security concern"
+    ],
+    "is_not_equivalent_to": [
+      "protected environment isolation",
+      "branch protection",
+      "a separate reviewer repository",
+      "independent third-party attestation"
+    ]
+  },
+  "policy_profiles": {
+    "document": "governance/midterm-panel-pins.json",
+    "authority_class": "OPERATOR_APPROVED_MIDTERM_POLICY_ATTESTATION",
+    "selected_by": "MIDTERM_REVIEW_CLASS, derived by preflight.review_class_for from the pull-request number through a CLOSED rule. No caller-supplied free-form name, and no per-PR allowlist: the previous design listed pr-23/pr-25/pr-29 and would have refused every future routine pull request.",
+    "classes": [
+      "SYNTHETIC",
+      "HISTORICAL_PR25",
+      "ROUTINE_PR",
+      "LARGE_PR23"
+    ],
+    "transport_ceilings_live_in_the_profile": true,
+    "honest_scope": "operator-attested, not cryptographically authenticated and not write-separated."
+  },
+  "ordinary_ci_binding": {
+    "bound_to": "the triggering workflow run, by exact id",
+    "reads": [
+      "pull_requests[0].head.sha",
+      "pull_requests[0].base.sha",
+      "run jobs: test (3.12), image"
+    ],
+    "why": "A pull-request CI run checks out a generated refs/pull/N/merge commit, so its green is evidence about a merge of the candidate with a SPECIFIC base. The previous check compared the current PR object's base to current main; both track the branch, so when main advanced they moved together and the check passed while ordinary CI had tested a combination that no longer existed.",
+    "published": [
+      "triggering_ci_run_id",
+      "triggering_ci_run_attempt",
+      "tested_base_sha",
+      "tested_head_sha"
+    ]
+  }
+}

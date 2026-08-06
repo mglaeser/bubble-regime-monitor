@@ -1,0 +1,252 @@
+name: midterm-panel-dry-run
+
+# The hosted no-key proof.
+#
+# The mid-term panel's privileged workflow cannot be exercised before an
+# operator installs a provider secret, and installing one before the lane is
+# known to work is the wrong order. So this runs the WHOLE vertical — the
+# approved engine built from its pinned commits and loaded, Stage 1 derived
+# from a real repository's objects, every governed model and batch counted, the
+# plan written and re-read across an artifact boundary, the panel executed
+# through the engine's Stage 3, and the decision published — with the engine's
+# own labelled stand-ins at the end of the wire.
+#
+# It is the same code path. `MIDTERM_PANEL_MODE=DRY_RUN_NO_PROVIDER` changes
+# exactly two objects: a transport that cannot reach a socket, and a status
+# opener that writes a file.
+#
+# ## Why this workflow holds no secrets and needs none
+#
+# `permissions: contents: read` and no `secrets.` anywhere. `dryrun.py` refuses
+# to run if a credential is present under EITHER the lane's own variable or the
+# trusted-lane secret name, so a future edit that pulled one in would turn this
+# job red rather than quietly making it a live run.
+#
+# ## What a green run here proves, and what it does not
+#
+# It proves the lane works end to end on a hosted runner, from a clean clone,
+# on the Python this repository pins. Every verdict it produces is
+# MOCK_NOT_PROVIDER. It says nothing about what three real models would say,
+# and it is not a substitute for operator prerequisite 14.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: midterm-dry-run-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vertical:
+    name: midterm-panel-selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+          # The vertical builds the engine artifact from two pinned commits by
+          # reading git blobs out of the object database. A shallow clone does
+          # not carry them and the suite would skip rather than run — which is
+          # the one outcome worse than failing, because it reads as a pass.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the hash-locked runtime
+        run: |
+          python -m pip install --require-hashes --no-deps \
+            -r requirements-trusted-runtime.txt
+          python -m pip install pytest pyyaml
+
+      - name: Assert the pinned engine commits are present
+        # ASSERT, not fetch. This step used to be
+        # `git cat-file -e ... || git fetch ...`, and on every hosted run so far
+        # the `cat-file` succeeded and the fetch never executed — the step
+        # completed in ZERO seconds, which is what proved it. So its green never
+        # demonstrated that an authenticated post-checkout fetch works here, and
+        # it could not have: `persist-credentials: false` removes the token and
+        # this repository is private.
+        #
+        # `fetch-depth: 0` is what makes the objects present. If a pinned engine
+        # commit is ever unreachable — its branch deleted, say — the honest
+        # outcome is a named failure telling the operator to re-pin, not a
+        # fetch that cannot authenticate.
+        run: |
+          set -euo pipefail
+          python - <<'PROBE' > /tmp/engine-refs.txt
+          import json
+          doc = json.load(open("governance/midterm-panel-engine-release.json"))
+          print(doc["approved_engine_source_sha"])
+          print(doc["approved_engine_protected_sha"])
+          PROBE
+          while read -r sha; do
+            if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              echo "::error::pinned engine commit ${sha} is not reachable from" \
+                   "any branch in this repository. Re-pin the engine release to" \
+                   "a reachable commit; this lane never fetches after checkout." >&2
+              exit 1
+            fi
+          done < /tmp/engine-refs.txt
+          echo "both pinned engine commits present in the checkout"
+
+      - name: Prove the candidate object model works without a fetch
+        # §2.3. The hosted proof that the acquisition model this lane now
+        # depends on actually holds ON A RUNNER, after a real
+        # `persist-credentials: false` checkout, against this PRIVATE
+        # repository.
+        #
+        # ## The commit it tests, and why not just any commit
+        #
+        # `git cat-file -e HEAD` proves nothing: HEAD is what the checkout
+        # produced. The claim under test is that a commit which is NOT on the
+        # checked-out ref is nonetheless present, because `fetch-depth: 0`
+        # brought every branch in while the token still existed.
+        #
+        #   pull_request  the pull request's head sha. For a PR the checkout
+        #                 takes `refs/pull/N/merge`, so the branch head is a
+        #                 different commit — exactly the object the count and
+        #                 panel jobs must reach. This is the real proof, it is
+        #                 REQUIRED, and a fork or a head that turns out to be
+        #                 HEAD fails the step.
+        #   push          there is no pull request, so the tip of `main` stands
+        #                 in: on a feature branch that is a commit on another
+        #                 branch, present for the same reason. Labelled WEAK
+        #                 rather than reported as the same thing.
+        #   push to main  `origin/main` IS the checked-out commit, so there is
+        #                 nothing here that proves anything. The step says
+        #                 exactly that and exits 0. It does not invent a proof,
+        #                 and it does not turn every post-merge run red.
+        #
+        # So a green from this step means "proved" only when it printed a
+        # strength. `docs/HUMAN_MERGE_PROTOCOL.md` §7.1 requires the STRONG
+        # line from the pull_request run, not merely a green check.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
+        run: |
+          set -euo pipefail
+          before_head=$(git rev-parse HEAD)
+          before_status=$(git status --porcelain | wc -l)
+
+          # Read from the code that enforces it, not typed here. A second copy
+          # of the repository id is a second thing that can be wrong, and this
+          # one would be wrong in the direction of passing.
+          expected_repository_id=$(PYTHONPATH="$GITHUB_WORKSPACE/scripts" \
+            python -c 'import midtermpanel; print(midtermpanel.REPOSITORY_NUMERIC_ID)')
+
+          strength="WEAK"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ "$PR_HEAD_REPO_ID" != "$expected_repository_id" ]; then
+              echo "::error::fork pull request (head repo ${PR_HEAD_REPO_ID}," \
+                   "expected ${expected_repository_id}). This lane reviews" \
+                   "same-repository pull requests only; preflight refuses" \
+                   "these before any credential is read. There is no candidate" \
+                   "object to prove, so this step cannot report a pass." >&2
+              exit 1
+            fi
+            candidate="$PR_HEAD_SHA"
+            strength="STRONG"
+            if [ "$candidate" = "$before_head" ]; then
+              echo "::error::the pull request head is the checked-out commit," \
+                   "so its presence says nothing about fetch-depth: 0. A" \
+                   "pull_request checkout should be refs/pull/N/merge." >&2
+              exit 1
+            fi
+          else
+            candidate=$(git rev-parse origin/main)
+            if [ "$candidate" = "$before_head" ]; then
+              echo "PROOF NOT APPLICABLE: this is a push to the default" \
+                   "branch, so origin/main IS the checked-out commit and" \
+                   "its presence demonstrates nothing. The proof runs on" \
+                   "pull_request events, where the head is a different" \
+                   "object from the merge ref that was checked out."
+              exit 0
+            fi
+          fi
+
+          echo "candidate object under test: $candidate (proof strength: $strength)"
+          echo "checked-out HEAD:            $before_head"
+          git cat-file -e "${candidate}^{commit}"
+          echo "present in the object database, and it is not HEAD"
+
+          # Readable through plumbing, with no worktree change. Written to a
+          # file rather than piped into `head`: under `set -o pipefail` a
+          # reader that exits early can SIGPIPE the writer and fail the step
+          # for a reason that has nothing to do with what it tests.
+          git cat-file -t "${candidate}^{commit}"
+          git ls-tree --name-only "$candidate" > /tmp/candidate-tree.txt
+          head -3 /tmp/candidate-tree.txt
+
+          # Nothing moved.
+          [ "$(git rev-parse HEAD)" = "$before_head" ] || {
+            echo "::error::HEAD moved" >&2; exit 1; }
+          [ "$(git status --porcelain | wc -l)" = "$before_status" ] || {
+            echo "::error::the worktree changed" >&2; exit 1; }
+
+          # And no credential was persisted for a fetch to have used.
+          if git config --local --get-regexp 'http\..*\.extraheader' >/dev/null 2>&1; then
+            echo "::error::a git credential is persisted in this checkout" >&2
+            exit 1
+          fi
+          echo "no persisted git credential; no fetch attempted; HEAD and worktree unchanged"
+
+      - name: Prove no provider credential is in scope
+        # Before the vertical, not after. A job that discovered a credential
+        # halfway through would already have run half of a live lane.
+        run: |
+          python - <<'PROBE'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          from midtermpanel import dryrun
+          print(dryrun.assert_no_credential_is_present(dict(os.environ)))
+          PROBE
+
+      - name: Run the whole vertical
+        env:
+          PYTHONPATH: ${{ github.workspace }}/scripts
+        run: |
+          python -m pytest tests/test_midterm_vertical.py -v \
+            --no-header -p no:randomly
+
+      - name: Run the candidate-object shell against a real repository
+        # The vertical is handed a repository path and never executes the
+        # workflow's own shell, which is how `git fetch --no-checkout` — not a
+        # git command, exit 129 — survived a green vertical. This runs the
+        # committed command, including the mutation cases that prove those
+        # checks can still fail.
+        env:
+          PYTHONPATH: ${{ github.workspace }}/scripts
+        run: |
+          python -m pytest tests/test_midterm_candidate_objects.py -q
+
+      - name: Refuse a skipped vertical
+        # `pytest` exits 0 when every test is skipped, and this suite skips
+        # itself when the pinned engine commits are absent. A skip that reported
+        # success would be this workflow claiming a proof it did not produce.
+        run: |
+          python -m pytest tests/test_midterm_vertical.py -q \
+            --collect-only > /tmp/collected.txt
+          python - <<'PROBE'
+          import re, sys
+          text = open("/tmp/collected.txt").read()
+          match = re.search(r"(\d+) tests? collected", text)
+          if not match or int(match.group(1)) < 1:
+              sys.exit("the vertical collected no tests; a suite that did not "
+                       "run is not a suite that passed")
+          print(f"collected {match.group(1)} vertical tests")
+          PROBE
+
+      - name: Run the panel's unit and merge-gate suites
+        env:
+          PYTHONPATH: ${{ github.workspace }}/scripts
+        run: |
+          python -m pytest tests/test_midterm_panel.py \
+            tests/test_human_merge_gate.py tests/test_checkruns.py -q

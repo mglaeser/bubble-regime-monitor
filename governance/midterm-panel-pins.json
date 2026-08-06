@@ -1,0 +1,81 @@
+{
+  "schema_version": 3,
+  "document_class": "MIDTERM_PANEL_OPERATOR_APPROVED_POLICY",
+  "money_unit": "integer micro-USD",
+  "authority_class": "OPERATOR_APPROVED_MIDTERM_POLICY_ATTESTATION",
+  "write_separated": false,
+  "approved_by": "mglaeser",
+  "approved_at": "2026-08-03T00:00:00Z",
+  "approval_source": "operator conversation; recorded as an attestation, transcribed by the implementing agent",
+  "honest_scope": "These values are the operator's approved mid-term policy, recorded as an attestation. That is a stronger claim than REPOSITORY_AUTHORED_NOT_OPERATOR_APPROVED, which understated the operator's authority, and a weaker one than the trusted lane's VERIFIED_OPERATOR_PIN_AUTHORIZATION: nothing here is cryptographically signed, no external verifier promoted it, and the lane is not write-separated. `verifier.pins.validate_pins` checks that the values are internally coherent; it proves nothing about who chose them, and this block is what says who did.",
+  "pins": {
+    "VERIFIER_MAX_OUTPUT_TOKENS": 8000,
+    "VERIFIER_CONTEXT_MARGIN_TOKENS": 4000,
+    "VERIFIER_COST_CAP_MICRO_USD": 25000000,
+    "VERIFIER_REASONING_EFFORT_BY_MODEL": {
+      "gpt-5.3-codex": "medium",
+      "gpt-5.6-sol": "medium",
+      "gpt-4.1-mini": null
+    },
+    "VERIFIER_MAX_REVIEW_UNITS": 512,
+    "VERIFIER_MAX_GENERATION_CALLS": 80,
+    "VERIFIER_MAX_COUNT_CALLS": 1200,
+    "VERIFIER_COUNT_TIMEOUT_SECONDS": 30,
+    "VERIFIER_COUNT_MAX_RETRIES": 2,
+    "VERIFIER_GENERATION_TIMEOUT_SECONDS": 180,
+    "VERIFIER_GENERATION_MAX_RETRIES": 1,
+    "VERIFIER_TOKEN_DRIFT_TOLERANCE": 64
+  },
+  "profile_note": "The twelve `pins` above carry the review-target-independent values; their call and cost caps duplicate ROUTINE_PR because the engine requires one complete record. `profiles` is what preflight selects from, and the selected profile overwrites every field named in `profile_overridden_pins`. The two TRANSPORT ceilings live in the profile too: they used to be free-standing workflow literals, and `MIDTERM_GENERATION_ATTEMPT_CAP=60` silently contradicted the approved cap of 80, so a PR-29 plan projecting ~78 attempts would have stopped at 60 under a limit no operator wrote.",
+  "profile_overridden_pins": [
+    "VERIFIER_MAX_COUNT_CALLS",
+    "VERIFIER_MAX_GENERATION_CALLS",
+    "VERIFIER_COST_CAP_MICRO_USD"
+  ],
+  "profile_transport_ceilings": [
+    "authorized_total_input_tokens",
+    "generation_attempt_cap"
+  ],
+  "review_classes": {
+    "note": "A CLOSED rule, not a per-PR allowlist. The previous document listed pr-23/pr-25/pr-29 and the workflow emitted `pr-<number>`, so PR #35 and every routine pull request after it would have refused with review_target_not_uniquely_allowlisted before a panel could run — which contradicts the requirement that every PR gets a review. `preflight.review_class_for` maps a PR number to exactly one class; no caller supplies a free-form name.",
+    "SYNTHETIC": "explicit synthetic test target only; never a real pull request",
+    "HISTORICAL_PR25": "PR #25, historical validation",
+    "LARGE_PR23": "PR #23, remediation review",
+    "ROUTINE_PR": "every other open pull request"
+  },
+  "profiles": {
+    "SYNTHETIC": {
+      "VERIFIER_MAX_COUNT_CALLS": 100,
+      "VERIFIER_MAX_GENERATION_CALLS": 0,
+      "VERIFIER_COST_CAP_MICRO_USD": 5000000,
+      "authorized_total_input_tokens": 500000,
+      "generation_attempt_cap": 1,
+      "honest_scope": "zero generation calls: this profile counts and never spends on a verdict. The engine refuses to plan a verdict under it, which is the profile working as approved. `generation_attempt_cap` is 1 only because the transport refuses to exist with a non-positive cap; the zero generation-call PIN is what actually forbids generating."
+    },
+    "HISTORICAL_PR25": {
+      "VERIFIER_MAX_COUNT_CALLS": 100,
+      "VERIFIER_MAX_GENERATION_CALLS": 0,
+      "VERIFIER_COST_CAP_MICRO_USD": 5000000,
+      "authorized_total_input_tokens": 500000,
+      "generation_attempt_cap": 1,
+      "honest_scope": "same ceilings the operator approved for the synthetic range; PR #25 is historical validation and does not generate"
+    },
+    "ROUTINE_PR": {
+      "VERIFIER_MAX_COUNT_CALLS": 1200,
+      "VERIFIER_MAX_GENERATION_CALLS": 80,
+      "VERIFIER_COST_CAP_MICRO_USD": 25000000,
+      "authorized_total_input_tokens": 2000000,
+      "generation_attempt_cap": 80,
+      "approved_by": "mglaeser",
+      "approved_at": "2026-08-04T00:00:00Z",
+      "honest_scope": "the PR #29 ceilings reused as a conservative routine maximum, approved explicitly by the operator so the panel can review every pull request rather than a hand-listed few. A ceiling is not a forecast: actual spend stays governed by the engine's cost plan, the count ledger and the transport."
+    },
+    "LARGE_PR23": {
+      "VERIFIER_MAX_COUNT_CALLS": 2500,
+      "VERIFIER_MAX_GENERATION_CALLS": 200,
+      "VERIFIER_COST_CAP_MICRO_USD": 60000000,
+      "authorized_total_input_tokens": 5000000,
+      "generation_attempt_cap": 200
+    }
+  }
+}

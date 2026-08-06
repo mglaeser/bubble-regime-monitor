@@ -37,7 +37,19 @@ from .errors import refuse
 
 #: The deterministic gate. Authoritative for ordinary correctness, and the sole
 #: merge authority while the trusted lane is inactive.
-ORDINARY_STATUSES = ("test (3.12)", "image")
+#: `midterm-panel-selftest` is ORDINARY and not MIDTERM_JOB, and the distinction
+#: is the trigger rather than the subject. The MIDTERM_JOB checks come from the
+#: privileged `workflow_run` panel, so they land on main's commit and can never
+#: satisfy a pull request. This one runs on `pull_request` against the candidate
+#: head, like any other test job, and requiring it is meaningful.
+#:
+#: What requiring it means is narrow, and the NAME has to carry that: the panel's
+#: own suites — including the whole no-key vertical — pass on this head. It is
+#: not a review of the change and no model saw the change. The job was first
+#: called `fake-provider vertical (no key)`, which reads on a checks tab like a
+#: verdict about the candidate; `assert_workflow_statuses_are_registered` caught
+#: it as unregistered, which is this registry doing exactly what it is for.
+ORDINARY_STATUSES = ("test (3.12)", "image", "midterm-panel-selftest")
 
 #: D0. Proves containment on the allowed default ref; holds no credential and
 #: reviews nothing.
@@ -71,11 +83,44 @@ TRUSTED_STATUSES = ("trusted-verifier-count", "trusted-cross-vendor-review")
 #: reached from the other direction.
 TRUSTED_CONTAINMENT_STATUSES = ("d1-containment-gate", "d2-containment-gate")
 
+#: The mid-term single-repository panel (`scripts/midtermpanel/`).
+#:
+#: Requirable, and for exactly the same mechanical reason TRUSTED is: the panel
+#: publishes these two contexts EXPLICITLY onto the candidate head SHA, so they
+#: can satisfy a check on a pull request. A `workflow_run` job's own check lands
+#: on the default branch and never would.
+#:
+#: Requirable is not the same as authoritative, and the difference is the whole
+#: reason these are a separate class instead of extra TRUSTED entries. A
+#: mid-term panel runs from a repository-scoped secret in the repository it is
+#: reviewing. It is not write-separated, no operator prerequisite is recorded,
+#: and a pull request that edits a `pull_request` workflow may be able to read
+#: the same key. Requiring `midterm-panel-review` means "a panel ran and did not
+#: refuse"; it does not mean what `trusted-cross-vendor-review` is reserved to
+#: mean, and `assert_midterm_and_trusted_never_collide` keeps the two from ever
+#: becoming the same string.
+MIDTERM_STATUSES = ("midterm-panel-count", "midterm-panel-review")
+
+#: The privileged panel workflow's own job checks.
+#:
+#: Never requirable, for the `d1-containment-gate` reason: the panel runs via
+#: `workflow_run` from the default branch, so these checks are associated with
+#: main's commit rather than with the candidate head. Requiring one would leave
+#: every pull request waiting on a check that never arrives there.
+MIDTERM_JOB_STATUSES = ("midterm-preflight", "midterm-count",
+                        "midterm-panel", "midterm-finalize")
+
 #: Operator-dispatched diagnostics. `workflow_dispatch` only, so they never run
 #: on a pull request — requiring one would leave every PR permanently pending on
 #: a check that cannot start. Not requirable for a different reason than
 #: INACTIVE: an inactive check passes when it should not, a diagnostic never
 #: reports at all.
+#: `midterm-panel-rerun` was registered here and has been REMOVED along with
+#: its workflow. It was dispatch-only and held no secret in its committed form,
+#: but a workflow_dispatch workflow runs a BRANCH-SELECTED copy — so once a
+#: persistent repository secret exists, a branch version of it could reference
+#: that secret. Reruns go through ordinary CI instead, which needs no
+#: repository workflow at all.
 DIAGNOSTIC_STATUSES = ("probe",)
 
 #: R10. The protected engine build, which produces what the trusted lane
@@ -99,6 +144,8 @@ STATUS_CLASSES = {
     "INACTIVE": INACTIVE_STATUSES,
     "TRUSTED": TRUSTED_STATUSES,
     "TRUSTED_CONTAINMENT": TRUSTED_CONTAINMENT_STATUSES,
+    "MIDTERM": MIDTERM_STATUSES,
+    "MIDTERM_JOB": MIDTERM_JOB_STATUSES,
     "DIAGNOSTIC": DIAGNOSTIC_STATUSES,
     "BUILD": BUILD_STATUSES,
 }
@@ -118,7 +165,7 @@ STATUS_CLASSES = {
 #: TRUSTED is requirable only because D1/D2 publish those contexts EXPLICITLY on
 #: the candidate SHA (see statuspublish.py). The workflow job's own check lands
 #: on main and would never satisfy a PR — reserving a job name is not enough.
-REQUIRABLE_CLASSES = ("ORDINARY", "TRUSTED")
+REQUIRABLE_CLASSES = ("ORDINARY", "TRUSTED", "MIDTERM")
 
 #: Everything that must never appear in a required-status list, for either
 #: reason. Derived rather than written out, so adding a class cannot forget it.
@@ -174,6 +221,42 @@ def assert_inactive_and_trusted_never_collide() -> dict:
                 refuse(f"category=inactive_status_matches_trusted_case_"
                        f"insensitively inactive={inactive!r} trusted={trusted!r}")
     return {"inactive": list(INACTIVE_STATUSES),
+            "trusted": list(TRUSTED_STATUSES), "collisions": 0}
+
+
+def assert_midterm_and_trusted_never_collide() -> dict:
+    """A mid-term panel status must never become a trusted one.
+
+    Same shape as the inactive/trusted check and a different failure. The
+    inactive job's danger is that it reviews nothing; the mid-term panel's danger
+    is the opposite — it reviews something real, with real models, and produces a
+    result an operator will reasonably believe. What it does NOT have is write
+    separation: it runs from a repository-scoped secret in the repository under
+    review, with no operator prerequisite recorded and no protected environment.
+
+    So the risk is not that someone requires `midterm-panel-review` — that is a
+    legitimate thing to require. The risk is that the two name sets converge,
+    by a rename or by someone deciding the mid-term panel has "become" trusted,
+    and a requirement written for a write-separated reviewer is then satisfied by
+    one that is not. Reserving the strings is what stops that being a one-line
+    diff nobody reads twice."""
+    overlap = sorted(set(MIDTERM_STATUSES) & set(TRUSTED_STATUSES))
+    if overlap:
+        refuse(f"category=midterm_status_is_also_trusted overlap={overlap} — a "
+               "single-repository panel using a repository-scoped secret must "
+               "never satisfy a requirement reserved for a write-separated "
+               "reviewer")
+    for midterm in MIDTERM_STATUSES:
+        for trusted in TRUSTED_STATUSES:
+            if midterm.strip().lower() == trusted.strip().lower():
+                refuse("category=midterm_status_matches_trusted_case_"
+                       f"insensitively midterm={midterm!r} trusted={trusted!r}")
+    for midterm in MIDTERM_STATUSES:
+        if midterm.strip().lower().startswith("trusted"):
+            refuse(f"category=midterm_status_claims_trusted_prefix "
+                   f"status={midterm!r} — the name is the entire interface "
+                   "between 'this ran' and 'this is authoritative'")
+    return {"midterm": list(MIDTERM_STATUSES),
             "trusted": list(TRUSTED_STATUSES), "collisions": 0}
 
 
@@ -353,7 +436,23 @@ def branch_protection_instructions() -> dict:
                 "head; and a green build says the engine artifact was "
                 "PRODUCED, never that anyone approved it — approval of its "
                 "five digests is operator prerequisite 14, out of band",
+            **{
+                job: ("internal job of the mid-term panel, which runs via "
+                      "workflow_run from the default branch; its check lands on "
+                      "main's commit, not on the candidate head. The panel "
+                      "publishes `midterm-panel-count` and "
+                      "`midterm-panel-review` onto the candidate SHA — require "
+                      "those instead")
+                for job in MIDTERM_JOB_STATUSES
+            },
         },
+        "require_midterm_panel": list(MIDTERM_STATUSES),
+        "midterm_is_not_trusted": (
+            "`midterm-panel-*` may be required and means 'a three-model panel "
+            "ran on this exact head and did not refuse'. It does NOT mean what "
+            "`trusted-*` is reserved to mean: the panel is not write-separated, "
+            "holds a repository-scoped secret in the repository it reviews, and "
+            "rests on no recorded operator prerequisite"),
         "trusted_contexts_must_be_published_on_the_candidate_sha": True,
         "honest_scope": ("this is the instruction, not the enforcement — the "
                          "lane holds no credential and cannot read or set "
@@ -374,6 +473,7 @@ def validate_status_policy(*, root: str = ".") -> dict:
 
     assert_classes_are_disjoint()
     assert_inactive_and_trusted_never_collide()
+    assert_midterm_and_trusted_never_collide()
 
     documents = {}
     for path in live_workflow_paths(root=root):

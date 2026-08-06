@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "document_class": "MIDTERM_PANEL_APPROVED_ENGINE_RELEASE",
+  "honest_scope": "The two commits the reviewing engine is built from. They are PINNED, which is what makes the reviewer independent of the candidate; they are not APPROVED, because `GET /releases` returns [] and operator prerequisite 14 is unrecorded. With no artifact digest and no release tag, `engine.provenance_of` labels this REBUILT_FROM_PINNED_SOURCE_TEST_ONLY, and `assert_provenance_permits` refuses it for any run that spends money. A dry run may use it.",
+  "sha_fields_are_git_commit_ids": "The two `*_sha` values below are 40-hex git commit ids, not credentials. An entropy detector cannot tell the difference, which is the correct default, so they carry an audited entry in `.secrets.baseline` — JSON has no comment syntax, so an inline `pragma: allowlist secret` is not available here.",
+  "approved_engine_source_sha": "c8ba2a727d46347904ed072422a11ab68c5b2e74",
+  "approved_engine_protected_sha": "c8ba2a727d46347904ed072422a11ab68c5b2e74",
+  "approved_engine_artifact_sha256": null,
+  "approved_engine_release_tag": null,
+  "operator_action_required": [
+    "Build the artifact from these two commits, record its sha256 here, and cut a release tag. Only then does provenance_of return APPROVED_RELEASE and only then may a provider-backed run proceed.",
+    "The engine source deliberately LAGS the candidate. A pull request that changes scripts/verifier is reviewed by the engine pinned here, not by its own edited code; picking up that change means merging it first and then re-pinning."
+  ]
+}
