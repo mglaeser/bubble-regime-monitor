@@ -209,14 +209,19 @@ def run(*, observations: dict, operator_claims, lane_verifier,
     steps.append(("engine_root",
                   artifactload.assert_engine_root_is_not_the_candidate(
                       engine_artifact["root"])))
-    # `engine_root` is supplied, so this refuses a `verifier` module loaded from
-    # ANYWHERE ELSE rather than refusing the name outright. The engine is
-    # `scripts/verifier` inside the approved artifact — the lane authenticates
-    # PIN and literal claims through it — so a name check here would mean either
-    # that this step or that authentication had to go.
+    # The candidate package must be neither loaded nor reachable. Absolute
+    # again (EX6-R02): the approved engine is loaded under its own namespace by
+    # `enginebridge`, so a module named `verifier` in this process cannot be
+    # the engine and there is nothing left to make an exception for.
+    #
+    # `loaded_modules` and `search_path` come off the artifact record so a
+    # process where the candidate is present BY CONSTRUCTION — the candidate's
+    # own test suite — can hand the runtime a modelled runner view. Both
+    # default to the real process, which is what a real runner gets and what
+    # `test_the_runtime_checks_the_real_process_by_default` proves.
     steps.append(("no_candidate_import", enginepolicy.assert_no_candidate_import(
-        search_path=engine_artifact.get("search_path"),
-        engine_root=engine_artifact.get("root"))))
+        modules=engine_artifact.get("loaded_modules"),
+        search_path=engine_artifact.get("search_path"))))
 
     # AUTHENTICATED, not parsed — see the note in d1runtime. D2 requires the
     # same fifteen records D1 does PLUS prerequisite 16, and phase="D2" is what

@@ -89,6 +89,37 @@ from trustedlane import (  # noqa: E402
 )
 
 LANE_DIR = ROOT / "scripts" / "trustedlane"
+
+
+# --------------------------------------------------------------------------
+# WHAT USED TO BE HERE, AND WHY ITS REMOVAL IS THE FIX
+#
+# An autouse fixture that purged every `verifier*` module from `sys.modules`
+# before and after each test in this file. It was added in Exchange 6 to stop
+# the lane tests refusing when `tests/test_verifier_plan.py` had imported the
+# checkout's package, and it did stop that. It also caused EX6-R02.
+#
+# Two ways, both of which a reader should be able to reconstruct:
+#
+# 1. It could not do its job. `_engine()` is called from MODULE-scoped fixtures
+#    and from a module-level cache, and a function-scoped autouse fixture runs
+#    AFTER module-scoped setup — so the engine was loaded before the purge had
+#    ever run.
+#
+# 2. It broke everything downstream. `enginebridge.load_engine` used to insert
+#    the artifact root at `sys.path[0]` and import `verifier` from it. Purging
+#    `sys.modules` while that entry was still on the path meant the NEXT
+#    `import verifier.errors` — from a test that had bound `BlockingError` at
+#    collection time — got a fresh class object from the artifact. The engine
+#    raised correctly and `pytest.raises` was holding a different class.
+#
+# Neither is needed now. `enginebridge` loads the artifact under
+# `trustedengine_<digest>`, touches `sys.path` not at all, and never puts a
+# module named `verifier` into `sys.modules`. The checkout's package stays
+# exactly as the verifier tests imported it, with its class identities intact.
+#
+# `test_no_lane_test_purges_sys_modules` fails if a purge comes back.
+# --------------------------------------------------------------------------
 # Real commit SHAs from this repository's history: protected main, the reviewed
 # candidate head, and PR #23's frozen head. Public git identities, not
 # credentials — hence the allowlist pragmas the secret gate requires for any
@@ -4900,11 +4931,11 @@ def _real_literal_members(occurrence, **over):
     engine = _engine()
     finalize = engine["modules"]["verifier.finalize"]
     preflight = engine["modules"]["verifier.preflight"]
-    import verifier.unitpayload
+    unitpayload = _module("verifier.unitpayload")
 
     skeleton = _d1_skeleton()
     atom_map = finalize.atom_texts(skeleton, cwd=_d1_clone())
-    atom_records = verifier.unitpayload.index_atom_records(skeleton)
+    atom_records = unitpayload.index_atom_records(skeleton)
     members, seen = [], set()
     for atom_id, text in atom_map.items():
         record = atom_records.get(atom_id)
@@ -6920,16 +6951,86 @@ def _engine():
     return _ENGINE_CACHE["engine"]
 
 
+def _clean_runner_modules():
+    """`sys.modules` as a real trusted runner would have it.
+
+    THE HONEST STATEMENT OF WHAT THIS DOES AND DOES NOT PROVE.
+
+    A real D1/D2 runner checks out only the protected ref and unpacks one
+    approved artifact; `scripts/verifier` is not on that disk, so nothing named
+    `verifier` can be loaded and `assert_no_candidate_import` passes on the
+    real process. THIS process is the candidate package's own test suite. The
+    candidate is loaded here by construction — that is what is being tested —
+    so the containment claim is FALSE here and no amount of arrangement makes
+    it true.
+
+    So the view is modelled, and the modelling is bounded to exactly one thing:
+    the checkout's own `verifier` modules are excluded. Every other module in
+    the process is passed through unchanged, so a stray candidate import from
+    somewhere else would still be caught.
+
+    Two separate tests keep this from becoming a way to pass by pretending:
+
+    * `test_the_real_process_view_refuses_here` asserts the UNMODELLED view
+      refuses in this very process, which is the fact this helper works around;
+    * `test_the_runtime_checks_the_real_process_by_default` asserts the runtime
+      passes `None` — the real process — when the artifact record carries no
+      view, which is what a real runner hands it.
+
+    And `test_a_subprocess_runner_has_no_candidate_package` proves the real
+    thing end to end in a genuinely clean interpreter, which is the only
+    evidence here that does not depend on a model."""
+    root = os.path.realpath(str(ROOT / "scripts" / "verifier"))
+    view = {}
+    for name, module in list(sys.modules.items()):
+        if name == "verifier" or name.startswith("verifier."):
+            locations = [os.path.realpath(p) for p in
+                         ([getattr(module, "__file__", None)]
+                          if getattr(module, "__file__", None)
+                          else list(getattr(module, "__path__", []) or []))]
+            if locations and all(p.startswith(root) for p in locations):
+                continue    # the checkout's own package, present by construction
+        view[name] = module
+    return view
+
+
+def _clean_runner_search_path(engine_root):
+    """`sys.path` as a real runner would have it.
+
+    The real `sys.path` MINUS the one entry that makes `scripts/verifier`
+    reachable — which is exactly the difference between this process and a
+    trusted runner, and nothing else. Every other entry passes through, so a
+    candidate package reachable from somewhere unexpected is still caught.
+
+    The engine root is deliberately NOT added. After EX6-R02 the lane never
+    puts it on `sys.path` at all: `enginebridge` loads the artifact through
+    `spec_from_file_location` under its own namespace, so there is no path
+    entry from which `import verifier` could resolve to the artifact. Adding
+    the root here would model a runner that does not exist and would reintroduce
+    the reachability the aliasing removed."""
+    del engine_root      # deliberately unused; see above
+    scripts = os.path.realpath(str(ROOT / "scripts"))
+    return [entry for entry in sys.path
+            if os.path.realpath(entry or ".") != scripts]
+
+
 def _engine_artifact_argument():
     """What D1/D2 are handed as `engine_artifact` — the REAL one.
 
     It used to be `{"root": "/opt/engine", "expected_sha256": "c" * 64}`, which
-    was harmless while nothing loaded an engine. It is not harmless now:
-    `assert_no_candidate_import` compares every loaded `verifier` module against
-    this root, so a placeholder here would make the D1 tests pass by proving
-    nothing rather than by proving the modules came out of the artifact."""
+    was harmless while nothing loaded an engine. It is not harmless now: the
+    digest is verified against the archive on disk and the identity record is
+    compared against it, so a placeholder would make the D1 tests pass by
+    proving nothing.
+
+    `loaded_modules` and `search_path` are the modelled runner view — see
+    `_clean_runner_modules` for exactly what that models and what it does
+    not."""
     _engine()
-    return dict(_ENGINE_CACHE["artifact"])
+    record = dict(_ENGINE_CACHE["artifact"])
+    record["loaded_modules"] = _clean_runner_modules()
+    record["search_path"] = _clean_runner_search_path(record["root"])
+    return record
 
 
 def _module(name):
@@ -7017,9 +7118,9 @@ def _literal_digest(literal=REVIEWED_LITERAL):
     never calls it — so it is imported directly here, from the artifact root
     `load_engine` already put on `sys.path`."""
     _engine()
-    import verifier.canon
+    canon = _module("verifier.canon")
 
-    return verifier.canon.sha256_hex(literal.encode("utf-8", "surrogateescape"))
+    return canon.sha256_hex(literal.encode("utf-8", "surrogateescape"))
 
 
 #: One protected typed payload per prerequisite, carrying the evidence THAT
@@ -8025,29 +8126,39 @@ def test_a_set_digest_that_does_not_cover_the_approved_set_is_refused():
             _literal_set(set_digest="f" * 64), verifier=_verifier())
 
 
-def test_a_verifier_module_from_outside_the_approved_engine_is_refused():
-    """The restated containment invariant. With an engine root supplied the
-    question is no longer "is anything named `verifier` loaded" — D1 must load
-    it — but "did it come from the approved artifact"."""
-    root = _ENGINE_CACHE["artifact"]["root"]
+def test_any_module_named_verifier_is_the_candidate_and_is_refused():
+    """EX6-R02. The containment invariant is ABSOLUTE again.
+
+    It used to take an `engine_root` and permit `verifier` modules loaded from
+    under it, because the artifact was also imported as `verifier` and a name
+    check could not tell them apart. That exception was load-bearing and it was
+    the hole: two packages called `verifier` in one interpreter have different
+    classes, so an exception raised by one was not caught by a `pytest.raises`
+    naming the other's.
+
+    `enginebridge` now loads the artifact under `trustedengine_<digest>`. So a
+    module named `verifier` cannot be the engine — there is nothing left to
+    make an exception for, and the parameter is gone."""
     impostor = types.ModuleType("verifier.authority")
     impostor.__file__ = "/somewhere/else/verifier/authority.py"
-    with _refusal("candidate_module_imported_from_outside_the_engine"):
+    with _refusal("candidate_module_imported"):
         enginepolicy.assert_no_candidate_import(
-            modules={"verifier.authority": impostor}, search_path=[],
-            engine_root=root)
-    # A module with no traceable origin is refused rather than assumed
-    # approved.
-    untraceable = types.ModuleType("verifier.authority")
-    with _refusal("candidate_module_origin_unknown"):
+            modules={"verifier.authority": impostor}, search_path=[])
+    # Even one whose file IS inside the approved artifact: with aliasing, a
+    # module under that root named `verifier` was put there by something other
+    # than the bridge, and "it came from the right directory" is no longer an
+    # answer to "who loaded it".
+    inside = types.ModuleType("verifier.authority")
+    inside.__file__ = os.path.join(
+        _engine_artifact_argument()["root"], "verifier", "authority.py")
+    with _refusal("candidate_module_imported"):
         enginepolicy.assert_no_candidate_import(
-            modules={"verifier.authority": untraceable}, search_path=[],
-            engine_root=root)
-    # And an "approved root" inside the candidate checkout approves nothing.
-    with _refusal("engine_from_candidate_checkout"):
-        enginepolicy.assert_no_candidate_import(
-            modules={}, search_path=[],
-            engine_root=os.path.join("/work", "scripts", "verifier"))
+            modules={"verifier.authority": inside}, search_path=[])
+    assert not hasattr(enginepolicy.assert_no_candidate_import, "engine_root")
+    assert "engine_root" not in inspect.signature(
+        enginepolicy.assert_no_candidate_import).parameters, (
+        "the engine_root exception is back; the artifact is not named "
+        "`verifier` and nothing should be permitted under that name")
 
 
 # ---- what no single envelope can check about itself -----------------------
@@ -8914,11 +9025,11 @@ def _unverified_local_authorizations(engine_clone, skeleton):
     engine = _engine()
     authority = engine["modules"]["verifier.authority"]
     finalize = engine["modules"]["verifier.finalize"]
-    import verifier.unitpayload
+    unitpayload = _module("verifier.unitpayload")
 
     atom_map = finalize.atom_texts(skeleton, cwd=engine_clone)
     return authority.propose_local_fixture_authorizations(
-        skeleton, atom_map, verifier.unitpayload.index_atom_records(skeleton),
+        skeleton, atom_map, unitpayload.index_atom_records(skeleton),
         repository_identity=CANONICAL_REPOSITORY)
 
 
@@ -9410,11 +9521,11 @@ def test_a_clean_range_completes_d1_under_an_empty_set(d1_engine):
     engine = _engine()
     finalize = engine["modules"]["verifier.finalize"]
     preflight = engine["modules"]["verifier.preflight"]
-    import verifier.unitpayload
+    unitpayload = _module("verifier.unitpayload")
 
     skeleton = _d1_skeleton()
     atom_map = finalize.atom_texts(skeleton, cwd=_d1_clone())
-    verifier.unitpayload.index_atom_records(skeleton)
+    unitpayload.index_atom_records(skeleton)
     findings = sum(len(list(preflight.occurrence_index_map(text)))
                    for text in atom_map.values())
     # This range is NOT clean, which is why the empty set must block it — and
