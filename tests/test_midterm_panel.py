@@ -11,6 +11,7 @@ the difference between "the check ran" and "the check works".
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -2224,3 +2225,75 @@ class TestEveryWorkflowStepNamesSomethingThatExists:
                         f"{path.name}:{job_id}.steps[{index}] is not valid "
                         f"bash:\n{result.stderr}")
         assert checked > 0
+
+
+class TestPreflightCanActuallyReadTheChecksItVerifies:
+    """The first real privileged run refused with
+
+        category=github_api_error where=check-runs http_status=403
+
+    `assert_ordinary_checks_green` reads `GET /commits/{sha}/check-runs`, which
+    needs `checks: read`. The workflow granted `contents`, `actions`,
+    `pull-requests` and `statuses` — and an explicit `permissions:` block sets
+    every UNLISTED scope to `none`, so the omission did not fall back to a
+    default, it REVOKED the scope. Preflight could never have passed.
+
+    Nothing caught it because the privileged workflow had never run: the static
+    validator compared the block to a constant that was itself missing the
+    scope, so the file and the rule agreed with each other and both were
+    wrong."""
+
+    def test_the_workflow_grants_checks_read(self):
+        document = _document()
+        assert document["permissions"]["checks"] == "read"
+
+    def test_every_job_that_reads_check_runs_grants_it(self):
+        """Job-level blocks override the workflow default entirely."""
+        document = _document()
+        for job in ("preflight", "count", "panel", "finalize"):
+            block = document["jobs"][job].get("permissions")
+            if block is None:
+                continue
+            assert block.get("checks") == "read", job
+
+    def test_the_required_set_names_every_scope_the_code_calls(self):
+        """The constant and the file must not simply agree with each other.
+
+        Derived from what `ReadOnlyGitHub` actually requests: a reader that
+        hits `/check-runs` needs `checks`, one that hits `/actions/runs` needs
+        `actions`, `/pulls` needs `pull-requests`."""
+        from midtermpanel import githubapi
+        source = inspect.getsource(githubapi)
+        needed = set()
+        if "check-runs" in source:
+            needed.add("checks")
+        if "/actions/runs" in source:
+            needed.add("actions")
+        if "/pulls" in source:
+            needed.add("pull-requests")
+        if "/commits/" in source and "statuses" in source:
+            needed.add("statuses")
+        granted = set(privilegedworkflow.REQUIRED_PERMISSIONS)
+        assert needed <= granted, sorted(needed - granted)
+
+    def test_dropping_checks_read_is_refused(self, tmp_path):
+        document = _document()
+        del document["permissions"]["checks"]
+        with pytest.raises(PanelRefusal) as caught:
+            _validate(document, tmp_path)
+        assert "permissions_mismatch" in caught.value.reason
+
+    def test_checks_write_is_refused(self, tmp_path):
+        """A read the panel needs must not become a write it does not."""
+        document = _document()
+        document["permissions"]["checks"] = "write"
+        with pytest.raises(PanelRefusal) as caught:
+            _validate(document, tmp_path)
+        assert "permissions_mismatch" in caught.value.reason
+
+    def test_statuses_write_is_still_the_only_write(self):
+        writes = [k for k, v in
+                  privilegedworkflow.REQUIRED_PERMISSIONS.items()
+                  if v != "read"]
+        assert writes == ["statuses"]
+        assert privilegedworkflow.REQUIRED_PERMISSIONS["statuses"] == "write"

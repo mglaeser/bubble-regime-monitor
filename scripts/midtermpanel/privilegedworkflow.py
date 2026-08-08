@@ -660,16 +660,26 @@ def assert_secret_is_scoped(document: dict) -> dict:
 #: maximum, because "no more than these" and "exactly these" differ: a workflow
 #: that silently drops `statuses: write` would still pass a subset check and then
 #: fail at run time, having already spent the provider budget.
+#:
+#: `checks: read` is here because preflight reads
+#: `GET /commits/{sha}/check-runs` to confirm ordinary CI is green on the exact
+#: head. An explicit `permissions:` block sets every UNLISTED scope to `none`,
+#: so omitting it did not fall back to a default — it revoked the scope, and
+#: the first real privileged run refused with
+#: `github_api_error where=check-runs http_status=403`. It is a READ scope on a
+#: surface the panel already reads by another route, so it widens nothing the
+#: lane did not already depend on.
 REQUIRED_PERMISSIONS = {
     "contents": "read",
     "actions": "read",
+    "checks": "read",
     "pull-requests": "read",
     "statuses": "write",
 }
 
 
 def assert_permissions(document: dict) -> dict:
-    """Exactly four scopes, and `statuses: write` is the only write.
+    """Exactly five scopes, and `statuses: write` is the only write.
 
     An unset block inherits the repository default, which on many repositories
     is write-all — so absence is refused rather than defaulted."""

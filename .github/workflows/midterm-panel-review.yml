@@ -88,6 +88,13 @@ on:
 permissions:
   contents: read
   actions: read
+  # `checks: read` is what `GET /commits/{sha}/check-runs` needs. An explicit
+  # permissions block sets every UNLISTED scope to `none`, so leaving it out
+  # did not inherit a default — it revoked the scope, and the first real
+  # privileged run refused with `where=check-runs http_status=403` before it
+  # could verify ordinary CI. A read scope on a surface this lane already
+  # depends on.
+  checks: read
   pull-requests: read
   statuses: write
 
@@ -126,6 +133,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
       pull-requests: read
       statuses: write
     # Every output `preflight` emits is declared here, including the ones only
@@ -232,6 +240,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
       pull-requests: read
       statuses: write
     steps:
@@ -383,6 +392,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
       pull-requests: read
       statuses: write
     steps:
@@ -520,6 +530,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      checks: read
       pull-requests: read
       statuses: write
     steps:
