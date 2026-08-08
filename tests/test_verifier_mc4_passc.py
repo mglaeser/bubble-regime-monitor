@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import secretbaselineref  # noqa: E402
 from test_verifier_finalize import (  # noqa: E402
     PR25_BASE,
     PR25_HEAD,
@@ -53,7 +54,6 @@ from verifier.errors import (  # noqa: E402
 )
 
 SECRET = "sk-proj-abcdef1234567890abcdef"          # pragma: allowlist secret
-MAIN = "b08844a0755710035d62830faa84902d9d85d3fe"  # pragma: allowlist secret
 
 
 def _span(start, end, kind, *, source_text=None, **fields):
@@ -575,13 +575,17 @@ class TestSecretBaselineIsUntouched:
         # dropped the .venv/, __pycache__/ and cache exclusions, because
         # detect-secrets keys filters by function path and a second entry
         # REPLACES the first.
-        ours = (ROOT / ".secrets.baseline").read_bytes()
-        theirs = subprocess.run(
-            ["git", "show", f"{MAIN}:.secrets.baseline"], cwd=ROOT,
-            capture_output=True)
-        if theirs.returncode != 0:
-            pytest.skip("main baseline unavailable")
-        assert ours == theirs.stdout
+        #
+        # The reference is the SHARED pinned commit in
+        # `tests/secretbaselineref.py` — the same one the growth ratchet in
+        # `test_secret_gate_policy.py` uses. This test used to pin its own
+        # copy of the reference, and two copies of one authority is two
+        # things that can disagree.
+        reference = secretbaselineref.reference_baseline_bytes(root=ROOT)
+        if reference is None:
+            pytest.skip("accepted baseline reference unavailable")
+        secretbaselineref.assert_identical_to_reference(
+            (ROOT / ".secrets.baseline").read_bytes(), reference)
 
 
 # ---------------------------------------------------------- fixtures ---------

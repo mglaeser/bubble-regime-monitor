@@ -584,3 +584,88 @@ class TestHighRiskChangesNeedAHumanSecurityReview:
     def test_an_ordinary_pr_needs_no_approval_record(self, tmp_path):
         result = _check(tmp_path=tmp_path, opener=_opener(files=[{"filename": "app/thing.py"}]))
         assert result["high_risk"]["review_required"] is False
+
+
+class TestFinalizeWhenPreflightNeverResolvedACandidate:
+    """The first real privileged run turned one honest refusal into two red
+    jobs and no summary.
+
+    `finalize` runs `if: always()` and requires `CANDIDATE_HEAD_SHA`. When
+    preflight refuses early its outputs render as EMPTY STRINGS, so finalize
+    refused too — while there was, in fact, nothing to finalize: `count` is the
+    first job that publishes anything, and it was skipped."""
+
+    def _environ(self, **overrides):
+        environ = {"GITHUB_TOKEN": "t", "CANDIDATE_HEAD_SHA": "",
+                   "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1",
+                   "PREFLIGHT_RESULT": "failure", "COUNT_RESULT": "skipped",
+                   "PANEL_RESULT": "skipped"}
+        environ.update(overrides)
+        return environ
+
+    def _perform(self, environ):
+        from midtermpanel import finalizecli
+
+        class Unreachable:
+            def commit_statuses(self, head):     # pragma: no cover
+                raise AssertionError(
+                    "finalize must not query the API when there is no "
+                    "candidate head to query it about")
+        return finalizecli.perform(environ, api=Unreachable(), opener=None)
+
+    def test_a_refused_preflight_leaves_nothing_to_finalize(self):
+        from midtermpanel import finalizecli
+        outcome = self._perform(self._environ())
+        assert outcome["outcome"] == finalizecli.NOTHING_TO_FINALIZE
+        assert outcome["closed"] == []
+
+    def test_it_says_why_rather_than_exiting_quietly(self):
+        """A job that exits 0 having done nothing must report WHY."""
+        outcome = self._perform(self._environ())
+        assert "nothing to close" in outcome["honest_scope"]
+        assert "not a claim that the run succeeded" in outcome["honest_scope"]
+
+    @pytest.mark.parametrize("result", ["cancelled", "failure", "skipped"])
+    def test_every_non_success_preflight_result_is_covered(self, result):
+        from midtermpanel import finalizecli
+        outcome = self._perform(self._environ(PREFLIGHT_RESULT=result))
+        assert outcome["outcome"] == finalizecli.NOTHING_TO_FINALIZE
+
+    def test_a_successful_preflight_with_a_blank_head_still_refuses(self):
+        """The narrowness that makes the exemption safe.
+
+        A blank head after a SUCCESSFUL preflight is an output that went
+        missing between jobs — the defect this lane already lost two digests
+        to — and it must keep failing loudly rather than being read as
+        'nothing to do'."""
+        from midtermpanel.errors import PanelRefusal
+        with pytest.raises(PanelRefusal) as caught:
+            self._perform(self._environ(PREFLIGHT_RESULT="success"))
+        assert "required_environment_absent" in caught.value.reason
+
+    def test_a_resolved_head_takes_the_normal_path(self):
+        """With a head present, finalize must NOT take the early return.
+
+        Proved by the API being queried for that exact head. What the run does
+        after that — rendering and publishing — is other tests' subject, and
+        this one deliberately does not depend on it: a synthetic environment
+        produces a degenerate summary, and asserting on it here would make this
+        test fail for reasons that have nothing to do with the early return."""
+        from midtermpanel import finalizecli
+        from midtermpanel.errors import PanelRefusal
+        seen = {}
+
+        class Api:
+            def commit_statuses(self, head):
+                seen["head"] = head
+                return []
+
+        try:
+            finalizecli.perform(
+                self._environ(CANDIDATE_HEAD_SHA="a" * 40,
+                              PREFLIGHT_RESULT="success"),
+                api=Api(), opener=lambda *a, **k: None)
+        except PanelRefusal:
+            pass
+        assert seen["head"] == "a" * 40, (
+            "finalize took the nothing-to-do path despite a resolved head")

@@ -24,8 +24,41 @@ from .status import publish, status_request
 REQUIRED = ("GITHUB_TOKEN", "CANDIDATE_HEAD_SHA", "GITHUB_RUN_ID",
             "GITHUB_RUN_ATTEMPT")
 
+#: The one state in which there is genuinely nothing to close out.
+NOTHING_TO_FINALIZE = "NOTHING_TO_FINALIZE_PREFLIGHT_RESOLVED_NO_CANDIDATE"
+
+
+def preflight_never_resolved_a_candidate(environ: dict) -> bool:
+    """True when preflight refused BEFORE it published a head to close against.
+
+    `finalize` runs `if: always()` and its obligation is that no
+    `midterm-panel-*` status is left pending. That obligation is about a
+    COMMIT, and when preflight refuses early there is no commit: its outputs
+    render as empty strings, and no status was ever published because `count`
+    — the first thing that publishes — was skipped.
+
+    The first real privileged run failed here for exactly that reason, turning
+    one honest refusal into two red jobs and no summary.
+
+    Deliberately narrow. It requires preflight to have NOT succeeded. If
+    preflight reports success and the head is still blank, that is an output
+    that went missing between jobs — the defect this lane already lost two
+    digests to — and it must keep failing loudly."""
+    head = str(environ.get("CANDIDATE_HEAD_SHA") or "").strip()
+    preflight = str(environ.get("PREFLIGHT_RESULT") or "").strip()
+    return not head and preflight not in ("", "success")
+
 
 def perform(environ: dict, *, api, opener) -> dict:
+    if preflight_never_resolved_a_candidate(environ):
+        return {"outcome": NOTHING_TO_FINALIZE,
+                "preflight_result": environ.get("PREFLIGHT_RESULT"),
+                "closed": [], "statuses_seen": 0,
+                "honest_scope": (
+                    "preflight refused before resolving a candidate head, so "
+                    "no midterm-panel status was ever published and there is "
+                    "nothing to close. This is not a claim that the run "
+                    "succeeded — preflight's own failure is the run's result")}
     env = require_env(environ, REQUIRED, where="finalizecli")
     head = env["CANDIDATE_HEAD_SHA"]
     run_id, attempt = int(env["GITHUB_RUN_ID"]), int(env["GITHUB_RUN_ATTEMPT"])
@@ -71,7 +104,16 @@ def main() -> None:
     environ = dict(os.environ)
     api = ReadOnlyGitHub(token=environ["GITHUB_TOKEN"],
                          repository_numeric_id=REPOSITORY_NUMERIC_ID)
-    perform(environ, api=api, opener=urllib.request.urlopen)
+    outcome = perform(environ, api=api, opener=urllib.request.urlopen)
+    if outcome.get("outcome") == NOTHING_TO_FINALIZE:
+        # Said out loud. A job that exits 0 having done nothing must report
+        # WHY, or its green is indistinguishable from a green that closed
+        # statuses it never looked at.
+        summary(f"### {NOTHING_TO_FINALIZE}\n\n{outcome['honest_scope']}\n\n"
+                f"- preflight result: `{outcome['preflight_result']}`\n"
+                "- midterm-panel statuses published this run: none\n")
+        sys.stdout.write(f"{NOTHING_TO_FINALIZE}: "
+                         f"preflight={outcome['preflight_result']}\n")
 
 
 def _self_test() -> int:
