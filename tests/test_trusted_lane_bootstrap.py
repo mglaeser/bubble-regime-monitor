@@ -8599,9 +8599,15 @@ def test_d2_without_prerequisite_sixteen_makes_zero_generation_attempts(
 # SLICE 1 — a real engine artifact built from exact Git blobs, and the REAL
 # planner imported out of it.
 #
-# `scripts/verifier` does not exist on main, which is the whole reason the
-# artifact has to carry both roles. These tests build one from the object
-# database at two different commits, extract it, and import through the bridge.
+# The two roles are resolved at INDEPENDENT commits, which is the whole reason
+# the artifact carries a role mapping rather than one SHA. These tests build one
+# from the object database at two different commits, extract it, and import
+# through the bridge.
+#
+# This comment used to assert that `scripts/verifier` does not exist on main.
+# Merging the precursor made that false. The claim was load-bearing for a test
+# that has since been rewritten against a constructed fixture; it is corrected
+# here rather than left as prose nobody re-reads.
 # --------------------------------------------------------------------------
 
 
@@ -8653,16 +8659,140 @@ def test_the_artifact_digest_is_a_function_of_the_source_commits_alone(
             == second["engine_artifact_sha256"]), "digest moved with the path"
 
 
+#: A commit that genuinely CHANGED `scripts/trustedlane`, and its parent.
+#: Pinned, not derived from a branch. `origin/main~1` stood here and passed only
+#: while every previous commit happened to touch a role prefix; the merge of the
+#: post-merge corrective changed only tests, `scripts/midtermpanel` and
+#: `governance`, so `main` and `main~1` had byte-identical role trees and this
+#: assertion inverted. The premise is now pinned AND checked below.
+#:
+#: Both ids below carry an inline allowlist pragma: they are 40-hex git commit
+#: ids, which an entropy detector cannot distinguish from a credential. The
+#: pragma must follow `#` DIRECTLY — detect-secrets' inline regex does not match
+#: it after other comment text — and it belongs here rather than in
+#: `.secrets.baseline`, which stays byte-identical.
+ROLE_MOVED_COMMIT = \
+    "c8ba2a727d46347904ed072422a11ab68c5b2e74"  # pragma: allowlist secret
+
+#: A DIFFERENT commit whose role trees match its parent's — the merge that
+#: exposed the defect above. Immutable history.
+ROLE_UNCHANGED_COMMIT = \
+    "e9d27052832551c6cbd5d34b5dcabf4b3d9102ec"  # pragma: allowlist secret
+
+
+def _first_parent(commit):
+    """The parent of a pinned commit is itself pinned, so this is a pin
+    expressed relationally, not a moving reference.
+
+    Written this way rather than as two more literals for a specific reason:
+    one of these parents is the commit `tests/secretbaselineref.py` pins, and
+    `test_the_accepted_reference_is_defined_exactly_once` requires that id to
+    appear in exactly one file. That guard is right — two copies of an
+    authority are two things that can disagree — and it should not be loosened
+    to make room for an unrelated pin that happens to name the same commit.
+
+    Asserts rather than skips: ordinary CI checks out with `fetch-depth: 0`, so
+    a missing parent is a finding, not a precondition."""
+    out = subprocess.run(["git", "rev-parse", f"{commit}^"],  # noqa: S603
+                         cwd=str(ROOT), capture_output=True, text=True)
+    assert out.returncode == 0, f"{commit}^ unavailable: {out.stderr}"
+    return out.stdout.strip()
+
+
+def _protected_role_sha256(commit):
+    return enginesource.role_digest(
+        role="protected_trusted_lane", commit=commit,
+        cwd=str(ROOT))["role_sha256"]
+
+
 def test_the_artifact_digest_moves_when_a_source_commit_moves(
         tmp_path, engine_roles):
+    """A pinned pair whose protected-lane tree genuinely differs.
+
+    The premise is asserted rather than assumed. Two commit ids are not two
+    engines: the artifact is a pure function of the blobs under the role
+    prefixes, so a pair that differs only outside them MUST produce the same
+    bytes, and pointing this test at such a pair tests nothing while looking
+    like it tests everything."""
+    moved, parent = (_protected_role_sha256(ROLE_MOVED_COMMIT),
+                     _protected_role_sha256(_first_parent(ROLE_MOVED_COMMIT)))
+    assert moved != parent, (
+        "premise broken: the pinned pair no longer differs inside "
+        "scripts/trustedlane, so this test cannot show the digest moving")
+
     here = enginesource.build_engine_artifact(
-        roles=engine_roles, destination=str(tmp_path / "a.tar.gz"),
+        roles=dict(engine_roles, protected_trusted_lane=ROLE_MOVED_COMMIT),
+        destination=str(tmp_path / "a.tar.gz"),
         repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
     older = enginesource.build_engine_artifact(
-        roles=dict(engine_roles, protected_trusted_lane=_rev("origin/main~1")),
+        roles=dict(engine_roles,
+                   protected_trusted_lane=_first_parent(ROLE_MOVED_COMMIT)),
         destination=str(tmp_path / "b.tar.gz"),
         repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
     assert here["engine_artifact_sha256"] != older["engine_artifact_sha256"]
+
+
+def test_the_artifact_digest_does_not_move_when_only_unrelated_paths_move(
+        tmp_path, engine_roles):
+    """The other half, and the half an operator's approval actually rests on.
+
+    An approved digest must survive commits that do not touch the engine. If it
+    moved with every unrelated commit, the operator would have to re-approve
+    for changes that cannot reach the reviewer — and the digest would stop
+    meaning "this engine" and start meaning "this repository state".
+
+    Untested until the pair above inverted, which is the point: a one-sided
+    invariant is one that can silently become an equality."""
+    parent = _first_parent(ROLE_UNCHANGED_COMMIT)
+    newer, older_role = (_protected_role_sha256(ROLE_UNCHANGED_COMMIT),
+                         _protected_role_sha256(parent))
+    assert newer == older_role, (
+        "premise broken: the pinned pair now differs inside "
+        "scripts/trustedlane")
+    assert ROLE_UNCHANGED_COMMIT != parent
+
+    first = enginesource.build_engine_artifact(
+        roles=dict(engine_roles,
+                   protected_trusted_lane=ROLE_UNCHANGED_COMMIT),
+        destination=str(tmp_path / "newer.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    second = enginesource.build_engine_artifact(
+        roles=dict(engine_roles, protected_trusted_lane=parent),
+        destination=str(tmp_path / "older.tar.gz"),
+        repository_numeric_id=REPOSITORY_NUMERIC_ID, cwd=str(ROOT))
+    assert first["engine_artifact_sha256"] == second["engine_artifact_sha256"]
+
+
+def test_the_pinned_role_pairs_are_real_commits_in_this_clone():
+    """Pinned SHAs, not refs — but a pin nobody resolves is a pin that can name
+    a commit this repository does not have. `fetch-depth: 0` in ordinary CI is
+    what makes requiring them correct rather than flaky."""
+    pinned = (ROLE_MOVED_COMMIT, ROLE_UNCHANGED_COMMIT)
+    for commit in (*pinned, *(_first_parent(c) for c in pinned)):
+        out = subprocess.run(  # noqa: S603
+            ["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=str(ROOT),
+            capture_output=True, text=True)
+        assert out.returncode == 0, f"pinned commit {commit} is not present"
+        assert len(commit) == 40 and int(commit, 16) >= 0
+
+
+def test_these_two_tests_would_redden_if_their_pins_were_swapped():
+    """The defect was a passing test with a false premise, so the premise
+    guards are the repair — and a guard that cannot fire is decoration.
+
+    Each pair is fed to the OTHER test's premise, which is exactly the mistake
+    that shipped: `origin/main~1` silently became a commit with an unchanged
+    role tree, and the moves-assertion inverted with nothing to say so."""
+    moved = {_protected_role_sha256(ROLE_MOVED_COMMIT),
+             _protected_role_sha256(_first_parent(ROLE_MOVED_COMMIT))}
+    unchanged = {_protected_role_sha256(ROLE_UNCHANGED_COMMIT),
+                 _protected_role_sha256(
+                     _first_parent(ROLE_UNCHANGED_COMMIT))}
+
+    # The moves-test's premise (`!=`) is false for the unchanged pair...
+    assert len(unchanged) == 1
+    # ...and the unchanged-test's premise (`==`) is false for the moved pair.
+    assert len(moved) == 2
 
 
 def test_the_bridge_imports_the_real_planner_from_the_artifact(engine_artifact):
