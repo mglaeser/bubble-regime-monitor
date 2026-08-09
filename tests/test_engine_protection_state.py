@@ -1114,3 +1114,74 @@ def test_only_provider_mode_requires_the_identity_binding():
 
     assert '"require_identity": mode == MODE_PROVIDER' in source
     assert source.count("require_identity=prepared[\"require_identity\"]") == 2
+
+
+def test_panel_evidence_names_the_counts_published_digest(monkeypatch):
+    """`digest_of(count_record)` can never equal its own `evidence_sha256`.
+
+    The record carries that field, so re-hashing it yields a number nobody
+    else can reproduce — and a field named `count_evidence_sha256` that
+    identifies nothing is worse than an absent one."""
+    from midtermpanel.evidence import digest_of
+
+    body = {"a": 1}
+    record = {**body, "evidence_sha256": digest_of(body)}
+    assert digest_of(record) != record["evidence_sha256"]
+
+    with open("scripts/midtermpanel/panelcli.py", encoding="utf-8") as handle:
+        source = handle.read()
+    assert 'count_evidence_sha256 = count_record.get("evidence_sha256")' in (
+        source)
+    assert "count_evidence_sha256 = digest_of(count_record)" not in source
+
+
+def test_identity_compared_needs_every_field_not_merely_one(monkeypatch):
+    """A dry run rebuilds the artifact, so `engine_artifact_sha256` is
+    populated even there. Under `any()` that single field made the record
+    claim an identity comparison while eight of nine were absent."""
+    from midtermpanel import panel
+    from midtermpanel.panel import verify_handoff
+
+    monkeypatch.setattr(panel, "assert_plan_is_executable", lambda p: p)
+    plan = {"plan_sha256": "p" * 64, "candidate_head_sha": "a" * 40,
+            "candidate_base_sha": "b" * 40, "engine_digest": "c" * 64,
+            "policy_digest": "d" * 64, "request_semantics_digest": "r" * 64,
+            "execution_request_hashes": ["h"], "executable": True}
+    partial = {f: None for f in _count_body()}
+    partial["engine_artifact_sha256"] = "9" * 64
+    count = {"candidate_head_sha": "a" * 40,
+             "body": {"request_semantics_digest": "r" * 64,
+                      "plan_sha256": "p" * 64, **partial}}
+
+    result = verify_handoff(
+        count_record=count, plan=plan, expected_head="a" * 40,
+        expected_base="b" * 40, expected_engine_digest="c" * 64,
+        expected_policy_digest="d" * 64, panel_identity=partial,
+        require_identity=False)
+
+    assert result["identity_compared"] is False, (
+        "one populated field of nine is not an identity comparison")
+
+
+def test_identity_compared_is_true_only_for_a_complete_comparison(monkeypatch):
+    from midtermpanel import panel
+    from midtermpanel.panel import verify_handoff
+
+    monkeypatch.setattr(panel, "assert_plan_is_executable", lambda p: p)
+    plan = {"plan_sha256": "p" * 64, "candidate_head_sha": "a" * 40,
+            "candidate_base_sha": "b" * 40, "engine_digest": "c" * 64,
+            "policy_digest": "d" * 64, "request_semantics_digest": "r" * 64,
+            "execution_request_hashes": ["h"], "executable": True}
+    full = _count_body()
+    count = {"candidate_head_sha": "a" * 40,
+             "body": {"request_semantics_digest": "r" * 64,
+                      "plan_sha256": "p" * 64, **full}}
+
+    result = verify_handoff(
+        count_record=count, plan=plan, expected_head="a" * 40,
+        expected_base="b" * 40, expected_engine_digest="c" * 64,
+        expected_policy_digest="d" * 64, panel_identity=full,
+        require_identity=True)
+
+    assert result["identity_compared"] is True
+    assert result["identity_required"] is True

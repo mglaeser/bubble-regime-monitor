@@ -19,7 +19,6 @@ from . import (
 from .clibase import require_env, run, self_test_report, self_test_requested
 from .errors import PanelRefusal, refuse
 from .evidence import (
-    digest_of,
     panel_evidence,
     strict_load,
     strict_load_plan,
@@ -105,7 +104,13 @@ def perform(environ: dict, *, execute_fn, opener,
         expected_policy_digest=env["MIDTERM_POLICY_DIGEST"],
         panel_identity=panel_identity,
         require_identity=require_identity)
-    count_evidence_sha256 = digest_of(count_record)
+    # The count record's OWN published self-digest, not a fresh hash of it.
+    # `digest_of(count_record)` can never equal `evidence_sha256`, because the
+    # record contains that field: re-hashing it produces a number nobody else
+    # can reproduce, so a field named `count_evidence_sha256` would have
+    # identified nothing. This is the digest the status marker and the merge
+    # gate already use.
+    count_evidence_sha256 = count_record.get("evidence_sha256")
 
     published = [publish(
         pending(candidate_head_sha=head, context=REVIEW_STATUS,

@@ -154,8 +154,15 @@ def verify_handoff(*, count_record: dict, plan: dict, expected_head: str,
     # was true for a dry run's all-`None` binding, so the record claimed an
     # identity comparison had happened when nine absences had been compared
     # to nine absences.
-    compared = bool(panel_identity) and any(
-        panel_identity.get(f) is not None for f in IDENTITY_HANDOFF_FIELDS)
+    #
+    # ALL nine, not any. `engine_artifact_sha256` is populated even in a dry
+    # run — the artifact is rebuilt either way — so `any()` reported a
+    # comparison as having happened when one field of nine was present and
+    # eight were `None` on both sides. A partial comparison is not a
+    # comparison, and this field is read as though it were one.
+    compared = bool(panel_identity) and all(
+        panel_identity.get(f) is not None and body.get(f) is not None
+        for f in IDENTITY_HANDOFF_FIELDS)
     return {"handoff": "verified",
             "plan_sha256": plan["plan_sha256"],
             "identity_compared": compared,
