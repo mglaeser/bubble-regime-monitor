@@ -713,15 +713,101 @@ def test_materialisation_precedes_every_provider_key_step():
             "a provider-key step precedes every materialisation step")
 
 
-def test_the_materialiser_step_holds_no_provider_secret():
+def test_every_materialiser_step_holds_no_provider_secret():
+    """BOTH jobs. The first version of this test read `split(...)[1]` and so
+    only ever inspected the count job's step; the panel job's copy was
+    unasserted."""
     with open(".github/workflows/midterm-panel-review.yml",
               encoding="utf-8") as handle:
         text = handle.read()
 
-    block = text.split("Materialise the approved engine identity document")[1]
-    block = block.split("python -m midtermpanel.releaseasset")[0]
-    assert "TRUSTED_VERIFIER_OPENAI_KEY" not in block
-    assert "GITHUB_TOKEN" in block
+    blocks = text.split("Materialise the approved engine identity document")[1:]
+    assert len(blocks) == 2, "count and panel must each have the step"
+    for block in blocks:
+        env_block = block.split("python -m midtermpanel.releaseasset")[0]
+        assert "TRUSTED_VERIFIER_OPENAI_KEY" not in env_block
+        assert "MIDTERM_PANEL_PROVIDER_KEY" not in env_block
+        assert "GITHUB_TOKEN" in env_block
+
+
+def test_the_materialiser_is_actually_runnable_as_a_module():
+    """`python -m midtermpanel.releaseasset` was a no-op.
+
+    The module defined `main()` and never called it, so the step ran, exited
+    0, materialised nothing and exported no path — a green step that did not
+    do its job, which is worse than a red one."""
+    with open("scripts/midtermpanel/releaseasset.py", encoding="utf-8") as h:
+        source = h.read()
+
+    assert 'if __name__ == "__main__":' in source
+    assert source.rstrip().endswith("main()")
+
+
+def test_the_ordering_guard_checks_the_name_this_lane_actually_uses():
+    """The panel binds the secret to MIDTERM_PANEL_PROVIDER_KEY on purpose.
+
+    A guard that looked only for TRUSTED_VERIFIER_OPENAI_KEY would read
+    'no provider secret in scope' with the key present under the name this
+    lane really exports."""
+    from midtermpanel import releaseasset
+    from midtermpanel.transport import PROVIDER_KEY_ENV
+
+    with open("scripts/midtermpanel/releaseasset.py", encoding="utf-8") as h:
+        assert "PROVIDER_KEY_ENV" in h.read()
+    assert PROVIDER_KEY_ENV == "MIDTERM_PANEL_PROVIDER_KEY"
+    assert releaseasset.materialise_release_identity is not None
+
+
+def test_the_host_check_happens_before_the_token_is_sent():
+    """Checking `response.geturl()` after urlopen is too late: urllib has
+    already followed the redirect and re-sent the Authorization header."""
+    from midtermpanel import releaseasset
+
+    assert issubclass(releaseasset._HostRestrictedRedirect,
+                      __import__("urllib.request", fromlist=["x"]
+                                 ).HTTPRedirectHandler)
+    for bad in ("http://api.github.com/x", "https://evil.example/x",
+                "ftp://api.github.com/x"):
+        with pytest.raises(PanelRefusal):
+            releaseasset.assert_permitted_url(bad, where="test")
+    assert releaseasset.assert_permitted_url(
+        "https://api.github.com/x", where="test")
+
+
+def test_count_evidence_carries_the_release_binding_the_panel_compares():
+    """A field compared but never written makes the check unreachable."""
+    from midtermpanel.panel import IDENTITY_HANDOFF_FIELDS
+
+    with open("scripts/midtermpanel/countcli.py", encoding="utf-8") as handle:
+        source = handle.read()
+
+    for field in IDENTITY_HANDOFF_FIELDS:
+        assert f'"{field}"' in source, (
+            f"{field} is compared in the handoff but never written by count")
+
+
+def test_identity_compared_is_false_when_nothing_was_compared(monkeypatch):
+    from midtermpanel import panel
+    from midtermpanel.panel import verify_handoff
+
+    monkeypatch.setattr(panel, "assert_plan_is_executable", lambda p: p)
+    plan = {"plan_sha256": "p" * 64, "candidate_head_sha": "a" * 40,
+            "candidate_base_sha": "b" * 40, "engine_digest": "c" * 64,
+            "policy_digest": "d" * 64, "request_semantics_digest": "r" * 64,
+            "execution_request_hashes": ["h"], "executable": True}
+    count = {"candidate_head_sha": "a" * 40,
+             "body": {"request_semantics_digest": "r" * 64,
+                      "plan_sha256": "p" * 64}}
+
+    result = verify_handoff(
+        count_record=count, plan=plan, expected_head="a" * 40,
+        expected_base="b" * 40, expected_engine_digest="c" * 64,
+        expected_policy_digest="d" * 64,
+        panel_identity={f: None for f in _count_body()},
+        require_identity=False)
+
+    assert result["identity_compared"] is False
+    assert result["identity_required"] is False
 
 
 def test_the_materialiser_refuses_a_missing_or_malformed_approved_digest():

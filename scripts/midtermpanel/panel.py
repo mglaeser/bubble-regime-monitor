@@ -150,9 +150,16 @@ def verify_handoff(*, count_record: dict, plan: dict, expected_head: str,
                "engine this run counted with; anything else spends money on "
                "requests nobody counted and reports the result as if they "
                "were the same")
+    # Honest about what was actually compared. `panel_identity is not None`
+    # was true for a dry run's all-`None` binding, so the record claimed an
+    # identity comparison had happened when nine absences had been compared
+    # to nine absences.
+    compared = bool(panel_identity) and any(
+        panel_identity.get(f) is not None for f in IDENTITY_HANDOFF_FIELDS)
     return {"handoff": "verified",
             "plan_sha256": plan["plan_sha256"],
-            "identity_compared": panel_identity is not None,
+            "identity_compared": compared,
+            "identity_required": require_identity,
             "execution_requests": len(plan["execution_request_hashes"])}
 
 

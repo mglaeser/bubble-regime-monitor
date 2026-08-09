@@ -130,6 +130,12 @@ def perform(environ: dict, *, core, transport, opener, engine=None,
                   (engine_identity or {}).get("engine_build_run_attempt"),
               "engine_provenance_sha256":
                   (engine_identity or {}).get("engine_provenance_sha256"),
+              # The whole operator approval as one digest. The panel compares
+              # this field, so a count job that omitted it would make every
+              # provider-backed handoff fail on a blank — the check would have
+              # been unreachable rather than strict.
+              "engine_release_binding_sha256":
+                  (engine_identity or {}).get("engine_release_binding_sha256"),
               "approved_engine_source_sha":
                   (engine_identity or {}).get("approved_engine_source_sha"),
               "governed_policies": governed_policies,

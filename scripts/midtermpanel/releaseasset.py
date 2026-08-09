@@ -64,18 +64,43 @@ MAX_ASSET_BYTES = 1 << 20
 API_ROOT = "https://api.github.com"
 
 
+def assert_permitted_url(url: str, *, where: str) -> str:
+    """https, and a host on the list — checked BEFORE anything is sent."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        refuse(f"category=release_asset_scheme_not_https where={where} "
+               f"scheme={parsed.scheme!r}")
+    if (parsed.hostname or "") not in PERMITTED_HOSTS:
+        refuse(f"category=release_asset_host_not_permitted where={where} "
+               f"host={parsed.hostname!r} permitted={list(PERMITTED_HOSTS)}")
+    return url
+
+
+class _HostRestrictedRedirect(urllib.request.HTTPRedirectHandler):
+    """Validate a redirect target before the request carrying the token
+    follows it.
+
+    Checking `response.geturl()` after `urlopen` returns is too late:
+    `urllib` has already followed the redirect and re-sent the Authorization
+    header to wherever it pointed. The check has to happen while the redirect
+    is being decided, which is here."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        assert_permitted_url(newurl, where="redirect")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _request(url: str, *, token: str, accept: str) -> bytes:
     """One bounded GET, with the token and nothing else."""
+    assert_permitted_url(url, where="request")
     request = urllib.request.Request(url, method="GET")  # noqa: S310
     request.add_header("Authorization", f"Bearer {token}")
     request.add_header("Accept", accept)
     request.add_header("X-GitHub-Api-Version", "2022-11-28")
+    opener = urllib.request.build_opener(_HostRestrictedRedirect)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-            final = urllib.parse.urlparse(response.geturl()).hostname or ""
-            if final not in PERMITTED_HOSTS:
-                refuse(f"category=release_asset_redirected_off_host "
-                       f"host={final!r} permitted={list(PERMITTED_HOSTS)}")
+        with opener.open(request, timeout=30) as response:
+            assert_permitted_url(response.geturl(), where="final")
             payload = response.read(MAX_ASSET_BYTES + 1)
     except urllib.error.HTTPError as exc:
         refuse(f"category=release_api_http_error status={exc.code} — the "
@@ -200,12 +225,25 @@ def main() -> None:
 
     from . import REPOSITORY_NUMERIC_ID
     from .engine import ENGINE_IDENTITY_DIGEST_ENV, ENGINE_RELEASE_TAG_ENV
+    from .transport import PROVIDER_KEY_ENV
 
     # The ordering guarantee, checked rather than documented: this step runs
     # before the provider key is introduced, and refuses if one is already in
-    # scope. Reuses the trusted lane's own check so there is one list of
-    # capability names rather than a second that can drift.
+    # scope.
+    #
+    # BOTH name families, and that is the point. The trusted lane's own check
+    # looks for TRUSTED_VERIFIER_OPENAI_KEY, but this lane deliberately never
+    # exports that name — the panel workflow binds the secret to
+    # MIDTERM_PANEL_PROVIDER_KEY precisely so a mid-term process cannot look
+    # like a trusted runner. A guard that checked only the trusted name would
+    # therefore have read "no provider secret in scope" with the key sitting
+    # right there under the name this lane really uses.
     _enginebuild.assert_build_holds_no_provider_secret(os.environ)
+    if os.environ.get(PROVIDER_KEY_ENV):
+        refuse(f"category=release_materialisation_holds_the_provider_key "
+               f"name={PROVIDER_KEY_ENV} — this step must run before the key "
+               "is introduced; a downloader that can also reach the provider "
+               "is a downloader whose compromise costs money")
 
     temp = os.environ.get("RUNNER_TEMP") or refuse(
         "category=runner_temp_not_set")
@@ -226,3 +264,9 @@ def main() -> None:
     json.dump({k: v for k, v in result.items() if k != "path"}, sys.stdout,
               indent=2, sort_keys=True)
     sys.stdout.write("\n")
+
+
+# Without this the step ran the module, defined `main`, called nothing, and
+# exited 0 — a green step that materialised no document and exported no path.
+if __name__ == "__main__":
+    main()
