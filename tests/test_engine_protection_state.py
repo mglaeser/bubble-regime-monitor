@@ -991,3 +991,40 @@ def test_an_identical_full_release_binding_reuses():
 def test_a_dedupe_binding_with_an_empty_member_is_refused():
     with pytest.raises(PanelRefusal, match="dedupe_binding_incomplete"):
         _dedupe_binding(engine_release_binding_sha256="")
+
+
+def test_provider_mode_refuses_a_binding_of_absences(monkeypatch):
+    """Comparing `None` to `None` nine times is not a check.
+
+    A dry run legitimately has no identity to compare. A provider-backed run
+    that reached the comparison with blanks on either side has demonstrated
+    only that neither job knew which engine it used."""
+    from midtermpanel import panel
+    from midtermpanel.panel import verify_handoff
+
+    # The plan validator runs first and is not what this test is about; the
+    # synthetic plan below is deliberately not a real signed plan.
+    monkeypatch.setattr(panel, "assert_plan_is_executable", lambda p: p)
+
+    plan = {"plan_sha256": "p" * 64, "candidate_head_sha": "a" * 40,
+            "candidate_base_sha": "b" * 40, "engine_digest": "c" * 64,
+            "policy_digest": "d" * 64, "request_semantics_digest": "r" * 64,
+            "execution_request_hashes": ["h"], "executable": True}
+    count = {"candidate_head_sha": "a" * 40,
+             "body": {"request_semantics_digest": "r" * 64,
+                      "plan_sha256": "p" * 64}}
+
+    with pytest.raises(PanelRefusal, match="identity_binding_incomplete"):
+        verify_handoff(count_record=count, plan=plan, expected_head="a" * 40,
+                       expected_base="b" * 40, expected_engine_digest="c" * 64,
+                       expected_policy_digest="d" * 64,
+                       panel_identity={f: None for f in _count_body()},
+                       require_identity=True)
+
+
+def test_only_provider_mode_requires_the_identity_binding():
+    with open("scripts/midtermpanel/panelcli.py", encoding="utf-8") as handle:
+        source = handle.read()
+
+    assert '"require_identity": mode == MODE_PROVIDER' in source
+    assert source.count("require_identity=prepared[\"require_identity\"]") == 2

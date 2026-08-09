@@ -82,7 +82,8 @@ IDENTITY_HANDOFF_FIELDS = (
 def verify_handoff(*, count_record: dict, plan: dict, expected_head: str,
                    expected_base: str, expected_engine_digest: str,
                    expected_policy_digest: str,
-                   panel_identity: dict | None = None) -> dict:
+                   panel_identity: dict | None = None,
+                   require_identity: bool = False) -> dict:
     """Refuse the plan unless it is the one this run counted.
 
     Every binding is compared explicitly rather than trusting that the artifact
@@ -123,6 +124,19 @@ def verify_handoff(*, count_record: dict, plan: dict, expected_head: str,
     # between count and panel while the two source commits stayed put, every
     # existing comparison still passed and the panel executed under a builder
     # the count evidence does not describe.
+    if require_identity:
+        # A comparison of two absences passes and proves nothing. In provider
+        # mode both sides MUST be fully populated, or the equality below is
+        # `None == None` nine times and the panel has demonstrated only that
+        # neither job knew which engine it used.
+        blank = sorted(f for f in IDENTITY_HANDOFF_FIELDS
+                       if (panel_identity or {}).get(f) is None
+                       or body.get(f) is None)
+        if blank:
+            refuse(f"category=engine_identity_binding_incomplete "
+                   f"fields={blank} — a provider-backed panel must compare a "
+                   "populated builder identity against a populated one; "
+                   "comparing absences is not a check")
     if panel_identity is not None:
         for field in IDENTITY_HANDOFF_FIELDS:
             counted, observed = body.get(field), panel_identity.get(field)

@@ -67,7 +67,8 @@ def input_paths(temp: str) -> dict:
 
 
 def perform(environ: dict, *, execute_fn, opener,
-            panel_identity: dict | None = None) -> dict:
+            panel_identity: dict | None = None,
+            require_identity: bool = False) -> dict:
     """Verify the handoff, execute, aggregate, publish. Injected seams only.
 
     The challenge comes from the PLAN, not from the environment. It is what the
@@ -102,7 +103,8 @@ def perform(environ: dict, *, execute_fn, opener,
         expected_base=base,
         expected_engine_digest=env["MIDTERM_ENGINE_DIGEST"],
         expected_policy_digest=env["MIDTERM_POLICY_DIGEST"],
-        panel_identity=panel_identity)
+        panel_identity=panel_identity,
+        require_identity=require_identity)
     count_evidence_sha256 = digest_of(count_record)
 
     published = [publish(
@@ -200,7 +202,7 @@ def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
     from trustedlane import enginebridge
 
     from . import inputs
-    from .engine import load_engine_for_mode, resolve_release_config
+    from .engine import MODE_PROVIDER, load_engine_for_mode, resolve_release_config
     from .panel import execute
 
     release = resolve_release_config(environ)
@@ -236,6 +238,10 @@ def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
 
     return {"execute_fn": execute_fn, "engine_identity": opened,
             "identity_binding": identity_binding(opened),
+            # Only a provider-backed run has an identity to compare. A dry run
+            # has none, and saying so is different from silently comparing two
+            # absences and calling it verified.
+            "require_identity": mode == MODE_PROVIDER,
             "transport": transport}
 
 
@@ -278,7 +284,8 @@ def main() -> None:
             transport_factory=dryrun.generation_transport_factory(environ))
         outcome = perform(environ, execute_fn=prepared["execute_fn"],
                           opener=sink,
-                          panel_identity=prepared["identity_binding"])
+                          panel_identity=prepared["identity_binding"],
+                          require_identity=prepared["require_identity"])
         proof = dryrun.record(environ, sink=sink,
                               transport=prepared["transport"])
         print(json.dumps({"dry_run": proof, "verdict": outcome["verdict"]},
@@ -299,7 +306,8 @@ def main() -> None:
             generation_attempt_cap=cap))
     perform(environ, execute_fn=prepared["execute_fn"],
             opener=urllib.request.urlopen,
-            panel_identity=prepared["identity_binding"])
+            panel_identity=prepared["identity_binding"],
+            require_identity=prepared["require_identity"])
 
 
 def _self_test() -> int:
