@@ -207,9 +207,27 @@ jobs:
                   ("approved_engine_artifact_sha256",
                    "MIDTERM_APPROVED_ENGINE_ARTIFACT_SHA256"),
                   ("approved_engine_release_tag",
-                   "MIDTERM_APPROVED_ENGINE_RELEASE_TAG")):
+                   "MIDTERM_APPROVED_ENGINE_RELEASE_TAG"),
+                  ("approved_engine_identity_sha256",
+                   "MIDTERM_APPROVED_ENGINE_IDENTITY_SHA256")):
               if doc.get(key):
                   print(f"{variable}={doc[key]}")
+          # Exported through a SEPARATE loop, because the loop above skips
+          # falsy values and `native_branch_protection` is legitimately
+          # `false` on this repository. Under the old guard the honest answer
+          # would have been the one value that never reached the consumer,
+          # which is the same shape of bug as the truthiness check in
+          # `enginebuild.PROVENANCE_FIELDS`.
+          for key, variable in (
+                  ("native_branch_protection",
+                   "MIDTERM_APPROVED_ENGINE_NATIVE_BRANCH_PROTECTION"),
+                  ("control_class",
+                   "MIDTERM_APPROVED_ENGINE_CONTROL_CLASS")):
+              if key in doc:
+                  value = doc[key]
+                  if isinstance(value, bool):
+                      value = "true" if value else "false"
+                  print(f"{variable}={value}")
           PROBE
 
       - name: Identify the exact candidate and verify ordinary CI
@@ -278,9 +296,27 @@ jobs:
                   ("approved_engine_artifact_sha256",
                    "MIDTERM_APPROVED_ENGINE_ARTIFACT_SHA256"),
                   ("approved_engine_release_tag",
-                   "MIDTERM_APPROVED_ENGINE_RELEASE_TAG")):
+                   "MIDTERM_APPROVED_ENGINE_RELEASE_TAG"),
+                  ("approved_engine_identity_sha256",
+                   "MIDTERM_APPROVED_ENGINE_IDENTITY_SHA256")):
               if doc.get(key):
                   print(f"{variable}={doc[key]}")
+          # Exported through a SEPARATE loop, because the loop above skips
+          # falsy values and `native_branch_protection` is legitimately
+          # `false` on this repository. Under the old guard the honest answer
+          # would have been the one value that never reached the consumer,
+          # which is the same shape of bug as the truthiness check in
+          # `enginebuild.PROVENANCE_FIELDS`.
+          for key, variable in (
+                  ("native_branch_protection",
+                   "MIDTERM_APPROVED_ENGINE_NATIVE_BRANCH_PROTECTION"),
+                  ("control_class",
+                   "MIDTERM_APPROVED_ENGINE_CONTROL_CLASS")):
+              if key in doc:
+                  value = doc[key]
+                  if isinstance(value, bool):
+                      value = "true" if value else "false"
+                  print(f"{variable}={value}")
           PROBE
 
       - name: Assert the candidate is present as OBJECTS
@@ -441,9 +477,27 @@ jobs:
                   ("approved_engine_artifact_sha256",
                    "MIDTERM_APPROVED_ENGINE_ARTIFACT_SHA256"),
                   ("approved_engine_release_tag",
-                   "MIDTERM_APPROVED_ENGINE_RELEASE_TAG")):
+                   "MIDTERM_APPROVED_ENGINE_RELEASE_TAG"),
+                  ("approved_engine_identity_sha256",
+                   "MIDTERM_APPROVED_ENGINE_IDENTITY_SHA256")):
               if doc.get(key):
                   print(f"{variable}={doc[key]}")
+          # Exported through a SEPARATE loop, because the loop above skips
+          # falsy values and `native_branch_protection` is legitimately
+          # `false` on this repository. Under the old guard the honest answer
+          # would have been the one value that never reached the consumer,
+          # which is the same shape of bug as the truthiness check in
+          # `enginebuild.PROVENANCE_FIELDS`.
+          for key, variable in (
+                  ("native_branch_protection",
+                   "MIDTERM_APPROVED_ENGINE_NATIVE_BRANCH_PROTECTION"),
+                  ("control_class",
+                   "MIDTERM_APPROVED_ENGINE_CONTROL_CLASS")):
+              if key in doc:
+                  value = doc[key]
+                  if isinstance(value, bool):
+                      value = "true" if value else "false"
+                  print(f"{variable}={value}")
           PROBE
 
       - name: Assert the candidate is present as OBJECTS

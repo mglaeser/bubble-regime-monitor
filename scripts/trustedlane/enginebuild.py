@@ -542,6 +542,65 @@ def assert_built_record(record: dict) -> dict:
     return record
 
 
+#: An identity record is a few tens of kilobytes. The bound exists so that a
+#: consumer pointed at something enormous refuses by name instead of reading
+#: it into memory first.
+IDENTITY_DOCUMENT_MAX_BYTES = 1 << 20
+
+
+def _reject_duplicate_keys(pairs):
+    """`json.loads` keeps the LAST value for a repeated key, silently.
+
+    A document carrying `"state"` twice would therefore be read one way by a
+    validator and another way by anything that looked at the raw text — and
+    the second `"state"` is exactly where a relabelling would hide."""
+    seen = set()
+    for key, _ in pairs:
+        if key in seen:
+            refuse(f"category=engine_identity_duplicate_key key={key!r} — a "
+                   "repeated key resolves to the last value, so the document "
+                   "means different things to a parser and to a reader")
+        seen.add(key)
+    return dict(pairs)
+
+
+def strict_load_built_identity(path: str) -> dict:
+    """Read an identity record from disk and validate it completely.
+
+    The single loader both lanes use. It exists because the strictness added
+    to `assert_built_record` was worth nothing while the live consumer read
+    the file with a plain `json.load` and checked five string lengths: a
+    mid-term record could be relabelled `PROTECTED_ENGINE_IDENTITY` by editing
+    four header fields, leaving all five approved digests and the sealed
+    provenance untouched, and the lane-grade helper saw a self-consistent
+    protected header and accepted it.
+
+    The provenance reseal is the check that catches that edit, and a validator
+    nobody calls is not a control."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(IDENTITY_DOCUMENT_MAX_BYTES + 1)
+    except OSError as exc:
+        refuse(f"category=engine_identity_unreadable "
+               f"exception_class={type(exc).__name__} — the path is not "
+               "reported; it can carry a runner temp directory layout")
+    if len(raw) > IDENTITY_DOCUMENT_MAX_BYTES:
+        refuse(f"category=engine_identity_too_large "
+               f"limit_bytes={IDENTITY_DOCUMENT_MAX_BYTES}")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        refuse("category=engine_identity_not_utf8")
+    try:
+        record = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+    except json.JSONDecodeError as exc:
+        refuse(f"category=engine_identity_not_json "
+               f"exception_class={type(exc).__name__}")
+    if not isinstance(record, dict):
+        refuse("category=engine_identity_not_an_object")
+    return assert_built_record(record)
+
+
 def assert_build_holds_no_provider_secret(environ) -> dict:
     """The build must not be able to reach the provider, at all.
 

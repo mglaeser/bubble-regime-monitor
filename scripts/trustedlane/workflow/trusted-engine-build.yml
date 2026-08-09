@@ -16,8 +16,15 @@
 #
 # What it adds is three things a reproduction cannot:
 #
-#   * it runs from a PROTECTED ref, so the source commits it names are commits
-#     that survived branch protection;
+#   * it records the exact default-branch SHA it ran from, together with the
+#     platform's own `github.ref_protected` answer for that ref. Being
+#     `refs/heads/main`, being the default branch, having been merged by a
+#     human and carrying a GitHub-signed merge commit are four different
+#     facts, and none of them is branch protection. On this repository the
+#     answer is currently FALSE, the emitted state is
+#     MIDTERM_OPERATOR_APPROVED_ENGINE_IDENTITY, and the accepted control is
+#     HUMAN_EXACT_HEAD_COMPENSATING_CONTROL — a human choosing an exact
+#     commit id. This build makes no protected-ref claim;
 #   * it holds NO credential. No `environment:`, no `secrets.` reference
 #     anywhere in this file, and `assert_build_holds_no_provider_secret`
 #     re-checks the names at runtime. A build that could reach the provider is
@@ -67,7 +74,7 @@ jobs:
     outputs:
       artifact_sha256: ${{ steps.build.outputs.artifact_sha256 }}
     steps:
-      - name: Check out the protected ref only
+      - name: Check out the dispatching ref only
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false

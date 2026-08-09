@@ -73,6 +73,7 @@ environment is what the caller controls.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 
@@ -101,6 +102,16 @@ ENGINE_SOURCE_ENV = "MIDTERM_APPROVED_ENGINE_SOURCE_SHA"
 ENGINE_PROTECTED_ENV = "MIDTERM_APPROVED_ENGINE_PROTECTED_SHA"
 ENGINE_ARTIFACT_ENV = "MIDTERM_APPROVED_ENGINE_ARTIFACT_SHA256"
 ENGINE_RELEASE_TAG_ENV = "MIDTERM_APPROVED_ENGINE_RELEASE_TAG"
+
+#: The builder's own identity record, materialised from the exact release.
+#: Rebuilding the artifact from pinned commits proves reproducibility and
+#: nothing else: it says the bytes can be produced, not which build produced
+#: the approved ones, under what control, or whether the ref was protected.
+#: Only the identity document carries that, and only if something reads it.
+ENGINE_IDENTITY_PATH_ENV = "MIDTERM_APPROVED_ENGINE_IDENTITY_PATH"
+ENGINE_IDENTITY_DIGEST_ENV = "MIDTERM_APPROVED_ENGINE_IDENTITY_SHA256"
+ENGINE_PROTECTION_ENV = "MIDTERM_APPROVED_ENGINE_NATIVE_BRANCH_PROTECTION"
+ENGINE_CONTROL_CLASS_ENV = "MIDTERM_APPROVED_ENGINE_CONTROL_CLASS"
 
 #: Retired names. Their presence is refused rather than ignored: a workflow
 #: still exporting `MIDTERM_ENGINE_CANDIDATE_SHA` is a workflow that still
@@ -163,7 +174,25 @@ def resolve_release_config(environ=None) -> dict:
             protected, field="approved_engine_protected_sha"),
         "approved_engine_artifact_sha256": artifact_sha256,
         "approved_engine_release_tag": release_tag,
+        "approved_engine_identity_path":
+            env.get(ENGINE_IDENTITY_PATH_ENV) or None,
+        "approved_engine_identity_sha256":
+            env.get(ENGINE_IDENTITY_DIGEST_ENV) or None,
     }
+    if config["approved_engine_identity_sha256"] is not None:
+        config["approved_engine_identity_sha256"] = assert_artifact_digest(
+            config["approved_engine_identity_sha256"])
+    # The protection restatement, carried only when configured. Absent is not
+    # defaulted to False here: a run that needs it refuses for the missing
+    # input, which is a different and more useful failure than one that
+    # silently assumed the weaker lane.
+    protection = env.get(ENGINE_PROTECTION_ENV)
+    control_class = env.get(ENGINE_CONTROL_CLASS_ENV)
+    if protection is not None or control_class is not None:
+        config["native_branch_protection"] = protection
+        config["control_class"] = control_class
+        claim = assert_release_protection_claim(config)
+        config.update(claim)
     config["provenance"] = provenance_of(config)
     return config
 
@@ -256,6 +285,92 @@ def assert_identity_is_midterm_grade(record, *, release: dict) -> dict:
                 "selected by a human and the exact five digests were approved "
                 "out of band. This backs MIDTERM_SINGLE_REPO_* evidence only "
                 "and is refused by the trusted lane")}
+
+
+def load_release_engine_identity(*, release: dict, mode: str,
+                                 rebuilt_artifact_sha256: str) -> dict:
+    """Load and enforce the builder's identity record for the exact release.
+
+    This is the check the mid-term lane was missing entirely. `build_pinned_
+    artifact` rebuilds the engine from the two pinned commits and compares the
+    digest to the operator's approval, which proves the bytes are reproducible
+    and says nothing at all about which build produced the approved ones, what
+    ref it ran from, whether that ref was protected, or under which control the
+    operator accepted it. Only the identity document carries those facts, and
+    for as long as nothing read it, the corrected producer-side state was
+    decoration.
+
+    Provider mode requires the document. Dry runs may proceed without one —
+    there is no approved release to have an identity for — but if a path IS
+    configured it is validated, so a broken document fails the cheap run
+    rather than first surfacing on the run that spends money."""
+    from trustedlane import enginebuild
+
+    assert_mode(mode)
+    path = release.get("approved_engine_identity_path")
+    if not path:
+        if mode == MODE_PROVIDER:
+            refuse(f"category=approved_engine_identity_not_configured "
+                   f"variable='{ENGINE_IDENTITY_PATH_ENV}' — a provider-backed "
+                   "run must read the identity record the build published for "
+                   "the exact approved release. Rebuilding the artifact proves "
+                   "reproducibility, which is not provenance and not approval")
+        return {"engine_identity": None, "state": None,
+                "honest_scope": ("no identity document was configured and this "
+                                 "is a dry run; nothing about the builder, its "
+                                 "ref or its control class has been checked")}
+
+    try:
+        record = enginebuild.strict_load_built_identity(path)
+    except Exception as exc:  # noqa: BLE001 — re-raised as a panel refusal
+        refuse(f"category=approved_engine_identity_rejected "
+               f"exception_class={type(exc).__name__} — the trusted-lane "
+               "loader refused the release identity document")
+
+    grade = assert_identity_is_midterm_grade(record, release=release)
+
+    # The identity must describe THIS engine: the same two source commits the
+    # operator pinned, and the same bytes both the operator approved and this
+    # run just rebuilt. Any one of those alone is satisfiable by a document
+    # from a different build.
+    roles = record.get("source_roles") or {}
+    expected_roles = source_roles(release)
+    observed = {role: (roles.get(role) or {}).get("source_commit")
+                if isinstance(roles.get(role), dict) else roles.get(role)
+                for role in expected_roles}
+    if observed != expected_roles:
+        refuse(f"category=approved_engine_identity_source_roles_differ "
+               f"expected={ {k: v[:12] for k, v in expected_roles.items()} } "
+               f"observed={ {k: (v or '')[:12] for k, v in observed.items()} } "
+               "— the identity record describes a build of different commits "
+               "than the ones the operator pinned")
+    if record["engine_artifact_sha256"] != rebuilt_artifact_sha256:
+        refuse("category=approved_engine_identity_is_for_a_different_artifact "
+               "— the identity record names one artifact and this run rebuilt "
+               "another, so the record describes bytes that did not load")
+
+    configured_digest = release.get("approved_engine_identity_sha256")
+    with open(path, "rb") as handle:
+        document_sha256 = hashlib.sha256(handle.read()).hexdigest()
+    if configured_digest and configured_digest != document_sha256:
+        refuse("category=approved_engine_identity_document_digest_mismatch — "
+               "the operator approved one identity document and this run read "
+               "another")
+
+    provenance = record.get("provenance") or {}
+    return {
+        "engine_identity": record,
+        "engine_identity_sha256": document_sha256,
+        "state": grade["state"],
+        "native_branch_protection": grade["native_branch_protection"],
+        "control_class": grade["control_class"],
+        "emits_evidence_classes": grade["emits_evidence_classes"],
+        "build_workflow_run_id": provenance.get("build_workflow_run_id"),
+        "build_workflow_run_attempt":
+            provenance.get("build_workflow_run_attempt"),
+        "engine_provenance_sha256": record["provenance_sha256"],
+        "honest_scope": grade["honest_scope"],
+    }
 
 
 def assert_release_protection_claim(config: dict) -> dict:
@@ -502,6 +617,11 @@ def load_engine_for_mode(*, mode: str, release: dict,
     # "expected_engine_digest_malformed", which reads as an operator mistake
     # and was a caller mistake.
     artifact_sha256 = built["engine_artifact_sha256"]
+    # Before the artifact is opened. The identity record decides whether this
+    # lane may use this KIND of engine at all, and a run that imports first
+    # and asks afterwards has already done the thing the answer governs.
+    identity = load_release_engine_identity(
+        release=release, mode=mode, rebuilt_artifact_sha256=artifact_sha256)
     engine = open_engine(artifact_path, destination=extract_to,
                          expected_sha256=artifact_sha256)
     assert_no_module_came_from_candidate_data(candidate_paths=candidate_paths)
@@ -511,6 +631,15 @@ def load_engine_for_mode(*, mode: str, release: dict,
         "engine": engine,
         "mode": mode,
         "provenance": provenance,
+        "engine_identity_record": identity,
+        "engine_identity_sha256": identity.get("engine_identity_sha256"),
+        "engine_identity_state": identity.get("state"),
+        "native_branch_protection": identity.get("native_branch_protection"),
+        "control_class": identity.get("control_class"),
+        "engine_build_run_id": identity.get("build_workflow_run_id"),
+        "engine_build_run_attempt":
+            identity.get("build_workflow_run_attempt"),
+        "engine_provenance_sha256": identity.get("engine_provenance_sha256"),
         "engine_artifact_sha256": artifact_sha256,
         "engine_source_digest": engine_digest(roles=roles),
         "engine_source_roles": roles,
