@@ -379,6 +379,22 @@ jobs:
           echo "MIDTERM_CHALLENGE_PATH=$RUNNER_TEMP/midterm/inputs/challenge.txt" \
             >> "$GITHUB_ENV"
 
+      # Materialise the operator-approved identity document BEFORE the step
+      # that receives the provider key. GITHUB_TOKEN only: a download that
+      # could also reach the provider is a download whose compromise costs
+      # money. The module re-checks that ordering at runtime and refuses if a
+      # provider secret is already in scope.
+      #
+      # Skipped while no release tag is configured, which is the current
+      # state. Provider mode then refuses for the missing identity path rather
+      # than proceeding — the honest failure, not a silent downgrade.
+      - name: Materialise the approved engine identity document
+        if: env.MIDTERM_APPROVED_ENGINE_RELEASE_TAG != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+        run: python -m midtermpanel.releaseasset
+
       - name: Count every governed model and batch
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -540,6 +556,22 @@ jobs:
             fi
           done
           echo "MIDTERM_REPOSITORY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      # Materialise the operator-approved identity document BEFORE the step
+      # that receives the provider key. GITHUB_TOKEN only: a download that
+      # could also reach the provider is a download whose compromise costs
+      # money. The module re-checks that ordering at runtime and refuses if a
+      # provider secret is already in scope.
+      #
+      # Skipped while no release tag is configured, which is the current
+      # state. Provider mode then refuses for the missing identity path rather
+      # than proceeding — the honest failure, not a silent downgrade.
+      - name: Materialise the approved engine identity document
+        if: env.MIDTERM_APPROVED_ENGINE_RELEASE_TAG != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+        run: python -m midtermpanel.releaseasset
 
       - name: Execute the governed panel
         env:

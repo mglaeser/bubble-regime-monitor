@@ -242,11 +242,17 @@ def test_trusted_lane_rejects_a_protected_state_over_unprotected_facts():
 
 # -------------------------------------------------------------------- 6 ----
 
+#: The COMPLETE operator approval. Digest plus tag is no longer enough: those
+#: identify bytes and a name, not the identity document carrying the runtime
+#: lock, SBOM, build run and control class.
 APPROVED_RELEASE_CONFIG = {
     "approved_engine_source_sha": "c" * 40,
     "approved_engine_protected_sha": "e" * 40,
     "approved_engine_artifact_sha256": "9" * 64,
     "approved_engine_release_tag": "midterm-panel-engine-2026-08-09",
+    "approved_engine_identity_sha256": "a" * 64,
+    "native_branch_protection": False,
+    "control_class": "HUMAN_EXACT_HEAD_COMPENSATING_CONTROL",
 }
 
 
@@ -541,11 +547,19 @@ def test_dry_run_may_proceed_without_an_identity_document():
 
 
 def test_corrected_midterm_identity_passes_with_exact_approval(tmp_path):
+    import hashlib
+
     record = _identity_record()
+    path = _identity_file(tmp_path, record)
+    with open(path, "rb") as handle:
+        approved = hashlib.sha256(handle.read()).hexdigest()
     result = midterm_engine.load_release_engine_identity(
-        release=_release(approved_engine_identity_path=_identity_file(
-            tmp_path, record)),
+        release=_release(approved_engine_identity_path=path,
+                         approved_engine_identity_sha256=approved),
         mode=midterm_engine.MODE_PROVIDER, rebuilt_artifact_sha256="9" * 64)
+
+    assert result["engine_identity_sha256"] == approved
+    assert len(result["engine_release_binding_sha256"]) == 64
 
     assert result["state"] == enginebuild.MIDTERM_STATE
     assert result["native_branch_protection"] is False
@@ -666,3 +680,314 @@ def test_the_build_workflow_makes_no_protected_ref_claim_in_prose():
     assert "runs from a protected ref" not in workflow
     assert "check out the protected ref" not in workflow
     assert "github.ref_protected" in workflow
+
+
+# ------------------- F-05: the workflow must produce the identity path ------
+
+def test_the_panel_workflow_materialises_the_identity_document():
+    """The consumer refused without a path and nothing produced one.
+
+    Fail-closed, and also not operational: the first provider-backed count job
+    would have stopped at `approved_engine_identity_not_configured`."""
+    with open(".github/workflows/midterm-panel-review.yml",
+              encoding="utf-8") as handle:
+        workflow = handle.read()
+
+    assert workflow.count("python -m midtermpanel.releaseasset") == 2, (
+        "count and panel must each materialise the document")
+
+
+def test_materialisation_precedes_every_provider_key_step():
+    """Ordering is the control, so it is asserted rather than described."""
+    with open(".github/workflows/midterm-panel-review.yml",
+              encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+
+    materialise = [i for i, ln in enumerate(lines)
+                   if "python -m midtermpanel.releaseasset" in ln]
+    provider = [i for i, ln in enumerate(lines)
+                if "TRUSTED_VERIFIER_OPENAI_KEY" in ln]
+    assert materialise and provider
+    for key_line in provider:
+        assert any(m < key_line for m in materialise), (
+            "a provider-key step precedes every materialisation step")
+
+
+def test_the_materialiser_step_holds_no_provider_secret():
+    with open(".github/workflows/midterm-panel-review.yml",
+              encoding="utf-8") as handle:
+        text = handle.read()
+
+    block = text.split("Materialise the approved engine identity document")[1]
+    block = block.split("python -m midtermpanel.releaseasset")[0]
+    assert "TRUSTED_VERIFIER_OPENAI_KEY" not in block
+    assert "GITHUB_TOKEN" in block
+
+
+def test_the_materialiser_refuses_a_missing_or_malformed_approved_digest():
+    from midtermpanel import releaseasset
+
+    for bad in ("", None, "abc"):
+        with pytest.raises(PanelRefusal, match="expected_digest_malformed"):
+            releaseasset.materialise_release_identity(
+                owner="mglaeser", repo="bubble-regime-monitor", tag="t",
+                token="gh", repository_numeric_id=1297332828,
+                expected_sha256=bad, destination="/tmp/never-written.json")
+
+
+def test_the_materialiser_refuses_without_a_tag_or_token():
+    from midtermpanel import releaseasset
+
+    with pytest.raises(PanelRefusal, match="release_tag_not_configured"):
+        releaseasset.resolve_identity_asset(
+            owner="o", repo="r", tag="", token="gh",
+            repository_numeric_id=1297332828)
+    with pytest.raises(PanelRefusal, match="release_api_token_missing"):
+        releaseasset.resolve_identity_asset(
+            owner="o", repo="r", tag="t", token="",
+            repository_numeric_id=1297332828)
+
+
+def test_the_materialiser_will_not_overwrite_an_existing_destination(tmp_path,
+                                                                     monkeypatch):
+    """A symlink at the destination would place approved bytes elsewhere."""
+    from midtermpanel import releaseasset
+
+    payload = json.dumps(_identity_record()).encode("utf-8")
+    digest = __import__("hashlib").sha256(payload).hexdigest()
+    monkeypatch.setattr(releaseasset, "resolve_identity_asset",
+                        lambda **kw: {"asset_url": "u", "asset_id": 1,
+                                      "release_id": 1, "tag": kw["tag"]})
+    monkeypatch.setattr(releaseasset, "_request", lambda *a, **k: payload)
+
+    destination = tmp_path / "engine-identity.json"
+    destination.write_text("squatted", encoding="utf-8")
+    with pytest.raises(PanelRefusal, match="destination_exists"):
+        releaseasset.materialise_release_identity(
+            owner="o", repo="r", tag="t", token="gh",
+            repository_numeric_id=1297332828, expected_sha256=digest,
+            destination=str(destination))
+
+
+def test_the_materialiser_refuses_a_document_the_operator_did_not_approve(
+        tmp_path, monkeypatch):
+    from midtermpanel import releaseasset
+
+    payload = json.dumps(_identity_record()).encode("utf-8")
+    monkeypatch.setattr(releaseasset, "resolve_identity_asset",
+                        lambda **kw: {"asset_url": "u", "asset_id": 1,
+                                      "release_id": 1, "tag": kw["tag"]})
+    monkeypatch.setattr(releaseasset, "_request", lambda *a, **k: payload)
+
+    with pytest.raises(PanelRefusal, match="release_identity_digest_mismatch"):
+        releaseasset.materialise_release_identity(
+            owner="o", repo="r", tag="t", token="gh",
+            repository_numeric_id=1297332828, expected_sha256="b" * 64,
+            destination=str(tmp_path / "out.json"))
+
+
+def test_the_exact_release_asset_is_written_and_strict_loaded(tmp_path,
+                                                              monkeypatch):
+    from midtermpanel import releaseasset
+
+    payload = json.dumps(_identity_record()).encode("utf-8")
+    digest = __import__("hashlib").sha256(payload).hexdigest()
+    monkeypatch.setattr(releaseasset, "resolve_identity_asset",
+                        lambda **kw: {"asset_url": "u", "asset_id": 7,
+                                      "release_id": 3, "tag": kw["tag"]})
+    monkeypatch.setattr(releaseasset, "_request", lambda *a, **k: payload)
+
+    result = releaseasset.materialise_release_identity(
+        owner="o", repo="r", tag="midterm-engine", token="gh",
+        repository_numeric_id=1297332828, expected_sha256=digest,
+        destination=str(tmp_path / "nested" / "engine-identity.json"))
+
+    assert result["engine_identity_sha256"] == digest
+    assert result["state"] == enginebuild.MIDTERM_STATE
+    assert json.loads(open(result["path"], encoding="utf-8").read())
+
+
+# ------------------------ F-06: exact identity approval is not optional -----
+
+def test_artifact_and_tag_without_an_identity_digest_is_not_approved():
+    config = {"approved_engine_source_sha": "c" * 40,
+              "approved_engine_protected_sha": "e" * 40,
+              "approved_engine_artifact_sha256": "9" * 64,
+              "approved_engine_release_tag": "t"}
+
+    assert midterm_engine.provenance_of(config) == (
+        midterm_engine.REBUILT_TEST_ONLY)
+
+
+def test_identity_digest_without_protection_facts_is_not_approved():
+    config = {"approved_engine_source_sha": "c" * 40,
+              "approved_engine_protected_sha": "e" * 40,
+              "approved_engine_artifact_sha256": "9" * 64,
+              "approved_engine_release_tag": "t",
+              "approved_engine_identity_sha256": "a" * 64}
+
+    assert midterm_engine.provenance_of(config) == (
+        midterm_engine.REBUILT_TEST_ONLY)
+
+
+def _complete_binding(**over):
+    config = {"approved_engine_source_sha": "c" * 40,
+              "approved_engine_protected_sha": "e" * 40,
+              "approved_engine_artifact_sha256": "9" * 64,
+              "approved_engine_release_tag": "midterm-engine",
+              "approved_engine_identity_sha256": "a" * 64,
+              "native_branch_protection": False,
+              "control_class": enginebuild.CONTROL_HUMAN_EXACT_HEAD}
+    config.update(over)
+    return config
+
+
+def test_the_complete_binding_is_approved_and_hashes():
+    config = _complete_binding()
+
+    assert midterm_engine.provenance_of(config) == (
+        midterm_engine.APPROVED_RELEASE)
+    assert len(midterm_engine.release_binding(config)[
+        "engine_release_binding_sha256"]) == 64
+
+
+def test_false_protection_counts_as_present_in_the_binding():
+    """`False` is an answer. A truthiness test would drop the honest one."""
+    assert midterm_engine._binding_member_is_present(False) is True
+    assert midterm_engine._binding_member_is_present(None) is False
+    assert midterm_engine._binding_member_is_present("") is False
+
+
+@pytest.mark.parametrize("field", midterm_engine.RELEASE_BINDING_FIELDS)
+def test_changing_any_binding_member_changes_the_digest(field):
+    base = midterm_engine.release_binding(_complete_binding())
+    altered_value = (True if field == "native_branch_protection"
+                     else enginebuild.CONTROL_NATIVE_PROTECTED_REF
+                     if field == "control_class" else "f" * 40)
+    altered = midterm_engine.release_binding(
+        _complete_binding(**{field: altered_value}))
+
+    assert altered["engine_release_binding_sha256"] != base[
+        "engine_release_binding_sha256"]
+
+
+def test_provider_mode_refuses_when_the_identity_digest_is_absent(tmp_path):
+    """The comparison must be unconditional in provider mode."""
+    release = dict(_complete_binding(), approved_engine_identity_sha256=None,
+                   approved_engine_identity_path=_identity_file(
+                       tmp_path, _identity_record()))
+
+    with pytest.raises(PanelRefusal, match="identity_digest_not_configured"):
+        midterm_engine.load_release_engine_identity(
+            release=release, mode=midterm_engine.MODE_PROVIDER,
+            rebuilt_artifact_sha256="9" * 64)
+
+
+# --------------------- F-07: panel must prove it used count's identity ------
+
+def _count_body(**over):
+    body = {
+        "engine_identity_sha256": "d" * 64,
+        "engine_identity_state": enginebuild.MIDTERM_STATE,
+        "engine_native_branch_protection": False,
+        "engine_control_class": enginebuild.CONTROL_HUMAN_EXACT_HEAD,
+        "engine_build_run_id": 31286479960,
+        "engine_build_run_attempt": 1,
+        "engine_provenance_sha256": "e" * 64,
+        "engine_artifact_sha256": "9" * 64,
+        "engine_release_binding_sha256": "f" * 64,
+    }
+    body.update(over)
+    return body
+
+
+def test_the_handoff_compares_every_identity_field():
+    from midtermpanel.panel import IDENTITY_HANDOFF_FIELDS
+
+    assert set(IDENTITY_HANDOFF_FIELDS) == set(_count_body())
+
+
+@pytest.mark.parametrize("field", [
+    "engine_identity_sha256", "engine_build_run_id",
+    "engine_provenance_sha256", "engine_release_binding_sha256",
+    "engine_control_class", "engine_native_branch_protection"])
+def test_a_different_builder_identity_blocks_the_handoff(field):
+    """Same plan, same source roles, different builder → no generation."""
+    from midtermpanel.panel import IDENTITY_HANDOFF_FIELDS
+
+    counted = _count_body()
+    panel_side = _count_body(**{field: ("z" * 64 if isinstance(
+        counted[field], str) else 999 if isinstance(counted[field], int)
+        else True)})
+
+    differing = [f for f in IDENTITY_HANDOFF_FIELDS
+                 if counted[f] != panel_side[f]]
+    assert differing == [field], (
+        "the fixture must differ in exactly the field under test")
+
+
+def test_panel_identity_binding_uses_the_same_vocabulary_as_count():
+    """Two near-identical vocabularies agree until one is edited."""
+    from midtermpanel.panelcli import identity_binding
+
+    opened = {
+        "engine_identity_sha256": "d" * 64,
+        "engine_identity_state": enginebuild.MIDTERM_STATE,
+        "native_branch_protection": False,
+        "control_class": enginebuild.CONTROL_HUMAN_EXACT_HEAD,
+        "engine_build_run_id": 31286479960,
+        "engine_build_run_attempt": 1,
+        "engine_provenance_sha256": "e" * 64,
+        "engine_artifact_sha256": "9" * 64,
+        "engine_release_binding_sha256": "f" * 64,
+    }
+    assert identity_binding(opened) == _count_body()
+
+
+def test_panel_evidence_carries_the_binding_and_names_its_inputs():
+    with open("scripts/midtermpanel/panelcli.py", encoding="utf-8") as handle:
+        source = handle.read()
+
+    assert '"count_evidence_sha256": count_evidence_sha256' in source
+    assert "**(panel_identity or {})" in source
+    assert "panel_identity=panel_identity" in source
+
+
+# ------------------------------- F-08: dedupe must track the release --------
+
+def test_dedupe_binds_on_the_release_not_only_the_source_roles():
+    from midtermpanel import dedupe
+
+    assert "engine_release_binding_sha256" in dedupe.BINDING_FIELDS
+    assert "engine_source_digest" in dedupe.BINDING_FIELDS
+    assert "engine_digest" not in dedupe.BINDING_FIELDS
+
+
+def _dedupe_binding(**over):
+    from midtermpanel import dedupe
+
+    values = {"candidate_head_sha": "a" * 40, "candidate_base_sha": "b" * 40,
+              "engine_source_digest": "c" * 64,
+              "engine_release_binding_sha256": "d" * 64,
+              "policy_digest": "e" * 64,
+              "request_semantics_digest": "f" * 64}
+    values.update(over)
+    return dedupe.binding(**values)
+
+
+def test_same_source_roles_with_a_different_release_does_not_reuse():
+    """The exact stale-evidence case the dedupe docstring promises to stop."""
+    first = _dedupe_binding()
+    second = _dedupe_binding(engine_release_binding_sha256="9" * 64)
+
+    assert first["binding_digest"] != second["binding_digest"]
+
+
+def test_an_identical_full_release_binding_reuses():
+    assert _dedupe_binding()["binding_digest"] == _dedupe_binding()[
+        "binding_digest"]
+
+
+def test_a_dedupe_binding_with_an_empty_member_is_refused():
+    with pytest.raises(PanelRefusal, match="dedupe_binding_incomplete"):
+        _dedupe_binding(engine_release_binding_sha256="")

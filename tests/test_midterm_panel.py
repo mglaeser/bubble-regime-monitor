@@ -1041,16 +1041,30 @@ class TestModeSelectsWhichWayTheGatesPoint:
             engine.assert_mode("PROVIDER")
         assert "engine_mode_unknown" in caught.value.reason
 
-    def test_approved_needs_both_the_bytes_and_the_release(self):
-        """A digest without a tag is a digest somebody computed; a tag without a
-        digest is a name with no bytes behind it."""
-        digest = "a" * 64
-        assert engine.provenance_of(
-            {"approved_engine_artifact_sha256": digest,
-             "approved_engine_release_tag": "v1"}) == engine.APPROVED_RELEASE
-        for partial in ({"approved_engine_artifact_sha256": digest},
-                        {"approved_engine_release_tag": "v1"}, {}):
-            assert engine.provenance_of(partial) == engine.REBUILT_TEST_ONLY
+    def test_approved_needs_the_whole_release_binding(self):
+        """Digest plus tag used to be enough. It is not.
+
+        Those two identify bytes and a name. They say nothing about the
+        identity document that carries the runtime lock, SBOM, provenance
+        digest, build run and control class — so a run could call itself
+        approved while the operator had never bound the document those facts
+        live in. Every member of the binding is now required."""
+        complete = {"approved_engine_source_sha": "c" * 40,
+                    "approved_engine_protected_sha": "e" * 40,
+                    "approved_engine_artifact_sha256": "a" * 64,
+                    "approved_engine_release_tag": "v1",
+                    "approved_engine_identity_sha256": "b" * 64,
+                    "native_branch_protection": False,
+                    "control_class": "HUMAN_EXACT_HEAD_COMPENSATING_CONTROL"}
+        assert engine.provenance_of(complete) == engine.APPROVED_RELEASE
+
+        # Every single-field omission drops it back to test-only, including
+        # the two that used to be the whole rule.
+        for field in engine.RELEASE_BINDING_FIELDS:
+            partial = {k: v for k, v in complete.items() if k != field}
+            assert engine.provenance_of(partial) == engine.REBUILT_TEST_ONLY, (
+                f"omitting {field} must not still count as approved")
+        assert engine.provenance_of({}) == engine.REBUILT_TEST_ONLY
 
     def _live(self, capability="COUNT_TRANSPORT", path=None):
         class Inner:

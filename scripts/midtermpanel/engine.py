@@ -74,6 +74,7 @@ environment is what the caller controls.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 
@@ -207,14 +208,64 @@ def assert_artifact_digest(value) -> str:
     return value
 
 
-def provenance_of(config: dict) -> str:
-    """Approved means an operator named BOTH the bytes and the release.
+#: Everything an operator must have named for a release to be APPROVED. The
+#: set is deliberately larger than "digest and tag": those two identify bytes
+#: and a name, and say nothing about the runtime lock, the SBOM, the build run
+#: or the control class under which the operator accepted it. All of that
+#: lives in the identity document, so the document's own digest has to be part
+#: of what is approved — otherwise a strict, internally sealed document that
+#: the operator never saw satisfies every check.
+RELEASE_BINDING_FIELDS = ("approved_engine_source_sha",
+                          "approved_engine_protected_sha",
+                          "approved_engine_artifact_sha256",
+                          "approved_engine_release_tag",
+                          "approved_engine_identity_sha256",
+                          "native_branch_protection",
+                          "control_class")
 
-    A digest without a tag is a digest somebody computed; a tag without a digest
-    is a name with no bytes behind it. Only the pair is an approval, and the
-    honest label for anything less is the one that refuses to spend."""
-    if config.get("approved_engine_artifact_sha256") and config.get(
-            "approved_engine_release_tag"):
+RELEASE_BINDING_DIGEST_LABEL = b"midterm-engine-release-binding-v1"
+
+
+def _binding_member_is_present(value) -> bool:
+    """`False` is a present value. Absent is `None` or empty string.
+
+    Spelled out because `native_branch_protection` is legitimately `False` on
+    this repository, and a truthiness test would treat the honest answer as a
+    missing field — the same trap as `enginebuild.PROVENANCE_FIELDS`."""
+    return value is not None and value != ""
+
+
+def release_binding(config: dict) -> dict:
+    """The complete operator approval, as one canonical digest.
+
+    Carrying seven separate fields through preflight, count, plan and panel
+    invites a comparison that checks six of them. One digest over all seven
+    cannot be partially compared."""
+    values = {field: config.get(field) for field in RELEASE_BINDING_FIELDS}
+    missing = sorted(f for f, v in values.items()
+                     if not _binding_member_is_present(v))
+    if missing:
+        refuse(f"category=engine_release_binding_incomplete fields={missing} "
+               "— a provider-backed run is authorised by the whole binding; "
+               "approving a subset approves an engine the operator did not "
+               "fully name")
+    blob = json.dumps(values, sort_keys=True, separators=(",", ":"),
+                      default=str).encode("utf-8")
+    return {**values, "engine_release_binding_sha256": hashlib.sha256(
+        RELEASE_BINDING_DIGEST_LABEL + b"\x00" + blob).hexdigest()}
+
+
+def provenance_of(config: dict) -> str:
+    """Approved means the operator named the WHOLE release, not part of it.
+
+    This used to return APPROVED_RELEASE for an artifact digest plus a release
+    tag. Those identify bytes and a name; they do not identify the identity
+    document that carries the runtime lock, SBOM, provenance digest, build run
+    and control class. A run could therefore call itself approved while the
+    operator had never bound the document those facts live in, and the
+    honest label for that is the one that refuses to spend."""
+    if all(_binding_member_is_present(config.get(field))
+           for field in RELEASE_BINDING_FIELDS):
         return APPROVED_RELEASE
     return REBUILT_TEST_ONLY
 
@@ -320,6 +371,15 @@ def load_release_engine_identity(*, release: dict, mode: str,
                                  "is a dry run; nothing about the builder, its "
                                  "ref or its control class has been checked")}
 
+    if mode == MODE_PROVIDER and not release.get(
+            "approved_engine_identity_sha256"):
+        refuse(f"category=approved_engine_identity_digest_not_configured "
+               f"variable='{ENGINE_IDENTITY_DIGEST_ENV}' — in provider mode "
+               "the comparison is unconditional. A document that is strict, "
+               "internally sealed and self-consistent is still not the "
+               "document the operator approved, and 'compare it only if a "
+               "digest happens to be configured' makes the approval optional")
+
     try:
         record = enginebuild.strict_load_built_identity(path)
     except Exception as exc:  # noqa: BLE001 — re-raised as a panel refusal
@@ -356,11 +416,17 @@ def load_release_engine_identity(*, release: dict, mode: str,
         refuse("category=approved_engine_identity_document_digest_mismatch — "
                "the operator approved one identity document and this run read "
                "another")
+    # The whole approval, as one number, so downstream comparisons cannot
+    # check six fields out of seven.
+    binding = (release_binding(release) if mode == MODE_PROVIDER
+               else {"engine_release_binding_sha256": None})
 
     provenance = record.get("provenance") or {}
     return {
         "engine_identity": record,
         "engine_identity_sha256": document_sha256,
+        "engine_release_binding_sha256":
+            binding["engine_release_binding_sha256"],
         "state": grade["state"],
         "native_branch_protection": grade["native_branch_protection"],
         "control_class": grade["control_class"],
@@ -633,6 +699,8 @@ def load_engine_for_mode(*, mode: str, release: dict,
         "provenance": provenance,
         "engine_identity_record": identity,
         "engine_identity_sha256": identity.get("engine_identity_sha256"),
+        "engine_release_binding_sha256":
+            identity.get("engine_release_binding_sha256"),
         "engine_identity_state": identity.get("state"),
         "native_branch_protection": identity.get("native_branch_protection"),
         "control_class": identity.get("control_class"),

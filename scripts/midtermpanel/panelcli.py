@@ -19,6 +19,7 @@ from . import (
 from .clibase import require_env, run, self_test_report, self_test_requested
 from .errors import PanelRefusal, refuse
 from .evidence import (
+    digest_of,
     panel_evidence,
     strict_load,
     strict_load_plan,
@@ -65,7 +66,8 @@ def input_paths(temp: str) -> dict:
             "plan": os.path.join(base, "executable-plan.json")}
 
 
-def perform(environ: dict, *, execute_fn, opener) -> dict:
+def perform(environ: dict, *, execute_fn, opener,
+            panel_identity: dict | None = None) -> dict:
     """Verify the handoff, execute, aggregate, publish. Injected seams only.
 
     The challenge comes from the PLAN, not from the environment. It is what the
@@ -95,10 +97,13 @@ def perform(environ: dict, *, execute_fn, opener) -> dict:
         paths["plan"], expected_head=head, expected_base=base,
         expected_engine_digest=env["MIDTERM_ENGINE_DIGEST"],
         expected_policy_digest=env["MIDTERM_POLICY_DIGEST"])
-    verify_handoff(count_record=count_record, plan=plan, expected_head=head,
-                   expected_base=base,
-                   expected_engine_digest=env["MIDTERM_ENGINE_DIGEST"],
-                   expected_policy_digest=env["MIDTERM_POLICY_DIGEST"])
+    handoff = verify_handoff(
+        count_record=count_record, plan=plan, expected_head=head,
+        expected_base=base,
+        expected_engine_digest=env["MIDTERM_ENGINE_DIGEST"],
+        expected_policy_digest=env["MIDTERM_POLICY_DIGEST"],
+        panel_identity=panel_identity)
+    count_evidence_sha256 = digest_of(count_record)
 
     published = [publish(
         pending(candidate_head_sha=head, context=REVIEW_STATUS,
@@ -130,7 +135,14 @@ def perform(environ: dict, *, execute_fn, opener) -> dict:
               "generation_ledger_sha256": executed["generation_ledger"].get(
                   "generation_ledger_sha256"),
               "anti_copy": tripwire,
-              "plan_sha256": plan["plan_sha256"]})
+              "plan_sha256": plan["plan_sha256"],
+              # The two exact inputs this verdict was produced from, so the
+              # final record identifies them rather than describing them.
+              "count_evidence_sha256": count_evidence_sha256,
+              "identity_compared": handoff["identity_compared"],
+              # The same builder identity the count job recorded and this job
+              # proved it shares, repeated verbatim.
+              **(panel_identity or {})})
     write_atomic(record, os.path.join(_runner_temp(environ),
                                       "midterm", "panel-evidence.json"))
 
@@ -223,7 +235,29 @@ def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
                        authorizations=authorizations)
 
     return {"execute_fn": execute_fn, "engine_identity": opened,
+            "identity_binding": identity_binding(opened),
             "transport": transport}
+
+
+def identity_binding(opened: dict) -> dict:
+    """The builder identity the panel actually loaded, in count's own shape.
+
+    Built from the same keys `countcli` writes into count evidence, so the
+    comparison in `verify_handoff` is field-for-field rather than two
+    near-identical vocabularies that agree until one of them is edited."""
+    return {
+        "engine_identity_sha256": opened.get("engine_identity_sha256"),
+        "engine_identity_state": opened.get("engine_identity_state"),
+        "engine_native_branch_protection":
+            opened.get("native_branch_protection"),
+        "engine_control_class": opened.get("control_class"),
+        "engine_build_run_id": opened.get("engine_build_run_id"),
+        "engine_build_run_attempt": opened.get("engine_build_run_attempt"),
+        "engine_provenance_sha256": opened.get("engine_provenance_sha256"),
+        "engine_artifact_sha256": opened.get("engine_artifact_sha256"),
+        "engine_release_binding_sha256":
+            opened.get("engine_release_binding_sha256"),
+    }
 
 
 def main() -> None:
@@ -243,7 +277,8 @@ def main() -> None:
             environ, mode=MODE_DRY_RUN,
             transport_factory=dryrun.generation_transport_factory(environ))
         outcome = perform(environ, execute_fn=prepared["execute_fn"],
-                          opener=sink)
+                          opener=sink,
+                          panel_identity=prepared["identity_binding"])
         proof = dryrun.record(environ, sink=sink,
                               transport=prepared["transport"])
         print(json.dumps({"dry_run": proof, "verdict": outcome["verdict"]},
@@ -263,7 +298,8 @@ def main() -> None:
             engine, opener=urllib.request.urlopen, key=key,
             generation_attempt_cap=cap))
     perform(environ, execute_fn=prepared["execute_fn"],
-            opener=urllib.request.urlopen)
+            opener=urllib.request.urlopen,
+            panel_identity=prepared["identity_binding"])
 
 
 def _self_test() -> int:
