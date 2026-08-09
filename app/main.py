@@ -109,14 +109,15 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.add_middleware(SlowAPIMiddleware)
 
-    # CORS so a browser dashboard on another origin (crash.klee.me) can call the
-    # public read API. Reads are public (READ_ENDPOINTS_PUBLIC=true) so no
+    # CORS so browser dashboards on another origin can call the public read API.
+    # Reads are public (READ_ENDPOINTS_PUBLIC=true) so no
     # credentials/X-API-Key are sent — keep allow_credentials=False. GET-only
     # (read-only API). Added at app level, so it covers every route
     # (/api/v1/*, /api/v1/status, /healthz, /readyz, /).
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
+            "https://ai-bubble.fyi",
             "https://crash.klee.me",
             # add local dev origins only if a dashboard dev server calls the API, e.g.:
             # "http://localhost:8000",

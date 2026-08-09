@@ -64,7 +64,7 @@ GET /api/v1/dashboard/feed?sections=metrics
 GET /api/v1/dashboard/feed?sections=series&symbols=qqq,gold,btc
 ```
 
-- Public read, `{data, meta}` envelope, 60/min/IP rate limit, CORS already allows `https://crash.klee.me` (GET-only, no credentials).
+- Public read, `{data, meta}` envelope, 60/min/IP rate limit, CORS allows `https://ai-bubble.fyi` and `https://crash.klee.me` (GET-only, no credentials).
 - `?symbols=` filters **both** `series` and `metrics` by key; `?sections=` selects the top-level maps. Unknown values ignored.
 - `Cache-Control: public, max-age=900`.
 - **503** only before the first payload exists. Per-item failures ship `available:false` inside a **200**. Never a 500 on upstream failure.
