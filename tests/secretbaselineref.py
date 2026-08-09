@@ -54,10 +54,19 @@ from __future__ import annotations
 import json
 import subprocess
 
-#: The accepted post-PR34 baseline. A 40-hex commit id, written as a literal so
-#: that no ref lookup — and therefore no branch movement — can change it.
+#: The accepted baseline. A 40-hex commit id, written as a literal so that no
+#: ref lookup — and therefore no branch movement — can change it.
+#:
+#: TRANSITION (PR37, engine identity protection state). Previous reference
+#: ab5f78bc15ec…; five entries added, all in
+#: governance/engine-build-dispositions.json, all content digests of the
+#: rejected build 31286479960 — the artifact sha256, the GitHub zip sha256,
+#: the identity-JSON sha256 and the two source-role commit ids. An entropy
+#: detector cannot distinguish a 64-hex digest from a 64-hex credential, and
+#: JSON has no comment syntax for an inline pragma. No credential is among
+#: them and the filter/plugin configuration is unchanged.
 ACCEPTED_SECRET_BASELINE_COMMIT = \
-    "ab5f78bc15ec7b7ce993ab16c0b4f24840c6991f"  # pragma: allowlist secret
+    "b20a2aa64b34c7eb69cee2c27049b120a6ab2b57"  # pragma: allowlist secret
 
 BASELINE_PATH = ".secrets.baseline"
 
