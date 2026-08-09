@@ -190,6 +190,110 @@ def provenance_of(config: dict) -> str:
     return REBUILT_TEST_ONLY
 
 
+def assert_identity_is_midterm_grade(record, *, release: dict) -> dict:
+    """What this lane will accept from a published engine identity record.
+
+    The mirror of `enginebridge.assert_identity_is_trusted_grade`, pointing
+    the other way. This lane accepts the mid-term state — an exact
+    default-branch SHA, no native protection, a human exact-head compensating
+    control — because that is honestly what backs it, and it emits only
+    `MIDTERM_SINGLE_REPO_*` evidence.
+
+    It also refuses a PROTECTED record, which looks strange until you ask what
+    accepting one would mean: this repository's `main` is unprotected, so a
+    record arriving here claiming native protection is either from a different
+    repository or is lying, and neither is something to run on. When `main`
+    does get native protection the build will emit the protected state and
+    this refusal is the thing that makes someone look at the change rather
+    than inherit it silently.
+
+    Exact operator approval is required on top: the state says what kind of
+    build it was, the release configuration says which exact bytes an operator
+    approved, and neither substitutes for the other."""
+    from trustedlane.enginebuild import (
+        CONTROL_HUMAN_EXACT_HEAD,
+        MIDTERM_STATE,
+        PROTECTED_STATE,
+        assert_ref_protected,
+    )
+
+    from . import COUNT_EVIDENCE_CLASS, PANEL_EVIDENCE_CLASS
+
+    if not isinstance(record, dict):
+        refuse("category=midterm_engine_identity_not_an_object")
+    state = record.get("state")
+    if state == PROTECTED_STATE:
+        refuse("category=midterm_engine_identity_claims_native_protection — "
+               "this lane's repository has no native branch protection, so a "
+               "record claiming it describes a build this lane did not make. "
+               "If protection was genuinely enabled, the mid-term acceptance "
+               "rule is what should be revisited, deliberately")
+    if state != MIDTERM_STATE:
+        refuse(f"category=midterm_engine_identity_unknown_state "
+               f"state={state!r} expected={MIDTERM_STATE}")
+    if assert_ref_protected(record.get("build_ref_protected")):
+        refuse("category=midterm_engine_identity_protection_contradicts_state")
+    if record.get("control_class") != CONTROL_HUMAN_EXACT_HEAD:
+        refuse(f"category=midterm_engine_identity_wrong_control "
+               f"control_class={record.get('control_class')!r} "
+               f"expected={CONTROL_HUMAN_EXACT_HEAD}")
+    if provenance_of(release) != APPROVED_RELEASE:
+        refuse("category=midterm_engine_identity_without_exact_approval — the "
+               "identity record is the right kind; the release configuration "
+               "still has to name the exact artifact digest and release tag "
+               "an operator approved")
+    approved = release.get("approved_engine_artifact_sha256")
+    if record.get("engine_artifact_sha256") != approved:
+        refuse("category=midterm_engine_identity_is_for_a_different_artifact "
+               "— the identity record names one artifact and the operator "
+               "approved another")
+    return {"state": MIDTERM_STATE, "native_branch_protection": False,
+            "control_class": CONTROL_HUMAN_EXACT_HEAD,
+            "emits_evidence_classes": [COUNT_EVIDENCE_CLASS,
+                                       PANEL_EVIDENCE_CLASS],
+            "honest_scope": (
+                "native branch protection was not active; the exact head was "
+                "selected by a human and the exact five digests were approved "
+                "out of band. This backs MIDTERM_SINGLE_REPO_* evidence only "
+                "and is refused by the trusted lane")}
+
+
+def assert_release_protection_claim(config: dict) -> dict:
+    """The governance file may not upgrade a build it did not perform.
+
+    `native_branch_protection` and `control_class` in the release
+    configuration are a RESTATEMENT of what the build recorded, for a human
+    reading the repository without downloading an artifact. Restatements
+    drift, so this refuses the combinations that would be a lie rather than a
+    typo — in particular a configuration claiming native protection while
+    naming the human compensating control, which is how a note added after
+    the fact would try to launder an unprotected build."""
+    from trustedlane.enginebuild import (
+        CONTROL_HUMAN_EXACT_HEAD,
+        CONTROL_NATIVE_PROTECTED_REF,
+        assert_ref_protected,
+    )
+
+    if not isinstance(config, dict):
+        refuse("category=engine_release_config_not_an_object")
+    if "native_branch_protection" not in config:
+        refuse("category=engine_release_config_omits_protection — the file "
+               "must state whether native branch protection backed the build "
+               "it approves; silence here is what let a false protected-ref "
+               "claim stand")
+    protected = assert_ref_protected(config.get("native_branch_protection"))
+    control = config.get("control_class")
+    if control not in (CONTROL_NATIVE_PROTECTED_REF, CONTROL_HUMAN_EXACT_HEAD):
+        refuse(f"category=engine_release_config_control_class_unknown "
+               f"control_class={control!r}")
+    if (control == CONTROL_NATIVE_PROTECTED_REF) is not protected:
+        refuse(f"category=engine_release_config_protection_claim_contradicts "
+               f"native_branch_protection={protected} control_class="
+               f"{control!r} — a configuration cannot describe an unprotected "
+               "build as protected")
+    return {"native_branch_protection": protected, "control_class": control}
+
+
 def assert_engine_source_is_not_the_reviewed_candidate(
         *, release: dict, reviewed_candidate_head_sha: str) -> dict:
     """The reviewer may not be the reviewed. The central invariant, checked.

@@ -724,6 +724,55 @@ ENGINE_IDENTITY_FIELDS = ("engine_artifact_sha256", "engine_source_sha256",
                           "provenance_sha256")
 
 
+def assert_identity_is_trusted_grade(record) -> dict:
+    """The trusted lane accepts protected identities only.
+
+    `MIDTERM_OPERATOR_APPROVED_ENGINE_IDENTITY` is a real, deterministic,
+    operator-approved record — and it is backed by a human agreeing to look at
+    an exact SHA, not by the platform refusing unreviewed writes. That is
+    enough for `MIDTERM_SINGLE_REPO_*` evidence and it is not enough for
+    `TRUSTED_*`. Refusing it here, by state, is what keeps "we accepted a
+    weaker control once, for the panel" from becoming the trusted lane's
+    standard by drift.
+
+    Checked separately from the five digests: those say WHICH engine, this
+    says whether this lane may use that kind of engine at all."""
+    from .enginebuild import (
+        CONTROL_NATIVE_PROTECTED_REF,
+        MIDTERM_STATE,
+        PROTECTED_STATE,
+        assert_ref_protected,
+    )
+
+    if not isinstance(record, dict):
+        refuse("category=engine_identity_not_supplied")
+    state = record.get("state")
+    if state == MIDTERM_STATE:
+        refuse(f"category=trusted_lane_refuses_midterm_engine_identity "
+               f"state={state!r} — this artifact was built from an "
+               "unprotected ref under a human exact-head compensating "
+               "control. It may back MIDTERM_SINGLE_REPO_* evidence; the "
+               "trusted lane requires native branch protection and will not "
+               "accept a weaker control by inheritance")
+    if state != PROTECTED_STATE:
+        refuse(f"category=trusted_lane_engine_identity_unknown_state "
+               f"state={state!r} expected={PROTECTED_STATE}")
+    if not assert_ref_protected(record.get("build_ref_protected")):
+        refuse("category=trusted_lane_engine_identity_not_protected — the "
+               "record claims the protected state while the platform said "
+               "the ref was unprotected")
+    if record.get("control_class") != CONTROL_NATIVE_PROTECTED_REF:
+        refuse(f"category=trusted_lane_engine_identity_wrong_control "
+               f"control_class={record.get('control_class')!r} "
+               f"expected={CONTROL_NATIVE_PROTECTED_REF}")
+    return {"state": PROTECTED_STATE, "native_branch_protection": True,
+            "control_class": CONTROL_NATIVE_PROTECTED_REF,
+            "honest_scope": ("the build reported the platform's "
+                             "ref-protection fact and it was true; this does "
+                             "not by itself satisfy the lane's other "
+                             "operator prerequisites")}
+
+
 def assert_identity_is_this_engine(engine_identity, *,
                                    engine_artifact: dict) -> dict:
     """The identity record must describe the artifact this run VERIFIED.

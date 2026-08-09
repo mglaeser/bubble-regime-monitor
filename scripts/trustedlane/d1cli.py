@@ -154,7 +154,14 @@ def load_engine_identity(path: str) -> dict:
         refuse(f"category=engine_identity_incomplete fields={missing} — the "
                "operator approves five digests, so a run that can state fewer "
                "is asking them to approve something it cannot check")
-    return {f: record[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS}
+    # Which engine, then whether this lane may use that KIND of engine. The
+    # second question is new: before it existed every build claimed the
+    # protected state unconditionally, so there was nothing here to ask.
+    grade = enginebridge.assert_identity_is_trusted_grade(record)
+    return {**{f: record[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS},
+            "state": grade["state"],
+            "native_branch_protection": grade["native_branch_protection"],
+            "control_class": grade["control_class"]}
 
 
 def observe_bootstrap(values: dict) -> dict:

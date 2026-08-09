@@ -233,13 +233,81 @@ def assert_is_only_a_candidate(record: dict) -> dict:
 #
 # What makes this build trustworthy is NOT that it runs different code — it
 # runs the same `enginesource.build_engine_artifact`, deterministically, so
-# anyone can reproduce the artifact. It is that it runs on a protected ref,
-# holds no provider credential, and records WHICH run produced the bytes. The
-# provenance is a statement by the builder about the build, and this is the
-# only place a builder exists.
+# anyone can reproduce the artifact. It holds no provider credential and
+# records WHICH run produced the bytes. The provenance is a statement by the
+# builder about the build, and this is the only place a builder exists.
+#
+# What it is NOT is a claim that the ref was protected. An earlier version of
+# this module hardcoded `PROTECTED_ENGINE_IDENTITY` and said in its own
+# `honest_scope` that "the workflow producing it runs only on a protected
+# ref". The workflow proved `refs/heads/main` and nothing more, and the
+# repository's `main` had no native protection, so every artifact it built
+# carried a false provenance claim inside its own identity record. A
+# governance note added later cannot repair a claim the artifact makes about
+# itself, so the state is now DERIVED from a platform fact the build is told
+# and must record.
+#
+#   ref == refs/heads/main        is not protection
+#   being the default branch      is not protection
+#   a human merged it             is not protection
+#   GitHub signed the merge       is not protection
+#
+# Those are four different facts. Only `github.ref_protected` answers the
+# question, and only the platform can answer it.
 # --------------------------------------------------------------------------
 
-BUILT_STATE = "PROTECTED_ENGINE_IDENTITY"
+#: Native branch/ruleset protection was observed active. Eligible for the
+#: trusted lane's D1/D2 once every other prerequisite is also met.
+PROTECTED_STATE = "PROTECTED_ENGINE_IDENTITY"
+
+#: An exact default-branch SHA was selected by a human, with no native
+#: protection behind it. Eligible ONLY for `MIDTERM_SINGLE_REPO_*` evidence,
+#: never for `TRUSTED_*`. This is a weaker claim wearing its weakness in its
+#: name, which is the whole point of having two states instead of one.
+MIDTERM_STATE = "MIDTERM_OPERATOR_APPROVED_ENGINE_IDENTITY"
+
+BUILT_STATES = (PROTECTED_STATE, MIDTERM_STATE)
+
+#: What stands in for native protection when there isn't any. Recorded as a
+#: named control rather than left as an absence, so a reader can tell "nobody
+#: checked" from "somebody accepted a weaker control on purpose".
+CONTROL_NATIVE_PROTECTED_REF = "NATIVE_PROTECTED_REF"
+CONTROL_HUMAN_EXACT_HEAD = "HUMAN_EXACT_HEAD_COMPENSATING_CONTROL"
+
+#: The state each control class produces. One mapping, so the state and the
+#: control can never be set independently and disagree.
+STATE_FOR_CONTROL = {CONTROL_NATIVE_PROTECTED_REF: PROTECTED_STATE,
+                     CONTROL_HUMAN_EXACT_HEAD: MIDTERM_STATE}
+
+#: The only two renderings of `${{ github.ref_protected }}` GitHub emits. A
+#: real `bool` is also accepted because Python callers (and tests) have one.
+#: Everything else — "True", "TRUE", "1", "yes", "", None — is refused rather
+#: than coerced: `bool("false")` is `True`, and a lenient parser here would
+#: turn an unprotected build into a protected claim silently, which is the
+#: exact defect this module was corrected for.
+PLATFORM_BOOLEANS = {"true": True, "false": False}
+
+
+def assert_ref_protected(value) -> bool:
+    """Parse the platform's protection fact. Fail closed, never coerce.
+
+    Absent is refused rather than defaulted to `False`. A default would be the
+    safe direction today, and would also mean a workflow that forgot to pass
+    the input produced a mid-term identity that looked deliberate. The build
+    should stop and say the input is missing."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        refuse("category=build_ref_protection_not_supplied — the build must "
+               "be told `${{ github.ref_protected }}`; it cannot observe from "
+               "inside the runner whether the ref it was dispatched from is "
+               "protected, and guessing is what produced a false claim before")
+    if not isinstance(value, str) or value not in PLATFORM_BOOLEANS:
+        refuse(f"category=build_ref_protection_malformed value={value!r} — "
+               f"expected exactly one of {sorted(PLATFORM_BOOLEANS)}; any "
+               "other spelling is an unrecognised platform rendering and is "
+               "refused rather than coerced, because `bool(\"false\")` is True")
+    return PLATFORM_BOOLEANS[value]
 
 #: The five digests D1/D2 compare against the operator's approval, and the
 #: names they are compared under. The lane's `ENGINE_IDENTITY_FIELDS` is the
@@ -257,6 +325,13 @@ BUILT_IDENTITY_FIELDS = ("engine_artifact_sha256", "engine_source_sha256",
 PROVENANCE_FIELDS = ("build_workflow_run_id", "build_workflow_run_attempt",
                      "build_ref", "build_head_sha", "runner_image_digest",
                      "repository_numeric_id")
+
+#: Deliberately NOT in `PROVENANCE_FIELDS`. That tuple is checked with `if not
+#: context.get(f)`, and `build_ref_protected` is legitimately `False` on this
+#: repository — a truthiness check would report the honest answer as a missing
+#: field and refuse every unprotected build. It is validated by
+#: `assert_ref_protected` instead, which distinguishes absent from False.
+PROTECTION_FIELD = "build_ref_protected"
 
 PROVENANCE_DIGEST_LABEL = b"trusted-engine-provenance-v1"
 
@@ -277,9 +352,20 @@ def provenance_record(context: dict, *, roles: dict) -> dict:
                "say which build this was")
     if not str(context["build_ref"]).startswith("refs/heads/"):
         refuse(f"category=build_ref_not_a_branch ref={context['build_ref']!r} "
-               "— the engine is built from a protected branch; a tag can be "
-               "moved to a different commit without changing its name")
+               "— the engine is built from a branch; a tag can be moved to a "
+               "different commit without changing its name. Being a branch is "
+               "not by itself protection: that is `build_ref_protected`")
+    protected = assert_ref_protected(context.get(PROTECTION_FIELD))
+    control_class = (CONTROL_NATIVE_PROTECTED_REF if protected
+                     else CONTROL_HUMAN_EXACT_HEAD)
     record = {f: context[f] for f in PROVENANCE_FIELDS}
+    # Inside the digested blob, so flipping false to true in a published
+    # record without rebuilding breaks `provenance_sha256` and the mismatch is
+    # caught by `assert_built_record`. A protection claim that could be edited
+    # after the fact would be worth nothing.
+    record[PROTECTION_FIELD] = protected
+    record["native_branch_protection"] = protected
+    record["control_class"] = control_class
     record["source_roles"] = {role: commit for role, commit in sorted(
         roles.items())}
     record["builder"] = "trusted-engine-build"
@@ -287,13 +373,48 @@ def provenance_record(context: dict, *, roles: dict) -> dict:
                       default=str).encode("utf-8")
     record["provenance_sha256"] = hashlib.sha256(
         PROVENANCE_DIGEST_LABEL + b"\x00" + blob).hexdigest()
-    record["honest_scope"] = (
-        "the run id, ref, head and image digest were supplied by the platform "
-        "and cannot be verified from inside the build. What this record proves "
-        "is that a build SAID so; what makes it worth anything is that the "
-        "workflow producing it runs only on a protected ref and holds no "
-        "provider credential")
+    supplied = ("the platform supplied run id, run attempt, ref, head, runner "
+                "image and ref-protection status; none of them can be "
+                "verified from inside the build. What this record proves is "
+                "that a build SAID so. ")
+    if protected:
+        record["honest_scope"] = supplied + (
+            f"Native branch protection was active on {context['build_ref']}, "
+            "and the build held no provider credential.")
+    else:
+        record["honest_scope"] = supplied + (
+            f"This build ran from exact default-branch SHA "
+            f"{context['build_head_sha']} and held no provider credential. "
+            "Native branch protection was NOT active. The artifact's "
+            "authority for the mid-term lane comes only from deterministic "
+            "reproduction, out-of-band operator approval of the exact five "
+            "digests, and the accepted human exact-head compensating control. "
+            "This record is not protected-ref or write-separated trusted "
+            "evidence.")
     return record
+
+
+#: Everything in a provenance record EXCEPT the two fields derived from it.
+#: Recomputing over the rest is what makes the digest a seal rather than a
+#: label that travels alongside the thing it describes.
+PROVENANCE_DERIVED_FIELDS = ("provenance_sha256", "honest_scope")
+
+
+def recomputed_provenance_digest(provenance: dict) -> str:
+    """Re-seal the provenance from its own contents.
+
+    Comparing `provenance["provenance_sha256"]` against the copy at the top of
+    the identity record catches a truncated write and nothing else — an editor
+    who flips `native_branch_protection` to `true` leaves both copies equal
+    and both wrong. Recomputing is the only check that notices, which is why
+    the protection fields are inside the digested blob."""
+    if not isinstance(provenance, dict):
+        refuse("category=engine_provenance_not_an_object")
+    body = {k: v for k, v in provenance.items()
+            if k not in PROVENANCE_DERIVED_FIELDS}
+    blob = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                      default=str).encode("utf-8")
+    return hashlib.sha256(PROVENANCE_DIGEST_LABEL + b"\x00" + blob).hexdigest()
 
 
 def built_package(*, roles, repository_numeric_id: int, artifact_sha256: str,
@@ -324,7 +445,13 @@ def built_package(*, roles, repository_numeric_id: int, artifact_sha256: str,
                "names one repository and the manifest was built for another")
 
     record = {
-        "state": BUILT_STATE,
+        # Derived from the platform fact the provenance recorded, never passed
+        # in. A caller that could choose the state could choose the stronger
+        # one, which is precisely the defect being corrected.
+        "state": STATE_FOR_CONTROL[provenance["control_class"]],
+        "build_ref_protected": provenance[PROTECTION_FIELD],
+        "native_branch_protection": provenance["native_branch_protection"],
+        "control_class": provenance["control_class"],
         "repository_numeric_id": repository_numeric_id,
         "engine_artifact_sha256": artifact_sha256,
         "engine_source_sha256": manifest["engine_source_sha256"],
@@ -340,7 +467,11 @@ def built_package(*, roles, repository_numeric_id: int, artifact_sha256: str,
             "anyone with them can rebuild it and get this digest. That is "
             "reproducibility, not authority: what makes THIS record usable is "
             "that an operator approved these five digests out of band, and "
-            "the lane compares their approval against the artifact it opened"),
+            "the lane compares their approval against the artifact it opened"
+            + ("" if provenance["native_branch_protection"] else
+               ". Native branch protection was not active on the source ref, "
+               "so this record is eligible for MIDTERM_SINGLE_REPO_* evidence "
+               "only and is refused by the trusted lane")),
     }
     return assert_built_record(record)
 
@@ -351,9 +482,35 @@ def assert_built_record(record: dict) -> dict:
     refusing to publish a record that one would reject."""
     if not isinstance(record, dict):
         refuse("category=engine_identity_not_an_object")
-    if record.get("state") != BUILT_STATE:
+    if record.get("state") not in BUILT_STATES:
         refuse(f"category=engine_identity_wrong_state "
-               f"state={record.get('state')!r} expected={BUILT_STATE}")
+               f"state={record.get('state')!r} expected one of "
+               f"{list(BUILT_STATES)}")
+    # The protection fields are required, not optional-with-a-default: a
+    # record that omits them is one a reader would have to guess about, and
+    # the guess that lost us a build was the optimistic one.
+    protected = assert_ref_protected(record.get(PROTECTION_FIELD))
+    if record.get("native_branch_protection") is not protected:
+        refuse("category=engine_identity_protection_fields_disagree — "
+               "`build_ref_protected` and `native_branch_protection` must be "
+               "the same fact")
+    if record.get("control_class") not in STATE_FOR_CONTROL:
+        refuse(f"category=engine_identity_control_class_unknown "
+               f"control_class={record.get('control_class')!r} expected one "
+               f"of {sorted(STATE_FOR_CONTROL)}")
+    if STATE_FOR_CONTROL[record["control_class"]] != record["state"]:
+        refuse(f"category=engine_identity_state_control_mismatch "
+               f"state={record['state']!r} "
+               f"control_class={record['control_class']!r} — the state is "
+               "derived from the control class and these two disagree")
+    if (record["control_class"] == CONTROL_NATIVE_PROTECTED_REF) is not \
+            protected:
+        refuse(f"category=engine_identity_control_class_contradicts_protection "
+               f"control_class={record['control_class']!r} "
+               f"build_ref_protected={protected} — a record claiming a native "
+               "protected ref while the platform said the ref was "
+               "unprotected is the false claim this state model exists to "
+               "prevent")
     bad = [f for f in BUILT_IDENTITY_FIELDS
            if not isinstance(record.get(f), str) or len(record[f]) != 64]
     if bad:
@@ -361,10 +518,27 @@ def assert_built_record(record: dict) -> dict:
                "operator approves five digests; publishing fewer makes the "
                "missing one unapprovable and the failure look like operator "
                "error")
-    if record.get("provenance", {}).get(
-            "provenance_sha256") != record["provenance_sha256"]:
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        refuse("category=engine_provenance_missing — the identity record must "
+               "carry the provenance its digest seals")
+    if provenance.get("provenance_sha256") != record["provenance_sha256"]:
         refuse("category=engine_provenance_digest_mismatch — the record's "
                "provenance digest and the provenance it carries disagree")
+    resealed = recomputed_provenance_digest(provenance)
+    if resealed != record["provenance_sha256"]:
+        refuse(f"category=engine_provenance_digest_does_not_reseal "
+               f"recorded={record['provenance_sha256'][:16]} "
+               f"recomputed={resealed[:16]} — the provenance content was "
+               "edited after the build sealed it. Flipping "
+               "`native_branch_protection` in a published record is exactly "
+               "this, and it does not survive a rebuild of the digest")
+    for field in (PROTECTION_FIELD, "native_branch_protection",
+                  "control_class"):
+        if provenance.get(field) != record.get(field):
+            refuse(f"category=engine_identity_provenance_disagree "
+                   f"field={field} — the identity header and the sealed "
+                   "provenance state different things about protection")
     return record
 
 

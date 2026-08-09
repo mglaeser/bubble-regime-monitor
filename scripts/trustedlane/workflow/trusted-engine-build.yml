@@ -107,6 +107,12 @@ jobs:
         env:
           EVENT_REPOSITORY_ID: ${{ github.repository_id }}
           BUILD_REF: ${{ github.ref }}
+          # The platform's answer to "was this ref protected", which the build
+          # cannot observe from inside the runner. `refs/heads/main`, being the
+          # default branch, a human merge and a GitHub-signed merge commit are
+          # four different facts and none of them is this one. Missing or
+          # malformed fails the build closed.
+          BUILD_REF_PROTECTED: ${{ github.ref_protected }}
           BUILD_HEAD_SHA: ${{ github.sha }}
           BUILD_RUN_ID: ${{ github.run_id }}
           BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -140,6 +146,10 @@ jobs:
                   "build_workflow_run_attempt":
                       int(os.environ["BUILD_RUN_ATTEMPT"]),
                   "build_ref": os.environ["BUILD_REF"],
+                  # Passed as the raw platform string. `enginebuild` accepts
+                  # exactly "true"/"false" and refuses anything else rather
+                  # than coercing — `bool("false")` is True.
+                  "build_ref_protected": os.environ["BUILD_REF_PROTECTED"],
                   "build_head_sha": os.environ["BUILD_HEAD_SHA"],
                   "runner_image_digest": os.environ["RUNNER_IMAGE_DIGEST"],
                   "repository_numeric_id": repository_numeric_id,
@@ -153,9 +163,16 @@ jobs:
           # they set `TRUSTED_ENGINE_ARTIFACT_SHA256` to.
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"artifact_sha256={identity['engine_artifact_sha256']}\n")
-          print(json.dumps({k: identity[k]
-                            for k in enginebuild.BUILT_IDENTITY_FIELDS},
-                           indent=2))
+          # The state and the protection fact are printed beside the digests
+          # because they decide which lane may consume this artifact, and an
+          # operator approving five numbers should not have to download the
+          # record to find out that it is mid-term rather than protected.
+          print(json.dumps(
+              {k: identity[k] for k in
+               enginebuild.BUILT_IDENTITY_FIELDS
+               + ("state", "build_ref_protected",
+                  "native_branch_protection", "control_class")},
+              indent=2))
           PROBE
 
       # Rebuilt a second time, from the same commits, and the digests compared.
