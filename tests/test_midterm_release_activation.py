@@ -347,6 +347,68 @@ class TestTheEgressGuard:
         assert reached == [], "refused BEFORE the underlying call, not after"
         assert [e["host"] for e in guard.refused] == ["api.openai.com"]
 
+    def test_a_permitted_hosts_own_resolved_address_gets_through(self,
+                                                                monkeypatch):
+        """The regression. `create_connection` resolves the name and then calls
+        `sock.connect(('140.82.121.6', 443))`, so the low-level wrapper saw an
+        IP for a connection the hostname check had just authorised — and
+        refused it. The hosted job failed at its FIRST request to
+        `api.github.com` with `release_api_unreachable`, which reads as a
+        network problem and was the guard eating its own permitted traffic.
+
+        Reproduced without a network by standing in for `create_connection`
+        with one that does what the real one does: resolve, then connect."""
+        connected = []
+
+        def resolve_then_connect(address, *args, **kwargs):
+            sock = socket.socket()
+            try:
+                sock.connect(("140.82.121.6", address[1]))
+            finally:
+                sock.close()
+            return sock
+
+        monkeypatch.setattr(socket, "create_connection", resolve_then_connect)
+        monkeypatch.setattr(socket.socket, "connect",
+                            lambda self, address: connected.append(address),
+                            raising=False)
+
+        with releasevalidation.EgressGuard() as guard:
+            socket.create_connection(("api.github.com", 443))
+
+        assert connected == [("140.82.121.6", 443)]
+        assert guard.refused == []
+        assert guard.hosts_contacted == ["api.github.com"], (
+            "the resolved address is not a host anybody approved")
+        assert guard.addresses_reached_under_authorisation == [
+            "140.82.121.6 (via api.github.com)"]
+
+    def test_the_authorisation_window_closes_again(self, monkeypatch):
+        """A nested connect is covered; the next one on its own is not."""
+        monkeypatch.setattr(socket, "create_connection",
+                            lambda address, *a, **k: None)
+        monkeypatch.setattr(socket.socket, "connect",
+                            lambda self, address: None, raising=False)
+
+        with releasevalidation.EgressGuard():
+            socket.create_connection(("api.github.com", 443))
+            sock = socket.socket()
+            try:
+                with pytest.raises(releasevalidation.EgressRefused):
+                    sock.connect(("140.82.121.6", 443))
+            finally:
+                sock.close()
+
+    def test_a_refused_host_never_opens_the_authorisation_window(self,
+                                                                monkeypatch):
+        monkeypatch.setattr(socket, "create_connection",
+                            lambda address, *a, **k: None)
+
+        with releasevalidation.EgressGuard() as guard:
+            with pytest.raises(releasevalidation.EgressRefused):
+                socket.create_connection(("api.openai.com", 443))
+            assert guard._authorised_depth == 0
+
     def test_the_raw_socket_path_is_guarded_too(self, monkeypatch):
         """A client that resolves the name itself must not walk around it."""
         monkeypatch.setattr(socket.socket, "connect",
@@ -413,6 +475,50 @@ class TestTheEgressGuard:
 
         assert socket.create_connection is before_create
         assert ("connect" in socket.socket.__dict__) is before_own
+
+    def test_a_guard_refusal_is_not_reported_as_a_network_problem(self,
+                                                                 tmp_path,
+                                                                 monkeypatch):
+        """The diagnosis defect, as a test.
+
+        `EgressRefused` is an `OSError`; `releaseasset._request` catches
+        `OSError` and reports `release_api_unreachable`, which reads as "GitHub
+        was down". The first hosted run said exactly that, and the cause was
+        this validation's own guard. The generic refusal is kept — it withholds
+        a URL that can carry a token — so the specific cause is stated over it.
+
+        Deterministic on any machine: the guard's own host list is narrowed so
+        `api.github.com` is refused by decision rather than by whatever the
+        network happens to do. The first version of this test passed because
+        this container routes through a local proxy the guard refused, which is
+        a true refusal and not the one the test names.
+
+        The proxy variables are cleared for the same reason. Behind a proxy
+        `urllib` connects to the PROXY and never dials `api.github.com` at all,
+        so the guard refuses `127.0.0.1` — correct behaviour, and not what is
+        under test here."""
+        from midtermpanel import releaseasset
+
+        for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                     "ALL_PROXY", "all_proxy"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(
+            releasevalidation, "PERMITTED_HOSTS", ("nothing.example",))
+        monkeypatch.setattr(
+            releaseasset, "PERMITTED_HOSTS", ("api.github.com",))
+        monkeypatch.setattr(socket, "create_connection",
+                            lambda address, *a, **k: None)
+
+        with pytest.raises(PanelRefusal) as excinfo:
+            releasevalidation.validate(
+                environ={}, root=str(ROOT), token="not-a-real-token",
+                destination=str(tmp_path / "engine-identity.json"))
+
+        reason = str(excinfo.value)
+        assert "blocked_by_the_egress_guard" in reason
+        assert "api.github.com" in reason, (
+            "the refusal must name the host the guard stopped, or the next "
+            "person debugging this learns nothing they did not already know")
 
     def test_the_permitted_hosts_are_the_release_asset_hosts_not_a_copy(self):
         from midtermpanel import releaseasset

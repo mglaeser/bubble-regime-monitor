@@ -43,6 +43,12 @@ Three independent controls, none of which is a promise:
 The connection ledger is returned. `provider_calls: 0` is then an observation
 about a list of hosts that were actually contacted, not a claim about intent.
 
+One consequence worth stating rather than discovering: behind an HTTP proxy,
+`urllib` connects to the PROXY, and a proxy host is not a release-asset host, so
+the guard refuses it and the validation fails closed. That is the correct
+direction — a proxy is a third party in the path of the bytes an operator
+approved — and it is why this job runs on a hosted runner with direct egress.
+
 ## What a green run here does NOT prove
 
 It does not prove the engine reviews well, that the operator approved the right
@@ -99,11 +105,38 @@ class EgressGuard:
     refused would leave "how many connections did this make, and to what"
     unanswerable, and that question is the whole reason the guard exists."""
 
-    def __init__(self, permitted=PERMITTED_HOSTS):
-        self.permitted = tuple(permitted)
+    def __init__(self, permitted=None):
+        # Read at CALL time, not bound as a default. A default argument is
+        # evaluated once when the class is defined, which freezes the host list
+        # to whatever it was at import — so a test that narrows
+        # `PERMITTED_HOSTS` would still get the full set and would pass for a
+        # reason it did not write down. That happened: the refusal it observed
+        # came from this container's local HTTP proxy, not from the narrowing.
+        self.permitted = tuple(PERMITTED_HOSTS if permitted is None
+                               else permitted)
         self.ledger = []
         self._create_connection = None
         self._socket_connect = None
+        #: How many permitted `create_connection` calls are on the stack.
+        #:
+        #: `socket.create_connection` resolves the name and then calls
+        #: `sock.connect(sa)` with an ADDRESS — `('140.82.121.6', 443)` — so
+        #: the low-level wrapper sees an IP for a connection the hostname
+        #: check has already authorised, and refusing it broke the one thing
+        #: this guard is supposed to permit. The nesting is what makes the two
+        #: wrappers agree: while an authorised named-host connection is in
+        #: progress, its own socket connect belongs to it. The low-level
+        #: wrapper still refuses everything outside that window, which is the
+        #: case it exists for — a client that resolves the name itself and
+        #: connects to an address, bypassing `create_connection` entirely.
+        #:
+        #: Not thread-local, and this is single-threaded on purpose: the
+        #: validation makes two sequential requests and nothing else. A
+        #: concurrent caller would need a `contextvars` counter, and a guard
+        #: that pretended to be concurrency-safe without being it would be
+        #: worse than one that says which shape it covers.
+        self._authorised_depth = 0
+        self._authorising_host = None
         #: `socket.socket` inherits `connect` from `_socket.socket`, so
         #: assigning to it creates a NEW attribute on the subclass rather than
         #: replacing one. Restoring by assignment would leave that shadow in
@@ -151,14 +184,34 @@ class EgressGuard:
                     f"permitted={list(guard.permitted)} — this validation reads "
                     "a release asset and nothing else. A connection anywhere "
                     "else is the thing it exists to make impossible")
-            return guard._create_connection(address, *args, **kwargs)
+            guard._authorised_depth += 1
+            guard._authorising_host = host
+            try:
+                return guard._create_connection(address, *args, **kwargs)
+            finally:
+                guard._authorised_depth -= 1
+                if not guard._authorised_depth:
+                    guard._authorising_host = None
 
         def connect(sock, address):
             host, port = guard._host_of(address)
+            if guard._authorised_depth:
+                # The resolved address of a name this guard already permitted.
+                # Recorded with the host that authorised it, so the ledger says
+                # which decision covered it rather than quietly growing an IP
+                # nobody approved.
+                guard.ledger.append({
+                    "host": host, "port": port,
+                    "via": f"socket.connect under {guard._authorising_host}",
+                    "permitted": True,
+                    "authorised_by": guard._authorising_host})
+                return guard._socket_connect(sock, address)
             if not guard._verdict(host, port, via="socket.connect"):
                 raise EgressRefused(
                     f"category=egress_refused host={host!r} port={port!r} "
-                    f"permitted={list(guard.permitted)}")
+                    f"permitted={list(guard.permitted)} — a connection made "
+                    "outside `create_connection`, so no permitted hostname "
+                    "authorised it")
             return guard._socket_connect(sock, address)
 
         socket.create_connection = create_connection
@@ -181,8 +234,18 @@ class EgressGuard:
 
     @property
     def hosts_contacted(self) -> list:
+        """The NAMES this guard decided on, not the addresses they resolved to.
+
+        A connection made under an authorisation is listed separately: it was
+        permitted by the hostname decision above it, and folding its resolved
+        IP in here would read as an extra host somebody approved."""
         return sorted({entry["host"] for entry in self.ledger
-                       if entry["permitted"]})
+                       if entry["permitted"] and not entry.get("authorised_by")})
+
+    @property
+    def addresses_reached_under_authorisation(self) -> list:
+        return sorted({f"{entry['host']} (via {entry['authorised_by']})"
+                       for entry in self.ledger if entry.get("authorised_by")})
 
 
 def prove_the_guard_refuses_the_provider(guard: EgressGuard) -> dict:
@@ -399,12 +462,30 @@ def validate(*, environ: dict, root: str = ".", destination: str,
 
     with EgressGuard() as guard:
         proof = prove_the_guard_refuses_the_provider(guard)
-        materialised = materialise_release_identity(
-            owner="mglaeser", repo="bubble-regime-monitor",
-            tag=release["approved_engine_release_tag"], token=token,
-            repository_numeric_id=REPOSITORY_NUMERIC_ID,
-            expected_sha256=release["approved_engine_identity_sha256"],
-            destination=destination)
+        expected_refusals = len(guard.refused)
+        try:
+            materialised = materialise_release_identity(
+                owner="mglaeser", repo="bubble-regime-monitor",
+                tag=release["approved_engine_release_tag"], token=token,
+                repository_numeric_id=REPOSITORY_NUMERIC_ID,
+                expected_sha256=release["approved_engine_identity_sha256"],
+                destination=destination)
+        except Exception:
+            # `EgressRefused` is an `OSError`, and `releaseasset._request`
+            # catches `OSError` and reports `release_api_unreachable` — which
+            # reads as "GitHub was down" and was, the first time this ran, the
+            # guard eating its own permitted traffic. The masking is worth
+            # keeping (that refusal deliberately withholds the URL, which can
+            # carry a token), so the guard's own ledger is re-read here and the
+            # more specific cause is stated on top of the more general one.
+            surprises = guard.refused[expected_refusals:]
+            if surprises:
+                refuse(f"category=release_read_blocked_by_the_egress_guard "
+                       f"refused={[(e['host'], e['via']) for e in surprises]} — "
+                       "the download was stopped by this validation's own "
+                       "guard, not by the network. Any 'unreachable' refusal "
+                       "above is a consequence of this one")
+            raise
 
     from trustedlane.enginebuild import strict_load_built_identity
     record = strict_load_built_identity(destination)
@@ -451,6 +532,8 @@ def validate(*, environ: dict, root: str = ".", destination: str,
             credentials["credential_variables_checked"],
         "egress_hosts_contacted": guard.hosts_contacted,
         "egress_hosts_refused": refused_hosts,
+        "egress_addresses_under_authorisation":
+            guard.addresses_reached_under_authorisation,
         "egress_guard_proof": proof,
         "honest_scope": (
             "the exact release asset the governance binding names was read "
