@@ -45,10 +45,12 @@ a new engine release — which is what "approved" means.
 
 ## Provenance is part of the answer
 
-There is no approved engine release yet — `GET /releases` returns `[]` and
-operator prerequisite 14 is unrecorded. So Phase A may build the artifact
-deterministically from the two pinned commits, which is reproducible by anyone
-and approved by nobody.
+An approved engine release now exists: `midterm-panel-engine-2026-08-10`, whose
+seven binding fields are recorded in
+`governance/midterm-panel-engine-release.json`. Before it did, this lane could
+only build the artifact deterministically from the two pinned commits — which is
+reproducible by anyone and approved by nobody, and is still exactly what a dry
+run does.
 
 That distinction is carried in the record rather than assumed away:
 
