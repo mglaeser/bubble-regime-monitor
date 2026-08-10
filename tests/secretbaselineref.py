@@ -57,16 +57,52 @@ import subprocess
 #: The accepted baseline. A 40-hex commit id, written as a literal so that no
 #: ref lookup — and therefore no branch movement — can change it.
 #:
-#: TRANSITION (PR37, engine identity protection state). Previous reference
-#: ab5f78bc15ec…; five entries added, all in
-#: governance/engine-build-dispositions.json, all content digests of the
-#: rejected build 31286479960 — the artifact sha256, the GitHub zip sha256,
-#: the identity-JSON sha256 and the two source-role commit ids. An entropy
-#: detector cannot distinguish a 64-hex digest from a 64-hex credential, and
-#: JSON has no comment syntax for an inline pragma. No credential is among
-#: them and the filter/plugin configuration is unchanged.
+#: TRANSITION (engine release activation). Previous reference b20a2aa64b34…
+#:
+#:     baseline blob sha256 before  0660a10239a6401dd80bf3f455b5dbb86ceb3a51df40d7c932bd935e1f92bc0e
+#:     baseline blob sha256 after   87f536ad374774307885eeae5c4dfe1e0da60a84f8b6d29a4cd5416b3b123a20
+#:     entries before / after       11 / 20      (+9)
+#:     files before / after         4 / 4
+#:     added                        governance/midterm-panel-engine-release.json
+#:                                  lines 7, 8, 10, 11, 20, 21, 22, 23, 36
+#:     removed                      none
+#:     changed                      none
+#:     filters added/removed/changed        none
+#:     plugins added/removed/changed        none
+#:     detect-secrets version       1.5.0 -> 1.5.0 (unchanged)
+#:
+#: All nine are in the ONE file this activation rewrote, and each is identified
+#: rather than counted:
+#:
+#:     line  7  approved_engine_protected_sha      27bfefb5… a git COMMIT id,
+#:                                                 this repository's main at
+#:                                                 build time
+#:     line  8  approved_engine_artifact_sha256    the released engine.tar.gz,
+#:                                                 reproduced from the two
+#:                                                 pinned commits in this
+#:                                                 container before it was
+#:                                                 recorded
+#:     line 10  approved_engine_identity_sha256    the released
+#:                                                 engine-identity.json
+#:     line 11  engine_release_binding_sha256      sha256 over the seven binding
+#:                                                 fields, recomputed by
+#:                                                 midtermpanel.engine
+#:     lines 20-23  the restated engine_source, runtime_lock, sbom and
+#:                  provenance digests the build published
+#:     line 36  actions_artifact_zip_sha256        the Actions ZIP wrapper
+#:
+#: `approved_engine_artifact_sha256` appears twice in the file — once as a
+#: binding field and once inside the restatement — and detect-secrets records
+#: one entry per distinct value per file, which is why the count is nine and
+#: not ten.
+#:
+#: None is a credential. An entropy detector cannot distinguish a 64-hex
+#: content digest or a 40-hex commit id from a 64-hex token, which is the
+#: correct default; JSON has no comment syntax, so the disposition is recorded
+#: here rather than inline. Nothing was regenerated beyond the `generated_at`
+#: stamp, which moves because the scanned file changed.
 ACCEPTED_SECRET_BASELINE_COMMIT = \
-    "b20a2aa64b34c7eb69cee2c27049b120a6ab2b57"  # pragma: allowlist secret
+    "dc60efbc4e88a697dda4d4fc42ce14db13cdaa71"  # pragma: allowlist secret
 
 BASELINE_PATH = ".secrets.baseline"
 
