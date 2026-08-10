@@ -27,11 +27,13 @@ from .errors import refuse
 from .githubapi import ReadOnlyGitHub
 from .policystate import assert_state_is_consistent_with_reality, current_state
 from .preflight import (
+    APPLICABLE,
     assert_head_is_unmoved,
     assert_ordinary_checks_green,
     assert_triggering_ci_tested_this_exact_combination,
     assert_triggering_run,
     classify_changed_files,
+    classify_triggering_run,
     resolve_pull_request,
     review_class_for,
 )
@@ -48,7 +50,9 @@ WORKFLOW_RUN_ENV = ("RUN_WORKFLOW_NAME", "RUN_EVENT", "RUN_CONCLUSION",
 #: resolves to the empty string at run time, and nothing in GitHub Actions treats
 #: that as an error — which is how two digests arrived blank in credential-bearing
 #: jobs while every test passed.
-PUBLIC_OUTPUTS = ("proceed", "pr_number", "head_sha", "base_sha", "high_risk",
+PUBLIC_OUTPUTS = ("proceed", "applicability", "applicability_reason",
+                  "provider_attempts", "generation_attempts",
+                  "pr_number", "head_sha", "base_sha", "high_risk",
                   "workflow_change", "engine_digest", "policy_digest",
                   "triggering_ci_run_id", "triggering_ci_run_attempt",
                   "tested_base_sha", "tested_head_sha", "review_class")
@@ -91,9 +95,33 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
     assert_state_is_consistent_with_reality(root=root)
 
     env = require_env(environ, WORKFLOW_RUN_ENV, where="workflow_run")
-    run_record = assert_triggering_run({
+    observed_run = {
         "name": env["RUN_WORKFLOW_NAME"], "event": env["RUN_EVENT"],
-        "conclusion": env["RUN_CONCLUSION"], "head_sha": env["RUN_HEAD_SHA"]})
+        "conclusion": env["RUN_CONCLUSION"], "head_sha": env["RUN_HEAD_SHA"]}
+    # Is there anything to review at all? Asked before any candidate is
+    # resolved and before any status is published, so a push run touches
+    # nothing: no API reads about pull requests, no pending status left
+    # behind, and count/panel skipped by `proceed == 'true'`.
+    applicability = classify_triggering_run(observed_run)
+    if not applicability["proceed"]:
+        return {
+            "proceed": False,
+            "applicability": applicability["applicability"],
+            "applicability_reason": applicability["reason"],
+            "provider_attempts": 0,
+            "generation_attempts": 0,
+            # Declared but empty: the workflow's `outputs:` block names these,
+            # and an output the CLI never emits resolves to "" with no error —
+            # which is how two digests once arrived blank in a
+            # credential-bearing job while every test passed.
+            **{name: "" for name in PUBLIC_OUTPUTS
+               if name not in ("proceed", "applicability",
+                               "applicability_reason", "provider_attempts",
+                               "generation_attempts")},
+            "_risk": {"high_risk": False, "high_risk_paths": [],
+                      "marker": "", "warning": ""},
+        }
+    run_record = assert_triggering_run(observed_run)
     run_head = run_record["head_sha"]
 
     pull = resolve_pull_request(api.open_pull_requests(), run_head_sha=run_head)
@@ -133,6 +161,10 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
 
     return {
         "proceed": True,
+        "applicability": APPLICABLE,
+        "applicability_reason": "ordinary CI passed on a pull request",
+        "provider_attempts": 0,
+        "generation_attempts": 0,
         "pr_number": pull["pr_number"],
         "head_sha": pull["head_sha"],
         "base_sha": pull["base_sha"],

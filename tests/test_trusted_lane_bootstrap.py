@@ -55,6 +55,7 @@ from trustedlane import (  # noqa: E402
     closure,
     countledger,
     counttransport,
+    d0containment,
     d1cli,
     d1runtime,
     d2cli,
@@ -532,9 +533,18 @@ def test_d0_asserts_candidate_isolation_at_runtime_not_just_in_a_test():
     document = _document(D0)
     steps = [s for job in document["jobs"].values()
              for s in (job.get("steps") or [])]
+    # The step now DRIVES the proof rather than inlining it. The old version
+    # did `sys.path.insert(0, "scripts")` and then asked whether `verifier`
+    # was reachable — a question it had just answered "yes" to, which passed
+    # only while `scripts/verifier` did not exist on main. Pinning the literal
+    # call would now pin the broken shape, so the chain is pinned instead:
+    # exactly one step drives the runner, and the runner really does make the
+    # call. See tests/test_d0_containment_isolation.py for the behaviour.
     isolation = [s for s in steps
-                 if "assert_no_candidate_import" in str(s.get("run") or "")]
+                 if "trustedlane.d0containment" in str(s.get("run") or "")]
     assert len(isolation) == 1, "D0 must prove candidate isolation at runtime"
+    assert "assert_no_candidate_import" in d0containment.CHILD_PROBE, (
+        "the runner the step drives must still make the call")
 
     block = document.get(True) or document.get("on")
     assert sorted(block) == ["push", "workflow_dispatch"]
