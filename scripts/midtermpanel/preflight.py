@@ -175,6 +175,59 @@ def parse_api_json(raw: bytes, *, where: str):
         refuse(f"category=api_body_not_json where={where} line={exc.lineno}")
 
 
+#: Applicability outcomes. A privileged workflow that fires on every ordinary
+#: CI run will see plenty of runs with no candidate in them, and "there is
+#: nothing to review" is a normal answer, not an error.
+#:
+#: This distinction was missing, so every successful push to `main` produced a
+#: red `midterm-panel-review`. A permanently-red signal for an expected
+#: condition is worse than no signal: people learn to ignore it, and the one
+#: time it goes red for a real reason it looks the same.
+APPLICABLE = "APPLICABLE"
+NOT_APPLICABLE_NO_PULL_REQUEST = "NOT_APPLICABLE_NO_PULL_REQUEST"
+NOT_APPLICABLE_CI_NOT_SUCCESSFUL = "NOT_APPLICABLE_CI_NOT_SUCCESSFUL"
+
+#: Underlying events this lane understands. Anything else still fails closed:
+#: an unrecognised event is a workflow topology nobody designed for, and
+#: treating the unknown as "not applicable" would silently skip the review for
+#: every future trigger type.
+KNOWN_TRIGGER_EVENTS = ("pull_request", "push")
+
+
+def classify_triggering_run(run: dict) -> dict:
+    """Applicable, not applicable, or refused — and which, by name.
+
+    Separated from `assert_triggering_run` so that the two questions stay
+    distinct: "should this run review anything" is an operational question
+    with three answers, and "is this candidate safe to review" is a security
+    question with two."""
+    name = str(run.get("name") or "")
+    event = str(run.get("event") or "")
+    conclusion = str(run.get("conclusion") or "")
+    if name != CI_WORKFLOW_NAME:
+        refuse(f"category=triggering_workflow_is_not_ci name={name!r} "
+               f"expected={CI_WORKFLOW_NAME!r}")
+    if event not in KNOWN_TRIGGER_EVENTS:
+        refuse(f"category=preflight_unknown_triggering_event event={event!r} "
+               f"known={list(KNOWN_TRIGGER_EVENTS)} — an event nobody designed "
+               "for is refused rather than treated as 'nothing to do', because "
+               "the second reading skips the review silently")
+    if event == "push":
+        return {"applicability": NOT_APPLICABLE_NO_PULL_REQUEST,
+                "proceed": False,
+                "reason": ("a push run reviews the default branch; there is no "
+                           "candidate pull request to review and nothing was "
+                           "spent finding that out")}
+    if conclusion != "success":
+        return {"applicability": NOT_APPLICABLE_CI_NOT_SUCCESSFUL,
+                "proceed": False,
+                "reason": (f"the deterministic gate concluded {conclusion!r}; "
+                           "a panel on top of a red tree spends money to "
+                           "review something already known broken")}
+    return {"applicability": APPLICABLE, "proceed": True,
+            "reason": "ordinary CI passed on a pull request"}
+
+
 def assert_triggering_run(run: dict) -> dict:
     """The triggering run must be ordinary CI, on a pull request, and green.
 

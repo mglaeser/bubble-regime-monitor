@@ -145,6 +145,13 @@ jobs:
     # declaration again.
     outputs:
       proceed: ${{ steps.decide.outputs.proceed }}
+      # Why the run did or did not review anything. A push to the
+      # default branch is NOT_APPLICABLE_NO_PULL_REQUEST — a normal
+      # answer, published rather than silently skipped.
+      applicability: ${{ steps.decide.outputs.applicability }}
+      applicability_reason: ${{ steps.decide.outputs.applicability_reason }}
+      provider_attempts: ${{ steps.decide.outputs.provider_attempts }}
+      generation_attempts: ${{ steps.decide.outputs.generation_attempts }}
       pr_number: ${{ steps.decide.outputs.pr_number }}
       head_sha: ${{ steps.decide.outputs.head_sha }}
       base_sha: ${{ steps.decide.outputs.base_sha }}
@@ -633,7 +640,24 @@ jobs:
           python -m pip install --require-hashes --no-deps \
             -r requirements-trusted-runtime.txt
 
+      # There is no candidate to close out. Explicit and visible rather than
+      # an empty step: "nothing to review" is an outcome, and a reader of this
+      # run should be able to see which outcome it was without inferring it
+      # from an absence.
+      - name: Record that this run had nothing to review
+        if: needs.preflight.outputs.proceed != 'true'
+        env:
+          APPLICABILITY: ${{ needs.preflight.outputs.applicability }}
+          APPLICABILITY_REASON: ${{ needs.preflight.outputs.applicability_reason }}
+        run: |
+          printf '### midterm panel: no review\n\n%s\n\n%s\n' \
+            "applicability: ${APPLICABILITY:-UNKNOWN}" \
+            "${APPLICABILITY_REASON:-preflight did not proceed}" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo "no candidate; provider_calls=0 generation_calls=0"
+
       - name: Close out every status and write the summary
+        if: needs.preflight.outputs.proceed == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           EVENT_REPOSITORY_ID: ${{ github.repository_id }}
