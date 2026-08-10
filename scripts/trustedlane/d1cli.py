@@ -42,6 +42,7 @@ from . import (
     candidatefetch,
     d1runtime,
     enginebridge,
+    enginebuild,
     phases,
     protectedstate,
     signing,
@@ -145,16 +146,21 @@ def load_engine_identity(path: str) -> dict:
 
     Shape-checked at the boundary so a truncated or half-written record refuses
     with a name rather than a `KeyError` three layers down."""
-    record = load_json_document(path, field="engine_identity")
-    if not isinstance(record, dict):
-        refuse("category=engine_identity_not_an_object")
-    missing = [f for f in enginebridge.ENGINE_IDENTITY_FIELDS
-               if not isinstance(record.get(f), str) or len(record[f]) != 64]
-    if missing:
-        refuse(f"category=engine_identity_incomplete fields={missing} — the "
-               "operator approves five digests, so a run that can state fewer "
-               "is asking them to approve something it cannot check")
-    return {f: record[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS}
+    # The FULL producer-side validator, not a shape check. This loader used to
+    # read the file with a plain `json.load` and check five string lengths,
+    # which meant the provenance reseal — the only check that catches a
+    # relabelled header — never ran on the path D1 actually takes. A mid-term
+    # record could be edited to claim `PROTECTED_ENGINE_IDENTITY` with all
+    # five approved digests and the sealed provenance untouched, and the
+    # lane-grade helper below would see a self-consistent protected header.
+    record = enginebuild.strict_load_built_identity(path)
+    # Which KIND of engine this lane may use, asked only after the record has
+    # been proved to be internally sealed and unedited.
+    grade = enginebridge.assert_identity_is_trusted_grade(record)
+    return {**{f: record[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS},
+            "state": grade["state"],
+            "native_branch_protection": grade["native_branch_protection"],
+            "control_class": grade["control_class"]}
 
 
 def observe_bootstrap(values: dict) -> dict:

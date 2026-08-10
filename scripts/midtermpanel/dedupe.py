@@ -31,24 +31,38 @@ from __future__ import annotations
 from .errors import refuse
 from .evidence import digest_of
 
-#: The five fields whose conjunction identifies a review.
-BINDING_FIELDS = ("candidate_head_sha", "candidate_base_sha", "engine_digest",
+#: The six fields whose conjunction identifies a review.
+#:
+#: `engine_release_binding_sha256` is the one that makes "the engine was
+#: rebuilt, so reuse is invalid" true rather than merely documented. The
+#: source-role digest covers the two commits and nothing else, so two
+#: different releases — different artifact, different identity document,
+#: different build run, different control class — built from the same pair of
+#: commits produced the SAME dedupe key, and a terminal panel result from the
+#: old release could be reused after the engine changed. That is exactly the
+#: reuse this module says it forbids.
+#:
+#: The source-role digest is kept under a name that says what it is, as a
+#: diagnostic. It is not the engine's identity.
+BINDING_FIELDS = ("candidate_head_sha", "candidate_base_sha",
+                  "engine_source_digest", "engine_release_binding_sha256",
                   "policy_digest", "request_semantics_digest")
 
 TERMINAL_STATES = ("success", "failure", "error")
 
 
 def binding(*, candidate_head_sha: str, candidate_base_sha: str,
-            engine_digest: str, policy_digest: str,
-            request_semantics_digest: str) -> dict:
+            engine_source_digest: str, engine_release_binding_sha256: str,
+            policy_digest: str, request_semantics_digest: str) -> dict:
     """The identity of a review, as data.
 
-    Keyword-only, because five same-shaped hex strings positionally is a swap
+    Keyword-only, because six same-shaped hex strings positionally is a swap
     waiting to happen and a swapped binding still hashes to something."""
     values = {
         "candidate_head_sha": candidate_head_sha,
         "candidate_base_sha": candidate_base_sha,
-        "engine_digest": engine_digest,
+        "engine_source_digest": engine_source_digest,
+        "engine_release_binding_sha256": engine_release_binding_sha256,
         "policy_digest": policy_digest,
         "request_semantics_digest": request_semantics_digest,
     }

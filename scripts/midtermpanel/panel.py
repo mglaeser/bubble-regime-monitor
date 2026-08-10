@@ -61,9 +61,29 @@ def _upstream():
     return independent_verify
 
 
+#: Every builder-identity field the panel must prove it shares with the count
+#: job. The source-role digest is NOT enough: two releases built from the same
+#: two commits can carry different artifacts, identity documents, build runs
+#: and control classes, so a panel comparing only `engine_digest` can execute
+#: under a builder the count job never saw.
+IDENTITY_HANDOFF_FIELDS = (
+    "engine_identity_sha256",
+    "engine_identity_state",
+    "engine_native_branch_protection",
+    "engine_control_class",
+    "engine_build_run_id",
+    "engine_build_run_attempt",
+    "engine_provenance_sha256",
+    "engine_artifact_sha256",
+    "engine_release_binding_sha256",
+)
+
+
 def verify_handoff(*, count_record: dict, plan: dict, expected_head: str,
                    expected_base: str, expected_engine_digest: str,
-                   expected_policy_digest: str) -> dict:
+                   expected_policy_digest: str,
+                   panel_identity: dict | None = None,
+                   require_identity: bool = False) -> dict:
     """Refuse the plan unless it is the one this run counted.
 
     Every binding is compared explicitly rather than trusting that the artifact
@@ -98,13 +118,55 @@ def verify_handoff(*, count_record: dict, plan: dict, expected_head: str,
         mismatches.append(
             "plan_sha256: the count evidence identifies a different plan than "
             "the one handed to the panel")
+    # The BUILDER's identity, compared before a single generation call. The
+    # rebuilt-skeleton check catches a candidate that moved between the jobs;
+    # nothing caught an ENGINE that moved. If the release asset were replaced
+    # between count and panel while the two source commits stayed put, every
+    # existing comparison still passed and the panel executed under a builder
+    # the count evidence does not describe.
+    if require_identity:
+        # A comparison of two absences passes and proves nothing. In provider
+        # mode both sides MUST be fully populated, or the equality below is
+        # `None == None` nine times and the panel has demonstrated only that
+        # neither job knew which engine it used.
+        blank = sorted(f for f in IDENTITY_HANDOFF_FIELDS
+                       if (panel_identity or {}).get(f) is None
+                       or body.get(f) is None)
+        if blank:
+            refuse(f"category=engine_identity_binding_incomplete "
+                   f"fields={blank} — a provider-backed panel must compare a "
+                   "populated builder identity against a populated one; "
+                   "comparing absences is not a check")
+    if panel_identity is not None:
+        for field in IDENTITY_HANDOFF_FIELDS:
+            counted, observed = body.get(field), panel_identity.get(field)
+            if counted != observed:
+                mismatches.append(
+                    f"{field}: count={str(counted)[:16]} "
+                    f"panel={str(observed)[:16]}")
     if mismatches:
         refuse(f"category=count_to_panel_handoff_mismatch found={mismatches} — "
-               "the panel must execute the plan this run counted; anything else "
-               "spends money on requests nobody counted and reports the result "
-               "as if they were the same")
+               "the panel must execute the plan this run counted, using the "
+               "engine this run counted with; anything else spends money on "
+               "requests nobody counted and reports the result as if they "
+               "were the same")
+    # Honest about what was actually compared. `panel_identity is not None`
+    # was true for a dry run's all-`None` binding, so the record claimed an
+    # identity comparison had happened when nine absences had been compared
+    # to nine absences.
+    #
+    # ALL nine, not any. `engine_artifact_sha256` is populated even in a dry
+    # run — the artifact is rebuilt either way — so `any()` reported a
+    # comparison as having happened when one field of nine was present and
+    # eight were `None` on both sides. A partial comparison is not a
+    # comparison, and this field is read as though it were one.
+    compared = bool(panel_identity) and all(
+        panel_identity.get(f) is not None and body.get(f) is not None
+        for f in IDENTITY_HANDOFF_FIELDS)
     return {"handoff": "verified",
             "plan_sha256": plan["plan_sha256"],
+            "identity_compared": compared,
+            "identity_required": require_identity,
             "execution_requests": len(plan["execution_request_hashes"])}
 
 

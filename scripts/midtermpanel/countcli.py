@@ -110,6 +110,32 @@ def perform(environ: dict, *, core, transport, opener, engine=None,
               "engine_provenance": (engine_identity or {}).get("provenance"),
               "engine_artifact_sha256":
                   (engine_identity or {}).get("engine_artifact_sha256"),
+              # The BUILDER's identity record, not the approval label above.
+              # Binding these into the evidence is what makes "which build
+              # produced the engine that reviewed this, and under what
+              # control" answerable from the evidence alone — previously the
+              # identity document was never read, so the honest answer was
+              # "nobody in this job knew".
+              "engine_identity_sha256":
+                  (engine_identity or {}).get("engine_identity_sha256"),
+              "engine_identity_state":
+                  (engine_identity or {}).get("engine_identity_state"),
+              "engine_native_branch_protection":
+                  (engine_identity or {}).get("native_branch_protection"),
+              "engine_control_class":
+                  (engine_identity or {}).get("control_class"),
+              "engine_build_run_id":
+                  (engine_identity or {}).get("engine_build_run_id"),
+              "engine_build_run_attempt":
+                  (engine_identity or {}).get("engine_build_run_attempt"),
+              "engine_provenance_sha256":
+                  (engine_identity or {}).get("engine_provenance_sha256"),
+              # The whole operator approval as one digest. The panel compares
+              # this field, so a count job that omitted it would make every
+              # provider-backed handoff fail on a blank — the check would have
+              # been unreachable rather than strict.
+              "engine_release_binding_sha256":
+                  (engine_identity or {}).get("engine_release_binding_sha256"),
               "approved_engine_source_sha":
                   (engine_identity or {}).get("approved_engine_source_sha"),
               "governed_policies": governed_policies,

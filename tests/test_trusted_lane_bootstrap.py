@@ -10285,9 +10285,13 @@ DEPLOYED_ENGINE_BUILD = (ROOT / ".github" / "workflows"
 
 
 def _build_context(**over):
+    # `build_ref_protected` is the platform's protection fact. "false" is
+    # this repository's real answer, so the default fixture builds the
+    # mid-term identity; pass "true" to exercise the protected branch.
     return {"build_workflow_run_id": 4242,
             "build_workflow_run_attempt": 1,
             "build_ref": "refs/heads/main",
+            "build_ref_protected": "false",
             "build_head_sha": SHA_A,
             "runner_image_digest": "Linux-X64-github-hosted",
             "repository_numeric_id": REPOSITORY_NUMERIC_ID, **over}
@@ -10309,7 +10313,7 @@ def test_the_built_package_carries_all_five_approved_digests():
         enginebridge.ENGINE_IDENTITY_FIELDS)
     assert all(len(record[f]) == 64
                for f in enginebuild.BUILT_IDENTITY_FIELDS)
-    assert record["state"] == enginebuild.BUILT_STATE
+    assert record["state"] == enginebuild.MIDTERM_STATE
     # And it is exactly what the consumer reads.
     assert enginebridge.assert_identity_is_this_engine(
         record, engine_artifact={"expected_sha256": "a" * 64})
@@ -10319,13 +10323,25 @@ def test_the_built_record_is_what_the_cli_will_accept(tmp_path):
     """Producer and consumer, joined. `d1cli.load_engine_identity` reads the
     file this build writes, and a shape either side invents alone is a shape
     the other rejects on a runner."""
+    # Built from a PROTECTED ref, because `load_engine_identity` is the
+    # TRUSTED lane's loader and the trusted lane refuses the mid-term state by
+    # design. The mid-term record's refusal here is asserted in
+    # tests/test_engine_protection_state.py rather than being an accident of
+    # this fixture.
     record = enginebuild.built_package(
         roles=_build_roles(), repository_numeric_id=REPOSITORY_NUMERIC_ID,
-        artifact_sha256="b" * 64, context=_build_context(), cwd=str(ROOT))
+        artifact_sha256="b" * 64,
+        context=_build_context(build_ref_protected="true"), cwd=str(ROOT))
+    assert record["state"] == enginebuild.PROTECTED_STATE
     path = tmp_path / "engine-identity.json"
     path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
     loaded = d1cli.load_engine_identity(str(path))
-    assert loaded == {f: record[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS}
+    assert {f: loaded[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS} == {
+        f: record[f] for f in enginebridge.ENGINE_IDENTITY_FIELDS}
+    # The loader also reports the grade it enforced, so a caller cannot use the
+    # digests without the state travelling alongside them.
+    assert loaded["state"] == enginebuild.PROTECTED_STATE
+    assert loaded["native_branch_protection"] is True
 
 
 def test_the_provenance_names_the_run_and_the_source_commits():
