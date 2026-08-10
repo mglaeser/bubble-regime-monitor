@@ -4,11 +4,25 @@
 `PHASE_A_HARDENED_PRE_KEY_NOT_YET_MERGEABLE`
 
 An external review of the first Phase-A package found concrete pre-key blockers.
-They are closed below in §17. The key is still **not** installed, this branch is
-**not** merged, and the policy state remains
+They are closed below in §17. At the time this report was written the key was
+**not** installed, this branch was **not** merged, and the policy state was
 `MIDTERM_SINGLE_REPO_PANEL_IMPLEMENTATION_IN_PROGRESS` — `STAGED_NO_PROVIDER_SECRET`
-means "merged and dry-run green", and declaring it before the merge would be a
-claim about a state this repository is not in.
+means "merged and dry-run green", and declaring it before the merge would have
+been a claim about a state this repository was not in.
+
+> **Superseded, and left standing as the record of a moment.** Phase A merged as
+> PR #37 and PR #38. The engine release `midterm-panel-engine-2026-08-10` now
+> exists, all seven binding fields are recorded, a usable provider key is
+> installed, and the state is
+> `MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS` — the key is
+> present and has never been spent. The ladder that took it there is recorded in
+> `governance/midterm-panel-policy.json` as
+> `architecture.ci_operational_state_history`, and
+> `policystate.assert_recorded_history_is_a_legal_walk` re-walks it. The first
+> run that may spend is gated by
+> `architecture.first_provider_backed_run_authorised`, which is `false`; see
+> `docs/MIDTERM_PANEL_OPERATOR_RUNBOOK.md` §4b. Nothing below is edited to match
+> the present, because a terminal report that is quietly updated stops being one.
 
 ---
 

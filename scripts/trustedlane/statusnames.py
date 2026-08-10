@@ -49,7 +49,18 @@ from .errors import refuse
 #: called `fake-provider vertical (no key)`, which reads on a checks tab like a
 #: verdict about the candidate; `assert_workflow_statuses_are_registered` caught
 #: it as unregistered, which is this registry doing exactly what it is for.
-ORDINARY_STATUSES = ("test (3.12)", "image", "midterm-panel-selftest")
+#: `midterm-engine-release-validation` is ORDINARY for the same reason and with
+#: the same narrowness. It runs on `pull_request` and `push`, holds no provider
+#: credential, and reads the approved engine release with `github.token` only
+#: inside an egress guard that permits the release-asset hosts and nothing else.
+#:
+#: What requiring it means: the release the governance binding names is still
+#: readable, still hashes to the approved identity digest, still re-seals from
+#: its own provenance, and still describes the mid-term control class rather
+#: than a protected one. It says nothing about the candidate — no model saw the
+#: change, and no provider call was made or could have been.
+ORDINARY_STATUSES = ("test (3.12)", "image", "midterm-panel-selftest",
+                     "midterm-engine-release-validation")
 
 #: D0. Proves containment on the allowed default ref; holds no credential and
 #: reviews nothing.

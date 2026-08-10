@@ -670,6 +670,16 @@ def load_engine_for_mode(*, mode: str, release: dict,
     assert_mode(mode)
     identities = assert_engine_source_is_not_the_reviewed_candidate(
         release=release, reviewed_candidate_head_sha=reviewed_candidate_head_sha)
+    # FIRST, and only in provider mode. `assert_provenance_permits` below used
+    # to be what kept this lane from spending, and it was doing that job by
+    # accident: it refuses an unbound engine release, and the release happened
+    # to be unbound. Binding it answered that question and would silently have
+    # answered "may we spend yet?" too. This asks the second question on its
+    # own, of a committed operator decision, before anything else happens.
+    authorisation = None
+    if mode == MODE_PROVIDER:
+        from .policystate import assert_provider_backed_run_is_authorised
+        authorisation = assert_provider_backed_run_is_authorised(root=cwd)
     provenance = assert_provenance_permits(
         release.get("provenance") or provenance_of(release), mode=mode)
     assert_no_candidate_path_is_importable(candidate_paths=candidate_paths)
@@ -697,6 +707,7 @@ def load_engine_for_mode(*, mode: str, release: dict,
         "engine": engine,
         "mode": mode,
         "provenance": provenance,
+        "provider_run_authorisation": authorisation,
         "engine_identity_record": identity,
         "engine_identity_sha256": identity.get("engine_identity_sha256"),
         "engine_release_binding_sha256":

@@ -1,19 +1,66 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "document_class": "MIDTERM_PANEL_APPROVED_ENGINE_RELEASE",
-  "honest_scope": "The two commits the reviewing engine is built from. They are PINNED, which is what makes the reviewer independent of the candidate; they are not APPROVED, because `GET /releases` returns [] and operator prerequisite 14 is unrecorded. With no artifact digest and no release tag, `engine.provenance_of` labels this REBUILT_FROM_PINNED_SOURCE_TEST_ONLY, and `assert_provenance_permits` refuses it for any run that spends money. A dry run may use it.",
-  "sha_fields_are_git_commit_ids": "The two `*_sha` values below are 40-hex git commit ids, not credentials. An entropy detector cannot tell the difference, which is the correct default, so they carry an audited entry in `.secrets.baseline` — JSON has no comment syntax, so an inline `pragma: allowlist secret` is not available here.",
+  "honest_scope": "The exact engine release a human operator approved for the mid-term single-repository panel. The two source commits are PINNED, which is what makes the reviewer independent of the candidate; the artifact digest, the release tag and the identity-document digest are APPROVED, which is what makes it usable by a run that spends money. `engine.provenance_of` returns APPROVED_RELEASE only because all seven binding fields below are present — approving a subset would approve an engine the operator did not fully name. What backs the approval is deterministic reproduction plus an out-of-band human decision, NOT native branch protection, NOT write separation, and NOT third-party attestation.",
+  "sha_fields_are_git_commit_ids": "`approved_engine_source_sha` and `approved_engine_protected_sha` are 40-hex git commit ids, not credentials. Every other 64-hex value here is a content digest. An entropy detector cannot tell either apart from a secret, which is the correct default, so they carry audited entries in `.secrets.baseline` — JSON has no comment syntax, so an inline `pragma: allowlist secret` is not available here.",
   "approved_engine_source_sha": "c8ba2a727d46347904ed072422a11ab68c5b2e74",
-  "approved_engine_protected_sha": "c8ba2a727d46347904ed072422a11ab68c5b2e74",
-  "approved_engine_artifact_sha256": null,
-  "approved_engine_release_tag": null,
-  "approved_engine_identity_sha256": null,
-  "identity_document_honest_scope": "sha256 of the `engine-identity.json` asset attached to the approved release. Null until a release exists. A provider-backed run refuses without the identity document itself: rebuilding the artifact from the two pinned commits proves the bytes are reproducible, which says nothing about which build produced the approved ones, what ref it ran from, or under which control the operator accepted it.",
+  "approved_engine_protected_sha": "27bfefb5cef8d4f7c80323cd53f3803616341427",
+  "approved_engine_artifact_sha256": "b70593218437545dd9f6109c52da1d5c7ac38c724792f6856deba3a5d2676790",
+  "approved_engine_release_tag": "midterm-panel-engine-2026-08-10",
+  "approved_engine_identity_sha256": "14de0945d10dee58579a80ae364d5503087eeb5be0d8c49ce5251d22cc37d43e",
+  "engine_release_binding_sha256": "f2f961fd29967673c222cb880396d758590b782598542088c88d24c956434d61",
+  "binding_digest_honest_scope": "A RESTATEMENT of the seven fields `engine.RELEASE_BINDING_FIELDS` names, as one number, so a human has a single value to compare and a downstream comparison cannot check six fields out of seven. It is not an input: `engine.release_binding` recomputes it from the seven fields, and `releasevalidation` refuses when the recomputation and this value disagree. Storing it without recomputing would be two copies of one claim, which is the drift this lane keeps finding.",
+  "identity_document_honest_scope": "sha256 of the `engine-identity.json` asset attached to the approved release. Rebuilding the artifact from the two pinned commits proves the bytes are reproducible, which says nothing about which build produced the approved ones, what ref it ran from, or under which control the operator accepted it. Only the identity document carries that, so a provider-backed run materialises the exact asset, checks it against this digest, and strict-loads it.",
   "native_branch_protection": false,
   "control_class": "HUMAN_EXACT_HEAD_COMPENSATING_CONTROL",
-  "protection_honest_scope": "`main` has no native branch protection or ruleset on this plan, and no claim of protected-ref provenance is made anywhere in this lane. The compensating control is that a human selects an exact default-branch commit id, approves the exact five identity digests out of band, and the build records `${{ github.ref_protected }}` as the platform reported it. This backs MIDTERM_SINGLE_REPO_* evidence only. The build role key `protected_trusted_lane` is retained for schema compatibility with `trustedlane.enginesource` and does NOT assert that the source ref was protected.",
+  "protection_honest_scope": "`main` has no native branch protection or ruleset on this plan, and no claim of protected-ref provenance is made anywhere in this lane. The compensating control is that a human selects an exact default-branch commit id, approves the exact five identity digests out of band, and the build records `${{ github.ref_protected }}` as the platform reported it — which for build run 31427275863 was `false`. This backs MIDTERM_SINGLE_REPO_* evidence only. The build role key `protected_trusted_lane` is retained for schema compatibility with `trustedlane.enginesource` and does NOT assert that the source ref was protected.",
+  "approved_engine_identity_digests": {
+    "honest_scope": "A RESTATEMENT of the five digests the build published and the operator approved out of band, so they can be read without downloading the release asset. `releasevalidation` compares every one of them against the materialised identity document and refuses on any difference; nothing reads them as an input.",
+    "engine_artifact_sha256": "b70593218437545dd9f6109c52da1d5c7ac38c724792f6856deba3a5d2676790",
+    "engine_source_sha256": "9b3dae26e3955af2b4291e445830c037d4e137e55c1981211d6646ac3a14eb9a",
+    "runtime_lock_sha256": "18ed511e512d4277869206b909f0b9cfbc0485e0241ec0931d463d20babefc2d",
+    "sbom_sha256": "2e55ff5093688057dfc5ddbffebcc141bc9ada4371ebff9ac6e8aa7fbc36a471",
+    "provenance_sha256": "541233981de713671f4c68e77c13beca1e626718298eb96c599d1e539df402b3"
+  },
+  "approved_engine_build": {
+    "honest_scope": "What the platform told the build about itself. A process cannot verify which ref dispatched it or whether that ref was protected; these are recorded as reported, and `build_ref_protected: false` is the reported value rather than an omission.",
+    "workflow": ".github/workflows/trusted-engine-build.yml",
+    "build_workflow_run_id": 31427275863,
+    "build_workflow_run_attempt": 1,
+    "build_ref": "refs/heads/main",
+    "build_head_sha": "27bfefb5cef8d4f7c80323cd53f3803616341427",
+    "build_ref_protected": false,
+    "engine_identity_state": "MIDTERM_OPERATOR_APPROVED_ENGINE_IDENTITY",
+    "determinism": "the same run rebuilt the artifact from the same two commits and reproduced b70593218437545dd9f6109c52da1d5c7ac38c724792f6856deba3a5d2676790",
+    "actions_artifact_id": 9077672382,
+    "actions_artifact_zip_sha256": "4dd3c6799b47932fbbee7ef3ebbb286b705b71359966a94f49df49865bf11483",
+    "actions_artifact_note": "The Actions artifact is a ZIP wrapper whose digest is NOT the engine digest, and it expires 30 days after the build. The release below is the durable copy."
+  },
+  "approved_engine_release": {
+    "tag": "midterm-panel-engine-2026-08-10",
+    "release_id": 368219671,
+    "target_commitish": "27bfefb5cef8d4f7c80323cd53f3803616341427",
+    "published_at": "2026-08-10T21:59:56Z",
+    "draft": false,
+    "prerelease": true,
+    "prerelease_note": "GitHub marks this release a prerelease. `releaseasset.resolve_identity_asset` refuses a DRAFT, because a draft can be edited or deleted without changing its tag; a prerelease cannot, so it is recorded rather than refused.",
+    "assets": [
+      {
+        "name": "engine-identity.json",
+        "asset_id": 509309062,
+        "size_bytes": 5606,
+        "sha256": "14de0945d10dee58579a80ae364d5503087eeb5be0d8c49ce5251d22cc37d43e"
+      },
+      {
+        "name": "engine.tar.gz",
+        "asset_id": 509309061,
+        "size_bytes": 356503,
+        "sha256": "b70593218437545dd9f6109c52da1d5c7ac38c724792f6856deba3a5d2676790"
+      }
+    ]
+  },
   "operator_action_required": [
-    "Build the artifact from these two commits, record its sha256 here, and cut a release tag. Only then does provenance_of return APPROVED_RELEASE and only then may a provider-backed run proceed.",
-    "The engine source deliberately LAGS the candidate. A pull request that changes scripts/verifier is reviewed by the engine pinned here, not by its own edited code; picking up that change means merging it first and then re-pinning."
+    "The engine source deliberately LAGS the candidate. A pull request that changes scripts/verifier is reviewed by the engine pinned here, not by its own edited code; picking up that change means merging it first, rebuilding, re-releasing and re-pinning every field in the binding above.",
+    "Re-pinning is a seven-field change, not a one-field change. `engine.release_binding` refuses an incomplete binding, so a partial edit fails closed rather than approving an engine nobody named."
   ]
 }
