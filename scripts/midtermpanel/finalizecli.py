@@ -125,11 +125,34 @@ def _self_test() -> int:
         and "transport" in ((getattr(n, "module", "") or "")
                             + " ".join(a.name for a in n.names))
         for n in ast.walk(tree))
+    # `callable(assert_no_trusted_claim)` is what used to be here, and it is
+    # the shape of self-test that reports green for a function that refuses
+    # every input. It did: the guard rejected this module's OWN summary, so the
+    # closeout could never publish one, and a probe asking whether the name
+    # exists could not tell. Both directions are exercised now, against the
+    # real renderer rather than a fixture.
+    from .errors import PanelRefusal
+    rendered = render_summary(
+        pr_number=0, head_sha="0" * 40, base_sha="0" * 40, ordinary_checks={},
+        high_risk=True, count_state="success", panel_state="success",
+        models=list(PANEL_MODELS), decision="SELF_TEST", evidence_digests={},
+        provider_calls=0, generation_calls=0, run_url="self-test")
+    try:
+        assert_no_trusted_claim(rendered)
+        accepts_its_own_summary = True
+    except PanelRefusal:
+        accepts_its_own_summary = False
+    try:
+        assert_no_trusted_claim("The verdict is a trusted review.")
+        refuses_a_real_claim = False
+    except PanelRefusal:
+        refuses_a_real_claim = True
     return self_test_report("finalizecli", {
         "module imports": True,
         "perform is callable": callable(perform),
         "holds no provider seam": not touches_provider,
-        "summary refuses a trust claim": callable(assert_no_trusted_claim),
+        "accepts the summary it renders": accepts_its_own_summary,
+        "still refuses an actual trust claim": refuses_a_real_claim,
     })
 
 

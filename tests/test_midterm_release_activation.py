@@ -36,6 +36,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from midtermpanel import (  # noqa: E402
     engine,
+    finalize,
     policystate,
     releasevalidation,
 )
@@ -902,6 +903,159 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
                   / "engine.py").read_text(encoding="utf-8")
         assert "if mode == MODE_PROVIDER:" in source
         assert "assert_provider_backed_run_is_authorised(root=cwd)" in source
+
+
+class TestTheSummaryGuardReadsItsOwnSummary:
+    """The defect the activation PR's own CI surfaced, in run 31441359197.
+
+    That run was the first time a `midterm-panel-review` reached `proceed ==
+    true` on a pull request, so it was the first time `finalizecli`'s closeout
+    step ever executed. It refused immediately:
+
+        category=summary_claims_trust phrase='trusted review'
+
+    `assert_no_trusted_claim` was rejecting the summary this very module
+    renders — because the disclaimer reads "This is **not a** trusted review"
+    and the exemption demanded the literal "not trusted review". The panel
+    could not publish the one artifact a human reads, and nothing noticed,
+    because there were no tests for the function and the code path had never
+    run.
+
+    Behind the false refusal sat the worse bug. The exemption was global: one
+    denial anywhere excused every occurrence, so a summary could disclaim trust
+    in its header and assert it in its verdict line. That is the fail-open, and
+    it is why the fix is per-occurrence rather than a wider substring."""
+
+    def _summary(self, **overrides):
+        fields = dict(
+            pr_number=39, head_sha="17b687b5", base_sha="27bfefb5",
+            ordinary_checks={"test (3.12)": "success"}, high_risk=True,
+            count_state="failure", panel_state="skipped",
+            models=["gpt-5.6-sol"], decision="INCOMPLETE",
+            evidence_digests={"count_evidence_sha256": "a" * 64},
+            provider_calls=0, generation_calls=0, run_url="https://example.invalid")
+        fields.update(overrides)
+        return finalize.render_summary(**fields)
+
+    def test_the_guard_accepts_the_summary_the_module_renders(self):
+        """The regression. Without this the closeout can never publish."""
+        assert finalize.assert_no_trusted_claim(self._summary())
+
+    @pytest.mark.parametrize("high_risk", [True, False])
+    @pytest.mark.parametrize("decision", ["PASS", "REFUSED", "INCOMPLETE"])
+    def test_every_rendered_shape_is_accepted(self, high_risk, decision):
+        """Both branches of the renderer, not just the one that was tried."""
+        assert finalize.assert_no_trusted_claim(
+            self._summary(high_risk=high_risk, decision=decision))
+
+    def test_the_rendered_summary_still_carries_its_disclaimer(self):
+        """The guard passing must not be achievable by deleting the sentence."""
+        text = self._summary().lower()
+        assert "not a trusted review" in text
+        assert "not write-separated" in text
+        assert "a human must make the merge decision" in text
+
+    def test_a_bare_trust_claim_is_refused(self):
+        with pytest.raises(PanelRefusal) as excinfo:
+            finalize.assert_no_trusted_claim("The verdict is a trusted review.")
+
+        assert "summary_claims_trust" in str(excinfo.value)
+
+    def test_disclaiming_once_does_not_licence_claiming_later(self):
+        """The fail-open, as a test. The old exemption accepted this."""
+        with pytest.raises(PanelRefusal) as excinfo:
+            finalize.assert_no_trusted_claim(
+                "This is not a trusted review.\n\n"
+                "Verdict: a trusted review by three models.")
+
+        assert "summary_claims_trust" in str(excinfo.value)
+        # The offset names WHICH occurrence, because "somewhere in this
+        # document" is what the old refusal said and it was not actionable.
+        assert "at_offset=" in str(excinfo.value)
+
+    @pytest.mark.parametrize("phrase", finalize.FORBIDDEN_CLAIMS)
+    def test_every_forbidden_phrase_is_refused_when_asserted(self, phrase):
+        with pytest.raises(PanelRefusal):
+            finalize.assert_no_trusted_claim(f"This run produced a {phrase}.")
+
+    @pytest.mark.parametrize("phrase", finalize.FORBIDDEN_CLAIMS)
+    def test_every_forbidden_phrase_is_allowed_when_denied(self, phrase):
+        assert finalize.assert_no_trusted_claim(
+            f"This run produced no {phrase}.")
+
+    @pytest.mark.parametrize("text", [
+        "This is not a trusted review.",
+        "This is **not** a trusted review.",
+        "This is never a trusted review.",
+        "It emits no third-party attestation.",
+        "These verdicts are not independently verified.",
+    ])
+    def test_ordinary_denials_are_understood(self, text):
+        assert finalize.assert_no_trusted_claim(text)
+
+    @pytest.mark.parametrize("text", [
+        "It is not write-separated. A trusted review followed.",
+        "Not applicable; verdict: trusted review",
+        "This is not the trusted lane, but it is a trusted review.",
+    ])
+    def test_a_denial_in_a_different_clause_does_not_carry(self, text):
+        """Sentence-ending punctuation breaks the link, deliberately. A denial
+        of one thing is not a denial of whatever comes after it."""
+        with pytest.raises(PanelRefusal):
+            finalize.assert_no_trusted_claim(text)
+
+    def test_the_old_check_would_fail_these_tests(self):
+        """The mutation, stated as code rather than as a claim in a comment.
+
+        Both defects reproduced against a local copy of the old predicate, so
+        the two tests above are demonstrably testing something. The fail-open
+        example needs the LITERAL "not trusted review" — that was the only
+        spelling the old exemption recognised, which is the same narrowness
+        that produced the false refusal."""
+        def old(text):
+            lowered = text.lower()
+            for phrase in finalize.FORBIDDEN_CLAIMS:
+                if phrase in lowered and "not " + phrase not in lowered:
+                    raise PanelRefusal("MIDTERM_PANEL_REFUSED",
+                                       "category=summary_claims_trust")
+            return text
+
+        # 1. the false refusal: it rejects the summary the module renders
+        with pytest.raises(PanelRefusal):
+            old(self._summary())
+        assert finalize.assert_no_trusted_claim(self._summary())
+
+        # 2. the fail-open: one literal denial licences a later assertion
+        two_faced = ("Published: not trusted review. "
+                     "Verdict: a trusted review by three models.")
+        assert old(two_faced)
+        with pytest.raises(PanelRefusal):
+            finalize.assert_no_trusted_claim(two_faced)
+
+    def test_the_self_test_exercises_both_directions(self):
+        """A self-test that only asked `callable(...)` reported green while the
+        guard rejected every input it would ever be given.
+
+        Asserted by RUNNING it, not by reading the source for a phrase — the
+        source now explains this defect and contains the old expression inside
+        that explanation, and a substring search cannot tell a comment from a
+        check. That is the same mistake in miniature."""
+        import io
+        from contextlib import redirect_stdout
+
+        from midtermpanel import finalizecli
+
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            code = finalizecli._self_test()
+        report = captured.getvalue()
+
+        assert code == 0, report
+        assert "accepts the summary it renders" in report
+        assert "still refuses an actual trust claim" in report
+        for line in report.splitlines():
+            if line.strip() and not line.startswith("MIDTERM"):
+                assert line.startswith("ok "), line
 
 
 class TestTheStateMatchesTheTree:
