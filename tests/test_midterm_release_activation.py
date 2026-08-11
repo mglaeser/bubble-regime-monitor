@@ -792,16 +792,28 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
     second, so the first run that cost money would have been triggered by
     whoever next opened a pull request after the merge."""
 
-    def _root(self, tmp_path, *, state=None, authorised=None, release=True):
+    #: "Leave this field as the committed policy has it".
+    #:
+    #: `None` cannot be that sentinel, because `None` is itself one of the
+    #: values under test: `authorised=None` has to mean "write a literal null
+    #: and expect a refusal", not "write nothing". While the committed policy
+    #: was `false` the two readings were indistinguishable — the `None` case
+    #: passed because the untouched file said false, not because the parameter
+    #: did anything — and authorising the first run separated them by making
+    #: the committed answer `true`.
+    _AS_COMMITTED = object()
+
+    def _root(self, tmp_path, *, state=_AS_COMMITTED,
+              authorised=_AS_COMMITTED, release=True):
         root = tmp_path / "repo"
         (root / "governance").mkdir(parents=True)
         (root / ".github" / "workflows").mkdir(parents=True)
         (root / ".github" / "workflows"
          / "midterm-panel-review.yml").write_text("{}", encoding="utf-8")
         policy = _policy()
-        if state is not None:
+        if state is not self._AS_COMMITTED:
             policy["architecture"]["ci_operational_state"] = state
-        if authorised is not None:
+        if authorised is not self._AS_COMMITTED:
             policy["architecture"][
                 policystate.FIRST_PROVIDER_RUN_FIELD] = authorised
         (root / "governance" / "midterm-panel-policy.json").write_text(
@@ -877,6 +889,25 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
         with pytest.raises(PanelRefusal) as excinfo:
             policystate.assert_provider_backed_run_is_authorised(
                 root=self._root(tmp_path, authorised=value))
+
+        assert "not_authorised" in str(excinfo.value)
+
+    def test_an_absent_field_is_refused(self, tmp_path):
+        """Absent is refused, like every other non-`true`.
+
+        Its own test rather than another parametrised value, because "absent"
+        is a shape the fixture has to express by DELETING the key — and the
+        deletion is the point. `architecture.get(FIELD)` returns `None` for a
+        missing field, so a policy that never mentions the decision must not
+        read as one that declined it by accident."""
+        root = self._root(tmp_path)
+        path = Path(root) / "governance" / "midterm-panel-policy.json"
+        policy = json.loads(path.read_text(encoding="utf-8"))
+        del policy["architecture"][policystate.FIRST_PROVIDER_RUN_FIELD]
+        path.write_text(json.dumps(policy), encoding="utf-8")
+
+        with pytest.raises(PanelRefusal) as excinfo:
+            policystate.assert_provider_backed_run_is_authorised(root=root)
 
         assert "not_authorised" in str(excinfo.value)
 
