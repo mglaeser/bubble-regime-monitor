@@ -155,6 +155,10 @@ step's own guard on a run where that step genuinely executes.
    they are what buys the first verdict.
 2. Open a small, low-risk pull request — or pick an open one — and let ordinary
    CI finish on its head.
+   The candidate must still be OPEN when the panel runs: preflight resolves the
+   head to a pull request and refuses with `no_open_pull_request_for_head` when
+   there is none. A candidate that was merged while the authorisation was being
+   arranged is no longer a candidate, and re-running its CI buys nothing.
 3. Trigger the panel by re-running that head's ordinary CI:
 
    ```
