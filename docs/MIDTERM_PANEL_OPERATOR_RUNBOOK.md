@@ -141,7 +141,9 @@ So the first one is a decision, made on its own:
 1. On `main`, in its own reviewed commit, set
    `architecture.first_provider_backed_run_authorised` to the JSON literal
    `true` in `governance/midterm-panel-policy.json`. A string is refused, not
-   coerced.
+   coerced. **Done** — the operator set it after watching the gate refuse in
+   panel run 31527283777. Step 1 is history; steps 2–5 are what remains, and
+   they are what buys the first verdict.
 2. Open a small, low-risk pull request — or pick an open one — and let ordinary
    CI finish on its head.
 3. Trigger the panel by re-running that head's ordinary CI:
