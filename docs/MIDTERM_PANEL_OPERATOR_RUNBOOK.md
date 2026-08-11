@@ -138,6 +138,15 @@ would have been triggered by whoever next opened a pull request after the merge.
 
 So the first one is a decision, made on its own:
 
+Before making it, rehearse the refusal. Open a trivial pull request that
+changes nothing executable and let ordinary CI finish on its head. The gate is
+read in the credential-bearing job, so a run that reaches it and refuses is the
+only evidence that it refuses; every green run so far stopped earlier and
+proved nothing about this path. A rehearsal costs nothing if the gate holds,
+and if it does not hold it spends one provider call on a throwaway pull request
+rather than on a real one at a worse moment. It also exercises the summary
+step's own guard on a run where that step genuinely executes.
+
 1. On `main`, in its own reviewed commit, set
    `architecture.first_provider_backed_run_authorised` to the JSON literal
    `true` in `governance/midterm-panel-policy.json`. A string is refused, not
