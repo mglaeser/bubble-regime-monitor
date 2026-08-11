@@ -367,6 +367,67 @@ jobs:
           done
           echo "MIDTERM_REPOSITORY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
+      - name: Materialise the trusted runtime
+        # WHY this exists, and why it is not a `cd`.
+        #
+        # `$GITHUB_WORKSPACE` is the CANDIDATE ROOT. The candidate's commits
+        # are present in it as objects, and `engine.assert_no_candidate_path_is_importable`
+        # refuses the run when any directory inside it is on `sys.path`,
+        # because a candidate directory on the import path makes candidate
+        # bytes importable — the one thing this lane's whole argument rests on
+        # not being true.
+        #
+        # The committed invocation put it there TWICE: `PYTHONPATH` named
+        # `<workspace>/scripts`, and `python -m` prepends the working
+        # directory, which defaults to `<workspace>`. Panel run 31534191556 —
+        # the first run ever authorised to spend — refused on exactly those
+        # two entries, inside the job that already held the provider key.
+        #
+        # So the engine is materialised OUT of the repository before it is
+        # imported. `git archive` reads the trusted commit's BLOBS rather than
+        # the worktree, so what runs is what that commit holds even if a file
+        # on disk differs. Only the two packages the engine imports are
+        # materialised: `midtermpanel` reaches into `trustedlane` for
+        # `enginebridge`, `enginebuild` and `actionpolicy`, and a runtime
+        # holding only the first imports and then fails.
+        #
+        # The workspace keeps its one job: the git repository the review data
+        # is read from. It simply stops being anywhere the interpreter looks
+        # for code.
+        env:
+          CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          trusted="$(git rev-parse HEAD)"
+          # The reviewer must not be the reviewed. This lane never checks the
+          # candidate out, so this should be unreachable — which is why it is
+          # asserted rather than assumed.
+          if [ "$trusted" = "$CANDIDATE_HEAD_SHA" ]; then
+            echo "::error::the trusted checkout is the candidate head" \
+                 "${CANDIDATE_HEAD_SHA}; refusing to build the engine out of" \
+                 "the code under review" >&2
+            exit 1
+          fi
+          runtime="$RUNNER_TEMP/midterm/runtime"
+          rm -rf "$runtime"
+          mkdir -p "$runtime"
+          git archive --format=tar "$trusted" \
+            scripts/midtermpanel scripts/trustedlane \
+            | tar -x -C "$runtime" --strip-components=1
+          for package in midtermpanel trustedlane; do
+            if [ ! -f "$runtime/$package/__init__.py" ]; then
+              echo "::error::${package} is missing from the materialised" \
+                   "runtime; the engine imports both" >&2
+              exit 1
+            fi
+          done
+          # An EMPTY directory to run from. `-P` keeps the working directory
+          # off `sys.path` anyway; running somewhere with nothing in it means
+          # the guarantee does not rest on that flag alone.
+          mkdir -p "$RUNNER_TEMP/midterm/run"
+          echo "MIDTERM_TRUSTED_RUNTIME=$runtime" >> "$GITHUB_ENV"
+          echo "MIDTERM_TRUSTED_RUNTIME_COMMIT=$trusted" >> "$GITHUB_ENV"
+
       - name: Materialise the operator PIN record
         run: |
           mkdir -p "$RUNNER_TEMP/midterm/inputs"
@@ -428,8 +489,22 @@ jobs:
           MIDTERM_TRIGGERING_CI_RUN_ATTEMPT: ${{ needs.preflight.outputs.triggering_ci_run_attempt }}
           MIDTERM_TESTED_BASE_SHA: ${{ needs.preflight.outputs.tested_base_sha }}
           MIDTERM_TESTED_HEAD_SHA: ${{ needs.preflight.outputs.tested_head_sha }}
+          # Overrides the workflow-level PYTHONPATH, which names
+          # `<workspace>/scripts` — a directory INSIDE the candidate
+          # root. `Materialise the trusted runtime` put the same two
+          # packages here, from the trusted commit's blobs.
+          PYTHONPATH: ${{ runner.temp }}/midterm/runtime
+        # NOT $GITHUB_WORKSPACE, which is where Actions would run this
+        # by default: `-m` prepends the working directory to `sys.path`
+        # and the workspace is the candidate root.
+        working-directory: ${{ runner.temp }}/midterm/run
         run: |
-          python -m midtermpanel.countcli
+          # `-P` does not prepend the working directory to `sys.path`;
+          # `-s` leaves user site-packages out. NOT `-I`, which is the
+          # obvious way to say "isolated" and is unusable here: it
+          # implies `-E`, which would discard the PYTHONPATH above and
+          # leave the trusted runtime unimportable.
+          python -P -s -m midtermpanel.countcli
 
       - name: Retain count evidence and the private plan
         if: always()
@@ -567,6 +642,67 @@ jobs:
           done
           echo "MIDTERM_REPOSITORY_PATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
 
+      - name: Materialise the trusted runtime
+        # WHY this exists, and why it is not a `cd`.
+        #
+        # `$GITHUB_WORKSPACE` is the CANDIDATE ROOT. The candidate's commits
+        # are present in it as objects, and `engine.assert_no_candidate_path_is_importable`
+        # refuses the run when any directory inside it is on `sys.path`,
+        # because a candidate directory on the import path makes candidate
+        # bytes importable — the one thing this lane's whole argument rests on
+        # not being true.
+        #
+        # The committed invocation put it there TWICE: `PYTHONPATH` named
+        # `<workspace>/scripts`, and `python -m` prepends the working
+        # directory, which defaults to `<workspace>`. Panel run 31534191556 —
+        # the first run ever authorised to spend — refused on exactly those
+        # two entries, inside the job that already held the provider key.
+        #
+        # So the engine is materialised OUT of the repository before it is
+        # imported. `git archive` reads the trusted commit's BLOBS rather than
+        # the worktree, so what runs is what that commit holds even if a file
+        # on disk differs. Only the two packages the engine imports are
+        # materialised: `midtermpanel` reaches into `trustedlane` for
+        # `enginebridge`, `enginebuild` and `actionpolicy`, and a runtime
+        # holding only the first imports and then fails.
+        #
+        # The workspace keeps its one job: the git repository the review data
+        # is read from. It simply stops being anywhere the interpreter looks
+        # for code.
+        env:
+          CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          trusted="$(git rev-parse HEAD)"
+          # The reviewer must not be the reviewed. This lane never checks the
+          # candidate out, so this should be unreachable — which is why it is
+          # asserted rather than assumed.
+          if [ "$trusted" = "$CANDIDATE_HEAD_SHA" ]; then
+            echo "::error::the trusted checkout is the candidate head" \
+                 "${CANDIDATE_HEAD_SHA}; refusing to build the engine out of" \
+                 "the code under review" >&2
+            exit 1
+          fi
+          runtime="$RUNNER_TEMP/midterm/runtime"
+          rm -rf "$runtime"
+          mkdir -p "$runtime"
+          git archive --format=tar "$trusted" \
+            scripts/midtermpanel scripts/trustedlane \
+            | tar -x -C "$runtime" --strip-components=1
+          for package in midtermpanel trustedlane; do
+            if [ ! -f "$runtime/$package/__init__.py" ]; then
+              echo "::error::${package} is missing from the materialised" \
+                   "runtime; the engine imports both" >&2
+              exit 1
+            fi
+          done
+          # An EMPTY directory to run from. `-P` keeps the working directory
+          # off `sys.path` anyway; running somewhere with nothing in it means
+          # the guarantee does not rest on that flag alone.
+          mkdir -p "$RUNNER_TEMP/midterm/run"
+          echo "MIDTERM_TRUSTED_RUNTIME=$runtime" >> "$GITHUB_ENV"
+          echo "MIDTERM_TRUSTED_RUNTIME_COMMIT=$trusted" >> "$GITHUB_ENV"
+
       # Materialise the operator-approved identity document BEFORE the step
       # that receives the provider key. GITHUB_TOKEN only: a download that
       # could also reach the provider is a download whose compromise costs
@@ -602,8 +738,22 @@ jobs:
           MIDTERM_TRIGGERING_CI_RUN_ATTEMPT: ${{ needs.preflight.outputs.triggering_ci_run_attempt }}
           MIDTERM_TESTED_BASE_SHA: ${{ needs.preflight.outputs.tested_base_sha }}
           MIDTERM_TESTED_HEAD_SHA: ${{ needs.preflight.outputs.tested_head_sha }}
+          # Overrides the workflow-level PYTHONPATH, which names
+          # `<workspace>/scripts` — a directory INSIDE the candidate
+          # root. `Materialise the trusted runtime` put the same two
+          # packages here, from the trusted commit's blobs.
+          PYTHONPATH: ${{ runner.temp }}/midterm/runtime
+        # NOT $GITHUB_WORKSPACE, which is where Actions would run this
+        # by default: `-m` prepends the working directory to `sys.path`
+        # and the workspace is the candidate root.
+        working-directory: ${{ runner.temp }}/midterm/run
         run: |
-          python -m midtermpanel.panelcli
+          # `-P` does not prepend the working directory to `sys.path`;
+          # `-s` leaves user site-packages out. NOT `-I`, which is the
+          # obvious way to say "isolated" and is unusable here: it
+          # implies `-E`, which would discard the PYTHONPATH above and
+          # leave the trusted runtime unimportable.
+          python -P -s -m midtermpanel.panelcli
 
       - name: Retain private verdict evidence
         if: always()
