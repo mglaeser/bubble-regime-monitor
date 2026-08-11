@@ -20,7 +20,9 @@ been a claim about a state this repository was not in.
 > `architecture.ci_operational_state_history`, and
 > `policystate.assert_recorded_history_is_a_legal_walk` re-walks it. The first
 > run that may spend is gated by
-> `architecture.first_provider_backed_run_authorised`, which is `false`; see
+> `architecture.first_provider_backed_run_authorised`, which the operator has
+> since set to `true` after watching the gate refuse in panel run 31527283777;
+> see
 > `docs/MIDTERM_PANEL_OPERATOR_RUNBOOK.md` §4b. Nothing below is edited to match
 > the present, because a terminal report that is quietly updated stops being one.
 

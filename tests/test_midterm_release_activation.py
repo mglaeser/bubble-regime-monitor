@@ -792,16 +792,28 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
     second, so the first run that cost money would have been triggered by
     whoever next opened a pull request after the merge."""
 
-    def _root(self, tmp_path, *, state=None, authorised=None, release=True):
+    #: "Leave this field as the committed policy has it".
+    #:
+    #: `None` cannot be that sentinel, because `None` is itself one of the
+    #: values under test: `authorised=None` has to mean "write a literal null
+    #: and expect a refusal", not "write nothing". While the committed policy
+    #: was `false` the two readings were indistinguishable — the `None` case
+    #: passed because the untouched file said false, not because the parameter
+    #: did anything — and authorising the first run separated them by making
+    #: the committed answer `true`.
+    _AS_COMMITTED = object()
+
+    def _root(self, tmp_path, *, state=_AS_COMMITTED,
+              authorised=_AS_COMMITTED, release=True):
         root = tmp_path / "repo"
         (root / "governance").mkdir(parents=True)
         (root / ".github" / "workflows").mkdir(parents=True)
         (root / ".github" / "workflows"
          / "midterm-panel-review.yml").write_text("{}", encoding="utf-8")
         policy = _policy()
-        if state is not None:
+        if state is not self._AS_COMMITTED:
             policy["architecture"]["ci_operational_state"] = state
-        if authorised is not None:
+        if authorised is not self._AS_COMMITTED:
             policy["architecture"][
                 policystate.FIRST_PROVIDER_RUN_FIELD] = authorised
         (root / "governance" / "midterm-panel-policy.json").write_text(
@@ -812,19 +824,53 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
                 RELEASE_DOCUMENT.read_text(encoding="utf-8"), encoding="utf-8")
         return str(root)
 
-    def test_the_committed_policy_does_not_authorise_spending(self):
-        """This activation PR must not be the thing that starts the meter."""
+    def test_the_committed_policy_authorises_spending_by_the_json_literal(self):
+        """The operator decision, asserted against the real file.
+
+        This assertion used to read `is False`, and it was correct while the
+        decision was outstanding: the activation PR must not be the thing that
+        starts the meter. The decision has since been made in its own reviewed
+        commit, so what the file must now prove is that it was made the strict
+        way — the JSON literal `true`, not a string, not a truthy stand-in.
+        `is True` fails on `"true"`, which is exactly the hedge
+        `assert_provider_backed_run_is_authorised` refuses to coerce."""
         assert _policy()["architecture"][
-            policystate.FIRST_PROVIDER_RUN_FIELD] is False
+            policystate.FIRST_PROVIDER_RUN_FIELD] is True
 
+        record = policystate.assert_provider_backed_run_is_authorised(
+            root=str(ROOT))
+
+        assert record["authorised"] is True
+        assert record["authorisation"] == (
+            f"architecture.{policystate.FIRST_PROVIDER_RUN_FIELD} is true")
+
+    def test_the_authorisation_is_read_at_the_key_present_rung(self):
+        """The state is unchanged by the authorisation.
+
+        Spending is authorised; the lane has still never spent. Those are two
+        different claims, and conflating them is how a document starts
+        describing a world it has not reached. `ACTIVE` is earned by a real
+        panel completing, not by permission to attempt one."""
+        assert _policy()["architecture"]["ci_operational_state"] == (
+            policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS)
+
+        record = policystate.assert_provider_backed_run_is_authorised(
+            root=str(ROOT))
+
+        assert record["state"] == (
+            policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS)
+
+    def test_the_refusal_still_tells_the_operator_exactly_what_to_set(
+            self, tmp_path):
+        """Asked of a withdrawn authorisation rather than of the real root.
+
+        The refusal text is the operator's instruction sheet, and it must keep
+        naming the field and the file it lives in. It cannot be asserted
+        against the committed policy any more — that policy now authorises —
+        so it is asserted where the answer is still no."""
         with pytest.raises(PanelRefusal) as excinfo:
-            policystate.assert_provider_backed_run_is_authorised(root=str(ROOT))
-
-        assert "first_provider_backed_run_not_authorised" in str(excinfo.value)
-
-    def test_the_refusal_tells_the_operator_exactly_what_to_set(self):
-        with pytest.raises(PanelRefusal) as excinfo:
-            policystate.assert_provider_backed_run_is_authorised(root=str(ROOT))
+            policystate.assert_provider_backed_run_is_authorised(
+                root=self._root(tmp_path, authorised=False))
 
         reason = str(excinfo.value)
         assert policystate.FIRST_PROVIDER_RUN_FIELD in reason
@@ -843,6 +889,25 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
         with pytest.raises(PanelRefusal) as excinfo:
             policystate.assert_provider_backed_run_is_authorised(
                 root=self._root(tmp_path, authorised=value))
+
+        assert "not_authorised" in str(excinfo.value)
+
+    def test_an_absent_field_is_refused(self, tmp_path):
+        """Absent is refused, like every other non-`true`.
+
+        Its own test rather than another parametrised value, because "absent"
+        is a shape the fixture has to express by DELETING the key — and the
+        deletion is the point. `architecture.get(FIELD)` returns `None` for a
+        missing field, so a policy that never mentions the decision must not
+        read as one that declined it by accident."""
+        root = self._root(tmp_path)
+        path = Path(root) / "governance" / "midterm-panel-policy.json"
+        policy = json.loads(path.read_text(encoding="utf-8"))
+        del policy["architecture"][policystate.FIRST_PROVIDER_RUN_FIELD]
+        path.write_text(json.dumps(policy), encoding="utf-8")
+
+        with pytest.raises(PanelRefusal) as excinfo:
+            policystate.assert_provider_backed_run_is_authorised(root=root)
 
         assert "not_authorised" in str(excinfo.value)
 
@@ -874,10 +939,18 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
 
         Asserted by the refusal arriving with no artifact written: a gate that
         fired after the build would have done the expensive half of the work it
-        exists to prevent."""
+        exists to prevent.
+
+        Asked of a root that withholds the authorisation. It used to be asked
+        of the committed root, which authorises now — and an ordering property
+        must not stop being tested merely because the real answer became yes.
+        The hosted evidence for the same ordering is panel run 31527283777,
+        where the refusal landed after the identity document was materialised
+        and before any artifact was built."""
         artifact = tmp_path / "engine.tar.gz"
         release = dict(_release())
         release["provenance"] = engine.APPROVED_RELEASE
+        withheld = self._root(tmp_path, authorised=False)
 
         with pytest.raises(PanelRefusal) as excinfo:
             engine.load_engine_for_mode(
@@ -885,7 +958,7 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
                 reviewed_candidate_head_sha="d" * 40,
                 artifact_path=str(artifact),
                 extract_to=str(tmp_path / "extract"),
-                repository_numeric_id=1297332828, cwd=str(ROOT))
+                repository_numeric_id=1297332828, cwd=withheld)
 
         assert "first_provider_backed_run_not_authorised" in str(excinfo.value)
         assert not artifact.exists(), "refused before anything was built"
