@@ -4,9 +4,13 @@
   "what_this_is": [
     "The machine-readable spine of the mid-term single-repository review panel.",
     "Every constant here is cross-checked against scripts/midtermpanel/ by",
-    "`midtermpanel.policy.assert_matches_code`, so this document and the code",
-    "cannot drift apart without a test failing. A governance file that merely",
-    "describes what the code is supposed to do is a comment with a digest."
+    "`TestThePolicyDocumentCannotDriftFromTheCode` in tests/test_midterm_panel.py,",
+    "so this document and the code cannot drift apart without a test failing. A",
+    "governance file that merely describes what the code is supposed to do is a",
+    "comment with a digest. (This line used to name a function,",
+    "`midtermpanel.policy.assert_matches_code`, that has never existed in this",
+    "repository — a governance document claiming a mechanism it does not have is",
+    "the same defect the state ladder below exists to prevent.)"
   ],
   "what_this_is_not": [
     "This is NOT the trusted lane. It is not write-separated, it holds a",
@@ -16,7 +20,36 @@
     "or third-party attested."
   ],
   "architecture": {
-    "ci_operational_state": "MIDTERM_SINGLE_REPO_PANEL_IMPLEMENTATION_IN_PROGRESS",
+    "ci_operational_state": "MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS",
+    "ci_operational_state_history": [
+      "MIDTERM_SINGLE_REPO_PANEL_IMPLEMENTATION_IN_PROGRESS",
+      "MIDTERM_SINGLE_REPO_PANEL_STAGED_NO_PROVIDER_SECRET",
+      "MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS"
+    ],
+    "ci_operational_state_history_evidence": [
+      "IMPLEMENTATION_IN_PROGRESS -> STAGED_NO_PROVIDER_SECRET. The panel workflow merged to main as PR #37 (merge 8644935e) and PR #38 (merge 27bfefb5). The hosted no-key vertical `midterm-panel-dry-run` ran green from a clean clone with `permissions: contents: read` and no `secrets.` reference of any kind, and the repository secret named by `secret.name` held a three-space placeholder rather than a usable provider credential throughout. The document was never advanced at the time, which is why this rung is recorded here rather than inferred from the file's history.",
+      "STAGED_NO_PROVIDER_SECRET -> STAGED_PROVIDER_KEY_PRESENT_NO_CALLS. A usable provider key was installed by the operator, and the engine release the panel is bound to now exists: tag `midterm-panel-engine-2026-08-10`, built by run 31427275863 from exact default-branch SHA 27bfefb5 with `github.ref_protected` reported as false. `governance/midterm-panel-engine-release.json` names all seven binding fields, and `midterm-engine-release-validation` materialises that exact release asset and validates it in a job that holds no provider credential and can open no socket to a provider host. No provider or generation call has been made."
+    ],
+    "state_history_honest_scope": "The ordered walk that reached the declared state. `policystate.assert_recorded_history_is_a_legal_walk` re-walks it through the same `assert_transition` a live transition uses, so a history that starts halfway up the ladder, takes a forbidden step, or ends somewhere other than the declared state is a failing test. It cannot verify that each step's evidence exists — the prose above is an operator record, not a proof.",
+    "first_provider_backed_run_authorised": false,
+    "first_provider_backed_run_note": [
+      "The one field that stands between a merged activation and an automatic",
+      "panel that spends. It is FALSE, so `engine.load_engine_for_mode` refuses",
+      "every provider-backed run at the key-present rung before it builds an",
+      "engine or touches a transport.",
+      "Until this activation the same protection existed by accident:",
+      "`assert_provenance_permits` refused a provider-backed run while the",
+      "engine release was unbound, and binding the release would have answered",
+      "'may we spend?' as a side effect of answering 'which engine?'. The two",
+      "questions are now separate, and this one is an operator decision made in",
+      "its own reviewed commit rather than a consequence of another change.",
+      "To authorise the first spending run: set this to the JSON literal true on",
+      "main, then re-run ordinary CI on the pull request that should be the",
+      "first real panel. A string is refused, not coerced.",
+      "It is read only while ci_operational_state is",
+      "MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS; once",
+      "ACTIVE has been earned the panel runs normally and this gates nothing."
+    ],
     "repository_plan": "GITHUB_FREE_PRIVATE",
     "native_branch_protection": "UNAVAILABLE_ACCEPTED_RESIDUAL",
     "native_environment_secret_isolation_available": false,
@@ -28,9 +61,15 @@
     "trusted_review_authority": "NOT_WRITE_SEPARATED",
     "production_eligible": false,
     "state_note": [
-      "The workflow has never run and no provider-backed panel has completed.",
-      "ACTIVE is reachable only through STAGED_NO_PROVIDER_SECRET, and",
-      "`policystate.assert_transition` refuses the direct jump."
+      "The provider key is installed and has never been spent. No",
+      "provider-backed panel has completed, and no provider or generation call",
+      "has been made from this lane at all.",
+      "ACTIVE is reachable only through STAGED_PROVIDER_KEY_PRESENT_NO_CALLS,",
+      "and `policystate.assert_transition` refuses every other route into it —",
+      "including the direct STAGED_NO_PROVIDER_SECRET -> ACTIVE jump, because a",
+      "lane that has never held a key cannot have spent one.",
+      "While this state stands, any provider call is unexpected by definition",
+      "and is an incident rather than a cost."
     ]
   },
   "secret": {

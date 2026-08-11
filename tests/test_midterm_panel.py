@@ -1264,9 +1264,16 @@ class TestEveryCountInputHasAWorkflowProducer:
         pins = json.loads(
             (ROOT / "governance" / "midterm-panel-pins.json")
             .read_text(encoding="utf-8"))
-        assert release["approved_engine_artifact_sha256"] is None
-        assert release["approved_engine_release_tag"] is None
-        assert engine.provenance_of(release) == engine.REBUILT_TEST_ONLY
+        # The release now EXISTS, so these assertions flipped — and the flip is
+        # the point of the activation change. What used to be checked was that
+        # the document honestly reported having no approval; what is checked
+        # now is that its approval is COMPLETE, because `provenance_of` returns
+        # APPROVED_RELEASE only when all seven binding fields are named and a
+        # partial binding would authorise a run the operator never sanctioned.
+        for field in engine.RELEASE_BINDING_FIELDS:
+            assert engine._binding_member_is_present(release[field]), field
+        assert engine.provenance_of(release) == engine.APPROVED_RELEASE
+        assert release["native_branch_protection"] is False
         assert pins["authority_class"] == (
             "OPERATOR_APPROVED_MIDTERM_POLICY_ATTESTATION")
         assert pins["write_separated"] is False

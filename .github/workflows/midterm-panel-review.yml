@@ -392,9 +392,12 @@ jobs:
       # money. The module re-checks that ordering at runtime and refuses if a
       # provider secret is already in scope.
       #
-      # Skipped while no release tag is configured, which is the current
-      # state. Provider mode then refuses for the missing identity path rather
-      # than proceeding — the honest failure, not a silent downgrade.
+      # The `if:` guard remains, and it is now the DRY-RUN path rather than
+      # the current state: a release tag IS configured on main, so this step
+      # runs. When no tag is configured — a dry run against unbound
+      # governance — the step is skipped and provider mode refuses for the
+      # missing identity path rather than proceeding, which is the honest
+      # failure and not a silent downgrade.
       - name: Materialise the approved engine identity document
         if: env.MIDTERM_APPROVED_ENGINE_RELEASE_TAG != ''
         env:
@@ -570,9 +573,12 @@ jobs:
       # money. The module re-checks that ordering at runtime and refuses if a
       # provider secret is already in scope.
       #
-      # Skipped while no release tag is configured, which is the current
-      # state. Provider mode then refuses for the missing identity path rather
-      # than proceeding — the honest failure, not a silent downgrade.
+      # The `if:` guard remains, and it is now the DRY-RUN path rather than
+      # the current state: a release tag IS configured on main, so this step
+      # runs. When no tag is configured — a dry run against unbound
+      # governance — the step is skipped and provider mode refuses for the
+      # missing identity path rather than proceeding, which is the honest
+      # failure and not a silent downgrade.
       - name: Materialise the approved engine identity document
         if: env.MIDTERM_APPROVED_ENGINE_RELEASE_TAG != ''
         env:

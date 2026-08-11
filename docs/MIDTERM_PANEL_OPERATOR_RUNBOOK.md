@@ -50,7 +50,8 @@ Every one of these must hold. The key must not be installed until they do.
 | --- | --- | --- |
 | 1 | the implementation is merged to the default branch | `workflow_run` runs the default branch's copy; a workflow on a branch reviews nothing |
 | 2 | the engine is rebuilt and released for the final source | §4 below |
-| 3 | `governance/midterm-panel-engine-release.json` carries an artifact digest **and** a release tag | without both, `provenance_of` returns `REBUILT_FROM_PINNED_SOURCE_TEST_ONLY` and `assert_provenance_permits` refuses any run that would spend |
+| 3 | `governance/midterm-panel-engine-release.json` names **all seven** binding fields | with any of them absent, `provenance_of` returns `REBUILT_FROM_PINNED_SOURCE_TEST_ONLY` and `assert_provenance_permits` refuses any run that would spend. The seven are the two source commits, the artifact digest, the release tag, the identity-document digest, `native_branch_protection` and `control_class` — a subset approves an engine nobody fully named |
+| 3b | `midterm-engine-release-validation` is green on the head you are about to merge | it materialises the exact release asset with `github.token` only, hashes it to the approved identity digest, strict-loads it, re-seals its provenance and recomputes the seven-field binding — inside an egress guard that permits the release hosts and is proved by a refused connection to the provider host |
 | 4 | the hosted no-key dry run is green | §3 below |
 | 5 | the merge guard and this runbook have been read | `docs/HUMAN_MERGE_PROTOCOL.md` |
 | 6 | you have inspected the live workflow source on the default branch | read `.github/workflows/midterm-panel-review.yml` as it exists on `main`, not as it exists in a pull request |
@@ -102,9 +103,10 @@ works. It says nothing about what three real models would say.
 
 ## 4. Installing the key
 
-1. Build the engine artifact from the two pinned commits and record its
-   sha256 and a release tag in `governance/midterm-panel-engine-release.json`.
-   Merge that change.
+1. Build the engine artifact from the two pinned commits, cut a release with
+   `engine.tar.gz` and `engine-identity.json` attached, and record all seven
+   binding fields in `governance/midterm-panel-engine-release.json`. Merge that
+   change with `midterm-engine-release-validation` green.
 2. Add the repository secret **`TRUSTED_VERIFIER_OPENAI_KEY`**.
 
    The secret's name is deliberately identical to the trusted lane's, and the
@@ -114,7 +116,48 @@ works. It says nothing about what three real models would say.
    variable named after the trusted secret, and a mid-term process exporting
    that exact name would look, to any such check, like a trusted runner that
    had obtained a trusted credential.
-3. Open a small, low-risk pull request and watch the first real run.
+3. Move the policy state to
+   `MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS`, appending
+   it to `architecture.ci_operational_state_history` with a written rationale.
+   The lane now holds a usable key and has never spent it, and that is what the
+   document says.
+
+## 4b. Authorising the first run that spends
+
+While the state is `…STAGED_PROVIDER_KEY_PRESENT_NO_CALLS`, every
+provider-backed run is refused by
+`policystate.assert_provider_backed_run_is_authorised`, before an engine is
+built and before any transport exists.
+
+This gate exists because the previous protection was an accident. While the
+engine release was unbound, `assert_provenance_permits` refused a
+provider-backed run — and that single refusal meant both "no approved engine"
+and "no spending yet". Binding the release answers the first question, and
+would have answered the second one as a side effect: the first run to cost money
+would have been triggered by whoever next opened a pull request after the merge.
+
+So the first one is a decision, made on its own:
+
+1. On `main`, in its own reviewed commit, set
+   `architecture.first_provider_backed_run_authorised` to the JSON literal
+   `true` in `governance/midterm-panel-policy.json`. A string is refused, not
+   coerced.
+2. Open a small, low-risk pull request — or pick an open one — and let ordinary
+   CI finish on its head.
+3. Trigger the panel by re-running that head's ordinary CI:
+
+   ```
+   gh run rerun <CI_RUN_ID>
+   ```
+
+   `workflow_run` is the panel's only trigger, so this is how a panel is
+   started. There is no dispatch path, deliberately: a dispatched run executes a
+   branch-selected copy, and the panel's checkouts name no ref.
+4. Watch `midterm-panel-count` and `midterm-panel-review` on the candidate head.
+5. When a real count and a real panel have both completed, move the state to
+   `MIDTERM_SINGLE_REPO_PANEL_ACTIVE`. From then on the authorisation field
+   gates nothing — re-authorising every review is a prompt people learn to
+   click through.
 
 ## 5. Cost controls
 
