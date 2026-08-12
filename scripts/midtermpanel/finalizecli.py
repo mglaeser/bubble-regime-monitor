@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import sys
 
-from . import PANEL_MODELS, REPOSITORY_NUMERIC_ID
+from . import PANEL_MODELS, REPOSITORY_NUMERIC_ID, attemptjournal
 from .clibase import require_env, run, self_test_report, self_test_requested, summary
 from .finalize import (
     assert_no_trusted_claim,
@@ -49,6 +49,97 @@ def preflight_never_resolved_a_candidate(environ: dict) -> bool:
     return not head and preflight not in ("", "success")
 
 
+def _as_count(environ: dict, key: str):
+    """An integer, or `UNKNOWN`. Never a zero invented to fill a gap.
+
+    The previous version returned 0 on `ValueError`, which turned a job output
+    that arrived malformed — or as the empty string from a job that never ran —
+    into the affirmative claim "nothing was spent". That is the fail-open this
+    function exists to remove: a run that cannot say what it spent must say so,
+    because a zero is read as evidence and an absence is not."""
+    raw = str(environ.get(key) or "").strip()
+    if not raw:
+        return attemptjournal.UNKNOWN
+    try:
+        value = int(raw)
+    except ValueError:
+        return attemptjournal.UNKNOWN
+    return value if value >= 0 else attemptjournal.UNKNOWN
+
+
+def _sum(*values):
+    """`UNKNOWN` is absorbing: a total containing an unknown is unknown."""
+    if any(value == attemptjournal.UNKNOWN for value in values):
+        return attemptjournal.UNKNOWN
+    return sum(values)
+
+
+def _job_attempts(environ: dict, job: str) -> dict:
+    """One spending job's contribution, and whether it may be believed.
+
+    Three cases, kept apart because collapsing any two of them is how a zero
+    gets invented:
+
+    * the job never ran — it attempted nothing, and that is KNOWN, not unknown;
+    * the job ran and its ledger is whole — the numbers are exact;
+    * the job ran and its ledger is missing, invalid or truncated — UNKNOWN,
+      whatever the numeric outputs happen to say. A number carried out of a
+      broken ledger is not a smaller number; it is not a number."""
+    result = str(environ.get(f"{job}_RESULT") or "").strip().lower()
+    state = str(environ.get(f"MIDTERM_{job}_ACCOUNTING_STATE") or "").strip()
+    complete = str(environ.get(f"MIDTERM_{job}_ACCOUNTING_COMPLETE") or ""
+                   ).strip().lower() == "true"
+    if result in ("", "skipped", "cancelled"):
+        return {"provider": 0, "generation": 0, "believable": True,
+                "state": attemptjournal.ATTEMPTS_KNOWN_ZERO, "ran": False}
+    if state not in attemptjournal.KNOWN_STATES or not complete:
+        return {"provider": attemptjournal.UNKNOWN,
+                "generation": attemptjournal.UNKNOWN, "believable": False,
+                "state": state or attemptjournal.ATTEMPT_ACCOUNTING_UNAVAILABLE,
+                "ran": True}
+    return {"provider": _as_count(environ, f"MIDTERM_{job}_PROVIDER_ATTEMPTS"),
+            "generation": _as_count(
+                environ, f"MIDTERM_{job}_GENERATION_ATTEMPTS")
+            if job == "PANEL" else 0,
+            "believable": True, "state": state, "ran": True}
+
+
+def attempt_totals(environ: dict) -> dict:
+    """What was attempted, from the durable ledger rather than the evidence.
+
+    The evidence files are written at the END of each path, so a run that
+    refused after its first provider call reported nothing at all — the state
+    panel run 31608202983 ended in. The attempt journal is written before each
+    call and survives the refusal, and its totals arrive here as job outputs
+    because `RUNNER_TEMP` does not cross a job boundary.
+
+    One unbelievable job poisons the total. A believable count beside an
+    unreadable panel is not a run that spent the count's number; it is a run
+    that cannot say what it spent."""
+    jobs = {job: _job_attempts(environ, job) for job in ("COUNT", "PANEL")}
+    provider = _sum(*(j["provider"] for j in jobs.values()))
+    generation = _sum(*(j["generation"] for j in jobs.values()))
+    states = sorted({j["state"] for j in jobs.values() if j["ran"]})
+    if not any(j["believable"] for j in jobs.values()) or not all(
+            j["believable"] for j in jobs.values()):
+        unbelievable = [j["state"] for j in jobs.values()
+                        if not j["believable"]]
+        return {"provider_calls": attemptjournal.UNKNOWN,
+                "generation_calls": attemptjournal.UNKNOWN,
+                "accounting_state": unbelievable[0],
+                "accounting_detail": f"job states {states or ['none']}"}
+    if not states:
+        return {"provider_calls": 0, "generation_calls": 0,
+                "accounting_state": attemptjournal.ATTEMPTS_KNOWN_ZERO,
+                "accounting_detail": "no job that could spend ever ran"}
+    state = (attemptjournal.ATTEMPTS_KNOWN_NONZERO
+             if attemptjournal.ATTEMPTS_KNOWN_NONZERO in states
+             else attemptjournal.ATTEMPTS_KNOWN_ZERO)
+    return {"provider_calls": provider, "generation_calls": generation,
+            "accounting_state": state,
+            "accounting_detail": f"job states {states}"}
+
+
 def perform(environ: dict, *, api, opener) -> dict:
     if preflight_never_resolved_a_candidate(environ):
         return {"outcome": NOTHING_TO_FINALIZE,
@@ -81,6 +172,7 @@ def perform(environ: dict, *, api, opener) -> dict:
             opener=opener, token=env["GITHUB_TOKEN"]))
 
     latest = latest_state_per_context(statuses)
+    totals = attempt_totals(environ)
     text = assert_no_trusted_claim(render_summary(
         pr_number=environ.get("CANDIDATE_PR_NUMBER", "?"), head_sha=head,
         base_sha=environ.get("CANDIDATE_BASE_SHA", "?"),
@@ -90,9 +182,11 @@ def perform(environ: dict, *, api, opener) -> dict:
         panel_state=latest.get("midterm-panel-review", "not published"),
         models=list(PANEL_MODELS),
         decision=environ.get("MIDTERM_DECISION", "unknown"),
-        evidence_digests={}, provider_calls=int(
-            environ.get("MIDTERM_PROVIDER_CALLS", 0) or 0),
-        generation_calls=int(environ.get("MIDTERM_GENERATION_CALLS", 0) or 0),
+        evidence_digests={},
+        provider_calls=totals["provider_calls"],
+        generation_calls=totals["generation_calls"],
+        accounting_state=totals["accounting_state"],
+        accounting_detail=totals["accounting_detail"],
         run_url=target))
     summary(text)
     return {"closed": closed, "latest": latest, "summary": text}

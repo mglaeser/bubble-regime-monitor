@@ -262,6 +262,16 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    # Carried out of the job because RUNNER_TEMP is per-job: the journal this
+    # job writes is not on finalize's runner at all. Without these, a refusal
+    # between the first provider call and the evidence write leaves finalize
+    # with nothing to report but a zero it cannot justify.
+    outputs:
+      provider_attempts: ${{ steps.attempts.outputs.provider_attempts }}
+      generation_attempts: ${{ steps.attempts.outputs.generation_attempts }}
+      journal_present: ${{ steps.attempts.outputs.journal_present }}
+      accounting_complete: ${{ steps.attempts.outputs.accounting_complete }}
+      accounting_state: ${{ steps.attempts.outputs.accounting_state }}
     permissions:
       contents: read
       actions: read
@@ -506,6 +516,32 @@ jobs:
           # leave the trusted runtime unimportable.
           python -P -s -m midtermpanel.countcli
 
+      # BEFORE the evidence upload, and `always()`, because the run this exists
+      # for is the one where there is no evidence to upload. `continue-on-error`
+      # so that bookkeeping can never be the step that turns an honest refusal
+      # into a second, louder failure with a different cause.
+      - name: Account for every provider attempt
+        id: attempts
+        if: always()
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}
+        env:
+          PYTHONPATH: ${{ runner.temp }}/midterm/runtime
+        run: |
+          python -P -s -m midtermpanel.attemptscli
+
+      - name: Retain the provider attempt journal
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: midterm-count-attempts-${{ needs.preflight.outputs.head_sha }}
+          path: ${{ runner.temp }}/midterm/provider-attempts.jsonl
+          # `ignore`, unlike the evidence below: a run that refused before its
+          # first provider call correctly has no journal, and that is not an
+          # error to report.
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Retain count evidence and the private plan
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -526,6 +562,15 @@ jobs:
     needs: [preflight, count]
     if: needs.preflight.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    # Same reason as `count` — a different runner, a different RUNNER_TEMP.
+    # These are the generation attempts, which is the number the run cap and
+    # the operator's spend reconciliation are both about.
+    outputs:
+      provider_attempts: ${{ steps.attempts.outputs.provider_attempts }}
+      generation_attempts: ${{ steps.attempts.outputs.generation_attempts }}
+      journal_present: ${{ steps.attempts.outputs.journal_present }}
+      accounting_complete: ${{ steps.attempts.outputs.accounting_complete }}
+      accounting_state: ${{ steps.attempts.outputs.accounting_state }}
     permissions:
       contents: read
       actions: read
@@ -755,6 +800,25 @@ jobs:
           # leave the trusted runtime unimportable.
           python -P -s -m midtermpanel.panelcli
 
+      - name: Account for every provider attempt
+        id: attempts
+        if: always()
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}
+        env:
+          PYTHONPATH: ${{ runner.temp }}/midterm/runtime
+        run: |
+          python -P -s -m midtermpanel.attemptscli
+
+      - name: Retain the provider attempt journal
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: midterm-panel-attempts-${{ needs.preflight.outputs.head_sha }}
+          path: ${{ runner.temp }}/midterm/provider-attempts.jsonl
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Retain private verdict evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -823,5 +887,20 @@ jobs:
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           COUNT_RESULT: ${{ needs.count.result }}
           PANEL_RESULT: ${{ needs.panel.result }}
+          # The attempt ledger, carried from the two jobs that could spend.
+          # Reported even when neither wrote an evidence file, which is the
+          # state panel run 31608202983 ended in.
+          MIDTERM_COUNT_PROVIDER_ATTEMPTS: ${{ needs.count.outputs.provider_attempts }}
+          MIDTERM_PANEL_PROVIDER_ATTEMPTS: ${{ needs.panel.outputs.provider_attempts }}
+          MIDTERM_PANEL_GENERATION_ATTEMPTS: ${{ needs.panel.outputs.generation_attempts }}
+          MIDTERM_COUNT_JOURNAL_PRESENT: ${{ needs.count.outputs.journal_present }}
+          MIDTERM_PANEL_JOURNAL_PRESENT: ${{ needs.panel.outputs.journal_present }}
+          # Whether the numbers above may be believed. Without these, an
+          # unreadable ledger arrives as an empty string and would be reported
+          # as zero — the fail-open this correction removes.
+          MIDTERM_COUNT_ACCOUNTING_COMPLETE: ${{ needs.count.outputs.accounting_complete }}
+          MIDTERM_PANEL_ACCOUNTING_COMPLETE: ${{ needs.panel.outputs.accounting_complete }}
+          MIDTERM_COUNT_ACCOUNTING_STATE: ${{ needs.count.outputs.accounting_state }}
+          MIDTERM_PANEL_ACCOUNTING_STATE: ${{ needs.panel.outputs.accounting_state }}
         run: |
           python -m midtermpanel.finalizecli

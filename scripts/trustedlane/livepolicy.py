@@ -87,6 +87,18 @@ ADVISORY_STEPS = {
     "ci.yml": frozenset({
         "Type-check (ADVISORY — 43 tracked errors, A-13; not a gate yet)",
     }),
+    # Bookkeeping, not a gate. This step reads the provider-attempt journal and
+    # reports it as a job output; it decides nothing and blocks nothing. It is
+    # advisory in the exact sense this allowlist is for: it runs `always()`,
+    # AFTER the step that may have refused, and a failure to read the ledger
+    # must not replace the real refusal with a louder one about the ledger.
+    #
+    # What it cannot hide: the attempt counts themselves. A failure here yields
+    # empty job outputs, which `finalize` reports as zero attempts with
+    # `journal_present` false — visibly missing rather than silently clean.
+    "midterm-panel-review.yml": frozenset({
+        "Account for every provider attempt",
+    }),
 }
 
 

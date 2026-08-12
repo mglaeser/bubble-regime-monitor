@@ -75,7 +75,7 @@ from __future__ import annotations
 import json
 import os
 
-from . import PANEL_MODELS
+from . import PANEL_MODELS, attemptjournal
 from .errors import refuse
 
 #: The environment variable the workflow populates from the repository secret.
@@ -342,7 +342,8 @@ class MidtermProviderTransport:
     kind = "LIVE_PROVIDER"
     source = SOURCE_PROVIDER
 
-    def __init__(self, inner, *, capability: str, permitted_paths):
+    def __init__(self, inner, *, capability: str, permitted_paths,
+                 journal=None, environ=None):
         declared = getattr(inner, "source", None)
         if declared != SOURCE_PROVIDER:
             refuse(f"category=live_transport_does_not_declare_provider "
@@ -354,6 +355,35 @@ class MidtermProviderTransport:
         self.capability = capability
         self.permitted_paths = tuple(permitted_paths)
         self.calls = []
+        env = dict(os.environ if environ is None else environ)
+        # Resolved once, at construction, from the same RUNNER_TEMP the
+        # evidence uses. A journal path derived per call would follow an
+        # environment edit made between calls, and the ledger would split.
+        temp = str(env.get("RUNNER_TEMP") or "").strip()
+        self._journal = journal if journal is not None else (
+            attemptjournal.journal_path(temp) if temp else None)
+        self._run_id = env.get("GITHUB_RUN_ID")
+        self._run_attempt = env.get("GITHUB_RUN_ATTEMPT")
+        # A transport that can spend must not exist before its ledger does.
+        # This object's `post` is the only way a provider call is made, so
+        # refusing here means no socket is opened rather than one being opened
+        # unaccounted — which is what the first version of this did.
+        if not self._journal:
+            refuse("category=attempt_journal_location_unknown "
+                   f"transport={type(self).__name__} — RUNNER_TEMP names the "
+                   "only directory this run may write private evidence to, and "
+                   "a provider transport without a durable attempt ledger "
+                   "cannot afterwards say what it spent")
+        try:
+            attemptjournal.initialize(self._journal, run_id=self._run_id,
+                                      run_attempt=self._run_attempt)
+        except OSError as exc:
+            # The exception TYPE only. Its message can name a path, and this
+            # refusal is printed from a job that holds a provider key.
+            refuse("category=attempt_journal_uninitializable "
+                   f"transport={type(self).__name__} "
+                   f"error_class={type(exc).__name__} — the ledger must be "
+                   "provably writable before anything is spent against it")
 
     def post(self, path, body, *, timeout=None):
         # Checked here as well as inside. Not redundant: this one is the
@@ -361,9 +391,42 @@ class MidtermProviderTransport:
         # and it holds even if a future trusted-lane edit widened theirs.
         _assert_path_permitted(path, permitted=self.permitted_paths,
                                transport_class=type(self).__name__)
-        _assert_body_is_bytes(body, transport_class=type(self).__name__)
+        body = _assert_body_is_bytes(body, transport_class=type(self).__name__)
         self.calls.append({"path": path, "bytes": len(body)})
+        # Recorded, flushed and fsynced BEFORE delegation — see
+        # `attemptjournal`. The two validations above run first on purpose: a
+        # call refused by this lane's own allowlist never reaches the socket,
+        # so counting it would overstate what was spent.
+        self._journal_attempt(path, body)
         return self._inner.post(path, body, timeout=timeout)
+
+    def _journal_attempt(self, path, body) -> None:
+        """Write the record, or refuse the call. There is no third option.
+
+        The first version of this swallowed `OSError` and let the call proceed,
+        on the reasoning that bookkeeping should not fail a good run. That was
+        a fail-open: the call happened, the ledger read zero, and the summary
+        gave the reader no reason to distrust the zero.
+
+        Refusing costs a run that would otherwise have succeeded. Proceeding
+        costs the ability to ever say what that run spent, which is the claim
+        the ceiling is enforced against."""
+        try:
+            attemptjournal.record_attempt(
+                self._journal,
+                operation=attemptjournal.OPERATION_FOR_CAPABILITY.get(
+                    self.capability, self.capability),
+                attempt=len(self.calls), endpoint=path, payload=body,
+                run_id=self._run_id, run_attempt=self._run_attempt)
+        except OSError as exc:
+            # `self.calls` already holds this attempt; drop it, because the
+            # call is about to be refused and never reaches the socket.
+            self.calls.pop()
+            refuse("category=attempt_not_journalled "
+                   f"transport={type(self).__name__} "
+                   f"error_class={type(exc).__name__} — the pre-attempt record "
+                   "did not reach the disk, so this call would be unaccountable "
+                   "and is refused instead of made")
 
     def __getattr__(self, name):
         """Forward the trusted transport's own gates — `assert_zero_generation`,

@@ -28,11 +28,32 @@ from __future__ import annotations
 import os
 import sys
 
+from trustedlane.errors import LaneRefusal
+
 from .errors import PanelRefusal
 
 EXIT_OK = 0
 EXIT_REFUSED = 2
 EXIT_UNEXPECTED = 3
+
+#: The category a trusted-lane refusal is reported under.
+#:
+#: One category for the whole class, with the lane's own code and reason carried
+#: as fields beside it. The alternative — promoting the inner reason to the
+#: top-level category — would let the trusted lane define mid-term categories,
+#: and an operator grepping for a mid-term category would be reading a string
+#: chosen by a different package.
+TRUSTED_LANE_CATEGORY = "trusted_lane_refusal"
+
+#: Longer than any reason `trustedlane.errors.refuse` composes, short enough
+#: that an unbounded string cannot be laundered through this line into the log.
+MAX_TRUSTED_REASON_CHARS = 1024
+
+#: Shape a lane code may take. `refuse()` defaults to `TRUSTED_LANE_REFUSED`;
+#: anything that is not a plain identifier is not a code we will echo.
+_CODE_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                  "abcdefghijklmnopqrstuvwxyz0123456789_.:-")
+UNPRINTABLE_CODE = "UNPRINTABLE_CODE"
 
 #: Substrings that must never reach stdout, stderr or the job summary.
 #:
@@ -43,6 +64,62 @@ EXIT_UNEXPECTED = 3
 #: refusal output rather than assumed.
 NEVER_PRINT = ("Bearer ", "Authorization", "Traceback (most recent call last)",
                "sk-", "ghp_", "github_pat_")
+
+
+def _printable_code(code) -> str:
+    """A lane code we are willing to echo, or a fixed stand-in.
+
+    The code is echoed unquoted so an operator can grep for it, which means a
+    code carrying a newline would forge a second log line. Constrained to a
+    plain identifier rather than sanitized in place: there is no legitimate
+    code outside that shape, so anything else is a defect worth showing as
+    one."""
+    text = code if isinstance(code, str) else ""
+    if not text or len(text) > 64 or not set(text) <= _CODE_CHARS:
+        return UNPRINTABLE_CODE
+    return text
+
+
+def sanitized_trusted_reason(reason) -> tuple:
+    """`(text, ok)` — whether a lane reason may be echoed verbatim.
+
+    `trustedlane.errors.refuse` composes reasons from fixed strings and is
+    intended to be sanitized already. This is the final output guard anyway,
+    because "intended to be" is the assumption every leak in this repository
+    has been made of, and because `LaneRefusal` is an ordinary class that any
+    code — including code reached through a provider response — can construct
+    directly with an arbitrary reason.
+
+    Failing closed loses the diagnostic, which is the whole point of the
+    change. That trade is deliberate: a withheld reason costs one more run to
+    diagnose, and a leaked `Authorization` header costs a credential."""
+    text = reason if isinstance(reason, str) else ""
+    if not text:
+        return ("", False)
+    if len(text) > MAX_TRUSTED_REASON_CHARS:
+        return ("", False)
+    # Control characters, not just newline: a carriage return rewrites the line
+    # in a terminal and an escape sequence can hide the rest of it.
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in text):
+        return ("", False)
+    lowered = text.lower()
+    if any(token.lower() in lowered for token in NEVER_PRINT):
+        return ("", False)
+    return (text, True)
+
+
+def trusted_refusal_line(refusal) -> str:
+    """The one line a `LaneRefusal` is allowed to print.
+
+    Reports `category=trusted_lane_refusal` and carries the lane's own code and
+    reason as fields. Deliberately NOT a `TRUSTED_*` evidence claim: this is a
+    mid-term single-repository run, and the trusted lane is the source of the
+    inner refusal, not a lane this run is entitled to claim it executed."""
+    code = _printable_code(getattr(refusal, "code", None))
+    reason, ok = sanitized_trusted_reason(getattr(refusal, "reason", None))
+    head = (f"MIDTERM_PANEL_REFUSED: category={TRUSTED_LANE_CATEGORY} "
+            f"trusted_code={code}")
+    return f"{head} trusted_reason={reason}" if ok else f"{head} reason_redacted=true"
 
 
 def emit_outputs(outputs: dict, *, stream=None) -> str:
@@ -115,6 +192,18 @@ def run(main_callable, *, name: str) -> int:
         main_callable()
     except PanelRefusal as refusal:
         sys.stderr.write(f"{refusal.code}: {refusal.reason}\n")
+        return EXIT_REFUSED
+    except LaneRefusal as refusal:
+        # BEFORE the generic catch, and a separate branch rather than a wider
+        # `except (PanelRefusal, LaneRefusal)`: the two classes mean different
+        # things. A PanelRefusal is this package deciding; a LaneRefusal is the
+        # trusted lane deciding, and the evidence has to keep saying which.
+        #
+        # Without this branch a lane refusal fell through to `except Exception`
+        # and printed `exception_class=LaneRefusal` with the reason withheld —
+        # which is what a decision the lane took deliberately looked like on
+        # panel run 31608202983, indistinguishable from a crash.
+        sys.stderr.write(f"{trusted_refusal_line(refusal)}\n")
         return EXIT_REFUSED
     except Exception as exc:  # noqa: BLE001 - see docstring
         sys.stderr.write(

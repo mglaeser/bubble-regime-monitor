@@ -93,8 +93,9 @@ def render_summary(*, pr_number, head_sha: str, base_sha: str,
                    ordinary_checks: dict, high_risk: bool,
                    count_state: str, panel_state: str, models: list,
                    decision: str, evidence_digests: dict,
-                   provider_calls: int, generation_calls: int,
-                   run_url: str) -> str:
+                   provider_calls, generation_calls,
+                   run_url: str, accounting_state: str = "",
+                   accounting_detail: str = "") -> str:
     """The job summary. Aggregates only — no prompts, no verdict text.
 
     The private plan and the raw verdicts carry the candidate's code and the
@@ -119,6 +120,12 @@ def render_summary(*, pr_number, head_sha: str, base_sha: str,
         f"- aggregate decision: **{decision}**",
         f"- provider calls: **{provider_calls}** · generation calls: "
         f"**{generation_calls}**",
+        # Stated beside the numbers, always. A reader who cannot see whether
+        # the count is believable will believe it, and `UNKNOWN` printed with
+        # no explanation reads as a rendering bug rather than as the finding
+        # it is.
+        f"- attempt accounting: **{accounting_state or 'NOT_REPORTED'}**"
+        + (f" ({accounting_detail})" if accounting_detail else ""),
         f"- run: {run_url}",
     ]
     if evidence_digests:
