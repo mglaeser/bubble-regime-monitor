@@ -29,6 +29,18 @@ from midtermpanel.errors import PanelRefusal  # noqa: E402
 from trustedlane import statusnames  # noqa: E402
 from trustedlane.errors import LaneRefusal  # noqa: E402
 
+
+def _scratch_journal() -> str:
+    """A writable attempt-journal path for a transport built outside a run.
+
+    A live transport now refuses to exist without a durable ledger — a provider
+    call whose pre-attempt record could not be written is a call the run could
+    never account for. These tests are about the endpoint allowlist and the
+    mode gates, not about accounting, so they get a real throwaway ledger
+    rather than an exemption from needing one."""
+    import tempfile
+    return str(Path(tempfile.mkdtemp()) / "midterm" / "provider-attempts.jsonl")
+
 WORKFLOW = ROOT / ".github" / "workflows" / mp.WORKFLOW_FILENAME
 POLICY = ROOT / "governance" / "midterm-panel-policy.json"
 # A git commit id, not a credential. A bare 40-hex literal is
@@ -435,13 +447,15 @@ class TestCountingAndGeneratingAreDifferentCapabilities:
         return transport.MidtermProviderTransport(
             self.Inner(transport.COUNT_PATH, **kwargs),
             capability="COUNT_TRANSPORT",
-            permitted_paths=(transport.COUNT_PATH,))
+            permitted_paths=(transport.COUNT_PATH,),
+            journal=_scratch_journal())
 
     def _generation(self, **kwargs):
         return transport.MidtermProviderTransport(
             self.Inner(transport.GENERATION_PATH, **kwargs),
             capability="GENERATION_TRANSPORT",
-            permitted_paths=(transport.GENERATION_PATH,))
+            permitted_paths=(transport.GENERATION_PATH,),
+            journal=_scratch_journal())
 
     def test_the_count_transport_cannot_reach_the_generation_endpoint(self):
         live = self._count()
@@ -1082,7 +1096,8 @@ class TestModeSelectsWhichWayTheGatesPoint:
 
         return transport.MidtermProviderTransport(
             Inner(), capability=capability,
-            permitted_paths=(path or transport.COUNT_PATH,))
+            permitted_paths=(path or transport.COUNT_PATH,),
+            journal=_scratch_journal())
 
     def test_a_dry_run_may_not_hold_a_transport_that_could_spend(self):
         live = self._live("GENERATION_TRANSPORT", transport.GENERATION_PATH)

@@ -28,20 +28,22 @@ from .clibase import emit_outputs, run, self_test_report, self_test_requested
 #: declaration whose producer stopped emitting it yields the empty string at
 #: run time rather than failing. The producer-side test reads this.
 PUBLIC_OUTPUTS = ("provider_attempts", "count_attempts", "generation_attempts",
-                  "journal_present")
+                  "journal_present", "accounting_complete", "accounting_state")
 
 
 def perform(environ: dict) -> dict:
     temp = str(environ.get("RUNNER_TEMP") or "").strip()
     path = attemptjournal.journal_path(temp) if temp else ""
     counts = attemptjournal.counts(path)
-    emit_outputs(counts)
+    emit_outputs({key: counts[key] for key in PUBLIC_OUTPUTS})
     sys.stdout.write(
         "MIDTERM_PROVIDER_ATTEMPTS: "
         f"provider_attempts={counts['provider_attempts']} "
         f"count_attempts={counts['count_attempts']} "
         f"generation_attempts={counts['generation_attempts']} "
-        f"journal_present={str(counts['journal_present']).lower()}\n")
+        f"journal_present={str(counts['journal_present']).lower()} "
+        f"accounting_complete={str(counts['accounting_complete']).lower()} "
+        f"accounting_state={counts['accounting_state']}\n")
     return counts
 
 

@@ -23,7 +23,6 @@ because the helpers were never the thing that was wrong: the dispatch was.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -208,53 +207,18 @@ class TestOutputGuard:
         assert "category=trusted_lane_refusal" in err
 
 
-class TestAttemptJournal:
-    """Attempts are counted where a refusal cannot erase them."""
+class TestAttemptJournalMovedOut:
+    """The ledger's own semantics are pinned in `test_midterm_attempt_accounting`.
 
-    def test_absent_journal_is_zero_and_says_so(self, tmp_path):
-        counts = attemptjournal.counts(str(tmp_path / "nope.jsonl"))
-        assert counts["provider_attempts"] == 0
-        assert counts["generation_attempts"] == 0
-        assert counts["journal_present"] is False
+    This file had a `TestAttemptJournal` class asserting that an absent journal
+    reads as zero and that a truncated final line is dropped without comment.
+    Both assertions encoded the fail-open the accounting correction removes, so
+    they are gone rather than adjusted — a test that asserts the defect is worse
+    than no test, because it defends the defect during review."""
 
-    def test_an_attempt_is_durable_immediately(self, tmp_path):
-        """Written and fsynced before the byte is sent, so a crash keeps it."""
-        path = attemptjournal.journal_path(str(tmp_path))
-        attemptjournal.record_attempt(
-            path, operation=attemptjournal.COUNT_OPERATION, attempt=1,
-            endpoint="/v1/responses/input_tokens", payload=b'{"a":1}')
-        assert attemptjournal.counts(path)["provider_attempts"] == 1
-
-    def test_journal_carries_no_request_or_provider_text(self, tmp_path):
-        path = attemptjournal.journal_path(str(tmp_path))
-        secret = b'{"prompt":"the candidate diff","key":"sk-live-000"}'
-        attemptjournal.record_attempt(
-            path, operation=attemptjournal.COUNT_OPERATION, attempt=1,
-            endpoint="/v1/responses/input_tokens", payload=secret)
-        raw = Path(path).read_text(encoding="utf-8")
-        assert "sk-live-000" not in raw
-        assert "the candidate diff" not in raw
-        entry = json.loads(raw.strip())
-        assert set(entry) == set(attemptjournal.PERMITTED_FIELDS)
-        assert entry["payload_bytes"] == len(secret)
-
-    def test_a_truncated_final_line_does_not_lose_the_ledger(self, tmp_path):
-        path = attemptjournal.journal_path(str(tmp_path))
-        attemptjournal.record_attempt(
-            path, operation=attemptjournal.COUNT_OPERATION, attempt=1,
-            endpoint="/p", payload=b"{}")
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write('{"operation":"count","att')
-        assert attemptjournal.counts(path)["provider_attempts"] == 1
-
-    def test_count_and_generation_are_separated(self, tmp_path):
-        path = attemptjournal.journal_path(str(tmp_path))
-        for i, op in enumerate((attemptjournal.COUNT_OPERATION,
-                                attemptjournal.GENERATION_OPERATION,
-                                attemptjournal.GENERATION_OPERATION), start=1):
-            attemptjournal.record_attempt(path, operation=op, attempt=i,
-                                          endpoint="/p", payload=b"{}")
-        counts = attemptjournal.counts(path)
-        assert counts["provider_attempts"] == 3
-        assert counts["count_attempts"] == 1
-        assert counts["generation_attempts"] == 2
+    def test_unavailable_accounting_is_not_zero(self, tmp_path):
+        counts = attemptjournal.counts(
+            attemptjournal.journal_path(str(tmp_path)))
+        assert counts["provider_attempts"] == attemptjournal.UNKNOWN
+        assert counts["accounting_state"] == (
+            attemptjournal.ATTEMPT_ACCOUNTING_UNAVAILABLE)

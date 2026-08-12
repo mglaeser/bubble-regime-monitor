@@ -270,6 +270,8 @@ jobs:
       provider_attempts: ${{ steps.attempts.outputs.provider_attempts }}
       generation_attempts: ${{ steps.attempts.outputs.generation_attempts }}
       journal_present: ${{ steps.attempts.outputs.journal_present }}
+      accounting_complete: ${{ steps.attempts.outputs.accounting_complete }}
+      accounting_state: ${{ steps.attempts.outputs.accounting_state }}
     permissions:
       contents: read
       actions: read
@@ -567,6 +569,8 @@ jobs:
       provider_attempts: ${{ steps.attempts.outputs.provider_attempts }}
       generation_attempts: ${{ steps.attempts.outputs.generation_attempts }}
       journal_present: ${{ steps.attempts.outputs.journal_present }}
+      accounting_complete: ${{ steps.attempts.outputs.accounting_complete }}
+      accounting_state: ${{ steps.attempts.outputs.accounting_state }}
     permissions:
       contents: read
       actions: read
@@ -891,5 +895,12 @@ jobs:
           MIDTERM_PANEL_GENERATION_ATTEMPTS: ${{ needs.panel.outputs.generation_attempts }}
           MIDTERM_COUNT_JOURNAL_PRESENT: ${{ needs.count.outputs.journal_present }}
           MIDTERM_PANEL_JOURNAL_PRESENT: ${{ needs.panel.outputs.journal_present }}
+          # Whether the numbers above may be believed. Without these, an
+          # unreadable ledger arrives as an empty string and would be reported
+          # as zero — the fail-open this correction removes.
+          MIDTERM_COUNT_ACCOUNTING_COMPLETE: ${{ needs.count.outputs.accounting_complete }}
+          MIDTERM_PANEL_ACCOUNTING_COMPLETE: ${{ needs.panel.outputs.accounting_complete }}
+          MIDTERM_COUNT_ACCOUNTING_STATE: ${{ needs.count.outputs.accounting_state }}
+          MIDTERM_PANEL_ACCOUNTING_STATE: ${{ needs.panel.outputs.accounting_state }}
         run: |
           python -m midtermpanel.finalizecli
