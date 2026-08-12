@@ -894,9 +894,16 @@ class TestWorkflowOutputsHaveProducers:
 
         `preflightcli.decide()` builds the dict that becomes the job outputs.
         If it stops emitting one the workflow declares, the declaration silently
-        yields empty — the same failure from the other end."""
-        from midtermpanel import preflightcli
-        emitted = set(preflightcli.PUBLIC_OUTPUTS)
+        yields empty — the same failure from the other end.
+
+        Two producers now, not one: `count` and `panel` declare the provider
+        attempt counts, which `attemptscli` emits. The union is checked rather
+        than preflight alone, because an output produced by either step is
+        produced — and an output produced by neither is the defect this
+        catches."""
+        from midtermpanel import attemptscli, preflightcli
+        emitted = set(preflightcli.PUBLIC_OUTPUTS) | set(
+            attemptscli.PUBLIC_OUTPUTS)
         declared = self._declared()
         assert self._consumed() <= emitted, sorted(self._consumed() - emitted)
         assert declared <= emitted, sorted(declared - emitted)

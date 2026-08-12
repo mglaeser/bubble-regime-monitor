@@ -75,7 +75,7 @@ from __future__ import annotations
 import json
 import os
 
-from . import PANEL_MODELS
+from . import PANEL_MODELS, attemptjournal
 from .errors import refuse
 
 #: The environment variable the workflow populates from the repository secret.
@@ -342,7 +342,8 @@ class MidtermProviderTransport:
     kind = "LIVE_PROVIDER"
     source = SOURCE_PROVIDER
 
-    def __init__(self, inner, *, capability: str, permitted_paths):
+    def __init__(self, inner, *, capability: str, permitted_paths,
+                 journal=None, environ=None):
         declared = getattr(inner, "source", None)
         if declared != SOURCE_PROVIDER:
             refuse(f"category=live_transport_does_not_declare_provider "
@@ -354,6 +355,15 @@ class MidtermProviderTransport:
         self.capability = capability
         self.permitted_paths = tuple(permitted_paths)
         self.calls = []
+        env = dict(os.environ if environ is None else environ)
+        # Resolved once, at construction, from the same RUNNER_TEMP the
+        # evidence uses. A journal path derived per call would follow an
+        # environment edit made between calls, and the ledger would split.
+        temp = str(env.get("RUNNER_TEMP") or "").strip()
+        self._journal = journal if journal is not None else (
+            attemptjournal.journal_path(temp) if temp else None)
+        self._run_id = env.get("GITHUB_RUN_ID")
+        self._run_attempt = env.get("GITHUB_RUN_ATTEMPT")
 
     def post(self, path, body, *, timeout=None):
         # Checked here as well as inside. Not redundant: this one is the
@@ -361,9 +371,34 @@ class MidtermProviderTransport:
         # and it holds even if a future trusted-lane edit widened theirs.
         _assert_path_permitted(path, permitted=self.permitted_paths,
                                transport_class=type(self).__name__)
-        _assert_body_is_bytes(body, transport_class=type(self).__name__)
+        body = _assert_body_is_bytes(body, transport_class=type(self).__name__)
         self.calls.append({"path": path, "bytes": len(body)})
+        # Recorded, flushed and fsynced BEFORE delegation — see
+        # `attemptjournal`. The two validations above run first on purpose: a
+        # call refused by this lane's own allowlist never reaches the socket,
+        # so counting it would overstate what was spent.
+        self._journal_attempt(path, body)
         return self._inner.post(path, body, timeout=timeout)
+
+    def _journal_attempt(self, path, body) -> None:
+        """Never let bookkeeping be the thing that fails the run.
+
+        A journal write that raises would convert a successful count into an
+        unexpected exception, which is a worse outcome than an incomplete
+        ledger. The failure is not silent: `counts()` reports
+        `journal_present`, so a missing ledger is visible as missing rather
+        than as zero."""
+        if not self._journal:
+            return
+        try:
+            attemptjournal.record_attempt(
+                self._journal,
+                operation=attemptjournal.OPERATION_FOR_CAPABILITY.get(
+                    self.capability, self.capability),
+                attempt=len(self.calls), endpoint=path, payload=body,
+                run_id=self._run_id, run_attempt=self._run_attempt)
+        except OSError:
+            return
 
     def __getattr__(self, name):
         """Forward the trusted transport's own gates — `assert_zero_generation`,

@@ -49,6 +49,34 @@ def preflight_never_resolved_a_candidate(environ: dict) -> bool:
     return not head and preflight not in ("", "success")
 
 
+def _as_int(environ: dict, key: str) -> int:
+    """A job output from a skipped job renders as `''`, not as `0`."""
+    try:
+        return int(str(environ.get(key) or "0").strip() or "0")
+    except ValueError:
+        return 0
+
+
+def attempt_totals(environ: dict) -> dict:
+    """What was attempted, from the durable ledger rather than the evidence.
+
+    The evidence files are written at the END of each path, so a run that
+    refused after its first provider call reported nothing at all — the state
+    panel run 31608202983 ended in. The attempt journal is written before each
+    call and survives the refusal, and its totals arrive here as job outputs
+    because `RUNNER_TEMP` does not cross a job boundary.
+
+    Falls back to the older `MIDTERM_*_CALLS` variables so a run whose count
+    job predates the journal still reports what it knew."""
+    provider = (_as_int(environ, "MIDTERM_COUNT_PROVIDER_ATTEMPTS")
+                + _as_int(environ, "MIDTERM_PANEL_PROVIDER_ATTEMPTS"))
+    generation = _as_int(environ, "MIDTERM_PANEL_GENERATION_ATTEMPTS")
+    if provider or generation:
+        return {"provider_calls": provider, "generation_calls": generation}
+    return {"provider_calls": _as_int(environ, "MIDTERM_PROVIDER_CALLS"),
+            "generation_calls": _as_int(environ, "MIDTERM_GENERATION_CALLS")}
+
+
 def perform(environ: dict, *, api, opener) -> dict:
     if preflight_never_resolved_a_candidate(environ):
         return {"outcome": NOTHING_TO_FINALIZE,
@@ -90,9 +118,7 @@ def perform(environ: dict, *, api, opener) -> dict:
         panel_state=latest.get("midterm-panel-review", "not published"),
         models=list(PANEL_MODELS),
         decision=environ.get("MIDTERM_DECISION", "unknown"),
-        evidence_digests={}, provider_calls=int(
-            environ.get("MIDTERM_PROVIDER_CALLS", 0) or 0),
-        generation_calls=int(environ.get("MIDTERM_GENERATION_CALLS", 0) or 0),
+        evidence_digests={}, **attempt_totals(environ),
         run_url=target))
     summary(text)
     return {"closed": closed, "latest": latest, "summary": text}
