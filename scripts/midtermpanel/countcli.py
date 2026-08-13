@@ -308,18 +308,33 @@ def main() -> None:
 
     from . import dryrun
     from .engine import MODE_DRY_RUN, MODE_PROVIDER
-    from .transport import live_count_transport, read_provider_key
+    from .transport import (
+        live_count_transport,
+        provider_http_opener,
+        read_provider_key,
+    )
 
     environ = dict(os.environ)
     dry = dryrun.is_dry_run(environ)
     mode = MODE_DRY_RUN if dry else MODE_PROVIDER
+    # TWO openers, two protocols, two names. They are not interchangeable and
+    # the single name `opener` is what let one be passed where the other was
+    # expected:
+    #
+    #   github_status_opener   urlopen(url_or_Request, data=None, timeout=...)
+    #   provider_http_opener   opener(method, url, headers, body)
+    #                              -> (status, bytes)
+    #
+    # The provider one is constructed at the point of use, not here, so that
+    # nothing capable of reaching a provider exists while the run is still
+    # doing local work.
     if dry:
         dryrun.assert_no_credential_is_present(environ)
         sink = dryrun.status_sink(environ)
-        opener = sink
+        github_status_opener = sink
     else:
         sink = None
-        opener = urllib.request.urlopen
+        github_status_opener = urllib.request.urlopen
 
     # 1. Everything local. Nothing here can reach a socket.
     context = prepare_count_context(environ, mode=mode)
@@ -337,7 +352,7 @@ def main() -> None:
     published = [publish(
         pending(candidate_head_sha=head, context=COUNT_STATUS,
                 target_url=target, run_id=run_id, run_attempt=attempt),
-        opener=opener, token=env["GITHUB_TOKEN"])]
+        opener=github_status_opener, token=env["GITHUB_TOKEN"])]
 
     # 3. Only now is a provider-capable transport constructed. The ceilings
     #    come from the selected operator profile, never from a workflow literal.
@@ -349,13 +364,14 @@ def main() -> None:
 
         def factory(engine):
             return live_count_transport(
-                engine, opener=urllib.request.urlopen, key=key,
+                engine, opener=provider_http_opener(
+                    capability="COUNT_TRANSPORT"), key=key,
                 authorized_input_tokens=ceilings[
                     "authorized_total_input_tokens"])
 
     counted = execute_count_context(context, transport_factory=factory)
-    outcome = perform(environ, opener=opener, already_published=published,
-                      **counted)
+    outcome = perform(environ, opener=github_status_opener,
+                      already_published=published, **counted)
 
     if dry:
         proof = dryrun.record(environ, sink=sink,

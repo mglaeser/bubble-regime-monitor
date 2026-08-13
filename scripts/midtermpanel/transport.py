@@ -462,6 +462,49 @@ class MidtermProviderTransport:
         return sorted({call["path"] for call in self.calls})
 
 
+#: The response bound for each capability. Count replies are a few hundred
+#: bytes; a generation body is up to the adapter's 4 MiB. Sharing one bound
+#: silently truncated generation responses, which then failed to parse as if
+#: the model had answered badly.
+COUNT_RESPONSE_BYTES = 64 * 1024
+GENERATION_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def provider_http_opener(*, capability: str):
+    """The mid-term lane's provider opener, gated by the mid-term lane.
+
+    `trustedlane.transport.open_https` refuses any phase that is not D1 or D2,
+    and this lane is `MIDTERM_SINGLE_REPO` — correctly not one of them. The
+    previous code responded to that refusal by handing the provider transport
+    `urllib.request.urlopen` instead, which is a different calling convention
+    entirely: the lane calls `opener(method, url, headers, body)` and `urlopen`
+    accepts three positional parameters. Every provider call raised `TypeError`
+    before a socket existed; the engine retried it as a transport fault and
+    stopped at `TOKEN_COUNT_RETRY_EXHAUSTED`, naming neither side. Panel run
+    31641139382 was three prepared attempts and, on that reading, no request.
+
+    The fix is to reuse the trusted lane's HTTP client — fixed host, verified
+    TLS, no proxy, bounded response — behind THIS lane's own authorization,
+    rather than to write a second network stack or to loosen the phase gate on
+    the first one. `build_https_opener` makes no authority decision, so calling
+    it is not a way around anything; the decision is the check below.
+
+    The opener holds no credential. `_send` composes the `Authorization` header
+    per request from the credential the transport was constructed with, so a
+    captured opener is not a captured key."""
+    from trustedlane import transport as trustedtransport
+
+    bounds = {"COUNT_TRANSPORT": COUNT_RESPONSE_BYTES,
+              "GENERATION_TRANSPORT": GENERATION_RESPONSE_BYTES}
+    if capability not in bounds:
+        refuse(f"category=provider_opener_capability_not_governed "
+               f"capability={capability!r} permitted={sorted(bounds)} — the "
+               "response bound is per-capability, and an ungoverned capability "
+               "has no bound to apply")
+    return trustedtransport.build_https_opener(
+        max_response_bytes=bounds[capability])
+
+
 def live_count_transport(engine: dict, *, opener, key: str,
                          authorized_input_tokens: int
                          ) -> MidtermProviderTransport:
