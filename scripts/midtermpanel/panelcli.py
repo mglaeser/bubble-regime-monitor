@@ -277,7 +277,11 @@ def main() -> None:
 
     from . import dryrun
     from .engine import MODE_DRY_RUN, MODE_PROVIDER
-    from .transport import live_generation_transport, read_provider_key
+    from .transport import (
+        live_generation_transport,
+        provider_http_opener,
+        read_provider_key,
+    )
 
     environ = dict(os.environ)
 
@@ -304,13 +308,19 @@ def main() -> None:
     # limit nobody wrote, reported as an exhausted budget.
     cap = selected_generation_attempt_cap(environ)
 
+    # Two protocols, two names — see `countcli.main`. The provider one takes
+    # `(method, url, headers, body)`; `urlopen` does not, and passing it here
+    # was the same defect that stopped the count job at
+    # TOKEN_COUNT_RETRY_EXHAUSTED. Generation carries the larger response bound.
+    github_status_opener = urllib.request.urlopen
     prepared = panel_execution(
         environ, mode=MODE_PROVIDER,
         transport_factory=lambda engine: live_generation_transport(
-            engine, opener=urllib.request.urlopen, key=key,
+            engine, opener=provider_http_opener(
+                capability="GENERATION_TRANSPORT"), key=key,
             generation_attempt_cap=cap))
     perform(environ, execute_fn=prepared["execute_fn"],
-            opener=urllib.request.urlopen,
+            opener=github_status_opener,
             panel_identity=prepared["identity_binding"],
             require_identity=prepared["require_identity"])
 

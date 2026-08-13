@@ -58,6 +58,18 @@ CREDENTIAL_ENV = "TRUSTED_VERIFIER_OPENAI_KEY"  # pragma: allowlist secret
 #: first in order to find that out is the wrong order.
 MAX_RESPONSE_BYTES = 64 * 1024
 
+#: The calling convention every provider opener in this repository must satisfy:
+#:
+#:     opener(method: str, url: str, headers: dict, body: bytes)
+#:         -> tuple[status: int, body: bytes]
+#:
+#: Named, and stamped onto the openers this module builds, because the defect
+#: it exists to prevent was a DIFFERENT callable — `urllib.request.urlopen`,
+#: whose protocol is `urlopen(url, data=None, timeout=...)` — being passed
+#: where this one was expected. Both are "an opener" to a reader; only one of
+#: them can be called with four positional arguments.
+PROVIDER_OPENER_PROTOCOL = "METHOD_URL_HEADERS_BODY__STATUS_BYTES"
+
 #: A count above this is refused rather than believed. The ledger multiplies
 #: counts by prices, and an absurd count is either a different endpoint's
 #: response or a number nobody should silently budget for.
@@ -176,29 +188,45 @@ def assert_credential_shape(value) -> str:
     return value
 
 
-def open_https(*, phase: str, max_response_bytes: int = MAX_RESPONSE_BYTES):
-    """Build the real opener. The HTTP client is imported HERE, after the
-    refusal, so that importing this module loads no network code at all.
+def build_https_opener(*, max_response_bytes: int = MAX_RESPONSE_BYTES):
+    """The transport itself, with NO authority decision of its own.
 
-    `max_response_bytes` is a parameter because D1 and D2 have different
-    bounds. It used to be hardcoded to this module's `MAX_RESPONSE_BYTES`
-    (64 KiB), which is right for a count reply of a few hundred bytes and wrong
-    for a generation body — `adapter.MAX_RESPONSE_BYTES` is 4 MiB. D2 was
-    handed the count lane's opener, so any real generation response over 64 KiB
-    was silently truncated and then failed to parse, and the adapter's own
-    4 MiB bound was unreachable. Found by adversarial review.
+    Split out of `open_https` so a lane that is not D1/D2 can reuse THIS —
+    the fixed-host, verified-TLS, no-proxy HTTP client — after applying its own
+    authorization, instead of substituting a second network stack.
+
+    That substitution is not hypothetical. The mid-term lane could not call
+    `open_https` (its phase is not D1 or D2, and rightly so), so it passed
+    `urllib.request.urlopen` into the provider transport instead. The two
+    protocols do not match: this lane calls its opener as
+    `opener(method, url, headers, body)` and `urlopen` takes only three
+    positional parameters, so every provider call raised `TypeError` before a
+    socket was opened, was retried as a transport fault, and the run ended in
+    `TOKEN_COUNT_RETRY_EXHAUSTED` naming neither side.
+
+    THE PROTOCOL, which every caller must satisfy exactly:
+
+        opener(method: str, url: str, headers: dict, body: bytes)
+            -> tuple[status: int, body: bytes]
+
+    What this function does NOT do is decide whether the caller may call a
+    provider. That decision belongs to the caller and differs between lanes;
+    keeping it out of here is what makes reuse safe rather than a way around
+    the gate.
+
+    The HTTP client is imported HERE so that importing this module loads no
+    network code at all.
+
+    `max_response_bytes` is a parameter because count and generation have
+    different bounds. It used to be hardcoded to this module's
+    `MAX_RESPONSE_BYTES` (64 KiB), which is right for a count reply of a few
+    hundred bytes and wrong for a generation body — `adapter.MAX_RESPONSE_BYTES`
+    is 4 MiB. D2 was handed the count lane's opener, so any real generation
+    response over 64 KiB was silently truncated and then failed to parse.
 
     No proxy environment is consulted. On a hosted runner there is none, and
     honouring one would let an environment variable redirect a credential-
     bearing request to a host nobody approved."""
-    from .phases import D1, D2, assert_phase_permitted
-
-    if phase not in (D1, D2):
-        refuse(f"category=transport_phase_not_permitted phase={phase!r}")
-    capabilities = assert_phase_permitted(phase)
-    if not capabilities.get("calls_provider"):
-        refuse(f"category=phase_does_not_call_provider phase={phase}")
-
     if isinstance(max_response_bytes, bool) or not isinstance(
             max_response_bytes, int) or max_response_bytes < 1:
         refuse("category=transport_response_bound_invalid")
@@ -210,7 +238,7 @@ def open_https(*, phase: str, max_response_bytes: int = MAX_RESPONSE_BYTES):
     context.check_hostname = True
     context.verify_mode = ssl.CERT_REQUIRED
 
-    def opener(method, url, headers, body):
+    def provider_http_opener(method, url, headers, body):
         host = url.split("/", 3)[2]
         path = "/" + url.split("/", 3)[3]
         connection = http.client.HTTPSConnection(
@@ -222,7 +250,28 @@ def open_https(*, phase: str, max_response_bytes: int = MAX_RESPONSE_BYTES):
         finally:
             connection.close()
 
-    return opener
+    # Named so an opener that reaches a provider is identifiable as one from
+    # the object alone, and so the AST guard has something to assert against.
+    provider_http_opener.protocol = PROVIDER_OPENER_PROTOCOL
+    provider_http_opener.max_response_bytes = max_response_bytes
+    return provider_http_opener
+
+
+def open_https(*, phase: str, max_response_bytes: int = MAX_RESPONSE_BYTES):
+    """D1/D2's opener: the phase gate, then the shared transport.
+
+    The gate is unchanged and stays here rather than moving into the builder.
+    A trusted-lane phase check that a different lane could reuse by calling the
+    builder would not be a check."""
+    from .phases import D1, D2, assert_phase_permitted
+
+    if phase not in (D1, D2):
+        refuse(f"category=transport_phase_not_permitted phase={phase!r}")
+    capabilities = assert_phase_permitted(phase)
+    if not capabilities.get("calls_provider"):
+        refuse(f"category=phase_does_not_call_provider phase={phase}")
+
+    return build_https_opener(max_response_bytes=max_response_bytes)
 
 
 def _send(request: dict, *, opener, credential: str) -> dict:
