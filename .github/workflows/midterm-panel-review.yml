@@ -748,6 +748,36 @@ jobs:
           echo "MIDTERM_TRUSTED_RUNTIME=$runtime" >> "$GITHUB_ENV"
           echo "MIDTERM_TRUSTED_RUNTIME_COMMIT=$trusted" >> "$GITHUB_ENV"
 
+      # The panel needs this for the SAME reason the count job does, and it was
+      # missing here. `panelcli.selected_generation_attempt_cap` reads the
+      # generation cap out of the operator's selected profile rather than out
+      # of a workflow literal — deliberately, so the cap cannot disagree with
+      # `VERIFIER_MAX_GENERATION_CALLS`. That reader needs the PIN record, and
+      # `$GITHUB_ENV` does not cross jobs, so the variable the count job
+      # exported was simply absent here.
+      #
+      # Panel run 31844576977 is what that cost: preflight passed, the count
+      # job made its real provider calls and produced evidence and a plan, and
+      # then the panel job died with an opaque `exception_class=KeyError`
+      # inside the credential-bearing step, having spent the count and produced
+      # no verdict.
+      #
+      # Copied from the TRUSTED checkout, exactly as in `count`. This lane
+      # never checks the candidate out, so `governance/` here is the default
+      # branch's copy; the candidate cannot supply its own caps.
+      #
+      # The run challenge is deliberately NOT copied alongside it. The panel's
+      # challenge comes from the PLAN — it is what the count job actually
+      # counted — and minting a second one here would let the two disagree
+      # while `require_approvals` still passed.
+      - name: Materialise the operator PIN record
+        run: |
+          mkdir -p "$RUNNER_TEMP/midterm/inputs"
+          cp governance/midterm-panel-pins.json \
+            "$RUNNER_TEMP/midterm/inputs/pins.json"
+          echo "MIDTERM_PIN_RECORD_PATH=$RUNNER_TEMP/midterm/inputs/pins.json" \
+            >> "$GITHUB_ENV"
+
       # Materialise the operator-approved identity document BEFORE the step
       # that receives the provider key. GITHUB_TOKEN only: a download that
       # could also reach the provider is a download whose compromise costs

@@ -80,6 +80,32 @@ COUNT_INPUTS = (
      "required": False},
 )
 
+#: The same declaration for the PANEL job, which did not have one.
+#:
+#: The count job's table above is what made "this input has no producer" a
+#: statement a test could check, and it worked: every count input has a step.
+#: The panel job reads inputs too and had no table, so nothing compared it to
+#: the workflow — and the pin record, which `panelcli` needs to know what it
+#: may spend, was exported only by the count job. `$GITHUB_ENV` is per-job, so
+#: the panel job simply did not have it, and found out by raising `KeyError`
+#: inside the step holding the provider key on run 31844576977.
+#:
+#: The challenge is deliberately NOT here. The panel takes it from the PLAN —
+#: it is what the count job actually counted — and a second one minted in this
+#: job could disagree with the first while every check still passed.
+PANEL_INPUTS = (
+    {"name": "repository_path",
+     "variable": "MIDTERM_REPOSITORY_PATH",
+     "kind": "directory",
+     "producer": "panel / assert the candidate is present as OBJECTS",
+     "required": True},
+    {"name": "pin_record_path",
+     "variable": "MIDTERM_PIN_RECORD_PATH",
+     "kind": "json_object",
+     "producer": "panel / materialise the operator PIN record",
+     "required": True},
+)
+
 #: The challenge proves a verdict was written for THIS run. The engine refuses
 #: anything under 16 characters, and a short one is guessable — which proves
 #: nothing at all. Stated here too so the refusal names the input rather than
@@ -158,6 +184,13 @@ def load_repository_path(environ: dict) -> str:
 #: order of magnitude in cost cap, so a default profile is a default budget.
 REVIEW_CLASS_ENV = "MIDTERM_REVIEW_CLASS"
 
+#: The environment variable naming the operator's PIN record on disk.
+#:
+#: Exported by a `Materialise the operator PIN record` step, which every job
+#: that reads caps must carry its own copy of: `$GITHUB_ENV` is per-job, so one
+#: job exporting it says nothing about the next.
+PIN_RECORD_PATH_ENV = "MIDTERM_PIN_RECORD_PATH"
+
 
 def load_pin_values(environ: dict) -> dict:
     """The twelve PIN VALUES and the two transport ceilings for THIS class.
@@ -172,8 +205,27 @@ def load_pin_values(environ: dict) -> dict:
     The operator approved different ceilings for different kinds of review. A
     single global cap has to be the largest of them to let the largest run
     finish, which means every smaller run is protected by a number chosen for a
-    bigger one."""
-    document = _read_json(environ["MIDTERM_PIN_RECORD_PATH"], what="pin_record")
+    bigger one.
+
+    ## Why the path is refused rather than indexed
+
+    This was `environ["MIDTERM_PIN_RECORD_PATH"]`. When the panel job turned
+    out not to export that variable — the count job did, and `$GITHUB_ENV`
+    does not cross jobs — the subscript raised `KeyError` inside the step that
+    holds the provider key, where `clibase` withholds the message and the
+    traceback because they could carry the credential. What reached the log was
+    `exception_class=KeyError` and nothing else, on panel run 31844576977,
+    after the count had already been paid for.
+
+    Every other input in this module is refused by name. This one was indexed,
+    so it was the only one whose absence could not say so."""
+    path = str(environ.get(PIN_RECORD_PATH_ENV) or "").strip()
+    if not path:
+        refuse(f"category=count_input_absent input={PIN_RECORD_PATH_ENV} — the "
+               "job holding the provider key reads the operator's approved "
+               "caps from this record, and a job that cannot find it does not "
+               "know what it is allowed to spend")
+    document = _read_json(path, what="pin_record")
     if not isinstance(document, dict):
         refuse("category=pin_record_not_an_object")
     pins = document.get("pins")
