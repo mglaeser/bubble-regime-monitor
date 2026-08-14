@@ -523,14 +523,20 @@ def live_count_transport(engine: dict, *, opener, key: str,
 
 
 def live_generation_transport(engine: dict, *, opener, key: str,
-                              generation_attempt_cap: int
+                              generation_attempt_cap: int,
+                              engine_source_sha256: str
                               ) -> MidtermProviderTransport:
-    """The panel itself. Reaches `/v1/responses` and nothing else."""
+    """The panel itself. Reaches `/v1/responses` and nothing else.
+
+    `engine_source_sha256` is required rather than defaulted: it identifies the
+    response-normalization adapter, and an adapter identified by nothing is an
+    adapter whose output cannot be traced to an approved engine."""
     from trustedlane import generationtransport
     assert_paths_match_engine(engine)
     inner = generationtransport.bind(
         engine, opener=opener, credential=key, phase=PHASE_LABEL,
-        generation_attempt_cap=generation_attempt_cap)
+        generation_attempt_cap=generation_attempt_cap,
+        engine_source_sha256=engine_source_sha256)
     return MidtermProviderTransport(inner, capability="GENERATION_TRANSPORT",
                                     permitted_paths=(GENERATION_PATH,))
 

@@ -314,7 +314,8 @@ def run(*, observations: dict, operator_claims, lane_verifier,
             engine, opener=opener, credential=credential, phase="D2",
             generation_attempt_cap=record_set.require(
                 GENERATION_PREREQUISITE).require_typed(
-                    "generation_attempt_cap"))
+                    "generation_attempt_cap"),
+            engine_source_sha256=engine_source_sha256)
         executed = enginebridge.execute_review_plan(
             engine, skeleton=rebuilt, plan=plan,
             repository_path=fetched["destination"],

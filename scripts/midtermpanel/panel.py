@@ -226,7 +226,52 @@ def execute(*, engine: dict, plan: dict, skeleton: dict, transport,
             # that true rather than a convention — so "provider calls" and
             # "generation calls" are the same number, and the evidence uses the
             # narrower name because it says more.
-            "generation_calls": int(getattr(transport, "call_count", 0) or 0)}
+            "generation_calls": int(getattr(transport, "call_count", 0) or 0),
+            # The structural binding from each raw provider reply to the
+            # envelope the engine was actually given. Absent for a dry run,
+            # which normalizes nothing because nothing provider-shaped arrives.
+            "normalization": normalization_evidence(transport)}
+
+
+def normalization_evidence(transport) -> dict:
+    """What the transport normalized, as digests and counts only.
+
+    Reads the transport's own record rather than reaching into its attributes,
+    so a transport that reports nothing produces an explicit "none" instead of
+    a silent empty dict that reads like "nothing needed normalizing"."""
+    record = None
+    inner = getattr(transport, "inner", None) or transport
+    reporter = getattr(inner, "record", None)
+    if callable(reporter):
+        record = reporter()
+    if not isinstance(record, dict) or "normalization_records" not in record:
+        return {"normalized": False,
+                "honest_scope": "this transport performs no normalization; a "
+                                "dry run's stand-in returns the engine's own "
+                                "envelope and never a provider document"}
+    records = record.get("normalization_records") or []
+    return {
+        "normalized": True,
+        "normalization_version": record.get("normalization_version"),
+        "normalization_records_sha256": record.get(
+            "normalization_records_sha256"),
+        "normalizations": len(records),
+        "per_model": sorted(
+            ({"model": r.get("requested_model"),
+              "attempt": r.get("attempt"),
+              "raw_response_sha256": r.get("raw_response_sha256"),
+              "raw_response_bytes": r.get("raw_response_bytes"),
+              "payload_sha256": r.get("payload_sha256"),
+              "normalized_envelope_sha256": r.get(
+                  "normalized_envelope_sha256"),
+              "normalized_verdicts_sha256": r.get(
+                  "normalized_verdicts_sha256")}
+             for r in records),
+            key=lambda r: (r["attempt"], str(r["model"]))),
+        "honest_scope": "digests and counts. No raw body, no output text, no "
+                        "provider identifiers and no headers are carried here "
+                        "or persisted anywhere",
+    }
 
 
 def assert_every_batch_and_model_was_executed(result: dict, *,

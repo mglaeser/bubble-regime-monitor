@@ -191,8 +191,13 @@ def generation_transport_factory(environ: dict):
         refute = {model: set(units) for model, units in parsed.items()}
     identical = str(
         environ.get("MIDTERM_DRY_RUN_IDENTICAL_REASONS") or "").strip() == "1"
-    return lambda engine: engine_stand_in_generation_transport(
-        engine, refute=refute, identical_reasons=identical)
+    # `engine_source_sha256` is accepted and ignored: a dry run normalizes
+    # nothing, because the stand-in never produces a provider document. Taking
+    # the argument keeps ONE factory contract, so the provider path cannot be
+    # the only one that has to remember to pass it.
+    return lambda engine, *, engine_source_sha256=None: (
+        engine_stand_in_generation_transport(
+            engine, refute=refute, identical_reasons=identical))
 
 
 def record(environ: dict, *, sink: StatusSink, transport) -> dict:
