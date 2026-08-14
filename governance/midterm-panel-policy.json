@@ -9,7 +9,7 @@
     "governance file that merely describes what the code is supposed to do is a",
     "comment with a digest. (This line used to name a function,",
     "`midtermpanel.policy.assert_matches_code`, that has never existed in this",
-    "repository — a governance document claiming a mechanism it does not have is",
+    "repository \u2014 a governance document claiming a mechanism it does not have is",
     "the same defect the state ladder below exists to prevent.)"
   ],
   "what_this_is_not": [
@@ -20,17 +20,19 @@
     "or third-party attested."
   ],
   "architecture": {
-    "ci_operational_state": "MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS",
+    "ci_operational_state": "MIDTERM_SINGLE_REPO_PANEL_PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE",
     "ci_operational_state_history": [
       "MIDTERM_SINGLE_REPO_PANEL_IMPLEMENTATION_IN_PROGRESS",
       "MIDTERM_SINGLE_REPO_PANEL_STAGED_NO_PROVIDER_SECRET",
-      "MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS"
+      "MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS",
+      "MIDTERM_SINGLE_REPO_PANEL_PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE"
     ],
     "ci_operational_state_history_evidence": [
       "IMPLEMENTATION_IN_PROGRESS -> STAGED_NO_PROVIDER_SECRET. The panel workflow merged to main as PR #37 (merge 8644935e) and PR #38 (merge 27bfefb5). The hosted no-key vertical `midterm-panel-dry-run` ran green from a clean clone with `permissions: contents: read` and no `secrets.` reference of any kind, and the repository secret named by `secret.name` held a three-space placeholder rather than a usable provider credential throughout. The document was never advanced at the time, which is why this rung is recorded here rather than inferred from the file's history.",
-      "STAGED_NO_PROVIDER_SECRET -> STAGED_PROVIDER_KEY_PRESENT_NO_CALLS. A usable provider key was installed by the operator, and the engine release the panel is bound to now exists: tag `midterm-panel-engine-2026-08-10`, built by run 31427275863 from exact default-branch SHA 27bfefb5 with `github.ref_protected` reported as false. `governance/midterm-panel-engine-release.json` names all seven binding fields, and `midterm-engine-release-validation` materialises that exact release asset and validates it in a job that holds no provider credential and can open no socket to a provider host. No provider or generation call has been made."
+      "STAGED_NO_PROVIDER_SECRET -> STAGED_PROVIDER_KEY_PRESENT_NO_CALLS. A usable provider key was installed by the operator, and the engine release the panel is bound to now exists: tag `midterm-panel-engine-2026-08-10`, built by run 31427275863 from exact default-branch SHA 27bfefb5 with `github.ref_protected` reported as false. `governance/midterm-panel-engine-release.json` names all seven binding fields, and `midterm-engine-release-validation` materialises that exact release asset and validates it in a job that holds no provider credential and can open no socket to a provider host. No provider or generation call has been made.",
+      "STAGED_PROVIDER_KEY_PRESENT_NO_CALLS -> PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE. Panel run 31718284187 (midterm-count job 94508561279) reviewed candidate head 14a9b3225e2563d0475b7b662d4b556489dc2342 against tested base 512e81e31b21edafb440937718cd8912c3326c59. It made ONE real provider count attempt and the provider answered 400 invalid_request_error / invalid_json_schema at param=text.format.schema. Durable accounting: provider_attempts=1, count_attempts=1, generation_attempts=0, journal_present=true, accounting_complete=true, accounting_state=ATTEMPTS_KNOWN_NONZERO. No count evidence and no panel evidence were produced; midterm-panel was skipped; the terminal status was midterm-panel-count=error. The previous state's claim that no provider call had been made became false at that moment, and ACTIVE remained false because no review completed. A further 16 operator diagnostic calls were made against the count endpoint only, to isolate the rejected schema keyword; those are diagnostics, not panel votes and not panel evidence."
     ],
-    "state_history_honest_scope": "The ordered walk that reached the declared state. `policystate.assert_recorded_history_is_a_legal_walk` re-walks it through the same `assert_transition` a live transition uses, so a history that starts halfway up the ladder, takes a forbidden step, or ends somewhere other than the declared state is a failing test. It cannot verify that each step's evidence exists — the prose above is an operator record, not a proof.",
+    "state_history_honest_scope": "The ordered walk that reached the declared state. `policystate.assert_recorded_history_is_a_legal_walk` re-walks it through the same `assert_transition` a live transition uses, so a history that starts halfway up the ladder, takes a forbidden step, or ends somewhere other than the declared state is a failing test. It cannot verify that each step's evidence exists \u2014 the prose above is an operator record, not a proof.",
     "first_provider_backed_run_authorised": true,
     "first_provider_backed_run_note": [
       "The one field that stands between a merged activation and an automatic",
@@ -67,16 +69,35 @@
     "trusted_review_authority": "NOT_WRITE_SEPARATED",
     "production_eligible": false,
     "state_note": [
-      "The provider key is installed and has never been spent. No",
-      "provider-backed panel has completed, and no provider or generation call",
-      "has been made from this lane at all.",
-      "ACTIVE is reachable only through STAGED_PROVIDER_KEY_PRESENT_NO_CALLS,",
-      "and `policystate.assert_transition` refuses every other route into it —",
-      "including the direct STAGED_NO_PROVIDER_SECRET -> ACTIVE jump, because a",
-      "lane that has never held a key cannot have spent one.",
-      "While this state stands, any provider call is unexpected by definition",
-      "and is an incident rather than a cost."
-    ]
+      "A provider attempt has been observed. NO review has completed.",
+      "The provider key is installed, the approved engine release is bound, and",
+      "one real count attempt reached the provider and was rejected for an",
+      "unsupported JSON-Schema keyword (uniqueItems) in the verdict schema.",
+      "Zero generation calls have ever been made. No model verdict, no panel",
+      "evidence and no approval exist, so this lane has reviewed nothing.",
+      "ACTIVE remains reachable only by a real count AND a real panel completing",
+      "on an exact candidate head. This state is mechanically distinct from",
+      "ACTIVE, still requires first_provider_backed_run_authorised, still",
+      "requires the complete engine release binding, and keeps trusted D1/D2",
+      "locked. The step back to STAGED_PROVIDER_KEY_PRESENT_NO_CALLS is refused:",
+      "once an attempt has been observed, no later edit can truthfully deny it."
+    ],
+    "provider_attempts_observed_evidence": {
+      "panel_run_id": 31718284187,
+      "count_job_id": 94508561279,
+      "reviewed_heads_recorded_in": "ci_operational_state_history_evidence \u2014 the candidate head and tested base for this run are stated there in prose. They are not repeated here as bare 40-hex values because detect-secrets classifies a standalone hex string as a potential secret, and growing .secrets.baseline is a deliberate human-gated ratchet (tests/secretbaselineref.py) that this change has no need to move.",
+      "provider_attempts": 1,
+      "count_attempts": 1,
+      "generation_attempts": 0,
+      "accounting_complete": true,
+      "accounting_state": "ATTEMPTS_KNOWN_NONZERO",
+      "provider_result": "400 invalid_request_error / invalid_json_schema at param=text.format.schema",
+      "count_evidence_produced": false,
+      "panel_evidence_produced": false,
+      "model_verdicts": [],
+      "operator_diagnostic_calls": 16,
+      "operator_diagnostic_scope": "count endpoint only; not panel votes and not panel evidence"
+    }
   },
   "secret": {
     "name": "TRUSTED_VERIFIER_OPENAI_KEY",

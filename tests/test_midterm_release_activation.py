@@ -658,20 +658,59 @@ class TestTheKeyPresentRung:
 
         assert "transition_forbidden" in str(excinfo.value)
 
-    def test_active_is_reachable_only_through_the_key_present_rung(self):
+    def test_active_is_reachable_only_through_the_attempts_rung(self):
+        """The single predecessor of ACTIVE moved one rung up.
+
+        It used to be the key-present rung, which spanned two different
+        events: the first provider CALL and the first completed REVIEW. Panel
+        run 31718284187 made the first and not the second, so the ladder now
+        separates them and ACTIVE has exactly one way in."""
         into_active = [state for state, targets
                        in policystate.PERMITTED_TRANSITIONS.items()
                        if policystate.ACTIVE in targets]
         assert into_active == [
-            policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS]
+            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE]
 
-    def test_the_two_forward_steps_are_permitted(self):
+    def test_the_key_present_rung_can_no_longer_jump_to_active(self):
+        with pytest.raises(PanelRefusal) as excinfo:
+            policystate.assert_transition(
+                policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS,
+                policystate.ACTIVE)
+
+        assert "transition_forbidden" in str(excinfo.value)
+
+    def test_the_three_forward_steps_are_permitted(self):
         assert policystate.assert_transition(
             policystate.STAGED_NO_PROVIDER_SECRET,
             policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS)["changed"]
         assert policystate.assert_transition(
             policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS,
+            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE)["changed"]
+        assert policystate.assert_transition(
+            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE,
             policystate.ACTIVE)["changed"]
+
+    def test_observed_attempts_cannot_be_denied_afterwards(self):
+        """The claim is monotonic. Once an attempt has been observed, no
+        later edit may return to a state asserting none was made — from the
+        attempts rung OR from ACTIVE."""
+        for origin in (policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE,
+                       policystate.ACTIVE):
+            with pytest.raises(PanelRefusal):
+                policystate.assert_transition(
+                    origin, policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS)
+
+    def test_the_attempts_rung_still_permits_retiring_the_key(self):
+        """Refusing to un-say the attempts must not trap the credential."""
+        assert policystate.assert_transition(
+            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE,
+            policystate.STAGED_NO_PROVIDER_SECRET)["changed"]
+
+    def test_the_attempts_rung_names_what_it_does_and_does_not_claim(self):
+        means = policystate.STATE_MEANS[
+            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE]
+        assert "provider attempt has been observed" in means
+        assert "NO count-and-panel review has completed" in means
 
     def test_retiring_the_key_walks_back_down_rather_than_sideways(self):
         assert policystate.assert_transition(
@@ -703,9 +742,11 @@ class TestTheRecordedWalk:
             root=str(ROOT))
 
         assert report["state"] == (
-            policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS)
+            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE)
         assert report["history"][0] == policystate.INITIAL_STATE
-        assert report["transitions_taken"] == 2
+        # Three now: the attempts rung was appended when panel run
+        # 31718284187 made the lane's first real provider call.
+        assert report["transitions_taken"] == 3
 
     def test_the_declared_state_is_the_end_of_the_walk(self):
         policy = _policy()["architecture"]
@@ -844,21 +885,28 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
         assert record["authorisation"] == (
             f"architecture.{policystate.FIRST_PROVIDER_RUN_FIELD} is true")
 
-    def test_the_authorisation_is_read_at_the_key_present_rung(self):
+    def test_the_authorisation_is_read_at_the_attempts_rung(self):
         """The state is unchanged by the authorisation.
 
-        Spending is authorised; the lane has still never spent. Those are two
-        different claims, and conflating them is how a document starts
+        Spending is authorised; the lane has still reviewed nothing. Those are
+        two different claims, and conflating them is how a document starts
         describing a world it has not reached. `ACTIVE` is earned by a real
-        panel completing, not by permission to attempt one."""
+        panel completing, not by permission to attempt one — and an attempt
+        that reached the provider and produced no verdict has earned none of
+        the standing a completed panel would have."""
         assert _policy()["architecture"]["ci_operational_state"] == (
-            policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS)
+            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE)
 
         record = policystate.assert_provider_backed_run_is_authorised(
             root=str(ROOT))
 
+        # Still gated on the operator's explicit field, not waved through
+        # because an attempt already happened. A failed attempt spent the
+        # authorisation on nothing; it did not earn a standing exemption.
         assert record["state"] == (
-            policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS)
+            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE)
+        assert record["authorisation"] == (
+            f"architecture.{policystate.FIRST_PROVIDER_RUN_FIELD} is true")
 
     def test_the_refusal_still_tells_the_operator_exactly_what_to_set(
             self, tmp_path):
@@ -1137,8 +1185,13 @@ class TestTheStateMatchesTheTree:
         report = policystate.assert_state_is_consistent_with_reality(
             root=str(ROOT))
 
+        # Advanced when panel run 31718284187 made one real provider count
+        # attempt and was answered 400 invalid_json_schema. The key-present
+        # rung asserts "no provider or generation call has been made", which
+        # stopped being true at that moment; ACTIVE is still false because no
+        # review completed.
         assert report["state"] == (
-            policystate.STAGED_PROVIDER_KEY_PRESENT_NO_CALLS)
+            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE)
         assert report["workflow_live"] is True
 
     def test_the_key_present_state_needs_a_complete_engine_binding(self,

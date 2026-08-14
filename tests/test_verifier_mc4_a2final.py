@@ -243,7 +243,13 @@ class TestVerdictSchema:
         assert verdict["reason"]["minLength"] == reviewpolicy.REASON_MIN_CHARS
         assert verdict["proof_of_check"]["minLength"] == (
             reviewpolicy.PROOF_MIN_CHARS)
-        assert verdict["checked_categories"]["uniqueItems"] is True
+        # `uniqueItems` used to be asserted here. It is gone from the wire
+        # schema because the provider rejects it — a live operator differential
+        # returned 400 invalid_json_schema for the exact payload and 200 with
+        # only that keyword removed, on all three governed models. Uniqueness
+        # is enforced after parsing instead; see
+        # tests/test_verifier_schema_uniqueitems.py.
+        assert "uniqueItems" not in verdict["checked_categories"]
         assert verdict["checked_categories"]["minItems"] == 1
 
     def test_a_good_response_validates(self):
