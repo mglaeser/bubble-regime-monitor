@@ -31,7 +31,14 @@ from .errors import BlockingError
 
 TRUNCATION = "disabled"
 
-VERDICT_SCHEMA_NAME = "verifier_unit_verdicts_v1"
+#: v2 drops `uniqueItems` from `checked_categories` — see `verdict_schema`.
+#:
+#: Renamed rather than edited in place because the name travels into
+#: `text.format` AND into `semantics_payload`, so it is part of what the count
+#: and execution request hashes are taken over. A schema change that kept the
+#: v1 name would let count evidence produced under the old, provider-rejected
+#: contract be presented as evidence for the new one.
+VERDICT_SCHEMA_NAME = "verifier_unit_verdicts_v2"
 
 
 def verdict_schema(unit_hashes: list[str], *, challenge: str,
@@ -53,12 +60,38 @@ def verdict_schema(unit_hashes: list[str], *, challenge: str,
     # the structured-output contract rather than checked afterwards. Free text
     # here meant every model could return ["logic", "state"] and the evidence
     # could not distinguish a security review from an invariant review.
+    # NO `uniqueItems`. The provider's structured-output schema subset does not
+    # accept it, and a strict schema containing an unsupported keyword is
+    # rejected outright — the request never reaches a model.
+    #
+    # Established by live operator differential, not by inference. Sixteen
+    # count-only requests built from the real engine, one keyword apart:
+    #
+    #   exact engine payload            400 invalid_json_schema
+    #                                       param=text.format.schema
+    #   remove ONLY uniqueItems         200, all three governed models
+    #   remove text entirely            200  (so `text` itself is fine)
+    #   remove ONLY reasoning           400  (so reasoning is not the cause)
+    #   also remove minLength/maxLength  200  (no better than uniqueItems alone,
+    #                                        so those two are not implicated)
+    #
+    # gpt-4.1-mini carries no `reasoning` field at all and behaved identically
+    # — exact 400, without-uniqueItems 200 — which isolates the keyword from
+    # any model-specific reasoning interaction.
+    #
+    # Uniqueness is NOT abandoned, only moved off the wire: a duplicate
+    # category is rejected after parsing by `verdicts._validate_one`, which
+    # fails with `checked_categories_not_unique`. That check is load-bearing
+    # now rather than belt-and-braces, and a test asserts it reddens if removed.
+    #
+    # Deliberately no generic "strip unsupported keywords" pass. What this lane
+    # sends a provider is a reviewed contract, and a function that silently
+    # rewrote it would make the next incompatibility invisible instead of loud.
     if model_id is not None:
         categories_schema = {
             "type": "array",
             "minItems": reviewpolicy.MIN_CHECKED_CATEGORIES,
             "maxItems": reviewpolicy.MAX_CHECKED_CATEGORIES,
-            "uniqueItems": True,
             "items": {"type": "string",
                       "enum": list(reviewpolicy.lens_categories(model_id))},
         }
@@ -67,7 +100,6 @@ def verdict_schema(unit_hashes: list[str], *, challenge: str,
             "type": "array",
             "minItems": reviewpolicy.MIN_CHECKED_CATEGORIES,
             "maxItems": reviewpolicy.MAX_CHECKED_CATEGORIES,
-            "uniqueItems": True,
             "items": {"type": "string", "minLength": 1,
                       "maxLength": reviewpolicy.CATEGORY_MAX_CHARS},
         }

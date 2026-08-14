@@ -30,7 +30,13 @@ from __future__ import annotations
 from .canon import canonical_json, digest
 from .errors import UNSET_POLICY_PIN, BlockingError
 
-POLICY_VERSION = "review-request-policy-v2"
+#: v3: the response-schema contract changed. This record binds the shape the
+#: models are asked to answer in — category bounds, confidence values, reason
+#: and proof bounds, `findings_field_in_schema` — and `verdict_schema` no
+#: longer sends `uniqueItems`, which the provider rejects. Bumping the version
+#: moves the policy digest, so a plan or count produced under v2 cannot be
+#: replayed or deduplicated against a v3 review.
+POLICY_VERSION = "review-request-policy-v3"
 
 # ------------------------------------------------------------- lenses v2 -----
 #
