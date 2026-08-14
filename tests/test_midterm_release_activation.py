@@ -256,7 +256,7 @@ class TestTheReleasedIdentityIsCompared:
         sealed = releasevalidation.assert_provenance_reseals(record)
 
         assert sealed["build_ref_protected"] is False
-        assert sealed["build_workflow_run_id"] == 31427275863
+        assert sealed["build_workflow_run_id"] == 31838609804
 
     def test_flipping_protection_inside_the_provenance_breaks_the_seal(self):
         """The edit a governance note could never repair, caught by the seal.

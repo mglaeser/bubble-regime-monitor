@@ -45,7 +45,8 @@ a new engine release — which is what "approved" means.
 
 ## Provenance is part of the answer
 
-An approved engine release now exists: `midterm-panel-engine-2026-08-10`, whose
+An approved engine release now exists:
+`midterm-panel-engine-2026-08-14-schema-v2`, whose
 seven binding fields are recorded in
 `governance/midterm-panel-engine-release.json`. Before it did, this lane could
 only build the artifact deterministically from the two pinned commits — which is
