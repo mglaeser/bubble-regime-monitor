@@ -12,7 +12,7 @@ correcting: a document asserting a capability that no run has demonstrated. The
 fix is not a more careful author. It is to make the claim reachable only by
 passing through the states that earn it.
 
-Four states, in order:
+Five states, in order:
 
     IMPLEMENTATION_IN_PROGRESS      code exists, workflow not merged, nothing ran
     STAGED_NO_PROVIDER_SECRET       merged and dry-run green, NO key installed
@@ -20,6 +20,9 @@ Four states, in order:
                                     key installed, engine release approved, a
                                     hosted no-provider validation green, and no
                                     provider or generation call yet made
+    PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE
+                                    a provider attempt happened and was durably
+                                    accounted for; NO review completed
     ACTIVE                          a real count and panel completed on an exact
                                     candidate head
 
@@ -97,12 +100,28 @@ STAGED_NO_PROVIDER_SECRET = (
 STAGED_PROVIDER_KEY_PRESENT_NO_CALLS = (
     "MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS"  # noqa: S105 - a STATE NAME; pragma: allowlist secret
 )
+#: A provider attempt has happened and no review has completed.
+#:
+#: Added because the rung below it became false while nobody could say so.
+#: Panel run 31718284187 made one real count attempt and the provider answered
+#: `400 invalid_json_schema` at `text.format.schema`; sixteen operator
+#: diagnostic count-only calls followed. `..._NO_CALLS` was then a false
+#: statement, and `ACTIVE` — "a real count and a real panel have both
+#: completed" — was equally false, because neither did.
+#:
+#: Both readings being wrong at once is exactly the gap the key-present rung
+#: was added to close one level down, reappearing one level up: the ladder had
+#: no name for "it tried, it failed, nothing was reviewed".
+PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE = (
+    "MIDTERM_SINGLE_REPO_PANEL_PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE"
+)
 ACTIVE = "MIDTERM_SINGLE_REPO_PANEL_ACTIVE"
 
 #: In ladder order. `STATES` is used for membership, never for ordering — the
 #: adjacency map below is the only thing that decides what may follow what.
 STATES = (IMPLEMENTATION_IN_PROGRESS, STAGED_NO_PROVIDER_SECRET,
-          STAGED_PROVIDER_KEY_PRESENT_NO_CALLS, ACTIVE)
+          STAGED_PROVIDER_KEY_PRESENT_NO_CALLS,
+          PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE, ACTIVE)
 
 #: The state a lane starts in, and the only legal beginning of a recorded walk.
 INITIAL_STATE = IMPLEMENTATION_IN_PROGRESS
@@ -117,9 +136,23 @@ PERMITTED_TRANSITIONS = {
     STAGED_NO_PROVIDER_SECRET: (STAGED_PROVIDER_KEY_PRESENT_NO_CALLS,
                                 IMPLEMENTATION_IN_PROGRESS),
     # Backwards to the no-key state is how the key is RETIRED: delete the
-    # secret, then say so. Forwards to ACTIVE needs a real panel.
-    STAGED_PROVIDER_KEY_PRESENT_NO_CALLS: (ACTIVE, STAGED_NO_PROVIDER_SECRET),
-    ACTIVE: (STAGED_PROVIDER_KEY_PRESENT_NO_CALLS,),
+    # secret, then say so. Forwards is now the attempts rung, NOT `ACTIVE`:
+    # a lane cannot pass from "no calls" to "a panel completed" in one step,
+    # because the first provider call and the first completed review are two
+    # different events and the run that proved it made the first one made
+    # neither of the second.
+    STAGED_PROVIDER_KEY_PRESENT_NO_CALLS: (
+        PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE, STAGED_NO_PROVIDER_SECRET),
+    # NOT back to `..._NO_CALLS`. That claim is monotonic: once a provider
+    # attempt has been observed, no later edit can truthfully say none was
+    # made. Retiring the credential is still reachable — that is the step to
+    # `STAGED_NO_PROVIDER_SECRET`, which is a statement about the secret
+    # rather than a denial of the attempts.
+    PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE: (ACTIVE, STAGED_NO_PROVIDER_SECRET),
+    # Down from `ACTIVE` lands on the attempts rung for the same reason: a lane
+    # that has run a panel cannot return to a state asserting it never called a
+    # provider.
+    ACTIVE: (PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE,),
 }
 
 #: What each state asserts has already happened. Used in the refusal message so
@@ -135,6 +168,11 @@ STATE_MEANS = {
         "release is bound by all seven binding fields, a hosted no-provider "
         "validation of that exact release completed, and no provider or "
         "generation call has been made",
+    PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE:
+        "a usable repository provider secret is installed, an approved engine "
+        "release is bound, at least one provider attempt has been observed and "
+        "durably accounted for, and NO count-and-panel review has completed — "
+        "so no verdict, no panel evidence and no approval exist",
     ACTIVE:
         "a real count and a real panel have both completed on an exact "
         "candidate head, with the provider actually called",
@@ -366,7 +404,8 @@ def assert_state_is_consistent_with_reality(*, root: str = ".") -> dict:
     # workflow, and that IS visible from the tree: `provenance_of` refuses a
     # partial binding. Checked in the same one direction — a complete binding
     # cannot confirm the state, it can only fail to disprove it.
-    if state in (STAGED_PROVIDER_KEY_PRESENT_NO_CALLS, ACTIVE):
+    if state in (STAGED_PROVIDER_KEY_PRESENT_NO_CALLS,
+                 PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE, ACTIVE):
         from .engine import APPROVED_RELEASE, provenance_of
         release = _committed_release(root=root)
         if provenance_of(release) != APPROVED_RELEASE:
@@ -393,10 +432,19 @@ def assert_provider_backed_run_is_authorised(*, root: str = ".") -> dict:
     answered the second one too, so the first run that cost money would have
     been triggered by whoever next opened a pull request.
 
-    Two states may spend at all, and they are asked different questions:
+    Three states may spend at all, and they are asked different questions:
 
         STAGED_PROVIDER_KEY_PRESENT_NO_CALLS   an operator must have said yes,
                                                explicitly, in its own commit
+        PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE  the SAME question, still asked.
+                                               An attempt that failed spent the
+                                               authorisation on nothing; the
+                                               operator's decision is what
+                                               permits the retry, and a run
+                                               that reached a provider and
+                                               produced no review has earned no
+                                               standing that a completed panel
+                                               would have earned
         ACTIVE                                 the lane has already run; the
                                                authorisation is spent
 
