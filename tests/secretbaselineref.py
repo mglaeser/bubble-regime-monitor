@@ -57,44 +57,64 @@ import subprocess
 #: The accepted baseline. A 40-hex commit id, written as a literal so that no
 #: ref lookup — and therefore no branch movement — can change it.
 #:
-#: TRANSITION (engine release activation). Previous reference b20a2aa64b34…
+#: TRANSITION (schema-v2 engine re-binding). Previous reference dc60efbc4e88…
 #:
-#:     baseline blob sha256 before  0660a10239a6401dd80bf3f455b5dbb86ceb3a51df40d7c932bd935e1f92bc0e
-#:     baseline blob sha256 after   87f536ad374774307885eeae5c4dfe1e0da60a84f8b6d29a4cd5416b3b123a20
-#:     entries before / after       11 / 20      (+9)
+#:     baseline blob sha256 before  87f536ad374774307885eeae5c4dfe1e0da60a84f8b6d29a4cd5416b3b123a20
+#:     baseline blob sha256 after   4bc565aeed203caeedc7091a72ecdd3dee0b31232a6d2374db859fc6dfda9bde
+#:     entries before / after       20 / 19      (-1)
 #:     files before / after         4 / 4
 #:     added                        governance/midterm-panel-engine-release.json
-#:                                  lines 7, 8, 10, 11, 20, 21, 22, 23, 36
-#:     removed                      none
-#:     changed                      none
+#:                                  lines 6, 8, 10, 11, 21, 24, 37
+#:     removed                      governance/midterm-panel-engine-release.json
+#:                                  old lines 6, 7, 8, 10, 11, 20, 23, 36
+#:     moved, value unchanged       old 21 -> 22, old 22 -> 23
 #:     filters added/removed/changed        none
 #:     plugins added/removed/changed        none
 #:     detect-secrets version       1.5.0 -> 1.5.0 (unchanged)
 #:
-#: All nine are in the ONE file this activation rewrote, and each is identified
-#: rather than counted:
+#: This is the first transition that SHRINKS the baseline, and the reason is
+#: the one fact worth carrying: the two role pins are now the same commit, so
+#: nine of the ten values in this file are distinct where ten used to be.
+#: `assert_has_not_grown` is satisfied by a shrink and would have said nothing;
+#: `assert_identical_to_reference` is what requires this file to move, which is
+#: the intended division of labour between them.
 #:
-#:     line  7  approved_engine_protected_sha      27bfefb5… a git COMMIT id,
-#:                                                 this repository's main at
-#:                                                 build time
-#:     line  8  approved_engine_artifact_sha256    the released engine.tar.gz,
-#:                                                 reproduced from the two
-#:                                                 pinned commits in this
-#:                                                 container before it was
+#: Every entry is in the ONE file this re-binding rewrote, and each is
+#: identified rather than counted. Seven values were replaced, one disappeared,
+#: two survived unchanged and only shifted line:
+#:
+#:     line  6  approved_engine_source_sha         c8ba2a72… -> 5986c13d…, a git
+#:                                                 COMMIT id; `main` after the
+#:                                                 schema fix merged
+#:     (old 7) approved_engine_protected_sha       27bfefb5… REMOVED as a
+#:                                                 distinct value: it is now
+#:                                                 5986c13d… too, and
+#:                                                 detect-secrets records one
+#:                                                 entry per distinct value per
+#:                                                 file. The field is still
+#:                                                 there; only the entry is gone
+#:     line  8  approved_engine_artifact_sha256    b7059321… -> cf0b14d2…, the
+#:                                                 released engine.tar.gz,
+#:                                                 rebuilt from the two pinned
+#:                                                 commits in this container to
+#:                                                 the same digest before it was
 #:                                                 recorded
-#:     line 10  approved_engine_identity_sha256    the released
-#:                                                 engine-identity.json
-#:     line 11  engine_release_binding_sha256      sha256 over the seven binding
-#:                                                 fields, recomputed by
+#:     line 10  approved_engine_identity_sha256    14de0945… -> beb82a9f…, the
+#:                                                 released engine-identity.json
+#:     line 11  engine_release_binding_sha256      f2f961fd… -> 499c1e22…,
+#:                                                 recomputed over the seven
+#:                                                 binding fields by
 #:                                                 midtermpanel.engine
-#:     lines 20-23  the restated engine_source, runtime_lock, sbom and
-#:                  provenance digests the build published
-#:     line 36  actions_artifact_zip_sha256        the Actions ZIP wrapper
+#:     line 21  engine_source_sha256               9b3dae26… -> c1bd860e…
+#:     line 22  runtime_lock_sha256                UNCHANGED, was line 21
+#:     line 23  sbom_sha256                        UNCHANGED, was line 22
+#:     line 24  provenance_sha256                  54123398… -> 388b975f…
+#:     line 37  actions_artifact_zip_sha256        4dd3c679… -> fa1f32aa…, the
+#:                                                 Actions ZIP wrapper
 #:
-#: `approved_engine_artifact_sha256` appears twice in the file — once as a
-#: binding field and once inside the restatement — and detect-secrets records
-#: one entry per distinct value per file, which is why the count is nine and
-#: not ten.
+#: `approved_engine_artifact_sha256` still appears twice in the file — once as a
+#: binding field and once inside the restatement — and is one entry for the same
+#: reason the two role pins are now one.
 #:
 #: None is a credential. An entropy detector cannot distinguish a 64-hex
 #: content digest or a 40-hex commit id from a 64-hex token, which is the
@@ -102,7 +122,7 @@ import subprocess
 #: here rather than inline. Nothing was regenerated beyond the `generated_at`
 #: stamp, which moves because the scanned file changed.
 ACCEPTED_SECRET_BASELINE_COMMIT = \
-    "dc60efbc4e88a697dda4d4fc42ce14db13cdaa71"  # pragma: allowlist secret
+    "b047c3d61b4999e8f1b387a2d933d1ad787bd8bd"  # pragma: allowlist secret
 
 BASELINE_PATH = ".secrets.baseline"
 
