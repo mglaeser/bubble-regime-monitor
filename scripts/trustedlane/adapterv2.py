@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from .errors import refuse
 
@@ -162,6 +163,76 @@ def assert_adapter_is_trusted(identity: dict) -> dict:
     return {"adapter_trusted_shape": True, "adapter_authenticated": False}
 
 
+#: A dated snapshot suffix, and nothing else that looks like one.
+#:
+#: A DATE by shape rather than a general suffix: the whole point is that
+#: `gpt-4.1-mini-preview`, `-latest` and `-codex` are DIFFERENT models, and a
+#: rule loose enough to admit a date is loose enough to admit them unless the
+#: shape is pinned.
+#:
+#: Two anti-footguns, both of which were live holes in the first version of
+#: this rule and both of which admit a suffix that is not a date:
+#:
+#: `[0-9]` and NOT `\d`. In a Python `str` pattern `\d` is Unicode-aware and
+#: matches the whole `Nd` category — 660 codepoints, not ten — so
+#: `gpt-4.1-mini-٢٠٢٥-٠٤-١٤` in Arabic-Indic digits, the fullwidth form, the
+#: Devanagari form and script-mixed forms all passed. None of those is anything
+#: a provider can legitimately return, which is precisely why accepting one
+#: means accepting a string that is not the governed model — and writing it
+#: verbatim into `response_model`, the one provider-controlled value this
+#: module persists.
+#:
+#: `\A`/`\Z` and NOT `^`/`$`. Python's `$` also matches before a trailing
+#: newline, so `"gpt-4.1-mini-2025-04-14\n"` passes a `$`-anchored rule. A
+#: newline is a suffix.
+#:
+#: This adapter reads provider-controlled bytes inside the job that holds the
+#: credential, so it takes the strict form of both.
+_DATED_SNAPSHOT = r"\A{escaped}-[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}\Z"
+
+
+def model_identity_matches(observed, requested) -> bool:
+    """Does a resolved model id count as the governed model that was asked for?
+
+    ## Why this is not equality
+
+    OpenAI aliases resolve to dated snapshots. A request naming `gpt-4.1-mini`
+    is answered by `gpt-4.1-mini-2025-04-14`, and exact equality reads that as
+    "the answer came from somewhere else". Panel run 31853893226 is what that
+    cost: the first two models answered, `gpt-4.1-mini` was refused for its own
+    snapshot id, retried once under `VERIFIER_GENERATION_MAX_RETRIES = 1`, and
+    the batch stopped at `PROVIDER_RESPONSE_INVALID` with four generation
+    attempts spent and no verdict.
+
+    ## Why it is not a prefix either
+
+    `gpt-4.1-mini-preview`, `gpt-4.1-mini-latest` and `gpt-4.1-mini-codex` all
+    start with `gpt-4.1-mini` and are different models — possibly weaker ones,
+    and one of them impersonating the required approver is exactly the failure
+    the panel's model policy exists to prevent. So the accepted suffix is a
+    DATE, matched by shape, and every other suffix is refused.
+
+    This is the same rule `independent_verify.model_matches` already states,
+    written here rather than imported: that module is a candidate-side script
+    with its own dependencies, and the trusted lane must not take its answer to
+    "which model spoke" from anything outside the trusted lane. The tests
+    compare the two implementations across a table so the duplication cannot
+    drift silently.
+
+    Total on purpose — a non-string returns False rather than raising, because
+    the observed value comes off the wire and `re.match` on a non-string is a
+    `TypeError` inside the credential-bearing job.
+    """
+    if not isinstance(observed, str) or not isinstance(requested, str):
+        return False
+    if not observed or not requested:
+        return False
+    if observed == requested:
+        return True
+    return re.match(_DATED_SNAPSHOT.format(escaped=re.escape(requested)),
+                    observed) is not None
+
+
 def _no_duplicate_keys(pairs):
     """Duplicate keys are a refusal, and the key is never named.
 
@@ -179,13 +250,28 @@ def _no_duplicate_keys(pairs):
 
 
 def _strict_json(raw: bytes, *, what: str):
+    """Decode and parse, turning every malformed-input failure into a refusal.
+
+    `RecursionError` and `UnicodeEncodeError` are caught alongside
+    `JSONDecodeError` because they are the same event — provider bytes this
+    module will not accept — and they are not `JSONDecodeError` subclasses:
+
+    * deeply nested JSON (`[[[[…`) raises `RecursionError` from `json.loads`;
+    * a lone surrogate that survived an earlier parse raises
+      `UnicodeEncodeError` on the way back in.
+
+    Either one escaping this function reaches `clibase` as
+    `MIDTERM_PANEL_UNEXPECTED … exception_class=…` with the message withheld,
+    because this job holds the provider key. That is the opaque-crash failure
+    mode that has already cost two panel runs, and the honest form of it is a
+    named refusal. Found by adversarial review before the fix shipped."""
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         refuse(f"category={what}_not_utf8 exception_class={type(exc).__name__}")
     try:
         return json.loads(text, object_pairs_hook=_no_duplicate_keys)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         refuse(f"category={what}_not_json "
                f"exception_class={type(exc).__name__} — repairing it would "
                "decide what the model meant")
@@ -293,7 +379,14 @@ def parse_verdict_payload(text: str) -> dict:
     returned object goes to `verifier.verdicts.validate_verdicts` exactly as
     parsed — this module deliberately builds no intermediate representation,
     because an intermediate representation is somewhere a field can be renamed."""
-    document = _strict_json(text.encode("utf-8"), what="verdict_payload")
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        # A lone surrogate survives `json.loads` and dies here. Refused by
+        # name rather than raised, for the reason `_strict_json` explains.
+        refuse("category=verdict_payload_not_encodable "
+               f"exception_class={type(exc).__name__}")
+    document = _strict_json(encoded, what="verdict_payload")
     if not isinstance(document, dict):
         refuse("category=verdict_payload_not_an_object")
     keys = set(document)
@@ -379,10 +472,11 @@ def normalize_generation_response(raw_body, *, http_status, requested_model,
     response_model = document.get("model")
     if not isinstance(response_model, str) or not response_model:
         refuse("category=response_model_missing")
-    if response_model != requested_model:
+    if not model_identity_matches(response_model, requested_model):
         refuse(f"category=response_model_mismatch expected={requested_model} — "
                "the observed model is not echoed; the answer came from "
-               "somewhere other than the model this run priced and approved")
+               "somewhere other than the model this run priced and approved. "
+               "Only the exact id or its dated snapshot counts")
 
     usage = assert_usage(document)
     message = select_assistant_message(document)
