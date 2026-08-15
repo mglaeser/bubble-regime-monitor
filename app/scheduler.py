@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import get_settings
+from app.engine.recompute_slots import cron_hour_expression
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -57,7 +58,11 @@ def start() -> BackgroundScheduler:
         # Upstream budget at 6 runs/day: price/series caches reuse within their
         # SLAs (daily data doesn't change intraday), Polygon stays 1 call/day,
         # breadth spends nothing here (separate job), judgment = 6 LLM calls/day.
-        _scheduler.add_job(_job, CronTrigger(hour="2,6,10,14,18,22", minute=0, timezone="UTC"),
+        # The slot hours live in app.engine.recompute_slots — the SAME
+        # definition the snapshot's expected_recompute_slot and the alert
+        # watchdog's missed-slot count use. Never restate them here.
+        _scheduler.add_job(_job, CronTrigger(hour=cron_hour_expression(), minute=0,
+                                             timezone="UTC"),
                            id="recompute", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
         # Breadth cache refresh twice daily, off the recompute hours so the two

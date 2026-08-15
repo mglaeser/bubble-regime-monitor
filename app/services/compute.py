@@ -59,6 +59,13 @@ from app.engine.montecarlo import (
     MonteCarloInputs,
     monte_carlo,
 )
+from app.engine.recompute_slots import next_slot_after
+from app.engine.snapshot_contract import (
+    ALERT_CONTRACT_VERSION,
+    TypedBandState,
+    build_red_flag_meta,
+    derive_band_state,
+)
 from app.indicators import (
     d1_breadth,
     d2_margin,
@@ -411,6 +418,16 @@ class SnapshotData:
     coverage: dict[str, Any]
     unknown_red_flags: list[str] = field(default_factory=list)  # v3.7.8/§24 (observability)
     ath_provenance: dict[str, Any] = field(default_factory=lambda: dict(ATH_PROVENANCE))  # PIN-F label
+    # Typed alert contract (Stage 0) — derived from the values above, never a
+    # second opinion on them. See app/engine/snapshot_contract.py.
+    band_state: TypedBandState | None = None
+    red_flag_meta: dict[str, Any] = field(default_factory=dict)
+    # Already-computed red-flag INPUTS carried forward so the typed contract is
+    # built from the exact values scoring used, never recomputed from raw.
+    gsadf_contested: bool = True
+    gsadf_available: bool = False
+    hy_oas_tight_bps: float | None = None
+    semi_runup_pp: float | None = None
 
 
 def _track(raw: RawInputs, source: str, fn: Any) -> Any:
@@ -1041,12 +1058,15 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     mc_in.v_multiplier = v_mult
 
     # ---- red flags ----
+    # The trailing tights are bound to a local so the typed alert contract can
+    # report the SAME value the flag was evaluated against (no recomputation).
+    hy_oas_tight_bps = min(raw.hy_oas_history_bps[-756:]) if raw.hy_oas_history_bps else None
     red_flags = evaluate_red_flags(
         gsadf_explosive_p05=s4_gsadf.explosive_p05(raw.gsadf_stat, raw.gsadf_cv95),
         gsadf_contested=contested,
         semi_runup_pp=runup if runup is not None else 0.0,
         hy_oas_bps=raw.hy_oas_bps,
-        hy_oas_3yr_tight_bps=(min(raw.hy_oas_history_bps[-756:]) if raw.hy_oas_history_bps else None),
+        hy_oas_3yr_tight_bps=hy_oas_tight_bps,
         breadth_pct=raw.breadth_pct,
         index_within_2pct_of_ath=raw.index_within_2pct_of_ath,
     )
@@ -1135,6 +1155,18 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         freshness=freshness,
         coverage=coverage,
         unknown_red_flags=unknown_red_flags,
+        # Typed alert contract (Stage 0): the band decomposition the display
+        # string above collapses. Derived by calling the SAME authoritative
+        # band functions, from the SAME median — never a second computation.
+        band_state=derive_band_state(
+            headline_median=mc.median,
+            red_flags=red_flags,
+            coverage_degraded=bool(coverage["degraded"]),
+        ),
+        gsadf_contested=contested,
+        gsadf_available=_s4_ok,
+        hy_oas_tight_bps=hy_oas_tight_bps,
+        semi_runup_pp=runup,
     )
 
 
@@ -1148,9 +1180,10 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
     # judgment call (degrades gracefully; never blocks the recompute)
     with session_scope() as session:
         last = session.execute(
-            select(Snapshot).order_by(Snapshot.computed_at.desc()).limit(1)
+            select(Snapshot).order_by(Snapshot.computed_at.desc(), Snapshot.id.desc()).limit(1)
         ).scalars().first()
         last_text = last.judgment_call if last else None
+        prev_snapshot_id = last.id if last else None
 
     s_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("s")}
     d_scores = {k: v.sub_score for k, v in data.indicators.items() if k.startswith("d")}
@@ -1161,6 +1194,36 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
         data.trend_states.get("QQQ", {}).get("faber_10mo", "unknown"),
         data.fast_alarm, last_successful=last_text,
     )
+
+    # ---- typed alert contract (Stage 0). NON-SCORING, post-hoc, pure. -------
+    # Built here (not in compute_snapshot) so `observed_at` is the SAME instant
+    # the snapshot is stamped with. Every input is a value scoring already
+    # produced; none of it is re-derived from raw.
+    def _ind_stale(indicator_id: str) -> bool | None:
+        ind = data.indicators.get(indicator_id)
+        return ind.stale if ind is not None else None
+
+    red_flag_meta = build_red_flag_meta(
+        red_flags=data.red_flags,
+        observed_at=now.isoformat(),
+        gsadf_stat=raw.gsadf_stat,
+        gsadf_cv95=raw.gsadf_cv95,
+        gsadf_contested=data.gsadf_contested,
+        gsadf_available=data.gsadf_available,
+        gsadf_as_of=raw.gsadf_as_of,
+        gsadf_stale=_ind_stale("s4"),
+        semi_runup_pp=data.semi_runup_pp,
+        semis_as_of=raw.semis_as_of,
+        semis_stale=_ind_stale("s3"),
+        hy_oas_bps=raw.hy_oas_bps,
+        hy_oas_tight_bps=data.hy_oas_tight_bps,
+        hy_oas_as_of=raw.hy_oas_as_of,
+        hy_oas_stale=_ind_stale("s5"),
+        breadth_pct=raw.breadth_pct,
+        breadth_as_of=raw.breadth_as_of,
+        breadth_stale=_ind_stale("d1"),
+    )
+    band_state = data.band_state
 
     block_s_payload = {
         "value": round(data.s_block, 6),
@@ -1200,6 +1263,19 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
             # read from the loader, never re-stated by hand.
             methodology_sha256=_M.frozen_sha256(),
             methodology_version=_M.get_path("_meta", "methodology_version"),
+            # Typed alert contract. `action_band` above is unchanged.
+            prev_snapshot_id=prev_snapshot_id,
+            expected_recompute_slot=next_slot_after(now),
+            alert_contract_version=ALERT_CONTRACT_VERSION,
+            score_action_band=band_state.score_action_band if band_state else None,
+            base_action_band=band_state.base_action_band if band_state else None,
+            effective_action_state=band_state.effective_action_state if band_state else None,
+            band_suppressed_by_coverage=bool(
+                band_state.band_suppressed_by_coverage if band_state else False),
+            data_degraded=bool(band_state.data_degraded if band_state else False),
+            red_flag_meta=red_flag_meta,
+            override_required_count=red_flag_meta["override_required_count"],
+            override_fireable_universe_count=red_flag_meta["override_fireable_universe_count"],
         )
         session.add(snap)
         session.flush()
