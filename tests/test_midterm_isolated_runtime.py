@@ -24,11 +24,18 @@ this lane refuses to treat as code.
 
 ## The fix these tests describe
 
-Materialise `midtermpanel` and `trustedlane` from the trusted commit's git
-BLOBS into `$RUNNER_TEMP`, and run count and panel from a neutral empty
-directory with `PYTHONPATH` pointing at that materialised runtime. The
-workspace stays exactly what it was — the git repository the review data is
+Materialise `midtermpanel`, `trustedlane` and `independent_verify.py` from the
+trusted commit's git BLOBS into `$RUNNER_TEMP`, and run count and panel from a
+neutral empty directory with `PYTHONPATH` pointing at that materialised runtime.
+The workspace stays exactly what it was — the git repository the review data is
 read from — and stops being anywhere the interpreter looks for code.
+
+The third entry arrived after this file did, and it is why
+`tests/test_midterm_materialised_runtime_vertical.py` exists: the probe here
+imports `midtermpanel.engine` and stops, which is the right shape for asking
+about `sys.path` and blind to whether the runtime holds everything the panel
+imports LATER. What this file describes about the runtime's contents is kept in
+step with that one through `RUNTIME_ENTRIES`.
 
 ## Why the two obvious one-line fixes are here as tests
 
@@ -80,6 +87,18 @@ WORKFLOW = ROOT / ".github" / "workflows" / "midterm-panel-review.yml"
 # `trustedlane` for `enginebridge`, `enginebuild`, `actionpolicy` and more, so
 # a runtime holding only the first one imports and then fails.
 RUNTIME_PACKAGES = ("midtermpanel", "trustedlane")
+
+# The top-level MODULE the engine also needs: `panel._upstream()` does
+# `import independent_verify`, reusing the default branch's policy
+# implementation rather than re-deriving it. Absent from the runtime it is a
+# `ModuleNotFoundError` in `anti_copy_tripwire` — after every model has
+# answered and been paid for. `tests/test_midterm_materialised_runtime_vertical.py`
+# runs the vertical that proves it; this file only has to stop describing a
+# runtime of two entries.
+RUNTIME_MODULES = ("independent_verify.py",)
+
+# Everything the materialisation step puts in the runtime, and nothing else.
+RUNTIME_ENTRIES = RUNTIME_PACKAGES + RUNTIME_MODULES
 
 # The step that must put those packages somewhere outside the candidate root.
 MATERIALISE_STEP = "Materialise the trusted runtime"
@@ -175,6 +194,8 @@ def world(tmp_path):
         shutil.copytree(ROOT / "scripts" / package,
                         workspace / "scripts" / package,
                         ignore=shutil.ignore_patterns("__pycache__"))
+    for module in RUNTIME_MODULES:
+        shutil.copy(ROOT / "scripts" / module, workspace / "scripts" / module)
 
     def git(*args):
         subprocess.run(["git", *args], cwd=workspace, check=True,
@@ -411,14 +432,18 @@ class TestTheMaterialisedRuntime:
             assert (Path(runtime) / package / "__init__.py").exists(), (
                 f"{package} is missing from the materialised runtime; the "
                 "engine imports both and a partial runtime fails at import")
+        for module in RUNTIME_MODULES:
+            assert (Path(runtime) / module).is_file(), (
+                f"{module} is missing from the materialised runtime; "
+                "`panel._upstream()` imports it once every model has answered")
 
-    def test_only_those_packages_are_materialised(self, world):
+    def test_only_those_entries_are_materialised(self, world):
         """`scripts/` also holds `verifier`, `human_merge_gate` and more. The
         runtime is the engine's dependencies, not a second copy of the tree."""
         materialise(world)
         runtime = Path(_exported(world)["MIDTERM_TRUSTED_RUNTIME"])
         present = sorted(child.name for child in runtime.iterdir())
-        assert present == sorted(RUNTIME_PACKAGES), present
+        assert present == sorted(RUNTIME_ENTRIES), present
 
     def test_the_bytes_are_the_trusted_commits_blobs(self, world):
         """Byte-identical to what the trusted commit holds, and read from the

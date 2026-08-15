@@ -396,10 +396,23 @@ jobs:
         # So the engine is materialised OUT of the repository before it is
         # imported. `git archive` reads the trusted commit's BLOBS rather than
         # the worktree, so what runs is what that commit holds even if a file
-        # on disk differs. Only the two packages the engine imports are
-        # materialised: `midtermpanel` reaches into `trustedlane` for
-        # `enginebridge`, `enginebuild` and `actionpolicy`, and a runtime
-        # holding only the first imports and then fails.
+        # on disk differs. Only what the engine imports is materialised:
+        # `midtermpanel` reaches into `trustedlane` for `enginebridge`,
+        # `enginebuild` and `actionpolicy`, and a runtime holding only the
+        # first imports and then fails.
+        #
+        # The THIRD path is a single top-level module, and it is not optional.
+        # `panel._upstream()` does `import independent_verify` — the panel
+        # deliberately reuses the default branch's policy implementation rather
+        # than re-deriving `norm_reason`, `model_matches` and the approval rules
+        # a second time. A runtime holding the two packages and not that file
+        # imports, counts, sends every request, normalises every reply, and THEN
+        # dies in `anti_copy_tripwire` with `ModuleNotFoundError: No module
+        # named 'independent_verify'` — after the money is spent and before any
+        # panel evidence is written. It is a FILE and not a package:
+        # `scripts/independent_verify.py` under `--strip-components=1` extracts
+        # to `<runtime>/independent_verify.py`, which is exactly where a
+        # top-level import looks for it.
         #
         # The workspace keeps its one job: the git repository the review data
         # is read from. It simply stops being anywhere the interpreter looks
@@ -422,7 +435,9 @@ jobs:
           rm -rf "$runtime"
           mkdir -p "$runtime"
           git archive --format=tar "$trusted" \
-            scripts/midtermpanel scripts/trustedlane \
+            scripts/midtermpanel \
+            scripts/trustedlane \
+            scripts/independent_verify.py \
             | tar -x -C "$runtime" --strip-components=1
           for package in midtermpanel trustedlane; do
             if [ ! -f "$runtime/$package/__init__.py" ]; then
@@ -431,6 +446,17 @@ jobs:
               exit 1
             fi
           done
+          # Asserted separately from the loop above because it is a MODULE and
+          # not a package, and because the thing it protects happens late: the
+          # import that needs it runs after every provider call has been paid
+          # for. A missing file must fail here, before the key is read, and not
+          # in `anti_copy_tripwire`.
+          if [ ! -f "$runtime/independent_verify.py" ]; then
+            echo "::error::independent_verify.py is missing from the" \
+                 "materialised runtime; panel._upstream() imports it as a" \
+                 "top-level module once every model has answered" >&2
+            exit 1
+          fi
           # An EMPTY directory to run from. `-P` keeps the working directory
           # off `sys.path` anyway; running somewhere with nothing in it means
           # the guarantee does not rest on that flag alone.
@@ -706,10 +732,23 @@ jobs:
         # So the engine is materialised OUT of the repository before it is
         # imported. `git archive` reads the trusted commit's BLOBS rather than
         # the worktree, so what runs is what that commit holds even if a file
-        # on disk differs. Only the two packages the engine imports are
-        # materialised: `midtermpanel` reaches into `trustedlane` for
-        # `enginebridge`, `enginebuild` and `actionpolicy`, and a runtime
-        # holding only the first imports and then fails.
+        # on disk differs. Only what the engine imports is materialised:
+        # `midtermpanel` reaches into `trustedlane` for `enginebridge`,
+        # `enginebuild` and `actionpolicy`, and a runtime holding only the
+        # first imports and then fails.
+        #
+        # The THIRD path is a single top-level module, and it is not optional.
+        # `panel._upstream()` does `import independent_verify` — the panel
+        # deliberately reuses the default branch's policy implementation rather
+        # than re-deriving `norm_reason`, `model_matches` and the approval rules
+        # a second time. A runtime holding the two packages and not that file
+        # imports, counts, sends every request, normalises every reply, and THEN
+        # dies in `anti_copy_tripwire` with `ModuleNotFoundError: No module
+        # named 'independent_verify'` — after the money is spent and before any
+        # panel evidence is written. It is a FILE and not a package:
+        # `scripts/independent_verify.py` under `--strip-components=1` extracts
+        # to `<runtime>/independent_verify.py`, which is exactly where a
+        # top-level import looks for it.
         #
         # The workspace keeps its one job: the git repository the review data
         # is read from. It simply stops being anywhere the interpreter looks
@@ -732,7 +771,9 @@ jobs:
           rm -rf "$runtime"
           mkdir -p "$runtime"
           git archive --format=tar "$trusted" \
-            scripts/midtermpanel scripts/trustedlane \
+            scripts/midtermpanel \
+            scripts/trustedlane \
+            scripts/independent_verify.py \
             | tar -x -C "$runtime" --strip-components=1
           for package in midtermpanel trustedlane; do
             if [ ! -f "$runtime/$package/__init__.py" ]; then
@@ -741,6 +782,17 @@ jobs:
               exit 1
             fi
           done
+          # Asserted separately from the loop above because it is a MODULE and
+          # not a package, and because the thing it protects happens late: the
+          # import that needs it runs after every provider call has been paid
+          # for. A missing file must fail here, before the key is read, and not
+          # in `anti_copy_tripwire`.
+          if [ ! -f "$runtime/independent_verify.py" ]; then
+            echo "::error::independent_verify.py is missing from the" \
+                 "materialised runtime; panel._upstream() imports it as a" \
+                 "top-level module once every model has answered" >&2
+            exit 1
+          fi
           # An EMPTY directory to run from. `-P` keeps the working directory
           # off `sys.path` anyway; running somewhere with nothing in it means
           # the guarantee does not rest on that flag alone.
