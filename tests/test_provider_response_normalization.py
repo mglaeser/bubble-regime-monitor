@@ -268,14 +268,18 @@ class TestWhatTheAdapterRefuses:
     def test_a_provider_refusal_blocks_and_its_text_is_not_logged(self):
         """D8. The refusal string is provider-controlled text leaving a job
         that holds the credential."""
-        secret = "I will not comply because SENTINEL_TEXT_9137"
+        # Named `sentinel`, not `secret`: the value is a marker this test
+        # looks for in the refusal, and a local called `secret` is what the
+        # tracked-file secret scan flags — correctly, since it cannot tell a
+        # sentinel from a credential by reading the name.
+        sentinel = "I will not comply because MARKER_TEXT_9137"
         document = json.loads(raw_response())
         document["output"][-1]["content"] = [
-            {"type": "refusal", "refusal": secret}]
+            {"type": "refusal", "refusal": sentinel}]
         reason = self._refuses(json.dumps(document).encode())
         assert "response_is_a_refusal" in reason
-        assert "SENTINEL" not in reason
-        assert secret not in reason
+        assert "MARKER" not in reason
+        assert sentinel not in reason
 
     @pytest.mark.parametrize("status", ["incomplete", "in_progress", "failed"])
     def test_a_non_completed_status_blocks(self, status):
@@ -349,11 +353,11 @@ class TestWhatTheAdapterRefuses:
 
     def test_an_unknown_payload_key_blocks_and_is_counted_not_named(self):
         body = payload()
-        body["SENTINEL_KEY_4471"] = "x"
+        body["MARKER_KEY_4471"] = "x"
         reason = self._refuses(raw_response(body=body))
         assert "verdict_payload_key_set" in reason
         assert "unexpected=1" in reason
-        assert "SENTINEL" not in reason
+        assert "MARKER" not in reason
 
     def test_a_missing_payload_key_blocks(self):
         body = payload()
