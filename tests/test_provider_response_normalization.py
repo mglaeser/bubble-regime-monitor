@@ -795,3 +795,314 @@ class TestTheEnvelopeContractIsCheckedAgainstTheEngine:
     def test_the_real_engine_agrees(self):
         assert generationtransport.assert_envelope_contract_agrees(
             executor)["envelope_contract_agrees"] is True
+
+
+# ======================== the dated snapshot an alias resolves to ===========
+
+
+class TestDatedModelSnapshotsAreAccepted:
+    """OpenAI aliases resolve to dated snapshots, and exact equality read that
+    as "the answer came from somewhere else".
+
+    Panel run 31853893226: `gpt-5.3-codex` and `gpt-5.6-sol` answered, then
+    `gpt-4.1-mini` was refused for returning `gpt-4.1-mini-2025-04-14`, retried
+    once under `VERIFIER_GENERATION_MAX_RETRIES = 1`, and the batch stopped at
+    `PROVIDER_RESPONSE_INVALID` — four generation attempts, no verdict. The
+    journal's payload sizes identify it without another call: 2795, 2829, 2786,
+    2786, the last two sharing a SHA, against the governed order codex, sol,
+    mini.
+    """
+
+    SNAPSHOTS = {
+        "gpt-4.1-mini": "gpt-4.1-mini-2025-04-14",
+        "gpt-5.3-codex": "gpt-5.3-codex-2025-11-04",
+        "gpt-5.6-sol": "gpt-5.6-sol-2026-02-19",
+    }
+
+    #: Every one of these starts with the requested id and is a DIFFERENT model
+    #: — or is not a date at all. A prefix rule admits the lot.
+    NEAR_MISSES = (
+        "gpt-4.1-mini-preview",
+        "gpt-4.1-mini-latest",
+        "gpt-4.1-mini-codex",
+        "gpt-4.1-mini-2025-04-14-extra",
+        "gpt-4.1-mini2025-04-14",
+        "gpt-4.1",
+        "gpt-4.1-mini-x2025-04-14",
+    )
+
+    def test_the_exact_id_matches(self):
+        for model in self.SNAPSHOTS:
+            assert adapterv2.model_identity_matches(model, model)
+
+    def test_a_dated_snapshot_matches_for_every_governed_model(self):
+        for requested, resolved in self.SNAPSHOTS.items():
+            assert adapterv2.model_identity_matches(resolved, requested), (
+                f"{resolved} did not match {requested}")
+
+    @pytest.mark.parametrize("observed", NEAR_MISSES)
+    def test_every_near_miss_is_refused(self, observed):
+        assert not adapterv2.model_identity_matches(observed, "gpt-4.1-mini")
+
+    @pytest.mark.parametrize("observed", [
+        "gpt-4.1-mini-25-04-14", "gpt-4.1-mini-2025-4-14",
+        "gpt-4.1-mini-2025-04-1", "gpt-4.1-mini-20250414",
+        "gpt-4.1-mini-2025-04-14 ", " gpt-4.1-mini-2025-04-14",
+        "gpt-4.1-mini--2025-04-14", "GPT-4.1-MINI-2025-04-14",
+    ])
+    def test_a_malformed_date_is_refused(self, observed):
+        assert not adapterv2.model_identity_matches(observed, "gpt-4.1-mini")
+
+    @pytest.mark.parametrize("observed", [
+        "gpt-4.1-mini-\u0662\u0660\u0662\u0665-\u0660\u0664-\u0661\u0664",   # Arabic-Indic
+        "gpt-4.1-mini-\uff12\uff10\uff12\uff15-\uff10\uff14-\uff11\uff14",   # fullwidth
+        "gpt-4.1-mini-\u0968\u0966\u0968\u096b-\u0966\u096a-\u0967\u096a",   # Devanagari
+        "gpt-4.1-mini-20\u0662\u0665-04-14",                                       # script-mixed
+    ])
+    def test_a_non_ascii_digit_date_is_refused(self, observed):
+        """`\\d` in a Python `str` pattern is Unicode-aware: it matches the whole
+        `Nd` category, 660 codepoints rather than ten. Every string here passed
+        the first version of this rule, and none of them is anything a provider
+        can legitimately return — so accepting one means accepting a value that
+        is not the governed model and writing it verbatim into `response_model`.
+
+        Found by adversarial review before the fix shipped, not after."""
+        assert not adapterv2.model_identity_matches(observed, "gpt-4.1-mini")
+
+    def test_the_pattern_uses_an_explicit_ascii_digit_class(self):
+        """Stated over the source, so a future edit back to `\\d` fails here and
+        not only in the table above."""
+        assert "[0-9]" in adapterv2._DATED_SNAPSHOT
+        assert "\\d" not in adapterv2._DATED_SNAPSHOT
+
+    def test_a_trailing_newline_is_refused(self):
+        """`$` in Python also matches before a trailing newline, so a
+        `$`-anchored rule would accept this. A newline is a suffix, and this
+        adapter reads provider-controlled bytes inside the job that holds the
+        credential."""
+        assert not adapterv2.model_identity_matches(
+            "gpt-4.1-mini-2025-04-14\n", "gpt-4.1-mini")
+
+    @pytest.mark.parametrize("value", [None, "", 0, 1, [], {}, b"gpt-4.1-mini",
+                                       True, 3.5])
+    def test_non_strings_are_false_rather_than_an_exception(self, value):
+        """Total on purpose: the observed value comes off the wire, and
+        `re.match` on a non-string raises inside the credential-bearing job."""
+        assert adapterv2.model_identity_matches(value, "gpt-4.1-mini") is False
+        assert adapterv2.model_identity_matches("gpt-4.1-mini", value) is False
+
+    def test_the_regex_metacharacters_in_a_model_id_are_escaped(self):
+        """`gpt-4.1-mini` contains a `.`, which is `any character` unescaped —
+        so `gpt-4X1-mini` would match a rule that forgot to escape."""
+        assert not adapterv2.model_identity_matches("gpt-4X1-mini",
+                                                    "gpt-4.1-mini")
+        assert not adapterv2.model_identity_matches("gpt-4X1-mini-2025-04-14",
+                                                    "gpt-4.1-mini")
+
+
+class TestTheHelperAgreesWithTheRepositorysExistingRule:
+    """`independent_verify.model_matches` already states this rule. The two are
+    separate implementations on purpose — the trusted lane must not take its
+    answer to "which model spoke" from a candidate-side script — so the table
+    below is what keeps the duplication from drifting."""
+
+    TABLE = [
+        ("gpt-4.1-mini", "gpt-4.1-mini"),
+        ("gpt-4.1-mini-2025-04-14", "gpt-4.1-mini"),
+        ("gpt-5.6-sol-2026-02-19", "gpt-5.6-sol"),
+        ("gpt-5.3-codex-2025-11-04", "gpt-5.3-codex"),
+        ("gpt-4.1-mini-2025-4-14", "gpt-4.1-mini"),
+        ("gpt-4.1-mini-25-04-14", "gpt-4.1-mini"),
+        ("gpt-4.1-mini-20250414", "gpt-4.1-mini"),
+        ("gpt-4.1-mini-preview", "gpt-4.1-mini"),
+        ("gpt-4.1-mini-latest", "gpt-4.1-mini"),
+        ("gpt-4.1-mini-codex", "gpt-4.1-mini"),
+        ("gpt-4.1-mini-2025-04-14-extra", "gpt-4.1-mini"),
+        ("gpt-4.1-mini2025-04-14", "gpt-4.1-mini"),
+        ("gpt-4.1-mini-x2025-04-14", "gpt-4.1-mini"),
+        ("gpt-4.1", "gpt-4.1-mini"),
+        ("claude-opus-5", "gpt-4.1-mini"),
+        ("", "gpt-4.1-mini"),
+        ("gpt-4.1-mini", ""),
+        (None, "gpt-4.1-mini"),
+        ("gpt-4.1-mini", None),
+    ]
+
+    def _reference(self):
+        import importlib.util
+        path = ROOT / "scripts" / "independent_verify.py"
+        spec = importlib.util.spec_from_file_location("_indep_verify", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.model_matches
+
+    @pytest.mark.parametrize("observed,requested", TABLE)
+    def test_the_two_implementations_agree(self, observed, requested):
+        reference = self._reference()
+        assert bool(reference(observed, requested)) is (
+            adapterv2.model_identity_matches(observed, requested))
+
+    def test_the_helper_is_stricter_on_non_ascii_digits(self):
+        """The second deliberate difference. `model_matches` uses `\\d`, so it
+        accepts an Arabic-Indic "date"; this one does not. The trusted lane
+        takes the stricter reading — it is the copy that runs beside the
+        credential."""
+        reference = self._reference()
+        observed = "gpt-4.1-mini-\u0662\u0660\u0662\u0665-\u0660\u0664-\u0661\u0664"
+        assert reference(observed, "gpt-4.1-mini") is not None
+        assert adapterv2.model_identity_matches(observed, "gpt-4.1-mini") is False
+
+    def test_the_helper_is_total_where_the_reference_raises(self):
+        """The one deliberate difference. `model_matches` reaches `re.match`
+        with a truthy non-string and raises; this one returns False, because a
+        `TypeError` inside the credential-bearing job is reported as an opaque
+        `exception_class` and nothing else."""
+        reference = self._reference()
+        with pytest.raises(TypeError):
+            reference(123, "gpt-4.1-mini")
+        assert adapterv2.model_identity_matches(123, "gpt-4.1-mini") is False
+
+
+class TestADatedSnapshotResponseNormalizes:
+
+    MINI = "gpt-4.1-mini"
+    MINI_SNAPSHOT = "gpt-4.1-mini-2025-04-14"
+
+    def _out(self):
+        raw = raw_response(model=self.MINI, reasoning=False)
+        document = json.loads(raw)
+        # The alias was requested; the snapshot answered. Only `response.model`
+        # changes — the verdict payload is the model's own answer and is
+        # untouched.
+        document["model"] = self.MINI_SNAPSHOT
+        return normalize(json.dumps(document).encode(), model=self.MINI)
+
+    def test_a_realistic_dated_snapshot_response_normalizes(self):
+        assert self._out()["envelope"]["output_parsed"]["lens_id"] == (
+            reviewpolicy.lens_id(self.MINI))
+
+    def test_the_record_preserves_both_identities(self):
+        record = self._out()["record"]
+        assert record["requested_model"] == self.MINI
+        assert record["response_model"] == self.MINI_SNAPSHOT
+
+    def test_the_envelope_carries_the_GOVERNED_requested_id(self):
+        """The engine's role, lens and policy checks are keyed on the id the
+        run priced and approved. The resolved snapshot is bound in the record,
+        which is where a fact about the provider belongs."""
+        assert self._out()["envelope"]["model"] == self.MINI
+
+    def test_the_engine_accepts_the_envelope_under_the_requested_id(self):
+        envelope_bytes = self._out()["envelope_bytes"]
+        parsed = executor.validate_response_envelope(
+            200, envelope_bytes, model_id=self.MINI)
+        assert parsed["model"] == self.MINI
+
+    def test_a_preview_variant_is_still_refused_before_aggregation(self):
+        document = json.loads(raw_response(model=self.MINI, reasoning=False))
+        document["model"] = "gpt-4.1-mini-preview"
+        with pytest.raises(LaneRefusal) as caught:
+            normalize(json.dumps(document).encode(), model=self.MINI)
+        assert "response_model_mismatch" in caught.value.reason
+        assert "preview" not in caught.value.reason
+
+
+class TestTheVerticalWithADatedMiniSnapshot:
+    """D10 and D11. The run that failed, as it would have run with the fix."""
+
+    RESOLVED = {"gpt-5.3-codex": "gpt-5.3-codex-2025-11-04",
+                "gpt-5.6-sol": "gpt-5.6-sol-2026-02-19",
+                "gpt-4.1-mini": "gpt-4.1-mini-2025-04-14"}
+
+    def _run(self, resolved):
+        policy = panel_policy()
+        replies = []
+        for model in PANEL:
+            document = json.loads(raw_response(model=model,
+                                               body=payload(model=model)))
+            document["model"] = resolved.get(model, model)
+            replies.append((200, json.dumps(document).encode()))
+        transport = build_transport(replies)
+        ledger = executor.GenerationLedger({
+            "VERIFIER_MAX_GENERATION_CALLS": 80,
+            "VERIFIER_GENERATION_MAX_RETRIES": 1,
+            "VERIFIER_GENERATION_TIMEOUT_SECONDS": 60,
+            "VERIFIER_TOKEN_DRIFT_TOLERANCE": 10000})
+        result = executor.execute_batch(
+            {"batch_id": "b1", "unit_sha256_in_order": ["u1"]},
+            policy, transport=transport,
+            pin_values={"VERIFIER_GENERATION_TIMEOUT_SECONDS": 60,
+                        "VERIFIER_TOKEN_DRIFT_TOLERANCE": 10000},
+            challenge=CHALLENGE, counted_by_model={},
+            assemblies={m: Assembly(m) for m in PANEL}, ledger=ledger)
+        return result, transport
+
+    def test_all_three_models_vote_when_every_alias_resolves(self):
+        result, transport = self._run(self.RESOLVED)
+        assert len(result["per_model_verdict_evidence"]) == 3
+        assert result["unit_decisions"]["u1"]["approved"] is True
+        assert len(transport.normalization_records) == 3
+
+    def test_only_the_mini_snapshot_is_enough_to_have_broken_it(self):
+        """The exact shape of run 31853893226: two exact ids, one snapshot."""
+        result, transport = self._run(
+            {"gpt-4.1-mini": "gpt-4.1-mini-2025-04-14"})
+        assert result["unit_decisions"]["u1"]["approved"] is True
+        assert len(transport.normalization_records) == 3
+
+    def test_each_record_names_the_requested_and_the_resolved_model(self):
+        _, transport = self._run(self.RESOLVED)
+        by_requested = {r["requested_model"]: r["response_model"]
+                        for r in transport.normalization_records}
+        assert by_requested == self.RESOLVED
+
+    def test_exact_equality_would_turn_this_red(self, monkeypatch):
+        """D11. Reverting the matcher must break the mini-snapshot vertical —
+        otherwise these tests would pass with the defect still in place."""
+        monkeypatch.setattr(adapterv2, "model_identity_matches",
+                            lambda observed, requested: observed == requested)
+        with pytest.raises(BlockingError) as caught:
+            self._run({"gpt-4.1-mini": "gpt-4.1-mini-2025-04-14"})
+        assert caught.value.code == "PROVIDER_RESPONSE_INVALID"
+
+    def test_the_retry_budget_matches_the_run_that_failed(self, monkeypatch):
+        """One retry, then the batch stops — four attempts for three models,
+        which is what the journal recorded."""
+        monkeypatch.setattr(adapterv2, "model_identity_matches",
+                            lambda observed, requested: observed == requested)
+        with pytest.raises(BlockingError):
+            self._run({"gpt-4.1-mini": "gpt-4.1-mini-2025-04-14"})
+
+
+class TestMalformedProviderBytesRefuseRatherThanCrash:
+    """An uncaught exception here reaches `clibase` as
+    `MIDTERM_PANEL_UNEXPECTED … exception_class=…` with the message withheld,
+    because this job holds the provider key. That opacity has already cost two
+    panel runs. Both of these escaped the first version of the adapter and were
+    found by adversarial review before it shipped."""
+
+    def test_deeply_nested_json_is_refused_not_a_recursion_error(self):
+        """`json.loads` raises `RecursionError`, which is not a
+        `JSONDecodeError` subclass and so was not caught."""
+        deep = (b"[" * 20000) + (b"]" * 20000)
+        with pytest.raises(LaneRefusal) as caught:
+            adapterv2._strict_json(deep, what="raw_response")
+        assert "raw_response_not_json" in caught.value.reason
+        assert "RecursionError" in caught.value.reason
+
+    def test_a_lone_surrogate_in_the_output_text_is_refused(self):
+        """A lone surrogate survives `json.loads` and dies on the way back in
+        with `UnicodeEncodeError`."""
+        with pytest.raises(LaneRefusal) as caught:
+            adapterv2.parse_verdict_payload('{"x":"\ud800"}')
+        assert "verdict_payload_not_encodable" in caught.value.reason
+
+    def test_a_surrogate_bearing_response_refuses_through_the_transport(self):
+        document = json.loads(raw_response())
+        document["output"][-1]["content"][0]["text"] = '{"x":"\ud800"}'
+        transport = build_transport(
+            [(200, json.dumps(document).encode("utf-8", "surrogatepass"))])
+        with pytest.raises(LaneRefusal):
+            transport.post(executor.GENERATION_PATH, request_bytes(),
+                           timeout=30)
+        assert transport.calls == 1
