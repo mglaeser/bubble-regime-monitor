@@ -59,6 +59,7 @@ from midtermpanel import (  # noqa: E402
     PANEL_MODELS,
     REVIEW_STATUS,
     dryrun,  # noqa: E402
+    reviewrender,  # noqa: E402
 )
 
 #: The engine both roles are pinned to. Read from the governance document
@@ -215,6 +216,16 @@ class Vertical:
     def panel_evidence(self):
         return json.loads(
             (self.runner / "midterm" / "panel-evidence.json")
+            .read_text(encoding="utf-8"))
+
+    def panel_review_markdown(self) -> str:
+        """Exactly what the panel would have posted to the pull request."""
+        return (self.runner / "midterm" / "panel-review.md").read_text(
+            encoding="utf-8")
+
+    def panel_review(self) -> dict:
+        return json.loads(
+            (self.runner / "midterm" / "panel-review.json")
             .read_text(encoding="utf-8"))
 
 
@@ -486,6 +497,65 @@ class TestThePanelRefusesABrokenHandoff:
         assert result["returncode"] != 0
 
 
+class TestTheReadableReviewIsProducedByTheWholeVertical:
+    """The full provider-SHAPED fake vertical produces a review a person can
+    read, and produces it from the same objects the real run does.
+
+    Unit tests cover the renderer's sanitization exhaustively. What only the
+    vertical can show is that the plan's own unit metadata, the engine's own
+    verdict records and the engine's own scanner meet correctly at the end of a
+    real process — the same class of seam every earlier defect in this lane
+    lived in."""
+
+    def test_the_approved_run_wrote_a_readable_review(self, full_run):
+        body = full_run["run"].panel_review_markdown()
+        assert reviewrender.MARKER in body
+        assert reviewrender.NO_FINDINGS in body
+        assert "**approved**" in body
+
+    def test_it_names_the_exact_head_the_base_and_every_model(self, full_run):
+        run = full_run["run"]
+        body = run.panel_review_markdown()
+        assert run.candidate["head"] in body
+        assert run.candidate["base"] in body
+        for model in PANEL_MODELS:
+            assert f"`{model}`" in body
+
+    def test_the_dry_run_rendered_it_and_published_nothing(self, full_run):
+        stored = full_run["run"].panel_review()
+        assert stored["publication"]["published"] is False
+        assert stored["publication"]["outcome"] == "dry_run_not_published"
+
+    def test_the_retained_json_matches_the_retained_markdown(self, full_run):
+        import hashlib
+        run = full_run["run"]
+        body = run.panel_review_markdown()
+        stored = run.panel_review()
+        assert stored["published_body_sha256"] == hashlib.sha256(
+            body.encode("utf-8")).hexdigest()
+
+    def test_the_execution_challenge_never_reaches_the_review(self, full_run):
+        run = full_run["run"]
+        challenge = run.plan()["execution_challenge"]
+        assert challenge
+        assert challenge not in run.panel_review_markdown()
+        assert challenge not in json.dumps(run.panel_review())
+
+    def test_no_proof_of_check_reaches_the_review(self, full_run):
+        """The engine's mock builds every proof by opening with the challenge,
+        so a review carrying a proof would carry the challenge too. Asserted
+        separately because the two would be fixed in different places."""
+        stored = json.dumps(full_run["run"].panel_review())
+        assert "proof_of_check" not in stored
+        assert "proof_sha256" not in stored
+
+    def test_the_review_is_beside_the_cryptographic_evidence_not_instead(
+            self, full_run):
+        run = full_run["run"]
+        assert run.panel_evidence()["evidence_class"].startswith("MIDTERM_")
+        assert run.panel_review()["publication_class"] == "private_sanitized"
+
+
 class TestTheRefutationPathsBlock:
     """Driven through the REAL entry points by scripting the engine's own mock,
     not by calling `aggregate` with a hand-built vote list."""
@@ -499,6 +569,34 @@ class TestTheRefutationPathsBlock:
 
     def _units(self, vertical):
         return [unit["unit_sha256"] for unit in vertical.plan()["final_units"]]
+
+    def test_a_blocked_run_still_leaves_a_readable_finding(self, counted):
+        """Requirement 9, through the real entry point.
+
+        The refusal is the process exit. It must not also be the reason nobody
+        can see what was refused — which is what happened while the only
+        readable output was a 140-character status."""
+        units = self._units(counted)
+        result = counted.run(
+            "panelcli",
+            MIDTERM_DRY_RUN_REFUTE=json.dumps({"gpt-5.6-sol": units}))
+        assert result["returncode"] != 0
+        body = counted.panel_review_markdown()
+        assert "**blocked**" in body
+        assert "#### Findings" in body
+        assert "raised by `gpt-5.6-sol`" in body
+        assert reviewrender.NO_FINDINGS not in body
+
+    def test_the_blocked_review_locates_its_finding_in_the_repository(
+            self, counted):
+        """The location comes from the plan, so it is a real path in the
+        candidate rather than anything a model reported."""
+        units = self._units(counted)
+        counted.run("panelcli",
+                    MIDTERM_DRY_RUN_REFUTE=json.dumps({"gpt-4.1-mini": units}))
+        body = counted.panel_review_markdown()
+        assert "app/thing.py" in body
+        assert " line" in body
 
     def test_the_required_approver_refuting_blocks(self, counted):
         units = self._units(counted)

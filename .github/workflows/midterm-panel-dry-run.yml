@@ -245,8 +245,14 @@ jobs:
           PROBE
 
       - name: Run the panel's unit and merge-gate suites
+        # `test_midterm_readable_review.py` is here for the same reason the
+        # vertical is: the publisher takes provider-written text and
+        # candidate-chosen file names and puts them in a GitHub comment, and
+        # this workflow is the one place that proves the whole lane behaves
+        # with no credential anywhere in scope.
         env:
           PYTHONPATH: ${{ github.workspace }}/scripts
         run: |
           python -m pytest tests/test_midterm_panel.py \
+            tests/test_midterm_readable_review.py \
             tests/test_human_merge_gate.py tests/test_checkruns.py -q

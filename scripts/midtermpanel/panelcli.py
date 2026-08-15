@@ -65,9 +65,54 @@ def input_paths(temp: str) -> dict:
             "plan": os.path.join(base, "executable-plan.json")}
 
 
+def review_paths(temp: str) -> dict:
+    """Where the sanitized human-readable review is retained.
+
+    Beside `panel-evidence.json` and never instead of it. The evidence file is
+    the cryptographic record — full per-model verdicts, proofs, digests, all
+    private. These two are the SANITIZED reading of it: exactly what was
+    published (`.md`) and the structured object it was rendered from (`.json`),
+    so a reader can check what the panel showed a human against what it
+    actually decided."""
+    base = os.path.join(temp, "midterm")
+    return {"markdown": os.path.join(base, "panel-review.md"),
+            "json": os.path.join(base, "panel-review.json")}
+
+
+def retain_review(environ: dict, *, review: dict, body: str,
+                  publication: dict) -> dict:
+    """Write both artifacts. Atomic for the JSON, and plain for the Markdown.
+
+    The Markdown is written with the same temp-and-rename discipline by hand
+    rather than through `write_atomic`, which is typed for evidence records and
+    would refuse a string."""
+    from .evidence import write_atomic
+    paths = review_paths(_runner_temp(environ))
+    os.makedirs(os.path.dirname(paths["markdown"]), exist_ok=True)
+    temporary = f"{paths['markdown']}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    os.replace(temporary, paths["markdown"])
+    write_atomic({"schema_version": 1,
+                  "artifact": "midterm-panel-readable-review",
+                  "publication_class": "private_sanitized",
+                  "review": review,
+                  "publication": publication,
+                  "published_body_sha256": _sha256(body),
+                  "published_body_chars": len(body)},
+                 paths["json"])
+    return paths
+
+
+def _sha256(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()
+
+
 def perform(environ: dict, *, execute_fn, opener,
             panel_identity: dict | None = None,
-            require_identity: bool = False) -> dict:
+            require_identity: bool = False,
+            scan=None, publish_review_fn=None) -> dict:
     """Verify the handoff, execute, aggregate, publish. Injected seams only.
 
     The challenge comes from the PLAN, not from the environment. It is what the
@@ -173,6 +218,24 @@ def perform(environ: dict, *, execute_fn, opener,
         target_url=target, run_id=run_id, run_attempt=attempt),
         opener=opener, token=env["GITHUB_TOKEN"]))
 
+    # The readable review, and it happens HERE — after the machine record is
+    # complete and before the process exits. Requirement 9 is that a finding
+    # stays readable after it blocks the job, and the only way to guarantee that
+    # is to publish before the refusal rather than in a later step that a
+    # nonzero exit would skip.
+    #
+    # Nothing below can change `verdict`. `build_review` re-asserts that against
+    # the aggregate, `publish_review` returns a record instead of raising, and
+    # the refusal at the end reads the same `verdict` it would have read if this
+    # block did not exist. A publisher able to redden an approval would turn a
+    # GitHub 502 into a review outcome; one able to green a block is what
+    # requirement 11 forbids outright.
+    published_review = publish_readable_review(
+        environ, plan=plan, executed=executed, verdict=verdict, record=record,
+        count_evidence_sha256=count_evidence_sha256, head=head, base=base,
+        target=target, run_id=run_id, token=env["GITHUB_TOKEN"], scan=scan,
+        publish_review_fn=publish_review_fn)
+
     # After the status is published and the evidence is on disk, and only then.
     # A blocked review that returns normally leaves the panel JOB green while
     # the commit status is red — and the job is what a person glances at, what
@@ -187,7 +250,75 @@ def perform(environ: dict, *, execute_fn, opener,
                f"evidence_sha256={record['evidence_sha256'][:16]} — the full "
                "per-model verdicts are retained in the private evidence; this "
                "refusal is the process exit, not the finding")
-    return {"published": published, "verdict": verdict, "evidence": record}
+    return {"published": published, "verdict": verdict, "evidence": record,
+            "review": published_review}
+
+
+def publish_readable_review(environ: dict, *, plan: dict, executed: dict,
+                            verdict: dict, record: dict,
+                            count_evidence_sha256, head: str, base: str,
+                            target: str, run_id: int, token: str, scan,
+                            publish_review_fn) -> dict:
+    """Render, publish and retain the human-readable review.
+
+    Separated from `perform` so the ordering above stays legible and so a test
+    can drive this alone. It returns a record in every case — including the case
+    where it could not run at all — because the caller writes that record into
+    the private artifact, and "the publisher was not wired up" and "the
+    publisher ran and GitHub refused" must not look the same.
+    """
+    from . import reviewrender
+
+    if not callable(scan) or not callable(publish_review_fn):
+        # Reported, never raised. A missing seam is a wiring defect worth
+        # seeing, and it is not a reason to discard a completed review.
+        return {"published": False, "outcome": "publisher_not_wired",
+                "refusal": ("no engine scanner or no publish function was "
+                            "supplied; every rendered field must be scanned "
+                            "with the engine's own scanner")}
+    challenge = plan.get("execution_challenge")
+    try:
+        review = reviewrender.build_review(
+            decision=verdict["decision"], candidate_head_sha=head,
+            candidate_base_sha=base, votes=executed["votes"], plan=plan,
+            aggregate_record=verdict, scan=scan, run_url=target, run_id=run_id,
+            evidence_sha256=record["evidence_sha256"],
+            count_evidence_sha256=count_evidence_sha256, challenge=challenge)
+        body = reviewrender.render(review, challenge=challenge)
+    except Exception as exc:
+        # A rendering fault must NEVER become the process's answer. The vertical
+        # found this the hard way: a body-level refusal escaped, replaced
+        # `category=panel_blocked` as the exit reason, and a run that had
+        # correctly refuted three units reported a publication problem instead.
+        # The decision is already made and already published; this is a reading
+        # of it, and a reading that fails is a reading that is missing.
+        reason = getattr(exc, "reason", None)
+        print("::warning::midterm panel review could not be rendered: "
+              + (reason if isinstance(reason, str)
+                 else f"exception_class={type(exc).__name__}"))
+        return {"published": False, "outcome": "render_refused",
+                "refusal": (reason if isinstance(reason, str)
+                            else f"exception_class={type(exc).__name__}")}
+    publication = publish_review_fn(
+        body=body, pr_number=environ.get("CANDIDATE_PR_NUMBER"),
+        candidate_head_sha=head, token=token, challenge=challenge)
+    try:
+        paths = retain_review(environ, review=review, body=body,
+                              publication=publication)
+    except OSError as exc:
+        # Same rule as above, one layer out: a full disk is not a verdict.
+        paths = {"retained": False,
+                 "refusal": f"exception_class={type(exc).__name__}"}
+    # The panel job's log is the one place an operator looks when a comment did
+    # not appear, so the outcome is stated there rather than only on disk.
+    if not publication.get("published"):
+        print(f"::warning::midterm panel review not published "
+              f"(outcome={publication.get('outcome')}): "
+              f"{publication.get('refusal')}")
+    return {**publication, "render_version": reviewrender.RENDER_VERSION,
+            "finding_count": review["finding_count"],
+            "retained": paths,
+            "decision_unchanged": review["decision"] == verdict["decision"]}
 
 
 def selected_generation_attempt_cap(environ: dict) -> int:
@@ -251,6 +382,10 @@ def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
 
     return {"execute_fn": execute_fn, "engine_identity": opened,
             "identity_binding": identity_binding(opened),
+            # The ENGINE's scanner, for the readable review. Every field the
+            # publisher renders is scanned with the operator-approved artifact's
+            # own copy rather than with one this package imported for itself.
+            "scan": enginebridge.secret_scanner(engine),
             # Only a provider-backed run has an identity to compare. A dry run
             # has none, and saying so is different from silently comparing two
             # absences and calling it verified.
@@ -302,10 +437,19 @@ def main() -> None:
         outcome = perform(environ, execute_fn=prepared["execute_fn"],
                           opener=sink,
                           panel_identity=prepared["identity_binding"],
-                          require_identity=prepared["require_identity"])
+                          require_identity=prepared["require_identity"],
+                          scan=prepared["scan"],
+                          # RENDERED and retained, never sent. See
+                          # `reviewpublish.not_published_in_a_dry_run` for why
+                          # this is not a sink: the comment publisher reads the
+                          # pull request's head and its comment list, and a sink
+                          # answering those would be a model of GitHub rather
+                          # than a record of what was constructed.
+                          publish_review_fn=_dry_run_review_publisher())
         proof = dryrun.record(environ, sink=sink,
                               transport=prepared["transport"])
-        print(json.dumps({"dry_run": proof, "verdict": outcome["verdict"]},
+        print(json.dumps({"dry_run": proof, "verdict": outcome["verdict"],
+                          "review": outcome["review"]},
                          indent=2, sort_keys=True, default=str))
         return
 
@@ -332,10 +476,34 @@ def main() -> None:
     perform(environ, execute_fn=prepared["execute_fn"],
             opener=github_status_opener,
             panel_identity=prepared["identity_binding"],
-            require_identity=prepared["require_identity"])
+            require_identity=prepared["require_identity"],
+            scan=prepared["scan"],
+            publish_review_fn=_live_review_publisher(github_status_opener))
+
+
+def _live_review_publisher(opener):
+    """The real comment publisher, bound to the GitHub opener.
+
+    A separate function so that the two `perform` call sites differ in exactly
+    one visible way, and so a test can assert that the provider path is wired to
+    `reviewpublish.publish_review` and the dry-run path is not."""
+    from . import reviewpublish
+    return lambda *, body, pr_number, candidate_head_sha, token, challenge: (
+        reviewpublish.publish_review(
+            body=body, pr_number=pr_number,
+            candidate_head_sha=candidate_head_sha, token=token, opener=opener,
+            challenge=challenge))
+
+
+def _dry_run_review_publisher():
+    from . import reviewpublish
+    return lambda *, body, pr_number, candidate_head_sha, token, challenge: (
+        reviewpublish.not_published_in_a_dry_run(
+            body=body, candidate_head_sha=candidate_head_sha))
 
 
 def _self_test() -> int:
+    from . import reviewpublish, reviewrender
     return self_test_report("panelcli", {
         "module imports": True,
         "perform is callable": callable(perform),
@@ -343,6 +511,13 @@ def _self_test() -> int:
             INPUT_DIRNAME in input_paths("/x")["plan"],
         "panel evidence class is the mid-term one":
             PANEL_EVIDENCE_CLASS.startswith("MIDTERM_"),
+        "retains the readable review beside the evidence":
+            review_paths("/x")["markdown"].endswith("panel-review.md"),
+        "the review publisher reaches only the pinned repository":
+            reviewpublish.comments_url(1).startswith(
+                f"https://api.github.com/repositories/{REPOSITORY_NUMERIC_ID}/"),
+        "the renderer has one sticky marker":
+            reviewrender.MARKER.startswith("<!--"),
     })
 
 

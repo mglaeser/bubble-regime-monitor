@@ -824,3 +824,22 @@ def required_approver(engine: dict) -> str:
 def pin_names(engine: dict) -> tuple:
     """The twelve PIN names, in order, from the engine."""
     return tuple(engine["modules"]["verifier.policy"].POLICY_PIN_NAMES)
+
+
+def secret_scanner(engine: dict):
+    """The engine's OWN `scan_text`, as a one-argument callable.
+
+    Exposed for the readable-review renderer, which has to scan every field it
+    is about to publish. This is emphatically NOT the second scanner this
+    module's docstring forbids — it is the first one, handed out. A renderer
+    that imported a scanner for itself would be a second implementation of the
+    one check whose disagreement nobody would notice until a credential was in
+    a comment, and it would not be the operator-approved artifact's copy.
+
+    The narrowed signature is deliberate. `scan_text` also takes `allowlist` and
+    `cleared_hashes` — the scoped clearances that let a REVIEWED source literal
+    through on its way to a provider. Nothing published to a pull request has
+    ever been reviewed for that, so the publisher gets the version with no way
+    to clear anything."""
+    scan_text = engine["modules"]["verifier.preflight"].scan_text
+    return lambda text: scan_text(text)

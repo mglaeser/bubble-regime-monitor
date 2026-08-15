@@ -601,7 +601,28 @@ jobs:
       contents: read
       actions: read
       checks: read
-      pull-requests: read
+      # THE ONLY JOB IN THIS FILE WITH A SECOND WRITE SCOPE, and the only one
+      # that may have it — `privilegedworkflow.assert_permissions` keys its
+      # allowlist on the JOB ID, so the same two words in `preflight` or
+      # `finalize` are a refusal rather than a widening.
+      #
+      # It exists so the panel can publish its findings where a person will
+      # read them. A commit status carries a decision and 140 characters; it
+      # cannot say which file, which lines, which model objected or why. A
+      # governed panel that publishes only statuses is a reviewer nobody can
+      # act on, which is how a real refutation becomes "the bot is broken,
+      # merge it".
+      #
+      # Granted here rather than at the workflow level deliberately. The
+      # top-level block stays `pull-requests: read`, so `preflight` — which
+      # decides whether this run may proceed at all — and `finalize` — which
+      # runs on every failure path including cancellation — still cannot write
+      # to any pull request.
+      #
+      # The write is narrow by construction: `midtermpanel.reviewpublish`
+      # builds every URL from the pinned repository numeric id and a validated
+      # integer, and can create or edit exactly one marker-bearing comment.
+      pull-requests: write
       statuses: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
@@ -899,6 +920,28 @@ jobs:
           name: midterm-panel-attempts-${{ needs.preflight.outputs.head_sha }}
           path: ${{ runner.temp }}/midterm/provider-attempts.jsonl
           if-no-files-found: ignore
+          retention-days: 3
+
+      # BESIDE the cryptographic evidence, never instead of it. These two are
+      # the SANITIZED reading of the panel's decision: `panel-review.md` is
+      # byte-for-byte what was published to the pull request, and
+      # `panel-review.json` is the structured object it was rendered from,
+      # including which fields were withheld and why. Neither carries a reason's
+      # proof, the execution challenge, or any raw provider text.
+      #
+      # `if-no-files-found: warn` and not `error`, unlike the evidence below: a
+      # run that refused before it reached the publisher — a stale head, a
+      # handoff mismatch — legitimately has no review to retain, and turning
+      # that into a second failure would bury the first one.
+      - name: Retain the sanitized readable review
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: midterm-panel-review-${{ needs.preflight.outputs.head_sha }}
+          path: |
+            ${{ runner.temp }}/midterm/panel-review.md
+            ${{ runner.temp }}/midterm/panel-review.json
+          if-no-files-found: warn
           retention-days: 3
 
       - name: Retain private verdict evidence
