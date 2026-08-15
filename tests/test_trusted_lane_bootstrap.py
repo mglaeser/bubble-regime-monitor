@@ -47,6 +47,7 @@ from trustedlane import (  # noqa: E402
     REPOSITORY_NUMERIC_ID,
     actionpolicy,
     adapter,
+    adapterv2,
     artifactload,
     authzenvelope,
     bootstrapstate,
@@ -5855,9 +5856,57 @@ def _engine_generation_opener(*, refute=None, identical_reasons=False,
                            "has_credential": "authorization" in
                            {k.lower() for k in headers}})
         reply_status, payload = mock.post("/v1/responses", body, timeout=None)
-        return (status if status != 200 else reply_status), payload
+        # The mock speaks the ENGINE's internal envelope, because that is what
+        # the engine consumes. A real provider does not: it returns a Responses
+        # document, and the lane's transport is what turns one into the other.
+        # Wrapping here means these tests drive the real `adapterv2` path
+        # rather than handing the engine something no provider would send.
+        return (status if status != 200 else reply_status), _as_raw_responses(
+            payload)
 
     return opener
+
+
+def _as_raw_responses(envelope_bytes: bytes) -> bytes:
+    """The engine's internal envelope, dressed as the provider's own document.
+
+    Reasoning item included on purpose: a real reasoning model returns one, and
+    a fixture without it would leave the "do not read output[0]" rule untested
+    everywhere the D2 lane runs."""
+    envelope = json.loads(envelope_bytes)
+    usage = envelope.get("usage") or {}
+    return json.dumps({
+        "id": "resp_d2", "object": "response", "created_at": 1,
+        "status": "completed", "incomplete_details": None,
+        "model": envelope["model"],
+        "output": [
+            {"type": "reasoning", "id": "rs_d2", "summary": []},
+            {"type": "message", "id": "msg_d2", "status": "completed",
+             "role": "assistant",
+             "content": [{"type": "output_text",
+                          "text": json.dumps(envelope["output_parsed"]),
+                          "annotations": []}]},
+        ],
+        "usage": {"input_tokens": usage.get("input_tokens", 0),
+                  "output_tokens": usage.get("output_tokens", 0),
+                  "total_tokens": (usage.get("input_tokens", 0)
+                                   + usage.get("output_tokens", 0))},
+    }).encode()
+
+
+def _envelope_view(raw_bytes: bytes) -> dict:
+    """The internal-envelope view of a raw document, for the tamper helpers.
+
+    They were written against the envelope and say what they mean in those
+    terms; re-expressing each of them in provider vocabulary would make the
+    tests harder to read without testing anything new."""
+    document = json.loads(raw_bytes)
+    message = next(item for item in document["output"]
+                   if item.get("type") == "message")
+    return {"object": "response", "model": document["model"],
+            "usage": {k: document["usage"][k]
+                      for k in ("input_tokens", "output_tokens")},
+            "output_parsed": json.loads(message["content"][0]["text"])}
 
 
 def _d2_opener(units, *, decision="approve", record=None):
@@ -6206,7 +6255,8 @@ def _tampered_response_opener(rewrite):
 
     def opener(method, url, headers, body):
         status, payload = inner(method, url, headers, body)
-        return status, json.dumps(rewrite(json.loads(payload))).encode()
+        rewritten = rewrite(_envelope_view(payload))
+        return status, _as_raw_responses(json.dumps(rewritten).encode())
 
     return opener
 
@@ -6422,14 +6472,22 @@ def test_the_generation_request_record_carries_no_credential():
         opener=lambda method, url, headers, body: sent.append(
             {"headers": headers}) or (200, b"{}"),
         credential=FAKE_CREDENTIAL, phase="D2",
-        engine_generation_path="/v1/responses", generation_attempt_cap=2)
-    lane.post("/v1/responses", b'{"model":"gpt-5"}')
+        engine_generation_path="/v1/responses", generation_attempt_cap=2,
+        adapter_identity=adapterv2.builtin_adapter_identity(
+            engine_source_sha256="a" * 64))
+    # `b"{}"` is not a Responses document, so normalization refuses it — which
+    # is the point of the refusal and not of this test. What is under test is
+    # what the lane KEPT, and it keeps it either way: the request was built and
+    # the attempt recorded before the reply was read.
+    with _refusal("response_object_mismatch"):
+        lane.post("/v1/responses", b'{"model":"gpt-5"}')
     # The credential DID reach the wire — that is the transport's job.
     assert any("authorization" in {k.lower() for k in call["headers"]}
                for call in sent)
     # And it is in none of the records the lane keeps.
     assert FAKE_CREDENTIAL not in json.dumps(lane.record(), default=str)
     assert FAKE_CREDENTIAL not in json.dumps(lane.attempts, default=str)
+    assert lane.attempts and lane.attempts[0]["attempt"] == 1
 
 
 # --------------------------------------------------------------------------

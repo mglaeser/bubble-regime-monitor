@@ -141,6 +141,10 @@ def perform(environ: dict, *, execute_fn, opener,
               "output_privacy": executed["output_privacy"],
               "generation_ledger_sha256": executed["generation_ledger"].get(
                   "generation_ledger_sha256"),
+              # Raw reply -> internal envelope, per model, as digests. This is
+              # what makes "the engine saw what the provider sent" checkable
+              # rather than asserted.
+              "normalization": executed["normalization"],
               "anti_copy": tripwire,
               "plan_sha256": plan["plan_sha256"],
               # The two exact inputs this verdict was produced from, so the
@@ -234,7 +238,11 @@ def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
         repository_path=repository_path)
     authorizations, _ = inputs.load_authorizations(
         environ, engine=engine, skeleton=skeleton)
-    transport = transport_factory(engine)
+    # The adapter that reads the provider's answers is identified by the engine
+    # the operator approved, so the digest comes from the VERIFIED identity
+    # rather than from anything this job could compute about itself.
+    transport = transport_factory(
+        engine, engine_source_sha256=opened["engine_source_digest"])
 
     def execute_fn(*, plan):
         return execute(engine=engine, plan=plan, skeleton=skeleton,
@@ -315,10 +323,12 @@ def main() -> None:
     github_status_opener = urllib.request.urlopen
     prepared = panel_execution(
         environ, mode=MODE_PROVIDER,
-        transport_factory=lambda engine: live_generation_transport(
-            engine, opener=provider_http_opener(
-                capability="GENERATION_TRANSPORT"), key=key,
-            generation_attempt_cap=cap))
+        transport_factory=lambda engine, *, engine_source_sha256:
+            live_generation_transport(
+                engine, opener=provider_http_opener(
+                    capability="GENERATION_TRANSPORT"), key=key,
+                generation_attempt_cap=cap,
+                engine_source_sha256=engine_source_sha256))
     perform(environ, execute_fn=prepared["execute_fn"],
             opener=github_status_opener,
             panel_identity=prepared["identity_binding"],
