@@ -72,7 +72,10 @@ def start() -> BackgroundScheduler:
                            id="breadth_refresh", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
         sms_schedule = "disabled"
-        if settings.sms_enabled:
+        # DAILY_SMS_ENABLED is the migration-friendly alias; until the explicit
+        # Stage 4 cutover the legacy digest keeps its own switch, and turning
+        # the alert system on never silently disables it.
+        if settings.effective_daily_sms_enabled:
             _scheduler.add_job(
                 _sms_job,
                 CronTrigger(hour=settings.sms_daily_hour, minute=settings.sms_daily_minute,

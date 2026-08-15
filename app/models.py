@@ -244,3 +244,20 @@ class DashboardFeed(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     payload: Mapped[str] = mapped_column(Text)  # JSON: {anchor_month, anchor_partial, series, metrics}
+
+
+def _register_alert_tables() -> None:
+    """Attach the alert-domain tables to this Base.metadata.
+
+    They live in `app/alerts/models.py` — nineteen tables would swamp this
+    module — but they must be registered here before ANY `create_all()`, or the
+    boot fallback would silently produce a database missing the partial unique
+    index that guarantees one open episode per mechanism.
+
+    Imported at the bottom, after `Base` exists, so the alert module's
+    `from app.models import Base` resolves during the circular import.
+    """
+    import app.alerts.models  # noqa: F401,PLC0415
+
+
+_register_alert_tables()

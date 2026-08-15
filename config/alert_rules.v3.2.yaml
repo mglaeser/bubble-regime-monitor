@@ -1,0 +1,3068 @@
+# bubblegauge alert ruleset v3.2 — THE COMPLETE INVENTORY.
+#
+# Every production rule lives here. No rule may exist only in Python: a rule
+# the operator cannot see in this file is a mechanism nobody can audit, silence
+# or replay. Rules that cannot run yet are present and DISABLED, each with a
+# recorded reason, so "dark" is visible rather than absent.
+#
+# Reading this file:
+#   enabled            the rule may run at all
+#   enabled_in_stages  which rollout stages it may run in. `enabled` AND the
+#                      active stage must both allow it — a stage is never
+#                      skipped by flipping one flag.
+#   policy_status      APPROVED | CALIBRATION_REQUIRED | GOVERNANCE_BLOCKED
+#   runtime_readiness  READY | MISSING_INPUT | MISSING_HISTORY | UNPINNED | ...
+#   authoritative      the rule keys off a persisted DECISION (band, red flag,
+#                      override, leg state). Such a rule may not carry a
+#                      numeric hysteresis and may not restate the decision's
+#                      formula — the loader enforces both.
+#   attribution        MECH (frozen mechanic) | LIT | JUDG | PIN
+#
+# A threshold with `value: null` and `attribution: PIN` is an UNRESOLVED pin.
+# The loader refuses to enable any rule that references one, and the API
+# reports null plus a reason — never the literal string "<PIN>".
+#
+# `capture.enabled` is written as a real boolean. An unquoted YAML `on` is the
+# string "on" under YAML 1.2 and a boolean under YAML 1.1; a safety switch does
+# not get to be ambiguous.
+
+meta:
+  rule_version: "v3.2.0"
+  alert_input_schema_version: 1
+  methodology_version: "v3-final"
+  methodology_manifest_sha256: "86c52c71a88f5e2cca3ad26e4d82b2afbc87099b6f68fa0ed4373ad020bba96e"  # pragma: allowlist secret  (public content hash of frozen_methodology.json)
+  min_service_version: "3.8.0"
+  max_service_version: "3.99.99"
+  phrase_set: "v3.2"
+  evaluator_version: "1"
+  active_stage: 1
+  note: >-
+    Stage 1: schema, sidecar capture and pure evaluation only. Nothing in this
+    file sends anything at active_stage 1 — delivery begins at stage 3 and only
+    after an operator promotes this artifact by hand.
+
+capture:
+  enabled: true
+
+rules:
+
+  # =======================================================================
+  # 11.1  REGIME — the action band itself
+  # =======================================================================
+
+  # Any entry into de-risk is P1, whatever it came from. This is a deliberate
+  # ONE-TRANSITION LATENCY POLICY, not temporal smoothing: the Monte Carlo
+  # spread is within-snapshot parameter uncertainty and says nothing about
+  # persistence. Keep it only while replay shows <= 1 transient one-snapshot
+  # P1 per 24 months (mandate 10.1 / 29).
+  - rule_id: regime.band_to_derisk
+    identity_version: 1
+    title: "Effective action state enters de-risk"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: regime
+    priority: 1
+    source_fields: [effective_action_state]
+    authoritative: true
+    condition:
+      kind: transition
+      source: effective_action_state
+      from_states: [hold, trim, suppressed]
+      to_states: [de-risk]
+    thresholds: []
+    attribution: JUDG
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [effective_action_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: true, after_seconds: 172800, max_reminders: 1}
+    supersedes: [regime.band_hold_to_trim, regime.base_band_moved_while_suppressed]
+    cancel_unsent_superseded: true
+    group_key: regime
+    quiet_hours_exempt: true
+    budget_exempt: true
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: regime.band_hold_to_trim
+    identity_version: 1
+    title: "Effective action state moves hold -> trim"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: regime
+    priority: 2
+    source_fields: [effective_action_state]
+    authoritative: true
+    condition:
+      kind: transition
+      source: effective_action_state
+      from_states: [hold]
+      to_states: [trim]
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [effective_action_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: regime.band_trim_to_hold
+    identity_version: 1
+    title: "Effective action state moves trim -> hold"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: regime
+    priority: 2
+    source_fields: [effective_action_state]
+    authoritative: true
+    condition:
+      kind: transition
+      source: effective_action_state
+      from_states: [trim]
+      to_states: [hold]
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [effective_action_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # The decision moved while the DISPLAY stayed "suppressed". Without this the
+  # operator sees an unchanged dashboard while the underlying call changed.
+  - rule_id: regime.base_band_moved_while_suppressed
+    identity_version: 1
+    title: "Base band changed while coverage suppression is active"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: regime
+    priority: 2
+    source_fields: [base_action_band, band_suppressed_by_coverage]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: transition, source: base_action_band,
+           from_states: [hold, trim, de-risk], to_states: [hold, trim, de-risk]}
+        - {kind: boolean_state, source: band_suppressed_by_coverage, equals: true}
+    thresholds: []
+    attribution: JUDG
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [base_action_band]
+    hold_sources: [band_suppressed_by_coverage]
+    freshness_requirements: {band_suppressed_by_coverage: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: [DATA_DEGRADED]
+
+  - rule_id: regime.score_jump_1r
+    identity_version: 1
+    title: "Point score jumps within one recompute"
+    enabled: false
+    disabled_reason: "delta_pp is an unresolved [PIN]: no operator artifact defines a material one-recompute point-score move."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: regime
+    priority: 2
+    source_fields: [point_score]
+    authoritative: false
+    condition:
+      kind: delta
+      source: point_score
+      mode: abs
+      op: ge
+      threshold: delta_pp
+      window: previous_input
+    thresholds:
+      - {name: delta_pp, value: null, unit: points, attribution: PIN,
+         note: "Material single-recompute move in the deterministic point score."}
+    attribution: PIN
+    confirmation: {count: 1, basis: adjacent_snapshots}
+    confirmation_sources: [point_score]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: regime.score_trend_7d
+    identity_version: 1
+    title: "Point score trends over seven days"
+    enabled: false
+    disabled_reason: "delta_7d_pp is an unresolved [PIN]."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: regime
+    priority: 2
+    source_fields: [point_score]
+    authoritative: false
+    condition:
+      kind: delta
+      source: point_score
+      mode: abs
+      op: ge
+      threshold: delta_7d_pp
+      window: rolling_7d
+    thresholds:
+      - {name: delta_7d_pp, value: null, unit: points, attribution: PIN,
+         note: "Material seven-day move in the deterministic point score."}
+    attribution: PIN
+    confirmation: {count: 1, basis: adjacent_snapshots}
+    confirmation_sources: [point_score]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # A proximity warning on the MEDIAN, not a second band edge: 57 is a JUDG
+  # early-warning level, and the de-risk decision remains the frozen one.
+  - rule_id: regime.derisk_edge_approach
+    identity_version: 1
+    title: "Median approaching the de-risk edge and rising"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; not enabled before the P3 stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [7]
+    bucket: regime
+    priority: 3
+    source_fields: [headline_median]
+    authoritative: false
+    condition:
+      kind: all_of
+      terms:
+        - {kind: range, source: headline_median, lower: approach_from, upper: derisk_edge}
+        - {kind: delta, source: headline_median, mode: rise, op: ge,
+           threshold: min_rise, window: adjacent_snapshots}
+    thresholds:
+      - {name: approach_from, value: 57.0, unit: points, attribution: JUDG,
+         note: "Early-warning proximity level. NOT a band edge."}
+      - {name: derisk_edge, value: 60.0, unit: points, attribution: MECH,
+         note: "The frozen de-risk edge, read from the methodology artifact."}
+      - {name: min_rise, value: 0.0, unit: points, attribution: JUDG,
+         note: "Any non-negative move counts as rising."}
+    attribution: JUDG
+    confirmation: {count: 3, basis: adjacent_snapshots}
+    confirmation_sources: [headline_median]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: RECOMPUTE_SLOT, intervals: 6, grace_seconds: 5400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  - rule_id: regime.iqr_edge_cross
+    identity_version: 1
+    title: "Q1 of the Monte Carlo distribution crosses a band edge"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; not enabled before the P3 stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [7]
+    bucket: regime
+    priority: 3
+    source_fields: [iqr_lo]
+    authoritative: false
+    condition: {kind: crossing, source: iqr_lo, direction: up, level: derisk_edge}
+    thresholds:
+      - {name: derisk_edge, value: 60.0, unit: points, attribution: MECH,
+         note: "Frozen de-risk edge; the crossing is reported, not re-decided."}
+    attribution: MECH
+    confirmation: {count: 2, basis: adjacent_snapshots}
+    confirmation_sources: [iqr_lo]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: RECOMPUTE_SLOT, intervals: 4, grace_seconds: 5400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  # =======================================================================
+  # 11.2  OVERRIDE AND FLAGS
+  # =======================================================================
+
+  - rule_id: override.first_flag
+    identity_version: 1
+    title: "First fireable red flag becomes active"
+    enabled: false
+    disabled_reason: "Requires the typed red-flag contract on the trigger AND the predecessor snapshot; historical rows carry none."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_HISTORY
+    enabled_in_stages: [5, 6, 7]
+    bucket: override
+    priority: 3
+    source_fields: [override_active_fireable_count]
+    authoritative: false
+    condition:
+      kind: count
+      source: override_active_fireable_count
+      op: eq
+      threshold: first_flag
+    thresholds:
+      - {name: first_flag, value: 1, unit: flags, attribution: MECH,
+         note: "One active fireable flag. The override requirement itself is read from the snapshot."}
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [override_active_fireable_count]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: override
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # "One short of the override" WITHOUT hardcoding three: the requirement is
+  # read from the snapshot, so a governance change to the override rule cannot
+  # desynchronize this alert.
+  - rule_id: override.warning
+    identity_version: 1
+    title: "One fireable flag short of the override"
+    enabled: false
+    disabled_reason: "Requires the typed red-flag contract on both the trigger and its predecessor."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_HISTORY
+    enabled_in_stages: [5, 6, 7]
+    bucket: override
+    priority: 2
+    source_fields: [override_active_fireable_count, override_required_count]
+    authoritative: false
+    condition:
+      kind: count
+      source: override_active_fireable_count
+      op: eq
+      relative_to: override_required_count
+      offset: -1
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [override_active_fireable_count]
+    hold_sources: [override_required_count]
+    freshness_requirements: {override_required_count: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: override
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: override.fires
+    identity_version: 1
+    title: "Non-compensatory override fires"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: override
+    priority: 1
+    source_fields: [override_fired]
+    authoritative: true
+    condition: {kind: boolean_transition, source: override_fired, to: true}
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [override_fired]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: true, after_seconds: 172800, max_reminders: 1}
+    supersedes: [override.warning, override.first_flag]
+    cancel_unsent_superseded: true
+    group_key: override
+    quiet_hours_exempt: true
+    budget_exempt: true
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: override.resolves
+    identity_version: 1
+    title: "Non-compensatory override clears"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: override
+    priority: 2
+    source_fields: [override_fired]
+    authoritative: true
+    condition: {kind: boolean_transition, source: override_fired, to: false}
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [override_fired]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: override
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # =======================================================================
+  # 11.3  EXECUTION LEGS
+  # =======================================================================
+
+  # The P1 gate is exactly: a NEW month-end SPY Faber IN -> OUT, AND the
+  # headline MEDIAN at or above 55, AND data not degraded. A bare `score`
+  # would be ambiguous between the median and the point score and is rejected
+  # by the loader.
+  - rule_id: legs.faber_spy_out_high_risk
+    identity_version: 1
+    title: "SPY Faber turns OUT in a high-risk regime"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: legs
+    priority: 1
+    labels_schema: [asset]
+    source_fields: [spy_faber_state, headline_median, data_degraded]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: transition, source: spy_faber_state, from_states: [in], to_states: [out]}
+        - {kind: threshold, source: headline_median, op: ge, threshold: gate_median}
+        - {kind: boolean_state, source: data_degraded, equals: false}
+    thresholds:
+      - {name: gate_median, value: 55.0, unit: points, attribution: JUDG,
+         note: "Execution gate on the Monte Carlo MEDIAN. Not the point score."}
+    attribution: JUDG
+    confirmation: {count: 1, basis: new_month_end_period}
+    confirmation_sources: [spy_faber_state]
+    hold_sources: [headline_median, data_degraded]
+    freshness_requirements: {headline_median: same_snapshot, data_degraded: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: true, after_seconds: 172800, max_reminders: 1}
+    supersedes: [legs.faber_spy_out_standard]
+    cancel_unsent_superseded: true
+    group_key: legs
+    quiet_hours_exempt: true
+    budget_exempt: true
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: legs.faber_spy_out_standard
+    identity_version: 1
+    title: "SPY Faber turns OUT without the high-risk gate"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: legs
+    priority: 2
+    labels_schema: [asset]
+    source_fields: [spy_faber_state]
+    authoritative: true
+    condition: {kind: transition, source: spy_faber_state, from_states: [in], to_states: [out]}
+    thresholds: []
+    attribution: LIT
+    confirmation: {count: 1, basis: new_month_end_period}
+    confirmation_sources: [spy_faber_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: legs
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: legs.faber_qqq_out
+    identity_version: 1
+    title: "QQQ Faber turns OUT"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: legs
+    priority: 2
+    labels_schema: [asset]
+    source_fields: [qqq_faber_state]
+    authoritative: true
+    condition: {kind: transition, source: qqq_faber_state, from_states: [in], to_states: [out]}
+    thresholds: []
+    attribution: LIT
+    confirmation: {count: 1, basis: new_month_end_period}
+    confirmation_sources: [qqq_faber_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: legs
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: legs.faber_spy_back_in
+    identity_version: 1
+    title: "SPY Faber turns back IN"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: legs
+    priority: 2
+    labels_schema: [asset]
+    source_fields: [spy_faber_state]
+    authoritative: true
+    condition: {kind: transition, source: spy_faber_state, from_states: [out], to_states: [in]}
+    thresholds: []
+    attribution: LIT
+    confirmation: {count: 1, basis: new_month_end_period}
+    confirmation_sources: [spy_faber_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: legs
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: legs.faber_qqq_back_in
+    identity_version: 1
+    title: "QQQ Faber turns back IN"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: legs
+    priority: 2
+    labels_schema: [asset]
+    source_fields: [qqq_faber_state]
+    authoritative: true
+    condition: {kind: transition, source: qqq_faber_state, from_states: [out], to_states: [in]}
+    thresholds: []
+    attribution: LIT
+    confirmation: {count: 1, basis: new_month_end_period}
+    confirmation_sources: [qqq_faber_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: legs
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: legs.sma200_flip
+    identity_version: 1
+    title: "200-day trend state flips and holds"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; not enabled before the P3 stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [7]
+    bucket: legs
+    priority: 3
+    labels_schema: [asset]
+    source_fields: [spy_sma200_state]
+    authoritative: true
+    condition:
+      kind: transition
+      source: spy_sma200_state
+      from_states: [above, below]
+      to_states: [above, below]
+    thresholds: []
+    attribution: LIT
+    confirmation: {count: 3, basis: distinct_trading_date}
+    confirmation_sources: [spy_sma200_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: US_TRADING, intervals: 5, grace_seconds: 86400}
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: legs
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: legs.faber_prewarning
+    identity_version: 1
+    title: "SPY approaching a Faber flip before month end"
+    enabled: false
+    disabled_reason: "Needs BOTH an unresolved [PIN] distance and a month-end-proximity input this service does not compute."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [7]
+    bucket: legs
+    priority: 2
+    condition: {kind: never, reason: "no persisted distance-to-Faber-trigger evidence exists"}
+    thresholds:
+      - {name: distance_pct, value: null, unit: percent, attribution: PIN,
+         note: "How close the index must be to its 10-month average to pre-warn."}
+    attribution: PIN
+    authoritative: false
+    confirmation: {count: 1, basis: new_month_end_period}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: legs
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # =======================================================================
+  # 11.4  TRIPWIRES — the persisted red flags, never recomputed
+  # =======================================================================
+
+  - rule_id: tripwire.rf4_first
+    identity_version: 1
+    title: "Breadth red flag rf4 becomes active"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: tripwire
+    priority: 2
+    source_fields: [rf4_active]
+    authoritative: true
+    condition: {kind: boolean_transition, source: rf4_active, to: true}
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [rf4_active]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: tripwire
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # Persistence needs a SECOND DISTINCT BREADTH OBSERVATION, not a second
+  # recompute: the breadth series updates far less often than the 4-hourly
+  # snapshot, so counting snapshots would confirm on the same datum twice.
+  - rule_id: tripwire.rf4_persistent
+    identity_version: 1
+    title: "Breadth red flag rf4 persists across breadth observations"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: tripwire
+    priority: 1
+    source_fields: [rf4_active]
+    authoritative: true
+    condition: {kind: boolean_state, source: rf4_active, equals: true}
+    thresholds: []
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [rf4_active]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: {calendar: US_TRADING, intervals: 10, grace_seconds: 86400}
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: true, after_seconds: 172800, max_reminders: 1}
+    supersedes: [tripwire.rf4_first]
+    cancel_unsent_superseded: true
+    group_key: tripwire
+    quiet_hours_exempt: true
+    budget_exempt: true
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: tripwire.rf4_all_clear
+    identity_version: 1
+    title: "Breadth red flag rf4 clears"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: tripwire
+    priority: 2
+    source_fields: [rf4_active]
+    authoritative: true
+    condition: {kind: boolean_transition, source: rf4_active, to: false}
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [rf4_active]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: tripwire
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # rf3 is CONSUMED, never recalculated. Raw OAS, the trailing low and the
+  # distance are evidence for the message, not inputs to the decision.
+  - rule_id: tripwire.rf3_credit_stress
+    identity_version: 1
+    title: "Credit red flag rf3 becomes active"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: tripwire
+    priority: 2
+    source_fields: [rf3_active]
+    authoritative: true
+    condition: {kind: boolean_state, source: rf3_active, equals: true}
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [rf3_active]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: {calendar: US_TRADING, intervals: 6, grace_seconds: 86400}
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: tripwire
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: tripwire.margin_rollover
+    identity_version: 1
+    title: "FINRA margin-debt rollover multiplier turns"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: tripwire
+    priority: 2
+    source_fields: [d2_multiplier]
+    authoritative: false
+    condition: {kind: crossing, source: d2_multiplier, direction: up, level: rollover_level}
+    thresholds:
+      - {name: rollover_level, value: 1.0, unit: multiplier, attribution: MECH,
+         note: "The frozen rollover multiplier; the crossing is reported, not re-decided."}
+    attribution: MECH
+    confirmation: {count: 1, basis: new_release_period}
+    confirmation_sources: [d2_multiplier]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: tripwire
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # =======================================================================
+  # 11.5  CREDIT DISPLAY SIDECAR
+  #
+  # None of these is rf3, and none may be labelled as rf3. They are display
+  # evidence about the same market, with their own [JUDG] levels.
+  # =======================================================================
+
+  - rule_id: credit.hy_watch
+    identity_version: 1
+    title: "HY OAS 50 bps above its point-in-time tights"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; not enabled before the P3 stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [7]
+    bucket: credit
+    priority: 3
+    source_fields: [hy_oas_above_tights_bps]
+    authoritative: false
+    condition:
+      kind: threshold
+      source: hy_oas_above_tights_bps
+      op: ge
+      threshold: watch_bps
+      off_threshold: watch_off_bps
+    thresholds:
+      - {name: watch_bps, value: 50.0, unit: bps, attribution: JUDG,
+         note: "Display watch level above the 24-month tights. NOT rf3."}
+      - {name: watch_off_bps, value: 35.0, unit: bps, attribution: JUDG,
+         note: "Hysteresis off-level; permitted because this source is not a decision."}
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [hy_oas_above_tights_bps]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: US_TRADING, intervals: 6, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: credit
+    phrase_set: "v3.2"
+    required_caveat_codes: [DISPLAY_ONLY]
+
+  - rule_id: credit.ig_watch
+    identity_version: 1
+    title: "IG OAS 30 bps above its point-in-time tights"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; IG evidence is not yet captured in the sidecar."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [7]
+    bucket: credit
+    priority: 3
+    source_fields: [ig_oas_above_tights_bps]
+    authoritative: false
+    condition: {kind: threshold, source: ig_oas_above_tights_bps, op: ge, threshold: watch_bps}
+    thresholds:
+      - {name: watch_bps, value: 30.0, unit: bps, attribution: JUDG}
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [ig_oas_above_tights_bps]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: US_TRADING, intervals: 6, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: credit
+    phrase_set: "v3.2"
+    required_caveat_codes: [DISPLAY_ONLY]
+
+  - rule_id: credit.ig_alarm
+    identity_version: 1
+    title: "IG OAS 60 bps above its point-in-time tights"
+    enabled: false
+    disabled_reason: "IG evidence is not yet captured in the sidecar."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: credit
+    priority: 2
+    source_fields: [ig_oas_above_tights_bps]
+    authoritative: false
+    condition: {kind: threshold, source: ig_oas_above_tights_bps, op: ge, threshold: alarm_bps}
+    thresholds:
+      - {name: alarm_bps, value: 60.0, unit: bps, attribution: JUDG}
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [ig_oas_above_tights_bps]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: US_TRADING, intervals: 6, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: credit
+    phrase_set: "v3.2"
+    required_caveat_codes: [DISPLAY_ONLY]
+
+  - rule_id: credit.ebp_sign_flip
+    identity_version: 1
+    title: "Excess bond premium turns positive"
+    enabled: false
+    disabled_reason: "EBP evidence is not yet captured in the sidecar."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: credit
+    priority: 2
+    source_fields: [ebp]
+    authoritative: false
+    condition: {kind: crossing, source: ebp, direction: up, level: zero}
+    thresholds:
+      - {name: zero, value: 0.0, unit: "", attribution: LIT,
+         note: "A positive excess bond premium is the sign convention in the source literature."}
+    attribution: LIT
+    confirmation: {count: 1, basis: new_release_period}
+    confirmation_sources: [ebp]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: credit
+    phrase_set: "v3.2"
+    required_caveat_codes: [DISPLAY_ONLY]
+
+  - rule_id: credit.leverage_escalation
+    identity_version: 1
+    title: "Leverage watchlist escalates"
+    enabled: false
+    disabled_reason: "There is no typed leverage-watchlist input in this service at all."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: credit
+    priority: 2
+    condition: {kind: never, reason: "no leverage watchlist evidence exists"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: new_filing}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: manual}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: credit
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: credit.watchlist_stale
+    identity_version: 1
+    title: "Leverage watchlist review is overdue"
+    enabled: false
+    disabled_reason: "There is no leverage watchlist to age."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: credit
+    priority: 4
+    condition: {kind: never, reason: "no leverage watchlist evidence exists"}
+    thresholds:
+      - {name: max_age_days, value: 45, unit: days, attribution: JUDG}
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # =======================================================================
+  # 11.6  STRUCTURE
+  # =======================================================================
+
+  - rule_id: structure.cape_record_near
+    identity_version: 1
+    title: "CAPE at or above the record-proximity level"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; not enabled before the P3 stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [7]
+    bucket: structure
+    priority: 3
+    source_fields: [cape]
+    authoritative: false
+    condition: {kind: threshold, source: cape, op: ge, threshold: cape_level}
+    thresholds:
+      - {name: cape_level, value: 43.0, unit: "", attribution: JUDG,
+         note: "Proximity to the historical record. Display only."}
+    attribution: JUDG
+    confirmation: {count: 1, basis: distinct_economic_observation}
+    confirmation_sources: [cape]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: structure
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  - rule_id: structure.s2_saturation
+    identity_version: 1
+    title: "Top-10 concentration at or above the saturation level"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; not enabled before the P3 stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [7]
+    bucket: structure
+    priority: 3
+    source_fields: [top10_pct]
+    authoritative: false
+    condition: {kind: threshold, source: top10_pct, op: ge, threshold: top10_level}
+    thresholds:
+      - {name: top10_level, value: 40.0, unit: percent, attribution: JUDG}
+    attribution: JUDG
+    confirmation: {count: 1, basis: distinct_economic_observation}
+    confirmation_sources: [top10_pct]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: structure
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  # A DIRECTED crossing, not a threshold: sitting above 100 pp forever must
+  # alert once, not on every recompute.
+  - rule_id: structure.s3_tier_100
+    identity_version: 1
+    title: "Semiconductor run-up crosses 100 pp"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: structure
+    priority: 2
+    source_fields: [semi_runup_pp]
+    authoritative: false
+    condition: {kind: crossing, source: semi_runup_pp, direction: up, level: tier_100}
+    thresholds:
+      - {name: tier_100, value: 100.0, unit: pp, attribution: LIT,
+         note: "Industry run-up tier from the source literature behind s3."}
+    attribution: LIT
+    confirmation: {count: 1, basis: distinct_economic_observation}
+    confirmation_sources: [semi_runup_pp]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: structure
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # The MECHANICAL 150 pp crossing. It may mention rf2 only when the persisted
+  # rf2 flag is actually true; a crossing without the flag emits
+  # ops.flag_contract_mismatch instead of claiming the flag.
+  - rule_id: structure.s3_tier_150
+    identity_version: 1
+    title: "Semiconductor run-up crosses 150 pp"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: structure
+    priority: 1
+    source_fields: [semi_runup_pp]
+    authoritative: false
+    condition: {kind: crossing, source: semi_runup_pp, direction: up, level: tier_150}
+    thresholds:
+      - {name: tier_150, value: 150.0, unit: pp, attribution: MECH,
+         note: "The frozen rf2 level, read from the methodology artifact. The FLAG itself is rf2_active."}
+    attribution: MECH
+    confirmation: {count: 1, basis: distinct_economic_observation}
+    confirmation_sources: [semi_runup_pp]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: true, after_seconds: 172800, max_reminders: 1}
+    supersedes: [structure.s3_tier_100]
+    cancel_unsent_superseded: true
+    group_key: structure
+    quiet_hours_exempt: true
+    budget_exempt: true
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: structure.s3_approach_100
+    identity_version: 1
+    title: "Semiconductor run-up approaching 100 pp"
+    enabled: false
+    disabled_reason: "approach_from is an unresolved [PIN]."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [7]
+    bucket: structure
+    priority: 3
+    source_fields: [semi_runup_pp]
+    authoritative: false
+    condition: {kind: range, source: semi_runup_pp, lower: approach_from, upper: tier_100}
+    thresholds:
+      - {name: approach_from, value: null, unit: pp, attribution: PIN}
+      - {name: tier_100, value: 100.0, unit: pp, attribution: LIT}
+    attribution: PIN
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [semi_runup_pp]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: US_TRADING, intervals: 10, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: structure
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: structure.s5_percentile_jump
+    identity_version: 1
+    title: "Credit percentile moves materially on a new release"
+    enabled: false
+    disabled_reason: "jump_pct is an unresolved [PIN]."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [7]
+    bucket: structure
+    priority: 3
+    source_fields: [s5_percentile]
+    authoritative: false
+    condition:
+      kind: delta
+      source: s5_percentile
+      mode: abs
+      op: ge
+      threshold: jump_pct
+      window: previous_input
+    thresholds:
+      - {name: jump_pct, value: null, unit: percentile, attribution: PIN}
+    attribution: PIN
+    confirmation: {count: 1, basis: new_release_period}
+    confirmation_sources: [s5_percentile]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: structure
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # =======================================================================
+  # 11.7  DYNAMICS
+  # =======================================================================
+
+  - rule_id: dynamics.breadth_downtrend
+    identity_version: 1
+    title: "Breadth in a confirmed downtrend"
+    enabled: false
+    disabled_reason: "Needs an immutable EWMA calibration artifact and an unresolved [PIN] delta."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [6, 7]
+    bucket: dynamics
+    priority: 2
+    source_fields: [breadth_pct]
+    authoritative: false
+    condition:
+      kind: delta
+      source: breadth_pct
+      mode: fall
+      op: ge
+      threshold: fall_7d_pct
+      window: rolling_7d
+    thresholds:
+      - {name: fall_7d_pct, value: null, unit: percent, attribution: PIN}
+    attribution: PIN
+    calibration_id: null
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [breadth_pct]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: US_TRADING, intervals: 10, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: dynamics
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: dynamics.d3_gate_fires
+    identity_version: 1
+    title: "Hyperscaler free-cash-flow gate fires"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: dynamics
+    priority: 2
+    source_fields: [d3_gate]
+    authoritative: true
+    condition: {kind: boolean_transition, source: d3_gate, to: true}
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: new_filing}
+    confirmation_sources: [d3_gate]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: dynamics
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: dynamics.d4_lppls_wake
+    identity_version: 1
+    title: "LPPLS endpoint confidence wakes from the floor"
+    enabled: false
+    disabled_reason: "Stage 5; not enabled before the constellation stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [5, 6, 7]
+    bucket: dynamics
+    priority: 2
+    source_fields: [d4_confidence]
+    authoritative: false
+    condition:
+      kind: threshold
+      source: d4_confidence
+      op: gt
+      threshold: wake_on
+      off_threshold: wake_off
+    thresholds:
+      - {name: wake_on, value: 0.15, unit: confidence, attribution: JUDG,
+         note: "Wake level. JUDG, exposed in the rule API."}
+      - {name: wake_off, value: 0.10, unit: confidence, attribution: JUDG,
+         note: "Off level. JUDG, exposed in the rule API."}
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [d4_confidence]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: RECOMPUTE_SLOT, intervals: 12, grace_seconds: 5400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: dynamics
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  - rule_id: dynamics.d4_band_structure
+    identity_version: 1
+    title: "Long LPPLS band leads the comparison bands"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; band-structure evidence is not yet captured."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [7]
+    bucket: dynamics
+    priority: 3
+    source_fields: [d4_long_band_leads]
+    authoritative: false
+    condition: {kind: boolean_state, source: d4_long_band_leads, equals: true}
+    thresholds: []
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [d4_long_band_leads]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: RECOMPUTE_SLOT, intervals: 12, grace_seconds: 5400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: dynamics
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  # =======================================================================
+  # 11.8  VOLATILITY
+  # =======================================================================
+
+  - rule_id: vol.backwardation
+    identity_version: 1
+    title: "VIX term structure enters backwardation"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: vol
+    priority: 2
+    source_fields: [v_state]
+    authoritative: true
+    condition:
+      kind: transition
+      source: v_state
+      from_states: [contango, flat]
+      to_states: [backwardation]
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [v_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: vol
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: vol.vrp_nonpositive
+    identity_version: 1
+    title: "Variance risk premium turns non-positive"
+    enabled: false
+    disabled_reason: "Stage 5; VRP evidence is not yet captured in the sidecar."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: vol
+    priority: 2
+    source_fields: [vrp]
+    authoritative: false
+    condition: {kind: threshold, source: vrp, op: le, threshold: vrp_on,
+                off_threshold: vrp_off}
+    thresholds:
+      - {name: vrp_on, value: 0.0, unit: "", attribution: JUDG}
+      - {name: vrp_off, value: 10.0, unit: "", attribution: JUDG}
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_trading_date}
+    confirmation_sources: [vrp]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: {calendar: US_TRADING, intervals: 5, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: vol
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: vol.skew_extreme
+    identity_version: 1
+    title: "SKEW at an extreme level"
+    enabled: false
+    disabled_reason: "skew_level is an unresolved [PIN]."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [7]
+    bucket: vol
+    priority: 3
+    source_fields: [skew]
+    authoritative: false
+    condition: {kind: threshold, source: skew, op: ge, threshold: skew_level}
+    thresholds:
+      - {name: skew_level, value: null, unit: "", attribution: PIN}
+    attribution: PIN
+    confirmation: {count: 1, basis: distinct_trading_date}
+    confirmation_sources: [skew]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: vol
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: vol.v_multiplier_change
+    identity_version: 1
+    title: "VIX multiplier state transitions"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; not enabled before the P3 stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [7]
+    bucket: vol
+    priority: 3
+    source_fields: [v_state]
+    authoritative: true
+    condition:
+      kind: transition
+      source: v_state
+      from_states: [contango, flat, backwardation]
+      to_states: [contango, flat, backwardation]
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [v_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: [vol.backwardation]
+    cancel_unsent_superseded: false
+    group_key: vol
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # =======================================================================
+  # 11.9  DATA QUALITY AND OPERATIONS
+  # =======================================================================
+
+  - rule_id: ops.coverage_risk_masking
+    identity_version: 1
+    title: "Coverage degradation is masking a risk decision"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 2
+    source_fields: [band_suppressed_by_coverage]
+    authoritative: true
+    condition: {kind: boolean_transition, source: band_suppressed_by_coverage, to: true}
+    thresholds: []
+    attribution: JUDG
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [band_suppressed_by_coverage]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: [DATA_DEGRADED]
+
+  - rule_id: ops.coverage_degraded_info
+    identity_version: 1
+    title: "Data degraded without a suppressed decision"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    source_fields: [data_degraded, band_suppressed_by_coverage]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: boolean_state, source: data_degraded, equals: true}
+        - {kind: boolean_state, source: band_suppressed_by_coverage, equals: false}
+    thresholds: []
+    attribution: JUDG
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [data_degraded]
+    hold_sources: [band_suppressed_by_coverage]
+    freshness_requirements: {band_suppressed_by_coverage: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: [DATA_DEGRADED]
+
+  - rule_id: ops.rf_input_unavailable
+    identity_version: 1
+    title: "A red-flag input was unavailable this run"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 2
+    source_fields: [override_fireable_universe_count, override_required_count]
+    authoritative: false
+    condition:
+      kind: count
+      source: override_fireable_universe_count
+      op: lt
+      relative_to: override_required_count
+      offset: 0
+    thresholds: []
+    attribution: JUDG
+    note: >-
+      When fewer flags CAN fire than the override requires, the override is
+      structurally unreachable — the risk is invisible rather than absent.
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [override_fireable_universe_count]
+    hold_sources: [override_required_count]
+    freshness_requirements: {override_required_count: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: [DATA_DEGRADED]
+
+  - rule_id: ops.indicator_stale
+    identity_version: 1
+    title: "An indicator is past its freshness SLA"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    source_fields: [breadth_pct]
+    authoritative: false
+    condition: {kind: freshness, source: breadth_pct, require: stale_or_missing}
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [breadth_pct]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: independent
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.flag_contract_mismatch
+    identity_version: 1
+    title: "A mechanical crossing disagrees with its persisted flag"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 2
+    source_fields: [semi_runup_pp, rf2_active]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: threshold, source: semi_runup_pp, op: ge, threshold: tier_150}
+        - {kind: boolean_state, source: rf2_active, equals: false}
+    thresholds:
+      - {name: tier_150, value: 150.0, unit: pp, attribution: MECH}
+    attribution: JUDG
+    note: >-
+      The crossing and the persisted flag must agree. When they do not, the
+      alert layer reports the disagreement rather than picking a side.
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [semi_runup_pp]
+    hold_sources: [rf2_active]
+    freshness_requirements: {rf2_active: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.period_label_future
+    identity_version: 1
+    title: "An observation claims a future economic period"
+    enabled: false
+    disabled_reason: "Detected structurally by the input builder, not by a rule condition; kept in the inventory so the mechanism is visible."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "raised by the input builder as an ineligibility reason"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.observed_at_future
+    identity_version: 1
+    title: "An observation timestamp is in the future"
+    enabled: false
+    disabled_reason: "Detected structurally by the input builder, not by a rule condition."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 2
+    condition: {kind: never, reason: "raised by the input builder as an ineligibility reason"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.known_issue_active
+    identity_version: 1
+    title: "A known data issue is active"
+    enabled: false
+    disabled_reason: "No known-issue registry exists yet; the evidence field is carried but never populated."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "no known-issue registry exists"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.condition_unknown_persistent
+    identity_version: 1
+    title: "A condition has been UNKNOWN for too long"
+    enabled: false
+    disabled_reason: "Raised by the state machine from persisted UNKNOWN duration, not by a rule condition."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "raised by the state machine, not evaluated from the sidecar"}
+    thresholds:
+      - {name: escalate_hours, value: 24, unit: hours, attribution: JUDG}
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.missing_input_sidecar
+    identity_version: 1
+    title: "A committed snapshot has no alert input sidecar"
+    enabled: false
+    disabled_reason: "Raised by the sidecar reconciliation job, not by a rule condition."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "raised by the reconciliation job"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: manual}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.stale_evaluation_abandoned
+    identity_version: 1
+    title: "A stale evaluation lease was recovered"
+    enabled: false
+    disabled_reason: "Raised by the evaluation recovery job, not by a rule condition."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "raised by the recovery job"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 3600
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.provider_cooldown
+    identity_version: 1
+    title: "A data provider entered cooldown"
+    enabled: false
+    disabled_reason: "Provider cooldown state is not carried in the sidecar."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "provider health is not carried as typed evidence"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 21600
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.indicator_floor
+    identity_version: 1
+    title: "An indicator is at its FLOOR state"
+    enabled: false
+    disabled_reason: "Indicator state strings are not yet carried as typed evidence."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "indicator state is not carried as typed evidence"}
+    thresholds: []
+    attribution: MECH
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.rules_invalid
+    identity_version: 1
+    title: "A candidate ruleset failed validation; last-known-good is active"
+    enabled: false
+    disabled_reason: "Raised by the ruleset loader, not by a rule condition."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "raised by the ruleset loader"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: manual}
+    cooldown_seconds: 3600
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.alerting_unavailable
+    identity_version: 1
+    title: "No valid ruleset is available; alerting is dark"
+    enabled: false
+    disabled_reason: "Raised by the ruleset loader; health reports it as critical."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "raised by the ruleset loader"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: manual}
+    cooldown_seconds: 3600
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.delivery_unknown
+    identity_version: 1
+    title: "A delivery ended in an ambiguous transport outcome"
+    enabled: false
+    disabled_reason: "Raised by the dispatcher, not by a rule condition."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 4
+    condition: {kind: never, reason: "raised by the dispatcher"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: manual}
+    cooldown_seconds: 3600
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: ops.recompute_outage
+    identity_version: 1
+    title: "Recompute has missed consecutive scheduled slots"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: ops
+    priority: 2
+    source_fields: [missed_recompute_slots]
+    authoritative: false
+    condition: {kind: threshold, source: missed_recompute_slots, op: ge, threshold: missed_slots}
+    thresholds:
+      - {name: missed_slots, value: 2, unit: slots, attribution: JUDG,
+         note: "Two consecutive missed slots plus a 90-minute grace, per mandate 19.1."}
+    attribution: JUDG
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [missed_recompute_slots]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 21600
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # =======================================================================
+  # 11.10  CALENDAR AND RELEASES
+  # =======================================================================
+
+  - rule_id: cal.finra_release
+    identity_version: 1
+    title: "FINRA margin-debt release moves d2 materially"
+    enabled: false
+    disabled_reason: "Needs a release-calendar registry (absent) AND an unresolved [PIN] materiality."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: calendar
+    priority: 2
+    condition: {kind: never, reason: "no release-calendar registry exists"}
+    thresholds:
+      - {name: material_delta, value: null, unit: multiplier, attribution: PIN}
+    attribution: PIN
+    authoritative: false
+    confirmation: {count: 1, basis: new_release_period}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: calendar
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: cal.ebp_release
+    identity_version: 1
+    title: "EBP release moves s5 materially or flips sign"
+    enabled: false
+    disabled_reason: "Needs a release-calendar registry (absent) AND an unresolved [PIN] materiality."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: calendar
+    priority: 2
+    condition: {kind: never, reason: "no release-calendar registry exists"}
+    thresholds:
+      - {name: material_delta, value: null, unit: percentile, attribution: PIN}
+    attribution: PIN
+    authoritative: false
+    confirmation: {count: 1, basis: new_release_period}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: calendar
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: cal.hyperscaler_earnings
+    identity_version: 1
+    title: "d3 gate flips inside a versioned earnings window"
+    enabled: false
+    disabled_reason: "Needs a versioned earnings-window registry, which does not exist."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: calendar
+    priority: 2
+    condition: {kind: never, reason: "no versioned earnings-window registry exists"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: new_filing}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: calendar
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: cal.ssga_holdings
+    identity_version: 1
+    title: "SSGA holdings update crosses the s2 threshold"
+    enabled: false
+    disabled_reason: "Stage 7 enrichment; no holdings-release calendar exists."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [7]
+    bucket: calendar
+    priority: 3
+    condition: {kind: never, reason: "no holdings-release calendar exists"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: new_release_period}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: calendar
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: cal.release_missing
+    identity_version: 1
+    title: "An expected release window plus grace has elapsed"
+    enabled: false
+    disabled_reason: "Needs a release-calendar registry, which does not exist."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: calendar
+    priority: 4
+    condition: {kind: never, reason: "no release-calendar registry exists"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: new_release_period}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: calendar
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+# ===========================================================================
+# 12  CONSTELLATIONS
+#
+# Every constellation separates CONFIRMATION sources (which must ADVANCE on a
+# new economic observation) from HOLD sources (which only have to stay true and
+# stay fresh). Mixing them is how a monthly release ends up "confirming" a
+# daily series three times in one afternoon.
+# ===========================================================================
+
+constellations:
+
+  - rule_id: constellation.d_block_confirmed
+    constellation_id: C-01
+    identity_version: 1
+    title: "Block D confirmed weak"
+    enabled: false
+    disabled_reason: "The seven-day point-score rise is an unresolved [PIN]."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 1
+    source_fields: [breadth_pct, d2_multiplier, point_score]
+    authoritative: false
+    condition:
+      kind: all_of
+      terms:
+        - {kind: delta, source: breadth_pct, mode: fall, op: ge,
+           threshold: breadth_fall_pct, window: rolling_7d}
+        - {kind: threshold, source: d2_multiplier, op: ge, threshold: rollover_level}
+        - {kind: delta, source: point_score, mode: rise, op: ge,
+           threshold: score_rise_7d, window: rolling_7d}
+    thresholds:
+      - {name: breadth_fall_pct, value: null, unit: percent, attribution: PIN}
+      - {name: rollover_level, value: 1.0, unit: multiplier, attribution: MECH}
+      - {name: score_rise_7d, value: null, unit: points, attribution: PIN}
+    attribution: PIN
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [breadth_pct]
+    hold_sources: [d2_multiplier, point_score]
+    freshness_requirements: {d2_multiplier: within_release_period, point_score: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: {calendar: US_TRADING, intervals: 10, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: true, after_seconds: 172800, max_reminders: 1}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: dynamics
+    quiet_hours_exempt: true
+    budget_exempt: true
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.credit_channel_opens
+    constellation_id: C-02
+    identity_version: 1
+    title: "Credit channel opens"
+    enabled: false
+    disabled_reason: "GOVERNANCE_BLOCKED, and neither IG nor EBP evidence is captured."
+    policy_status: GOVERNANCE_BLOCKED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 1
+    condition: {kind: never, reason: "governance blocked; IG and EBP evidence absent"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: new_release_period}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: credit
+    quiet_hours_exempt: true
+    budget_exempt: true
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.melt_up
+    constellation_id: C-03
+    identity_version: 1
+    title: "Melt-up"
+    enabled: false
+    disabled_reason: "The seven-day point-score rise is an unresolved [PIN]."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [7]
+    bucket: constellation
+    priority: 3
+    source_fields: [point_score, breadth_pct, v_state]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: delta, source: point_score, mode: rise, op: ge,
+           threshold: score_rise_7d, window: rolling_7d}
+        - {kind: threshold, source: breadth_pct, op: gt, threshold: breadth_strong}
+        - {kind: enum_equals, source: v_state, values: [contango]}
+    thresholds:
+      - {name: score_rise_7d, value: null, unit: points, attribution: PIN}
+      - {name: breadth_strong, value: 65.0, unit: percent, attribution: JUDG}
+    attribution: PIN
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [breadth_pct]
+    hold_sources: [point_score, v_state]
+    freshness_requirements: {point_score: same_snapshot, v_state: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: {calendar: US_TRADING, intervals: 10, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  - rule_id: constellation.fragile_top
+    constellation_id: C-04
+    identity_version: 1
+    title: "Fragile top"
+    enabled: false
+    disabled_reason: "Stage 5; not enabled before the constellation stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [headline_median, breadth_pct]
+    authoritative: false
+    condition:
+      kind: all_of
+      terms:
+        - {kind: threshold, source: headline_median, op: ge, threshold: median_high}
+        - {kind: threshold, source: breadth_pct, op: lt, threshold: breadth_weak}
+    thresholds:
+      - {name: median_high, value: 58.0, unit: points, attribution: JUDG}
+      - {name: breadth_weak, value: 55.0, unit: percent, attribution: JUDG}
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [breadth_pct]
+    hold_sources: [headline_median]
+    freshness_requirements: {headline_median: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: {calendar: US_TRADING, intervals: 10, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  - rule_id: constellation.execution_armed
+    constellation_id: C-05
+    identity_version: 1
+    title: "Execution armed"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: constellation
+    priority: 1
+    source_fields: [spy_faber_state, headline_median, data_degraded]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: transition, source: spy_faber_state, from_states: [in], to_states: [out]}
+        - {kind: threshold, source: headline_median, op: ge, threshold: gate_median}
+        - {kind: boolean_state, source: data_degraded, equals: false}
+    thresholds:
+      - {name: gate_median, value: 55.0, unit: points, attribution: JUDG,
+         note: "The same execution gate as legs.faber_spy_out_high_risk, on the MEDIAN."}
+    attribution: JUDG
+    confirmation: {count: 1, basis: new_month_end_period}
+    confirmation_sources: [spy_faber_state]
+    hold_sources: [headline_median, data_degraded]
+    freshness_requirements: {headline_median: same_snapshot, data_degraded: same_snapshot}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: true, after_seconds: 172800, max_reminders: 1}
+    supersedes: [legs.faber_spy_out_standard, legs.faber_spy_out_high_risk]
+    cancel_unsent_superseded: true
+    group_key: legs
+    quiet_hours_exempt: true
+    budget_exempt: true
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  # A SUPPRESSION signal, not a notification: the point score rising while
+  # coverage falls is the shape of a measurement artifact, not a regime move.
+  - rule_id: constellation.false_alarm_likely
+    constellation_id: C-06
+    identity_version: 1
+    title: "False alarm likely"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [1, 2, 3, 4, 5, 6, 7]
+    bucket: constellation
+    priority: 4
+    source_fields: [point_score, data_degraded]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: delta, source: point_score, mode: rise, op: ge,
+           threshold: any_rise, window: previous_input}
+        - {kind: boolean_state, source: data_degraded, equals: true}
+    thresholds:
+      - {name: any_rise, value: 0.0, unit: points, attribution: JUDG,
+         note: "Any rise at all, while coverage is degraded."}
+    attribution: JUDG
+    confirmation: {count: 1, basis: adjacent_snapshots}
+    confirmation_sources: [point_score]
+    hold_sources: [data_degraded]
+    freshness_requirements: {data_degraded: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: [DATA_DEGRADED]
+
+  - rule_id: constellation.structure_maxed
+    constellation_id: C-07
+    identity_version: 1
+    title: "Structure maxed"
+    enabled: false
+    disabled_reason: "Stage 5; not enabled before the constellation stage gate."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [cape, top10_pct, breadth_pct]
+    authoritative: false
+    condition:
+      kind: all_of
+      terms:
+        - {kind: threshold, source: cape, op: ge, threshold: cape_level}
+        - {kind: threshold, source: top10_pct, op: ge, threshold: top10_level}
+        - {kind: threshold, source: breadth_pct, op: lt, threshold: breadth_weak}
+    thresholds:
+      - {name: cape_level, value: 43.0, unit: "", attribution: JUDG}
+      - {name: top10_level, value: 40.0, unit: percent, attribution: JUDG}
+      - {name: breadth_weak, value: 55.0, unit: percent, attribution: JUDG}
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [breadth_pct]
+    hold_sources: [cape, top10_pct]
+    freshness_requirements: {cape: within_release_period, top10_pct: within_release_period}
+    sync_policy: same_information_set
+    candidate_ttl: {calendar: US_TRADING, intervals: 10, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: [structure.cape_record_near, structure.s2_saturation]
+    cancel_unsent_superseded: true
+    group_key: structure
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  - rule_id: constellation.semis_tier_jump
+    constellation_id: C-08
+    identity_version: 1
+    title: "Semiconductor tier jump"
+    enabled: false
+    disabled_reason: "An alias wrapper over structure.s3_tier_100/150, which already deliver; enabled only if a bundled projection is wanted."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [semi_runup_pp]
+    authoritative: false
+    condition: {kind: crossing, source: semi_runup_pp, direction: up, level: tier_100}
+    thresholds:
+      - {name: tier_100, value: 100.0, unit: pp, attribution: LIT}
+    attribution: LIT
+    confirmation: {count: 1, basis: distinct_economic_observation}
+    confirmation_sources: [semi_runup_pp]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: structure
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.lppls_awakening
+    constellation_id: C-09
+    identity_version: 1
+    title: "LPPLS awakening with a leading long band"
+    enabled: false
+    disabled_reason: "Band-structure evidence is not yet captured in the sidecar."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [d4_confidence, d4_long_band_leads]
+    authoritative: false
+    condition:
+      kind: all_of
+      terms:
+        - {kind: threshold, source: d4_confidence, op: gt, threshold: wake_on}
+        - {kind: boolean_state, source: d4_long_band_leads, equals: true}
+    thresholds:
+      - {name: wake_on, value: 0.15, unit: confidence, attribution: JUDG}
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_economic_observation}
+    confirmation_sources: [d4_confidence]
+    hold_sources: [d4_long_band_leads]
+    freshness_requirements: {d4_long_band_leads: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: {calendar: RECOMPUTE_SLOT, intervals: 12, grace_seconds: 5400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: [dynamics.d4_lppls_wake, dynamics.d4_band_structure]
+    cancel_unsent_superseded: true
+    group_key: dynamics
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  - rule_id: constellation.score_trend_divergence
+    constellation_id: C-10
+    identity_version: 1
+    title: "Point score falls while the execution leg is OUT"
+    enabled: false
+    disabled_reason: "The point-score fall threshold is an unresolved [PIN]."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [point_score, spy_faber_state]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: delta, source: point_score, mode: fall, op: ge,
+           threshold: score_fall, window: rolling_7d}
+        - {kind: enum_equals, source: spy_faber_state, values: [out]}
+    thresholds:
+      - {name: score_fall, value: null, unit: points, attribution: PIN}
+    attribution: PIN
+    confirmation: {count: 2, basis: adjacent_snapshots}
+    confirmation_sources: [point_score]
+    hold_sources: [spy_faber_state]
+    freshness_requirements: {spy_faber_state: within_month_end_period}
+    sync_policy: same_information_set
+    candidate_ttl: {calendar: RECOMPUTE_SLOT, intervals: 12, grace_seconds: 5400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: legs
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.outage_masks_risk
+    constellation_id: C-11
+    identity_version: 1
+    title: "An outage is masking flags that sit near their thresholds"
+    enabled: false
+    disabled_reason: "Needs an unresolved [PIN] near-threshold distance and per-flag distances on the predecessor snapshot."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    condition: {kind: never, reason: "near-threshold distance is an unresolved [PIN]"}
+    thresholds:
+      - {name: near_distance, value: null, unit: "", attribution: PIN}
+    attribution: PIN
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: [DATA_DEGRADED]
+
+  - rule_id: constellation.vol_regime_flip
+    constellation_id: C-12
+    identity_version: 1
+    title: "Volatility regime flip"
+    enabled: false
+    disabled_reason: "VRP evidence is not yet captured in the sidecar."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [v_state, vrp]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: enum_equals, source: v_state, values: [backwardation]}
+        - {kind: threshold, source: vrp, op: le, threshold: vrp_on}
+    thresholds:
+      - {name: vrp_on, value: 0.0, unit: "", attribution: JUDG}
+    attribution: JUDG
+    confirmation: {count: 2, basis: distinct_trading_date}
+    confirmation_sources: [vrp]
+    hold_sources: [v_state]
+    freshness_requirements: {v_state: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: {calendar: US_TRADING, intervals: 5, grace_seconds: 86400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: [vol.backwardation, vol.vrp_nonpositive]
+    cancel_unsent_superseded: true
+    group_key: vol
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.monthly_truth
+    constellation_id: C-13
+    identity_version: 1
+    title: "A monthly release moves the picture materially"
+    enabled: false
+    disabled_reason: "Needs a release-calendar registry (absent) AND an unresolved [PIN] materiality."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    condition: {kind: never, reason: "no release-calendar registry exists"}
+    thresholds:
+      - {name: material_delta, value: null, unit: "", attribution: PIN}
+    attribution: PIN
+    authoritative: false
+    confirmation: {count: 1, basis: new_release_period}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: [cal.finra_release, cal.ebp_release]
+    cancel_unsent_superseded: false
+    group_key: calendar
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.override_warning
+    constellation_id: C-14
+    identity_version: 1
+    title: "One flag short of the override, with the missing flag near its threshold"
+    enabled: false
+    disabled_reason: "The near-threshold distance is an unresolved [PIN]."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    condition: {kind: never, reason: "near-threshold distance is an unresolved [PIN]"}
+    thresholds:
+      - {name: near_distance, value: null, unit: "", attribution: PIN}
+    attribution: PIN
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: [override.warning]
+    cancel_unsent_superseded: false
+    group_key: override
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.falsification_event
+    constellation_id: C-15
+    identity_version: 1
+    title: "A falsification criterion tripped"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: constellation
+    priority: 1
+    source_fields: [falsification_outcome_count]
+    authoritative: false
+    condition:
+      kind: delta
+      source: falsification_outcome_count
+      mode: rise
+      op: ge
+      threshold: one_new
+      window: previous_input
+    thresholds:
+      - {name: one_new, value: 1, unit: outcomes, attribution: MECH,
+         note: "One new append-only falsification outcome."}
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [falsification_outcome_count]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 0
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: governance
+    quiet_hours_exempt: true
+    budget_exempt: true
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+    note: >-
+      No reminder by policy: a falsification outcome is recorded permanently in
+      an append-only table, so a second SMS adds nothing.
+
+  - rule_id: constellation.rf4_all_clear
+    constellation_id: C-16
+    identity_version: 1
+    title: "rf4 all clear (constellation projection)"
+    enabled: false
+    disabled_reason: "Duplicates tripwire.rf4_all_clear; kept in the inventory for the C-16 identity."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [rf4_active]
+    authoritative: true
+    condition: {kind: boolean_transition, source: rf4_active, to: false}
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [rf4_active]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: tripwire
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.override_all_clear
+    constellation_id: C-17
+    identity_version: 1
+    title: "Override all clear (constellation projection)"
+    enabled: false
+    disabled_reason: "Duplicates override.resolves; kept in the inventory for the C-17 identity."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [override_fired]
+    authoritative: true
+    condition: {kind: boolean_transition, source: override_fired, to: false}
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [override_fired]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 172800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: override
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.trim_entry
+    constellation_id: C-18
+    identity_version: 1
+    title: "Trim entry (constellation projection)"
+    enabled: false
+    disabled_reason: "Duplicates regime.band_hold_to_trim; kept in the inventory for the C-18 identity."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [effective_action_state]
+    authoritative: true
+    condition:
+      kind: transition
+      source: effective_action_state
+      from_states: [hold]
+      to_states: [trim]
+    thresholds: []
+    attribution: MECH
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [effective_action_state]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_inverse}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.derisk_edge
+    constellation_id: C-19
+    identity_version: 1
+    title: "De-risk edge (constellation projection)"
+    enabled: false
+    disabled_reason: "Duplicates regime.derisk_edge_approach; kept in the inventory for the C-19 identity."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [7]
+    bucket: constellation
+    priority: 3
+    source_fields: [headline_median]
+    authoritative: false
+    condition: {kind: range, source: headline_median, lower: approach_from, upper: derisk_edge}
+    thresholds:
+      - {name: approach_from, value: 57.0, unit: points, attribution: JUDG}
+      - {name: derisk_edge, value: 60.0, unit: points, attribution: MECH}
+    attribution: JUDG
+    confirmation: {count: 3, basis: adjacent_snapshots}
+    confirmation_sources: [headline_median]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: same_information_set
+    candidate_ttl: {calendar: RECOMPUTE_SLOT, intervals: 6, grace_seconds: 5400}
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: regime
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  - rule_id: constellation.profile_holds
+    constellation_id: C-20
+    identity_version: 1
+    title: "Structural anchor holds with a benign dynamics profile"
+    enabled: false
+    disabled_reason: "Both the block-S anchor and the benign-D predicate are unresolved [PIN]s."
+    policy_status: CALIBRATION_REQUIRED
+    runtime_readiness: UNPINNED
+    enabled_in_stages: [7]
+    bucket: constellation
+    priority: 3
+    condition: {kind: never, reason: "block-S anchor and benign-D predicate are unresolved [PIN]s"}
+    thresholds:
+      - {name: s_anchor, value: null, unit: "", attribution: PIN}
+      - {name: d_benign, value: null, unit: "", attribution: PIN}
+    attribution: PIN
+    authoritative: false
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: structure
+    phrase_set: "v3.2"
+    required_caveat_codes: [NOT_A_PROBABILITY]
+
+  - rule_id: constellation.leverage_escalation
+    constellation_id: C-21
+    identity_version: 1
+    title: "Leverage escalation (constellation)"
+    enabled: false
+    disabled_reason: "There is no typed leverage-watchlist input in this service."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    condition: {kind: never, reason: "no leverage watchlist evidence exists"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: new_filing}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: manual}
+    cooldown_seconds: 604800
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: [credit.leverage_escalation]
+    cancel_unsent_superseded: false
+    group_key: credit
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.gate_plus_earnings
+    constellation_id: C-22
+    identity_version: 1
+    title: "d3 gate flips inside an earnings window"
+    enabled: false
+    disabled_reason: "Needs a versioned earnings-window registry, which does not exist."
+    policy_status: APPROVED
+    runtime_readiness: MISSING_INPUT
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    condition: {kind: never, reason: "no versioned earnings-window registry exists"}
+    thresholds: []
+    attribution: JUDG
+    authoritative: false
+    confirmation: {count: 1, basis: new_filing}
+    confirmation_sources: []
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: single_shot}
+    cooldown_seconds: 2592000
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: [cal.hyperscaler_earnings]
+    cancel_unsent_superseded: false
+    group_key: calendar
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.recompute_outage
+    constellation_id: C-23
+    identity_version: 1
+    title: "Recompute outage (constellation projection)"
+    enabled: false
+    disabled_reason: "Duplicates ops.recompute_outage; kept in the inventory for the C-23 identity."
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [missed_recompute_slots]
+    authoritative: false
+    condition: {kind: threshold, source: missed_recompute_slots, op: ge, threshold: missed_slots}
+    thresholds:
+      - {name: missed_slots, value: 2, unit: slots, attribution: JUDG}
+    attribution: JUDG
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [missed_recompute_slots]
+    hold_sources: []
+    freshness_requirements: {}
+    sync_policy: single_event
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 21600
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: []
+    cancel_unsent_superseded: false
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: []
+
+  - rule_id: constellation.coverage_degradation_real
+    constellation_id: C-24
+    identity_version: 1
+    title: "Coverage degradation is real and unmitigated"
+    enabled: true
+    policy_status: APPROVED
+    runtime_readiness: READY
+    enabled_in_stages: [3, 4, 5, 6, 7]
+    bucket: constellation
+    priority: 2
+    source_fields: [data_degraded, band_suppressed_by_coverage, override_fired]
+    authoritative: true
+    condition:
+      kind: all_of
+      terms:
+        - {kind: boolean_state, source: data_degraded, equals: true}
+        - {kind: boolean_state, source: band_suppressed_by_coverage, equals: true}
+        - {kind: boolean_state, source: override_fired, equals: false}
+    thresholds: []
+    attribution: JUDG
+    confirmation: {count: 1, basis: authoritative_transition}
+    confirmation_sources: [band_suppressed_by_coverage]
+    hold_sources: [data_degraded, override_fired]
+    freshness_requirements: {data_degraded: same_snapshot, override_fired: same_snapshot}
+    sync_policy: same_information_set
+    candidate_ttl: null
+    resolution: {policy: auto_on_condition_false}
+    cooldown_seconds: 86400
+    reminder_policy: {enabled: false, after_seconds: null, max_reminders: 0}
+    supersedes: [ops.coverage_risk_masking]
+    cancel_unsent_superseded: true
+    group_key: ops
+    phrase_set: "v3.2"
+    required_caveat_codes: [DATA_DEGRADED]

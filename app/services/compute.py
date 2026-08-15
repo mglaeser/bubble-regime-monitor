@@ -1321,5 +1321,15 @@ def run_recompute() -> int | None:
         build_and_persist_feed(raw, data)
     except Exception as exc:
         log.warning("dashboard_feed_failed", error=str(exc)[:300])
+    # Alert system: strictly AFTER the snapshot commits, in its own transaction
+    # and its own exception boundary. It cannot delay, alter or roll back the
+    # snapshot — the whole system is off by default and does nothing here until
+    # an operator enables capture.
+    try:
+        from app.services.alert_integration import on_snapshot_committed
+
+        on_snapshot_committed(snap_id)
+    except Exception as exc:
+        log.warning("alert_hook_failed", error=str(exc)[:300])
     log.info("recompute_done", snapshot_id=snap_id, median=data.median, band=data.action_band)
     return snap_id
