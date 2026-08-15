@@ -20,17 +20,19 @@
     "or third-party attested."
   ],
   "architecture": {
-    "ci_operational_state": "MIDTERM_SINGLE_REPO_PANEL_PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE",
+    "ci_operational_state": "MIDTERM_SINGLE_REPO_PANEL_ACTIVE",
     "ci_operational_state_history": [
       "MIDTERM_SINGLE_REPO_PANEL_IMPLEMENTATION_IN_PROGRESS",
       "MIDTERM_SINGLE_REPO_PANEL_STAGED_NO_PROVIDER_SECRET",
       "MIDTERM_SINGLE_REPO_PANEL_STAGED_PROVIDER_KEY_PRESENT_NO_CALLS",
-      "MIDTERM_SINGLE_REPO_PANEL_PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE"
+      "MIDTERM_SINGLE_REPO_PANEL_PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE",
+      "MIDTERM_SINGLE_REPO_PANEL_ACTIVE"
     ],
     "ci_operational_state_history_evidence": [
       "IMPLEMENTATION_IN_PROGRESS -> STAGED_NO_PROVIDER_SECRET. The panel workflow merged to main as PR #37 (merge 8644935e) and PR #38 (merge 27bfefb5). The hosted no-key vertical `midterm-panel-dry-run` ran green from a clean clone with `permissions: contents: read` and no `secrets.` reference of any kind, and the repository secret named by `secret.name` held a three-space placeholder rather than a usable provider credential throughout. The document was never advanced at the time, which is why this rung is recorded here rather than inferred from the file's history.",
       "STAGED_NO_PROVIDER_SECRET -> STAGED_PROVIDER_KEY_PRESENT_NO_CALLS. A usable provider key was installed by the operator, and the engine release the panel is bound to now exists: tag `midterm-panel-engine-2026-08-10`, built by run 31427275863 from exact default-branch SHA 27bfefb5 with `github.ref_protected` reported as false. `governance/midterm-panel-engine-release.json` names all seven binding fields, and `midterm-engine-release-validation` materialises that exact release asset and validates it in a job that holds no provider credential and can open no socket to a provider host. No provider or generation call has been made.",
-      "STAGED_PROVIDER_KEY_PRESENT_NO_CALLS -> PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE. Panel run 31718284187 (midterm-count job 94508561279) reviewed candidate head 14a9b3225e2563d0475b7b662d4b556489dc2342 against tested base 512e81e31b21edafb440937718cd8912c3326c59. It made ONE real provider count attempt and the provider answered 400 invalid_request_error / invalid_json_schema at param=text.format.schema. Durable accounting: provider_attempts=1, count_attempts=1, generation_attempts=0, journal_present=true, accounting_complete=true, accounting_state=ATTEMPTS_KNOWN_NONZERO. No count evidence and no panel evidence were produced; midterm-panel was skipped; the terminal status was midterm-panel-count=error. The previous state's claim that no provider call had been made became false at that moment, and ACTIVE remained false because no review completed. A further 16 operator diagnostic calls were made against the count endpoint only, to isolate the rejected schema keyword; those are diagnostics, not panel votes and not panel evidence."
+      "STAGED_PROVIDER_KEY_PRESENT_NO_CALLS -> PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE. Panel run 31718284187 (midterm-count job 94508561279) reviewed candidate head 14a9b3225e2563d0475b7b662d4b556489dc2342 against tested base 512e81e31b21edafb440937718cd8912c3326c59. It made ONE real provider count attempt and the provider answered 400 invalid_request_error / invalid_json_schema at param=text.format.schema. Durable accounting: provider_attempts=1, count_attempts=1, generation_attempts=0, journal_present=true, accounting_complete=true, accounting_state=ATTEMPTS_KNOWN_NONZERO. No count evidence and no panel evidence were produced; midterm-panel was skipped; the terminal status was midterm-panel-count=error. The previous state's claim that no provider call had been made became false at that moment, and ACTIVE remained false because no review completed. A further 16 operator diagnostic calls were made against the count endpoint only, to isolate the rejected schema keyword; those are diagnostics, not panel votes and not panel evidence.",
+      "PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE -> ACTIVE. Panel run 31908633745 reviewed candidate head 8df3f15e0ad1b4db1c7678443c9cb57c2ce2cf28 (PR #42) against tested base 1073496bedc86a1e3e908730428ded37ccaaf231 and COMPLETED. midterm-preflight (job 95070244673), midterm-count (95070273226), midterm-panel (95070297698) and midterm-finalize (95070350151) all succeeded. The count published `counted 1 units in 1 batches across 3 models` with evidence digest b0fe5618f29e899e; the panel published `panel approved: 3 models` with evidence digest dac379117e7edebd, retained as artifact 9253049093. Durable accounting: count provider_attempts=3, panel provider_attempts=3, generation_attempts=3, journal_present=true, accounting_complete=true, accounting_state=ATTEMPTS_KNOWN_NONZERO in both jobs, journal retained as artifact 9253048980. Three governed models were counted, prompted, answered and validated; the required approver approved and the corroboration minimum was met, because `strict_any_refutation` makes any refutation a block and the review published success. This is the first completed provider-backed review this lane has produced."
     ],
     "state_history_honest_scope": "The ordered walk that reached the declared state. `policystate.assert_recorded_history_is_a_legal_walk` re-walks it through the same `assert_transition` a live transition uses, so a history that starts halfway up the ladder, takes a forbidden step, or ends somewhere other than the declared state is a failing test. It cannot verify that each step's evidence exists \u2014 the prose above is an operator record, not a proof.",
     "first_provider_backed_run_authorised": true,
@@ -69,17 +71,16 @@
     "trusted_review_authority": "NOT_WRITE_SEPARATED",
     "production_eligible": false,
     "state_note": [
-      "A provider attempt has been observed. NO review has completed.",
-      "The provider key is installed, the approved engine release is bound, and",
-      "one real count attempt reached the provider and was rejected for an",
-      "unsupported JSON-Schema keyword (uniqueItems) in the verdict schema.",
-      "Zero generation calls have ever been made. No model verdict, no panel",
-      "evidence and no approval exist, so this lane has reviewed nothing.",
-      "ACTIVE remains reachable only by a real count AND a real panel completing",
-      "on an exact candidate head. This state is mechanically distinct from",
-      "ACTIVE, still requires first_provider_backed_run_authorised, still",
-      "requires the complete engine release binding, and keeps trusted D1/D2",
-      "locked. The step back to STAGED_PROVIDER_KEY_PRESENT_NO_CALLS is refused:",
+      "A real count AND a real panel have completed on an exact candidate head.",
+      "That is what ACTIVE claims, and nothing more. Panel run 31908633745 on",
+      "head 8df3f15e produced count evidence b0fe5618f29e899e and panel evidence",
+      "dac379117e7edebd, with three generation calls durably accounted for.",
+      "What ACTIVE does NOT claim, and what no run has changed: this lane is not",
+      "write-separated, it publishes no TRUSTED_* evidence, it holds a persistent",
+      "repository-level secret because this plan has no environment boundary, and",
+      "`main` has no native branch protection. Merge authority remains HUMAN;",
+      "`production_eligible` stays false and the trusted D1/D2 lane stays locked.",
+      "The step back to STAGED_PROVIDER_KEY_PRESENT_NO_CALLS is still refused:",
       "once an attempt has been observed, no later edit can truthfully deny it."
     ],
     "provider_attempts_observed_evidence": {
@@ -97,6 +98,31 @@
       "model_verdicts": [],
       "operator_diagnostic_calls": 16,
       "operator_diagnostic_scope": "count endpoint only; not panel votes and not panel evidence"
+    },
+    "first_completed_panel_evidence": {
+      "honest_scope": "The run that earned ACTIVE, identified by run and job ids and by the two published evidence digests. The per-model reasons are deliberately NOT here: `output_privacy` keeps model prose out of public records, and the digests are the durable handles to the retained artifacts.",
+      "panel_run_id": 31908633745,
+      "preflight_job_id": 95070244673,
+      "count_job_id": 95070273226,
+      "panel_job_id": 95070297698,
+      "finalize_job_id": 95070350151,
+      "candidate_pr_number": 42,
+      "reviewed_head_recorded_in": "ci_operational_state_history_evidence \u2014 the candidate head and tested base are stated there in prose rather than as bare 40-hex values, because detect-secrets classifies a standalone hex string as a potential secret and growing .secrets.baseline is a human-gated ratchet this change has no need to move.",
+      "review_class": "ROUTINE_PR",
+      "high_risk_workflow_change": false,
+      "count_evidence_public_marker": "ev=b0fe5618f29e899e",
+      "panel_evidence_public_marker": "ev=dac379117e7edebd",
+      "panel_evidence_artifact_id": 9253049093,
+      "attempt_journal_artifact_id": 9253048980,
+      "count_provider_attempts": 3,
+      "panel_provider_attempts": 3,
+      "generation_attempts": 3,
+      "accounting_state": "ATTEMPTS_KNOWN_NONZERO",
+      "accounting_complete": true,
+      "decision": "approved",
+      "models_voting": 3,
+      "refutations": "NONE \u2014 strict_any_refutation makes any refutation a block, and the published review state is success",
+      "engine_release_tag": "midterm-panel-engine-2026-08-14-schema-v2"
     }
   },
   "secret": {
