@@ -741,12 +741,14 @@ class TestTheRecordedWalk:
         report = policystate.assert_recorded_history_is_a_legal_walk(
             root=str(ROOT))
 
-        assert report["state"] == (
-            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE)
+        assert report["state"] == policystate.ACTIVE
         assert report["history"][0] == policystate.INITIAL_STATE
-        # Three now: the attempts rung was appended when panel run
-        # 31718284187 made the lane's first real provider call.
-        assert report["transitions_taken"] == 3
+        # Four now. The attempts rung was appended when panel run 31718284187
+        # made the lane's first real provider call; ACTIVE was appended when
+        # panel run 31908633745 became the first review to COMPLETE — three
+        # models counted, prompted, answered and validated on an exact
+        # candidate head.
+        assert report["transitions_taken"] == 4
 
     def test_the_declared_state_is_the_end_of_the_walk(self):
         policy = _policy()["architecture"]
@@ -844,7 +846,17 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
     #: the committed answer `true`.
     _AS_COMMITTED = object()
 
-    def _root(self, tmp_path, *, state=_AS_COMMITTED,
+    #: The rung where the authorisation field is actually consulted.
+    #:
+    #: These tests are about the GATE, and the gate only speaks below `ACTIVE`
+    #: — once a real panel has completed, `assert_provider_backed_run_is_authorised`
+    #: stops gating by design. Pinning the rung here keeps them testing the
+    #: gate rather than testing where the ladder happens to stand: they used to
+    #: inherit the committed state, so earning `ACTIVE` turned every one of
+    #: them red without anything about the gate having changed.
+    _GATED_RUNG = policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE
+
+    def _root(self, tmp_path, *, state=_GATED_RUNG,
               authorised=_AS_COMMITTED, release=True):
         root = tmp_path / "repo"
         (root / "governance").mkdir(parents=True)
@@ -882,10 +894,16 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
             root=str(ROOT))
 
         assert record["authorised"] is True
-        assert record["authorisation"] == (
-            f"architecture.{policystate.FIRST_PROVIDER_RUN_FIELD} is true")
+        # The FIELD is still the strict literal above, and that is what this
+        # test is about. The RECORD now cites the rung instead: once a real
+        # panel has completed, the first-run gate has done its job and says so
+        # rather than pretending it is still the thing holding the line. The
+        # gate's own behaviour is tested at the rung where it speaks, in
+        # `TestTheFirstSpendingRunIsAnOperatorDecision._GATED_RUNG`.
+        assert record["state"] == policystate.ACTIVE
+        assert record["authorisation"] == "the lane is ACTIVE; a real panel has run"
 
-    def test_the_authorisation_is_read_at_the_attempts_rung(self):
+    def test_the_authorisation_is_read_at_the_attempts_rung(self, tmp_path):
         """The state is unchanged by the authorisation.
 
         Spending is authorised; the lane has still reviewed nothing. Those are
@@ -894,11 +912,8 @@ class TestTheFirstSpendingRunIsAnOperatorDecision:
         panel completing, not by permission to attempt one — and an attempt
         that reached the provider and produced no verdict has earned none of
         the standing a completed panel would have."""
-        assert _policy()["architecture"]["ci_operational_state"] == (
-            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE)
-
         record = policystate.assert_provider_backed_run_is_authorised(
-            root=str(ROOT))
+            root=self._root(tmp_path, authorised=True))
 
         # Still gated on the operator's explicit field, not waved through
         # because an attempt already happened. A failed attempt spent the
@@ -1185,13 +1200,14 @@ class TestTheStateMatchesTheTree:
         report = policystate.assert_state_is_consistent_with_reality(
             root=str(ROOT))
 
-        # Advanced when panel run 31718284187 made one real provider count
-        # attempt and was answered 400 invalid_json_schema. The key-present
-        # rung asserts "no provider or generation call has been made", which
-        # stopped being true at that moment; ACTIVE is still false because no
-        # review completed.
-        assert report["state"] == (
-            policystate.PROVIDER_ATTEMPTS_OBSERVED_NOT_ACTIVE)
+        # Advanced to the attempts rung when panel run 31718284187 made one
+        # real provider count attempt and was answered 400 invalid_json_schema,
+        # and to ACTIVE when panel run 31908633745 COMPLETED — count evidence
+        # b0fe5618f29e899e, panel evidence dac379117e7edebd, three generation
+        # calls durably accounted for. ACTIVE claims a real count and a real
+        # panel completed on an exact head, and nothing beyond that: this lane
+        # is still not write-separated and merge authority is still human.
+        assert report["state"] == policystate.ACTIVE
         assert report["workflow_live"] is True
 
     def test_the_key_present_state_needs_a_complete_engine_binding(self,
