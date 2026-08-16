@@ -25,6 +25,12 @@ from .preflight import parse_api_json
 
 API_ROOT = "https://api.github.com"
 
+#: Pagination for the open pull request list. Bounded so a pathological or
+#: hostile response cannot make this loop for ever, and the bound is a REFUSAL
+#: rather than a truncation — see `open_pull_requests`.
+PULL_REQUEST_PAGE_SIZE = 100
+MAX_PULL_REQUEST_PAGES = 20
+
 
 class ReadOnlyGitHub:
     """The four reads preflight and finalize need, and nothing else."""
@@ -64,10 +70,34 @@ class ReadOnlyGitHub:
         return parse_api_json(raw, where=where)
 
     def open_pull_requests(self) -> list:
-        got = self._get("/pulls?state=open&per_page=100", where="pulls")
-        if not isinstance(got, list):
-            refuse("category=pulls_response_not_a_list")
-        return got
+        """Every open pull request, across pages — or a refusal.
+
+        Paginated rather than first-page-only because a caller now draws a
+        conclusion from ABSENCE. `preflight.classify_candidate` reads "no open
+        pull request at this head" as "it merged, or the author pushed again"
+        and ends the run quietly, publishing no status.
+
+        While the only reader refused on absence, a truncated first page was
+        merely a wrong red — loud, and visibly wrong. Now the same truncation
+        would be a review that silently did not happen. So the read either
+        completes or says that it did not: a page bound is a bound on how much
+        this will fetch, never a licence to answer from a partial list."""
+        collected: list = []
+        for page in range(1, MAX_PULL_REQUEST_PAGES + 1):
+            got = self._get(
+                f"/pulls?state=open&per_page={PULL_REQUEST_PAGE_SIZE}"
+                f"&page={page}",
+                where="pulls")
+            if not isinstance(got, list):
+                refuse("category=pulls_response_not_a_list")
+            collected.extend(got)
+            if len(got) < PULL_REQUEST_PAGE_SIZE:
+                return collected
+        refuse(f"category=open_pull_requests_did_not_end "
+               f"pages={MAX_PULL_REQUEST_PAGES} collected={len(collected)} — "
+               "the list did not terminate within the page bound, so absence "
+               "cannot be concluded from it and the run refuses rather than "
+               "quietly reviewing nothing")
 
     def default_branch_head(self) -> str:
         got = self._get("/branches/main", where="branches/main")

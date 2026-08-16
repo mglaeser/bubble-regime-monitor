@@ -32,6 +32,7 @@ from .preflight import (
     assert_ordinary_checks_green,
     assert_triggering_ci_tested_this_exact_combination,
     assert_triggering_run,
+    classify_candidate,
     classify_changed_files,
     classify_triggering_run,
     resolve_pull_request,
@@ -72,6 +73,28 @@ def _policy_digest(root: str) -> str:
     from .evidence import digest_of
     from .policystate import load_policy
     return digest_of(load_policy(root=root))
+
+
+def _nothing_to_review(applicability: dict) -> dict:
+    """The one shape every not-applicable exit returns.
+
+    Factored so a second not-applicable path cannot be added that forgets one
+    of the declared outputs. An output the workflow's `outputs:` block names
+    but this CLI never emits resolves to the empty string with no error at all
+    — which is how two digests once arrived blank in a credential-bearing job
+    while every test passed."""
+    return {
+        "proceed": False,
+        "applicability": applicability["applicability"],
+        "applicability_reason": applicability["reason"],
+        "provider_attempts": 0,
+        "generation_attempts": 0,
+        **{name: "" for name in PUBLIC_OUTPUTS
+           if name not in ("proceed", "applicability", "applicability_reason",
+                           "provider_attempts", "generation_attempts")},
+        "_risk": {"high_risk": False, "high_risk_paths": [],
+                  "marker": "", "warning": ""},
+    }
 
 
 def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".",
@@ -119,27 +142,23 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".",
     # behind, and count/panel skipped by `proceed == 'true'`.
     applicability = classify_triggering_run(observed_run)
     if not applicability["proceed"]:
-        return {
-            "proceed": False,
-            "applicability": applicability["applicability"],
-            "applicability_reason": applicability["reason"],
-            "provider_attempts": 0,
-            "generation_attempts": 0,
-            # Declared but empty: the workflow's `outputs:` block names these,
-            # and an output the CLI never emits resolves to "" with no error —
-            # which is how two digests once arrived blank in a
-            # credential-bearing job while every test passed.
-            **{name: "" for name in PUBLIC_OUTPUTS
-               if name not in ("proceed", "applicability",
-                               "applicability_reason", "provider_attempts",
-                               "generation_attempts")},
-            "_risk": {"high_risk": False, "high_risk_paths": [],
-                      "marker": "", "warning": ""},
-        }
+        return _nothing_to_review(applicability)
     run_record = assert_triggering_run(observed_run)
     run_head = run_record["head_sha"]
 
-    pull = resolve_pull_request(api.open_pull_requests(), run_head_sha=run_head)
+    # Read the pull request list ONCE and ask both questions of the same
+    # observation. Two reads would let the operational answer and the security
+    # assertion describe two different moments — the exact class of defect the
+    # settle work above exists to remove.
+    pulls = api.open_pull_requests()
+    # Is there still a candidate at this head? Merged, closed, and
+    # pushed-again are ordinary development events, and the panel's answer to
+    # them is "nothing to review", not a red run. No status is published on
+    # either path, so a required panel check stays ABSENT rather than green.
+    candidate = classify_candidate(pulls, run_head_sha=run_head)
+    if not candidate["proceed"]:
+        return _nothing_to_review(candidate)
+    pull = resolve_pull_request(pulls, run_head_sha=run_head)
     assert_head_is_unmoved(run_head_sha=run_head,
                            current_head_sha=pull["head_sha"])
     # BOTH remaining reads go through `observation.settle`, and the reason is

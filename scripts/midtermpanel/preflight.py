@@ -186,6 +186,11 @@ def parse_api_json(raw: bytes, *, where: str):
 APPLICABLE = "APPLICABLE"
 NOT_APPLICABLE_NO_PULL_REQUEST = "NOT_APPLICABLE_NO_PULL_REQUEST"
 NOT_APPLICABLE_CI_NOT_SUCCESSFUL = "NOT_APPLICABLE_CI_NOT_SUCCESSFUL"
+#: The candidate stopped being a candidate between ordinary CI going green and
+#: this panel reading the pull request: merged, closed, or superseded by a
+#: further push. See `classify_candidate` for why this is an outcome and not a
+#: failure.
+NOT_APPLICABLE_CANDIDATE_MOVED_ON = "NOT_APPLICABLE_CANDIDATE_MOVED_ON"
 
 #: Underlying events this lane understands. Anything else still fails closed:
 #: an unrecognised event is a workflow topology nobody designed for, and
@@ -255,22 +260,100 @@ def assert_triggering_run(run: dict) -> dict:
             "head_sha": head}
 
 
-def resolve_pull_request(pulls, *, run_head_sha: str) -> dict:
-    """Exactly one open pull request, whose CURRENT head is the run's head.
+def _open_pull_requests_at(pulls, run_head_sha: str) -> list:
+    """The open pull requests whose CURRENT head is exactly this commit.
 
-    Ambiguity is refused rather than resolved by picking the first. Two open PRs
-    matching one head is a state nobody designed for, and choosing one of them
-    silently means the status lands on a pull request the reviewer was not
-    looking at."""
-    if not isinstance(pulls, list):
-        refuse("category=pull_request_list_not_a_list")
-    open_matching = [
+    One matcher, used by both the operational question (`classify_candidate`)
+    and the security assertion (`resolve_pull_request`), so the two cannot come
+    to disagree about what "the candidate" means. Two copies of this filter is
+    how a classifier says "nothing to review" about a candidate the assertion
+    would happily have reviewed, or the reverse."""
+    return [
         p for p in pulls
         if isinstance(p, dict)
         and str(p.get("state")) == "open"
         and not p.get("merged_at")
         and str((p.get("head") or {}).get("sha") or "") == run_head_sha
     ]
+
+
+def classify_candidate(pulls, *, run_head_sha: str) -> dict:
+    """Is there still something to review at this head — or has it moved on?
+
+    The second half of the applicability question, and the same shape as
+    `classify_triggering_run`: an operational answer with three outcomes, kept
+    apart from the security question `resolve_pull_request` answers.
+
+    ## The signal this repairs
+
+    Between ordinary CI going green and this panel reading the pull request,
+    two entirely ordinary things happen all the time: the author pushes again,
+    and somebody merges. Either one leaves no OPEN pull request at the head the
+    panel was triggered for, and the lane's only answer was
+    `category=no_open_pull_request_for_head` — a RED `midterm-panel-review` run
+    on a pull request whose real state is "already merged" or "superseded, and
+    its replacement has its own CI and its own panel on the way".
+
+    That is the same defect the applicability split above was written for, one
+    step later in the sequence, and it is worse here because it lands on the
+    common path: every merge of a panel-reviewed pull request produced a red
+    run behind it. A permanently-red signal for an expected condition teaches
+    people to ignore the signal.
+
+    ## What is NOT relaxed
+
+    Nothing this returns lets a run proceed that could not proceed before. The
+    two structural refusals stay refusals — a response that is not a list, and
+    two open pull requests sharing one head — because neither is an ordinary
+    development event; both are states nobody designed for.
+
+    And "not applicable" is not "approved". The run publishes NO commit status
+    on this head, exactly as the push path does not. A required panel status
+    therefore stays absent rather than arriving green, so branch protection
+    still blocks. The only thing that changes is the colour of a run that had
+    nothing to do.
+
+    The head cannot be told apart from the merge here, and this does not
+    pretend to: `open_pull_requests()` asks for `state=open`, so a merged
+    candidate is simply missing from the list rather than present and closed.
+    The reason names both possibilities instead of guessing between them."""
+    if not isinstance(pulls, list):
+        refuse("category=pull_request_list_not_a_list")
+    open_matching = _open_pull_requests_at(pulls, run_head_sha)
+    if len(open_matching) > 1:
+        numbers = sorted(int(p.get("number", 0)) for p in open_matching)
+        refuse(f"category=ambiguous_pull_request_mapping numbers={numbers} — "
+               "two open pull requests share this head; publishing a status "
+               "would land it on whichever one this code picked first")
+    if not open_matching:
+        return {"applicability": NOT_APPLICABLE_CANDIDATE_MOVED_ON,
+                "proceed": False,
+                "reason": (f"no open pull request is at {run_head_sha[:12]} any "
+                           "more: it was merged, it was closed, or the author "
+                           "pushed again while this panel was starting. A new "
+                           "head gets its own ordinary CI run and its own "
+                           "panel; nothing was spent finding that out")}
+    return {"applicability": APPLICABLE, "proceed": True,
+            "reason": "an open pull request is still at the reviewed head"}
+
+
+def resolve_pull_request(pulls, *, run_head_sha: str) -> dict:
+    """Exactly one open pull request, whose CURRENT head is the run's head.
+
+    Ambiguity is refused rather than resolved by picking the first. Two open PRs
+    matching one head is a state nobody designed for, and choosing one of them
+    silently means the status lands on a pull request the reviewer was not
+    looking at.
+
+    `classify_candidate` answers the operational form of the first question
+    ahead of this one, so on the ordinary path the refusal below is unreachable.
+    It is kept, and kept a refusal, for the same reason `assert_triggering_run`
+    still refuses a `push` that `classify_triggering_run` already sorted: a
+    caller that skips the classifier must not silently get a candidate-less
+    run reviewed, and this function's contract is not "report what happened"."""
+    if not isinstance(pulls, list):
+        refuse("category=pull_request_list_not_a_list")
+    open_matching = _open_pull_requests_at(pulls, run_head_sha)
     if not open_matching:
         refuse(f"category=no_open_pull_request_for_head "
                f"head={run_head_sha[:12]} — the pull request was closed, "

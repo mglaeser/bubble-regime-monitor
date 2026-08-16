@@ -179,6 +179,150 @@ def test_the_strict_candidate_check_is_unchanged_for_applicable_runs():
         preflight.assert_triggering_run(_run(event="push"))
 
 
+# ----------------------------- B-bis: the candidate that moved on ----------
+#
+# The same defect as Finding B, one step later in the sequence. Ordinary CI
+# goes green, the panel starts, and in between the author pushes again or
+# somebody merges. Either leaves no open pull request at the triggering head,
+# and the only answer the lane had was a refusal — so every merge of a
+# panel-reviewed pull request left a red `midterm-panel-review` behind it.
+
+HEAD = "a" * 40
+OTHER_HEAD = "b" * 40
+
+
+def _candidate(head=HEAD, number=34, **overrides):
+    """An open, same-repository pull request as the API returns one.
+
+    Complete enough that `resolve_pull_request` resolves it all the way, so
+    the agreement test below compares two whole answers rather than stopping
+    at the first shared question."""
+    pull = {"number": number, "state": "open", "merged_at": None,
+            "head": {"sha": head,
+                     "repo": {"id": preflight.REPOSITORY_NUMERIC_ID}},
+            "base": {"ref": "main", "sha": "c" * 40}}
+    pull.update(overrides)
+    return pull
+
+
+def test_a_merged_candidate_is_not_applicable_rather_than_an_error():
+    """`open_pull_requests()` asks for `state=open`, so a merged candidate is
+    simply absent from the list rather than present and closed."""
+    outcome = preflight.classify_candidate([], run_head_sha=HEAD)
+
+    assert outcome["proceed"] is False
+    assert outcome["applicability"] == (
+        preflight.NOT_APPLICABLE_CANDIDATE_MOVED_ON)
+
+
+def test_a_candidate_pushed_again_is_not_applicable_rather_than_an_error():
+    outcome = preflight.classify_candidate([_candidate(head=OTHER_HEAD)],
+                                           run_head_sha=HEAD)
+
+    assert outcome["proceed"] is False
+    assert outcome["applicability"] == (
+        preflight.NOT_APPLICABLE_CANDIDATE_MOVED_ON)
+
+
+def test_the_reason_names_both_possibilities_and_guesses_neither():
+    """The list cannot tell a merge from a push. Saying which would be a
+    claim about something this function did not observe."""
+    reason = preflight.classify_candidate([], run_head_sha=HEAD)["reason"]
+
+    assert "merged" in reason and "pushed again" in reason
+    assert HEAD[:12] in reason
+
+
+def test_an_open_candidate_still_at_this_head_is_applicable():
+    outcome = preflight.classify_candidate([_candidate()], run_head_sha=HEAD)
+
+    assert outcome["proceed"] is True
+    assert outcome["applicability"] == preflight.APPLICABLE
+
+
+def test_not_applicable_is_never_spelled_approved():
+    """"Nothing to review" and "reviewed and approved" must not share a
+    value: the workflow gates status publication on `proceed == 'true'`, and
+    an applicability constant that read APPLICABLE would publish a green
+    panel status for a run that reviewed nothing."""
+    for pulls in ([], [_candidate(head=OTHER_HEAD)]):
+        outcome = preflight.classify_candidate(pulls, run_head_sha=HEAD)
+        assert outcome["applicability"] != preflight.APPLICABLE
+        assert outcome["proceed"] is False
+
+
+@pytest.mark.parametrize("pulls", [
+    pytest.param([_candidate(number=34), _candidate(number=35)],
+                 id="two-open-at-one-head"),
+])
+def test_ambiguity_still_fails_closed(pulls):
+    """Not an ordinary development event. Nobody designed for it, and
+    picking one silently lands the status on the wrong pull request."""
+    with pytest.raises(PanelRefusal) as excinfo:
+        preflight.classify_candidate(pulls, run_head_sha=HEAD)
+
+    assert "ambiguous_pull_request_mapping" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("pulls", [None, {}, "[]", 0])
+def test_a_malformed_pull_request_response_still_fails_closed(pulls):
+    with pytest.raises(PanelRefusal) as excinfo:
+        preflight.classify_candidate(pulls, run_head_sha=HEAD)
+
+    assert "pull_request_list_not_a_list" in str(excinfo.value)
+
+
+def test_the_strict_resolver_is_unchanged_and_still_refuses():
+    """`classify_` decides whether to look; `assert_`/`resolve_` is still the
+    gate. A caller that skips the classifier must not get a candidate-less
+    run reviewed."""
+    with pytest.raises(PanelRefusal) as excinfo:
+        preflight.resolve_pull_request([], run_head_sha=HEAD)
+
+    assert "no_open_pull_request_for_head" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("pulls,expected", [
+    pytest.param([], False, id="nothing-open"),
+    pytest.param([_candidate()], True, id="open-at-head"),
+    pytest.param([_candidate(head=OTHER_HEAD)], False, id="head-moved"),
+    pytest.param([_candidate(state="closed")], False, id="closed-at-head"),
+    pytest.param([_candidate(merged_at="2026-08-16T00:00:00Z")], False,
+                 id="merged-at-stamped"),
+    pytest.param([_candidate(head={"sha": ""})], False, id="head-sha-blank"),
+    pytest.param(["not-a-pull-request"], False, id="entry-not-a-dict"),
+    pytest.param([_candidate(head=OTHER_HEAD), _candidate()], True,
+                 id="one-of-several"),
+])
+def test_the_classifier_and_the_resolver_agree_about_what_a_candidate_is(
+        pulls, expected):
+    """The anti-drift test, and the reason both read one shared matcher.
+
+    Two copies of this filter is how a classifier comes to say "nothing to
+    review" about a candidate the resolver would happily have reviewed — or,
+    far worse, the reverse: a classifier that proceeds on a pull request the
+    resolver then refuses, turning the quiet path back into a red run."""
+    assert preflight.classify_candidate(
+        pulls, run_head_sha=HEAD)["proceed"] is expected
+
+    try:
+        preflight.resolve_pull_request(pulls, run_head_sha=HEAD)
+        resolved = True
+    except PanelRefusal as refusal:
+        assert "no_open_pull_request_for_head" in str(refusal)
+        resolved = False
+    assert resolved is expected
+
+
+def test_the_two_paths_read_one_matcher_rather_than_two_copies():
+    """Behavioural agreement above can be satisfied by two filters that
+    happen to agree today. This says they are the same object."""
+    source = preflight.classify_candidate.__code__.co_names
+    assert "_open_pull_requests_at" in source
+    assert "_open_pull_requests_at" in (
+        preflight.resolve_pull_request.__code__.co_names)
+
+
 # ------------------------------------------- B: the workflow's own shape ---
 
 def _panel_workflow():
