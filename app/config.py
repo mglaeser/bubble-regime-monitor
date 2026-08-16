@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -73,6 +74,58 @@ class Settings(BaseSettings):
     sms_daily_minute: int = 0
     sms_max_len: int = 160           # single-SMS GSM-7 ceiling (hard cap)
 
+    # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
+    # Two INDEPENDENT switches. Evidence capture may run with alerting fully
+    # disabled (that is how Stage 1 collects replay material), and enabling
+    # alerts never implies capture. `live` is never reached automatically: it
+    # requires promoted rule + phrase artifacts and a deliberate operator edit.
+    alert_input_capture: bool = False
+    alerts_mode: Literal["disabled", "shadow", "live"] = "disabled"
+    alerts_live_profile: str = "default"
+
+    # Immutable artifacts. The *_lkg_* pair is the last-known-good ruleset used
+    # when a candidate fails validation — a fallback NEVER escalates the mode.
+    alerts_rules_path: str = "/data/alert_rules.yaml"
+    alerts_lkg_path: str = "/data/alert_rules.last_good.yaml"
+    alerts_lkg_hash_path: str = "/data/alert_rules.last_good.sha256"
+    alerts_phrase_path: str = "/data/alert_phrases.json"
+    alerts_calibration_dir: str = "/data/alert-calibration"
+
+    # Separate scopes. A browser never receives the admin key (or the write
+    # key); detailed reads go through a server-side proxy or the redacted
+    # projection. Empty means "this scope is not configured" -> fail closed.
+    alerts_read_api_key: str = ""
+    alerts_write_api_key: str = ""
+    alerts_public_read: bool = False
+
+    # Volume governance. P1 is exempt from all three.
+    alerts_non_p1_target_168h: int = 2
+    alerts_non_p1_cap_24h: int = 3
+    alerts_non_p1_cap_168h: int = 6
+
+    alerts_dispatch_poll_s: int = 20
+    alerts_dispatch_lease_s: int = 120
+    alerts_eval_lease_s: int = 300
+    alerts_eval_budget_ms: int = 1500
+    alerts_unknown_escalate_h: int = 24
+    alerts_metadata_retention_days: int = 800
+    alerts_message_retention_days: int = 400
+    alerts_busy_timeout_ms: int = 5000
+
+    # The model SELECTS reviewed codes; it never writes prose and never writes
+    # a number. P1 skips it entirely.
+    alerts_llm_enabled: bool = True
+    alerts_llm_timeout_s: int = 6
+    alerts_llm_render_cap_24h: int = 12
+    alerts_llm_test_cap_1h: int = 6
+    alerts_llm_retry_max: int = 1
+    alerts_llm_shadow_enabled: bool = False
+
+    # Migration-friendly alias for the legacy `sms_enabled`. Until the Stage 4
+    # cutover the daily digest keeps running: ALERTS_MODE=live must NOT
+    # implicitly disable it. See `effective_daily_sms_enabled`.
+    daily_sms_enabled: bool | None = None
+
     # Runtime. mc_samples / mc_seed DEFAULT to the canonical frozen artifact
     # (F-01/L-07) so the runtime MC seed is causally the frozen value; env vars
     # may still override for operational runs.
@@ -96,6 +149,18 @@ class Settings(BaseSettings):
     def sms_configured(self) -> bool:
         return bool(self.sms_enabled and self.sipgate_token_id
                     and self.sipgate_token and self.sipgate_recipient)
+
+    @property
+    def effective_daily_sms_enabled(self) -> bool:
+        """Whether the LEGACY daily digest runs.
+
+        DAILY_SMS_ENABLED wins when explicitly set; otherwise the legacy
+        SMS_ENABLED still governs. The alert system never touches this — the
+        Stage 4 cutover is an explicit operator action, not a side effect of
+        turning alerts on."""
+        if self.daily_sms_enabled is not None:
+            return self.daily_sms_enabled
+        return self.sms_enabled
 
 
 @lru_cache

@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import get_settings
+from app.engine.recompute_slots import cron_hour_expression
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -35,6 +36,24 @@ def _sms_job() -> None:
         log.error("scheduled_digest_failed", error=str(exc))
 
 
+def _alert_recovery_job() -> None:
+    # Stale evaluation leases and missing input sidecars. Runs whether or not
+    # alerting is enabled: both failures are about EVIDENCE, and a sidecar gap
+    # during a capture-only stage is exactly what would ruin a later replay.
+    from app.jobs.alert_recovery import job
+
+    job()   # never raises
+
+
+def _alert_dispatch_job() -> None:
+    # The SINGLE delivery worker. Disabled unless ALERTS_MODE is shadow or
+    # live; in shadow it runs the whole path against the NullSender, so nothing
+    # leaves the host.
+    from app.jobs.alert_dispatch import job
+
+    job()   # never raises
+
+
 def _breadth_job() -> None:
     # Incremental breadth-cache refresh (Twelve Data, ~8/min, credit-governed).
     # Runs off the recompute path so the twice-daily recompute stays fast and
@@ -57,7 +76,11 @@ def start() -> BackgroundScheduler:
         # Upstream budget at 6 runs/day: price/series caches reuse within their
         # SLAs (daily data doesn't change intraday), Polygon stays 1 call/day,
         # breadth spends nothing here (separate job), judgment = 6 LLM calls/day.
-        _scheduler.add_job(_job, CronTrigger(hour="2,6,10,14,18,22", minute=0, timezone="UTC"),
+        # The slot hours live in app.engine.recompute_slots — the SAME
+        # definition the snapshot's expected_recompute_slot and the alert
+        # watchdog's missed-slot count use. Never restate them here.
+        _scheduler.add_job(_job, CronTrigger(hour=cron_hour_expression(), minute=0,
+                                             timezone="UTC"),
                            id="recompute", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
         # Breadth cache refresh twice daily, off the recompute hours so the two
@@ -66,8 +89,24 @@ def start() -> BackgroundScheduler:
         _scheduler.add_job(_breadth_job, CronTrigger(hour="1,13", minute=0, timezone="UTC"),
                            id="breadth_refresh", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
+        # The delivery dispatcher polls the outbox. `max_instances=1` is the
+        # single-worker guarantee the budget recheck depends on.
+        _scheduler.add_job(_alert_dispatch_job,
+                           CronTrigger(second=f"*/{max(20, settings.alerts_dispatch_poll_s)}",
+                                       timezone="UTC"),
+                           id="alert_dispatch", replace_existing=True,
+                           coalesce=True, misfire_grace_time=120, max_instances=1)
+        # Every 30 minutes, offset off the recompute and breadth hours so the
+        # three jobs never contend for the single SQLite writer.
+        _scheduler.add_job(_alert_recovery_job,
+                           CronTrigger(minute="15,45", timezone="UTC"),
+                           id="alert_recovery", replace_existing=True,
+                           coalesce=True, misfire_grace_time=1800, max_instances=1)
         sms_schedule = "disabled"
-        if settings.sms_enabled:
+        # DAILY_SMS_ENABLED is the migration-friendly alias; until the explicit
+        # Stage 4 cutover the legacy digest keeps its own switch, and turning
+        # the alert system on never silently disables it.
+        if settings.effective_daily_sms_enabled:
             _scheduler.add_job(
                 _sms_job,
                 CronTrigger(hour=settings.sms_daily_hour, minute=settings.sms_daily_minute,
@@ -77,7 +116,10 @@ def start() -> BackgroundScheduler:
             sms_schedule = f"{settings.sms_daily_hour:02d}:{settings.sms_daily_minute:02d} UTC"
         _scheduler.start()
         log.info("scheduler_started", recompute="every 4h (02/06/10/14/18/22 UTC)",
-                 breadth_refresh="01:00/13:00 UTC", daily_sms=sms_schedule)
+                 breadth_refresh="01:00/13:00 UTC", daily_sms=sms_schedule,
+                 alert_recovery="every 30min (:15/:45)",
+                 alert_dispatch=f"every {max(20, settings.alerts_dispatch_poll_s)}s "
+                               f"(mode={settings.alerts_mode})")
     return _scheduler
 
 

@@ -93,6 +93,8 @@ def create_app() -> FastAPI:
 
     from app.routers import (
         admin,
+        admin_alerts,
+        alerts,
         dashboard,
         health,
         indicators,
@@ -138,6 +140,12 @@ def create_app() -> FastAPI:
     app.include_router(dashboard.router)
     app.include_router(webhooks.router)
     app.include_router(replay.router)
+    # Alert API. Reads use ALERTS_READ_API_KEY (or ALERTS_PUBLIC_READ); writes
+    # use ALERTS_WRITE_API_KEY; neither falls back to the admin key. CORS above
+    # is GET-only, so a browser cannot reach the write routes without a
+    # deliberate, separately-reviewed change — a dashboard proxies them.
+    app.include_router(alerts.router)
+    app.include_router(admin_alerts.router)
     return app
 
 

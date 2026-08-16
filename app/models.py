@@ -46,6 +46,35 @@ class Snapshot(Base):
     methodology_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     methodology_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # ---- Typed alert contract (Stage 0). NON-SCORING. -----------------------
+    # `action_band` above stays exactly as it is: a display string that folds
+    # coverage suppression and degradation into prose. The alert layer must
+    # never parse it, and must never recompute the band itself — so the scoring
+    # layer persists the decomposition it already knows (app/engine/
+    # snapshot_contract.py). None of these fields feeds any score.
+    prev_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("snapshots.id"), nullable=True, index=True)
+    expected_recompute_slot: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True)
+    alert_contract_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # hold | trim | de-risk — the band implied by the MC median alone.
+    score_action_band: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # hold | trim | de-risk — after the override, before coverage suppression.
+    base_action_band: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # hold | trim | de-risk | suppressed — the authoritative action state.
+    effective_action_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    band_suppressed_by_coverage: Mapped[bool] = mapped_column(Boolean, default=False,
+                                                              server_default="0")
+    data_degraded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+
+    # Per-flag typed contract: active/fireable/state/distance/provenance, plus
+    # the override requirement and the fireable universe actually available on
+    # this run. Consumers READ the counts; they never restate the rule.
+    red_flag_meta: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    override_required_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    override_fireable_universe_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     readings: Mapped[list[IndicatorReading]] = relationship(back_populates="snapshot")
 
 
@@ -215,3 +244,20 @@ class DashboardFeed(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     payload: Mapped[str] = mapped_column(Text)  # JSON: {anchor_month, anchor_partial, series, metrics}
+
+
+def _register_alert_tables() -> None:
+    """Attach the alert-domain tables to this Base.metadata.
+
+    They live in `app/alerts/models.py` — nineteen tables would swamp this
+    module — but they must be registered here before ANY `create_all()`, or the
+    boot fallback would silently produce a database missing the partial unique
+    index that guarantees one open episode per mechanism.
+
+    Imported at the bottom, after `Base` exists, so the alert module's
+    `from app.models import Base` resolves during the circular import.
+    """
+    import app.alerts.models  # noqa: F401,PLC0415
+
+
+_register_alert_tables()

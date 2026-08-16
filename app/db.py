@@ -37,6 +37,12 @@ def _set_sqlite_pragmas(dbapi_connection: object, _record: object) -> None:
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA synchronous=NORMAL")
+    # The alert system adds a second and third writer (the dispatcher poll loop
+    # and the post-recompute evaluation) to what used to be a single-writer
+    # service. Without busy_timeout, SQLite returns SQLITE_BUSY IMMEDIATELY on
+    # a contended write instead of waiting — a lost alert plan rather than a
+    # slightly slower one. WAL keeps readers unblocked either way.
+    cursor.execute(f"PRAGMA busy_timeout={int(get_settings().alerts_busy_timeout_ms)}")
     # With the default OFF, the implicit DELETE performed by INSERT OR
     # REPLACE conflict resolution does NOT fire DELETE triggers (panel
     # round-8 finding on PR #22) — ON makes the append-only DELETE trigger

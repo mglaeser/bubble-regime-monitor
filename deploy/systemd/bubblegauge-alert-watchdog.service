@@ -1,0 +1,29 @@
+# Host-side alert watchdog for bubblegauge.
+#
+# This runs OUTSIDE the container on purpose. A watchdog that only runs as a
+# callback after a successful recompute cannot notice that recomputes have
+# stopped — which is the failure it exists to catch.
+#
+# It is still not a complete answer: a total host or network failure silences
+# this timer too. That needs external monitoring, and no amount of local
+# scheduling substitutes for it.
+#
+# Install (rootless podman, user units):
+#   cp deploy/systemd/bubblegauge-alert-watchdog.* ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now bubblegauge-alert-watchdog.timer
+#
+# Exit codes: 0 = healthy, 2 = outage detected (recorded as a watchdog input).
+
+[Unit]
+Description=bubblegauge alert watchdog (missed recompute slots)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust the container name and, if the service runs directly, the working
+# directory and interpreter.
+ExecStart=/usr/bin/podman exec bubblegauge python -m app.alerts.watchdog --once
+# A non-zero exit means "outage detected", not "the unit failed".
+SuccessExitStatus=0 2
+TimeoutStartSec=120
