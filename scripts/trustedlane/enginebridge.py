@@ -200,13 +200,15 @@ def engine_category(exc) -> str | None:
 
 ENGINE_CODE_REMEDIES = {
     "PROVIDER_RESPONSE_INVALID": (
-        "the provider replied and the engine rejected the reply's ENVELOPE, "
-        "not its content. Every category this code can carry is structural — "
-        "`generation_status` (a non-200), `generation_body_oversized`, "
-        "`generation_envelope_key_set`, `generation_model_mismatch` (the "
-        "model returned is not the model requested, which a dated model "
-        "alias will do), `generation_usage_key_set`. Read the "
-        "`engine_category=` above: it names which one"),
+        "the provider replied and the engine refused the reply. This code "
+        "spans TWO very different failures and the `engine_category=` above "
+        "is what tells them apart. `generation_*` categories are envelope "
+        "structure, raised by `executor.validate_response_envelope`. "
+        "Everything else comes from `verdicts.py` and is verdict CONTENT "
+        "policy — the unit set answered, the challenge echo in "
+        "`proof_of_check`, reason length and charset, the lens vocabulary, "
+        "identical canned approvals. Content policy is the larger set by far, "
+        "so do not read this code as 'a malformed reply'"),
     "SECRET_PREFLIGHT_FAILED": (
         "a secret-shaped literal in the REVIEWED DIFF could not be mapped to "
         "an authorized source occurrence. This lane passes "

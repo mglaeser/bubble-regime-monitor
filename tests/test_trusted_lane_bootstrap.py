@@ -10037,46 +10037,52 @@ class TestARefusalCodeCarriesANextStepAndStillNoPayload:
         for forbidden in "/. =:\\\t\n\"'<>@#$%&*()[]{}":
             assert forbidden not in token
 
-    def test_no_engine_refusal_interpolates_a_value_inside_its_category(self):
+    def test_no_engine_category_is_built_from_an_interpolated_value(self):
         """Derived from the ENGINE's own source, not from a list here.
 
         The token is safe to publish only because it is a source literal at
         every site. An `f"category={name}"` anywhere in the engine would make
-        it content-derived, and this is the check that would notice."""
+        it content-derived, and this is the check that notices.
+
+        Scans EVERY string that starts a `category=`, not only the ones passed
+        directly to `raise BlockingError(...)`. The first version of this test
+        walked `ast.Raise` nodes and so was blind to `verdicts.py`, whose 26
+        categories all go through a `_fail()` wrapper — including the ones a
+        real panel run is most likely to hit. A check that inspects the
+        delivery mechanism rather than the value is a check that misses every
+        site using a different mechanism."""
         engine_dir = ROOT / "scripts" / "verifier"
-        checked = 0
+        checked, modules = 0, set()
         for path in sorted(engine_dir.glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Raise)
-                        and isinstance(node.exc, ast.Call)):
-                    continue
-                func = node.exc.func
-                name = (func.id if isinstance(func, ast.Name)
-                        else getattr(func, "attr", ""))
-                if name != "BlockingError" or len(node.exc.args) < 2:
-                    continue
-                reason = node.exc.args[1]
-                if isinstance(reason, ast.Constant):
-                    literal = reason.value if isinstance(reason.value,
-                                                         str) else ""
-                elif isinstance(reason, ast.JoinedStr):
-                    first = reason.values[0] if reason.values else None
+                # A plain literal, or the first segment of an f-string. Those
+                # are the only two ways a category can begin a message.
+                if isinstance(node, ast.Constant) and isinstance(node.value,
+                                                                 str):
+                    literal = node.value
+                elif isinstance(node, ast.JoinedStr):
+                    first = node.values[0] if node.values else None
                     literal = (first.value
                                if isinstance(first, ast.Constant)
                                and isinstance(first.value, str) else "")
                 else:
-                    literal = ""
+                    continue
                 match = enginebridge._ENGINE_CATEGORY.match(literal)
                 if match is None:
-                    continue        # prose site; nothing is extracted from it
+                    continue
                 checked += 1
+                modules.add(path.name)
                 # The whole token came out of the LITERAL segment, so no
                 # interpolated value can be inside it.
                 assert match.end() <= len(literal), f"{path.name}:{node.lineno}"
-        assert checked > 50, (
+        assert checked > 100, (
             "the engine's category sites were not found; this check would "
             f"pass vacuously (checked={checked})")
+        assert "verdicts.py" in modules, (
+            "verdicts.py raises through a `_fail()` wrapper and holds the "
+            "categories a real run is most likely to hit; a scan that cannot "
+            "see it is the gap this test was rewritten to close")
 
     def test_every_remedy_is_a_fixed_string_with_nothing_to_interpolate(self):
         """A remedy containing a placeholder is a remedy somebody will one day
