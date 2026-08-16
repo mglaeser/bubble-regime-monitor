@@ -9931,14 +9931,41 @@ class TestARefusalCodeCarriesANextStepAndStillNoPayload:
     CODE = "SECRET_PREFLIGHT_FAILED"
 
     def _engine(self):
+        # Mirrors `verifier.errors.BlockingError` EXACTLY — `code` and
+        # `message`, no `reason`. The previous stub bound `reason`, which the
+        # real class has never had, so every test in this group passed against
+        # a fiction while `engine_category` read a missing attribute in
+        # production and published nothing.
+        # `test_engine_category_reads_the_real_exception` below pins the stub
+        # to the real class so this cannot recur.
         class BlockingError(Exception):
-            def __init__(self, code, reason):
-                super().__init__(f"{code}: {reason}")
+            def __init__(self, code, message):
+                super().__init__(f"{code}: {message}")
                 self.code = code
-                self.reason = reason
+                self.message = message
 
         module = types.SimpleNamespace(BlockingError=BlockingError)
         return {"modules": {"verifier.errors": module}}, BlockingError
+
+    def test_engine_category_reads_the_real_exception(self):
+        """Bound to `verifier.errors.BlockingError`, not to the stub above.
+
+        Every other test in this group builds its own exception class, so all
+        of them stayed green while the extractor read an attribute the engine
+        does not define. This one raises what the engine really raises.
+        """
+        from verifier.errors import BlockingError as RealBlockingError
+
+        real = RealBlockingError(
+            "PROVIDER_RESPONSE_INVALID",
+            "category=generation_model_mismatch expected=some-model")
+        assert enginebridge.engine_category(real) == "generation_model_mismatch"
+
+        # And the stub must keep matching the real class's attributes, so a
+        # rename on either side fails here instead of silently returning None.
+        _engine, stub = self._engine()
+        probe = stub("C", "category=generation_status status=502")
+        assert set(vars(real)) == set(vars(probe))
 
     def _refuse_with(self, code, reason):
         engine, blocking = self._engine()

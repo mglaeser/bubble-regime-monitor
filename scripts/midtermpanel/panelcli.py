@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import sys
 
+from trustedlane.errors import LaneRefusal
+
 from . import (
     COUNT_EVIDENCE_CLASS,
     PANEL_EVIDENCE_CLASS,
@@ -162,7 +164,39 @@ def perform(environ: dict, *, execute_fn, opener,
                 target_url=target, run_id=run_id, run_attempt=attempt),
         opener=opener, token=env["GITHUB_TOKEN"])]
 
-    executed = execute_fn(plan=plan)
+    # PERSIST, THEN RE-RAISE. The same discipline the blocked path already has
+    # further down, applied to the one place that lacked it.
+    #
+    # `execute_fn` is where a provider reply gets refused, and its refusal
+    # propagates straight out of this function — so `panel_evidence` below and
+    # the readable review after it never run, and the artifact upload finds
+    # nothing. On panel run 31971282342 that left a red status whose only
+    # surviving detail was one stderr line, and the token meant to disambiguate
+    # it was absent for an unrelated reason. Every diagnostic channel was empty
+    # at once.
+    #
+    # This writes a SEPARATE file, never `panel-evidence.json`: a partial
+    # record under that name would be loaded by `human_merge_gate` as though a
+    # review had completed. The reason carried is the lane's own sanitized
+    # string — the same text `trusted_refusal_line` prints — so nothing enters
+    # the file that was not already cleared for stderr.
+    try:
+        executed = execute_fn(plan=plan)
+    except (PanelRefusal, LaneRefusal) as refusal:
+        write_atomic(
+            {"schema": "midterm-panel-refusal/v1",
+             "candidate_head_sha": head,
+             "candidate_base_sha": base,
+             "run_id": run_id,
+             "run_attempt": attempt,
+             "refusal_class": type(refusal).__name__,
+             "code": str(getattr(refusal, "code", "")),
+             "reason": str(getattr(refusal, "reason", "")),
+             "plan_sha256": plan["plan_sha256"],
+             "count_evidence_sha256": count_evidence_sha256},
+            os.path.join(_runner_temp(environ), "midterm", "panel-refusal.json"))
+        raise
+
     verdict = aggregate(votes=executed["votes"],
                         synthesis=executed["synthesis"],
                         challenge=plan["execution_challenge"])
@@ -181,6 +215,13 @@ def perform(environ: dict, *, execute_fn, opener,
               "required_approver": verdict["required_approver"],
               "strict_any_refutation": verdict["strict_any_refutation"],
               "votes": verdict["votes"],
+              # WHICH units were rejected and under which codes. `votes` is a
+              # count, so without these a blocked review recorded that it was
+              # blocked and nothing a reader could act on. Codes only — the
+              # engine's prose never enters the evidence body.
+              "decisions": executed["decisions"],
+              "unit_blocks": executed["unit_blocks"],
+              "block_codes": executed["block_codes"],
               "generation_calls": executed["generation_calls"],
               "coverage": executed["coverage"],
               "output_privacy": executed["output_privacy"],

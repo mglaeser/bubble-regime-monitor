@@ -1324,7 +1324,8 @@ class TestZeroProviderCalls:
 
 
 def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True,
-                 terminal_status_fails: bool = False) -> dict:
+                 terminal_status_fails: bool = False,
+                 execute_override=None) -> dict:
     """Drive the real `panelcli.perform` with injected seams and no network.
 
     Everything the function reads off disk is built here through the SAME
@@ -1390,7 +1391,15 @@ def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True,
     order, captured = [], {}
 
     def execute_fn(*, plan):
+        # Mirrors `panel.execute`'s real return, including the per-unit
+        # outcomes. A double that omits a key the caller reads is how a
+        # contract break reaches production green.
         return {"votes": votes, "coverage": {}, "generation_calls": 0,
+                "decisions": {"u" * 64: "reject" if refuted else "approve"},
+                "unit_blocks": ([{"unit_sha256": "u" * 64,
+                                  "code": "REQUIRED_APPROVER_REFUTED",
+                                  "batch_id": 1}] if refuted else []),
+                "block_codes": ["REQUIRED_APPROVER_REFUTED"] if refuted else [],
                 "normalization": {"normalized": False},
                 "output_privacy": {"scanned_field_count": 6},
                 "generation_ledger": {"generation_ledger_sha256": "g" * 64},
@@ -1422,18 +1431,28 @@ def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True,
                 "candidate_head_sha": candidate_head_sha,
                 "refusal": None if publish_ok else "connection reset"}
 
+    from trustedlane.errors import LaneRefusal
+
     raised = None
     try:
-        panelcli.perform(environ, execute_fn=execute_fn, opener=status_opener,
+        panelcli.perform(environ, execute_fn=execute_override or execute_fn,
+                         opener=status_opener,
                          scan=scan, publish_review_fn=publish_review_fn)
-    except PanelRefusal as exc:
+    except (PanelRefusal, LaneRefusal) as exc:
         raised = exc
     order.append("exit")
     paths = panelcli.review_paths(str(runner))
     return {"raised": raised, "order": order, "status_states": states,
             "published_body": captured.get("body"),
             "markdown": Path(paths["markdown"]), "json": Path(paths["json"]),
-            "evidence": runner / "midterm" / "panel-evidence.json"}
+            "evidence": runner / "midterm" / "panel-evidence.json",
+            "refusal": runner / "midterm" / "panel-refusal.json"}
+
+
+def _drive_perform(tmp_path, *, execute_fn=None, refuted: bool = False) -> dict:
+    """`_run_perform` with the execute seam swappable, for refusal paths."""
+    return _run_perform(tmp_path, decision="blocked" if refuted else "approved",
+                        execute_override=execute_fn)
 
 
 # ------------------------------------------- round three: the last sweep ----
@@ -2018,3 +2037,87 @@ class TestTheUntestedGuardsAreNowLoadBearing:
                 MAX_DESCRIPTION_CHARS
         assert all("mid-term, not write-separated" in _blocked_status_description(r)
                    for r in ({"published": True, "finding_count": 2}, {}))
+
+
+# ---------------------------------------------------------------------------
+# a refusal inside execute() must leave something behind
+# ---------------------------------------------------------------------------
+
+
+class TestARefusedRunRetainsItsReason:
+    """Panel run 31971282342 refused inside `execute_fn` and produced NO
+    evidence, NO readable review and one stderr line — every diagnostic
+    channel empty at once, because `panel-evidence.json` is written after
+    `execute_fn` returns and that return never happened."""
+
+    def _run(self, tmp_path, refusal):
+        from midtermpanel import panelcli
+
+        def execute_fn(*, plan):
+            raise refusal
+
+        return _drive_perform(tmp_path, execute_fn=execute_fn), panelcli
+
+    def test_the_refusal_record_is_written_and_the_refusal_still_propagates(
+            self, tmp_path):
+        from trustedlane.errors import LaneRefusal
+
+        refusal = LaneRefusal(
+            "TRUSTED_LANE_REFUSED",
+            "category=engine_refused where=execute_batch "
+            "code=PROVIDER_RESPONSE_INVALID engine_category=generation_status")
+        outcome, _cli = self._run(tmp_path, refusal)
+
+        assert outcome["raised"] is refusal, "the refusal must not be swallowed"
+        record = json.loads(outcome["refusal"].read_text(encoding="utf-8"))
+        assert record["schema"] == "midterm-panel-refusal/v1"
+        assert record["code"] == "TRUSTED_LANE_REFUSED"
+        assert "engine_category=generation_status" in record["reason"]
+        assert record["candidate_head_sha"] == HEAD
+
+    def test_it_is_not_written_to_the_evidence_path(self, tmp_path):
+        """A partial record under `panel-evidence.json` would be loaded by the
+        merge gate as though a review had completed."""
+        from trustedlane.errors import LaneRefusal
+
+        outcome, _cli = self._run(
+            tmp_path, LaneRefusal("TRUSTED_LANE_REFUSED", "category=x"))
+        assert not outcome["evidence"].exists()
+        assert outcome["refusal"].exists()
+
+    def test_a_completed_run_writes_no_refusal_record(self, tmp_path):
+        """`if-no-files-found: ignore` in the workflow depends on this: a
+        healthy run legitimately has no such file."""
+        outcome = _drive_perform(tmp_path)
+        assert outcome["evidence"].exists()
+        assert not outcome["refusal"].exists()
+
+
+class TestUnitOutcomesReachTheEvidence:
+    """WHICH unit was rejected, under WHICH code — and no engine prose."""
+
+    def test_the_evidence_body_names_the_blocked_units(self, tmp_path):
+        outcome = _drive_perform(tmp_path, refuted=True)
+        body = json.loads(
+            outcome["evidence"].read_text(encoding="utf-8"))["body"]
+        assert body["decisions"], "a review that answered records what it answered"
+        assert body["unit_blocks"][0]["code"] == "REQUIRED_APPROVER_REFUTED"
+        assert body["block_codes"] == ["REQUIRED_APPROVER_REFUTED"]
+
+    def test_the_engine_reason_is_never_carried(self):
+        """The one field that can quote the payload. Same rule as D2."""
+        from midtermpanel.panel import unit_outcomes
+
+        leaky = [{
+            "batch_id": 1,
+            "unit_decisions": {"u" * 64: {"approved": False}},
+            "unit_blocks": [{"unit_sha256": "u" * 64, "code": "SOME_CODE",
+                             "reason": "path=app/secrets/private.py "
+                                       "atom_id=deadbeefcafe"}],
+        }]
+        outcomes = unit_outcomes(leaky)
+        blob = json.dumps(outcomes)
+        for leaked in ("reason", "app/secrets/private.py", "deadbeefcafe"):
+            assert leaked not in blob, leaked
+        assert outcomes["decisions"]["u" * 64] == "reject"
+        assert outcomes["block_codes"] == ["SOME_CODE"]

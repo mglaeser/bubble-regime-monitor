@@ -217,6 +217,18 @@ def execute(*, engine: dict, plan: dict, skeleton: dict, transport,
                "reached nobody must not do")
     return {"votes": votes,
             "coverage": coverage,
+            # WHICH unit was rejected and under which code. Without these the
+            # evidence records that a review was blocked and nothing about
+            # where, so a reader has a decision and no way to act on it. The
+            # write-separated D2 lane has consumed both since it was written
+            # (`d2runtime._executed_record`); this brings the mid-term lane to
+            # parity rather than inventing a field.
+            #
+            # The engine's per-block `reason` is deliberately NOT carried. It
+            # is the one field that can quote the payload — a unit id prefix
+            # here, a path or an atom fragment elsewhere — and the block CODE
+            # is what a reader acts on. Same rule, same wording, as D2.
+            **unit_outcomes(result["batch_results"]),
             "synthesis": result["synthesis"],
             "generation_ledger": result["generation_ledger"],
             "execution_preflight": result["execution_preflight"],
@@ -231,6 +243,33 @@ def execute(*, engine: dict, plan: dict, skeleton: dict, transport,
             # envelope the engine was actually given. Absent for a dry run,
             # which normalizes nothing because nothing provider-shaped arrives.
             "normalization": normalization_evidence(transport)}
+
+
+def unit_outcomes(batch_results: list) -> dict:
+    """Per-unit decisions and block CODES, with no engine prose.
+
+    `decisions` maps every answered unit to `approve` / `reject`; `unit_blocks`
+    names the unit and the code that blocked it. Both are structural: a
+    SHA-256, a fixed vocabulary of codes, and a batch id. Nothing here can
+    carry a path, an atom id or a fragment of a refused payload, which is why
+    it is safe in an evidence body that states it holds digests and counts
+    rather than verdict text.
+    """
+    decisions: dict[str, str] = {}
+    blocks: list[dict] = []
+    for result in batch_results:
+        for unit_hash, decision in (result.get("unit_decisions") or {}).items():
+            decisions[unit_hash] = ("approve" if decision.get("approved")
+                                    else "reject")
+        for block in (result.get("unit_blocks") or []):
+            blocks.append({"unit_sha256": block["unit_sha256"],
+                           "code": block["code"],
+                           "batch_id": result.get("batch_id")})
+    return {
+        "decisions": dict(sorted(decisions.items())),
+        "unit_blocks": sorted(blocks, key=lambda b: (b["unit_sha256"], b["code"])),
+        "block_codes": sorted({b["code"] for b in blocks}),
+    }
 
 
 def normalization_evidence(transport) -> dict:

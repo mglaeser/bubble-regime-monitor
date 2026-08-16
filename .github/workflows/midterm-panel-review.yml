@@ -952,6 +952,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
+      # The one artifact a REFUSED run can produce. `panel-evidence.json` is
+      # only written once the review completed, so a refusal inside
+      # `execute_fn` left every channel empty at once — no evidence, no
+      # readable review, one stderr line. This carries the lane's own
+      # sanitized code and reason and nothing else.
+      #
+      # `ignore` rather than `warn` or `error`: on a run that completed
+      # normally this file legitimately does not exist, and a successful review
+      # must not pick up a warning for it.
+      - name: Retain the refusal record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: midterm-panel-refusal-${{ needs.preflight.outputs.head_sha }}
+          path: ${{ runner.temp }}/midterm/panel-refusal.json
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Retain private verdict evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

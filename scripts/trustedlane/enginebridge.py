@@ -182,6 +182,17 @@ def _resolved(path: str) -> str:
 _ENGINE_CATEGORY = re.compile(r"\Acategory=([a-z_][a-z0-9_]{0,63})(?=\s|\Z)")
 
 
+#: The attribute an engine `BlockingError` actually carries its text in.
+#: `verifier.errors.BlockingError.__init__` binds `code` and `message`, and
+#: NOTHING in the engine binds `reason` — so reading `reason` here returned
+#: None for every refusal from every one of the 154 sites, and the token this
+#: function exists to publish was never emitted once. The unit tests did not
+#: catch it because they raised a locally-defined stub that had a `reason`;
+#: they proved the stub. `test_engine_category_reads_the_real_exception`
+#: now binds the real class so the two cannot drift apart again.
+_ENGINE_MESSAGE_ATTRIBUTE = "message"
+
+
 def engine_category(exc) -> str | None:
     """The category identifier from an engine refusal, or None.
 
@@ -191,10 +202,10 @@ def engine_category(exc) -> str | None:
     path. A partial match is not attempted anywhere in the string, because a
     `category=` appearing mid-message could have been interpolated from
     content."""
-    reason = getattr(exc, "reason", None)
-    if not isinstance(reason, str):
+    message = getattr(exc, _ENGINE_MESSAGE_ATTRIBUTE, None)
+    if not isinstance(message, str):
         return None
-    match = _ENGINE_CATEGORY.match(reason.strip())
+    match = _ENGINE_CATEGORY.match(message.strip())
     return match.group(1) if match else None
 
 
