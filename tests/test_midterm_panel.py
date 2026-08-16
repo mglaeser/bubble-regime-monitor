@@ -1712,12 +1712,29 @@ class TestOrdinaryCIMustHaveTestedThisExactCombination:
         assert "triggering_run_missing_required_job" in caught.value.reason
 
     def test_an_incomplete_job_is_not_a_green_one(self):
+        """Still refused — under its OWN category now, and that split matters.
+
+        "The job has not finished" and "the job finished badly" were reported
+        as one thing: `triggering_run_job_not_successful jobs=['test
+        (3.12)=incomplete']`, which reads as a failure. They are now separate
+        because `observation.settle` may wait for the first and must never wait
+        for the second; a retry loop that could not tell them apart would be a
+        loop that eventually reported the answer it wanted."""
         jobs = self._jobs()
         jobs[0]["status"] = "in_progress"
         jobs[0]["conclusion"] = None
         with pytest.raises(PanelRefusal) as caught:
             self._assert(jobs=jobs)
-        assert "triggering_run_job_not_successful" in caught.value.reason
+        assert "triggering_run_job_incomplete" in caught.value.reason
+        assert "triggering_run_job_not_successful" not in caught.value.reason
+
+    def test_the_two_job_refusals_land_on_opposite_sides_of_the_retry_rule(self):
+        from midtermpanel import observation
+        assert "triggering_run_job_incomplete" in (
+            observation.RETRYABLE_CATEGORIES)
+        assert "triggering_run_job_not_successful" in observation.NEVER_RETRIED
+        assert not (observation.RETRYABLE_CATEGORIES
+                    & observation.NEVER_RETRIED)
 
     def test_the_workflow_publishes_what_ci_tested(self):
         document = _document()

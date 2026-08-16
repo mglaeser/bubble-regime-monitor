@@ -15,7 +15,7 @@ import json
 import os
 import sys
 
-from . import REPOSITORY_NUMERIC_ID
+from . import REPOSITORY_NUMERIC_ID, observation
 from .clibase import (
     emit_outputs,
     require_env,
@@ -64,8 +64,13 @@ def _policy_digest(root: str) -> str:
     return digest_of(load_policy(root=root))
 
 
-def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
-    """The whole decision, as data. No I/O beyond the injected client."""
+def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".",
+           sleep=None) -> dict:
+    """The whole decision, as data. No I/O beyond the injected client.
+
+    `sleep` is threaded through to `observation.settle` so the tests run
+    instantly and none of them can be made to pass by waiting. Production
+    passes nothing and gets `time.sleep`."""
     trigger = str(environ.get("TRIGGER_EVENT") or "")
     # ONE trigger. `workflow_dispatch` was removed from the privileged workflow
     # by external review: a dispatched run executes against a SELECTED REF, and
@@ -127,20 +132,42 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
     pull = resolve_pull_request(api.open_pull_requests(), run_head_sha=run_head)
     assert_head_is_unmoved(run_head_sha=run_head,
                            current_head_sha=pull["head_sha"])
+    # BOTH remaining reads go through `observation.settle`, and the reason is
+    # measured rather than defensive: this panel fires within a second or two of
+    # ordinary CI completing, GitHub is still writing the objects that describe
+    # it, and three of the first five panel attempts refused on
+    # `check_run_has_no_completed_at` — a record claiming to have completed with
+    # no completion time. Nothing had failed. The gate asked slightly too early.
+    #
+    # No rule is relaxed by this. `settle` decides only WHEN to look; the
+    # assertions below are the same functions, applied whole to a fresh read,
+    # and only a complete observation can pass. A real red — a job that finished
+    # badly — is refused on the first look and never waited on.
+    #
+    # This job holds NO credential, so the waiting costs nothing but wall clock.
+    #
     # F-01. Read what ordinary CI ACTUALLY tested, out of the triggering run,
     # rather than comparing two values that both track the branch and therefore
     # move together.
-    tested = assert_triggering_ci_tested_this_exact_combination(
-        api.workflow_run(int(env["RUN_ID"])),
-        api.workflow_run_jobs(int(env["RUN_ID"])),
-        event_run_id=int(env["RUN_ID"]), event_head_sha=run_head,
-        current_head_sha=pull["head_sha"], current_base_sha=pull["base_sha"],
-        main_head_sha=api.default_branch_head())
+    tested = observation.settle(
+        read=lambda: (api.workflow_run(int(env["RUN_ID"])),
+                      api.workflow_run_jobs(int(env["RUN_ID"]))),
+        assertion=lambda pair:
+            assert_triggering_ci_tested_this_exact_combination(
+                pair[0], pair[1],
+                event_run_id=int(env["RUN_ID"]), event_head_sha=run_head,
+                current_head_sha=pull["head_sha"],
+                current_base_sha=pull["base_sha"],
+                main_head_sha=api.default_branch_head()),
+        where="triggering-run-jobs", sleep=sleep)
     # Second, independent control: some run reported green on this exact
     # commit. A different question from "the run that triggered this panel was
     # green", and worth both.
-    assert_ordinary_checks_green(api.check_runs(pull["head_sha"]),
-                                 head_sha=pull["head_sha"])
+    checks = observation.settle(
+        read=lambda: api.check_runs(pull["head_sha"]),
+        assertion=lambda runs: assert_ordinary_checks_green(
+            runs, head_sha=pull["head_sha"]),
+        where="ordinary-checks", sleep=sleep)
 
     risk = classify_changed_files(api.changed_files(pull["pr_number"]))
     # §4. The engine's identity comes from the APPROVED RELEASE, not from the
@@ -180,6 +207,10 @@ def decide(environ: dict, *, api: ReadOnlyGitHub, root: str = ".") -> dict:
         "tested_head_sha": tested["tested_head_sha"],
         "review_class": review_class_for(pull["pr_number"]),
         "_trigger": run_record,
+        # What the waiting cost, reported rather than hidden. A lane that
+        # quietly retried would conceal the one number an operator would want:
+        # whether GitHub's write lag is getting worse.
+        "_observation": observation.summarise(tested, checks),
         "_risk": risk,
         "_state": current_state(root=root),
     }
@@ -198,6 +229,15 @@ def main() -> None:
     decision = decide(environ, api=api, root=environ.get("GITHUB_WORKSPACE", "."))
     public = {k: v for k, v in decision.items() if not k.startswith("_")}
     emit_outputs(public)
+    settled = decision.get("_observation") or {}
+    if settled.get("extra_observations"):
+        # Surfaced in the job log, not only in the returned record. A retry
+        # nobody can see is indistinguishable from a gate that never fired.
+        print(f"::notice::ordinary-CI observation settled after "
+              f"{settled['extra_observations']} extra read(s) over "
+              f"{settled['waited_seconds']}s "
+              f"({', '.join(settled['transient_categories'])}) — GitHub had "
+              "not finished writing the check objects when this panel fired")
     risk = decision["_risk"]
     if risk["high_risk"]:
         from .clibase import summary

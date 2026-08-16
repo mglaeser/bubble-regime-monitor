@@ -89,8 +89,37 @@ def _identifier(record: dict, *, name: str) -> int:
     return value
 
 
+#: The place a record that has not finished occupies in the ordering. Sorted
+#: LAST, because a run still going is the most recent activity on its context —
+#: and because sorting it anywhere else would let an older completed green win
+#: over a newer attempt, which is the fail-open this module exists to prevent.
+_STILL_RUNNING = 1
+_FINISHED = 0
+
+#: A constant standing in for the timestamp a non-terminal record does not have.
+#: Never compared against a real one: the rank above already separates them.
+_NO_TIMESTAMP = datetime.datetime.min.replace(tzinfo=datetime.UTC)
+
+
 def sort_key(record: dict, *, name: str) -> tuple:
-    return (_timestamp(record.get("completed_at"), name=name),
+    """Rank first, then time, then attempt, then id.
+
+    The rank exists because a run that has not finished has no `completed_at`
+    BY DESIGN — GitHub writes it when the run completes — and refusing to order
+    such a record reported `check_run_has_no_completed_at` for the ordinary,
+    correct state of a re-run that is still going. That message is about the
+    document; the honest one is `latest_check_not_terminal`, and
+    `assert_contexts_are_green` already says it.
+
+    Nothing is loosened. A non-terminal record sorts NEWEST, so it wins its
+    context and is then refused by name — the outcome is identical and only the
+    reported reason changes. A record claiming `status: "completed"` with no
+    timestamp still refuses here, because that one is not a state anything can
+    be in: it is a document mid-write, and `observation.settle` waits for it."""
+    if str(record.get("status") or "") != TERMINAL:
+        return (_STILL_RUNNING, _NO_TIMESTAMP, _attempt(record),
+                _identifier(record, name=name))
+    return (_FINISHED, _timestamp(record.get("completed_at"), name=name),
             _attempt(record), _identifier(record, name=name))
 
 

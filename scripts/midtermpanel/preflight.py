@@ -487,6 +487,21 @@ def assert_triggering_ci_jobs_are_green(jobs, *, run_id: int) -> dict:
     if missing:
         refuse(f"category=triggering_run_missing_required_job jobs={missing} "
                f"run_id={run_id} observed={sorted(observed)}")
+    # STILL RUNNING and FAILED are two different facts, and they were reported
+    # under one category. `triggering_run_job_not_successful jobs=['test
+    # (3.12)=incomplete']` reads as a failure and is a job that has not
+    # finished — and the distinction is now load-bearing, because
+    # `observation.settle` may wait for the first and must never wait for the
+    # second. A retry loop that could not tell them apart would be a loop that
+    # eventually reported the answer it wanted.
+    incomplete = sorted(name for name in REQUIRED_CI_JOBS
+                        if observed[name] == "incomplete")
+    if incomplete:
+        refuse(f"category=triggering_run_job_incomplete jobs={incomplete} "
+               f"run_id={run_id} — the job has not finished. This is the one "
+               "state that is worth re-reading: the panel fires within a second "
+               "of the run completing, and a sibling required job can still be "
+               "being written")
     bad = sorted(f"{name}={observed[name]}" for name in REQUIRED_CI_JOBS
                  if observed[name] != "success")
     if bad:

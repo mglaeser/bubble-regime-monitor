@@ -255,4 +255,5 @@ jobs:
         run: |
           python -m pytest tests/test_midterm_panel.py \
             tests/test_midterm_readable_review.py \
+            tests/test_midterm_check_settle.py \
             tests/test_human_merge_gate.py tests/test_checkruns.py -q
