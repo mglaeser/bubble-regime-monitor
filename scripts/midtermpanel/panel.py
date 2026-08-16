@@ -217,6 +217,16 @@ def execute(*, engine: dict, plan: dict, skeleton: dict, transport,
                "reached nobody must not do")
     return {"votes": votes,
             "coverage": coverage,
+            # WHICH unit, WHICH model, WHICH gate, and by how much. The engine
+            # computes all of it per unit and the lane used to drop it on the
+            # floor: a blocked run published `decision: blocked` and a stderr
+            # line naming the GATE, and nothing that said which of 99 units
+            # failed or which model objected.
+            #
+            # The write-separated D2 lane already carries the same two
+            # structures (`d2runtime.py`), so this is parity with a lane that
+            # decided the question, not a new disclosure.
+            **per_unit_evidence(result["batch_results"]),
             "synthesis": result["synthesis"],
             "generation_ledger": result["generation_ledger"],
             "execution_preflight": result["execution_preflight"],
@@ -231,6 +241,133 @@ def execute(*, engine: dict, plan: dict, skeleton: dict, transport,
             # envelope the engine was actually given. Absent for a dry run,
             # which normalizes nothing because nothing provider-shaped arrives.
             "normalization": normalization_evidence(transport)}
+
+
+#: Fields of a per-unit decision the lane retains. An ALLOWLIST, not a copy:
+#: `unit_decisions` is engine-authored today and every value in it is
+#: structural — a hash, a bool, a confidence enum, governed model ids,
+#: integers, and `distinct_reasoning`, which is itself only
+#: `{unit_sha256, gate_semantics, similarity_threshold_bp,
+#: distinct_reasoning_models, distinct_reasoning_count}`. Verified field by
+#: field before this was written. Naming them means a future engine that adds
+#: a prose field does not silently start publishing it.
+DECISION_FIELDS = ("unit_sha256", "approved", "approver_confidence",
+                   "refuted_by", "distinct_other_approvers",
+                   "distinct_reasoning", "block_code")
+
+#: `distinct_reasoning` is a NESTED object, and a top-level allowlist that
+#: copies one wholesale is not an allowlist. Its own test caught that: prose
+#: planted one level down arrived in the record untouched.
+#:
+#: These are `verdicts.assert_distinct_reasoning`'s actual return fields,
+#: read from the pinned engine. An engine that adds a prose field to it does
+#: not start publishing it by existing.
+DISTINCT_REASONING_FIELDS = ("unit_sha256", "gate_semantics",
+                             "similarity_threshold_bp",
+                             "distinct_reasoning_models",
+                             "distinct_reasoning_count")
+
+#: The most a single block reason may occupy. The reasons are engine-authored
+#: and structural, but a bound costs nothing and an unbounded string in an
+#: artifact is how a payload fragment would arrive if one ever could.
+MAX_BLOCK_REASON_CHARS = 400
+
+#: What replaces a reason that fails the checks below. The block still lands,
+#: with its unit, its code and its category — a reason that cannot be shown is
+#: not a reason to hide the block.
+BLOCK_REASON_WITHHELD = "withheld: reason failed the retention checks"
+
+
+def _retained_block_reason(reason, *, scan=None) -> str:
+    """An engine block reason, or a stand-in — never a silent omission.
+
+    ## Why this is not a straight copy
+
+    `d2runtime` deliberately does NOT carry this field, and says why: "it is
+    the one field that can quote the payload — a unit id prefix here, but the
+    same field elsewhere carries a path or an atom fragment".
+
+    That judgement is right about the field TYPE and over-broad for the four
+    messages actually reachable here, all of which were read before this was
+    written: `required_approver_absent`, `required_approver_veto`,
+    `insufficient_corroboration` and the anti-canned pair, carrying governed
+    model ids, a 16-character unit-hash prefix, a confidence enum and
+    integers. `similarity_bp=9100 threshold_bp=8500` is exactly the number an
+    operator acts on, and dropping it to honour a caution about a different
+    message would be cargo-culting the caution instead of the reasoning.
+
+    So the reason is carried, and defended rather than trusted: bounded,
+    control characters refused, and scanned by the engine's own scanner when
+    one is supplied. If a future engine ever does put a path in here, this
+    degrades to the code and the category instead of publishing it."""
+    if not isinstance(reason, str) or not reason:
+        return BLOCK_REASON_WITHHELD
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in reason):
+        return BLOCK_REASON_WITHHELD
+    if len(reason) > MAX_BLOCK_REASON_CHARS:
+        return BLOCK_REASON_WITHHELD
+    if scan is not None and scan(reason):
+        return BLOCK_REASON_WITHHELD
+    return reason
+
+
+def per_unit_evidence(batch_results, *, scan=None) -> dict:
+    """Per-unit decisions and blocks, flattened across batches.
+
+    Keyed by unit so a reader looks up the unit the merge gate named, rather
+    than searching eight batch objects for it. The batch id is carried on each
+    entry so the reverse lookup still works."""
+    decisions: dict = {}
+    blocks: list = []
+    for result in batch_results or []:
+        batch_id = result.get("batch_id")
+        for unit_hash, decision in (result.get("unit_decisions") or {}).items():
+            retained = {field: decision.get(field)
+                        for field in DECISION_FIELDS}
+            nested = retained.get("distinct_reasoning")
+            if isinstance(nested, dict):
+                retained["distinct_reasoning"] = {
+                    field: nested.get(field)
+                    for field in DISTINCT_REASONING_FIELDS if field in nested}
+            elif nested is not None:
+                # Not the shape this lane verified. Report the type rather
+                # than the value: a shape nobody checked is exactly what must
+                # not be copied through.
+                retained["distinct_reasoning"] = {
+                    "unexpected_shape": type(nested).__name__}
+            decisions[unit_hash] = {**retained, "batch_id": batch_id}
+        for block in result.get("unit_blocks") or []:
+            blocks.append({
+                "unit_sha256": block.get("unit_sha256"),
+                "code": block.get("code"),
+                # The engine's own `category=` token, extracted by the same
+                # anchored, identifier-only rule the lane already applies to
+                # engine refusals. Finer than `code`, and provably not a path.
+                "category": engine_category_of(block.get("reason")),
+                "reason": _retained_block_reason(block.get("reason"),
+                                                 scan=scan),
+                "batch_id": batch_id,
+            })
+    return {
+        "unit_decisions": dict(sorted(decisions.items())),
+        "unit_blocks": sorted(
+            blocks, key=lambda b: (str(b["unit_sha256"]), str(b["code"]))),
+    }
+
+
+def engine_category_of(reason) -> str | None:
+    """The `category=` identifier from an engine message, or None.
+
+    One rule, one implementation: delegates to
+    `trustedlane.enginebridge.engine_category`, which is anchored, admits
+    `[a-z_][a-z0-9_]*` only, bounds the length and requires termination. A
+    second copy of that regex here is how the two would come to disagree."""
+    from trustedlane.enginebridge import engine_category
+
+    class _Carrier:
+        message = reason
+
+    return engine_category(_Carrier())
 
 
 def normalization_evidence(transport) -> dict:

@@ -10,15 +10,19 @@ from __future__ import annotations
 import os
 import sys
 
+from trustedlane.errors import LaneRefusal
+
 from . import (
     COUNT_EVIDENCE_CLASS,
     PANEL_EVIDENCE_CLASS,
+    PANEL_REFUSAL_EVIDENCE_CLASS,
     REPOSITORY_NUMERIC_ID,
     REVIEW_STATUS,
 )
 from .clibase import require_env, run, self_test_report, self_test_requested
 from .errors import PanelRefusal, refuse
 from .evidence import (
+    build,
     panel_evidence,
     strict_load,
     strict_load_plan,
@@ -28,6 +32,7 @@ from .panel import (
     aggregate,
     anti_copy_tripwire,
     assert_synthesis_cannot_clear_a_refutation,
+    normalization_evidence,
     verify_handoff,
 )
 from .status import pending, publish, status_request
@@ -63,6 +68,87 @@ def input_paths(temp: str) -> dict:
     base = os.path.join(temp, "midterm", INPUT_DIRNAME)
     return {"evidence": os.path.join(base, "count-evidence.json"),
             "plan": os.path.join(base, "executable-plan.json")}
+
+
+def refusal_evidence_path(temp: str) -> str:
+    """Where a refused run leaves what it knows.
+
+    Its OWN file, never `panel-evidence.json`. That file means "a verdict was
+    reached", it is loaded by name with an expected evidence class, and a
+    refusal record living there would be a document that has to be inspected
+    before it can be disbelieved."""
+    return os.path.join(temp, "midterm", "panel-refusal.json")
+
+
+def retain_refusal_evidence(environ: dict, *, refusal, plan: dict, head: str,
+                            base: str, engine_digest: str, policy_digest: str,
+                            run_id: int, run_attempt: int,
+                            count_evidence_sha256, transport=None) -> dict:
+    """Write what a refused run knows, then let the refusal continue.
+
+    ## What this is for
+
+    A refusal inside `execute_batch` unwinds past every write in `perform`.
+    Both panel runs on this pull request ended that way: three real generation
+    calls spent, `panel-evidence.json` never written, its upload step red for
+    a missing file, and one stderr line whose engine detail is withheld by
+    design. Diagnosing it took rebuilding the trusted runtime in a scratch
+    directory and re-running the count against the real diff.
+
+    Everything needed was already computed. The adapter builds a structural
+    record for every attempt — http status, raw response bytes and digest,
+    requested and returned model, attempt number — and it is read only from
+    `execute`'s return value, which a refusal never produces.
+
+    ## What this is NOT
+
+    Not a verdict, and not a way to soften one. It carries its own evidence
+    class, lives in its own file, and the caller re-raises immediately after,
+    so the process still exits nonzero. Nothing downstream may read a decision
+    out of it, because there was none to read.
+
+    Never raises: a diagnostic that can replace the exit reason with its own
+    failure is a diagnostic that hides the thing it was written to explain.
+    That is not hypothetical — it happened once already on this branch, when
+    a rendering fault became the process's refusal category."""
+    from .clibase import sanitized_trusted_reason
+
+    reason, printable = sanitized_trusted_reason(
+        str(getattr(refusal, "reason", "") or ""))
+    body = {
+        "outcome": "REFUSED_BEFORE_A_VERDICT",
+        "refusal_code": str(getattr(refusal, "code", "") or "UNKNOWN"),
+        "refusal_reason": reason if printable else "",
+        "refusal_reason_printable": bool(printable),
+        "refusal_class": type(refusal).__name__,
+        "plan_sha256": plan.get("plan_sha256"),
+        "batches_planned": len(plan.get("batches") or []),
+        "units_planned": len(plan.get("final_units") or []),
+        "count_evidence_sha256": count_evidence_sha256,
+        "honest_scope": (
+            "this run did not reach a verdict. Nothing here is a decision "
+            "about the candidate, and no reader may treat an absent "
+            "refutation as an approval"),
+    }
+    try:
+        body["normalization"] = normalization_evidence(transport)
+    except Exception as exc:                                  # noqa: BLE001
+        body["normalization"] = {
+            "normalized": False,
+            "honest_scope": "the transport's own record could not be read "
+                            f"({type(exc).__name__}); absence here is not "
+                            "evidence that nothing was sent"}
+    try:
+        record = build(evidence_class=PANEL_REFUSAL_EVIDENCE_CLASS,
+                       repository_numeric_id=REPOSITORY_NUMERIC_ID,
+                       candidate_head_sha=head, candidate_base_sha=base,
+                       engine_digest=engine_digest,
+                       policy_digest=policy_digest, run_id=run_id,
+                       run_attempt=run_attempt, body=body)
+        write_atomic(record, refusal_evidence_path(_runner_temp(environ)))
+        return record
+    except Exception:                                         # noqa: BLE001
+        return {}
 
 
 def review_paths(temp: str) -> dict:
@@ -167,7 +253,28 @@ def perform(environ: dict, *, execute_fn, opener,
                 target_url=target, run_id=run_id, run_attempt=attempt),
         opener=opener, token=env["GITHUB_TOKEN"])]
 
-    executed = execute_fn(plan=plan)
+    try:
+        executed = execute_fn(plan=plan)
+    except (PanelRefusal, LaneRefusal) as refusal:
+        # A refusal inside `execute_batch` used to unwind past EVERY write in
+        # this function. `panel-evidence.json` is written below; the artifact
+        # step that uploads it is `if-no-files-found: error`; so a run that
+        # spent three real generation calls produced a red upload step and not
+        # one byte about why. Both panel runs on this pull request ended that
+        # way, and diagnosing them took rebuilding the trusted runtime in a
+        # scratch directory.
+        #
+        # This does NOT convert a refusal into a verdict. It writes what the
+        # run knows, then re-raises, so the process still exits nonzero and
+        # nothing downstream reads a decision that was never reached.
+        retain_refusal_evidence(
+            environ, refusal=refusal, plan=plan, head=head, base=base,
+            engine_digest=env["MIDTERM_ENGINE_DIGEST"],
+            policy_digest=env["MIDTERM_POLICY_DIGEST"],
+            run_id=run_id, run_attempt=attempt,
+            count_evidence_sha256=count_evidence_sha256,
+            transport=getattr(execute_fn, "transport", None))
+        raise
     verdict = aggregate(votes=executed["votes"],
                         synthesis=executed["synthesis"],
                         challenge=plan["execution_challenge"])
@@ -196,6 +303,16 @@ def perform(environ: dict, *, execute_fn, opener,
               # rather than asserted.
               "normalization": executed["normalization"],
               "anti_copy": tripwire,
+              # WHY, not just WHAT. `decision: blocked` beside a `votes` COUNT
+              # told a reader which way the panel went and nothing about which
+              # unit, which model, or by how much — the stderr line named the
+              # gate and then the process exited. These four fields are the
+              # answer, and every value in them is engine- or lane-authored
+              # and structural: hashes, enums, governed model ids, integers.
+              "engine_gate": verdict["engine_gate"],
+              "strict_gate": verdict["strict_gate"],
+              "unit_decisions": executed.get("unit_decisions", {}),
+              "unit_blocks": executed.get("unit_blocks", []),
               "plan_sha256": plan["plan_sha256"],
               # The two exact inputs this verdict was produced from, so the
               # final record identifies them rather than describing them.
@@ -406,6 +523,15 @@ def panel_execution(environ: dict, *, mode: str, transport_factory) -> dict:
         return execute(engine=engine, plan=plan, skeleton=skeleton,
                        transport=transport, repository_path=repository_path,
                        authorizations=authorizations)
+
+    # Reachable from the caller so a REFUSAL can still retain what the
+    # transport observed. The adapter builds a structural record per attempt —
+    # http status, raw response bytes and digest, requested and returned model,
+    # attempt number — and on the failure path that record used to die with
+    # the process, because it is only read from `execute`'s return value and
+    # `execute` raises. Attached rather than returned separately so there is
+    # one object to keep in step.
+    execute_fn.transport = transport
 
     return {"execute_fn": execute_fn, "engine_identity": opened,
             "identity_binding": identity_binding(opened),

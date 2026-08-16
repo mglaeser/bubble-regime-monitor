@@ -952,6 +952,20 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
+      # Written ONLY when the panel refused before reaching a verdict, so
+      # `ignore` rather than `error`: on the ordinary paths this file does not
+      # exist and must not turn a completed run red. The step below keeps
+      # `error`, because a run that DID reach a verdict and produced no
+      # evidence is a real fault.
+      - name: Retain what a refused run knew
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: midterm-panel-refusal-${{ needs.preflight.outputs.head_sha }}
+          path: ${{ runner.temp }}/midterm/panel-refusal.json
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Retain private verdict evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

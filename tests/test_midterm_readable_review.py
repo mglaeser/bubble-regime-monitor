@@ -43,6 +43,7 @@ from midtermpanel import (  # noqa: E402
     reviewrender,
 )
 from midtermpanel.errors import PanelRefusal  # noqa: E402
+from trustedlane.errors import LaneRefusal  # noqa: E402
 from verifier import preflight as verifier_preflight  # noqa: E402
 
 HEAD = "a" * 40
@@ -1324,7 +1325,8 @@ class TestZeroProviderCalls:
 
 
 def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True,
-                 terminal_status_fails: bool = False) -> dict:
+                 terminal_status_fails: bool = False,
+                 execute_raises=None, transport=None) -> dict:
     """Drive the real `panelcli.perform` with injected seams and no network.
 
     Everything the function reads off disk is built here through the SAME
@@ -1390,6 +1392,8 @@ def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True,
     order, captured = [], {}
 
     def execute_fn(*, plan):
+        if execute_raises is not None:
+            raise execute_raises
         return {"votes": votes, "coverage": {}, "generation_calls": 0,
                 "normalization": {"normalized": False},
                 "output_privacy": {"scanned_field_count": 6},
@@ -1422,18 +1426,25 @@ def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True,
                 "candidate_head_sha": candidate_head_sha,
                 "refusal": None if publish_ok else "connection reset"}
 
+    execute_fn.transport = transport
+
     raised = None
     try:
         panelcli.perform(environ, execute_fn=execute_fn, opener=status_opener,
                          scan=scan, publish_review_fn=publish_review_fn)
-    except PanelRefusal as exc:
+    except (PanelRefusal, LaneRefusal) as exc:
+        # BOTH, because `perform` re-raises whichever refusal it retained
+        # evidence for. Catching only `PanelRefusal` made a `LaneRefusal`
+        # escape the harness and read as an implementation fault.
         raised = exc
     order.append("exit")
     paths = panelcli.review_paths(str(runner))
     return {"raised": raised, "order": order, "status_states": states,
             "published_body": captured.get("body"),
             "markdown": Path(paths["markdown"]), "json": Path(paths["json"]),
-            "evidence": runner / "midterm" / "panel-evidence.json"}
+            "evidence": runner / "midterm" / "panel-evidence.json",
+            "refusal_evidence": Path(
+                panelcli.refusal_evidence_path(str(runner)))}
 
 
 # ------------------------------------------- round three: the last sweep ----

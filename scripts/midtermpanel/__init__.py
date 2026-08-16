@@ -105,7 +105,14 @@ PANEL_STATUSES = (COUNT_STATUS, REVIEW_STATUS)
 #: Evidence classes this package may emit.
 COUNT_EVIDENCE_CLASS = "MIDTERM_SINGLE_REPO_COUNT_EVIDENCE"
 PANEL_EVIDENCE_CLASS = "MIDTERM_SINGLE_REPO_PANEL_EVIDENCE"
-MIDTERM_EVIDENCE_CLASSES = (COUNT_EVIDENCE_CLASS, PANEL_EVIDENCE_CLASS)
+#: What a run that REFUSED emits. A separate class on purpose: a refusal
+#: record is not a verdict, and every loader that expects
+#: `PANEL_EVIDENCE_CLASS` must refuse this rather than read a decision out of
+#: a run that never reached one. It is written to its own file for the same
+#: reason.
+PANEL_REFUSAL_EVIDENCE_CLASS = "MIDTERM_SINGLE_REPO_PANEL_REFUSAL"
+MIDTERM_EVIDENCE_CLASSES = (COUNT_EVIDENCE_CLASS, PANEL_EVIDENCE_CLASS,
+                            PANEL_REFUSAL_EVIDENCE_CLASS)
 
 #: Evidence classes this package may NEVER emit, whatever it observes.
 #:
