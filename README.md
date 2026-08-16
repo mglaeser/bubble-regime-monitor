@@ -120,6 +120,9 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /api/v1/replay/evidence` | RM-1: per-snapshot methodology stamp + append-only outcome summary |
 | `GET /api/v1/replay/sufficiency` | RM-2: S5 activation-gate sufficiency tracker (≥60 trading days, per tier) |
 | `GET /api/v1/dashboard/feed` | Read-only feed for the companion dashboard (v3.4.0): 13 monthly series + 35 scalar metrics incl. CNN Fear & Greed (v3.7.0, non-scoring); per-item degradation; contract in `DASHBOARD_FEED_SPEC.md` |
+| `GET /api/v1/alerts/*` | Alert-system read surface: `overview`, `mechanisms[/{fingerprint}]`, `rules/{id}/instances`, `episodes[/{id}]`, `events`, `latest`, `deliveries[/{id}]`, `renders/{id}`, `ruleset`, `silences`, `health`. Separate `ALERTS_READ_API_KEY` scope — it does **not** fall back to the admin key. Nothing sends anything yet (`docs/ALERT_SYSTEM.md`) |
+| `POST`/`DELETE /api/v1/alerts/silences[/{id}]` | Silence a rule, instance or bucket (`ALERTS_WRITE_API_KEY`; `Idempotency-Key` honoured) |
+| `POST /api/v1/admin/alerts/evaluate` · `promote` · `recover` | Evaluate one captured sidecar (shadow by default); promote the validated ruleset; sweep stale evaluation leases (X-API-Key) |
 | `GET /api/v1/status` | Live service + science-audit status (JSON twin of the `/` status page) |
 | `GET /healthz` · `GET /readyz` | Liveness; per-source health matrix |
 | `POST /api/v1/admin/refresh` | Start a recompute in the background — returns 202 immediately; single-flight (X-API-Key) |

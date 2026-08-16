@@ -1,0 +1,293 @@
+"""Crash recovery, artifact promotion, and episode continuity across a promotion.
+
+The properties here are about what survives: a crash mid-evaluation, a ruleset
+promotion, and a candidate whose originating rules have been archived.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import select
+
+from app.alerts.enums import EvaluationRunStatus
+from app.alerts.models import AlertEvaluation, AlertRulesetRegistry
+from app.db import session_scope
+from tests.test_alert_evaluation import _artifacts, _store_input, make_input
+
+NOW = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+
+
+def _seed_evaluation(*, status: str, lease_offset_s: int, plan_applied: bool) -> str:
+    from app.alerts.canonical import new_ulid
+    from app.alerts.repository import utc_ms
+
+    artifacts = _artifacts()
+    inp = make_input(identity="i1", effective="trim")
+    _store_input(inp, NOW)
+    with session_scope() as session:
+        from app.alerts.artifacts import register
+
+        rules_sha = register(session, artifacts, now=NOW)
+        evaluation_id = new_ulid(utc_ms(NOW))
+        session.add(AlertEvaluation(
+            evaluation_id=evaluation_id,
+            idempotency_key=f"key-{evaluation_id}",
+            input_identity=inp.input_identity,
+            mode="shadow", live_profile="default",
+            current_rules_sha256=rules_sha,
+            evaluation_set_sha256="x" * 64,
+            evaluated_ruleset_hashes=[rules_sha],
+            evaluator_version="1",
+            status=status,
+            attempt_count=1,
+            lease_until=NOW + timedelta(seconds=lease_offset_s),
+            started_at=NOW,
+            plan_applied=plan_applied,
+        ))
+    return evaluation_id
+
+
+def test_a_live_lease_is_left_alone(isolated_db):
+    from app.alerts.recovery import recover_evaluations
+
+    evaluation_id = _seed_evaluation(status=EvaluationRunStatus.STARTED,
+                                     lease_offset_s=600, plan_applied=False)
+    with session_scope() as session:
+        report = recover_evaluations(session, now=NOW)
+    assert report.in_progress == [evaluation_id]
+    assert report.abandoned == []
+
+
+def test_stale_started_evaluation_recovers(isolated_db):
+    from app.alerts.recovery import recover_evaluations
+
+    evaluation_id = _seed_evaluation(status=EvaluationRunStatus.STARTED,
+                                     lease_offset_s=-600, plan_applied=False)
+    with session_scope() as session:
+        report = recover_evaluations(session, now=NOW)
+    assert report.abandoned == [evaluation_id]
+    with session_scope() as session:
+        row = session.get(AlertEvaluation, evaluation_id)
+        assert row.status == EvaluationRunStatus.ABANDONED
+        assert row.error_code == "LEASE_EXPIRED"
+
+
+def test_an_applied_plan_with_an_expired_lease_is_never_auto_repaired(isolated_db):
+    """Re-running would double-apply; marking it committed would assert a lie."""
+    from app.alerts.recovery import recover_evaluations
+
+    evaluation_id = _seed_evaluation(status=EvaluationRunStatus.STARTED,
+                                     lease_offset_s=-600, plan_applied=True)
+    with session_scope() as session:
+        report = recover_evaluations(session, now=NOW)
+    assert report.inconsistent == [evaluation_id]
+    assert report.needs_operator is True
+    with session_scope() as session:
+        # Untouched.
+        assert session.get(AlertEvaluation, evaluation_id).status == \
+            EvaluationRunStatus.STARTED
+
+
+def test_recovery_is_idempotent(isolated_db):
+    from app.alerts.recovery import recover_evaluations
+
+    _seed_evaluation(status=EvaluationRunStatus.STARTED, lease_offset_s=-600,
+                     plan_applied=False)
+    with session_scope() as session:
+        first = recover_evaluations(session, now=NOW)
+    with session_scope() as session:
+        second = recover_evaluations(session, now=NOW)
+    assert first.abandoned and second.abandoned == []
+
+
+def test_reconcile_reports_snapshots_without_a_sidecar(isolated_db, monkeypatch):
+    from app.alerts.recovery import reconcile_sidecars
+    from app.services.compute import compute_snapshot, persist_snapshot
+    from tests.conftest import make_golden_raw_inputs
+
+    raw = make_golden_raw_inputs()
+    data = compute_snapshot(raw, mc_samples=500, mc_seed=20260711, gsadf_contested=True)
+    snap_id = persist_snapshot(data, raw)      # capture is OFF -> no sidecar
+
+    with session_scope() as session:
+        gaps = reconcile_sidecars(session)
+    assert gaps == [snap_id]
+
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    from app.services.alert_integration import capture_alert_input
+
+    capture_alert_input(snap_id)
+    with session_scope() as session:
+        assert reconcile_sidecars(session) == []
+    get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# promotion and continuity
+# ---------------------------------------------------------------------------
+
+
+def test_promotion_supersedes_the_previous_ruleset(isolated_db, tmp_path):
+    from app.alerts.artifacts import register
+
+    first = _artifacts(stage=1, tmp_path=tmp_path / "a")
+    second = _artifacts(stage=3, tmp_path=tmp_path / "b")
+    assert first.ruleset.rules_sha256 != second.ruleset.rules_sha256
+
+    with session_scope() as session:
+        register(session, first, promote=True, now=NOW)
+    with session_scope() as session:
+        register(session, second, promote=True, now=NOW + timedelta(hours=1))
+
+    with session_scope() as session:
+        rows = {r.rules_sha256: r.status for r in session.execute(
+            select(AlertRulesetRegistry)).scalars().all()}
+    assert rows[first.ruleset.rules_sha256] == "SUPERSEDED"
+    assert rows[second.ruleset.rules_sha256] == "PROMOTED"
+
+
+def test_origin_phrase_bytes_are_recoverable_from_the_registry(isolated_db, tmp_path):
+    """Queued work must not depend on the file on disk still being there."""
+    from app.alerts.artifacts import load_by_hash, register
+
+    artifacts = _artifacts(stage=3, tmp_path=tmp_path)
+    with session_scope() as session:
+        rules_sha = register(session, artifacts, promote=True, now=NOW)
+
+    with session_scope() as session:
+        rebuilt = load_by_hash(session, rules_sha)
+    assert rebuilt is not None
+    assert rebuilt.ruleset.rules_sha256 == rules_sha
+    assert rebuilt.phrase_set.sha256 == artifacts.phrase_set.sha256
+
+
+def test_old_ruleset_episode_continues_after_promotion(isolated_db, tmp_path):
+    """An episode opened under an archived ruleset stays evaluable under IT."""
+    from app.alerts.artifacts import register
+    from app.alerts.engine import run_evaluation
+    from app.alerts.models import AlertEpisode
+    from app.alerts.repository import origin_rulesets_with_open_episodes
+
+    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
+    before = make_input(identity="i1", effective="trim",
+                        computed_at="2026-08-15T06:00:00+00:00")
+    after = make_input(identity="i2", effective="de-risk",
+                       computed_at="2026-08-15T10:00:00+00:00")
+    _store_input(before, datetime(2026, 8, 15, 6, 0, tzinfo=UTC))
+    _store_input(after, NOW)
+
+    with session_scope() as session:
+        register(session, old, promote=True, now=NOW)
+    run_evaluation(session_scope, alert_input=before, current=old.ruleset,
+                   mode="shadow", now=datetime(2026, 8, 15, 6, 1, tzinfo=UTC))
+    run_evaluation(session_scope, alert_input=after, current=old.ruleset,
+                   mode="shadow", now=NOW)
+
+    with session_scope() as session:
+        open_rows = session.execute(
+            select(AlertEpisode).where(AlertEpisode.is_open.is_(True))).scalars().all()
+        assert open_rows, "expected at least one open episode under the old ruleset"
+
+    # Promote a DIFFERENT ruleset; the open episode's origin must still be
+    # reported as needing continuation.
+    new = _artifacts(stage=4, tmp_path=tmp_path / "new")
+    assert new.ruleset.rules_sha256 != old.ruleset.rules_sha256
+    with session_scope() as session:
+        register(session, new, promote=True, now=NOW + timedelta(hours=1))
+        origins = origin_rulesets_with_open_episodes(
+            session, mode="shadow", live_profile="default",
+            current_rules_sha256=new.ruleset.rules_sha256)
+    assert old.ruleset.rules_sha256 in origins
+
+
+def test_cooldown_memory_survives_a_promotion(isolated_db, tmp_path):
+    """Notification memory is keyed WITHOUT a rules hash, on purpose."""
+    from app.alerts.artifacts import register
+    from app.alerts.engine import run_evaluation
+    from app.alerts.models import AlertInstanceNotificationState
+
+    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
+    inp = make_input(identity="i1", effective="trim")
+    _store_input(inp, NOW)
+    with session_scope() as session:
+        register(session, old, promote=True, now=NOW)
+    run_evaluation(session_scope, alert_input=inp, current=old.ruleset,
+                   mode="shadow", now=NOW)
+
+    with session_scope() as session:
+        rows = session.execute(select(AlertInstanceNotificationState)).scalars().all()
+        assert rows
+        # The primary key carries no ruleset hash, so a promotion cannot reset it.
+        pk_columns = {c.name for c in
+                      AlertInstanceNotificationState.__table__.primary_key.columns}
+    assert pk_columns == {"mode", "live_profile", "instance_fingerprint"}
+
+
+def test_lkg_fallback_never_escalates_the_mode(isolated_db, tmp_path, monkeypatch):
+    """An invalid candidate falls back — it does NOT enable anything."""
+    from app.alerts.artifacts import load_active
+
+    good = _artifacts(stage=1, tmp_path=tmp_path / "good")
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("meta: {this: is not a ruleset}\n", encoding="utf-8")
+    lkg = tmp_path / "lkg.yaml"
+    lkg.write_text(good.ruleset.canonical_yaml, encoding="utf-8")
+
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))
+    monkeypatch.setenv("ALERTS_LKG_PATH", str(lkg))
+    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.2.json")
+    monkeypatch.setenv("ALERTS_MODE", "disabled")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    with session_scope() as session:
+        loaded = load_active(session)
+    assert loaded.source == "last_known_good"
+    assert loaded.fallback_reason
+    assert get_settings().alerts_mode == "disabled"
+    get_settings.cache_clear()
+
+
+def test_alerting_unavailable_when_nothing_is_valid(isolated_db, tmp_path, monkeypatch):
+    from app.alerts.artifacts import load_active
+    from app.alerts.errors import AlertingUnavailable
+
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("meta: {this: is not a ruleset}\n", encoding="utf-8")
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))
+    monkeypatch.setenv("ALERTS_LKG_PATH", str(broken))
+    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.2.json")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    with pytest.raises(AlertingUnavailable), session_scope() as session:
+        load_active(session)
+    get_settings.cache_clear()
+
+
+def test_recovery_job_records_a_heartbeat(isolated_db, monkeypatch):
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.jobs.alert_recovery import run_once
+
+    result = run_once()
+    assert result["status"] in {"ok", "degraded", "critical"}
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "recovery")
+    assert row is not None and row.last_heartbeat_at is not None
+    get_settings.cache_clear()
+
+
+def test_recovery_job_skips_when_everything_is_off(isolated_db):
+    from app.jobs.alert_recovery import run_once
+
+    assert run_once()["status"] == "skipped"

@@ -36,6 +36,15 @@ def _sms_job() -> None:
         log.error("scheduled_digest_failed", error=str(exc))
 
 
+def _alert_recovery_job() -> None:
+    # Stale evaluation leases and missing input sidecars. Runs whether or not
+    # alerting is enabled: both failures are about EVIDENCE, and a sidecar gap
+    # during a capture-only stage is exactly what would ruin a later replay.
+    from app.jobs.alert_recovery import job
+
+    job()   # never raises
+
+
 def _breadth_job() -> None:
     # Incremental breadth-cache refresh (Twelve Data, ~8/min, credit-governed).
     # Runs off the recompute path so the twice-daily recompute stays fast and
@@ -71,6 +80,12 @@ def start() -> BackgroundScheduler:
         _scheduler.add_job(_breadth_job, CronTrigger(hour="1,13", minute=0, timezone="UTC"),
                            id="breadth_refresh", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
+        # Every 30 minutes, offset off the recompute and breadth hours so the
+        # three jobs never contend for the single SQLite writer.
+        _scheduler.add_job(_alert_recovery_job,
+                           CronTrigger(minute="15,45", timezone="UTC"),
+                           id="alert_recovery", replace_existing=True,
+                           coalesce=True, misfire_grace_time=1800, max_instances=1)
         sms_schedule = "disabled"
         # DAILY_SMS_ENABLED is the migration-friendly alias; until the explicit
         # Stage 4 cutover the legacy digest keeps its own switch, and turning
@@ -85,7 +100,8 @@ def start() -> BackgroundScheduler:
             sms_schedule = f"{settings.sms_daily_hour:02d}:{settings.sms_daily_minute:02d} UTC"
         _scheduler.start()
         log.info("scheduler_started", recompute="every 4h (02/06/10/14/18/22 UTC)",
-                 breadth_refresh="01:00/13:00 UTC", daily_sms=sms_schedule)
+                 breadth_refresh="01:00/13:00 UTC", daily_sms=sms_schedule,
+                 alert_recovery="every 30min (:15/:45)")
     return _scheduler
 
 

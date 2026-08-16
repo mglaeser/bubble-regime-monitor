@@ -24,11 +24,14 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.alerts.artifacts import archived_rulesets, load_active, register
 from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION
+from app.alerts.engine import run_evaluation
 from app.alerts.enums import InputOrigin
 from app.alerts.errors import sanitize
 from app.alerts.input_builder import build_alert_input, serialize
 from app.alerts.models import AlertInputSnapshot
+from app.alerts.repository import load_input, origin_rulesets_with_open_episodes
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_conf import get_logger
@@ -128,7 +131,53 @@ def on_snapshot_committed(snapshot_id: int) -> None:
 
     if settings.alerts_mode == "disabled":
         return
-    # P0b (evaluation claim) is wired in at Stage 1. Until then an operator can
-    # run `bubblegauge alerts evaluate` by hand against a captured sidecar.
-    log.info("alert_evaluation_skipped", snapshot_id=snapshot_id,
-             input_identity=input_identity, reason="evaluation not yet wired")
+    if input_identity is None:
+        log.warning("alert_evaluation_skipped", snapshot_id=snapshot_id,
+                    reason="no input sidecar was captured")
+        return
+    try:
+        evaluate_input(input_identity)
+    except Exception as exc:
+        log.error("alert_evaluation_failed", snapshot_id=snapshot_id,
+                  input_identity=input_identity,
+                  error_class=type(exc).__name__, error=sanitize(exc))
+
+
+def evaluate_input(input_identity: str, *, mode: str | None = None,
+                   now: datetime | None = None) -> Any:
+    """P0b + P1 + P2 for one captured sidecar.
+
+    Separated from the hook so an operator can replay a single input by hand
+    (`bubblegauge alerts evaluate --input-identity ...`) without a recompute.
+    """
+    settings = get_settings()
+    effective_mode = mode or settings.alerts_mode
+    if effective_mode == "disabled":
+        return None
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts)
+        alert_input = load_input(session, input_identity)
+        if alert_input is None:
+            log.warning("alert_input_missing", input_identity=input_identity)
+            return None
+        origins = origin_rulesets_with_open_episodes(
+            session, mode=effective_mode, live_profile=settings.alerts_live_profile,
+            current_rules_sha256=artifacts.ruleset.rules_sha256)
+        # Archived rulesets that still own open episodes are rebuilt from their
+        # stored bytes and evaluated alongside the current one, so a promotion
+        # never orphans an episode.
+        archived = archived_rulesets(session, origins)
+
+    return run_evaluation(
+        session_scope,
+        alert_input=alert_input,
+        current=artifacts.ruleset,
+        archived=archived,
+        mode=effective_mode,
+        live_profile=settings.alerts_live_profile,
+        now=now,
+        lease_seconds=settings.alerts_eval_lease_s,
+        budget_ms=settings.alerts_eval_budget_ms,
+    )

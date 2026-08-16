@@ -45,6 +45,41 @@ def require_admin_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
 
 
+def require_alerts_read(request: Request, x_api_key: str | None = Header(default=None)) -> None:
+    """Read scope for the alert API.
+
+    A SEPARATE key from admin on purpose: a browser dashboard needs to read
+    alert state, and it must never be handed a credential that can silence a
+    rule or send an SMS. Falling back to the admin key here — the way
+    `require_read_access` does for the scoring API — would defeat that, so this
+    guard does not do it.
+    """
+    settings = get_settings()
+    if settings.alerts_public_read:
+        return
+    configured = settings.alerts_read_api_key
+    if not configured or configured == PLACEHOLDER_ADMIN_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="alert reads require ALERTS_READ_API_KEY (or ALERTS_PUBLIC_READ=true)",
+        )
+    if not _key_matches(x_api_key, configured):
+        raise HTTPException(status_code=401, detail="alert reads require X-API-Key")
+
+
+def require_alerts_write(x_api_key: str | None = Header(default=None)) -> None:
+    """Write scope: silences and operator actions. Never the read key."""
+    settings = get_settings()
+    configured = settings.alerts_write_api_key
+    if not configured or configured == PLACEHOLDER_ADMIN_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="alert writes require ALERTS_WRITE_API_KEY",
+        )
+    if not _key_matches(x_api_key, configured):
+        raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
+
+
 def require_read_access(request: Request, x_api_key: str | None = Header(default=None)) -> None:
     """Reads are public when READ_ENDPOINTS_PUBLIC=true; otherwise keyed.
 
