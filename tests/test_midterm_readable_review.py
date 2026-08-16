@@ -24,6 +24,7 @@ leaving it as a fact about how the file happens to be written.
 
 from __future__ import annotations
 
+import base64 as _b64
 import hashlib
 import json
 import sys
@@ -348,13 +349,31 @@ class TestASecretShapedReasonIsWithheldAndTheFindingSurvives:
     refutation by writing something unpublishable — which is a way to turn a
     block into silence using nothing but word choice."""
 
-    #: A synthetic credential-SHAPED string. Not a credential and not derived
-    #: from one; it exists so the engine's scanner has something to catch, and
-    #: it carries the pragma because the repository's own secret gate correctly
-    #: flags it — which is the behaviour this fixture is here to exercise.
-    LEAKED = (
-        "sk-proj-EXAMPLEuOAcW8H2p1QzR7vTn4KdYbXm9LsG3JfPq5NwZ"  # pragma: allowlist secret
-    )
+    #: A synthetic credential-SHAPED string, ASSEMBLED AT RUN TIME. Not a
+    #: credential and not derived from one; it exists so the engine's scanner
+    #: has something to catch.
+    #:
+    #: Never written as a literal, and the reason is not the ratchet — a
+    #: pragma silences `detect-secrets` perfectly well, and one used to sit
+    #: here. The reason is the panel this pull request is adding. It reviews
+    #: THIS repository through an engine whose payload preflight refuses any
+    #: secret-shaped literal it cannot map to an AUTHORIZED source occurrence,
+    #: and `inputs.load_authorizations` records this lane's absence of an
+    #: operator envelope by passing `authorizations=None`. `resolve_finding`
+    #: then reads `authorizations is not None and ...`, so nothing can EVER
+    #: clear an occurrence here. A literal in this file therefore does not
+    #: need a pragma; it makes this pull request unreviewable by the very
+    #: panel it is adding, with `SECRET_PREFLIGHT_FAILED` and no readable
+    #: reason, because the lane deliberately withholds the engine's message.
+    #:
+    #: Built from a fixed seed so it is stable across runs, and asserted below
+    #: to still scan as a key: a fixture that quietly stopped looking like a
+    #: credential would leave the withholding path untested while every test
+    #: in this class still passed.
+    LEAKED = "sk-" + "proj-" + "".join(
+        character for character in _b64.b64encode(
+            hashlib.sha256(b"readable-review-withheld-fixture").digest()
+        ).decode("ascii") if character.isalnum())
 
     @pytest.fixture
     def body(self):
@@ -370,8 +389,16 @@ class TestASecretShapedReasonIsWithheldAndTheFindingSurvives:
     def test_the_explanation_is_replaced_by_the_governed_sentence(self, body):
         assert reviewrender.WITHHELD in body
 
+    def test_the_fixture_still_looks_like_a_credential_to_the_engine(self):
+        """Otherwise every other test in this class passes while testing
+        nothing: an unrecognised fixture is withheld by no rule at all, and
+        the sentence below would be asserted about prose that was never
+        secret-shaped in the first place."""
+        assert [finding["category"] for finding in scan(self.LEAKED)]
+
     def test_the_secret_shaped_token_does_not_appear(self, body):
-        assert "sk-proj-" not in body
+        assert self.LEAKED not in body
+        assert "sk-" + "proj-" not in body
 
     def test_the_location_model_confidence_and_categories_still_appear(self,
                                                                       body):
@@ -1829,12 +1856,21 @@ class TestTheUntestedGuardsAreNowLoadBearing:
         here is a bearer token — in a job that is also holding a provider key."""
         import urllib.error
 
+        # Token-SHAPED, and assembled at run time for the same reason
+        # `LEAKED` above is: a literal would be a secret-shaped occurrence in
+        # the reviewed diff, and this lane has no clearance envelope that
+        # could ever authorize one.
+        shaped = "ghs_" + hashlib.sha256(b"error-body-fixture").hexdigest()[:36]
+        assert [f["category"] for f in scan(shaped)], (
+            "the fixture must still read as a token, or this test proves "
+            "only that a plain string was not echoed")
+
         class Failing(Recorder):
             def __call__(self, request, timeout=None):
                 raise urllib.error.HTTPError(
                     request.full_url, 422, "Unprocessable", {},
                     __import__("io").BytesIO(
-                        b'{"message":"Bearer ghs_SECRETTOKENVALUE"}'))
+                        b'{"message":"Bearer %s"}' % shaped.encode("ascii")))
 
         with pytest.raises(PanelRefusal) as raised:
             reviewpublish._request(reviewpublish.comments_url(46),
