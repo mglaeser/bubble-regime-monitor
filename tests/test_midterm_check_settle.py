@@ -671,3 +671,44 @@ class TestABlockedAggregateNeverContradictsItsOwnCounts:
     def test_an_approval_is_unchanged(self):
         reason = self._aggregate(overall_approved=True)["engine_gate"]["reason"]
         assert "every unit approved" in reason
+
+
+class TestTheTokenNeverFollowsARedirect:
+    """`urllib` follows 301/302/307 and re-sends the headers on the Request —
+    including `Authorization`. Every URL this package builds is pinned to
+    api.github.com and a numeric repository id, and that pinning means nothing
+    if the response can move the request.
+
+    `releaseasset` already refused this on its own reads. The status publisher
+    and the review publisher were still using the bare `urlopen`, and fixing one
+    of three call sites for the same defect is worse than knowing about none."""
+
+    def test_the_shared_opener_refuses_a_redirect(self):
+        from midtermpanel import panelcli
+        opener = panelcli.github_api_opener()
+        handlers = [type(h).__name__ for h in opener.__self__.handlers]
+        assert any("Refuse" in name for name in handlers)
+
+    def test_the_refusal_names_the_status_and_not_the_target(self):
+        from midtermpanel import panelcli
+        opener = panelcli.github_api_opener()
+        handler = next(h for h in opener.__self__.handlers
+                       if "Refuse" in type(h).__name__)
+        with pytest.raises(PanelRefusal) as caught:
+            handler.redirect_request(None, None, 302, "Found", {},
+                                     "https://evil.example/steal")
+        assert "redirect_refused" in caught.value.reason
+        assert "302" in caught.value.reason
+        assert "evil.example" not in caught.value.reason
+
+    def test_the_review_publisher_defaults_to_refusing_too(self):
+        """A direct caller that thinks about none of this gets the safe one."""
+        from midtermpanel import reviewpublish
+        opener = reviewpublish._no_redirects(None)
+        assert any("Refuse" in type(h).__name__
+                   for h in opener.__self__.handlers)
+
+    def test_an_injected_opener_is_still_honoured(self):
+        from midtermpanel import reviewpublish
+        recorder = object()
+        assert reviewpublish._no_redirects(recorder) is recorder

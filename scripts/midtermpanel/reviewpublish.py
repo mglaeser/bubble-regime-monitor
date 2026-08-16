@@ -188,14 +188,15 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def _no_redirects(opener):
-    """The caller's opener, or a redirect-refusing one when it is the default.
+    """The caller's opener, or a redirect-refusing one when none was given.
 
-    Tests inject a recorder and must keep it. Production passes nothing, and
-    gets an opener built from the handler above rather than the module-level
-    default that follows redirects."""
+    `panelcli` wires one shared redirect-refusing opener for the status
+    publisher and this one together, so in production `opener` is already safe.
+    This is the default for a direct caller — a test, a future entry point —
+    so the safe behaviour is what you get by not thinking about it."""
     if opener is not None:
         return opener
-    return urllib.request.build_opener(_RefuseRedirects()).open
+    return urllib.request.build_opener(_RefuseRedirects).open
 
 
 def _request(url: str, *, method: str, token: str, opener=None,

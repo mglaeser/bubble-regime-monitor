@@ -419,7 +419,6 @@ def identity_binding(opened: dict) -> dict:
 
 def main() -> None:
     import json
-    import urllib.request
 
     from . import dryrun
     from .engine import MODE_DRY_RUN, MODE_PROVIDER
@@ -467,7 +466,16 @@ def main() -> None:
     # `(method, url, headers, body)`; `urlopen` does not, and passing it here
     # was the same defect that stopped the count job at
     # TOKEN_COUNT_RETRY_EXHAUSTED. Generation carries the larger response bound.
-    github_status_opener = urllib.request.urlopen
+    #
+    # NOT the bare `urlopen`. It follows redirects and re-sends the headers on
+    # the Request — including `Authorization` — so a 302 moves the GitHub token
+    # wherever the response says. `releaseasset` already refuses that on its own
+    # reads; the status publisher and the review publisher were still using the
+    # default, and adversarial review pointed out that fixing one of three call
+    # sites for the same defect is worse than knowing about none of them.
+    #
+    # Wired HERE, once, so both publishers get it from the same place.
+    github_status_opener = github_api_opener()
     prepared = panel_execution(
         environ, mode=MODE_PROVIDER,
         transport_factory=lambda engine, *, engine_source_sha256:
@@ -482,6 +490,27 @@ def main() -> None:
             require_identity=prepared["require_identity"],
             scan=prepared["scan"],
             publish_review_fn=_live_review_publisher(github_status_opener))
+
+
+def github_api_opener():
+    """An opener that refuses to carry the token off api.github.com.
+
+    A redirect is a request to send the bearer token somewhere else. Every URL
+    this package builds is pinned to `api.github.com` and a numeric repository
+    id, and that pinning means nothing if the response can move the request.
+    There is no legitimate redirect on these endpoints, so this refuses rather
+    than allowlisting hosts — an allowlist is a thing that has to be kept
+    correct, and a refusal is not."""
+    import urllib.request
+
+    class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            refuse(f"category=github_api_redirect_refused http_status={code} "
+                   "— the response asked this request to go somewhere else and "
+                   "it carries a bearer token. Checking the final URL after the "
+                   "fact is too late: urllib has already re-sent the header")
+
+    return urllib.request.build_opener(_RefuseRedirects).open
 
 
 def _live_review_publisher(opener):

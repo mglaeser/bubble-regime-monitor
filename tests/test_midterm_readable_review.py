@@ -1592,3 +1592,94 @@ class TestTheScalarPermissionShorthandIsRefusedByName:
         with pytest.raises(PanelRefusal) as caught:
             privilegedworkflow.assert_permissions(document)
         assert "permissions_not_a_mapping" in caught.value.reason
+
+
+# ------------------------------- round four: the frozen-head confirmation ----
+
+
+class TestTheChallengeSurvivesNoUnicodeReshaping:
+    """NFKC COMPOSES, and that was a live bypass.
+
+    `a` followed by a combining acute becomes `á` under NFKC — which is not
+    `a` — so a challenge written with a combining mark on every character
+    folded to nothing recoverable and was published in full. NFKD decomposes it
+    back, and dropping every non-alphanumeric removes the mark along with the
+    spaces, hyphens and zero-width characters the other reshapings use."""
+
+    import hashlib as _hashlib
+    TOKEN = _hashlib.sha256(b"frozen-head-fixture").hexdigest()[:32]
+
+    @pytest.mark.parametrize("shape,label", [
+        (lambda t: "".join(c + "́" for c in t), "combining acute on each"),
+        (lambda t: "".join(c + "‍" for c in t), "zero-width joiner between"),
+        (lambda t: "".join(chr(ord(c) + 0xFEE0) if c.isalnum() else c for c in t),
+         "fullwidth"),
+        (lambda t: " ".join(t[i:i + 2] for i in range(0, 32, 2)), "split in pairs"),
+        (lambda t: ".".join(t[i:i + 4] for i in range(0, 32, 4)), "dotted"),
+        (lambda t: t[8:], "tail only"),
+    ])
+    def test_no_reshaping_reaches_the_reader(self, shape, label):
+        got = reviewrender.sanitize(
+            f"the run token was {shape(self.TOKEN)} here", scan=scan, limit=600,
+            field="reason", redact=(self.TOKEN,),
+            charset=reviewrender.CHARSET_TEXT)
+        assert got["published"] is False, label
+        assert got["refusal"] == reviewrender.CARRIES_RUN_TOKEN, label
+
+    def test_the_fold_decomposes_rather_than_composing(self):
+        marked = "á"
+        assert reviewrender._fold_for_token_match(marked) == "a"
+
+
+class TestTheOneLiveLinkTargetIsPinned:
+    """`[{run_id}]({run_url})` is the single place in the body where a string
+    becomes a live target. Everything else untrusted is inside a code span,
+    where a destination cannot exist — so this one is pinned by pattern rather
+    than sanitized, and it arrives from the environment."""
+
+    def _build(self, url):
+        one = unit("app/thing.py")
+        return reviewrender.build_review(
+            decision="approved", candidate_head_sha=HEAD, candidate_base_sha=BASE,
+            plan=plan_of(one),
+            votes=[vote(m, {one["unit_sha256"]: verdict(
+                refuted=False, reason=f"{m} sees nothing objectionable")})
+                for m in PANEL_MODELS],
+            aggregate_record=aggregate_of("approved"), scan=scan, run_url=url,
+            run_id=7, evidence_sha256="e" * 64)
+
+    @pytest.mark.parametrize("hostile", [
+        "https://evil.example/x",
+        "javascript:alert(1)",
+        "https://github.com.evil.example/mglaeser/bubble-regime-monitor/actions/runs/7",
+        "https://github.com/other/repo/actions/runs/7",
+        "https://github.com/mglaeser/bubble-regime-monitor/settings",
+        "",
+        None,
+    ])
+    def test_anything_but_an_actions_run_here_is_refused(self, hostile):
+        with pytest.raises(PanelRefusal) as raised:
+            self._build(hostile)
+        assert "run_url_not_an_actions_run" in raised.value.reason
+
+    def test_the_real_run_url_is_accepted(self):
+        review = self._build(RUN_URL)
+        assert review["run_url"] == RUN_URL
+
+
+class TestTheDeadEscaperIsGone:
+    """It lost six times and then stopped being called at all.
+
+    A dead function that looks like the defence is how a later edit routes text
+    back through it believing it is protected — the same shape as the two
+    self-test guards that reported properties they never checked."""
+
+    def test_the_module_no_longer_exports_it(self):
+        assert not hasattr(reviewrender, "escape_markup")
+        assert "escape_markup" not in reviewrender.__all__
+
+    def test_there_is_exactly_one_defence_and_it_is_the_fence(self):
+        source = (ROOT / "scripts" / "midtermpanel"
+                  / "reviewrender.py").read_text(encoding="utf-8")
+        assert "def code_span(" in source
+        assert "def escape_markup(" not in source

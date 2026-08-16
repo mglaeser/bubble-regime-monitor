@@ -150,6 +150,16 @@ FORBIDDEN_FIELDS = (
     "plan_sha256",
 )
 
+#: The ONE URL this document links to. Interpolated into a Markdown link
+#: destination — `[{run_id}]({run_url})` — which is the one place in the body
+#: where a string becomes a live target, so it is pinned rather than sanitized.
+#: It arrives from `MIDTERM_RUN_URL` or is constructed from the run id; the
+#: workflow sets neither today, and a renderer that relies on that is relying on
+#: a fact about a file it does not own.
+_RUN_URL = re.compile(
+    r"\Ahttps://github\.com/mglaeser/bubble-regime-monitor/actions/runs/[0-9]{1,20}"
+    r"(?:/[A-Za-z0-9/_-]{0,64})?\Z")
+
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _NON_ASCII = re.compile(r"[^\x20-\x7e]")
 
@@ -198,89 +208,16 @@ REDACTED = "[redacted]"
 # --------------------------------------------------------------- sanitize ---
 
 
-#: One character to one replacement. Applied in a SINGLE pass — see below.
+#: `escape_markup` USED TO LIVE HERE, with a table of characters it rewrote as
+#: numeric references, and it is deliberately gone.
 #:
-#: Every entry renders as the character it replaces, so the reader sees exactly
-#: what the model or the repository wrote. What changes is that GitHub's parsers
-#: — which read the SOURCE text, before any entity is decoded — no longer see a
-#: construct there.
-_ESCAPES = {
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-    # A backtick could close a code span this module opened and continue as
-    # markup; a backslash could escape a character this function relied on.
-    "`": "&#96;",
-    "\\": "&#92;",
-    # `@` IS NOT HERE. It is removed rather than encoded — see `_AT` below.
-    # LINK, IMAGE AND REFERENCE-DEFINITION SYNTAX. These four were missing from
-    # the first version and the omission was the worst defect in this file.
-    # Entity references ARE decoded inside a link destination, so `://` being
-    # neutralised did not help: `[x](https&#58;//evil.example)` decodes back to
-    # a live external link in a comment authored by `github-actions[bot]` in the
-    # job that holds the provider key. Worse, this module splices its OWN
-    # `[redacted]` and `…[truncated]` markers into untrusted text before
-    # escaping, so it supplied the link label and a reason only had to supply
-    # `(destination)` after the challenge it was required to echo. Unescaped
-    # brackets also let a line register a document-wide link reference
-    # definition from inside the blockquote.
-    "[": "&#91;",
-    "]": "&#93;",
-    "(": "&#40;",
-    ")": "&#41;",
-    # BLOCK STRUCTURE. `_render_finding` writes `> {reason}`, so a reason is
-    # always the first content on its line — the exact position where ATX
-    # headings, list markers, thematic breaks, fences and tables are active. The
-    # control-character refusal exists because "a newline in a reason is enough
-    # to inject a heading"; a heading does not actually need the newline. The
-    # panel's own `###` and `####` headings are the vocabulary being forged,
-    # beside a decision the reader is being asked to trust.
-    "#": "&#35;",
-    "-": "&#45;",
-    "+": "&#43;",
-    "*": "&#42;",
-    "=": "&#61;",
-    "~": "&#126;",
-    "|": "&#124;",
-}
-
-#: `_` is deliberately NOT in the table above, and the reason is concrete.
-#: Emphasis is cosmetic — it cannot make a link, run script, forge a heading or
-#: escape the blockquote — and every governed lens category is snake_case
-#: (`data_flow`, `fail_closed`, `secret_handling`). Escaping it would turn every
-#: category into `data&#95;flow`, and those are rendered inside a code span,
-#: where entity references are NOT decoded and would show as literal garbage.
-#: A real defence against a cosmetic problem is not worth a real regression in
-#: the common case; `_code` below carries the guard for the case where some
-#: other field does need escaping.
-_ASCII_DIGITS = frozenset("0123456789")
-_LEADING_ORDERED_ITEM = re.compile(r"\A[0-9]{1,9}\.")
-
-#: `@` and a notifying `#` are REPLACED, not encoded, and this is the one place
-#: this module removes information rather than escaping it.
-#:
-#: The first version wrote `&#64;` and the tests asserted on the SOURCE string,
-#: so the whole gate passed. Adversarial review rendered the output through
-#: cmark-gfm with GitHub's extension set and got back
-#: `<a href="mailto:security@evil.example">` — a live anchor, from a comment
-#: authored by `github-actions[bot]` in the job that holds the provider key.
-#: Reproduced here before this fix was written; the premise the tests recorded
-#: ("the autolinker reads the SOURCE text, before any entity is decoded") is
-#: simply false for the email form.
-#:
-#: And that is only the layer that can be checked locally. GitHub's @mention and
-#: #cross-reference filters run on the RENDERED HTML, after entity decoding, so
-#: any encoding that survives to a text node as `@name` or `#123` is a live
-#: notification whatever cmark did with it.
-#:
-#: An encoding that depends on which layer runs first is not a defence against a
-#: renderer nobody here can test. Deleting the character does not depend on
-#: anything: `(at)mglaeser` and `(hash)23` are inert at every layer, in every
-#: renderer, forever, and a reader loses nothing they cannot see.
-_AT = "(at)"
-_HASH_REFERENCE = "(hash)"
+#: It lost six times — `&#64;` rendered a live `mailto:` anchor, `#N` and `GH-N`
+#: reached GitHub's cross-reference filter, `___` became a thematic break,
+#: leading spaces made lists and code blocks — and when untrusted text moved
+#: into code spans it stopped being called at all. Leaving a dead function that
+#: looks like the defence is how a later edit routes text back through it
+#: believing it is protected. The defence is `code_span`, below, and there is
+#: now only one.
 
 #: Untrusted text is published inside a CODE SPAN, and that is the whole
 #: defence — the escape table above is now a second layer, not the first.
@@ -336,8 +273,16 @@ _NOT_ALNUM = re.compile(r"[^0-9a-z]+")
 
 
 def _fold_for_token_match(text: str) -> str:
+    """NFKD, not NFKC, and the difference is a live bypass.
+
+    NFKC COMPOSES: `a` followed by a combining acute becomes `á`, which is not
+    `a`, so a challenge written with a combining mark on every character folded
+    to nothing recoverable and was published. NFKD decomposes it back to `a`
+    plus the mark, and dropping every non-alphanumeric removes the mark — along
+    with the spaces, hyphens and zero-width characters the other reshapings
+    use."""
     import unicodedata
-    return _NOT_ALNUM.sub("", unicodedata.normalize("NFKC", text).casefold())
+    return _NOT_ALNUM.sub("", unicodedata.normalize("NFKD", text).casefold())
 
 
 #: How much of a run token counts as disclosing it. The challenge is 32
@@ -368,59 +313,6 @@ def discloses_token(value: str, token: str,
     folded_value = _fold_for_token_match(value)
     return any(folded_token[i:i + minimum] in folded_value
                for i in range(len(folded_token) - minimum + 1))
-
-
-def escape_markup(text: str) -> str:
-    """HTML-escape and neutralise every construct GitHub would make LIVE.
-
-    ONE PASS, and that is the whole reason this is a loop rather than a chain of
-    `str.replace` calls. The chained version was written first and was wrong:
-    it emitted `&#64;` for `@` and then rewrote `#` before a digit, so its own
-    replacement became `&&#35;64;` and `@mglaeser` reached the body as visible
-    garbage instead of a neutralised mention. A single pass cannot rewrite its
-    own output, which is the only version of this function that is safe to
-    extend — and it has been extended twice since.
-
-    Three constructs need more than a character mapping:
-
-    * `www.example` — GFM's second autolink form. It needs no scheme and no
-      provider at all: a pull request can add a file at `www.attacker.example/
-      setup.py`, and `_render_finding` puts that path immediately after `**`,
-      which is one of the delimiters the extension accepts. Neutralising the dot
-      leaves `www.` visible and unlinked.
-    * `https://…` — the scheme separator the bare-URL autolinker keys on.
-    * a LEADING `1.` — an ordered list marker. `1)` is already dead because `)`
-      is escaped; the dotted form needs the dot, and only at the start, because
-      that is the only place a list can begin."""
-    out, index, length = [], 0, len(text)
-    while index < length:
-        char = text[index]
-        # THE TWO REMOVALS COME FIRST, before the escape table, because the
-        # table would otherwise claim `#` and this branch would be unreachable.
-        # (It was, briefly, and the renderer emitted `&#35;23` while the tests
-        # asserted only on the source.)
-        if char == "@":
-            out.append(_AT)
-            index += 1
-        elif (char == "#" and index + 1 < length
-              and text[index + 1] in _ASCII_DIGITS):
-            out.append(_HASH_REFERENCE)
-            index += 1
-        elif text[index:index + 4].lower() == "www.":
-            out.append(text[index:index + 3] + "&#46;")
-            index += 4
-        elif char == ":" and text[index:index + 3] == "://":
-            out.append("&#58;")
-            index += 1
-        else:
-            replacement = _ESCAPES.get(char)
-            out.append(char if replacement is None else replacement)
-            index += 1
-    escaped = "".join(out)
-    found = _LEADING_ORDERED_ITEM.match(escaped)
-    if found:
-        return f"{escaped[:found.end() - 1]}&#46;{escaped[found.end():]}"
-    return escaped
 
 
 def _unsafe_codepoint(text: str) -> str | None:
@@ -516,9 +408,10 @@ def sanitize(value, *, scan, limit: int, field: str, redact=(),
         kept = f"{kept}{TRUNCATION_MARK}"
     # 5. NO ESCAPING. The text is published inside a code span, where there is
     #    no Markdown grammar to escape against and where an entity reference
-    #    would render as literal garbage. `escape_markup` remains for the one
-    #    place trusted text is interpolated into prose, and as a second layer
-    #    the body gate can still check.
+    #    would render as literal garbage. There is no second escaping layer:
+    #    the one that existed lost six times and is deleted, because a dead
+    #    function that looks like the defence is how a later edit routes text
+    #    back through it believing it is protected.
     return {"field": field, "published": True, "text": kept,
             "code_span": code_span(kept),
             "published_chars": len(kept),
@@ -775,6 +668,12 @@ def build_review(*, decision: str, candidate_head_sha: str,
             refuse(f"category=review_render_sha_not_a_commit field={name} — a "
                    "published review names the exact commit it reviewed; an "
                    "abbreviated or symbolic ref names whatever it points at now")
+    if not isinstance(run_url, str) or not _RUN_URL.match(run_url):
+        refuse("category=review_render_run_url_not_an_actions_run — this is the "
+               "only string in the body that becomes a live link target, so it "
+               "is pinned to this repository's Actions runs rather than "
+               "sanitized. Everything else untrusted is published inside a code "
+               "span, where a destination cannot exist")
     locations = unit_locations(plan)
     # The challenge is passed to be REMOVED, never to be rendered. It is the one
     # value this function is given for the sole purpose of proving it did not
@@ -1158,7 +1057,8 @@ def _code_list(values) -> str:
 
 __all__ = [
     "MARKER", "WITHHELD", "NO_FINDINGS", "RENDER_VERSION", "MAX_BODY_CHARS",
-    "MAX_REASON_CHARS", "FORBIDDEN_FIELDS", "escape_markup", "sanitize",
+    "MAX_REASON_CHARS", "FORBIDDEN_FIELDS", "code_span", "sanitize",
+    "discloses_token", "MIN_DISCLOSED_TOKEN_CHARS",
     "unit_locations", "findings_from_votes", "build_review", "render",
     "assert_publishable", "assert_no_forbidden_fields",
     "assert_rendering_did_not_change_the_decision", "head_binding", "head_of",
