@@ -1,0 +1,32 @@
+{
+  "catalogue_version": "3.2",
+  "schema_version": 1,
+  "frozen": false,
+  "note": [
+    "The frozen catalogue of historical episodes the alert system MUST detect.",
+    "It is a GATE INPUT for Stage 2 (mandate 28 and 29), not a Stage 1 gate: the",
+    "recall number it produces is only meaningful once an operator has fixed the",
+    "windows against real captured history.",
+    "",
+    "It ships EMPTY on purpose. Every entry names a real market episode and a",
+    "real window, and inventing either would manufacture a recall number that",
+    "nothing measured — the same failure mode as inventing a [PIN] threshold.",
+    "Until an operator freezes entries here, `mandatory_event_total` is 0 and the",
+    "replay report says recall is not yet measurable rather than reporting 100%.",
+    "",
+    "Set `frozen` to true in the same commit that adds the first entries; after",
+    "that the file is append-only, because silently deleting an event the system",
+    "failed to detect would turn a miss into a pass."
+  ],
+  "entry_shape": {
+    "event_id": "stable slug, never reused",
+    "description": "what happened, in plain language",
+    "window_start": "ISO-8601 UTC — earliest input that could reasonably detect it",
+    "window_end": "ISO-8601 UTC — latest input that still counts as timely",
+    "rule_id": "the rule expected to fire",
+    "expected_priority": "P1 | P2 | P3 | P4",
+    "max_detection_slots": "integer — recompute slots allowed before it counts as late",
+    "source": "where the operator took the dates from"
+  },
+  "events": []
+}

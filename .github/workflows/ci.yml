@@ -65,6 +65,13 @@ jobs:
         run: python -m scripts.export_alert_openapi --check
         env:
           TESTING: "true"
+      - name: Alert Stage 1 gate — deterministic replay (BLOCKING)
+        # THE Stage 1 gate, enforced rather than attested. The committed
+        # evidence was produced by a different process on a different machine;
+        # if replay stops being deterministic, this stops matching.
+        run: python -m scripts.export_alert_stage1_gate --check
+        env:
+          TESTING: "true"
       - name: Tests (BLOCKING)
         # -rs prints the reason for every skip. Without it a hosted run reports
         # "N passed, 5 skipped" and nobody can tell whether the five are

@@ -1,0 +1,505 @@
+"""The Stage 1 gate: deterministic replay, no PII, no scoring regression.
+
+Every test here exists because a replay whose result depends on when it ran,
+or which could reach a provider, or which could write to production, would be
+worse than no replay at all — it would produce evidence that looks like proof.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from app.alerts.artifacts import validate_from_disk
+from app.alerts.enums import Evaluability, Mode
+from app.alerts.replay import (
+    REPLAY_SCHEMA_VERSION,
+    ReplayConfig,
+    ReplaySummary,
+    load_source_inputs,
+    ruleset_at_stage,
+    run_replay,
+)
+from tests.test_alert_evaluation import make_input
+
+RULES = Path("config/alert_rules.v3.2.yaml")
+PHRASES = Path("config/alert_phrases.v3.2.json")
+REPLAY_SOURCE = Path("app/alerts/replay.py")
+
+
+@pytest.fixture()
+def artifacts():
+    return validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
+                              service_version="3.8.0")
+
+
+def _history() -> list:
+    """A short but non-trivial history: a de-risk entry that then persists."""
+    return [
+        make_input(identity="r1", computed_at="2026-08-14T22:00:00+00:00",
+                   effective="trim", base="trim"),
+        make_input(identity="r2", computed_at="2026-08-15T02:00:00+00:00",
+                   effective="trim", base="trim"),
+        make_input(identity="r3", computed_at="2026-08-15T06:00:00+00:00",
+                   effective="de-risk", base="de-risk", median=64.0),
+        make_input(identity="r4", computed_at="2026-08-15T10:00:00+00:00",
+                   effective="de-risk", base="de-risk", median=65.0),
+        # A blind snapshot: UNKNOWN, which must never resolve anything.
+        make_input(identity="r5", computed_at="2026-08-15T14:00:00+00:00",
+                   effective=None, base=None, median=None, degraded=True),
+    ]
+
+
+def _run(tmp_path, artifacts, *, name="replay.db", stage=3, inputs=None,
+         events=None) -> ReplaySummary:
+    config = ReplayConfig(
+        source_db_url="sqlite:///unused-by-this-call",
+        state_db_path=tmp_path / name,
+        evaluate_at_stage=stage,
+        mandatory_events_path=events,
+    )
+    return run_replay(config=config, ruleset=artifacts.ruleset,
+                      phrase_set=artifacts.phrase_set,
+                      inputs=inputs if inputs is not None else _history())
+
+
+# ---------------------------------------------------------------------------
+# determinism — THE Stage 1 gate
+# ---------------------------------------------------------------------------
+
+
+def test_two_replays_of_the_same_history_are_byte_identical(tmp_path, artifacts):
+    """The gate. Two runs, two databases, one answer.
+
+    Byte-identical rather than merely equal: the artifact is committed as
+    evidence, so a diff in it has to mean a diff in behaviour.
+    """
+    first = _run(tmp_path, artifacts, name="a.db").to_json()
+    second = _run(tmp_path, artifacts, name="b.db").to_json()
+    assert first == second
+
+
+def test_the_summary_carries_no_identifier_and_no_run_timestamp(tmp_path, artifacts):
+    """Determinism is only credible if nothing run-specific can leak in.
+
+    ULIDs and wall-clock stamps are the two things that would silently break
+    byte-equality, so the summary must contain neither.
+    """
+    summary = _run(tmp_path, artifacts)
+    payload = summary.as_dict()
+    assert "evaluation_id" not in payload
+    assert "episode_id" not in payload
+    assert "generated_at" not in payload
+    assert "duration_ms" not in payload
+
+    # Every timestamp present must come from the replayed history, not from now.
+    for key in ("window_first", "window_last"):
+        moment = datetime.fromisoformat(payload[key])
+        assert moment.year == 2026 and moment.month == 8
+
+
+def test_replay_derives_time_from_the_input_not_from_the_clock(tmp_path, artifacts):
+    """The window is a property of the history, so it cannot move with the run."""
+    summary = _run(tmp_path, artifacts)
+    assert summary.window_first == "2026-08-14T22:00:00+00:00"
+    assert summary.window_last == "2026-08-15T14:00:00+00:00"
+
+
+# ---------------------------------------------------------------------------
+# isolation — a replay may not reach production, or a provider
+# ---------------------------------------------------------------------------
+
+
+def test_replay_writes_to_its_own_database_and_never_the_app_one(
+        tmp_path, artifacts, isolated_db):
+    """Production stays untouched: no episode, no evaluation, no delivery."""
+    from sqlalchemy import func, select
+
+    from app.alerts.models import AlertDelivery, AlertEpisode, AlertEvaluation
+    from app.db import session_scope
+
+    summary = _run(tmp_path, artifacts)
+    assert summary.evaluations_committed > 0          # it really did work
+
+    with session_scope() as session:
+        for model in (AlertEpisode, AlertEvaluation, AlertDelivery):
+            count = session.execute(
+                select(func.count()).select_from(model)).scalar_one()
+            assert count == 0, f"replay wrote {model.__name__} rows into production"
+
+
+def test_replay_state_database_is_recreated_not_appended(tmp_path, artifacts):
+    """Re-running into the same path must not accumulate — that is what makes
+    a second run comparable to the first rather than a superset of it."""
+    state = tmp_path / "shared.db"
+    config = ReplayConfig(source_db_url="sqlite:///unused",
+                          state_db_path=state, evaluate_at_stage=3)
+    first = run_replay(config=config, ruleset=artifacts.ruleset,
+                       phrase_set=artifacts.phrase_set, inputs=_history())
+    second = run_replay(config=config, ruleset=artifacts.ruleset,
+                        phrase_set=artifacts.phrase_set, inputs=_history())
+    assert first.episodes_opened == second.episodes_opened
+    assert first.to_json() == second.to_json()
+
+
+def test_replay_module_cannot_reach_a_provider_or_a_transport():
+    """Structural, not behavioural: the import graph itself has no way out.
+
+    A replay that could import the sipgate sender is one careless call away
+    from sending real SMS out of a historical simulation.
+    """
+    forbidden = {"httpx", "requests", "anthropic", "app.alerts.sender",
+                 "app.alerts.dispatcher", "app.alerts.llm_selector",
+                 "app.jobs.alert_dispatch", "app.services.sms"}
+    tree = ast.parse(REPLAY_SOURCE.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    assert not (imported & forbidden), f"replay imports {imported & forbidden}"
+
+
+def test_replay_never_dispatches(tmp_path, artifacts):
+    """Nothing reaches SENT, and the verdict says so rather than assuming it."""
+    summary = _run(tmp_path, artifacts)
+    assert summary.deliveries_sent == 0
+    assert summary.mode == str(Mode.DRYRUN)
+
+
+def test_replay_uses_the_dryrun_state_namespace(tmp_path, artifacts):
+    """Shadow and live state must never see a replay's episodes."""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+
+    from app.alerts.models import AlertEpisode
+
+    state = tmp_path / "ns.db"
+    _run(tmp_path, artifacts, name="ns.db")
+    engine = create_engine(f"sqlite:///{state}", future=True)
+    session = sessionmaker(bind=engine)()
+    try:
+        modes = {row.mode for row in
+                 session.execute(select(AlertEpisode)).scalars().all()}
+    finally:
+        session.close()
+        engine.dispose()
+    assert modes <= {str(Mode.DRYRUN)}
+
+
+# ---------------------------------------------------------------------------
+# no PII
+# ---------------------------------------------------------------------------
+
+
+def test_the_summary_contains_no_recipient_and_no_secret(tmp_path, artifacts):
+    """The report is committed as gate evidence, so it is a publication.
+
+    Sanitizing before persistence rather than before logging is the mandate's
+    rule; this asserts the persisted artifact itself.
+    """
+    summary = _run(tmp_path, artifacts)
+    blob = summary.to_json()
+    for forbidden in ("recipient", "+49", "token", "sipgate", "api_key",
+                      "Authorization", "recipient_ref"):
+        assert forbidden.lower() not in blob.lower(), f"{forbidden!r} leaked"
+
+
+def test_the_summary_reports_only_aggregates(tmp_path, artifacts):
+    """Counts and hashes, never a row. An id in the report would be a handle
+    back to state the report is not entitled to expose."""
+    payload = _run(tmp_path, artifacts).as_dict()
+    scalars = {k: v for k, v in payload.items()
+               if isinstance(v, (int, float, bool)) or v is None}
+    assert scalars, "summary should be dominated by counts"
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            # Keys are rule ids / priorities / buckets — all ruleset vocabulary.
+            assert all(isinstance(k, str) for k in value), key
+            assert all(isinstance(v, int) for v in value.values()), key
+
+
+# ---------------------------------------------------------------------------
+# honesty of the verdict
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_history_fails_rather_than_passing_vacuously(tmp_path, artifacts):
+    """Nothing to replay is not a green gate."""
+    summary = _run(tmp_path, artifacts, inputs=[])
+    assert summary.passed is False
+    assert "no_inputs" in summary.failures
+
+
+def test_unmeasured_targets_are_named_not_silently_passed(tmp_path, artifacts):
+    """`passed` may only speak for the checks that actually ran.
+
+    Zero non-P1 messages satisfies every volume cap arithmetically; saying so
+    would turn "the planner never ran" into "governance holds".
+    """
+    summary = _run(tmp_path, artifacts)
+    assert summary.notification_planning_ran is False
+    joined = " ".join(summary.not_measured)
+    assert "non_p1_volume_targets" in joined
+    assert "mandatory_event_recall" in joined
+
+
+def test_an_empty_mandatory_catalogue_reports_zero_not_full_recall(tmp_path, artifacts):
+    """Recall over an empty catalogue is undefined, never 100%."""
+    catalogue = Path("config/alert_mandatory_events.v3.2.json")
+    payload = json.loads(catalogue.read_text(encoding="utf-8"))
+    assert payload["events"] == [], "the shipped catalogue must ship empty"
+
+    summary = _run(tmp_path, artifacts, events=catalogue)
+    assert summary.mandatory_event_total == 0
+    assert summary.mandatory_event_detected == 0
+    assert any("recall" in note or "recall" in item
+               for note in summary.notes for item in summary.not_measured)
+
+
+def test_a_replay_reports_the_stage_it_actually_evaluated(tmp_path, artifacts):
+    """A forward-looking run must never be mistaken for the committed one."""
+    summary = _run(tmp_path, artifacts, stage=3)
+    assert summary.active_stage == 1               # what is committed
+    assert summary.evaluated_at_stage == 3         # what this run measured
+    assert summary.rules_sha256 != artifacts.ruleset.rules_sha256
+    assert any("forward-looking" in note for note in summary.notes)
+
+
+def test_replaying_at_the_committed_stage_uses_the_committed_bytes(tmp_path, artifacts):
+    """No silent re-stamp: at the committed stage the hash is the real one."""
+    summary = _run(tmp_path, artifacts, stage=1)
+    assert summary.rules_sha256 == artifacts.ruleset.rules_sha256
+    assert summary.evaluated_at_stage == summary.active_stage == 1
+
+
+def test_restamping_a_stage_rehashes_the_ruleset(artifacts):
+    """`active_stage` is content. A document claiming a different stage IS a
+    different document, and must not borrow the original's identity."""
+    restamped = ruleset_at_stage(artifacts.ruleset, 5, artifacts.phrase_set)
+    assert restamped.document.meta.active_stage == 5
+    assert restamped.rules_sha256 != artifacts.ruleset.rules_sha256
+    # Same rules, different gate.
+    assert {r.rule_id for r in restamped.rules()} == \
+           {r.rule_id for r in artifacts.ruleset.rules()}
+
+
+def test_stage_gating_still_binds_inside_a_replay(tmp_path, artifacts):
+    """Replay can ask about another stage; it cannot ignore staging."""
+    at_one = _run(tmp_path, artifacts, name="s1.db", stage=1)
+    at_three = _run(tmp_path, artifacts, name="s3.db", stage=3)
+    assert at_one.episodes_by_rule == {}
+    assert "regime.band_to_derisk" in at_three.episodes_by_rule
+
+
+# ---------------------------------------------------------------------------
+# three-valued logic survives the round trip
+# ---------------------------------------------------------------------------
+
+
+def test_an_unknown_snapshot_does_not_resolve_an_episode(tmp_path, artifacts):
+    """The whole point of UNKNOWN: a blind observation is not good news."""
+    history = _history()
+    summary = _run(tmp_path, artifacts, inputs=history)
+    assert summary.episodes_opened >= 1
+    # The last input is degraded/UNKNOWN. It must not have closed anything as
+    # RESOLVED on the strength of not knowing.
+    only_unknown_resolved = summary.episodes_resolved
+    without_blind = _run(tmp_path, artifacts, name="nb.db", inputs=history[:-1])
+    assert only_unknown_resolved == without_blind.episodes_resolved
+
+
+def test_not_evaluable_inputs_are_reported_and_skipped(tmp_path, artifacts):
+    """NOT_EVALUABLE is counted as neither a detection nor a miss."""
+    history = _history()
+    blind = history[-1].model_copy(
+        update={"evaluation_eligibility": Evaluability.NOT_EVALUABLE,
+                "ineligibility_reasons": ["no_median"]})
+    summary = _run(tmp_path, artifacts, inputs=[*history[:-1], blind])
+    assert summary.inputs_not_evaluable == 1
+    assert summary.evaluations_committed == len(history) - 1
+
+
+def test_a_blind_neighbour_does_not_make_an_excursion_transient(tmp_path, artifacts):
+    """A de-risk slot flanked by UNKNOWN is undecidable, not transient.
+
+    This number governs whether the immediate de-risk stays P1. Counting a
+    blind neighbour as "it ended" would argue for downgrading a P1 on the
+    strength of not knowing — the band-level form of letting UNKNOWN resolve.
+    """
+    def at(hour: int, effective):
+        return make_input(identity=f"e{hour}", computed_at=f"2026-08-15T{hour:02d}:00:00+00:00",
+                          effective=effective, base=effective,
+                          median=None if effective is None else 63.0,
+                          degraded=effective is None, suppressed=effective is None)
+
+    history = [at(2, "trim"), at(6, "de-risk"), at(10, None), at(14, "de-risk"),
+               at(18, "trim")]
+    summary = _run(tmp_path, artifacts, name="exc.db", inputs=history)
+    # index 1: neighbours trim / UNKNOWN -> indeterminate
+    # index 3: neighbours UNKNOWN / trim -> indeterminate
+    assert summary.transient_one_snapshot_band_p1 == 0
+    assert summary.indeterminate_band_excursions == 2
+
+
+def test_a_derisk_neighbour_settles_an_excursion(tmp_path, artifacts):
+    """A run of de-risk is not transient and is not undecidable either."""
+    def at(hour: int, effective):
+        return make_input(identity=f"s{hour}", computed_at=f"2026-08-15T{hour:02d}:00:00+00:00",
+                          effective=effective, base=effective,
+                          median=None if effective is None else 63.0,
+                          degraded=effective is None, suppressed=effective is None)
+
+    history = [at(2, "trim"), at(6, "de-risk"), at(10, "de-risk"), at(14, None),
+               at(18, "trim")]
+    summary = _run(tmp_path, artifacts, name="run.db", inputs=history)
+    assert summary.transient_one_snapshot_band_p1 == 0
+    assert summary.indeterminate_band_excursions == 0
+
+
+# ---------------------------------------------------------------------------
+# the committed gate artifact
+# ---------------------------------------------------------------------------
+
+
+def test_the_committed_gate_artifact_is_current():
+    """CI's real determinism check, asserted here too.
+
+    If the evaluator becomes non-deterministic this fails, because the artifact
+    in the repository was produced by a different process on a different day.
+    """
+    from scripts.export_alert_stage1_gate import ARTIFACT, build_evidence
+
+    rendered = json.dumps(build_evidence(), indent=2, sort_keys=True,
+                          ensure_ascii=False) + "\n"
+    assert ARTIFACT.read_text(encoding="utf-8") == rendered, (
+        "docs/alert-stage1-gate.json is stale — regenerate with "
+        "`python -m scripts.export_alert_stage1_gate` and review the diff")
+
+
+def test_the_gate_artifact_exercises_more_than_the_committed_stage():
+    """A stage-1-only artifact would be nearly blind: three ops rules run there."""
+    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
+    assert payload["runs"]["stage_1"]["evaluated_at_stage"] == 1
+    stage3 = payload["runs"]["stage_3"]
+    assert stage3["evaluated_at_stage"] == 3
+    assert len(stage3["episodes_by_rule"]) >= 8
+    assert stage3["passed"] is True
+
+
+def test_the_gate_artifact_carries_no_pii():
+    """It is committed, so it is published."""
+    blob = Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8").lower()
+    for forbidden in ("recipient", "+49", "sipgate", "token", "api_key"):
+        assert forbidden not in blob
+
+
+def test_the_replay_history_fixture_is_reproducible():
+    """The evidence is only as trustworthy as the history it replays."""
+    from tests.fixtures.gen_alert_replay_history import TARGET, build
+
+    committed = json.loads(TARGET.read_text(encoding="utf-8"))
+    assert build() == committed, (
+        "regenerate with `python -m tests.fixtures.gen_alert_replay_history`")
+    assert committed["inputs"], "the fixture must not be empty"
+
+
+# ---------------------------------------------------------------------------
+# the source database is only ever read
+# ---------------------------------------------------------------------------
+
+
+def test_loading_source_inputs_leaves_the_source_untouched(tmp_path, isolated_db):
+    """A replay opens its own engine over the source and only selects."""
+    from app.alerts.models import AlertInputSnapshot
+    from app.config import get_settings
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    record = make_input(identity="s1", computed_at=now.isoformat())
+    with session_scope() as session:
+        session.add(AlertInputSnapshot(
+            input_identity=record.input_identity, snapshot_id=None, origin="RECOMPUTE",
+            built_at=now, computed_at=now,
+            alert_input_schema_version=record.schema_version,
+            methodology_version=None, methodology_sha256=None, reconstructed=False,
+            evaluation_eligibility="EVALUABLE", ineligibility_reasons=[],
+            payload=json.dumps(record.model_dump(mode="json")), payload_sha256="x"))
+
+    db_url = get_settings().db_url
+    before = Path(db_url.replace("sqlite:///", "")).stat().st_mtime_ns
+    loaded = load_source_inputs(ReplayConfig(source_db_url=db_url,
+                                             state_db_path=tmp_path / "s.db"))
+    after = Path(db_url.replace("sqlite:///", "")).stat().st_mtime_ns
+
+    assert [r.input_identity for r in loaded] == ["s1"]
+    assert before == after, "reading the source must not modify it"
+
+
+def test_the_window_filters_by_the_inputs_own_time(tmp_path, isolated_db):
+    """`--from`/`--to` select history, not rows that happened to be written."""
+    from app.alerts.models import AlertInputSnapshot
+    from app.config import get_settings
+    from app.db import session_scope
+
+    moments = [datetime(2026, 8, d, 10, 0, tzinfo=UTC) for d in (10, 12, 14)]
+    with session_scope() as session:
+        for index, moment in enumerate(moments):
+            record = make_input(identity=f"w{index}", computed_at=moment.isoformat())
+            session.add(AlertInputSnapshot(
+                input_identity=record.input_identity, snapshot_id=None,
+                origin="RECOMPUTE", built_at=moment, computed_at=moment,
+                alert_input_schema_version=record.schema_version,
+                methodology_version=None, methodology_sha256=None, reconstructed=False,
+                evaluation_eligibility="EVALUABLE", ineligibility_reasons=[],
+                payload=json.dumps(record.model_dump(mode="json")),
+                payload_sha256=f"x{index}"))
+
+    loaded = load_source_inputs(ReplayConfig(
+        source_db_url=get_settings().db_url, state_db_path=tmp_path / "w.db",
+        from_moment=datetime(2026, 8, 11, tzinfo=UTC),
+        to_moment=datetime(2026, 8, 13, tzinfo=UTC)))
+    assert [r.input_identity for r in loaded] == ["w1"]
+
+
+# ---------------------------------------------------------------------------
+# the harness's own contract
+# ---------------------------------------------------------------------------
+
+
+def test_summary_schema_version_is_stamped(tmp_path, artifacts):
+    summary = _run(tmp_path, artifacts)
+    assert summary.schema_version == REPLAY_SCHEMA_VERSION
+    assert summary.as_dict()["schema_version"] == REPLAY_SCHEMA_VERSION
+
+
+def test_summary_json_is_canonical(tmp_path, artifacts):
+    """Sorted keys, so a diff between two evidence artifacts is a real diff."""
+    blob = _run(tmp_path, artifacts).to_json()
+    keys = list(json.loads(blob).keys())
+    assert keys == sorted(keys)
+
+
+def test_the_cli_dryrun_command_exists_and_is_read_only():
+    """The operator surface has to expose the gate, and expose it as a dry run."""
+    from app.alerts.cli import build_parser
+
+    args = build_parser().parse_args(["dryrun", "--state-db", "/tmp/x.db",
+                                      "--stage", "3"])
+    assert args.command == "dryrun"
+    assert args.stage == 3
+    assert args.state_db == "/tmp/x.db"
+
+
+def test_the_replay_script_forwards_to_the_cli():
+    from scripts.alert_replay import build_parser
+
+    args = build_parser().parse_args(["--state-db", "/tmp/x.db", "--from",
+                                      "2026-01-01T00:00:00+00:00"])
+    assert args.state_db == "/tmp/x.db"
+    assert args.from_moment == "2026-01-01T00:00:00+00:00"

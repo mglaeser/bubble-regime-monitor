@@ -286,6 +286,68 @@ def test_unknown_holds_confirmation_without_advancing_or_resetting():
     assert decision.candidate_started_input == "a"   # the candidate survives
 
 
+def test_recovery_from_unknown_resumes_the_candidate_it_never_opens_a_second():
+    """The other half of "UNKNOWN holds": coming BACK must not re-latch.
+
+    After an outage the persisted state reads UNKNOWN while still owning the
+    open episode and the candidate's progress. Treating "not PENDING" as "no
+    candidate" would open a second episode for a mechanism that already has one
+    — which the unique index rejects, wedging the rule for good — and would
+    throw away the confirmation the outage was meant to preserve.
+    """
+    rule = _rule(
+        rule_id="test.persist",
+        source_fields=["rf4_active"],
+        condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+        confirmation={"count": 2, "basis": "distinct_economic_observation"},
+        confirmation_sources=["rf4_active"],
+        candidate_ttl={"calendar": "US_TRADING", "intervals": 10, "grace_seconds": 0},
+    )
+    recovered = make_input(identity="c", rf4=True, rf4_period="2026-08-16")
+    memory = InstanceMemory(
+        state_version=2,
+        # What an UNKNOWN observation leaves behind: state UNKNOWN, candidate
+        # and episode both still held.
+        condition_state=ConditionState.UNKNOWN,
+        last_known_condition_state=ConditionState.PENDING,
+        candidate_started_input="a", current_episode_id="EP",
+        confirmed_keys={"rf4_active": frozenset({"key-1"})},
+        candidate_expires_at=NOW + timedelta(days=5),
+    )
+    decision = evaluate_state(
+        rule=rule, instance_fingerprint="fp", memory=memory,
+        outcome=evaluate_rule(rule, _ctx(recovered)), ctx=_ctx(recovered), now=NOW)
+
+    assert decision.open_episode is False            # the episode is reused
+    assert decision.episode_id == "EP"
+    # The candidate RESUMED: the pre-outage key still counts, so the recovery
+    # observation is the second of two and confirmation completes here. A
+    # re-latch would have reset the count to 1 and left it pending.
+    assert decision.confirmation_progress == {"rf4_active": 2}
+    assert decision.condition_state == ConditionState.FIRING
+    assert decision.activate_episode is True
+
+
+def test_a_candidate_is_never_latched_over_an_open_episode():
+    """The general form of the same invariant, independent of UNKNOWN."""
+    rule = _rule(
+        rule_id="test.persist",
+        source_fields=["rf4_active"],
+        condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+        confirmation={"count": 2, "basis": "distinct_economic_observation"},
+        confirmation_sources=["rf4_active"],
+        candidate_ttl={"calendar": "US_TRADING", "intervals": 10, "grace_seconds": 0},
+    )
+    memory = InstanceMemory(state_version=1, condition_state=ConditionState.NORMAL,
+                            current_episode_id="EP")
+    fresh = make_input(identity="b", rf4=True, rf4_period="2026-08-16")
+    decision = evaluate_state(
+        rule=rule, instance_fingerprint="fp", memory=memory,
+        outcome=evaluate_rule(rule, _ctx(fresh)), ctx=_ctx(fresh), now=NOW)
+    assert decision.open_episode is False
+    assert decision.episode_id == "EP"
+
+
 def test_candidate_expires_only_through_its_ttl_during_an_outage():
     rule = _rule(
         rule_id="test.persist",
