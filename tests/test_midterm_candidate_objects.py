@@ -66,8 +66,23 @@ JOBS = ("count", "panel")
 
 
 def _git(args, cwd, check=True):
-    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                          text=True, check=check)
+    """Run git, and on failure SAY WHY.
+
+    `capture_output=True` with `check=True` raises a `CalledProcessError` whose
+    string form is only the argv and the exit code — the stderr git wrote is
+    captured into the exception and then never shown. A `git clone` in this
+    file's fixtures failed that way on one runner while the same commit passed
+    on another, and the log carried "returned non-zero exit status 128" and
+    nothing else, so the cause could not be read off the run at all.
+    """
+    completed = subprocess.run(["git", *args], cwd=str(cwd),  # noqa: S603
+                               capture_output=True, text=True, check=False)
+    if check and completed.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} failed in {cwd} with exit "
+            f"{completed.returncode}\nstderr: {completed.stderr.strip()}\n"
+            f"stdout: {completed.stdout.strip()}")
+    return completed
 
 
 def committed_script(job: str) -> str:
