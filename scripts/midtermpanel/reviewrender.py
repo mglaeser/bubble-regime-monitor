@@ -176,6 +176,11 @@ REDACTED = "[redacted]"
 
 
 #: One character to one replacement. Applied in a SINGLE pass — see below.
+#:
+#: Every entry renders as the character it replaces, so the reader sees exactly
+#: what the model or the repository wrote. What changes is that GitHub's parsers
+#: — which read the SOURCE text, before any entity is decoded — no longer see a
+#: construct there.
 _ESCAPES = {
     "&": "&amp;",
     "<": "&lt;",
@@ -186,21 +191,55 @@ _ESCAPES = {
     # markup; a backslash could escape a character this function relied on.
     "`": "&#96;",
     "\\": "&#92;",
-    # A mention needs `@` in the SOURCE text. It is never left there.
+    # A mention needs `@` in the SOURCE text. It is never left there. This also
+    # kills the GFM email autolink, which is the same character.
     "@": "&#64;",
+    # LINK, IMAGE AND REFERENCE-DEFINITION SYNTAX. These four were missing from
+    # the first version and the omission was the worst defect in this file.
+    # Entity references ARE decoded inside a link destination, so `://` being
+    # neutralised did not help: `[x](https&#58;//evil.example)` decodes back to
+    # a live external link in a comment authored by `github-actions[bot]` in the
+    # job that holds the provider key. Worse, this module splices its OWN
+    # `[redacted]` and `…[truncated]` markers into untrusted text before
+    # escaping, so it supplied the link label and a reason only had to supply
+    # `(destination)` after the challenge it was required to echo. Unescaped
+    # brackets also let a line register a document-wide link reference
+    # definition from inside the blockquote.
+    "[": "&#91;",
+    "]": "&#93;",
+    "(": "&#40;",
+    ")": "&#41;",
+    # BLOCK STRUCTURE. `_render_finding` writes `> {reason}`, so a reason is
+    # always the first content on its line — the exact position where ATX
+    # headings, list markers, thematic breaks, fences and tables are active. The
+    # control-character refusal exists because "a newline in a reason is enough
+    # to inject a heading"; a heading does not actually need the newline. The
+    # panel's own `###` and `####` headings are the vocabulary being forged,
+    # beside a decision the reader is being asked to trust.
+    "#": "&#35;",
+    "-": "&#45;",
+    "+": "&#43;",
+    "*": "&#42;",
+    "=": "&#61;",
+    "~": "&#126;",
+    "|": "&#124;",
 }
 
+#: `_` is deliberately NOT in the table above, and the reason is concrete.
+#: Emphasis is cosmetic — it cannot make a link, run script, forge a heading or
+#: escape the blockquote — and every governed lens category is snake_case
+#: (`data_flow`, `fail_closed`, `secret_handling`). Escaping it would turn every
+#: category into `data&#95;flow`, and those are rendered inside a code span,
+#: where entity references are NOT decoded and would show as literal garbage.
+#: A real defence against a cosmetic problem is not worth a real regression in
+#: the common case; `_code` below carries the guard for the case where some
+#: other field does need escaping.
 _ASCII_DIGITS = frozenset("0123456789")
+_LEADING_ORDERED_ITEM = re.compile(r"\A[0-9]{1,9}\.")
 
 
 def escape_markup(text: str) -> str:
-    """HTML-escape and neutralise everything GitHub would make LIVE.
-
-    Escaping alone is not enough. GitHub's pipeline turns `@name` into a
-    notification, `#12` into a cross-reference that also notifies, and a bare
-    URL into a clickable link — all of which act on the SOURCE text, before any
-    HTML entity is decoded. So each becomes a numeric character reference: the
-    reader still sees `@name`, and the autolinker no longer does.
+    """HTML-escape and neutralise every construct GitHub would make LIVE.
 
     ONE PASS, and that is the whole reason this is a loop rather than a chain of
     `str.replace` calls. The chained version was written first and was wrong:
@@ -208,24 +247,40 @@ def escape_markup(text: str) -> str:
     replacement became `&&#35;64;` and `@mglaeser` reached the body as visible
     garbage instead of a neutralised mention. A single pass cannot rewrite its
     own output, which is the only version of this function that is safe to
-    extend."""
-    out, length = [], len(text)
-    for index, char in enumerate(text):
+    extend — and it has been extended twice since.
+
+    Three constructs need more than a character mapping:
+
+    * `www.example` — GFM's second autolink form. It needs no scheme and no
+      provider at all: a pull request can add a file at `www.attacker.example/
+      setup.py`, and `_render_finding` puts that path immediately after `**`,
+      which is one of the delimiters the extension accepts. Neutralising the dot
+      leaves `www.` visible and unlinked.
+    * `https://…` — the scheme separator the bare-URL autolinker keys on.
+    * a LEADING `1.` — an ordered list marker. `1)` is already dead because `)`
+      is escaped; the dotted form needs the dot, and only at the start, because
+      that is the only place a list can begin."""
+    out, index, length = [], 0, len(text)
+    while index < length:
+        char = text[index]
         replacement = _ESCAPES.get(char)
         if replacement is not None:
             out.append(replacement)
-        elif (char == "#" and index + 1 < length
-              and text[index + 1] in _ASCII_DIGITS):
-            # `#12` cross-references and notifies. `#` alone is harmless, so
-            # ordinary prose keeps its hash.
-            out.append("&#35;")
+            index += 1
+        elif text[index:index + 4].lower() == "www.":
+            out.append(text[index:index + 3] + "&#46;")
+            index += 4
         elif char == ":" and text[index:index + 3] == "://":
-            # A bare URL autolinks, and the scheme separator is what the linker
-            # keys on. Neutralising the colon leaves `://` visible and inert.
             out.append("&#58;")
+            index += 1
         else:
             out.append(char)
-    return "".join(out)
+            index += 1
+    escaped = "".join(out)
+    found = _LEADING_ORDERED_ITEM.match(escaped)
+    if found:
+        return f"{escaped[:found.end() - 1]}&#46;{escaped[found.end():]}"
+    return escaped
 
 
 def sanitize(value, *, scan, limit: int, field: str, redact=()) -> dict:
@@ -299,15 +354,43 @@ def sanitize(value, *, scan, limit: int, field: str, redact=()) -> dict:
     if truncated:
         kept = f"{kept}{TRUNCATION_MARK}"
     # 5. Escaping LAST, so no entity can be cut in half by the bound.
-    return {"field": field, "published": True, "text": escape_markup(kept),
+    escaped = escape_markup(kept)
+    return {"field": field, "published": True, "text": escaped,
+            # The bound is on SOURCE characters, not on the escaped form. A
+            # reason of 600 `<` legitimately becomes 2400 characters of
+            # `&lt;`, and re-truncating after escaping would cut an entity in
+            # half. The published document is bounded by `render`, which
+            # measures each finished block against the remaining budget — so
+            # expansion costs findings shown, never a body over the limit.
+            "published_chars": len(kept),
+            # Whether escaping CHANGED anything, so `_code` knows whether this
+            # value is safe to put inside a code span — entity references are
+            # not decoded there and would render as literal garbage.
+            "altered": escaped != kept,
             "truncated": truncated, "refusal": None, "redacted": redacted,
             "source_chars": len(original)}
 
 
 def _withheld(field: str, refusal: str) -> dict:
     return {"field": field, "published": False, "text": None,
-            "truncated": False, "refusal": refusal, "redacted": False,
-            "source_chars": None}
+            "altered": False, "truncated": False, "refusal": refusal,
+            "redacted": False, "published_chars": 0, "source_chars": None}
+
+
+def _code(sanitized: dict, *, fallback: str = "(withheld)") -> str:
+    """A short governed value, in a code span WHEN that is safe.
+
+    Entity references are not decoded inside a code span. Every value rendered
+    this way is engine-enum-constrained — `low`/`medium`/`high`, and the lens
+    categories, none of which contains a character `escape_markup` touches — so
+    in practice the backticks always apply. If one ever did need escaping, the
+    engine's own guarantee has already been broken, and this renders the escaped
+    form in bold rather than showing a reader `data&#95;flow` and letting them
+    conclude the panel is broken."""
+    if not sanitized.get("published"):
+        return fallback
+    text = sanitized["text"]
+    return f"**{text}**" if sanitized.get("altered") else f"`{text}`"
 
 
 # ------------------------------------------------------------- locations ----
@@ -470,7 +553,7 @@ def _categories(values, *, scan) -> dict:
         got = sanitize(entry, scan=scan, limit=MAX_CATEGORY_CHARS,
                        field="checked_category")
         if got["published"]:
-            shown.append(got["text"])
+            shown.append(_code(got))
         else:
             withheld += 1
     return {"shown": shown, "withheld": withheld,
@@ -756,18 +839,16 @@ def _render_finding(finding: dict) -> str:
     reason = (finding["reason"]["text"] if finding["reason"]["published"]
               else WITHHELD)
     categories = finding["checked_categories"]
-    rendered_categories = (", ".join(f"`{c}`" for c in categories["shown"])
+    rendered_categories = (", ".join(categories["shown"])
                            or "`(none publishable)`")
     if categories["withheld"] or categories["overflow"]:
         rendered_categories += (
             f" (+{categories['withheld'] + categories['overflow']} not shown)")
-    confidence = (finding["confidence"]["text"]
-                  if finding["confidence"]["published"] else "(withheld)")
     return "\n".join([
         f"**{finding['location']['label']}**",
         "",
-        f"- raised by `{finding['model']}` · confidence `{confidence}` · "
-        f"checked {rendered_categories}",
+        f"- raised by `{finding['model']}` · confidence "
+        f"{_code(finding['confidence'])} · checked {rendered_categories}",
         f"- unit `{finding['unit_sha256'][:16]}`",
         "",
         f"> {reason}",

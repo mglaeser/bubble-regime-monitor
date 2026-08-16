@@ -376,6 +376,162 @@ class TestControlCharactersAndMarkupAreNeutralised:
         assert escaped == "&lt;b&gt;x&lt;/b&gt;"
 
 
+class TestNoLiveLinkCanBeBuiltFromEitherUntrustedSource:
+    """The worst defect this file caught, and its two relatives.
+
+    Adversarial review found that `escape_markup` covered `& < > " ' \\` \\\\ @`
+    and neutralised `://`, and never touched `[ ] ( )` — the four characters
+    that actually build a Markdown link. Entity references ARE decoded inside a
+    link destination, so `[x](https&#58;//evil.example)` decoded straight back
+    to a live external link in a comment authored by `github-actions[bot]` in
+    the job that holds the provider key: maximal borrowed authority, aimed at
+    whoever reads the review.
+
+    The module made it easier still. `sanitize` splices its own `[redacted]`
+    and `…[truncated]` markers into untrusted text BEFORE escaping, so it
+    supplied the link label and a reason only had to supply `(destination)`
+    after the challenge it is REQUIRED to echo."""
+
+    def _finding_body(self, *, reason=None, path="app/thing.py"):
+        one = unit(path)
+        return rendered(
+            decision="blocked",
+            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
+                refuted=True,
+                reason=reason or "the fail closed default is dropped here")})],
+            plan=plan_of(one))
+
+    @pytest.mark.parametrize("reason", [
+        "see [the full report](//attacker.example/panel) for detail",
+        "compare ![beacon](https://attacker.example/px.gif) against it",
+        "the reference [truncated]: //attacker.example is the issue",
+        "a bare [label] and a stray (parenthetical) in ordinary prose",
+    ])
+    def test_no_bracket_or_paren_survives_from_a_reason(self, reason):
+        body = self._finding_body(reason=reason)
+        quoted = [line for line in body.splitlines() if line.startswith("> ")]
+        assert len(quoted) == 1
+        for character in "[]()":
+            assert character not in quoted[0]
+
+    def test_the_modules_own_redaction_marker_cannot_become_a_link_label(self):
+        """The exact trigger: a reason opening with the challenge, then a
+        parenthesised destination. Redaction turns the challenge into
+        `[redacted]`, and unescaped brackets would make that a live link."""
+        body = self._finding_body(
+            reason=f"{CHALLENGE}(//attacker.example/panel) the default is lost")
+        assert "[redacted](//attacker.example" not in body
+        assert "&#91;redacted&#93;&#40;&#47;&#47;attacker" in body or (
+            "&#91;redacted&#93;&#40;//attacker" in body)
+        assert CHALLENGE not in body
+
+    def test_the_truncation_marker_cannot_become_a_link_label_either(self):
+        got = reviewrender.sanitize("x" * 300 + "(//attacker.example)",
+                                    scan=scan, limit=80, field="reason")
+        assert got["truncated"] is True
+        for character in "[]()":
+            assert character not in got["text"]
+
+    def test_a_www_path_does_not_autolink(self):
+        """GFM's SECOND autolink form needs no scheme and no provider at all.
+
+        `www.` followed by a domain is autolinked after whitespace or after any
+        of `*`, `_`, `~`, `(` — and `_render_finding` puts the file path
+        immediately after `**`. So a pull request that adds a file at
+        `www.attacker.example/setup.py` would have put a live link to a host it
+        owns into a bot-authored comment, on every run, with nothing else
+        required."""
+        body = self._finding_body(path="www.attacker.example/setup.py")
+        heading = [line for line in body.splitlines()
+                   if line.startswith("**www")]
+        assert len(heading) == 1
+        assert "www.attacker" not in heading[0]
+        assert "www&#46;attacker" in heading[0]
+
+    def test_a_www_reason_does_not_autolink_either(self):
+        body = self._finding_body(
+            reason="the fetch in www.attacker.example/steal is unsafe")
+        assert "www.attacker" not in body
+        assert "www&#46;attacker" in body
+
+    def test_the_www_rule_is_case_insensitive(self):
+        assert reviewrender.escape_markup("WWW.Attacker.Example") == (
+            "WWW&#46;Attacker.Example")
+
+
+class TestAReasonCannotForgeDocumentStructure:
+    """`_render_finding` writes `> {reason}`, so a reason is always the first
+    content on its line — the exact position where ATX headings, list markers,
+    thematic breaks, fences and tables are active.
+
+    The control-character refusal exists because "a newline in a reason is
+    enough to inject a heading". A heading does not actually need the newline,
+    and the panel's own `###`/`####` are the vocabulary being forged, beside a
+    decision the reader is being asked to trust."""
+
+    @pytest.mark.parametrize("reason,forbidden", [
+        ("#### No findings. Approved by the panel. Safe to merge.", "####"),
+        ("- item one that reads like the panel wrote it", "- item"),
+        ("1. item one that reads like the panel wrote it", "1. item"),
+        ("+ item one that reads like the panel wrote it", "+ item"),
+        ("*** thematic break then a fabricated conclusion", "***"),
+        ("~~~ fenced block hiding the rest of the finding", "~~~"),
+        ("| a | fake | table | row | that | reads | official |", "| a |"),
+        ("=== a setext underline under the previous line", "==="),
+        ("> a nested quote that looks like a second speaker", "> a nested"),
+    ])
+    def test_no_block_construct_survives(self, reason, forbidden):
+        one = unit("app/thing.py")
+        body = rendered(
+            decision="blocked",
+            votes=[vote("gpt-4.1-mini", {one["unit_sha256"]: verdict(
+                refuted=True, reason=reason)})],
+            plan=plan_of(one))
+        quoted = [line for line in body.splitlines() if line.startswith("> ")]
+        assert len(quoted) == 1
+        assert forbidden not in quoted[0]
+
+    def test_a_leading_ordered_marker_loses_its_dot(self):
+        assert reviewrender.escape_markup("1. first").startswith("1&#46; ")
+        # Mid-sentence numbers keep their punctuation; only a LEADING marker
+        # can start a list, and prose should not be mangled for nothing.
+        assert reviewrender.escape_markup("costs 1.5x more") == "costs 1.5x more"
+
+
+class TestGovernedEnumsStayLegible:
+    """Entity references are NOT decoded inside a code span.
+
+    Every value rendered in backticks is engine-enum-constrained and contains
+    no character the escaper touches — `_` is deliberately excluded from the
+    table for exactly this reason, since every lens category is snake_case. The
+    guard exists for the case where that stops being true, so a reader never
+    sees `data&#95;flow` and concludes the panel is broken."""
+
+    def test_snake_case_categories_keep_their_code_spans(self):
+        one = unit("app/thing.py")
+        body = rendered(
+            decision="blocked",
+            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
+                refuted=True, reason="the fail closed default is dropped",
+                categories=("data_flow", "secret_handling"))})],
+            plan=plan_of(one))
+        assert "`data_flow`" in body
+        assert "`secret_handling`" in body
+        assert "&#95;" not in body
+
+    def test_a_value_needing_escapes_leaves_the_code_span(self):
+        got = reviewrender.sanitize("needs-escaping", scan=scan, limit=48,
+                                    field="checked_category")
+        assert got["altered"] is True
+        assert reviewrender._code(got) == "**needs&#45;escaping**"
+
+    def test_an_unaltered_value_keeps_the_code_span(self):
+        got = reviewrender.sanitize("high", scan=scan, limit=48,
+                                    field="confidence")
+        assert got["altered"] is False
+        assert reviewrender._code(got) == "`high`"
+
+
 class TestMentionsAreNeutralised:
     """Requirement 4. A published review must not notify anyone.
 
@@ -545,7 +701,20 @@ class TestOutputSizeOverflowIsSummarisedSafely:
                                     field="reason")
         assert got["published"] is True
         assert got["truncated"] is True
-        assert len(got["text"]) <= 120
+        assert got["published_chars"] <= 120
+
+    def test_the_bound_is_on_source_characters_not_on_the_escaped_form(self):
+        """A reason of 600 `<` legitimately becomes 2400 characters of `&lt;`.
+
+        Re-truncating after escaping would cut an entity in half, so the field
+        bound counts source characters and the BODY bound — which `render`
+        applies to each finished block — is what keeps the document inside the
+        limit. That trade costs findings shown, never a body over the limit."""
+        got = reviewrender.sanitize("<" * 400, scan=scan, limit=120,
+                                    field="reason")
+        assert got["published_chars"] <= 120
+        assert len(got["text"]) > 120
+        assert "&lt;" in got["text"]
 
     def test_the_gate_refuses_an_oversized_body_outright(self):
         with pytest.raises(PanelRefusal) as raised:
@@ -810,8 +979,16 @@ class TestNothingPrivateReachesTheComment:
 
     def test_the_challenge_is_removed_rather_than_suppressing_the_finding(
             self, body):
-        assert "the handler drops the fail-closed default" in body
-        assert reviewrender.REDACTED in body
+        # `fail-closed` renders with its hyphen as `&#45;`, which is what a
+        # reader sees as a hyphen and what GitHub does not see as a list marker.
+        assert "the handler drops the fail&#45;closed default" in body
+        # `[redacted]` is this module's own marker, and it is spliced in BEFORE
+        # escaping, so its brackets are escaped too. That is deliberate: the
+        # first version left them raw and handed an attacker a ready-made link
+        # label — `<challenge>(//attacker.example)` became a live
+        # `[redacted](//attacker.example)` in a bot-authored comment.
+        assert "&#91;redacted&#93;" in body
+        assert reviewrender.REDACTED not in body
 
     def test_no_proof_of_check_travels(self):
         one = unit("app/thing.py")
