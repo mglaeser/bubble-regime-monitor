@@ -193,22 +193,6 @@ CARRIES_RUN_TOKEN = "carries_a_run_token"  # noqa: S105 - a REFUSAL REASON
 #: What replaces a redacted run token in published text.
 REDACTED = "[redacted]"
 
-#: A run of hex long enough to be part of the execution challenge, which is 32
-#: lowercase hex characters (`trustedlane.challenge.TOKEN_HEX`).
-#:
-#: Exact-substring redaction is not enough on its own, and the gap is real: the
-#: engine's own secret scanner deliberately SKIPS a 32-hex token
-#: (`preflight._HEX_DIGEST` treats it as a content digest, which is the correct
-#: default), so redaction is the only thing standing between a challenge and the
-#: comment. A model that echoed it in upper case, or split across a space, or
-#: truncated, would slide past an exact `str.replace` and past an exact
-#: containment check in the body gate.
-#:
-#: 16 rather than 32, so a clean half of the token is caught too. A field
-#: carrying any hex run that overlaps the challenge is withheld outright rather
-#: than patched: partial disclosure of a token whose whole purpose is to be
-#: unguessable is not something to render carefully.
-_HEX_RUN = re.compile(r"[0-9a-fA-F]{16,}")
 
 
 # --------------------------------------------------------------- sanitize ---
@@ -297,6 +281,93 @@ _LEADING_ORDERED_ITEM = re.compile(r"\A[0-9]{1,9}\.")
 #: renderer, forever, and a reader loses nothing they cannot see.
 _AT = "(at)"
 _HASH_REFERENCE = "(hash)"
+
+#: Untrusted text is published inside a CODE SPAN, and that is the whole
+#: defence — the escape table above is now a second layer, not the first.
+#:
+#: Three rounds of review found six leaks in character-level escaping: `&#64;`
+#: rendered a live `mailto:` anchor, `#N` and `GH-N` reached GitHub's
+#: cross-reference filter (which runs on the rendered HTML, after decoding),
+#: `___` became a thematic break that deleted the explanation, one to three
+#: leading spaces slipped past the ordered-list guard, and four made an indented
+#: code block in which the escapes themselves rendered as visible garbage.
+#:
+#: Every one is the same failure: enumerating dangerous characters in a grammar
+#: this module does not control and cannot test. Inside a code span there is no
+#: grammar to enumerate — no inline or block Markdown is active, no entity is
+#: decoded, and GitHub's mention and reference filters skip `code` entirely
+#: (`IGNORE_PARENTS`). Verified against cmark-gfm with GitHub's extension set: a
+#: reason carrying all of the above at once renders to zero anchors, no HTML, no
+#: heading, no list, no rule, inside a single `<code>` element.
+#:
+#: The cost is monospace prose. That is a small price, and it is honest about
+#: what the text is: quoted machine output.
+_BACKTICK_RUN = re.compile(r"`+")
+
+#: A fenced span, as the body gate sees it. Non-greedy, and the
+#: back-reference is what makes the closing fence the same length as the
+#: opening one — which is the CommonMark rule.
+_CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)*?\1", re.DOTALL)
+
+
+def code_span(text: str) -> str:
+    """Fence `text` in more backticks than it contains anywhere.
+
+    CommonMark closes a span on a run of EXACTLY the opening length, so a fence
+    one longer than the longest run inside cannot be closed early. The spaces
+    are stripped by the renderer when both are present, and they are what lets
+    content begin or end with a backtick."""
+    longest = max((len(m.group(0)) for m in _BACKTICK_RUN.finditer(text)),
+                  default=0)
+    fence = "`" * (longest + 1)
+    return f"{fence} {text} {fence}"
+
+
+#: Everything a run token could be split or shaped into, folded away before the
+#: comparison. NFKC turns fullwidth `ｂａ９ｃ` back into `ba9c`; dropping every
+#: non-alphanumeric turns `ba9c 736f` and `ba9c-736f` back into `ba9c736f`.
+#:
+#: All three were live. The old rule — exact substring, plus a sweep for hex
+#: runs of sixteen or more — published the challenge whenever a model split it
+#: into shorter groups or wrote it in fullwidth digits, and the reason charset
+#: now permits non-ASCII in prose, which is what made the homoglyph form
+#: reachable.
+_NOT_ALNUM = re.compile(r"[^0-9a-z]+")
+
+
+def _fold_for_token_match(text: str) -> str:
+    import unicodedata
+    return _NOT_ALNUM.sub("", unicodedata.normalize("NFKC", text).casefold())
+
+
+#: How much of a run token counts as disclosing it. The challenge is 32
+#: characters (`trustedlane.challenge.TOKEN_HEX`), so sixteen is half.
+MIN_DISCLOSED_TOKEN_CHARS = 16
+
+
+def discloses_token(value: str, token: str,
+                    minimum: int = MIN_DISCLOSED_TOKEN_CHARS) -> bool:
+    """Does `value` reveal `minimum` consecutive characters of `token`?
+
+    TWO checks are needed and the first draft of this fold had only one. A
+    folded containment test catches the token SPLIT, hyphenated or written in
+    fullwidth digits, because folding puts it back together — but it cannot
+    catch a TRUNCATED echo, which is not a containment of the whole token at
+    all. Sliding a window over the token catches both: every reshaping folds to
+    a string containing some window, and a prefix of half the token contains one
+    by definition.
+
+    Seventeen comparisons for a 32-character token. A sixteen-character run of
+    an unguessable value appearing by chance in prose is not a thing that
+    happens; a model quoting half of one is."""
+    folded_token = _fold_for_token_match(token)
+    if len(folded_token) < minimum:
+        # Too short to slide. Fall back to whole-token containment rather than
+        # lowering the bar, because a short token would otherwise match noise.
+        return bool(folded_token) and folded_token in _fold_for_token_match(value)
+    folded_value = _fold_for_token_match(value)
+    return any(folded_token[i:i + minimum] in folded_value
+               for i in range(len(folded_token) - minimum + 1))
 
 
 def escape_markup(text: str) -> str:
@@ -406,21 +477,15 @@ def sanitize(value, *, scan, limit: int, field: str, redact=(),
     for token in redact or ():
         if not isinstance(token, str) or not token:
             continue
-        # CASE-INSENSITIVE. The challenge is lowercase hex; a model that echoed
-        # it shouting would have walked straight past an exact `str.replace`,
-        # and past the exact containment check in `assert_publishable` too.
         pattern = re.compile(re.escape(token), re.IGNORECASE)
         if pattern.search(value):
             value = pattern.sub(REDACTED, value)
             redacted = True
-        # Then the residue. A whitespace-split or truncated echo is not a
-        # substring of the token and is still a disclosure of it, so any hex run
-        # that overlaps the challenge withholds the field rather than being
-        # patched into something that looks safe.
-        lowered = token.lower()
-        for run in _HEX_RUN.findall(value):
-            if run.lower() in lowered or lowered in run.lower():
-                return _withheld(field, CARRIES_RUN_TOKEN)
+        # Then the FOLDED window sweep, which is what actually holds. Split,
+        # hyphenated, fullwidth or truncated — none is a substring of the token
+        # and every one discloses it.
+        if discloses_token(value, token):
+            return _withheld(field, CARRIES_RUN_TOKEN)
     if not value.strip() or value.strip() == REDACTED:
         return _withheld(field, NOTHING_LEFT)
     # 1. Control characters, on the raw text. A newline in a reason is enough to
@@ -449,20 +514,14 @@ def sanitize(value, *, scan, limit: int, field: str, redact=(),
     kept = value[:max(0, limit - len(TRUNCATION_MARK))] if truncated else value
     if truncated:
         kept = f"{kept}{TRUNCATION_MARK}"
-    # 5. Escaping LAST, so no entity can be cut in half by the bound.
-    escaped = escape_markup(kept)
-    return {"field": field, "published": True, "text": escaped,
-            # The bound is on SOURCE characters, not on the escaped form. A
-            # reason of 600 `<` legitimately becomes 2400 characters of
-            # `&lt;`, and re-truncating after escaping would cut an entity in
-            # half. The published document is bounded by `render`, which
-            # measures each finished block against the remaining budget — so
-            # expansion costs findings shown, never a body over the limit.
+    # 5. NO ESCAPING. The text is published inside a code span, where there is
+    #    no Markdown grammar to escape against and where an entity reference
+    #    would render as literal garbage. `escape_markup` remains for the one
+    #    place trusted text is interpolated into prose, and as a second layer
+    #    the body gate can still check.
+    return {"field": field, "published": True, "text": kept,
+            "code_span": code_span(kept),
             "published_chars": len(kept),
-            # Whether escaping CHANGED anything, so `_code` knows whether this
-            # value is safe to put inside a code span — entity references are
-            # not decoded there and would render as literal garbage.
-            "altered": escaped != kept,
             "truncated": truncated, "refusal": None, "redacted": redacted,
             "source_chars": len(original)}
 
@@ -473,23 +532,11 @@ def _withheld(field: str, refusal: str) -> dict:
             "redacted": False, "published_chars": 0, "source_chars": None}
 
 
-def _code(sanitized: dict, *, fallback: str = "(withheld)") -> str:
-    """A short governed value, in a code span WHEN that is safe.
-
-    Entity references are not decoded inside a code span. Every value rendered
-    this way is engine-enum-constrained — `low`/`medium`/`high`, and the lens
-    categories, none of which contains a character `escape_markup` touches — so
-    in practice the backticks always apply. If one ever did need escaping, the
-    engine's own guarantee has already been broken, and this renders the escaped
-    form in bold rather than showing a reader `data&#95;flow` and letting them
-    conclude the panel is broken."""
+def _code(sanitized: dict, *, fallback: str = "`(withheld)`") -> str:
+    """A sanitized value, fenced. One helper, so nothing renders unfenced."""
     if not sanitized.get("published"):
         return fallback
-    text = sanitized["text"]
-    return f"**{text}**" if sanitized.get("altered") else f"`{text}`"
-
-
-# ------------------------------------------------------------- locations ----
+    return sanitized["code_span"]
 
 
 def unit_locations(plan: dict) -> dict:
@@ -689,10 +736,11 @@ def _location_view(located, unit_hash: str, *, scan) -> dict:
     # sort key that a future edit might render; the rank cannot be rendered by
     # accident because it is not text.
     if path["published"]:
-        label, rank, sort_path = path["text"], 0, str(located.get("path") or "")
+        label = path["code_span"]
+        rank, sort_path = 0, str(located.get("path") or "")
     else:
         digest = str(located.get("path_sha256") or "")
-        label = f"path withheld by output-privacy policy (path {digest[:16]})"
+        label = f"path withheld by output-privacy policy (path `{digest[:16]}`)"
         rank, sort_path = 1, digest
     if line_range:
         singular = side.replace("lines", "line")
@@ -805,7 +853,8 @@ def block_reasons(aggregate_record: dict, *, scan) -> list:
         got = sanitize(record.get("reason"), scan=scan, limit=MAX_REASON_CHARS,
                        field=f"{gate}_reason", charset=CHARSET_TEXT)
         reasons.append({"gate": gate,
-                        "text": got["text"] if got["published"] else WITHHELD})
+                        "text": got["code_span"] if got["published"]
+                        else WITHHELD})
     return reasons
 
 
@@ -903,43 +952,37 @@ def assert_publishable(body: str, *, challenge: str | None = None) -> str:
     without_newlines = body.replace("\n", "")
     if _CONTROL.sub("", without_newlines) != without_newlines:
         refuse("category=review_body_carries_control_characters")
-    # The character itself, not an encoding of it. `&#64;` was the first
-    # version and it renders as a live `mailto:` anchor under cmark-gfm and as
-    # a live mention under GitHub's post-render filter; this assertion passed
-    # over it because it was checking the source for a character the encoding
-    # had removed. Now the character is genuinely gone, so the check means what
-    # it says.
-    if "@" in body:
-        refuse("category=review_body_carries_a_live_mention — '@' is REMOVED "
-               "from rendered text rather than encoded, because every encoding "
-               "of it survives to a text node that GitHub's mention filter "
-               "reads after decoding")
-    # NOT preceded by `&`. Every numeric character reference this module emits
-    # is `&#` followed by digits — `&#35;`, `&#45;`, `&#91;` — so a naive
-    # `#[0-9]` search fires on the escaper's own output and refuses every review
-    # containing a single escaped character. Found immediately by the tests,
-    # which is the only reason this file has a gate worth having.
-    if re.search(r"(?<!&)#[0-9]", body):
+
+    # OUTSIDE THE CODE SPANS, and that is the whole change. Untrusted text is
+    # published fenced, where `@`, `#23` and `GH-26` are inert — GitHub's
+    # mention and reference filters skip `code` entirely. So the body gate no
+    # longer asks "is this character anywhere", which was unanswerable once the
+    # character was legitimately present as literal text; it asks the question
+    # that matters: is any of it OUTSIDE a fence, where it would be live.
+    outside = _CODE_SPAN.sub(" ", body)
+    if "@" in outside:
+        refuse("category=review_body_carries_a_live_mention — an '@' outside a "
+               "code span is a notification. Inside one it is text, which is "
+               "why untrusted prose is published fenced")
+    if re.search(r"(?<!&)#[0-9]", outside):
         refuse("category=review_body_carries_a_cross_reference — '#' before a "
-               "digit is a cross-reference that notifies, and the filter that "
-               "makes it one runs on the rendered HTML")
+               "digit outside a code span is a cross-reference, and the filter "
+               "that makes it one runs on the rendered HTML")
+    if re.search(r"(?i)\bGH-[0-9]", outside):
+        refuse("category=review_body_carries_a_gh_reference — `GH-26` is the "
+               "other spelling of the same cross-reference")
+
     if isinstance(challenge, str) and challenge:
-        # Case-INSENSITIVE, and then the hex-run sweep, for the same reasons
-        # `sanitize` uses both: an exact comparison misses a shouted echo, and
-        # a substring comparison misses a split or truncated one.
-        if challenge.lower() in body.lower():
+        # FOLDED, for the reason `sanitize` folds: a token split across spaces,
+        # hyphenated, or written in fullwidth digits is not a substring of
+        # itself and is still a complete disclosure of it.
+        if discloses_token(body, challenge):
             refuse("category=review_body_carries_the_execution_challenge — the "
                    "challenge is what proves a verdict was written for this "
                    "run; published, it is a token a later model could echo "
-                   "without having seen the request")
-        lowered = challenge.lower()
-        for run in _HEX_RUN.findall(body):
-            if run.lower() in lowered:
-                refuse("category=review_body_carries_part_of_the_challenge "
-                       f"chars={len(run)} — a hex run in the published body "
-                       "overlaps this run's challenge. Partial disclosure of a "
-                       "token whose whole purpose is to be unguessable is not "
-                       "something to publish carefully")
+                   "without having seen the request. Whole or in half, split, "
+                   "hyphenated or in fullwidth digits: the comparison folds "
+                   "all of those together before it looks")
     return body
 
 
@@ -1065,7 +1108,8 @@ def render(review: dict, *, challenge: str | None = None) -> str:
 
 
 def _render_finding(finding: dict) -> str:
-    reason = (finding["reason"]["text"] if finding["reason"]["published"]
+    """One finding. Every untrusted value in it is inside a code span."""
+    reason = (finding["reason"]["code_span"] if finding["reason"]["published"]
               else WITHHELD)
     categories = finding["checked_categories"]
     rendered_categories = (", ".join(categories["shown"])
@@ -1100,9 +1144,11 @@ def _footer(review: dict) -> list:
         "holds a repository-scoped provider secret in the repository it "
         "reviews, so this is not an independent third-party attestation and "
         "cannot satisfy a requirement written for one. The machine decision is "
-        "authoritative — this comment is a reading of it. Full per-model "
-        "verdicts, proofs and digests are retained privately and are not "
-        "published.</sub>",
+        "authoritative — this comment is a reading of it. Per-model verdict "
+        "DIGESTS, counts and the aggregate decision are retained privately in "
+        "`panel-evidence.json`; the full reason and proof text is scanned, used "
+        "to decide, and then discarded rather than persisted, so a withheld "
+        "explanation above is not recoverable from an artifact.</sub>",
     ]
 
 

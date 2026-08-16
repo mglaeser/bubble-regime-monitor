@@ -479,3 +479,195 @@ class TestPreflightUsesRealWaitingOnlyInProduction:
         source = inspect.getsource(preflightcli.decide)
         assert source.count("observation.settle(") == 2
         assert source.count("sleep=sleep") == 2
+
+
+class TestTheRefusalLivesInTheGateNotInTheSort:
+    """Where a refusal is raised decides whether a red can be masked.
+
+    The first attempt at "a red must always win" moved the conclusion check to
+    the front of `assert_contexts_are_green` — and did nothing, because
+    `latest_by_context` runs first and its sort raised
+    `check_run_has_no_completed_at` before any conclusion had been looked at. A
+    finished, FAILED check sitting beside one mid-write sibling was polled for
+    the full thirty-second bound under a category naming the wrong problem.
+
+    The refusal had to leave `sort_key` entirely. Sorting now RANKS a mid-write
+    record newest; the gate refuses it, after the red."""
+
+    def _runs(self, **overrides):
+        base = {"test (3.12)": check_run("test (3.12)", identifier=1),
+                "image": check_run("image", identifier=2)}
+        base.update(overrides)
+        return list(base.values())
+
+    def test_sorting_never_raises_for_a_mid_write_record(self):
+        selected = checkruns.latest_by_context(
+            self._runs(image=check_run("image", completed_at=None,
+                                       identifier=2)),
+            head_sha=HEAD, contexts=CHECKS)
+        assert set(selected) == set(CHECKS)
+
+    def test_a_mid_write_record_sorts_newest_within_its_context(self):
+        selected = checkruns.latest_by_context(
+            [check_run("image", identifier=1,
+                       completed_at="2026-08-15T23:59:00Z"),
+             check_run("image", identifier=2, completed_at=None)],
+            head_sha=HEAD, contexts=("image",))
+        assert selected["image"]["id"] == 2
+
+    def test_a_red_sibling_beats_a_mid_write_one(self):
+        with pytest.raises(PanelRefusal) as caught:
+            assert_green(self._runs(
+                **{"test (3.12)": check_run("test (3.12)",
+                                            conclusion="failure", identifier=1),
+                   "image": check_run("image", completed_at=None,
+                                      identifier=2)}))
+        assert "check_not_successful" in caught.value.reason
+        assert not observation.is_retryable(caught.value)
+
+    def test_a_red_sibling_beats_an_absent_one(self):
+        with pytest.raises(PanelRefusal) as caught:
+            assert_green([check_run("test (3.12)", conclusion="failure")])
+        assert "check_not_successful" in caught.value.reason
+        assert not observation.is_retryable(caught.value)
+
+    def test_a_red_sibling_beats_a_running_one(self):
+        with pytest.raises(PanelRefusal) as caught:
+            assert_green(self._runs(
+                **{"test (3.12)": check_run("test (3.12)",
+                                            conclusion="failure", identifier=1),
+                   "image": check_run("image", status="in_progress",
+                                      conclusion=None, completed_at=None,
+                                      identifier=2)}))
+        assert "check_not_successful" in caught.value.reason
+
+    def test_a_mid_write_record_alone_is_still_waited_on(self):
+        with pytest.raises(PanelRefusal) as caught:
+            assert_green(self._runs(
+                image=check_run("image", completed_at=None, identifier=2)))
+        assert "check_run_has_no_completed_at" in caught.value.reason
+        assert observation.is_retryable(caught.value)
+
+    def test_the_refusal_names_the_conclusion_the_record_carried(self):
+        with pytest.raises(PanelRefusal) as caught:
+            assert_green(self._runs(
+                image=check_run("image", completed_at=None, identifier=2,
+                                conclusion="failure")))
+        assert "failure" in caught.value.reason
+
+    def test_settle_reaches_the_red_rather_than_polling_it(self):
+        """End to end: the loop must refuse on the first observation."""
+        sleeps = Sleeps()
+        reads = []
+
+        def read():
+            reads.append(1)
+            return self._runs(
+                **{"test (3.12)": check_run("test (3.12)",
+                                            conclusion="failure", identifier=1),
+                   "image": check_run("image", completed_at=None,
+                                      identifier=2)})
+
+        with pytest.raises(PanelRefusal) as caught:
+            observation.settle(read=read, assertion=assert_green, where="t",
+                               sleep=sleeps)
+        assert "check_not_successful" in caught.value.reason
+        assert len(reads) == 1
+        assert sleeps.calls == []
+
+
+class TestADuplicateJobNameCannotLaunderARed:
+    """`observed[name] = ...` in a loop is list order deciding a required gate.
+
+    A job name can legitimately appear twice — a re-run within one workflow run,
+    or a matrix leg — and the payload carries no timestamp to order them by. So
+    a FAILED `test (3.12)` followed by a successful one reported GREEN, purely
+    because of the order the API returned them. That is the exact defect
+    `checkruns` was written to remove from the check-run side; it survived here
+    until adversarial review found it.
+
+    Severity needs no ordering: take the worst."""
+
+    def _jobs(self, *pairs):
+        return [{"name": n, "status": "completed" if c not in (None,) else
+                 "in_progress", "conclusion": c} for n, c in pairs]
+
+    def test_a_red_then_a_green_of_the_same_name_is_red(self):
+        with pytest.raises(PanelRefusal) as caught:
+            preflight.assert_triggering_ci_jobs_are_green(
+                self._jobs(("test (3.12)", "failure"),
+                           ("test (3.12)", "success"),
+                           ("image", "success")), run_id=1)
+        assert "triggering_run_job_not_successful" in caught.value.reason
+        assert not observation.is_retryable(caught.value)
+
+    def test_a_green_then_a_red_of_the_same_name_is_also_red(self):
+        """Both orders, because the point is that order does not decide."""
+        with pytest.raises(PanelRefusal) as caught:
+            preflight.assert_triggering_ci_jobs_are_green(
+                self._jobs(("test (3.12)", "success"),
+                           ("test (3.12)", "failure"),
+                           ("image", "success")), run_id=1)
+        assert "triggering_run_job_not_successful" in caught.value.reason
+
+    def test_an_incomplete_duplicate_outranks_a_green_one(self):
+        with pytest.raises(PanelRefusal) as caught:
+            preflight.assert_triggering_ci_jobs_are_green(
+                [{"name": "test (3.12)", "status": "completed",
+                  "conclusion": "success"},
+                 {"name": "test (3.12)", "status": "in_progress",
+                  "conclusion": None},
+                 {"name": "image", "status": "completed",
+                  "conclusion": "success"}], run_id=1)
+        assert "triggering_run_job_incomplete" in caught.value.reason
+        assert observation.is_retryable(caught.value)
+
+    def test_a_red_still_outranks_an_incomplete_duplicate(self):
+        with pytest.raises(PanelRefusal) as caught:
+            preflight.assert_triggering_ci_jobs_are_green(
+                [{"name": "test (3.12)", "status": "in_progress",
+                  "conclusion": None},
+                 {"name": "test (3.12)", "status": "completed",
+                  "conclusion": "failure"},
+                 {"name": "image", "status": "completed",
+                  "conclusion": "success"}], run_id=1)
+        assert "triggering_run_job_not_successful" in caught.value.reason
+
+    def test_two_greens_of_one_name_are_still_green(self):
+        record = preflight.assert_triggering_ci_jobs_are_green(
+            self._jobs(("test (3.12)", "success"), ("test (3.12)", "success"),
+                       ("image", "success")), run_id=1)
+        assert record["jobs"]["test (3.12)"] == "success"
+
+
+class TestABlockedAggregateNeverContradictsItsOwnCounts:
+    """"the engine's synthesis refuted 0 unit(s)" is a sentence that argues with
+    itself, and the readable review publishes it verbatim under "Why this
+    blocked" — beside a decision the reader is being asked to trust.
+
+    The engine blocks for the role and corroboration gates as well as for a
+    refutation, and in those cases the refuted count is zero."""
+
+    def _aggregate(self, **synthesis):
+        from midtermpanel.panel import aggregate
+        base = {"overall_approved": False, "refuted_unit_count": 0,
+                "approved_unit_count": 2, "synthesis_sha256": "y" * 64}
+        base.update(synthesis)
+        return aggregate(
+            votes=[{"model": "gpt-5.6-sol",
+                    "v": {"refuted_count": 0, "verdicts_by_unit": {}}}],
+            synthesis=base)
+
+    def test_a_role_gate_block_does_not_claim_a_refutation(self):
+        reason = self._aggregate()["engine_gate"]["reason"]
+        assert "refuted 0" not in reason
+        assert "no unit was refuted" in reason
+        assert "required approver" in reason
+
+    def test_a_real_refutation_still_reports_its_count(self):
+        reason = self._aggregate(refuted_unit_count=3)["engine_gate"]["reason"]
+        assert "refuted 3 unit(s)" in reason
+
+    def test_an_approval_is_unchanged(self):
+        reason = self._aggregate(overall_approved=True)["engine_gate"]["reason"]
+        assert "every unit approved" in reason

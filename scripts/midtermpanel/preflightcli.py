@@ -58,6 +58,16 @@ PUBLIC_OUTPUTS = ("proceed", "applicability", "applicability_reason",
                   "tested_base_sha", "tested_head_sha", "review_class")
 
 
+#: The outputs the workflow's own `outputs:` block consumes. A subset of
+#: `PUBLIC_OUTPUTS`, named separately so the self-test compares two things that
+#: can actually disagree.
+REQUIRED_PUBLIC_OUTPUTS = (
+    "proceed", "pr_number", "head_sha", "base_sha", "high_risk",
+    "workflow_change", "engine_digest", "policy_digest",
+    "triggering_ci_run_id", "triggering_ci_run_attempt",
+    "tested_base_sha", "tested_head_sha", "review_class")
+
+
 def _policy_digest(root: str) -> str:
     from .evidence import digest_of
     from .policystate import load_policy
@@ -253,24 +263,32 @@ def _self_test() -> int:
 
     source = pathlib.Path(__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
+    # The module part AND the imported names, together. `or` made the second
+    # a FALLBACK for the first, so for any `from <something> import ...` with a
+    # real module name the imported symbols were never looked at — and
+    # `from midtermpanel import transport`, the plain absolute spelling of the
+    # relative form this guard does catch, sailed through while the self-test
+    # printed `ok`. A guard that reports a property it cannot see is worse than
+    # no guard, because it answers the question.
     imports_transport = any(
         isinstance(node, (ast.Import, ast.ImportFrom))
-        and "transport" in (getattr(node, "module", "") or
-                            " ".join(a.name for a in node.names))
+        and "transport" in " ".join(
+            [getattr(node, "module", "") or ""] + [a.name for a in node.names])
         for node in ast.walk(tree))
     return self_test_report("preflightcli", {
         "module imports": True,
         "decide is callable": callable(decide),
         "does not import the provider transport": not imports_transport,
-        "emits the eight required outputs": set(
-            ["proceed", "pr_number", "head_sha", "base_sha", "high_risk",
-             "workflow_change", "engine_digest", "policy_digest",
-             "triggering_ci_run_id", "triggering_ci_run_attempt",
-             "tested_base_sha", "tested_head_sha", "review_class"]) <= set(
-            ["proceed", "pr_number", "head_sha", "base_sha", "high_risk",
-             "workflow_change", "engine_digest", "policy_digest",
-             "triggering_ci_run_id", "triggering_ci_run_attempt",
-             "tested_base_sha", "tested_head_sha", "review_class"]),
+        # AGAINST THE MODULE CONSTANT, not against a copy of the literal. The
+        # old version compared a thirteen-name list to a byte-identical
+        # thirteen-name list — `X <= X`, true for every possible state of the
+        # program — under a label that said "eight" while `PUBLIC_OUTPUTS` has
+        # seventeen. It named neither `PUBLIC_OUTPUTS` nor `decide`, so it could
+        # not detect the exact failure the comment beside it describes: an
+        # output the workflow declares and the CLI never emits, which resolves
+        # to the empty string with no error.
+        f"declares all {len(PUBLIC_OUTPUTS)} public outputs": set(
+            REQUIRED_PUBLIC_OUTPUTS) <= set(PUBLIC_OUTPUTS),
     })
 
 

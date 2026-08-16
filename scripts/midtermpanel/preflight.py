@@ -473,22 +473,46 @@ def assert_triggering_ci_jobs_are_green(jobs, *, run_id: int) -> dict:
     the caller hoped for."""
     if not isinstance(jobs, list):
         refuse("category=triggering_run_jobs_not_a_list")
+    # WORST-WINS per name, not last-wins. The loop used to overwrite
+    # `observed[name]`, so two records for one job name were resolved by the
+    # order the API happened to return them — and a FAILED `test (3.12)`
+    # followed by a successful one reported green. That is list order deciding a
+    # required gate, which is the exact defect `checkruns` was written to remove
+    # from the check-run side; it survived here.
+    #
+    # A job name can legitimately appear twice: a re-run within one workflow
+    # run, or a matrix leg. There is no `completed_at` on this payload to order
+    # them by, so ordering is not available — but severity is, and taking the
+    # worst is the fail-closed answer that needs no ordering at all.
+    #: Higher is worse. A real failure outranks everything, so it can never be
+    #: overwritten by a later green record for the same name.
+    severity = {"success": 0, "unwritten": 2, "incomplete": 3}
     observed = {}
+
+    def _rank(value) -> int:
+        return severity.get(value, 4)
+
+    def _worse(existing, candidate):
+        if existing is None:
+            return candidate
+        return candidate if _rank(candidate) > _rank(existing) else existing
+
     for job in jobs:
         if not isinstance(job, dict):
             continue
         name = str(job.get("name") or "")
         if name in REQUIRED_CI_JOBS:
             if str(job.get("status")) != "completed":
-                observed[name] = "incomplete"
+                seen = "incomplete"
             elif job.get("conclusion") is None:
                 # Completed with no conclusion: the same write lag as a check
                 # run with no `completed_at`, and it used to be reported as
                 # `=None` under the not-successful category — a permanent
                 # refusal for a state that resolves itself in a second.
-                observed[name] = "unwritten"
+                seen = "unwritten"
             else:
-                observed[name] = str(job.get("conclusion"))
+                seen = str(job.get("conclusion"))
+            observed[name] = _worse(observed.get(name), seen)
     # SAME ORDER, SAME REASON as `checkruns.assert_contexts_are_green`. A red
     # is evaluated first and wins: with "incomplete" checked ahead of it, a job
     # that had finished and FAILED was reported under the retryable

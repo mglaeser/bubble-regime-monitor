@@ -169,8 +169,37 @@ def _issue_number(value) -> int:
 # -------------------------------------------------------------- transport ---
 
 
-def _request(url: str, *, method: str, token: str, opener, body: dict | None,
-             where: str, timeout: int = 30):
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect is a request to send the bearer token somewhere else.
+
+    `urllib` follows 301/302/307 by default and re-sends the headers that were
+    added to the Request — including `Authorization`. Every URL this module
+    builds is pinned to `api.github.com` and a numeric repository id, and that
+    pinning means nothing if the response can move the request. There is no
+    legitimate redirect on these endpoints, so the honest handling is a refusal
+    rather than a host allowlist that would have to be kept correct."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        refuse(f"category=review_publish_redirect_refused http_status={code} "
+               "— the response asked this request to go somewhere else, and "
+               "the request carries a bearer token. Every URL here is pinned "
+               "to api.github.com and a numeric repository id; a redirect is "
+               "the one thing that could move it")
+
+
+def _no_redirects(opener):
+    """The caller's opener, or a redirect-refusing one when it is the default.
+
+    Tests inject a recorder and must keep it. Production passes nothing, and
+    gets an opener built from the handler above rather than the module-level
+    default that follows redirects."""
+    if opener is not None:
+        return opener
+    return urllib.request.build_opener(_RefuseRedirects()).open
+
+
+def _request(url: str, *, method: str, token: str, opener=None,
+             body: dict | None = None, where: str = "", timeout: int = 30):
     if method not in ("GET", *PUBLISH_METHODS):
         refuse(f"category=review_publish_method_not_permitted method={method!r} "
                f"permitted={['GET', *PUBLISH_METHODS]}")
@@ -188,7 +217,7 @@ def _request(url: str, *, method: str, token: str, opener, body: dict | None,
     if data is not None:
         http.add_header("Content-Type", "application/json")
     try:
-        with opener(http, timeout=timeout) as response:
+        with _no_redirects(opener)(http, timeout=timeout) as response:
             return (int(getattr(response, "status", 0) or 0), response.read())
     except urllib.error.HTTPError as exc:
         # Status only, never the body. A GitHub error body can echo request

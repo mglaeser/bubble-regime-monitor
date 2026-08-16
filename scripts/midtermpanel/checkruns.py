@@ -50,16 +50,9 @@ SUCCESS = "success"
 
 
 def _timestamp(value, *, name: str, conclusion=None) -> datetime.datetime:
-    if not isinstance(value, str) or not value.strip():
-        # The observed conclusion travels with the refusal. `observation.settle`
-        # waits on this category, so without it an operator watching a run that
-        # never settles would see "no timestamp" for thirty seconds and never
-        # learn that the record also said `failure`.
-        refuse(f"category=check_run_has_no_completed_at check={name!r} "
-               f"observed_conclusion={conclusion!r} — a record with no "
-               "timestamp cannot be ordered, and guessing its place is how a "
-               "stale green masks a fresh red")
-    text = value.strip().replace("Z", "+00:00")
+    """Parse a timestamp that IS present. Absence is `sort_key`'s business."""
+    del conclusion
+    text = str(value).strip().replace("Z", "+00:00")
     try:
         parsed = datetime.datetime.fromisoformat(text)
     except ValueError:
@@ -101,6 +94,21 @@ def _identifier(record: dict, *, name: str) -> int:
 _STILL_RUNNING = 1
 _FINISHED = 0
 
+#: A record claiming `status: "completed"` with no `completed_at`. RANKED, not
+#: refused, and that distinction is the whole point of this constant.
+#:
+#: Refusing it inside `sort_key` refuses during SORTING — before
+#: `assert_contexts_are_green` has looked at a single conclusion. So a check that
+#: had FINISHED AND FAILED, sitting beside one mid-write sibling, raised the
+#: retryable `check_run_has_no_completed_at` and was polled for thirty seconds
+#: under a category naming the wrong problem. Moving the red check to the front
+#: of `assert_contexts_are_green` did not fix that, because the sort runs first;
+#: the refusal had to leave `sort_key` entirely.
+#:
+#: Sorted NEWEST — newer even than a running attempt — because a record being
+#: written right now is the most recent event on its context.
+_MID_WRITE = 2
+
 #: A constant standing in for the timestamp a non-terminal record does not have.
 #: Never compared against a real one: the rank above already separates them.
 _NO_TIMESTAMP = datetime.datetime.min.replace(tzinfo=datetime.UTC)
@@ -134,9 +142,12 @@ def sort_key(record: dict, *, name: str) -> tuple:
     if str(record.get("status") or "") != TERMINAL:
         return (_STILL_RUNNING, _NO_TIMESTAMP, _attempt(record),
                 _identifier(record, name=name))
-    return (_FINISHED,
-            _timestamp(record.get("completed_at"), name=name,
-                       conclusion=record.get("conclusion")),
+    stamp = record.get("completed_at")
+    if not isinstance(stamp, str) or not stamp.strip():
+        return (_MID_WRITE, _NO_TIMESTAMP, _attempt(record),
+                _identifier(record, name=name))
+    return (_FINISHED, _timestamp(stamp, name=name,
+                                  conclusion=record.get("conclusion")),
             _attempt(record), _identifier(record, name=name))
 
 
@@ -213,6 +224,21 @@ def assert_contexts_are_green(check_runs, *, head_sha: str, contexts,
     #    check above as `test (3.12)=None` — a permanent refusal for a state
     #    that resolves itself in a second. Its own category, so it can be
     #    waited on and a real red still cannot.
+    # 2a. TERMINAL WITH NO TIMESTAMP — the originally observed race. Refused
+    #     here rather than during sorting, so a red sibling is reported first.
+    unstamped = sorted(
+        f"{name}={selected[name].get('conclusion')!r}"
+        for name in contexts
+        if name in selected
+        and str(selected[name].get("status")) == TERMINAL
+        and not str(selected[name].get("completed_at") or "").strip())
+    if unstamped:
+        refuse(f"category=check_run_has_no_completed_at where={where} "
+               f"checks={unstamped} head={head_sha[:12]} — a record that says "
+               "it completed and carries no completion time is a document "
+               "mid-write. The observed conclusion is reported with it, so a "
+               "run that never settles does not hide what the record said")
+
     unwritten = sorted(name for name in contexts
                        if name in selected
                        and str(selected[name].get("status")) == TERMINAL

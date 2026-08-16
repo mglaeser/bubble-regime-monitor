@@ -247,9 +247,12 @@ def perform(environ: dict, *, execute_fn, opener,
         refuse(f"category=panel_blocked decision={verdict['decision']} "
                f"engine_gate={verdict['engine_gate']['reason']!r} "
                f"strict_gate={verdict['strict_gate']['reason']!r} "
-               f"evidence_sha256={record['evidence_sha256'][:16]} — the full "
-               "per-model verdicts are retained in the private evidence; this "
-               "refusal is the process exit, not the finding")
+               f"evidence_sha256={record['evidence_sha256'][:16]} — the "
+               "readable findings were published to the pull request before "
+               "this refusal and are retained in `panel-review.md`; the "
+               "evidence carries per-model DIGESTS and counts, not the full "
+               "verdict text. This refusal is the process exit, not the "
+               "finding")
     return {"published": published, "verdict": verdict, "evidence": record,
             "review": published_review}
 

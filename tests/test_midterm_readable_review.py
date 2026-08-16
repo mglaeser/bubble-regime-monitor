@@ -106,6 +106,42 @@ def rendered(*, decision: str, votes: list, plan: dict,
     return reviewrender.render(review, challenge=challenge)
 
 
+
+# ------------------------------------------------------------- helpers ------
+
+
+def outside_spans(body: str) -> str:
+    """The body with every fenced span blanked out.
+
+    This is the surface where Markdown is LIVE. Untrusted text is published
+    inside a code span, so the question worth asking is never "does this
+    character appear" — it legitimately does, as literal text — but "does any of
+    it appear out here, where GitHub would act on it"."""
+    import re
+    return re.sub(r"(`+)(?:(?!\1).)*?\1", " ", body, flags=re.DOTALL)
+
+
+def fenced_only(body: str, *needles) -> None:
+    """Every needle appears in the body, and NONE of it outside a fence."""
+    live = outside_spans(body)
+    for needle in needles:
+        assert needle in body, f"{needle!r} was dropped entirely"
+        assert needle not in live, f"{needle!r} reached live Markdown"
+
+
+def rendered_html(body: str) -> str:
+    """The body as GitHub would render it. Skipped where cmarkgfm is absent.
+
+    The empirical backstop, and it has earned its place: it is what caught
+    `&#64;` rendering a live `mailto:` anchor after three rounds of source-level
+    assertions had passed over it. The structural checks above are what run
+    everywhere; this is what proves they mean what they claim."""
+    cmarkgfm = pytest.importorskip("cmarkgfm")
+    from cmarkgfm.cmark import Options
+    return cmarkgfm.github_flavored_markdown_to_html(
+        body, options=Options.CMARK_OPT_UNSAFE)
+
+
 # ------------------------------------------------------- 1. no findings -----
 
 
@@ -175,16 +211,17 @@ class TestOneModelRaisingAFinding:
             plan=plan_of(one))
 
     def test_it_groups_the_finding_by_file_and_changed_line_range(self, body):
-        assert "**app/thing.py lines 41-58**" in body
+        assert "app/thing.py ` lines 41-58**" in body
+        fenced_only(body, "app/thing.py")
 
     def test_it_names_the_raising_model(self, body):
         assert "raised by `gpt-5.3-codex`" in body
 
     def test_it_carries_the_confidence(self, body):
-        assert "confidence `high`" in body
+        assert "confidence ` high `" in body
 
     def test_it_carries_the_checked_categories(self, body):
-        assert "`logic`" in body and "`interface_contract`" in body
+        assert "` logic `" in body and "` interface_contract `" in body
 
     def test_it_carries_the_bounded_reason(self, body):
         assert "the subtraction inverts the documented addition contract" in body
@@ -221,7 +258,7 @@ class TestTheRequiredApproverRefuting:
                        refuted=False, reason="the denominator is unchanged")})],
             plan=plan_of(one))
         assert f"raised by `{REQUIRED_APPROVER}`" in body
-        assert "**scripts/verifier/executor.py lines 802-833**" in body
+        assert "scripts/verifier/executor.py ` lines 802-833**" in body
         assert "| Actionable findings | 1 |" in body
 
 
@@ -251,17 +288,17 @@ class TestMultipleFindingsGroupedByFileAndRange:
         assert body.count("raised by `gpt-4.1-mini`") == 3
 
     def test_each_carries_its_own_file_and_range(self, body):
-        assert "**app/alpha.py lines 1-4**" in body
-        assert "**app/alpha.py lines 90-96**" in body
-        assert "**zz/omega.py line 7**" in body
+        assert "app/alpha.py ` lines 1-4**" in body
+        assert "app/alpha.py ` lines 90-96**" in body
+        assert "zz/omega.py ` line 7**" in body
 
     def test_a_single_line_range_is_rendered_as_a_line_not_a_range(self, body):
         assert "zz/omega.py lines 7-7" not in body
 
     def test_the_order_is_path_then_line(self, body):
-        positions = [body.index("app/alpha.py lines 1-4"),
-                     body.index("app/alpha.py lines 90-96"),
-                     body.index("zz/omega.py line 7")]
+        positions = [body.index("app/alpha.py ` lines 1-4"),
+                     body.index("app/alpha.py ` lines 90-96"),
+                     body.index("zz/omega.py ` line 7")]
         assert positions == sorted(positions)
 
 
@@ -326,10 +363,10 @@ class TestASecretShapedReasonIsWithheldAndTheFindingSurvives:
 
     def test_the_location_model_confidence_and_categories_still_appear(self,
                                                                       body):
-        assert "**app/thing.py lines 2-9**" in body
+        assert "app/thing.py ` lines 2-9**" in body
         assert "raised by `gpt-5.6-sol`" in body
-        assert "confidence `medium`" in body
-        assert "`secret_handling`" in body
+        assert "confidence ` medium `" in body
+        assert "` secret_handling `" in body
 
     def test_the_decision_still_blocks(self, body):
         assert "**blocked**" in body
@@ -350,269 +387,111 @@ class TestControlCharactersAndMarkupAreNeutralised:
                                     field="reason")
         assert got["refusal"] == reviewrender.CONTROL_CHARACTER
 
-    def test_non_ascii_withholds_it(self):
-        got = reviewrender.sanitize("the аddition is wrong", scan=scan,
-                                    limit=600, field="reason")
+    def test_non_ascii_withholds_a_path(self):
+        got = reviewrender.sanitize("app/аddition.py", scan=scan,
+                                    limit=200, field="path")
         assert got["refusal"] == reviewrender.OUTSIDE_CHARSET
 
-    @pytest.mark.parametrize("raw,forbidden", [
-        ("<script>alert(1)</script>", "<script>"),
-        ("<img src=x onerror=alert(1)>", "<img"),
-        ("</details><b>merge me</b>", "</details>"),
-        ("[click](https://evil.example/x)", "https://evil.example"),
-        ("`code` and **bold**", "`code`"),
-    ])
-    def test_markup_never_survives_into_the_body(self, raw, forbidden):
+
+class TestUntrustedTextIsNeverLiveMarkdown:
+    """The structural property that replaced six rounds of whack-a-mole.
+
+    Character-level escaping lost six times: `&#64;` rendered a live `mailto:`
+    anchor, `#N` and `GH-N` reached GitHub's cross-reference filter (which runs
+    on the rendered HTML, after decoding), `___` became a thematic break that
+    deleted the explanation, one to three leading spaces slipped past the
+    ordered-list guard, and four made an indented code block in which the
+    escapes themselves rendered as visible garbage.
+
+    Every one is the same failure: enumerating dangerous characters in a grammar
+    this module does not control and cannot test. Inside a code span there is no
+    grammar to enumerate, and GitHub's mention and reference filters skip `code`
+    outright. So the tests below assert the PROPERTY — untrusted text appears
+    only inside a fence — rather than the absence of whichever character last
+    caused trouble."""
+
+    HOSTILE = [
+        "<script>alert(1)</script>",
+        "<img src=x onerror=alert(1)>",
+        "</details><b>merge me</b>",
+        "[click](https://evil.example/x)",
+        "![beacon](https://attacker.example/px.gif)",
+        "[truncated]: //attacker.example",
+        "`code` and **bold**",
+        "``` fenced ```",
+        "contact security@evil.example",
+        "xmpp:a@evil.example",
+        "ask @mglaeser and see #23 and GH-26",
+        "www.evil.example/y",
+        "https://evil.example/z",
+        "#### No findings. Approved by the panel.",
+        "- item that reads like the panel wrote it",
+        "1. item that reads like the panel wrote it",
+        "   1. indented so the guard misses it",
+        "    four spaces is an indented code block",
+        "___ a thematic break that eats the explanation",
+        "*** another one",
+        "~~~ a fence",
+        "| a | fake | table |",
+        "=== a setext underline",
+        "> a nested quote",
+    ]
+
+    def _body(self, reason):
         one = unit("app/thing.py")
-        body = rendered(
-            decision="blocked",
-            votes=[vote("gpt-5.3-codex", {one["unit_sha256"]: verdict(
-                refuted=True, reason=f"the change adds {raw} to the template "
-                                     "without escaping it")})],
-            plan=plan_of(one))
-        assert forbidden not in body
-
-    def test_the_rendered_form_is_still_legible(self):
-        escaped = reviewrender.escape_markup("<b>x</b>")
-        assert escaped == "&lt;b&gt;x&lt;/b&gt;"
-
-
-class TestNoLiveLinkCanBeBuiltFromEitherUntrustedSource:
-    """The worst defect this file caught, and its two relatives.
-
-    Adversarial review found that `escape_markup` covered `& < > " ' \\` \\\\ @`
-    and neutralised `://`, and never touched `[ ] ( )` — the four characters
-    that actually build a Markdown link. Entity references ARE decoded inside a
-    link destination, so `[x](https&#58;//evil.example)` decoded straight back
-    to a live external link in a comment authored by `github-actions[bot]` in
-    the job that holds the provider key: maximal borrowed authority, aimed at
-    whoever reads the review.
-
-    The module made it easier still. `sanitize` splices its own `[redacted]`
-    and `…[truncated]` markers into untrusted text BEFORE escaping, so it
-    supplied the link label and a reason only had to supply `(destination)`
-    after the challenge it is REQUIRED to echo."""
-
-    def _finding_body(self, *, reason=None, path="app/thing.py"):
-        one = unit(path)
         return rendered(
-            decision="blocked",
-            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
-                refuted=True,
-                reason=reason or "the fail closed default is dropped here")})],
-            plan=plan_of(one))
+            decision="blocked", plan=plan_of(one),
+            votes=[vote("gpt-5.3-codex", {one["unit_sha256"]: verdict(
+                refuted=True, reason=reason)})])
 
-    @pytest.mark.parametrize("reason", [
-        "see [the full report](//attacker.example/panel) for detail",
-        "compare ![beacon](https://attacker.example/px.gif) against it",
-        "the reference [truncated]: //attacker.example is the issue",
-        "a bare [label] and a stray (parenthetical) in ordinary prose",
-    ])
-    def test_no_bracket_or_paren_survives_from_a_reason(self, reason):
-        body = self._finding_body(reason=reason)
-        quoted = [line for line in body.splitlines() if line.startswith("> ")]
-        assert len(quoted) == 1
-        for character in "[]()":
-            assert character not in quoted[0]
+    @pytest.mark.parametrize("hostile", HOSTILE)
+    def test_the_text_is_published_and_never_live(self, hostile):
+        body = self._body(f"the change adds {hostile} to the template")
+        fenced_only(body, hostile)
 
-    def test_the_modules_own_redaction_marker_cannot_become_a_link_label(self):
-        """The exact trigger: a reason opening with the challenge, then a
-        parenthesised destination. Redaction turns the challenge into
-        `[redacted]`, and unescaped brackets would make that a live link."""
-        body = self._finding_body(
-            reason=f"{CHALLENGE}(//attacker.example/panel) the default is lost")
-        assert "[redacted](//attacker.example" not in body
-        assert "&#91;redacted&#93;&#40;&#47;&#47;attacker" in body or (
-            "&#91;redacted&#93;&#40;//attacker" in body)
-        assert CHALLENGE not in body
+    @pytest.mark.parametrize("hostile", HOSTILE)
+    def test_github_renders_it_inert(self, hostile):
+        """The empirical check, against the renderer that caught the last one."""
+        import re
+        html = rendered_html(self._body(f"the change adds {hostile} here"))
+        outside = re.sub(r"<code>.*?</code>", " ", html, flags=re.DOTALL)
+        assert not re.findall(r'<a href="(?!https://github\.com)', html)
+        assert not re.findall(r'<a href="(?:mailto|xmpp):', html)
+        assert "<script" not in html and "<img" not in html
+        assert "@" not in outside
+        assert not re.search(r"#[0-9]", outside)
+        # The panel's own two headings, and no more.
+        assert len(re.findall(r"<h[1-6]", html)) == 2
 
-    def test_the_truncation_marker_cannot_become_a_link_label_either(self):
+    def test_a_hostile_file_name_is_fenced_too(self):
+        one = unit("www.attacker.example/@evil-`x`.py")
+        body = rendered(
+            decision="blocked", plan=plan_of(one),
+            votes=[vote("gpt-5.3-codex", {one["unit_sha256"]: verdict(
+                refuted=True, reason="the added branch is never restored")})])
+        fenced_only(body, "www.attacker.example/@evil-`x`.py")
+
+    def test_a_backtick_run_cannot_close_the_fence(self):
+        """CommonMark closes a span on a run of EXACTLY the opening length, so
+        the fence is one longer than the longest run inside."""
+        for content in ["a`b", "a``b", "a```b", "```", "`" * 12]:
+            span = reviewrender.code_span(content)
+            fence = span[:len(span) - len(span.lstrip("`"))]
+            assert content in span
+            assert fence + fence not in span or content.count(fence) == 0
+            assert len(fence) > max(
+                (len(r) for r in __import__("re").findall(r"`+", content)),
+                default=0)
+
+    def test_the_modules_own_markers_cannot_become_link_labels(self):
+        """`[redacted]` and the truncation mark are spliced into untrusted text,
+        so they used to supply a link label an attacker only had to follow with
+        a destination. Inside a fence a bracket is a bracket."""
         got = reviewrender.sanitize("x" * 300 + "(//attacker.example)",
                                     scan=scan, limit=80, field="reason")
         assert got["truncated"] is True
-        for character in "[]()":
-            assert character not in got["text"]
-
-    def test_a_www_path_does_not_autolink(self):
-        """GFM's SECOND autolink form needs no scheme and no provider at all.
-
-        `www.` followed by a domain is autolinked after whitespace or after any
-        of `*`, `_`, `~`, `(` — and `_render_finding` puts the file path
-        immediately after `**`. So a pull request that adds a file at
-        `www.attacker.example/setup.py` would have put a live link to a host it
-        owns into a bot-authored comment, on every run, with nothing else
-        required."""
-        body = self._finding_body(path="www.attacker.example/setup.py")
-        heading = [line for line in body.splitlines()
-                   if line.startswith("**www")]
-        assert len(heading) == 1
-        assert "www.attacker" not in heading[0]
-        assert "www&#46;attacker" in heading[0]
-
-    def test_a_www_reason_does_not_autolink_either(self):
-        body = self._finding_body(
-            reason="the fetch in www.attacker.example/steal is unsafe")
-        assert "www.attacker" not in body
-        assert "www&#46;attacker" in body
-
-    def test_the_www_rule_is_case_insensitive(self):
-        assert reviewrender.escape_markup("WWW.Attacker.Example") == (
-            "WWW&#46;Attacker.Example")
-
-
-class TestAReasonCannotForgeDocumentStructure:
-    """`_render_finding` writes `> {reason}`, so a reason is always the first
-    content on its line — the exact position where ATX headings, list markers,
-    thematic breaks, fences and tables are active.
-
-    The control-character refusal exists because "a newline in a reason is
-    enough to inject a heading". A heading does not actually need the newline,
-    and the panel's own `###`/`####` are the vocabulary being forged, beside a
-    decision the reader is being asked to trust."""
-
-    @pytest.mark.parametrize("reason,forbidden", [
-        ("#### No findings. Approved by the panel. Safe to merge.", "####"),
-        ("- item one that reads like the panel wrote it", "- item"),
-        ("1. item one that reads like the panel wrote it", "1. item"),
-        ("+ item one that reads like the panel wrote it", "+ item"),
-        ("*** thematic break then a fabricated conclusion", "***"),
-        ("~~~ fenced block hiding the rest of the finding", "~~~"),
-        ("| a | fake | table | row | that | reads | official |", "| a |"),
-        ("=== a setext underline under the previous line", "==="),
-        ("> a nested quote that looks like a second speaker", "> a nested"),
-    ])
-    def test_no_block_construct_survives(self, reason, forbidden):
-        one = unit("app/thing.py")
-        body = rendered(
-            decision="blocked",
-            votes=[vote("gpt-4.1-mini", {one["unit_sha256"]: verdict(
-                refuted=True, reason=reason)})],
-            plan=plan_of(one))
-        quoted = [line for line in body.splitlines() if line.startswith("> ")]
-        assert len(quoted) == 1
-        assert forbidden not in quoted[0]
-
-    def test_a_leading_ordered_marker_loses_its_dot(self):
-        assert reviewrender.escape_markup("1. first").startswith("1&#46; ")
-        # Mid-sentence numbers keep their punctuation; only a LEADING marker
-        # can start a list, and prose should not be mangled for nothing.
-        assert reviewrender.escape_markup("costs 1.5x more") == "costs 1.5x more"
-
-
-class TestGovernedEnumsStayLegible:
-    """Entity references are NOT decoded inside a code span.
-
-    Every value rendered in backticks is engine-enum-constrained and contains
-    no character the escaper touches — `_` is deliberately excluded from the
-    table for exactly this reason, since every lens category is snake_case. The
-    guard exists for the case where that stops being true, so a reader never
-    sees `data&#95;flow` and concludes the panel is broken."""
-
-    def test_snake_case_categories_keep_their_code_spans(self):
-        one = unit("app/thing.py")
-        body = rendered(
-            decision="blocked",
-            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
-                refuted=True, reason="the fail closed default is dropped",
-                categories=("data_flow", "secret_handling"))})],
-            plan=plan_of(one))
-        assert "`data_flow`" in body
-        assert "`secret_handling`" in body
-        assert "&#95;" not in body
-
-    def test_a_value_needing_escapes_leaves_the_code_span(self):
-        got = reviewrender.sanitize("needs-escaping", scan=scan, limit=48,
-                                    field="checked_category")
-        assert got["altered"] is True
-        assert reviewrender._code(got) == "**needs&#45;escaping**"
-
-    def test_an_unaltered_value_keeps_the_code_span(self):
-        got = reviewrender.sanitize("high", scan=scan, limit=48,
-                                    field="confidence")
-        assert got["altered"] is False
-        assert reviewrender._code(got) == "`high`"
-
-
-class TestMentionsAreNeutralised:
-    """Requirement 4. A published review must not notify anyone.
-
-    The first version encoded `@` as `&#64;` and this docstring asserted that
-    "GitHub's autolinker reads the SOURCE text, before any entity is decoded".
-    Adversarial review rendered the output through cmark-gfm with GitHub's
-    extension set and got `<a href="mailto:security@evil.example">` — a live
-    anchor. The premise was simply false for the email form, and every test here
-    passed over it because they all checked the SOURCE for a character the
-    encoding had removed.
-
-    And that is only the layer that can be checked from here. GitHub's @mention
-    and #cross-reference filters run on the RENDERED HTML, after decoding, so
-    any encoding that reaches a text node as `@name` is a live notification
-    whatever cmark did.
-
-    So the character is REMOVED, not encoded. `(at)mglaeser` is inert at every
-    layer, in every renderer, and a reader loses nothing they cannot see."""
-
-    def test_a_mention_in_a_reason_does_not_survive_as_a_mention(self):
-        one = unit("app/thing.py")
-        body = rendered(
-            decision="blocked",
-            votes=[vote("gpt-4.1-mini", {one["unit_sha256"]: verdict(
-                refuted=True,
-                reason="ask @mglaeser and @github/security to confirm the "
-                       "fail-closed default here")})],
-            plan=plan_of(one))
-        assert "@" not in body
-        assert "(at)mglaeser" in body
-        assert "&#64;" not in body, "an encoding renders as a live mailto anchor"
-
-    def test_an_email_in_a_reason_cannot_become_a_mailto_link(self):
-        """The exact shape the reviewer rendered into an anchor."""
-        one = unit("app/thing.py")
-        body = rendered(
-            decision="blocked",
-            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
-                refuted=True,
-                reason="contact security@evil.example or xmpp:a@evil.example "
-                       "about the dropped default")})],
-            plan=plan_of(one))
-        assert "@" not in body
-        assert "security(at)evil.example" in body
-
-    def test_a_mention_in_a_file_name_does_not_survive_either(self):
-        one = unit("app/@mglaeser.py")
-        body = rendered(
-            decision="blocked",
-            votes=[vote("gpt-4.1-mini", {one["unit_sha256"]: verdict(
-                refuted=True, reason="the invariant is not restored on the "
-                                     "error path")})],
-            plan=plan_of(one))
-        assert "@" not in body
-        assert "(at)mglaeser.py" in body
-
-    def test_an_issue_cross_reference_does_not_survive(self):
-        """Removed for the same reason as `@`: GitHub's cross-reference filter
-        runs on the rendered HTML, so `&#35;23` decodes to `#23` in a text node
-        and gets linkified — and a cross-reference notifies too."""
-        got = reviewrender.escape_markup("see #23 for context")
-        assert "#23" not in got
-        assert "(hash)23" in got
-        assert "&#35;23" not in got
-
-    def test_the_body_gate_refuses_a_cross_reference(self):
-        with pytest.raises(PanelRefusal) as raised:
-            reviewrender.assert_publishable(
-                f"{reviewrender.MARKER}\nsee #23")
-        assert "cross_reference" in raised.value.reason
-
-    def test_an_ordinary_hash_is_left_alone(self):
-        assert reviewrender.escape_markup("the C# port") == "the C&#35; port"
-
-    def test_the_body_gate_refuses_a_live_mention_outright(self):
-        with pytest.raises(PanelRefusal) as raised:
-            reviewrender.assert_publishable(
-                f"{reviewrender.MARKER}\nplease ask @someone")
-        assert "live_mention" in raised.value.reason
-
+        body = self._body("(//attacker.example) follows the token")
+        fenced_only(body, "(//attacker.example)")
 
 class TestTheCandidateCannotSteerThePublisherOrItsOutput:
     """Requirement 12. The two strings a pull request actually controls.
@@ -637,19 +516,10 @@ class TestTheCandidateCannotSteerThePublisherOrItsOutput:
                 refuted=True, reason="the added branch never restores the "
                                      "invariant it suspends")})],
             plan=plan_of(one))
-        # The heading line only. The footer legitimately contains `<sub>` —
-        # markup this module wrote, not markup a candidate supplied — and an
-        # assertion over the whole tail would have been testing the footer.
-        heading = [line for line in body.splitlines()
-                   if line.startswith("**app/")]
-        assert len(heading) == 1
-        for character in ("<", ">", "@", "`", "\\", '"'):
-            assert character not in heading[0]
-        # Neutralised, not deleted: the reader still sees the real file name,
-        # either through a numeric character reference or — for `@`, which no
-        # encoding makes safe — through `(at)`.
-        assert "&" in heading[0] or "(at)" in heading[0]
-        assert "app/" in heading[0]
+        # The real name reaches the reader, and none of it is live. Asserting
+        # the ABSENCE of characters was the old shape and it was wrong twice:
+        # the name is legitimately present as literal text inside a fence.
+        fenced_only(body, hostile)
 
     def test_a_file_name_with_a_control_character_withholds_the_location(self):
         one = unit("app/thing\x07.py")
@@ -745,18 +615,17 @@ class TestOutputSizeOverflowIsSummarisedSafely:
         assert got["truncated"] is True
         assert got["published_chars"] <= 120
 
-    def test_the_bound_is_on_source_characters_not_on_the_escaped_form(self):
-        """A reason of 600 `<` legitimately becomes 2400 characters of `&lt;`.
-
-        Re-truncating after escaping would cut an entity in half, so the field
-        bound counts source characters and the BODY bound — which `render`
-        applies to each finished block — is what keeps the document inside the
-        limit. That trade costs findings shown, never a body over the limit."""
+    def test_the_bound_counts_source_characters(self):
+        """Escaping is gone — untrusted text is published raw inside a fence —
+        so the published length is the source length plus the fence. The BODY
+        bound, which `render` applies to each finished block, is what keeps the
+        document inside the limit."""
         got = reviewrender.sanitize("<" * 400, scan=scan, limit=120,
                                     field="reason")
         assert got["published_chars"] <= 120
-        assert len(got["text"]) > 120
-        assert "&lt;" in got["text"]
+        assert got["text"] == "<" * (120 - len(reviewrender.TRUNCATION_MARK)) \
+            + reviewrender.TRUNCATION_MARK
+        assert got["code_span"].startswith("` ")
 
     def test_the_gate_refuses_an_oversized_body_outright(self):
         with pytest.raises(PanelRefusal) as raised:
@@ -980,7 +849,7 @@ class TestTheReviewIsPublishedBeforeTheBlockedJobExits:
         assert outcome["order"].index("review") < outcome["order"].index("exit")
 
     def test_the_readable_finding_survived_the_block(self, outcome):
-        assert "**app/thing.py lines 10-14**" in outcome["published_body"]
+        assert "app/thing.py ` lines 10-14**" in outcome["published_body"]
         assert "raised by `gpt-5.6-sol`" in outcome["published_body"]
 
     def test_both_private_artifacts_were_retained(self, outcome):
@@ -1045,16 +914,14 @@ class TestNothingPrivateReachesTheComment:
 
     def test_the_challenge_is_removed_rather_than_suppressing_the_finding(
             self, body):
-        # `fail-closed` renders with its hyphen as `&#45;`, which is what a
-        # reader sees as a hyphen and what GitHub does not see as a list marker.
-        assert "the handler drops the fail&#45;closed default" in body
-        # `[redacted]` is this module's own marker, and it is spliced in BEFORE
-        # escaping, so its brackets are escaped too. That is deliberate: the
-        # first version left them raw and handed an attacker a ready-made link
-        # label — `<challenge>(//attacker.example)` became a live
-        # `[redacted](//attacker.example)` in a bot-authored comment.
-        assert "&#91;redacted&#93;" in body
-        assert reviewrender.REDACTED not in body
+        # Published raw inside a fence, so the reader sees the sentence exactly
+        # as the model wrote it — hyphen and all — and none of it is live.
+        fenced_only(body, "the handler drops the fail-closed default")
+        # `[redacted]` is this module's own marker. It used to be a ready-made
+        # link label: `<challenge>(//attacker.example)` became a live
+        # `[redacted](//attacker.example)` in a bot-authored comment. Inside a
+        # fence a bracket is a bracket.
+        fenced_only(body, reviewrender.REDACTED)
 
     def test_no_proof_of_check_travels(self):
         one = unit("app/thing.py")
@@ -1250,7 +1117,7 @@ class TestTheChallengeSurvivesNeitherCaseNorSplitting:
         body = self._reason_body(
             f"{self.TOKEN} the fail closed default is dropped")
         assert self.TOKEN not in body
-        assert "&#91;redacted&#93;" in body
+        assert reviewrender.REDACTED in body
 
     def test_a_shouted_echo_is_redacted_too(self):
         body = self._reason_body(
@@ -1258,19 +1125,35 @@ class TestTheChallengeSurvivesNeitherCaseNorSplitting:
         assert self.TOKEN.upper() not in body
         assert self.TOKEN not in body.lower()
 
-    def test_a_truncated_echo_withholds_the_field(self):
-        """Half a 32-hex token is 64 bits of a value whose whole purpose is to
-        be unguessable. Withheld outright rather than patched."""
+    @pytest.mark.parametrize("shape", [
+        lambda t: t[:20],
+        lambda t: " ".join(t[i:i + 8] for i in range(0, 32, 8)),
+        lambda t: " ".join(t[i:i + 4] for i in range(0, 32, 4)),
+        lambda t: "-".join(t[i:i + 4] for i in range(0, 32, 4)),
+        lambda t: "".join(chr(ord(c) + 0xFEE0) if c.isalnum() else c for c in t),
+    ])
+    def test_a_reshaped_echo_withholds_the_field(self, shape):
+        """Truncated, split, hyphenated, or written in fullwidth digits.
+
+        None of those is a substring of the token and every one is a complete
+        disclosure of it. The old rule — exact match plus a sweep for hex runs
+        of sixteen or more — published three of these five, and the charset
+        split that lets prose keep its em dashes is what made the fullwidth form
+        reachable. The comparison folds NFKC, drops every non-alphanumeric and
+        casefolds before looking."""
+        reshaped = shape(self.TOKEN)
         body = self._reason_body(
-            f"the run token began {self.TOKEN[:20]} and the default is dropped")
-        assert self.TOKEN[:20] not in body
+            f"the run token began {reshaped} and the default is dropped")
+        folded = reviewrender._fold_for_token_match
+        assert folded(self.TOKEN) not in folded(body)
         assert reviewrender.WITHHELD in body
         assert "| Actionable findings | 1 |" in body
 
     def test_the_field_records_which_rule_withheld_it(self):
         got = reviewrender.sanitize(f"leaked {self.TOKEN[:24]} here", scan=scan,
                                     limit=600, field="reason",
-                                    redact=(self.TOKEN,))
+                                    redact=(self.TOKEN,),
+                                    charset=reviewrender.CHARSET_TEXT)
         assert got["refusal"] == reviewrender.CARRIES_RUN_TOKEN
 
     def test_the_body_gate_catches_a_shouted_challenge(self):
@@ -1280,12 +1163,23 @@ class TestTheChallengeSurvivesNeitherCaseNorSplitting:
                 challenge=self.TOKEN)
         assert "execution_challenge" in raised.value.reason
 
-    def test_the_body_gate_catches_a_partial_challenge(self):
+    @pytest.mark.parametrize("shape", [
+        lambda t: t[:24],
+        lambda t: t.upper(),
+        lambda t: " ".join(t[i:i + 4] for i in range(0, 32, 4)),
+        lambda t: "".join(chr(ord(c) + 0xFEE0) if c.isalnum() else c for c in t),
+    ])
+    def test_the_body_gate_catches_every_reshaping(self, shape):
         with pytest.raises(PanelRefusal) as raised:
             reviewrender.assert_publishable(
-                f"{reviewrender.MARKER}\ntoken {self.TOKEN[:24]}",
+                f"{reviewrender.MARKER}\ntoken {shape(self.TOKEN)}",
                 challenge=self.TOKEN)
-        assert "part_of_the_challenge" in raised.value.reason
+        assert "execution_challenge" in raised.value.reason
+
+    def test_the_window_is_half_the_token(self):
+        assert reviewrender.MIN_DISCLOSED_TOKEN_CHARS == 16
+        assert reviewrender.discloses_token(self.TOKEN[:16], self.TOKEN)
+        assert not reviewrender.discloses_token(self.TOKEN[:15], self.TOKEN)
 
     def test_an_unrelated_digest_is_not_mistaken_for_the_challenge(self):
         """A 64-hex content digest is ordinary in this codebase's prose and
@@ -1590,7 +1484,7 @@ class TestADeletionOnlyUnitSaysWhichSideItsLinesAreOn:
             decision="blocked", plan=plan_of(one),
             votes=[vote("gpt-5.3-codex", {one["unit_sha256"]: verdict(
                 refuted=True, reason="the removed guard was load bearing")})])
-        assert "**app/thing.py old lines 41-58**" in body
+        assert "app/thing.py ` old lines 41-58**" in body
 
     def test_new_side_numbers_are_not_relabelled(self):
         body = rendered(
@@ -1599,7 +1493,7 @@ class TestADeletionOnlyUnitSaysWhichSideItsLinesAreOn:
                 unit("app/thing.py", lines=(1, 2))["unit_sha256"]: verdict(
                     refuted=True, reason="the added branch is not restored")})])
         assert "old lines" not in body
-        assert "**app/thing.py lines 1-2**" in body
+        assert "app/thing.py ` lines 1-2**" in body
 
 
 class TestARedIsNeverRoutedIntoTheRetryPath:
