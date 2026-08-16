@@ -231,8 +231,14 @@ def perform(environ: dict, *, execute_fn, opener,
         ) if state == "success" else status_request(
         repository_numeric_id=REPOSITORY_NUMERIC_ID, candidate_head_sha=head,
         context=REVIEW_STATUS, state=state,
-        description=(f"panel {verdict['decision']} — see run summary "
-                     "(mid-term, not write-separated)"),
+        # POINTS AT THE COMMENT, now that one exists. "see run summary" sent a
+        # reader to a page documented to carry no verdict text — the private
+        # evidence is an artifact and the reasons were never in the summary —
+        # so the one red signal a person actually sees named the one place the
+        # finding is not. The finding count comes from the publication record,
+        # so a run whose comment did not publish says so instead of promising
+        # one.
+        description=_blocked_status_description(published_review),
         target_url=target, run_id=run_id, run_attempt=attempt),
         opener=opener, token=env["GITHUB_TOKEN"]))
 
@@ -255,6 +261,19 @@ def perform(environ: dict, *, execute_fn, opener,
                "finding")
     return {"published": published, "verdict": verdict, "evidence": record,
             "review": published_review}
+
+
+#: GitHub truncates a status description past 140 characters, and
+#: `status.status_request` refuses rather than letting it truncate — so this is
+#: built to fit, not trimmed afterwards.
+def _blocked_status_description(published_review: dict) -> str:
+    """What the red check says, given whether the comment actually landed."""
+    tail = "(mid-term, not write-separated)"
+    count = (published_review or {}).get("finding_count")
+    if (published_review or {}).get("published") and isinstance(count, int):
+        finding = "finding" if count == 1 else "findings"
+        return f"panel blocked: {count} {finding} in the PR comment {tail}"
+    return f"panel blocked — findings retained privately {tail}"
 
 
 def publish_readable_review(environ: dict, *, plan: dict, executed: dict,

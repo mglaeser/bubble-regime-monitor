@@ -1947,3 +1947,38 @@ class TestTheUntestedGuardsAreNowLoadBearing:
         monkeypatch.setattr(rr, "build_review", explode)
         outcome = _run_perform(tmp_path, decision="approved")
         assert outcome["raised"] is None
+
+    def test_the_red_status_points_at_the_comment_that_now_exists(self):
+        """"see run summary" sent a reader to a page with no verdict text.
+
+        The private evidence is an artifact and the reasons were never in the
+        summary, so the one red signal a person actually sees named the one
+        place the finding is not. Now that a comment exists, the status names
+        it — and a run whose comment did not publish says so instead of
+        promising one."""
+        from midtermpanel.panelcli import _blocked_status_description
+        from midtermpanel.status import MAX_DESCRIPTION_CHARS
+
+        landed = _blocked_status_description(
+            {"published": True, "finding_count": 3})
+        assert "3 findings in the PR comment" in landed
+        assert "run summary" not in landed
+
+        singular = _blocked_status_description(
+            {"published": True, "finding_count": 1})
+        assert "1 finding in the PR comment" in singular
+
+        for absent in ({"published": False, "outcome": "refused_stale_head"},
+                       {}, None):
+            missing = _blocked_status_description(absent)
+            assert "PR comment" not in missing
+            assert "retained privately" in missing
+
+        # Every form fits, because `status_request` REFUSES an over-long
+        # description rather than letting GitHub truncate it — and a truncated
+        # description can lose the `ev=` marker the merge gate reads.
+        for record in ({"published": True, "finding_count": 999999}, {}, None):
+            assert len(_blocked_status_description(record)) <= \
+                MAX_DESCRIPTION_CHARS
+        assert all("mid-term, not write-separated" in _blocked_status_description(r)
+                   for r in ({"published": True, "finding_count": 2}, {}))
