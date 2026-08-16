@@ -51,7 +51,7 @@ import urllib.error
 import urllib.request
 
 from . import REPOSITORY_NUMERIC_ID
-from .errors import refuse
+from .errors import PanelRefusal, refuse
 from .preflight import parse_api_json
 from .reviewrender import MARKER, assert_publishable, head_of
 
@@ -68,21 +68,19 @@ API_ROOT = "https://api.github.com"
 #: decision would be unaffected — which is why `where` names each call site
 #: separately rather than sharing one label.
 
-#: Comments to inspect when hunting for this panel's own. Bounded twice, and the
-#: page SIZE is the bound that matters.
+#: Comments to inspect when hunting for this panel's own.
 #:
-#: `preflight.parse_api_json` caps a response at 2 MiB, and GitHub accepts a
-#: comment body up to 65 536 characters — so a page of 100 could legitimately
-#: arrive at 6 MiB and be refused, and the panel would then never find its own
-#: comment on a busy pull request. 25 keeps the worst case at about 1.6 MiB,
-#: inside the cap with room to spare.
+#: The first version sized this against `parse_api_json`'s 2 MiB cap and got the
+#: arithmetic wrong — it treated GitHub's 65 536-CHARACTER comment limit as
+#: bytes. A comment of 65 536 astral-plane characters is 256 KiB of UTF-8, so
+#: eight legal comments already exceed the cap and NO page size fixes it.
 #:
-#: Six pages is 150 comments, scanned oldest-first because that is the order
-#: GitHub returns them and the order `find_sticky_comment` resolves ties in.
-#: Past 150 the panel would post a second comment rather than editing the first.
-#: That is a cosmetic failure and it is named rather than hidden: an unbounded
-#: pagination loop over a server-controlled list, in a job holding a provider
-#: key, is a worse thing to have.
+#: So the size is no longer load-bearing, and `existing_comment` degrades on a
+#: failed look instead. 25 keeps an ordinary page small; six pages is 150
+#: comments, scanned oldest-first because that is the order GitHub returns them
+#: and the order `find_sticky_comment` resolves ties in. Past that, or on any
+#: read fault, the panel posts a SECOND comment rather than none — see
+#: `existing_comment` for why that direction is the safe one.
 COMMENT_PAGE_SIZE = 25
 MAX_COMMENT_PAGES = 6
 
@@ -272,21 +270,46 @@ def find_sticky_comment(comments) -> dict | None:
     return min(found, key=lambda c: c["id"])
 
 
-def existing_comment(pr_number: int, *, token: str, opener) -> dict | None:
-    """Walk the comment pages until the marker is found or the bound is hit."""
+#: What `existing_comment` returns when it could not look properly. Not None —
+#: "there is no prior comment" and "I could not tell" are different facts, and
+#: only the second one should produce a duplicate.
+LOOKUP_FAILED = "lookup_failed"
+
+
+def existing_comment(pr_number: int, *, token: str, opener):
+    """Walk the comment pages until the marker is found or the bound is hit.
+
+    A failed LOOK degrades to `LOOKUP_FAILED` rather than propagating, and the
+    reason is an attack adversarial review actually ran. `parse_api_json` caps a
+    response at 2 MiB; a GitHub comment may be 65 536 CHARACTERS, which in
+    astral-plane UTF-8 is 256 KiB — so eight legal comments exceed the cap and
+    no page size fixes it. With the refusal propagating, anyone who could
+    comment on the pull request could make every future panel review vanish:
+    the blocked finding would never be published, and a stale `approved`
+    headline from an earlier head would stay pinned at the top of the thread.
+
+    Degrading here inverts the failure from SILENCE to NOISE. The worst an
+    attacker now achieves is a second comment, and a duplicate review is
+    readable — which is the property this whole publisher exists to provide.
+    """
     for page in range(1, MAX_COMMENT_PAGES + 1):
         url = f"{comments_url(pr_number)}&page={page}"
-        _, raw = _request(url, method="GET", token=token, opener=opener,
-                          body=None, where="issue-comments")
-        comments = parse_api_json(raw, where="issue-comments")
+        try:
+            _, raw = _request(url, method="GET", token=token, opener=opener,
+                              body=None, where="issue-comments")
+            comments = parse_api_json(raw, where="issue-comments")
+        except PanelRefusal:
+            return LOOKUP_FAILED
         if not isinstance(comments, list):
-            refuse("category=review_comments_response_not_a_list")
+            return LOOKUP_FAILED
         found = find_sticky_comment(comments)
         if found is not None:
             return found
         if len(comments) < COMMENT_PAGE_SIZE:
             return None
-    return None
+    # The bound, hit. Also a failed look rather than an absence: our comment may
+    # be on page seven, and creating a second one is the safe half of the guess.
+    return LOOKUP_FAILED
 
 
 # ---------------------------------------------------------------- publish ---
@@ -328,12 +351,15 @@ def publish_review(*, body: str, pr_number, candidate_head_sha: str,
                          "commit status on the reviewed SHA is unaffected"))
             return outcome
         prior = existing_comment(number, token=token, opener=opener)
-        if prior is None:
+        if prior is None or prior == LOOKUP_FAILED:
             status, _ = _request(comments_url(number), method="POST",
                                  token=token, opener=opener,
                                  body={"body": body}, where="create-comment")
             outcome.update(published=status in (200, 201), outcome=CREATED,
-                           http_status=status)
+                           http_status=status,
+                           # Recorded, so a run of duplicates is diagnosable
+                           # rather than mysterious.
+                           lookup_degraded=prior == LOOKUP_FAILED)
             return outcome
         status, _ = _request(comment_url(prior["id"]), method="PATCH",
                              token=token, opener=opener, body={"body": body},
@@ -375,6 +401,7 @@ __all__ = [
     "CREATED", "UPDATED", "REFUSED_STALE_HEAD", "REFUSED_NO_PULL_REQUEST",
     "REFUSED_API", "DRY_RUN_NOT_PUBLISHED", "comments_url", "comment_url",
     "pull_request_url", "find_sticky_comment", "written_by_a_bot",
+    "LOOKUP_FAILED",
     "existing_comment", "observed_head", "publish_review",
     "not_published_in_a_dry_run", "assert_no_candidate_influence",
 ]

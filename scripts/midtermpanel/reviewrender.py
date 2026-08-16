@@ -209,9 +209,7 @@ _ESCAPES = {
     # markup; a backslash could escape a character this function relied on.
     "`": "&#96;",
     "\\": "&#92;",
-    # A mention needs `@` in the SOURCE text. It is never left there. This also
-    # kills the GFM email autolink, which is the same character.
-    "@": "&#64;",
+    # `@` IS NOT HERE. It is removed rather than encoded — see `_AT` below.
     # LINK, IMAGE AND REFERENCE-DEFINITION SYNTAX. These four were missing from
     # the first version and the omission was the worst defect in this file.
     # Entity references ARE decoded inside a link destination, so `://` being
@@ -255,6 +253,30 @@ _ESCAPES = {
 _ASCII_DIGITS = frozenset("0123456789")
 _LEADING_ORDERED_ITEM = re.compile(r"\A[0-9]{1,9}\.")
 
+#: `@` and a notifying `#` are REPLACED, not encoded, and this is the one place
+#: this module removes information rather than escaping it.
+#:
+#: The first version wrote `&#64;` and the tests asserted on the SOURCE string,
+#: so the whole gate passed. Adversarial review rendered the output through
+#: cmark-gfm with GitHub's extension set and got back
+#: `<a href="mailto:security@evil.example">` — a live anchor, from a comment
+#: authored by `github-actions[bot]` in the job that holds the provider key.
+#: Reproduced here before this fix was written; the premise the tests recorded
+#: ("the autolinker reads the SOURCE text, before any entity is decoded") is
+#: simply false for the email form.
+#:
+#: And that is only the layer that can be checked locally. GitHub's @mention and
+#: #cross-reference filters run on the RENDERED HTML, after entity decoding, so
+#: any encoding that survives to a text node as `@name` or `#123` is a live
+#: notification whatever cmark did with it.
+#:
+#: An encoding that depends on which layer runs first is not a defence against a
+#: renderer nobody here can test. Deleting the character does not depend on
+#: anything: `(at)mglaeser` and `(hash)23` are inert at every layer, in every
+#: renderer, forever, and a reader loses nothing they cannot see.
+_AT = "(at)"
+_HASH_REFERENCE = "(hash)"
+
 
 def escape_markup(text: str) -> str:
     """HTML-escape and neutralise every construct GitHub would make LIVE.
@@ -281,9 +303,16 @@ def escape_markup(text: str) -> str:
     out, index, length = [], 0, len(text)
     while index < length:
         char = text[index]
-        replacement = _ESCAPES.get(char)
-        if replacement is not None:
-            out.append(replacement)
+        # THE TWO REMOVALS COME FIRST, before the escape table, because the
+        # table would otherwise claim `#` and this branch would be unreachable.
+        # (It was, briefly, and the renderer emitted `&#35;23` while the tests
+        # asserted only on the source.)
+        if char == "@":
+            out.append(_AT)
+            index += 1
+        elif (char == "#" and index + 1 < length
+              and text[index + 1] in _ASCII_DIGITS):
+            out.append(_HASH_REFERENCE)
             index += 1
         elif text[index:index + 4].lower() == "www.":
             out.append(text[index:index + 3] + "&#46;")
@@ -292,7 +321,8 @@ def escape_markup(text: str) -> str:
             out.append("&#58;")
             index += 1
         else:
-            out.append(char)
+            replacement = _ESCAPES.get(char)
+            out.append(char if replacement is None else replacement)
             index += 1
     escaped = "".join(out)
     found = _LEADING_ORDERED_ITEM.match(escaped)
@@ -830,10 +860,26 @@ def assert_publishable(body: str, *, challenge: str | None = None) -> str:
     without_newlines = body.replace("\n", "")
     if _CONTROL.sub("", without_newlines) != without_newlines:
         refuse("category=review_body_carries_control_characters")
+    # The character itself, not an encoding of it. `&#64;` was the first
+    # version and it renders as a live `mailto:` anchor under cmark-gfm and as
+    # a live mention under GitHub's post-render filter; this assertion passed
+    # over it because it was checking the source for a character the encoding
+    # had removed. Now the character is genuinely gone, so the check means what
+    # it says.
     if "@" in body:
-        refuse("category=review_body_carries_a_live_mention — every '@' is "
-               "written as a numeric character reference so GitHub's "
-               "autolinker cannot turn it into a notification")
+        refuse("category=review_body_carries_a_live_mention — '@' is REMOVED "
+               "from rendered text rather than encoded, because every encoding "
+               "of it survives to a text node that GitHub's mention filter "
+               "reads after decoding")
+    # NOT preceded by `&`. Every numeric character reference this module emits
+    # is `&#` followed by digits — `&#35;`, `&#45;`, `&#91;` — so a naive
+    # `#[0-9]` search fires on the escaper's own output and refuses every review
+    # containing a single escaped character. Found immediately by the tests,
+    # which is the only reason this file has a gate worth having.
+    if re.search(r"(?<!&)#[0-9]", body):
+        refuse("category=review_body_carries_a_cross_reference — '#' before a "
+               "digit is a cross-reference that notifies, and the filter that "
+               "makes it one runs on the rendered HTML")
     if isinstance(challenge, str) and challenge:
         # Case-INSENSITIVE, and then the hex-run sweep, for the same reasons
         # `sanitize` uses both: an exact comparison misses a shouted echo, and

@@ -734,6 +734,18 @@ def assert_permissions(document: dict) -> dict:
         job_permissions = (job or {}).get("permissions")
         if job_permissions is None:
             continue
+        # GitHub accepts a SCALAR shorthand — `permissions: write-all`,
+        # `read-all`, `{}` — and the allowlist below assumes a mapping, so a
+        # shorthand crashed this validator with an AttributeError instead of
+        # refusing it. `write-all` is the single most dangerous thing that could
+        # appear here, and it was the one shape that produced a stack trace
+        # rather than a named refusal.
+        if not isinstance(job_permissions, dict):
+            refuse(f"category=privileged_job_permissions_not_a_mapping "
+                   f"job={job_id} got={job_permissions!r} — the scalar "
+                   "shorthand grants a whole class at once; this lane names "
+                   "every scope it wants and refuses anything it cannot read "
+                   "scope by scope")
         writes = sorted(
             f"{k}={v}" for k, v in job_permissions.items()
             if v not in ("read", "none")

@@ -49,11 +49,16 @@ TERMINAL = "completed"
 SUCCESS = "success"
 
 
-def _timestamp(value, *, name: str) -> datetime.datetime:
+def _timestamp(value, *, name: str, conclusion=None) -> datetime.datetime:
     if not isinstance(value, str) or not value.strip():
-        refuse(f"category=check_run_has_no_completed_at check={name!r} — a "
-               "record with no timestamp cannot be ordered, and guessing its "
-               "place is how a stale green masks a fresh red")
+        # The observed conclusion travels with the refusal. `observation.settle`
+        # waits on this category, so without it an operator watching a run that
+        # never settles would see "no timestamp" for thirty seconds and never
+        # learn that the record also said `failure`.
+        refuse(f"category=check_run_has_no_completed_at check={name!r} "
+               f"observed_conclusion={conclusion!r} — a record with no "
+               "timestamp cannot be ordered, and guessing its place is how a "
+               "stale green masks a fresh red")
     text = value.strip().replace("Z", "+00:00")
     try:
         parsed = datetime.datetime.fromisoformat(text)
@@ -111,15 +116,27 @@ def sort_key(record: dict, *, name: str) -> tuple:
     document; the honest one is `latest_check_not_terminal`, and
     `assert_contexts_are_green` already says it.
 
-    Nothing is loosened. A non-terminal record sorts NEWEST, so it wins its
-    context and is then refused by name — the outcome is identical and only the
-    reported reason changes. A record claiming `status: "completed"` with no
-    timestamp still refuses here, because that one is not a state anything can
-    be in: it is a document mid-write, and `observation.settle` waits for it."""
+    Nothing is loosened, and the claim is one-directional on purpose: no
+    document that the old ordering PASSED can now produce a green it did not,
+    because a non-terminal record sorts newest, wins its context, and is refused
+    by `assert_contexts_are_green`.
+
+    The reverse direction is not identical, and saying so matters. A record
+    claiming a non-terminal status while carrying a `completed_at` used to be
+    ordered by that timestamp and could be outvoted by a newer completed green;
+    it now sorts newest and refuses. That is a contradictory document, refusing
+    is the fail-CLOSED answer, and it is a deliberate consequence rather than an
+    accident this docstring should have papered over.
+
+    A record claiming `status: "completed"` with no timestamp still refuses
+    here, because that one is not a state anything can be in: it is a document
+    mid-write, and `observation.settle` waits for it."""
     if str(record.get("status") or "") != TERMINAL:
         return (_STILL_RUNNING, _NO_TIMESTAMP, _attempt(record),
                 _identifier(record, name=name))
-    return (_FINISHED, _timestamp(record.get("completed_at"), name=name),
+    return (_FINISHED,
+            _timestamp(record.get("completed_at"), name=name,
+                       conclusion=record.get("conclusion")),
             _attempt(record), _identifier(record, name=name))
 
 

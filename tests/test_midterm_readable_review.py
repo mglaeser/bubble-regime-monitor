@@ -536,11 +536,21 @@ class TestGovernedEnumsStayLegible:
 class TestMentionsAreNeutralised:
     """Requirement 4. A published review must not notify anyone.
 
-    GitHub's autolinker reads the SOURCE text, before any entity is decoded, so
-    a numeric character reference renders as `@` and does not notify. The body
-    gate asserts the absence of a literal `@` rather than trusting the rewrite,
-    because 'we escaped it somewhere' and 'there is none left' are different
-    claims and only the second one is checkable."""
+    The first version encoded `@` as `&#64;` and this docstring asserted that
+    "GitHub's autolinker reads the SOURCE text, before any entity is decoded".
+    Adversarial review rendered the output through cmark-gfm with GitHub's
+    extension set and got `<a href="mailto:security@evil.example">` — a live
+    anchor. The premise was simply false for the email form, and every test here
+    passed over it because they all checked the SOURCE for a character the
+    encoding had removed.
+
+    And that is only the layer that can be checked from here. GitHub's @mention
+    and #cross-reference filters run on the RENDERED HTML, after decoding, so
+    any encoding that reaches a text node as `@name` is a live notification
+    whatever cmark did.
+
+    So the character is REMOVED, not encoded. `(at)mglaeser` is inert at every
+    layer, in every renderer, and a reader loses nothing they cannot see."""
 
     def test_a_mention_in_a_reason_does_not_survive_as_a_mention(self):
         one = unit("app/thing.py")
@@ -552,7 +562,21 @@ class TestMentionsAreNeutralised:
                        "fail-closed default here")})],
             plan=plan_of(one))
         assert "@" not in body
-        assert "&#64;mglaeser" in body
+        assert "(at)mglaeser" in body
+        assert "&#64;" not in body, "an encoding renders as a live mailto anchor"
+
+    def test_an_email_in_a_reason_cannot_become_a_mailto_link(self):
+        """The exact shape the reviewer rendered into an anchor."""
+        one = unit("app/thing.py")
+        body = rendered(
+            decision="blocked",
+            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
+                refuted=True,
+                reason="contact security@evil.example or xmpp:a@evil.example "
+                       "about the dropped default")})],
+            plan=plan_of(one))
+        assert "@" not in body
+        assert "security(at)evil.example" in body
 
     def test_a_mention_in_a_file_name_does_not_survive_either(self):
         one = unit("app/@mglaeser.py")
@@ -563,12 +587,25 @@ class TestMentionsAreNeutralised:
                                      "error path")})],
             plan=plan_of(one))
         assert "@" not in body
-        assert "&#64;mglaeser.py" in body
+        assert "(at)mglaeser.py" in body
 
     def test_an_issue_cross_reference_does_not_survive(self):
+        """Removed for the same reason as `@`: GitHub's cross-reference filter
+        runs on the rendered HTML, so `&#35;23` decodes to `#23` in a text node
+        and gets linkified — and a cross-reference notifies too."""
         got = reviewrender.escape_markup("see #23 for context")
         assert "#23" not in got
-        assert "&#35;23" in got
+        assert "(hash)23" in got
+        assert "&#35;23" not in got
+
+    def test_the_body_gate_refuses_a_cross_reference(self):
+        with pytest.raises(PanelRefusal) as raised:
+            reviewrender.assert_publishable(
+                f"{reviewrender.MARKER}\nsee #23")
+        assert "cross_reference" in raised.value.reason
+
+    def test_an_ordinary_hash_is_left_alone(self):
+        assert reviewrender.escape_markup("the C# port") == "the C&#35; port"
 
     def test_the_body_gate_refuses_a_live_mention_outright(self):
         with pytest.raises(PanelRefusal) as raised:
@@ -608,7 +645,11 @@ class TestTheCandidateCannotSteerThePublisherOrItsOutput:
         assert len(heading) == 1
         for character in ("<", ">", "@", "`", "\\", '"'):
             assert character not in heading[0]
-        assert "&" in heading[0]        # it was escaped, not deleted
+        # Neutralised, not deleted: the reader still sees the real file name,
+        # either through a numeric character reference or — for `@`, which no
+        # encoding makes safe — through `(at)`.
+        assert "&" in heading[0] or "(at)" in heading[0]
+        assert "app/" in heading[0]
 
     def test_a_file_name_with_a_control_character_withholds_the_location(self):
         one = unit("app/thing\x07.py")
