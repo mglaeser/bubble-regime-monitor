@@ -10080,7 +10080,7 @@ class TestARefusalCodeCarriesANextStepAndStillNoPayload:
                 f"{[t for t in clibase.NEVER_PRINT if t.lower() in remedy.lower()]}")
             assert text == remedy
 
-            whole = self._refuse_with(code, f"category=some_category more")
+            whole = self._refuse_with(code, "category=some_category more")
             text, printable = clibase.sanitized_trusted_reason(whole)
             assert printable, f"{code}: the assembled refusal line is redacted"
             assert remedy in text

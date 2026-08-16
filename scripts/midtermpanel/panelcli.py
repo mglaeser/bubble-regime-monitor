@@ -68,12 +68,17 @@ def input_paths(temp: str) -> dict:
 def review_paths(temp: str) -> dict:
     """Where the sanitized human-readable review is retained.
 
-    Beside `panel-evidence.json` and never instead of it. The evidence file is
-    the cryptographic record — full per-model verdicts, proofs, digests, all
-    private. These two are the SANITIZED reading of it: exactly what was
-    published (`.md`) and the structured object it was rendered from (`.json`),
-    so a reader can check what the panel showed a human against what it
-    actually decided."""
+    Beside `panel-evidence.json` and never instead of it. These two are the
+    SANITIZED reading of the decision: exactly what was published (`.md`) and
+    the structured object it was rendered from (`.json`), so a reader can
+    check what the panel showed a human against what it actually decided.
+
+    What `panel-evidence.json` is NOT: it is not "the full per-model verdicts,
+    proofs and digests". This docstring said that, and it was false —
+    `panel.aggregate` puts `"votes": len(votes)` into the record, an integer.
+    The reasons and proofs are scanned, used to decide, and then discarded.
+    An artifact described as holding detail it does not hold is worse than one
+    described honestly, because it stops anyone from going to look."""
     base = os.path.join(temp, "midterm")
     return {"markdown": os.path.join(base, "panel-review.md"),
             "json": os.path.join(base, "panel-review.json")}
