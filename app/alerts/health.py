@@ -87,14 +87,25 @@ def _planning_state_for(session: Session, episode_id: str | None) -> str:
               AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id)
         .where(AlertDeliveryMember.episode_id == episode_id)
     ).all()
-    live = [
-        state for state, transport in rows
-        if not TransportStatus(transport).is_terminal
-    ]
+    live: list[str] = []
+    for state, transport in rows:
+        status = TransportStatus(transport)
+        if status.is_terminal:
+            continue
+        # A delivery that is leased or mid-request is PAST planning. Reporting
+        # its stored planning state would say "READY" about a message already
+        # on its way to the provider, which is the one answer an operator
+        # asking "is this going out?" must not get.
+        if status == TransportStatus.SENDING:
+            live.append("SENDING")
+        elif status == TransportStatus.LEASED:
+            live.append("LEASED")
+        else:
+            live.append(str(state))
     for candidate in PLANNING_STATE_PRECEDENCE:
         if candidate in live:
-            return candidate
-    return PlanningState.NONE
+            return str(candidate)
+    return str(PlanningState.NONE)
 
 
 def mechanism_projection(

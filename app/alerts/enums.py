@@ -92,14 +92,34 @@ class PlanningState(StrEnum):
     PLANNED = "PLANNED"
 
 
+# Projection-only states. A delivery in flight has no distinct *planning*
+# state — it is past planning — but an operator asking "is this going out?"
+# must be able to see that. These are NEVER stored in
+# `alert_delivery.planning_state`; they exist only in the mechanism-level
+# projection, which is why they are not members of `PlanningState` (the check
+# constraint on that column is the stored vocabulary, and widening it would
+# let a projection value be written as if it were a plan).
+IN_FLIGHT_PROJECTION: tuple[str, ...] = ("SENDING", "LEASED")
+
 # Precedence when projecting the latest non-terminal delivery of an episode
 # onto a single mechanism-level planning state (mandate 21.4).
-PLANNING_STATE_PRECEDENCE: tuple[PlanningState, ...] = (
-    PlanningState.PLANNED,
+#
+# FURTHEST-ALONG wins, not most-recent. The order is therefore literally how
+# close the message is to the phone:
+#
+#     SENDING > LEASED > READY > HELD_GROUPING > HELD_QUIET > HELD_BUDGET
+#                                                                > PLANNED
+#
+# PLANNED is LAST because it is the least advanced of the non-terminal states:
+# an intent exists but is not yet cleared to send. Ranking it first would
+# answer "is this going out?" with the weakest thing that is true.
+PLANNING_STATE_PRECEDENCE: tuple[str, ...] = (
+    *IN_FLIGHT_PROJECTION,
     PlanningState.READY,
     PlanningState.HELD_GROUPING,
     PlanningState.HELD_QUIET,
     PlanningState.HELD_BUDGET,
+    PlanningState.PLANNED,
 )
 
 

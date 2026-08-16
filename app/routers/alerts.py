@@ -315,14 +315,24 @@ def get_deliveries(request: Request, limit: int = Query(default=100, ge=1, le=MA
         return {"items": [_delivery_projection(r) for r in rows]}
 
 
-def _delivery_projection(row: AlertDelivery) -> dict[str, Any]:
-    """No recipient, no provider correlation id, no raw error text."""
-    return {
+def _delivery_projection(row: AlertDelivery,
+                         members: list[Any] | None = None) -> dict[str, Any]:
+    """No recipient, no provider correlation id, no raw error text.
+
+    Provenance is reported at BOTH layers (A-08). `planning_rules_sha256` is
+    the ruleset that decided to group these episodes into one message; each
+    member carries the ruleset and phrase-set bytes it was itself planned
+    under, which after a promotion need not be the same. One field cannot say
+    both, and a bundle that reported only the planning hash would claim its
+    older members were rendered from rules they never saw.
+    """
+    payload = {
         "delivery_id": row.delivery_id,
         "delivery_kind": row.delivery_kind,
         "priority": row.priority,
         "transport_status": row.transport_status,
         "planning_state": row.planning_state,
+        "planning_rules_sha256": row.planning_rules_sha256,
         "hold_reason_code": row.hold_reason_code,
         "not_before": iso(row.not_before),
         "attempts": row.attempts,
@@ -332,6 +342,21 @@ def _delivery_projection(row: AlertDelivery) -> dict[str, Any]:
         "duplicate_risk_acknowledged": bool(row.duplicate_risk_acknowledged),
         "blocks_replanning": bool(row.blocks_replanning),
     }
+    if members is not None:
+        payload["members"] = [
+            {
+                "episode_id": m.episode_id,
+                "rule_id": m.rule_id,
+                "instance_fingerprint": m.instance_fingerprint,
+                "member_role": m.member_role,
+                "notification_generation": m.notification_generation,
+                "origin_rules_sha256": m.origin_rules_sha256,
+                "origin_phrase_set_version": m.origin_phrase_set_version,
+                "origin_phrase_set_sha256": m.origin_phrase_set_sha256,
+            }
+            for m in members
+        ]
+    return payload
 
 
 @router.get("/deliveries/{delivery_id}", summary="One delivery (redacted)")
@@ -342,7 +367,14 @@ def get_delivery(request: Request, delivery_id: str,
         row = session.get(AlertDelivery, delivery_id)
         if row is None:
             return problem(404, "Unknown delivery", "no delivery with that id")
-        return _delivery_projection(row)
+        from app.alerts.models import AlertDeliveryMember
+
+        members = session.execute(
+            select(AlertDeliveryMember)
+            .where(AlertDeliveryMember.delivery_id == delivery_id)
+            .order_by(AlertDeliveryMember.included_at.asc())
+        ).scalars().all()
+        return _delivery_projection(row, members=list(members))
 
 
 @router.get("/renders/{render_id}", summary="One render (redacted)")

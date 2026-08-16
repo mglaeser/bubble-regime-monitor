@@ -390,6 +390,38 @@ producer is not built.
 
 ---
 
+## 11a. Retention: two horizons
+
+```bash
+ALERTS_MESSAGE_RETENTION_DAYS=400    # rendered message BODIES
+ALERTS_METADATA_RETENTION_DAYS=800   # the audit trail
+python -m app.alerts.cli retention [--dry-run]
+```
+
+The short sweep **redacts, it does not delete**. An `alert_render` row carries
+the phrase-set provenance it was planned under, the render source, the septet
+count and the validation results — metadata — alongside the text. Dropping the
+row to expire the text would take the provenance with it, so the body is
+emptied in place and `body_redacted_at` is stamped.
+
+That is the one exception to render immutability, and it is enforced rather
+than trusted: migration `0009` replaces the `alert_render_no_update` trigger
+with one that permits *exactly* the transition `final_message -> ''` at the
+same moment `body_redacted_at` goes from NULL to set. A rewrite still aborts, a
+second redaction still aborts, and `gsm7_septets` is left alone so the length
+of what was sent stays auditable after the text is gone.
+
+Two things are never swept: a body whose delivery is not yet terminal (a retry
+could still reuse that exact render), and events belonging to an open episode
+(the trail explaining a still-firing mechanism is the one most likely to be
+needed). Inverted horizons — metadata shorter than messages — are refused
+outright rather than half-applied.
+
+Raw model output needs no sweep at all: `alert_llm_attempt` has never stored
+it, only status, timing, hashes and an already-redacted error string.
+
+---
+
 ## 12. Replay (the Stage 1 gate)
 
 Stage 1's gate is *deterministic replay; no PII; no scoring regression*.

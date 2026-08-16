@@ -16,6 +16,7 @@ read-only unless its name says otherwise.
     python -m app.alerts.cli reconcile-sidecars
     python -m app.alerts.cli watchdog --once     # exit 2 = outage detected
     python -m app.alerts.cli dispatch --once     # one outbox pass
+    python -m app.alerts.cli retention [--dry-run]
 """
 
 from __future__ import annotations
@@ -137,6 +138,15 @@ def cmd_dispatch(_args: argparse.Namespace) -> int:
     result = run_once()
     _print(result)
     return 0
+
+
+def cmd_retention(args: argparse.Namespace) -> int:
+    """Expire message bodies; keep the audit trail. `--dry-run` commits nothing."""
+    from app.jobs.alert_retention import run_once
+
+    result = run_once(dry_run=bool(args.dry_run))
+    _print(result)
+    return 1 if result.get("skipped") else 0
 
 
 def cmd_ruleset(_args: argparse.Namespace) -> int:
@@ -347,6 +357,11 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch = sub.add_parser("dispatch", help="run one pass of the delivery outbox")
     dispatch.add_argument("--once", action="store_true", default=True)
     dispatch.set_defaults(func=cmd_dispatch)
+    retention = sub.add_parser("retention",
+                               help="expire message bodies, keep the audit trail")
+    retention.add_argument("--dry-run", action="store_true",
+                           help="report what would be swept; commit nothing")
+    retention.set_defaults(func=cmd_retention)
     sub.add_parser("ruleset", help="active ruleset summary").set_defaults(func=cmd_ruleset)
     sub.add_parser("health", help="health projection").set_defaults(func=cmd_health)
     sub.add_parser("pending", help="open episodes").set_defaults(func=cmd_pending)
