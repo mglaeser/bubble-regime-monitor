@@ -481,32 +481,51 @@ def assert_triggering_ci_jobs_are_green(jobs, *, run_id: int) -> dict:
         if name in REQUIRED_CI_JOBS:
             if str(job.get("status")) != "completed":
                 observed[name] = "incomplete"
+            elif job.get("conclusion") is None:
+                # Completed with no conclusion: the same write lag as a check
+                # run with no `completed_at`, and it used to be reported as
+                # `=None` under the not-successful category — a permanent
+                # refusal for a state that resolves itself in a second.
+                observed[name] = "unwritten"
             else:
-                observed[name] = str(job.get("conclusion") or "")
-    missing = [name for name in REQUIRED_CI_JOBS if name not in observed]
-    if missing:
-        refuse(f"category=triggering_run_missing_required_job jobs={missing} "
-               f"run_id={run_id} observed={sorted(observed)}")
+                observed[name] = str(job.get("conclusion"))
+    # SAME ORDER, SAME REASON as `checkruns.assert_contexts_are_green`. A red
+    # is evaluated first and wins: with "incomplete" checked ahead of it, a job
+    # that had finished and FAILED was reported under the retryable
+    # `triggering_run_job_incomplete` whenever any sibling was still running,
+    # so the run polled for thirty seconds and then named the wrong problem.
+    bad = sorted(f"{name}={observed[name]}" for name in REQUIRED_CI_JOBS
+                 if name in observed
+                 and observed[name] not in ("incomplete", "unwritten", "success"))
+    if bad:
+        refuse(f"category=triggering_run_job_not_successful jobs={bad} "
+               f"run_id={run_id}")
+    unwritten = sorted(name for name in REQUIRED_CI_JOBS
+                       if observed.get(name) == "unwritten")
+    if unwritten:
+        refuse(f"category=triggering_run_job_conclusion_not_written "
+               f"jobs={unwritten} run_id={run_id} — the job says it completed "
+               "and does not say how; that is a document mid-write")
     # STILL RUNNING and FAILED are two different facts, and they were reported
     # under one category. `triggering_run_job_not_successful jobs=['test
     # (3.12)=incomplete']` reads as a failure and is a job that has not
     # finished — and the distinction is now load-bearing, because
     # `observation.settle` may wait for the first and must never wait for the
-    # second. A retry loop that could not tell them apart would be a loop that
-    # eventually reported the answer it wanted.
+    # second.
     incomplete = sorted(name for name in REQUIRED_CI_JOBS
-                        if observed[name] == "incomplete")
+                        if observed.get(name) == "incomplete")
     if incomplete:
         refuse(f"category=triggering_run_job_incomplete jobs={incomplete} "
                f"run_id={run_id} — the job has not finished. This is the one "
                "state that is worth re-reading: the panel fires within a second "
                "of the run completing, and a sibling required job can still be "
                "being written")
-    bad = sorted(f"{name}={observed[name]}" for name in REQUIRED_CI_JOBS
-                 if observed[name] != "success")
-    if bad:
-        refuse(f"category=triggering_run_job_not_successful jobs={bad} "
-               f"run_id={run_id}")
+    missing = [name for name in REQUIRED_CI_JOBS if name not in observed]
+    if missing:
+        # LAST, and retryable. The exact analogue of `check_absent_on_head`: a
+        # job the API has not listed yet is not a job that will never exist.
+        refuse(f"category=triggering_run_missing_required_job jobs={missing} "
+               f"run_id={run_id} observed={sorted(observed)}")
     return {"jobs": {name: observed[name] for name in REQUIRED_CI_JOBS},
             "run_id": run_id}
 

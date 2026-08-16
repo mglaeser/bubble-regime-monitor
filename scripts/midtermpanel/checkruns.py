@@ -182,10 +182,47 @@ def latest_by_context(check_runs, *, head_sha: str, contexts) -> dict:
 
 def assert_contexts_are_green(check_runs, *, head_sha: str, contexts,
                               where: str) -> dict:
-    """Every named context present, terminal, and `success`, on this head."""
+    """Every named context present, terminal, and `success`, on this head.
+
+    ORDER IS THE CONTROL, and adversarial review is what established it. These
+    refusals are no longer interchangeable: `observation.settle` waits on the
+    write-lag ones and must never wait on a real failure. With "absent" and
+    "still running" checked first, a check that had FINISHED AND FAILED was
+    masked by a sibling that had not arrived yet — the run polled for thirty
+    seconds and then refused under a category that named the wrong problem.
+
+    So a real red is evaluated FIRST, over whatever was selected, and wins.
+    """
     contexts = tuple(contexts)
     selected = latest_by_context(check_runs, head_sha=head_sha,
                                  contexts=contexts)
+
+    # 1. A RED, over whatever is present. Never retried, never masked.
+    bad = sorted(f"{name}={selected[name].get('conclusion')}"
+                 for name in contexts
+                 if name in selected
+                 and str(selected[name].get("status")) == TERMINAL
+                 and selected[name].get("conclusion") is not None
+                 and str(selected[name].get("conclusion")) != SUCCESS)
+    if bad:
+        refuse(f"category=check_not_successful where={where} checks={bad} "
+               f"head={head_sha[:12]}")
+
+    # 2. TERMINAL WITH NO CONCLUSION. The other half of the same write lag the
+    #    missing `completed_at` comes from, and it used to be absorbed by the
+    #    check above as `test (3.12)=None` — a permanent refusal for a state
+    #    that resolves itself in a second. Its own category, so it can be
+    #    waited on and a real red still cannot.
+    unwritten = sorted(name for name in contexts
+                       if name in selected
+                       and str(selected[name].get("status")) == TERMINAL
+                       and selected[name].get("conclusion") is None)
+    if unwritten:
+        refuse(f"category=check_conclusion_not_written where={where} "
+               f"checks={unwritten} head={head_sha[:12]} — the record says the "
+               "run completed and does not say how. That is a document "
+               "mid-write, not an outcome")
+
     missing = [name for name in contexts if name not in selected]
     if missing:
         refuse(f"category=check_absent_on_head where={where} checks={missing} "
@@ -198,13 +235,6 @@ def assert_contexts_are_green(check_runs, *, head_sha: str, contexts,
                f"checks={incomplete} head={head_sha[:12]} — the newest attempt "
                "has not finished. Falling back to an older completed record "
                "would report the result of a run that has been superseded")
-
-    bad = sorted(f"{name}={selected[name].get('conclusion')}"
-                 for name in contexts
-                 if str(selected[name].get("conclusion")) != SUCCESS)
-    if bad:
-        refuse(f"category=check_not_successful where={where} checks={bad} "
-               f"head={head_sha[:12]}")
 
     return {"checks": {name: {
                 "conclusion": selected[name].get("conclusion"),

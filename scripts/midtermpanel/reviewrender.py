@@ -152,6 +152,27 @@ FORBIDDEN_FIELDS = (
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _NON_ASCII = re.compile(r"[^\x20-\x7e]")
+
+#: Unicode general categories refused in PROSE. Everything else is allowed.
+#:
+#: `Cc` control, `Cf` format (bidi overrides, zero-width joiners), `Cs`
+#: surrogate, `Co` private use, `Cn` unassigned. Each of those changes what a
+#: reader sees without changing what they can read; ordinary punctuation does
+#: not, and a model writing an em dash or a curly quote in a REFUTATION should
+#: not have the most important sentence in the document replaced by
+#: "withheld by output-privacy policy".
+_UNSAFE_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
+
+#: Charset policies. The split is deliberate and it is about STAKES, not taste.
+#:
+#: A PATH is acted on: a reader follows it to a file, and a homoglyph sends them
+#: to the wrong one, so a path is ASCII printable or it is withheld — the same
+#: rule the engine applies to the fields its distinctness gate compares.
+#:
+#: PROSE is read, not acted on. A confusable in a sentence misleads nobody, and
+#: refusing it costs the reader the explanation they came for.
+CHARSET_ASCII = "ascii_printable"
+CHARSET_TEXT = "text_without_invisible_characters"
 _SHA1 = re.compile(r"\A[0-9a-f]{40}\Z")
 
 #: Refusal reasons, as distinct machine-readable strings. A field withheld for
@@ -331,7 +352,17 @@ def escape_markup(text: str) -> str:
     return escaped
 
 
-def sanitize(value, *, scan, limit: int, field: str, redact=()) -> dict:
+def _unsafe_codepoint(text: str) -> str | None:
+    """The first invisible or unassigned character, if any."""
+    import unicodedata
+    for char in text:
+        if unicodedata.category(char) in _UNSAFE_UNICODE_CATEGORIES:
+            return char
+    return None
+
+
+def sanitize(value, *, scan, limit: int, field: str, redact=(),
+             charset: str = CHARSET_ASCII) -> dict:
     """One field, from untrusted text to something publishable — or withheld.
 
     `scan` is the ENGINE's secret scanner, passed in rather than imported. The
@@ -396,11 +427,14 @@ def sanitize(value, *, scan, limit: int, field: str, redact=()) -> dict:
     #    inject a heading, a list, or a fake second finding into this body.
     if _CONTROL.search(value):
         return _withheld(field, CONTROL_CHARACTER)
-    # 2. Charset. The engine's `REASON_CHARSET_POLICY` restricts reason and proof
-    #    to ASCII printable so a homoglyph cannot make one canned sentence look
-    #    like two; the same restriction applies here, and extends to the path,
-    #    where a bidi override would let a rendered filename read backwards.
-    if _NON_ASCII.search(value):
+    # 2. Charset, by policy — see CHARSET_ASCII / CHARSET_TEXT for why these
+    #    differ. A path is acted on and must be ASCII; prose is read, and
+    #    refusing an em dash there would replace the most important sentence in
+    #    the document with the withheld notice.
+    if charset == CHARSET_ASCII:
+        if _NON_ASCII.search(value):
+            return _withheld(field, OUTSIDE_CHARSET)
+    elif _unsafe_codepoint(value) is not None:
         return _withheld(field, OUTSIDE_CHARSET)
     # 3. The secret scan, on the FULL raw text. Before the bound, deliberately:
     #    scanning a truncated string is a scan a long secret walks past.
@@ -590,7 +624,8 @@ def _finding(model: str, unit_hash: str, verdict: dict, *, locations: dict,
              scan, redact=()) -> dict:
     location = _location_view(locations.get(unit_hash), unit_hash, scan=scan)
     reason = sanitize(verdict.get("reason"), scan=scan,
-                      limit=MAX_REASON_CHARS, field="reason", redact=redact)
+                      limit=MAX_REASON_CHARS, field="reason", redact=redact,
+                      charset=CHARSET_TEXT)
     return {
         "unit_sha256": unit_hash,
         "model": model,
@@ -641,7 +676,14 @@ def _location_view(located, unit_hash: str, *, scan) -> dict:
                 "sort_key": (2, "", 0, unit_hash)}
     path = sanitize(located.get("path"), scan=scan, limit=MAX_PATH_CHARS,
                     field="path")
-    line_range = located.get("new_line_range") or located.get("old_line_range")
+    # WHICH SIDE. A deletion-only unit has no `new_line_range`, and rendering
+    # its OLD numbers unlabelled sent a reader to those lines in the file as it
+    # is now — a different place entirely, with the panel's authority behind it.
+    line_range = located.get("new_line_range")
+    side = "lines"
+    if not line_range:
+        line_range = located.get("old_line_range")
+        side = "old lines"
     # An integer RANK rather than a sentinel character. Ordering by a
     # high codepoint would work and would also put a non-ASCII character into a
     # sort key that a future edit might render; the rank cannot be rendered by
@@ -653,12 +695,13 @@ def _location_view(located, unit_hash: str, *, scan) -> dict:
         label = f"path withheld by output-privacy policy (path {digest[:16]})"
         rank, sort_path = 1, digest
     if line_range:
-        label = (f"{label} lines {line_range[0]}-{line_range[1]}"
+        singular = side.replace("lines", "line")
+        label = (f"{label} {side} {line_range[0]}-{line_range[1]}"
                  if line_range[0] != line_range[1]
-                 else f"{label} line {line_range[0]}")
+                 else f"{label} {singular} {line_range[0]}")
     return {"located": True, "path": path, "path_sha256":
             located.get("path_sha256"), "line_range": line_range,
-            "label": label,
+            "label": label, "line_side": side,
             "sort_key": (rank, sort_path, (line_range or [0])[0], unit_hash)}
 
 
@@ -760,7 +803,7 @@ def block_reasons(aggregate_record: dict, *, scan) -> list:
         if not isinstance(record, dict) or not record.get("block"):
             continue
         got = sanitize(record.get("reason"), scan=scan, limit=MAX_REASON_CHARS,
-                       field=f"{gate}_reason")
+                       field=f"{gate}_reason", charset=CHARSET_TEXT)
         reasons.append({"gate": gate,
                         "text": got["text"] if got["published"] else WITHHELD})
     return reasons
@@ -928,9 +971,17 @@ def render(review: dict, *, challenge: str | None = None) -> str:
     ABSENT — the one check that has to see the secret to confirm it did not
     travel."""
     decision = review["decision"]
-    headline = ("approved — no refutation from any governed model"
-                if decision == "approved"
-                else "blocked — at least one governed model refuted a change")
+    # The headline is derived from the FINDINGS, not from the decision alone.
+    # `blocked — at least one governed model refuted a change` was printed in
+    # exactly the case where none had: the role gate blocks with no `refuted`
+    # verdict anywhere, and the loudest line in the document then asserted
+    # something the rest of it contradicted.
+    if decision == "approved":
+        headline = "approved — no refutation from any governed model"
+    elif review["finding_count"]:
+        headline = "blocked — a governed model refuted a change"
+    else:
+        headline = "blocked — the role and corroboration gates were not met"
     lines = [
         MARKER,
         head_binding(review["candidate_head_sha"]),

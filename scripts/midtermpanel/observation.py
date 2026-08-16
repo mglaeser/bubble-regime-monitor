@@ -93,11 +93,22 @@ SETTLE_OBSERVATIONS = len(SETTLE_DELAYS_SECONDS) + 1
 #:     the same lag on the run's own jobs. Split out of
 #:     `triggering_run_job_not_successful` precisely so that this one may be
 #:     waited on and a genuine red may not.
+#: `check_conclusion_not_written` / `triggering_run_job_conclusion_not_written`
+#:     the OTHER half of the same write lag: a record that says the run
+#:     completed and does not say how. These were absorbed by the
+#:     not-successful categories as `test (3.12)=None` — a permanent refusal
+#:     for a state that resolves itself in a second.
+#: `triggering_run_missing_required_job`
+#:     the exact analogue of `check_absent_on_head`. A job the API has not
+#:     listed yet is not a job that will never exist.
 RETRYABLE_CATEGORIES = frozenset({
     "check_run_has_no_completed_at",
+    "check_conclusion_not_written",
     "check_absent_on_head",
     "latest_check_not_terminal",
     "triggering_run_job_incomplete",
+    "triggering_run_job_conclusion_not_written",
+    "triggering_run_missing_required_job",
 })
 
 #: Categories that are explicitly NOT retryable even though they are adjacent to
@@ -181,10 +192,13 @@ def settle(*, read, assertion, where: str, sleep=None,
             return {**record, "observation": observation}
         return {"result": record, "observation": observation}
 
-    # Exhausted. The ORIGINAL category leads the message, so anything reading
-    # for it still finds it, and the waiting is reported after rather than
-    # instead — "we looked six times over thirty seconds and it never settled"
-    # is a different fact from "it was not ready", and an operator needs both.
+    # Exhausted. The LAST observation's refusal leads the message — it is the
+    # most recent truth about the world, and it is what a person re-reading the
+    # API by hand would now see. Every category seen along the way is listed
+    # after it, in order, because a run that flipped between two of them is a
+    # different story from one stuck on one. Both are reported: "we looked six
+    # times over thirty seconds and it never settled" is a different fact from
+    # "it was not ready", and an operator needs both.
     refuse(f"{last.reason} [settle where={where} "
            f"observations={len(delays) + 1} "
            f"waited_seconds={sum(delays)} categories={sorted(set(transient))} "

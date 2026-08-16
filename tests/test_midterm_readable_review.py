@@ -1482,3 +1482,219 @@ def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True,
             "published_body": captured.get("body"),
             "markdown": Path(paths["markdown"]), "json": Path(paths["json"]),
             "evidence": runner / "midterm" / "panel-evidence.json"}
+
+
+# ------------------------------------------- round three: the last sweep ----
+
+
+class TestTheHeadlineNeverClaimsWhatTheBodyDenies:
+    """The loudest line in the document asserted "at least one governed model
+    refuted a change" in exactly the case where none had — the role-gate block,
+    which is also the case where the findings list is empty. A reader scanning
+    the heading and the count would have seen the two contradict each other."""
+
+    def _blocked_without_refutation(self):
+        one = unit("app/thing.py")
+        record = {**aggregate_of("blocked"),
+                  "engine_gate": {"block": True,
+                                  "reason": "the required approver has no valid "
+                                            "vote on 1 unit(s)",
+                                  "refuted_unit_count": 0},
+                  "strict_gate": {"block": False, "reason": "x",
+                                  "refuting_models": []}}
+        review = reviewrender.build_review(
+            decision="blocked", candidate_head_sha=HEAD, candidate_base_sha=BASE,
+            plan=plan_of(one),
+            votes=[vote(m, {one["unit_sha256"]: verdict(
+                refuted=False, reason=f"{m} sees nothing wrong here")})
+                for m in PANEL_MODELS],
+            aggregate_record=record, scan=scan, run_url=RUN_URL, run_id=7,
+            evidence_sha256="e" * 64)
+        return reviewrender.render(review)
+
+    def test_a_role_gate_block_does_not_claim_a_refutation(self):
+        body = self._blocked_without_refutation()
+        headline = next(line for line in body.splitlines()
+                        if line.startswith("### Mid-term panel review:"))
+        assert "refuted" not in headline
+        assert "role and corroboration gates were not met" in headline
+        # And the body says plainly that nobody refuted, which is the fact the
+        # headline used to contradict.
+        assert "No governed model refuted a change." in body
+
+    def test_a_real_refutation_still_says_so(self):
+        one = unit("app/thing.py")
+        body = rendered(
+            decision="blocked", plan=plan_of(one),
+            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
+                refuted=True, reason="the fail closed default is dropped")})])
+        assert "blocked — a governed model refuted a change" in body
+
+
+class TestProseKeepsItsPunctuationAndPathsDoNot:
+    """The charset split is about STAKES.
+
+    A path is ACTED ON — a reader follows it to a file, and a homoglyph sends
+    them to the wrong one. Prose is READ. Refusing an em dash in a refutation
+    replaced the single most important sentence in the document with the
+    withheld notice, for a confusable that misleads nobody."""
+
+    def test_a_refutation_may_use_ordinary_punctuation(self):
+        one = unit("app/thing.py")
+        body = rendered(
+            decision="blocked", plan=plan_of(one),
+            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
+                refuted=True,
+                reason="the handler — added in this change — drops "
+                       "the “fail closed” default")})])
+        assert reviewrender.WITHHELD not in body
+        assert "—" in body and "“fail closed”" in body
+
+    def test_an_invisible_character_still_withholds_prose(self):
+        got = reviewrender.sanitize("before‮after", scan=scan, limit=600,
+                                    field="reason",
+                                    charset=reviewrender.CHARSET_TEXT)
+        assert got["refusal"] == reviewrender.OUTSIDE_CHARSET
+
+    def test_a_zero_width_joiner_still_withholds_prose(self):
+        got = reviewrender.sanitize("a‍b", scan=scan, limit=600,
+                                    field="reason",
+                                    charset=reviewrender.CHARSET_TEXT)
+        assert got["refusal"] == reviewrender.OUTSIDE_CHARSET
+
+    def test_a_path_stays_ascii_only(self):
+        got = reviewrender.sanitize("app/аdmin.py", scan=scan, limit=200,
+                                    field="path")
+        assert got["refusal"] == reviewrender.OUTSIDE_CHARSET
+
+    def test_a_homoglyph_path_withholds_the_location_not_the_finding(self):
+        one = unit("app/аdmin.py")
+        body = rendered(
+            decision="blocked", plan=plan_of(one),
+            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
+                refuted=True, reason="the fail closed default is dropped")})])
+        assert "path withheld by output-privacy policy" in body
+        assert "| Actionable findings | 1 |" in body
+
+
+class TestADeletionOnlyUnitSaysWhichSideItsLinesAreOn:
+    """`new_line_range` is None for a deletion-only unit, and the old numbers
+    were rendered unlabelled — sending a reader to those lines in the file as it
+    is NOW, which is a different place entirely, with the panel behind it."""
+
+    def test_old_side_numbers_are_labelled_old(self):
+        one = unit("app/thing.py")
+        one["new_line_range"] = None
+        one["old_line_range"] = [41, 58]
+        body = rendered(
+            decision="blocked", plan=plan_of(one),
+            votes=[vote("gpt-5.3-codex", {one["unit_sha256"]: verdict(
+                refuted=True, reason="the removed guard was load bearing")})])
+        assert "**app/thing.py old lines 41-58**" in body
+
+    def test_new_side_numbers_are_not_relabelled(self):
+        body = rendered(
+            decision="blocked", plan=plan_of(unit("app/thing.py", lines=(1, 2))),
+            votes=[vote("gpt-5.3-codex", {
+                unit("app/thing.py", lines=(1, 2))["unit_sha256"]: verdict(
+                    refuted=True, reason="the added branch is not restored")})])
+        assert "old lines" not in body
+        assert "**app/thing.py lines 1-2**" in body
+
+
+class TestARedIsNeverRoutedIntoTheRetryPath:
+    """The ordering inside both gates, as a property.
+
+    With "absent" and "still running" checked first, a check that had FINISHED
+    AND FAILED was masked by a sibling that had not arrived yet: the run polled
+    for thirty seconds and refused under a category naming the wrong problem."""
+
+    def test_a_failed_check_beats_an_absent_sibling(self):
+        from midtermpanel import checkruns, observation
+        runs = [{"name": "test (3.12)", "status": "completed",
+                 "conclusion": "failure", "completed_at": "2026-08-15T22:00:00Z",
+                 "head_sha": HEAD, "id": 1}]
+        with pytest.raises(PanelRefusal) as caught:
+            checkruns.assert_contexts_are_green(
+                runs, head_sha=HEAD, contexts=("test (3.12)", "image"),
+                where="t")
+        assert "check_not_successful" in caught.value.reason
+        assert not observation.is_retryable(caught.value)
+
+    def test_a_failed_job_beats_an_incomplete_sibling(self):
+        from midtermpanel import observation, preflight
+        jobs = [{"name": "test (3.12)", "status": "completed",
+                 "conclusion": "failure"},
+                {"name": "image", "status": "in_progress", "conclusion": None}]
+        with pytest.raises(PanelRefusal) as caught:
+            preflight.assert_triggering_ci_jobs_are_green(jobs, run_id=1)
+        assert "triggering_run_job_not_successful" in caught.value.reason
+        assert not observation.is_retryable(caught.value)
+
+    def test_a_completed_check_with_no_conclusion_is_waited_on(self):
+        from midtermpanel import checkruns, observation
+        runs = [{"name": name, "status": "completed", "conclusion": None,
+                 "completed_at": "2026-08-15T22:00:00Z", "head_sha": HEAD,
+                 "id": index + 1}
+                for index, name in enumerate(("test (3.12)", "image"))]
+        with pytest.raises(PanelRefusal) as caught:
+            checkruns.assert_contexts_are_green(
+                runs, head_sha=HEAD, contexts=("test (3.12)", "image"),
+                where="t")
+        assert "check_conclusion_not_written" in caught.value.reason
+        assert observation.is_retryable(caught.value)
+
+    def test_a_completed_job_with_no_conclusion_is_waited_on(self):
+        from midtermpanel import observation, preflight
+        jobs = [{"name": "test (3.12)", "status": "completed",
+                 "conclusion": None},
+                {"name": "image", "status": "completed", "conclusion": "success"}]
+        with pytest.raises(PanelRefusal) as caught:
+            preflight.assert_triggering_ci_jobs_are_green(jobs, run_id=1)
+        assert "triggering_run_job_conclusion_not_written" in caught.value.reason
+        assert observation.is_retryable(caught.value)
+
+
+class TestAFloodedThreadDegradesToNoiseNotSilence:
+    """`parse_api_json` caps a response at 2 MiB and a GitHub comment may be
+    65 536 CHARACTERS — 256 KiB in astral-plane UTF-8 — so eight legal comments
+    exceed the cap and no page size fixes it. With the refusal propagating,
+    anyone who could comment could make every future review vanish."""
+
+    def test_an_unreadable_comment_list_still_publishes(self):
+        class Flooded(Recorder):
+            def __call__(self, request, timeout=None):
+                if request.get_method() == "GET" and "/pulls/" not in \
+                        request.full_url:
+                    raise OSError("body too large")
+                return super().__call__(request, timeout)
+
+        opener = Flooded()
+        got = reviewpublish.publish_review(
+            body=a_body(), pr_number=46, candidate_head_sha=HEAD, token="t",  # noqa: S106
+            opener=opener)
+        assert got["outcome"] == reviewpublish.CREATED
+        assert got["published"] is True
+        assert got["lookup_degraded"] is True
+
+    def test_a_readable_list_is_not_marked_degraded(self):
+        opener = Recorder()
+        got = reviewpublish.publish_review(
+            body=a_body(), pr_number=46, candidate_head_sha=HEAD, token="t",  # noqa: S106
+            opener=opener)
+        assert got["lookup_degraded"] is False
+
+
+class TestTheScalarPermissionShorthandIsRefusedByName:
+    """`permissions: write-all` is the single most dangerous value that could
+    appear in a job block, and it was the one shape that produced an
+    AttributeError instead of a refusal."""
+
+    @pytest.mark.parametrize("shorthand", ["write-all", "read-all", []])
+    def test_it_refuses_rather_than_crashing(self, shorthand):
+        from midtermpanel import privilegedworkflow
+        document = {"permissions": dict(privilegedworkflow.REQUIRED_PERMISSIONS),
+                    "jobs": {"panel": {"permissions": shorthand}}}
+        with pytest.raises(PanelRefusal) as caught:
+            privilegedworkflow.assert_permissions(document)
+        assert "permissions_not_a_mapping" in caught.value.reason
