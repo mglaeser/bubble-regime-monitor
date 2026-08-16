@@ -1,0 +1,15 @@
+# Every 30 minutes. The alert condition needs two missed 4-hourly slots plus a
+# 90-minute grace, so a 30-minute cadence detects an outage roughly 8-9 hours
+# in without adding polling noise.
+
+[Unit]
+Description=Run the bubblegauge alert watchdog every 30 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

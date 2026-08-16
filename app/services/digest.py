@@ -23,8 +23,8 @@ def send_daily_digest(*, force: bool = False) -> dict[str, Any]:
     SMS_ENABLED gate (used by the admin test endpoint) but still requires
     credentials + a recipient."""
     settings = get_settings()
-    if not force and not settings.sms_enabled:
-        return {"status": "skipped", "reason": "SMS_ENABLED=false"}
+    if not force and not settings.effective_daily_sms_enabled:
+        return {"status": "skipped", "reason": "DAILY_SMS_ENABLED/SMS_ENABLED=false"}
     if not (settings.sipgate_token_id and settings.sipgate_token and settings.sipgate_recipient):
         return {"status": "skipped", "reason": "sipgate credentials/recipient not configured"}
 
