@@ -130,6 +130,12 @@ jobs:
   preflight:
     name: midterm-preflight
     runs-on: ubuntu-latest
+    # A CEILING, not an estimate. GitHub's default is 360 minutes, and two of
+    # these jobs hold a provider key — a hung job with a credential in scope is
+    # a credential in scope for six hours. `observation.settle` also added up to
+    # sixty seconds of deliberate waiting here, which is a reason to state the
+    # bound rather than to leave it at the default.
+    timeout-minutes: 15
     permissions:
       contents: read
       actions: read
@@ -262,6 +268,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Carried out of the job because RUNNER_TEMP is per-job: the journal this
     # job writes is not on finalize's runner at all. Without these, a refusal
     # between the first provider call and the evidence write leaves finalize
@@ -588,6 +595,7 @@ jobs:
     needs: [preflight, count]
     if: needs.preflight.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Same reason as `count` — a different runner, a different RUNNER_TEMP.
     # These are the generation attempts, which is the number the run cap and
     # the operator's spend reconciliation are both about.
@@ -965,6 +973,7 @@ jobs:
     needs: [preflight, count, panel]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read

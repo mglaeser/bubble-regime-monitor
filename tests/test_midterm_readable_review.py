@@ -1787,3 +1787,163 @@ class TestThePublicationGateIsProvablyKillable:
         for span in spans:
             residue = residue.replace(span, " ")
         assert "@" not in residue
+
+
+class TestTheUntestedGuardsAreNowLoadBearing:
+    """Nine properties the audit found asserted nowhere.
+
+    A guard with no test is a guard a refactor deletes silently, and this
+    session has produced five checks that reported properties they could not
+    see. Each test below was verified by MUTATION: the guard was removed in a
+    scratch copy and the test confirmed red before it was kept."""
+
+    def test_a_method_outside_the_allowlist_is_refused(self):
+        """`PUBLISH_METHODS` is the capability. Without this, widening it is a
+        one-word edit nothing reports."""
+        with pytest.raises(PanelRefusal) as raised:
+            reviewpublish._request(
+                reviewpublish.comments_url(46), method="DELETE", token="t",  # noqa: S106
+                opener=Recorder(), body=None, where="t")
+        assert "method_not_permitted" in raised.value.reason
+
+    @pytest.mark.parametrize("method", ["GET", "POST", "PATCH"])
+    def test_the_three_permitted_methods_are_permitted(self, method):
+        reviewpublish._request(
+            reviewpublish.comments_url(46), method=method, token="t",  # noqa: S106
+            opener=Recorder(), body=None if method == "GET" else {"body": "x"},
+            where="t")
+
+    @pytest.mark.parametrize("token", ["", None, 0, b"bytes"])
+    def test_a_missing_token_refuses_rather_than_sending_anonymously(self,
+                                                                    token):
+        opener = Recorder()
+        with pytest.raises(PanelRefusal) as raised:
+            reviewpublish._request(reviewpublish.comments_url(46),
+                                   method="GET", token=token, opener=opener,
+                                   body=None, where="t")
+        assert "token_absent" in raised.value.reason
+        assert opener.calls == [], "nothing may be sent without a token"
+
+    def test_an_api_error_reports_the_status_and_never_the_body(self):
+        """A GitHub error body can echo request headers, and the one header
+        here is a bearer token — in a job that is also holding a provider key."""
+        import urllib.error
+
+        class Failing(Recorder):
+            def __call__(self, request, timeout=None):
+                raise urllib.error.HTTPError(
+                    request.full_url, 422, "Unprocessable", {},
+                    __import__("io").BytesIO(
+                        b'{"message":"Bearer ghs_SECRETTOKENVALUE"}'))
+
+        with pytest.raises(PanelRefusal) as raised:
+            reviewpublish._request(reviewpublish.comments_url(46),
+                                   method="GET", token="t", opener=Failing(),  # noqa: S106
+                                   body=None, where="probe")
+        reason = raised.value.reason
+        assert "http_status=422" in reason
+        assert "where=probe" in reason
+        assert "SECRETTOKEN" not in reason
+        assert "Bearer" not in reason
+
+    def test_the_body_is_gated_BEFORE_any_write(self):
+        """`assert_publishable` runs first. Without it a body that failed the
+        gate would be POSTed and only then found unpublishable."""
+        opener = Recorder()
+        got = reviewpublish.publish_review(
+            body="no marker, no fence, ask @mglaeser", pr_number=46,
+            candidate_head_sha=HEAD, token="t", opener=opener)  # noqa: S106
+        assert got["published"] is False
+        assert opener.writes() == [], "a rejected body must never be sent"
+
+    def test_a_comment_not_starting_with_the_marker_is_not_ours(self):
+        """`startswith`, not `in`. The only test that named this property
+        exercised the bot check and never the position."""
+        assert reviewpublish.find_sticky_comment(
+            [{"id": 1, "body": "quoting:\n" + reviewrender.MARKER,
+              "user": BOT}]) is None
+        assert reviewpublish.find_sticky_comment(
+            [{"id": 1, "body": reviewrender.MARKER + "\nours", "user": BOT}])
+
+    def test_a_body_without_the_marker_is_refused(self):
+        """Without the marker the next run cannot find this comment and posts a
+        second one, forever."""
+        with pytest.raises(PanelRefusal) as raised:
+            reviewrender.assert_publishable("### a review with no marker")
+        assert "has_no_marker" in raised.value.reason
+
+    def test_pagination_walks_past_page_one(self):
+        """The page bound and its degradation were never exercised."""
+        pages = {}
+        full = [{"id": i, "body": "x", "user": HUMAN}
+                for i in range(reviewpublish.COMMENT_PAGE_SIZE)]
+
+        class Paged(Recorder):
+            def __call__(self, request, timeout=None):
+                url = request.full_url
+                if request.get_method() == "GET" and "/pulls/" not in url:
+                    page = int(url.rsplit("page=", 1)[1])
+                    pages[page] = pages.get(page, 0) + 1
+                    body = (full if page < 3 else
+                            [{"id": 999, "body": reviewrender.MARKER + "\nours",
+                              "user": BOT}])
+                    return _Response(200, json.dumps(body))
+                return super().__call__(request, timeout)
+
+        got = reviewpublish.publish_review(
+            body=a_body(), pr_number=46, candidate_head_sha=HEAD, token="t",  # noqa: S106
+            opener=Paged())
+        assert sorted(pages) == [1, 2, 3]
+        assert got["outcome"] == reviewpublish.UPDATED
+        assert got["comment_id"] == 999
+
+    def test_the_page_bound_degrades_rather_than_looping(self):
+        full = [{"id": i, "body": "x", "user": HUMAN}
+                for i in range(reviewpublish.COMMENT_PAGE_SIZE)]
+        seen = []
+
+        class Endless(Recorder):
+            def __call__(self, request, timeout=None):
+                if request.get_method() == "GET" and "/pulls/" not in \
+                        request.full_url:
+                    seen.append(1)
+                    return _Response(200, json.dumps(full))
+                return super().__call__(request, timeout)
+
+        got = reviewpublish.publish_review(
+            body=a_body(), pr_number=46, candidate_head_sha=HEAD, token="t",  # noqa: S106
+            opener=Endless())
+        assert len(seen) == reviewpublish.MAX_COMMENT_PAGES
+        assert got["outcome"] == reviewpublish.CREATED
+        assert got["lookup_degraded"] is True
+
+    def test_a_render_fault_never_becomes_the_runs_answer(self, tmp_path,
+                                                          monkeypatch):
+        """The guard the vertical found the hard way, and it had no test.
+
+        A body-level refusal once escaped `publish_readable_review` and replaced
+        `category=panel_blocked` as the process's exit reason — so a run that
+        had correctly refuted three units reported a publication problem
+        instead. Removing the handler restores exactly that, silently."""
+        from midtermpanel import reviewrender as rr
+
+        def explode(**kwargs):
+            raise PanelRefusal("MIDTERM_PANEL_REFUSED",
+                               "category=review_render_exploded for the test")
+
+        monkeypatch.setattr(rr, "build_review", explode)
+        outcome = _run_perform(tmp_path, decision="blocked")
+        assert isinstance(outcome["raised"], PanelRefusal)
+        assert "category=panel_blocked" in outcome["raised"].reason
+        assert "review_render_exploded" not in outcome["raised"].reason
+
+    def test_a_render_fault_does_not_stop_an_approved_run_returning(
+            self, tmp_path, monkeypatch):
+        from midtermpanel import reviewrender as rr
+
+        def explode(**kwargs):
+            raise RuntimeError("something entirely unexpected")
+
+        monkeypatch.setattr(rr, "build_review", explode)
+        outcome = _run_perform(tmp_path, decision="approved")
+        assert outcome["raised"] is None

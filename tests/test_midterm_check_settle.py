@@ -712,3 +712,35 @@ class TestTheTokenNeverFollowsARedirect:
         from midtermpanel import reviewpublish
         recorder = object()
         assert reviewpublish._no_redirects(recorder) is recorder
+
+
+class TestEveryJobInTheKeyBearingWorkflowHasACeiling:
+    """GitHub's default job timeout is 360 minutes, and two of these jobs hold
+    a provider key. A hung job with a credential in scope is a credential in
+    scope for six hours.
+
+    `observation.settle` also added up to sixty seconds of deliberate waiting to
+    preflight, which is a reason to state the bound rather than leave it at the
+    default and hope."""
+
+    def _document(self):
+        import yaml
+        return yaml.safe_load(
+            (ROOT / ".github" / "workflows"
+             / "midterm-panel-review.yml").read_text(encoding="utf-8"))
+
+    def test_every_job_declares_one(self):
+        jobs = self._document()["jobs"]
+        missing = sorted(name for name, job in jobs.items()
+                         if not isinstance(job.get("timeout-minutes"), int))
+        assert missing == [], f"no ceiling on {missing}"
+
+    def test_none_of_them_is_the_six_hour_default(self):
+        for name, job in self._document()["jobs"].items():
+            assert job["timeout-minutes"] < 360, name
+
+    def test_the_ceiling_leaves_room_for_the_settle_bound(self):
+        """Two settled reads, thirty seconds each, plus the rest of preflight."""
+        preflight = self._document()["jobs"]["preflight"]["timeout-minutes"]
+        settle_minutes = (2 * sum(observation.SETTLE_DELAYS_SECONDS)) / 60
+        assert preflight > settle_minutes * 2
