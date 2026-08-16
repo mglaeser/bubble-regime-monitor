@@ -5,9 +5,12 @@ consumes committed scoring outcomes, exposes the complete alert state to a
 frontend, and — once an operator explicitly turns it on — sends deterministic
 SMS notifications. It never changes scoring.
 
-**Current state: Stages 0 and 1 are implemented. Nothing sends anything.**
-`ALERT_INPUT_CAPTURE` and `ALERTS_MODE` both default off, and there is no
-delivery path yet. See [What is not built](#what-is-not-built).
+**Current state: Stages 0 and 1 are implemented and the delivery path is built
+but unreachable. Nothing sends anything.** `ALERT_INPUT_CAPTURE` and
+`ALERTS_MODE` both default off; under `shadow` the whole pipeline runs against
+a `NullSender`, and only an operator setting `ALERTS_MODE=live` can change that
+— which the Stage 2 and Stage 3 gates do not yet permit. See
+[What is not built](#what-is-not-built).
 
 ---
 
@@ -254,6 +257,8 @@ python -m app.alerts.cli evaluate --input-identity ID [--shadow]
 python -m app.alerts.cli explain --evaluation-id ID
 python -m app.alerts.cli recover-evaluations --once
 python -m app.alerts.cli reconcile-sidecars
+python -m app.alerts.cli watchdog --once       # exit 2 = outage detected
+python -m app.alerts.cli dispatch --once       # one outbox pass
 ```
 
 `explain` returns facts and decisions — never private reasoning.
@@ -334,16 +339,24 @@ Present and honest about it, rather than half-built:
 | 0 | typed snapshot contract | **done** |
 | 1 | schema, sidecar capture, pure evaluation, CAS, read API | **done** |
 | 2 | `[PIN]` calibration, replay budgets, mandatory-event fixtures | not started — needs operator artifacts |
-| 3 | deterministic P1 delivery, weekly digest | **not built** |
+| 3 | deterministic P1 delivery | planner, outbox, renderer, typed sender and dispatcher **built and off**; not gated |
 | 4 | legacy daily-digest cutover | not started |
 | 5 | constellations, bundled P2 | rules present, delivery not built |
 | 6 | EWMA / CUSUM | not started — needs immutable calibration artifacts |
 | 7 | P3 enrichment, LLM A/B review | not started |
 
-Concretely absent: the planner, the outbox dispatcher, the renderer, the LLM
-code selector, the typed sipgate sender, the weekly digest job and the external
-watchdog timer. The tables and enums they will use exist and are empty; the
-read API reports them truthfully as empty rather than pretending.
+Concretely absent: the **weekly digest job** (digest ITEMS are created and
+tracked; the job that turns a window's items into one SMS is not written), the
+**statistical monitors**, the **replay/dry-run harness** and its budget and
+mandatory-event reports, and the **actionability review workflow**.
+
+Built but deliberately unreachable: the planner, the outbox, the renderer, the
+LLM code selector, the typed sipgate sender and the dispatcher. They run end to
+end under `ALERTS_MODE=shadow` against the `NullSender` — claiming,
+revalidation, budget recheck, rendering and outcome classification all execute
+and persist — but no SMS can leave the host until an operator sets
+`ALERTS_MODE=live`, and the Stage 2 and Stage 3 gates (calibrated pins, replay
+budgets, mandatory-event recall) have not been met.
 
 `ops.*` rules that are raised by machinery rather than evaluated from the
 sidecar (`ops.rules_invalid`, `ops.delivery_unknown`,

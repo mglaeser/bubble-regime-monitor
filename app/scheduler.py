@@ -45,6 +45,15 @@ def _alert_recovery_job() -> None:
     job()   # never raises
 
 
+def _alert_dispatch_job() -> None:
+    # The SINGLE delivery worker. Disabled unless ALERTS_MODE is shadow or
+    # live; in shadow it runs the whole path against the NullSender, so nothing
+    # leaves the host.
+    from app.jobs.alert_dispatch import job
+
+    job()   # never raises
+
+
 def _breadth_job() -> None:
     # Incremental breadth-cache refresh (Twelve Data, ~8/min, credit-governed).
     # Runs off the recompute path so the twice-daily recompute stays fast and
@@ -80,6 +89,13 @@ def start() -> BackgroundScheduler:
         _scheduler.add_job(_breadth_job, CronTrigger(hour="1,13", minute=0, timezone="UTC"),
                            id="breadth_refresh", replace_existing=True,
                            coalesce=True, misfire_grace_time=3600, max_instances=1)
+        # The delivery dispatcher polls the outbox. `max_instances=1` is the
+        # single-worker guarantee the budget recheck depends on.
+        _scheduler.add_job(_alert_dispatch_job,
+                           CronTrigger(second=f"*/{max(20, settings.alerts_dispatch_poll_s)}",
+                                       timezone="UTC"),
+                           id="alert_dispatch", replace_existing=True,
+                           coalesce=True, misfire_grace_time=120, max_instances=1)
         # Every 30 minutes, offset off the recompute and breadth hours so the
         # three jobs never contend for the single SQLite writer.
         _scheduler.add_job(_alert_recovery_job,
@@ -101,7 +117,9 @@ def start() -> BackgroundScheduler:
         _scheduler.start()
         log.info("scheduler_started", recompute="every 4h (02/06/10/14/18/22 UTC)",
                  breadth_refresh="01:00/13:00 UTC", daily_sms=sms_schedule,
-                 alert_recovery="every 30min (:15/:45)")
+                 alert_recovery="every 30min (:15/:45)",
+                 alert_dispatch=f"every {max(20, settings.alerts_dispatch_poll_s)}s "
+                               f"(mode={settings.alerts_mode})")
     return _scheduler
 
 

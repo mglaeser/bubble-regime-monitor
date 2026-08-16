@@ -13,6 +13,8 @@ read-only unless its name says otherwise.
     python -m app.alerts.cli explain --evaluation-id ID
     python -m app.alerts.cli recover-evaluations --once
     python -m app.alerts.cli reconcile-sidecars
+    python -m app.alerts.cli watchdog --once     # exit 2 = outage detected
+    python -m app.alerts.cli dispatch --once     # one outbox pass
 """
 
 from __future__ import annotations
@@ -116,6 +118,23 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
 
     _print({"ok": all(c["ok"] for c in checks), "checks": checks})
     return 0 if all(c["ok"] for c in checks) else 1
+
+
+def cmd_watchdog(_args: argparse.Namespace) -> int:
+    """Exit 2 on a detected outage — a timer can act on that directly."""
+    from app.alerts.watchdog import run_once
+
+    result = run_once()
+    _print(result)
+    return 2 if result["firing"] else 0
+
+
+def cmd_dispatch(_args: argparse.Namespace) -> int:
+    from app.jobs.alert_dispatch import run_once
+
+    result = run_once()
+    _print(result)
+    return 0
 
 
 def cmd_ruleset(_args: argparse.Namespace) -> int:
@@ -259,6 +278,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate.set_defaults(func=cmd_validate)
 
     sub.add_parser("preflight", help="pre-stage checks").set_defaults(func=cmd_preflight)
+    watchdog = sub.add_parser("watchdog", help="check for missed recompute slots")
+    watchdog.add_argument("--once", action="store_true", default=True)
+    watchdog.set_defaults(func=cmd_watchdog)
+    dispatch = sub.add_parser("dispatch", help="run one pass of the delivery outbox")
+    dispatch.add_argument("--once", action="store_true", default=True)
+    dispatch.set_defaults(func=cmd_dispatch)
     sub.add_parser("ruleset", help="active ruleset summary").set_defaults(func=cmd_ruleset)
     sub.add_parser("health", help="health projection").set_defaults(func=cmd_health)
     sub.add_parser("pending", help="open episodes").set_defaults(func=cmd_pending)
