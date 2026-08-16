@@ -167,9 +167,27 @@ SECRET_SHAPED = (
 )
 SCAN_FAILED = "scan_failed"
 NOTHING_LEFT = "nothing_left_after_redaction"
+CARRIES_RUN_TOKEN = "carries_a_run_token"  # noqa: S105 - a REFUSAL REASON
 
 #: What replaces a redacted run token in published text.
 REDACTED = "[redacted]"
+
+#: A run of hex long enough to be part of the execution challenge, which is 32
+#: lowercase hex characters (`trustedlane.challenge.TOKEN_HEX`).
+#:
+#: Exact-substring redaction is not enough on its own, and the gap is real: the
+#: engine's own secret scanner deliberately SKIPS a 32-hex token
+#: (`preflight._HEX_DIGEST` treats it as a content digest, which is the correct
+#: default), so redaction is the only thing standing between a challenge and the
+#: comment. A model that echoed it in upper case, or split across a space, or
+#: truncated, would slide past an exact `str.replace` and past an exact
+#: containment check in the body gate.
+#:
+#: 16 rather than 32, so a clean half of the token is caught too. A field
+#: carrying any hex run that overlaps the challenge is withheld outright rather
+#: than patched: partial disclosure of a token whose whole purpose is to be
+#: unguessable is not something to render carefully.
+_HEX_RUN = re.compile(r"[0-9a-fA-F]{16,}")
 
 
 # --------------------------------------------------------------- sanitize ---
@@ -325,9 +343,23 @@ def sanitize(value, *, scan, limit: int, field: str, redact=()) -> dict:
     original = value
     redacted = False
     for token in redact or ():
-        if isinstance(token, str) and token and token in value:
-            value = value.replace(token, REDACTED)
+        if not isinstance(token, str) or not token:
+            continue
+        # CASE-INSENSITIVE. The challenge is lowercase hex; a model that echoed
+        # it shouting would have walked straight past an exact `str.replace`,
+        # and past the exact containment check in `assert_publishable` too.
+        pattern = re.compile(re.escape(token), re.IGNORECASE)
+        if pattern.search(value):
+            value = pattern.sub(REDACTED, value)
             redacted = True
+        # Then the residue. A whitespace-split or truncated echo is not a
+        # substring of the token and is still a disclosure of it, so any hex run
+        # that overlaps the challenge withholds the field rather than being
+        # patched into something that looks safe.
+        lowered = token.lower()
+        for run in _HEX_RUN.findall(value):
+            if run.lower() in lowered or lowered in run.lower():
+                return _withheld(field, CARRIES_RUN_TOKEN)
     if not value.strip() or value.strip() == REDACTED:
         return _withheld(field, NOTHING_LEFT)
     # 1. Control characters, on the raw text. A newline in a reason is enough to
@@ -515,6 +547,12 @@ def findings_from_votes(votes: list, *, locations: dict, scan,
     # verdicts produce the same document and a reader can diff them.
     findings.sort(key=lambda f: (f["location"]["sort_key"], f["model"],
                                  f["unit_sha256"]))
+    # The sort key carries the RAW candidate-chosen path — unsanitized and
+    # unbounded, because ordering has to compare the real thing. It has done its
+    # job by now, and `panel-review.json` would otherwise retain a full
+    # untruncated path that `MAX_PATH_CHARS` exists to bound.
+    for finding in findings:
+        finding["location"].pop("sort_key", None)
     return findings
 
 
@@ -624,7 +662,8 @@ def build_review(*, decision: str, candidate_head_sha: str,
     findings = findings_from_votes(votes, locations=locations, scan=scan,
                                    redact=redact)
     assert_rendering_did_not_change_the_decision(
-        findings=findings, decision=decision, aggregate_record=aggregate_record)
+        findings=findings, decision=decision, aggregate_record=aggregate_record,
+        refutations_exist=any_model_refuted(votes))
     review = {
         "render_version": RENDER_VERSION,
         "decision": decision,
@@ -637,6 +676,12 @@ def build_review(*, decision: str, candidate_head_sha: str,
         "strict_any_refutation": STRICT_ANY_REFUTATION,
         "findings": findings,
         "finding_count": len(findings),
+        # WHY it blocked, in the aggregate's own words. Load-bearing for the
+        # role-gate case, where the panel blocks correctly and no per-model
+        # verdict carries `refuted: true` — without this the reader would see
+        # "blocked" beside an empty findings list and nothing else.
+        "block_reasons": (block_reasons(aggregate_record, scan=scan)
+                          if decision == "blocked" else []),
         "unit_count": len(locations),
         "run_url": run_url,
         "run_id": run_id,
@@ -654,20 +699,68 @@ def build_review(*, decision: str, candidate_head_sha: str,
     return review
 
 
+def any_model_refuted(votes: list) -> bool:
+    """Did any governed voice actually mark a unit refuted?
+
+    Read from the VOTES rather than from the synthesis, because this is the
+    input `findings_from_votes` reads and the property being defended is that
+    the rendering did not lose one of them. Asking the synthesis would be asking
+    a different document whether a third document was rendered faithfully."""
+    for vote in votes or ():
+        by_unit = ((vote or {}).get("v") or {}).get("verdicts_by_unit")
+        if not isinstance(by_unit, dict):
+            continue
+        for verdict in by_unit.values():
+            if isinstance(verdict, dict) and verdict.get("refuted") is True:
+                return True
+    return False
+
+
+def block_reasons(aggregate_record: dict, *, scan) -> list:
+    """Why the panel blocked, in the aggregate's own governed words.
+
+    NOT provider text. `aggregate` builds both strings itself out of counts and
+    model ids, so this is the lane describing its own decision. Sanitized
+    anyway, on the same rule that applies to every other rendered field: the
+    pipeline is uniform, or it is a pipeline with an exception somebody has to
+    remember."""
+    reasons = []
+    for gate in ("engine_gate", "strict_gate"):
+        record = aggregate_record.get(gate)
+        if not isinstance(record, dict) or not record.get("block"):
+            continue
+        got = sanitize(record.get("reason"), scan=scan, limit=MAX_REASON_CHARS,
+                       field=f"{gate}_reason")
+        reasons.append({"gate": gate,
+                        "text": got["text"] if got["published"] else WITHHELD})
+    return reasons
+
+
 def assert_rendering_did_not_change_the_decision(*, findings: list,
                                                  decision: str,
-                                                 aggregate_record: dict) -> dict:
+                                                 aggregate_record: dict,
+                                                 refutations_exist: bool) -> dict:
     """Requirement 11, as a check rather than as a promise.
 
-    Two directions, and the second is the one a summariser gets wrong. Findings
-    present with an `approved` decision would mean the panel refuted something
-    and the published headline said otherwise. No findings with a `blocked`
-    decision would mean the reader is told to look and given nothing — which is
-    how a real refutation becomes "the bot is broken, merge it".
+    Findings present with an `approved` decision would mean the panel refuted
+    something and the published headline said otherwise.
 
-    The `blocked` direction is asserted against the AGGREGATE's own refuted
-    count, not against the rendered list, because the rendered list is the thing
-    under suspicion."""
+    The other direction needed correcting, and adversarial review is what
+    caught it. The first version refused ANY blocked review with no findings, on
+    the reasoning that a block must always have something to read. That is true
+    of the reason and false of the mechanism: the engine's role gate blocks a
+    unit when the required approver has no valid vote, or when too few distinct
+    models corroborate, or when two approvals are near-identical — and in every
+    one of those the per-model verdicts contain no `refuted: true` at all. So
+    the panel would block correctly and this renderer would refuse to describe
+    it, `publish_readable_review` would catch that refusal, and NOTHING would be
+    published or retained. A blocked review with no readable output is precisely
+    the defect this publisher exists to remove, reached from the inside.
+
+    So the check is now the exact property: the rendering must not LOSE a
+    refutation. If any governed voice refuted a unit, a finding must appear. If
+    none did, the block is real and its reason is the aggregate's own, which
+    `render` publishes instead of a findings list."""
     if decision != aggregate_record.get("decision"):
         refuse(f"category=review_render_decision_disagrees_with_aggregate "
                f"rendered={decision!r} "
@@ -678,11 +771,17 @@ def assert_rendering_did_not_change_the_decision(*, findings: list,
                f"findings={len(findings)} — a refutation blocks under strict "
                "policy, so findings beside an approval means one of the two is "
                "wrong and the published one would be believed")
-    if decision == "blocked" and not findings:
-        refuse("category=review_render_block_with_nothing_to_read — a blocked "
-               "review whose readable form lists nothing is the defect this "
-               "publisher exists to remove; the finding must survive the block")
-    return {"decision": decision, "findings": len(findings)}
+    if decision == "approved" and refutations_exist:
+        refuse("category=review_render_approval_over_a_refutation — a governed "
+               "model marked a unit refuted and the aggregate reports approved; "
+               "the two documents describe different runs")
+    if decision == "blocked" and refutations_exist and not findings:
+        refuse("category=review_render_block_lost_its_refutation — a governed "
+               "model refuted a unit and the rendered review lists nothing. "
+               "That is the rendering deleting a finding, which is the one "
+               "thing it may never do")
+    return {"decision": decision, "findings": len(findings),
+            "refutations_exist": refutations_exist}
 
 
 def assert_no_forbidden_fields(node, *, path: str = "review") -> None:
@@ -735,11 +834,23 @@ def assert_publishable(body: str, *, challenge: str | None = None) -> str:
         refuse("category=review_body_carries_a_live_mention — every '@' is "
                "written as a numeric character reference so GitHub's "
                "autolinker cannot turn it into a notification")
-    if isinstance(challenge, str) and challenge and challenge in body:
-        refuse("category=review_body_carries_the_execution_challenge — the "
-               "challenge is what proves a verdict was written for this run; "
-               "published, it is a token a later model could echo without "
-               "having seen the request")
+    if isinstance(challenge, str) and challenge:
+        # Case-INSENSITIVE, and then the hex-run sweep, for the same reasons
+        # `sanitize` uses both: an exact comparison misses a shouted echo, and
+        # a substring comparison misses a split or truncated one.
+        if challenge.lower() in body.lower():
+            refuse("category=review_body_carries_the_execution_challenge — the "
+                   "challenge is what proves a verdict was written for this "
+                   "run; published, it is a token a later model could echo "
+                   "without having seen the request")
+        lowered = challenge.lower()
+        for run in _HEX_RUN.findall(body):
+            if run.lower() in lowered:
+                refuse("category=review_body_carries_part_of_the_challenge "
+                       f"chars={len(run)} — a hex run in the published body "
+                       "overlaps this run's challenge. Partial disclosure of a "
+                       "token whose whole purpose is to be unguessable is not "
+                       "something to publish carefully")
     return body
 
 
@@ -802,7 +913,28 @@ def render(review: dict, *, challenge: str | None = None) -> str:
     lines.append("")
 
     if not review["findings"]:
-        lines.append(NO_FINDINGS)
+        if decision == "blocked":
+            # NEVER the no-findings sentence beside a block. The panel's role
+            # gate blocks a unit when the required approver has no valid vote,
+            # when too few distinct models corroborate, or when two approvals
+            # are near-identical — and none of those produces a `refuted: true`
+            # verdict. Printing "no actionable findings were reported" next to
+            # `Decision: blocked` would read as a malfunction and invite exactly
+            # the override this publisher exists to prevent.
+            lines.append("#### Why this blocked")
+            lines.append("")
+            lines.append("No governed model refuted a change. The panel blocked "
+                         "on its role and corroboration gates:")
+            lines.append("")
+            lines.extend(f"- **{reason['gate'].replace('_', ' ')}** — "
+                         f"{reason['text']}"
+                         for reason in review.get("block_reasons") or [])
+            if not review.get("block_reasons"):
+                lines.append("- the aggregate reported a block and named no "
+                             "gate; the full record is in the private "
+                             "`panel-evidence.json` artifact")
+        else:
+            lines.append(NO_FINDINGS)
         lines.append("")
         lines.extend(_footer(review))
         return assert_publishable("\n".join(lines), challenge=challenge)

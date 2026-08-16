@@ -202,6 +202,24 @@ def perform(environ: dict, *, execute_fn, opener,
     write_atomic(record, os.path.join(_runner_temp(environ),
                                       "midterm", "panel-evidence.json"))
 
+    # The readable review goes out BEFORE the terminal status, and the ordering
+    # was corrected by adversarial review. `status.publish` refuses on any HTTP
+    # fault, and that refusal propagates — so with the review published after
+    # it, a single GitHub hiccup on the status POST would have aborted the run
+    # with the finding never rendered, retained or shown. Requirement 9 is that
+    # a finding stays readable after it blocks the job; it must also stay
+    # readable when the machine channel is the thing that failed.
+    #
+    # Publishing the human-readable comment a moment before the authoritative
+    # status is not a correctness problem: the comment says in its own footer
+    # that the machine decision is authoritative, and `finalize` resolves any
+    # status this run leaves pending.
+    published_review = publish_readable_review(
+        environ, plan=plan, executed=executed, verdict=verdict, record=record,
+        count_evidence_sha256=count_evidence_sha256, head=head, base=base,
+        target=target, run_id=run_id, token=env["GITHUB_TOKEN"], scan=scan,
+        publish_review_fn=publish_review_fn)
+
     published.append(publish(status_request(
         repository_numeric_id=REPOSITORY_NUMERIC_ID, candidate_head_sha=head,
         context=REVIEW_STATUS, state=state,
@@ -217,24 +235,6 @@ def perform(environ: dict, *, execute_fn, opener,
                      "(mid-term, not write-separated)"),
         target_url=target, run_id=run_id, run_attempt=attempt),
         opener=opener, token=env["GITHUB_TOKEN"]))
-
-    # The readable review, and it happens HERE — after the machine record is
-    # complete and before the process exits. Requirement 9 is that a finding
-    # stays readable after it blocks the job, and the only way to guarantee that
-    # is to publish before the refusal rather than in a later step that a
-    # nonzero exit would skip.
-    #
-    # Nothing below can change `verdict`. `build_review` re-asserts that against
-    # the aggregate, `publish_review` returns a record instead of raising, and
-    # the refusal at the end reads the same `verdict` it would have read if this
-    # block did not exist. A publisher able to redden an approval would turn a
-    # GitHub 502 into a review outcome; one able to green a block is what
-    # requirement 11 forbids outright.
-    published_review = publish_readable_review(
-        environ, plan=plan, executed=executed, verdict=verdict, record=record,
-        count_evidence_sha256=count_evidence_sha256, head=head, base=base,
-        target=target, run_id=run_id, token=env["GITHUB_TOKEN"], scan=scan,
-        publish_review_fn=publish_review_fn)
 
     # After the status is published and the evidence is on disk, and only then.
     # A blocked review that returns normally leaves the panel JOB green while

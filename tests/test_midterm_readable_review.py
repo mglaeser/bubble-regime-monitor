@@ -959,6 +959,30 @@ class TestAnApprovedRunPublishesAndReturns:
         assert reviewrender.NO_FINDINGS in outcome["published_body"]
 
 
+class TestAStatusFaultDoesNotSwallowTheFinding:
+    """`status.publish` refuses on any HTTP fault, and that refusal propagates.
+
+    With the review published after it, a single GitHub hiccup on the terminal
+    status POST would have aborted the run with the finding never rendered,
+    retained or shown — requirement 9 defeated by the machine channel being the
+    thing that failed. So the review goes out first."""
+
+    def test_the_review_is_published_even_when_the_status_post_fails(
+            self, tmp_path):
+        outcome = _run_perform(tmp_path, decision="blocked",
+                               terminal_status_fails=True)
+        assert isinstance(outcome["raised"], PanelRefusal)
+        assert "status_publish" in outcome["raised"].reason
+        assert outcome["published_body"] is not None
+        assert "raised by `gpt-5.6-sol`" in outcome["published_body"]
+        assert outcome["markdown"].exists()
+
+    def test_the_pending_status_is_still_published_first(self, tmp_path):
+        outcome = _run_perform(tmp_path, decision="blocked",
+                               terminal_status_fails=True)
+        assert outcome["status_states"][0] == "pending"
+
+
 class TestNothingPrivateReachesTheComment:
     """Requirement 4, asserted against a body built from text that carries all
     three of the things that must never travel."""
@@ -1049,19 +1073,33 @@ class TestRenderingCanNeverChangeAVerdict:
                       refuted=True, reason="this unit is not safe as written")})])
         assert "findings_under_an_approval" in raised.value.reason
 
-    def test_a_block_with_nothing_readable_is_refused(self):
-        one = unit("app/thing.py")
+    def test_a_block_that_LOST_a_refutation_is_refused(self):
+        """The precise property: the rendering may not DELETE a finding.
+
+        Not "a block must always have findings" — the engine's role gate blocks
+        with no `refuted: true` verdict anywhere, and refusing that case is what
+        made the publisher silently publish nothing at all."""
         with pytest.raises(PanelRefusal) as raised:
-            build(decision="blocked", plan=plan_of(one),
-                  votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
-                      refuted=False, reason="nothing objectionable here")})])
-        assert "block_with_nothing_to_read" in raised.value.reason
+            reviewrender.assert_rendering_did_not_change_the_decision(
+                findings=[], decision="blocked",
+                aggregate_record={"decision": "blocked"},
+                refutations_exist=True)
+        assert "block_lost_its_refutation" in raised.value.reason
+
+    def test_an_approval_over_a_refutation_is_refused(self):
+        with pytest.raises(PanelRefusal) as raised:
+            reviewrender.assert_rendering_did_not_change_the_decision(
+                findings=[], decision="approved",
+                aggregate_record={"decision": "approved"},
+                refutations_exist=True)
+        assert "approval_over_a_refutation" in raised.value.reason
 
     def test_a_rendered_decision_disagreeing_with_the_aggregate_is_refused(self):
         with pytest.raises(PanelRefusal) as raised:
             reviewrender.assert_rendering_did_not_change_the_decision(
                 findings=[], decision="approved",
-                aggregate_record={"decision": "blocked"})
+                aggregate_record={"decision": "blocked"},
+                refutations_exist=False)
         assert "disagrees_with_aggregate" in raised.value.reason
 
     def test_a_publication_failure_does_not_change_the_outcome(self, tmp_path):
@@ -1070,6 +1108,173 @@ class TestRenderingCanNeverChangeAVerdict:
         assert "category=panel_blocked" in outcome["raised"].reason
         stored = json.loads(outcome["json"].read_text(encoding="utf-8"))
         assert stored["review"]["decision"] == "blocked"
+
+
+class TestARoleGateBlockIsStillReadable:
+    """The worst of the second review round, and the one that hid inside a
+    check meant to prevent exactly it.
+
+    The engine's role gate blocks a unit when the required approver has no
+    valid vote, when too few distinct models corroborate, or when two approvals
+    are near-identical — and in every one of those the per-model verdicts
+    contain NO `refuted: true` at all. The first version refused any blocked
+    review with an empty findings list, `publish_readable_review` caught that
+    refusal, and the result was a blocked panel that published and retained
+    nothing. A blocked review with no readable output is precisely the defect
+    this publisher exists to remove, reached from the inside."""
+
+    @pytest.fixture
+    def body(self):
+        one = unit("app/thing.py")
+        record = {**aggregate_of("blocked"),
+                  "engine_gate": {
+                      "block": True,
+                      "reason": "the engine's synthesis refuted 1 unit(s)",
+                      "refuted_unit_count": 1, "approved_unit_count": 0},
+                  "strict_gate": {"block": False,
+                                  "reason": "strict mode: no model refuted any "
+                                            "unit",
+                                  "refuting_models": []}}
+        review = reviewrender.build_review(
+            decision="blocked", candidate_head_sha=HEAD,
+            candidate_base_sha=BASE, plan=plan_of(one),
+            # Every model APPROVED. The block came from the role gate.
+            votes=[vote(model, {one["unit_sha256"]: verdict(
+                refuted=False, reason=f"{model} sees nothing wrong here")})
+                for model in PANEL_MODELS],
+            aggregate_record=record, scan=scan, run_url=RUN_URL, run_id=7,
+            evidence_sha256="e" * 64, challenge=CHALLENGE)
+        return reviewrender.render(review, challenge=CHALLENGE)
+
+    def test_it_publishes_rather_than_refusing(self, body):
+        assert "**blocked**" in body
+
+    def test_it_never_claims_there_were_no_findings(self, body):
+        """`No actionable findings were reported` beside `Decision: blocked`
+        reads as a malfunction and invites the override this exists to
+        prevent."""
+        assert reviewrender.NO_FINDINGS not in body
+
+    def test_it_says_why_it_blocked_in_the_aggregates_own_words(self, body):
+        assert "#### Why this blocked" in body
+        assert "engine gate" in body
+        assert "refuted 1 unit" in body
+
+    def test_a_gate_that_did_not_block_is_not_quoted(self, body):
+        assert "no model refuted any unit" not in body
+
+    def test_a_block_naming_no_gate_still_says_something(self):
+        one = unit("app/thing.py")
+        review = reviewrender.build_review(
+            decision="blocked", candidate_head_sha=HEAD,
+            candidate_base_sha=BASE, plan=plan_of(one),
+            votes=[vote(m, {one["unit_sha256"]: verdict(
+                refuted=False, reason=f"{m} sees nothing wrong here")})
+                for m in PANEL_MODELS],
+            aggregate_record=aggregate_of("blocked"), scan=scan,
+            run_url=RUN_URL, run_id=7, evidence_sha256="e" * 64)
+        body = reviewrender.render(review)
+        assert "named no gate" in body
+        assert reviewrender.NO_FINDINGS not in body
+
+
+class TestTheChallengeSurvivesNeitherCaseNorSplitting:
+    """The engine's own scanner deliberately SKIPS a 32-hex token — it reads as
+    a content digest, which is the correct default — so redaction is the only
+    thing between the execution challenge and the comment. An exact
+    `str.replace` was not enough."""
+
+    TOKEN = "a3f19c04be7d2856" + "10fe4b93cc7a2d51"
+
+    def _reason_body(self, reason):
+        one = unit("app/thing.py")
+        review = reviewrender.build_review(
+            decision="blocked", candidate_head_sha=HEAD,
+            candidate_base_sha=BASE, plan=plan_of(one),
+            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
+                refuted=True, reason=reason)})],
+            aggregate_record=aggregate_of("blocked"), scan=scan,
+            run_url=RUN_URL, run_id=7, evidence_sha256="e" * 64,
+            challenge=self.TOKEN)
+        return reviewrender.render(review, challenge=self.TOKEN)
+
+    def test_an_exact_echo_is_redacted(self):
+        body = self._reason_body(
+            f"{self.TOKEN} the fail closed default is dropped")
+        assert self.TOKEN not in body
+        assert "&#91;redacted&#93;" in body
+
+    def test_a_shouted_echo_is_redacted_too(self):
+        body = self._reason_body(
+            f"{self.TOKEN.upper()} the fail closed default is dropped")
+        assert self.TOKEN.upper() not in body
+        assert self.TOKEN not in body.lower()
+
+    def test_a_truncated_echo_withholds_the_field(self):
+        """Half a 32-hex token is 64 bits of a value whose whole purpose is to
+        be unguessable. Withheld outright rather than patched."""
+        body = self._reason_body(
+            f"the run token began {self.TOKEN[:20]} and the default is dropped")
+        assert self.TOKEN[:20] not in body
+        assert reviewrender.WITHHELD in body
+        assert "| Actionable findings | 1 |" in body
+
+    def test_the_field_records_which_rule_withheld_it(self):
+        got = reviewrender.sanitize(f"leaked {self.TOKEN[:24]} here", scan=scan,
+                                    limit=600, field="reason",
+                                    redact=(self.TOKEN,))
+        assert got["refusal"] == reviewrender.CARRIES_RUN_TOKEN
+
+    def test_the_body_gate_catches_a_shouted_challenge(self):
+        with pytest.raises(PanelRefusal) as raised:
+            reviewrender.assert_publishable(
+                f"{reviewrender.MARKER}\ntoken {self.TOKEN.upper()}",
+                challenge=self.TOKEN)
+        assert "execution_challenge" in raised.value.reason
+
+    def test_the_body_gate_catches_a_partial_challenge(self):
+        with pytest.raises(PanelRefusal) as raised:
+            reviewrender.assert_publishable(
+                f"{reviewrender.MARKER}\ntoken {self.TOKEN[:24]}",
+                challenge=self.TOKEN)
+        assert "part_of_the_challenge" in raised.value.reason
+
+    def test_an_unrelated_digest_is_not_mistaken_for_the_challenge(self):
+        """A 64-hex content digest is ordinary in this codebase's prose and
+        must not trip the sweep."""
+        reviewrender.assert_publishable(
+            f"{reviewrender.MARKER}\nevidence " + "b" * 64,
+            challenge=self.TOKEN)
+
+
+class TestNoRawPathIsRetainedInThePrivateArtifact:
+    """The ordering key carries the RAW candidate path — unsanitized and
+    unbounded, because ordering has to compare the real thing. It had done its
+    job and was still being serialized into `panel-review.json`, which is what
+    `MAX_PATH_CHARS` exists to prevent."""
+
+    def test_the_sort_key_does_not_survive_into_the_review(self):
+        long_path = "app/" + ("x" * 400) + ".py"
+        one = unit(long_path)
+        review = build(
+            decision="blocked", plan=plan_of(one),
+            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
+                refuted=True, reason="the fail closed default is dropped")})])
+        serialized = json.dumps(review)
+        assert "sort_key" not in serialized
+        assert "x" * 300 not in serialized
+
+    def test_the_ordering_still_works_without_it(self):
+        first = unit("app/alpha.py", lines=(1, 4), tag="1")
+        second = unit("app/zeta.py", lines=(1, 4), tag="2")
+        body = rendered(
+            decision="blocked", plan=plan_of(second, first),
+            votes=[vote("gpt-4.1-mini", {
+                u["unit_sha256"]: verdict(
+                    refuted=True, reason=f"unit at {u['new_line_range']} fails "
+                                         "its stated invariant")
+                for u in (first, second)})])
+        assert body.index("app/alpha.py") < body.index("app/zeta.py")
 
 
 # ------------------------------------------------- 13. no provider calls ----
@@ -1118,7 +1323,8 @@ class TestZeroProviderCalls:
 # ------------------------------------------------- the perform harness ------
 
 
-def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True) -> dict:
+def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True,
+                 terminal_status_fails: bool = False) -> dict:
     """Drive the real `panelcli.perform` with injected seams and no network.
 
     Everything the function reads off disk is built here through the SAME
@@ -1195,7 +1401,13 @@ def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True) -> dict:
                     "approved_unit_count": 0 if refuted else 1,
                     "synthesis_sha256": "y" * 64}}
 
+    states = []
+
     def status_opener(request, timeout=None):
+        body = json.loads(request.data.decode("utf-8"))
+        states.append(body["state"])
+        if terminal_status_fails and body["state"] != "pending":
+            raise OSError("connection reset by peer")
         return _Response(201, "{}")
 
     def publish_review_fn(*, body, pr_number, candidate_head_sha, token,
@@ -1218,7 +1430,7 @@ def _run_perform(tmp_path, *, decision: str, publish_ok: bool = True) -> dict:
         raised = exc
     order.append("exit")
     paths = panelcli.review_paths(str(runner))
-    return {"raised": raised, "order": order,
+    return {"raised": raised, "order": order, "status_states": states,
             "published_body": captured.get("body"),
             "markdown": Path(paths["markdown"]), "json": Path(paths["json"]),
             "evidence": runner / "midterm" / "panel-evidence.json"}
