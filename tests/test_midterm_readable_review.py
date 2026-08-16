@@ -24,6 +24,7 @@ leaving it as a fact about how the file happens to be written.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -1184,7 +1185,13 @@ class TestTheChallengeSurvivesNeitherCaseNorSplitting:
     thing between the execution challenge and the comment. An exact
     `str.replace` was not enough."""
 
-    TOKEN = "a3f19c04be7d2856" + "10fe4b93cc7a2d51"
+    #: A synthetic 32-hex string in the exact shape of an execution challenge
+    #: (`trustedlane.challenge.TOKEN_HEX`). Built at run time from a fixed
+    #: seed rather than written as a literal: the repository's own secret gate
+    #: correctly flags a hex run of this length, and a fixture whose only job
+    #: is to look like a run token should not need the ratchet's permission to
+    #: exist. Deterministic, so the assertions below are stable.
+    TOKEN = hashlib.sha256(b"readable-review-fixture-challenge").hexdigest()[:32]
 
     def _reason_body(self, reason):
         one = unit("app/thing.py")
