@@ -13,11 +13,12 @@ matching and CI goes red — which is precisely the property Stage 1 claims.
     python -m scripts.export_alert_stage1_gate            # write
     python -m scripts.export_alert_stage1_gate --check    # fail on drift
 
-The history is SYNTHETIC and generated in-repo — see
-`tests/fixtures/gen_alert_replay_history.py`. It contains no market data of
-record and no personal data of any kind; it exists to exercise the state
-machine, not to establish recall. Real recall is a Stage 2 question and needs
-the operator-frozen mandatory-event catalogue.
+The history is SYNTHETIC. `tests/fixtures/alert_replay_history.json` declares
+the arc — twenty recompute slots — and `alert_replay_history.py` builds the
+inputs from it. It contains no market data of record and no personal data of
+any kind; it exists to exercise the state machine, not to establish recall.
+Real recall is a Stage 2 question and needs the operator-frozen
+mandatory-event catalogue.
 """
 
 from __future__ import annotations
@@ -40,16 +41,38 @@ EVENTS = ROOT / "config" / "alert_mandatory_events.v3.2.json"
 #: a stage-1-only artifact would be nearly blind to evaluator regressions.
 STAGES = (1, 3)
 
+#: Content digests are NOT written into the committed artifact, and truncating
+#: them is not the answer either.
+#:
+#: An entropy detector cannot tell a 64-hex content digest from a 64-hex token,
+#: which is the correct default, and this repository's secret baseline is a
+#: byte-identical ratchet that may not grow to carry digests. Truncation only
+#: looks like a fix: the detector scores Shannon entropy, not length, so
+#: whether a 12-character prefix passes depends on which characters the hash
+#: happened to produce — a future ruleset edit would fail CI for a reason that
+#: has nothing to do with the ruleset.
+#:
+#: Semantic versions carry the identity instead, and nothing is lost. Exact
+#: bytes are already gated by the separate "Alert artifacts" CI step, and a
+#: ruleset change the version failed to declare still moves the episode counts
+#: in this very document — a louder signal than a digest nobody diffs. The
+#: runtime report is unaffected: `ReplaySummary` carries the full digests, and
+#: `--out` writes them.
+_DIGEST_FIELDS = ("rules_sha256", "phrase_set_sha256")
+
+
+def _without_digests(summary: dict) -> dict:
+    return {k: v for k, v in summary.items() if k not in _DIGEST_FIELDS}
+
 
 def build_evidence() -> dict:
     from app.alerts.artifacts import validate_from_disk
-    from app.alerts.dto import AlertInput
     from app.alerts.replay import ReplayConfig, run_replay
+    from tests.fixtures import alert_replay_history as history
 
     artifacts = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
                                    service_version="3.8.0")
-    payload = json.loads(HISTORY.read_text(encoding="utf-8"))
-    inputs = [AlertInput.model_validate(record) for record in payload["inputs"]]
+    inputs = history.load()
 
     runs: dict[str, dict] = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -62,16 +85,25 @@ def build_evidence() -> dict:
             )
             summary = run_replay(config=config, ruleset=artifacts.ruleset,
                                  phrase_set=artifacts.phrase_set, inputs=inputs)
-            runs[f"stage_{stage}"] = summary.as_dict()
+            runs[f"stage_{stage}"] = _without_digests(summary.as_dict())
 
+    document = history.document()
     return {
         "artifact": "alert-stage1-gate",
         "gate": "deterministic replay; no PII; no scoring regression",
+        "artifacts": {
+            "rule_version": artifacts.ruleset.rule_version,
+            "phrase_set_version": artifacts.ruleset.phrase_set_version,
+            "digests": ("omitted by design — see _DIGEST_FIELDS in "
+                        "scripts/export_alert_stage1_gate.py; exact bytes are "
+                        "gated by the 'Alert artifacts' CI step, and "
+                        "`app.alerts.cli ruleset` prints them"),
+        },
         "history": {
             "source": str(HISTORY.relative_to(ROOT)),
             "synthetic": True,
+            "arc_schema_version": document["schema_version"],
             "inputs": len(inputs),
-            "sha256": payload["sha256_of_inputs"],
         },
         "runs": runs,
     }

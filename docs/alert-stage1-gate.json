@@ -1,9 +1,14 @@
 {
   "artifact": "alert-stage1-gate",
+  "artifacts": {
+    "digests": "omitted by design — see _DIGEST_FIELDS in scripts/export_alert_stage1_gate.py; exact bytes are gated by the 'Alert artifacts' CI step, and `app.alerts.cli ruleset` prints them",
+    "phrase_set_version": "v3.2",
+    "rule_version": "v3.2.0"
+  },
   "gate": "deterministic replay; no PII; no scoring regression",
   "history": {
+    "arc_schema_version": 2,
     "inputs": 20,
-    "sha256": "c4f5aed102c4232e6b40ea5412f43c550a7a90f3070902d05b05195b1e39414e",
     "source": "tests/fixtures/alert_replay_history.json",
     "synthetic": true
   },
@@ -66,8 +71,6 @@
       "p1_bypasses_of_unknown": 0,
       "p1_total": 0,
       "passed": true,
-      "phrase_set_sha256": "cb395ca1d90e8678eff9f3b607f8b652cfb546288ae29a5383696e26e79820f0",
-      "rules_sha256": "2b4c4a33a4090f35fc685fc08af049e937b3bc3ac9de4c7a280e19c176784a81",
       "schema_version": 1,
       "suppressions_by_reason": {},
       "transient_one_snapshot_band_p1": 1,
@@ -151,8 +154,6 @@
       "p1_bypasses_of_unknown": 0,
       "p1_total": 0,
       "passed": true,
-      "phrase_set_sha256": "cb395ca1d90e8678eff9f3b607f8b652cfb546288ae29a5383696e26e79820f0",
-      "rules_sha256": "1ac33de32c2f0aee6b41927ff6d979c0b73d1568b110bc7ec1042c62c1bdad11",
       "schema_version": 1,
       "suppressions_by_reason": {
         "DATA_QUALITY_GUARD": 1

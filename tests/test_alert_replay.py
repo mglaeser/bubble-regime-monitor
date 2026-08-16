@@ -399,14 +399,45 @@ def test_the_gate_artifact_carries_no_pii():
         assert forbidden not in blob
 
 
-def test_the_replay_history_fixture_is_reproducible():
+def test_the_replay_history_fixture_builds_the_arc_it_declares():
     """The evidence is only as trustworthy as the history it replays."""
-    from tests.fixtures.gen_alert_replay_history import TARGET, build
+    from tests.fixtures import alert_replay_history as history
 
-    committed = json.loads(TARGET.read_text(encoding="utf-8"))
-    assert build() == committed, (
-        "regenerate with `python -m tests.fixtures.gen_alert_replay_history`")
-    assert committed["inputs"], "the fixture must not be empty"
+    document = history.document()
+    inputs = history.load()
+    assert document["slots"], "the fixture must not be empty"
+    assert len(inputs) == len(document["slots"])
+    # Loading twice must give the same thing — the arc has no free variables.
+    assert [i.input_identity for i in inputs] == \
+           [i.input_identity for i in history.load()]
+    assert history.digest() == history.digest()
+
+
+def test_the_committed_history_carries_no_derived_content_hash():
+    """The arc is committed; its derivation is not.
+
+    Serializing the inputs would commit thousands of observation keys and
+    computation fingerprints — content nobody can review, indistinguishable
+    from credentials to a scanner, and all of it recomputable from the twenty
+    rows that are actually a decision.
+    """
+    import re
+
+    raw = Path("tests/fixtures/alert_replay_history.json").read_text(encoding="utf-8")
+    assert not re.search(r"\b[0-9a-f]{16,}\b", raw), (
+        "the committed arc must contain no content digests")
+    assert "economic_observation_key" not in raw
+
+
+def test_the_gate_artifact_records_artifact_identity_without_a_digest():
+    """Versions, not hashes — and the omission is stated, not silent."""
+    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
+    assert payload["artifacts"]["rule_version"]
+    assert payload["artifacts"]["phrase_set_version"]
+    assert "omitted by design" in payload["artifacts"]["digests"]
+    for run in payload["runs"].values():
+        assert "rules_sha256" not in run
+        assert "phrase_set_sha256" not in run
 
 
 # ---------------------------------------------------------------------------
