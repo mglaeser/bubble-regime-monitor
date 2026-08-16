@@ -463,6 +463,25 @@ class TestUntrustedTextIsNeverLiveMarkdown:
         # The panel's own two headings, and no more.
         assert len(re.findall(r"<h[1-6]", html)) == 2
 
+    @pytest.mark.parametrize("hostile", HOSTILE)
+    def test_the_blockquote_holding_the_reason_has_no_structure(self, hostile):
+        """Scoped to where the reason actually lives.
+
+        A whole-document check is too coarse to see this: the finding block has
+        the panel's OWN bullets, and the footer has the panel's own rule, so
+        `<li>` and `<hr>` are present in the body for legitimate reasons. The
+        question is whether the REASON produced any — which is the question the
+        leading-whitespace and thematic-break findings were really asking."""
+        import re
+        html = rendered_html(self._body(f"the change adds {hostile} here"))
+        quote = re.search(r"<blockquote>.*?</blockquote>", html, re.DOTALL)
+        assert quote, "the reason is rendered in a blockquote"
+        inner = quote.group(0)
+        for structure in ("<li", "<pre", "<hr", "<h1", "<h2", "<h3", "<h4",
+                          "<table", "<a "):
+            assert structure not in inner, f"{hostile!r} produced {structure}"
+        assert "<code>" in inner, "the reason is fenced"
+
     def test_a_hostile_file_name_is_fenced_too(self):
         one = unit("www.attacker.example/@evil-`x`.py")
         body = rendered(
