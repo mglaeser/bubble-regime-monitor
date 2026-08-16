@@ -110,23 +110,35 @@ def rendered(*, decision: str, votes: list, plan: dict,
 # ------------------------------------------------------------- helpers ------
 
 
-def outside_spans(body: str) -> str:
-    """The body with every fenced span blanked out.
-
-    This is the surface where Markdown is LIVE. Untrusted text is published
-    inside a code span, so the question worth asking is never "does this
-    character appear" — it legitimately does, as literal text — but "does any of
-    it appear out here, where GitHub would act on it"."""
-    import re
-    return re.sub(r"(`+)(?:(?!\1).)*?\1", " ", body, flags=re.DOTALL)
-
-
 def fenced_only(body: str, *needles) -> None:
-    """Every needle appears in the body, and NONE of it outside a fence."""
-    live = outside_spans(body)
+    """Every needle is in the body, and GITHUB puts all of it inside `<code>`.
+
+    THE ORACLE IS THE RENDERER, not a second copy of the implementation. The
+    first version of this helper used the byte-identical regex to
+    `reviewrender._CODE_SPAN`, so it validated the publication gate against a
+    copy of the publication gate: any way the two were wrong together passed
+    every test. The completeness critic named it, and it is the fifth time this
+    session that a check turned out to be examining itself.
+
+    So the question is asked of cmark-gfm with GitHub's extension set: does the
+    needle appear anywhere in the rendered HTML outside a `<code>` element? A
+    regex cannot answer that; the renderer answers it by construction."""
+    import re
+    assert needles
+    html = rendered_html(body)
+    outside = re.sub(r"<code>.*?</code>", " ", html, flags=re.DOTALL)
     for needle in needles:
-        assert needle in body, f"{needle!r} was dropped entirely"
-        assert needle not in live, f"{needle!r} reached live Markdown"
+        assert needle in body, f"{needle!r} was dropped from the source"
+        # Compared against the ESCAPED form the renderer emits inside <code>:
+        # cmark HTML-escapes `&`, `<`, `>` and `"` when it writes any element,
+        # code included. `&` must be replaced first or it would double-escape
+        # the entities the others introduce.
+        escaped = (needle.replace("&", "&amp;").replace("<", "&lt;")
+                         .replace(">", "&gt;").replace('"', "&quot;"))
+        assert escaped in html or needle in html, \
+            f"{needle!r} was dropped from the rendered output"
+        for form in (needle, escaped):
+            assert form not in outside, f"{needle!r} reached live Markdown"
 
 
 def rendered_html(body: str) -> str:
@@ -1702,3 +1714,76 @@ class TestTheDeadEscaperIsGone:
                   / "reviewrender.py").read_text(encoding="utf-8")
         assert "def code_span(" in source
         assert "def escape_markup(" not in source
+
+
+class TestThePublicationGateIsProvablyKillable:
+    """The suite validated the gate against a byte-identical copy of itself.
+
+    `outside_spans` used the same regex as `reviewrender._CODE_SPAN`, so any way
+    the two were wrong TOGETHER passed every test — a maximally broken gate
+    included. The completeness critic named it, and it is the fifth time this
+    session that a check turned out to be examining itself: source assertions
+    blind to rendering, an `or` that skipped the imported names, `X <= X`, a
+    rendering check averaged over the wrong scope, and this.
+
+    So these feed the gate hand-built bodies and assert it REFUSES. A broken
+    gate cannot pass them, because nothing here shares an implementation with
+    it."""
+
+    def _body(self, tail: str) -> str:
+        return f"{reviewrender.MARKER}\n{reviewrender.head_binding(HEAD)}\n{tail}"
+
+    @pytest.mark.parametrize("live,category", [
+        ("ask @mglaeser to look", "live_mention"),
+        ("see #23 for context", "cross_reference"),
+        ("see GH-26 for context", "gh_reference"),
+        ("a control\x07character", "control_characters"),
+    ])
+    def test_a_live_construct_outside_a_fence_is_refused(self, live, category):
+        with pytest.raises(PanelRefusal) as raised:
+            reviewrender.assert_publishable(self._body(live))
+        assert category in raised.value.reason
+
+    @pytest.mark.parametrize("live", [
+        "ask @mglaeser to look", "see #23", "see GH-26",
+    ])
+    def test_the_same_construct_inside_a_declared_fence_is_allowed(self, live):
+        """And it must be, or the gate would refuse every real review — the
+        text is legitimately present as literal characters inside `<code>`."""
+        span = reviewrender.code_span(live)
+        reviewrender.assert_publishable(self._body(f"> {span}"), fenced=[span])
+
+    def test_a_fence_the_gate_was_not_told_about_is_treated_as_live(self):
+        """The safe direction to be wrong in. `emitted_spans` collects what
+        `render` fenced; anything it misses is refused rather than trusted."""
+        span = reviewrender.code_span("ask @mglaeser to look")
+        with pytest.raises(PanelRefusal) as raised:
+            reviewrender.assert_publishable(self._body(f"> {span}"))
+        assert "live_mention" in raised.value.reason
+
+    def test_the_gate_no_longer_parses_commonmark_at_all(self):
+        """The regex approximation is gone. It disagreed with cmark-gfm on
+        inputs neither the gate nor the test could enumerate, and where it
+        over-matched it hid a live mention from the check that exists to find
+        one."""
+        source = (ROOT / "scripts" / "midtermpanel"
+                  / "reviewrender.py").read_text(encoding="utf-8")
+        assert "_CODE_SPAN = re.compile" not in source
+        assert "def emitted_spans(" in source
+
+    def test_emitted_spans_finds_every_fenced_value_in_a_real_review(self):
+        one = unit("app/thing.py")
+        review = build(
+            decision="blocked", plan=plan_of(one),
+            votes=[vote("gpt-5.6-sol", {one["unit_sha256"]: verdict(
+                refuted=True, reason="the fail closed default is dropped",
+                categories=("data_flow", "secret_handling"))})])
+        spans = reviewrender.emitted_spans(review)
+        body = reviewrender.render(review, challenge=CHALLENGE)
+        for span in spans:
+            assert span in body, "collected a span the body does not contain"
+        # And removing them leaves nothing live behind.
+        residue = body
+        for span in spans:
+            residue = residue.replace(span, " ")
+        assert "@" not in residue

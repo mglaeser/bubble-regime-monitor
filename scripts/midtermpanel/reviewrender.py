@@ -241,10 +241,19 @@ REDACTED = "[redacted]"
 #: what the text is: quoted machine output.
 _BACKTICK_RUN = re.compile(r"`+")
 
-#: A fenced span, as the body gate sees it. Non-greedy, and the
-#: back-reference is what makes the closing fence the same length as the
-#: opening one — which is the CommonMark rule.
-_CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)*?\1", re.DOTALL)
+#: THERE IS NO REGEX HERE ANY MORE, and its absence is the point.
+#:
+#: The body gate used to find fenced regions with `(`+)(?:(?!\1).)*?\1` — a
+#: regex approximation of CommonMark's code-span rule, which is not the same
+#: thing as CommonMark's code-span rule. Where the two disagree the gate strips
+#: a region cmark would render live, and a live mention becomes invisible to the
+#: check that exists to find it.
+#:
+#: It is exact now. `render` knows precisely which strings it fenced, because
+#: `sanitize` produced them, so the gate removes THOSE strings by identity. No
+#: parsing, no approximation, and nothing for a future CommonMark revision to
+#: disagree with. A span the collector misses is treated as live and refused,
+#: which is the safe direction to be wrong in.
 
 
 def code_span(text: str) -> str:
@@ -830,7 +839,32 @@ def assert_no_forbidden_fields(node, *, path: str = "review") -> None:
             assert_no_forbidden_fields(value, path=f"{path}[{index}]")
 
 
-def assert_publishable(body: str, *, challenge: str | None = None) -> str:
+def emitted_spans(review: dict) -> list:
+    """Every string `render` fences, collected from the same fields it reads.
+
+    The gate removes exactly these before looking for a live `@` or `#N`. Built
+    from the review rather than parsed out of the body, so the two can never
+    drift into disagreeing about what a code span is — the disagreement that a
+    regex approximation of CommonMark invites and that nothing would report."""
+    spans = []
+    for finding in review.get("findings") or ():
+        for part in (finding.get("reason"), finding.get("confidence"),
+                     (finding.get("location") or {}).get("path")):
+            if isinstance(part, dict) and part.get("code_span"):
+                spans.append(part["code_span"])
+        spans.extend((finding.get("checked_categories") or {}).get("shown")
+                     or ())
+    for reason in review.get("block_reasons") or ():
+        if isinstance(reason, dict) and isinstance(reason.get("text"), str):
+            spans.append(reason["text"])
+    # Longest first, so removing a short span cannot chew a hole in a long one
+    # that contains it.
+    return sorted({s for s in spans if isinstance(s, str) and s},
+                  key=len, reverse=True)
+
+
+def assert_publishable(body: str, *, challenge: str | None = None,
+                       fenced=()) -> str:
     """The last gate before anything leaves. Named refusals, not a filter.
 
     Deliberately a REFUSAL and not a scrub. A scrub that removed a challenge
@@ -858,7 +892,10 @@ def assert_publishable(body: str, *, challenge: str | None = None) -> str:
     # longer asks "is this character anywhere", which was unanswerable once the
     # character was legitimately present as literal text; it asks the question
     # that matters: is any of it OUTSIDE a fence, where it would be live.
-    outside = _CODE_SPAN.sub(" ", body)
+    outside = body
+    for span in fenced or ():
+        if isinstance(span, str) and span:
+            outside = outside.replace(span, " ")
     if "@" in outside:
         refuse("category=review_body_carries_a_live_mention — an '@' outside a "
                "code span is a notification. Inside one it is text, which is "
@@ -976,7 +1013,8 @@ def render(review: dict, *, challenge: str | None = None) -> str:
             lines.append(NO_FINDINGS)
         lines.append("")
         lines.extend(_footer(review))
-        return assert_publishable("\n".join(lines), challenge=challenge)
+        return assert_publishable("\n".join(lines), challenge=challenge,
+                                  fenced=emitted_spans(review))
 
     # Two blanks, so the heading is followed by an empty line. A heading with
     # the next block glued to it renders, but it renders as a wall.
@@ -1003,7 +1041,8 @@ def render(review: dict, *, challenge: str | None = None) -> str:
     omitted = review["finding_count"] - shown
     if omitted > 0:
         body += _omitted_note(omitted)
-    return assert_publishable(body + footer, challenge=challenge)
+    return assert_publishable(body + footer, challenge=challenge,
+                              fenced=emitted_spans(review))
 
 
 def _render_finding(finding: dict) -> str:
@@ -1060,6 +1099,6 @@ __all__ = [
     "MAX_REASON_CHARS", "FORBIDDEN_FIELDS", "code_span", "sanitize",
     "discloses_token", "MIN_DISCLOSED_TOKEN_CHARS",
     "unit_locations", "findings_from_votes", "build_review", "render",
-    "assert_publishable", "assert_no_forbidden_fields",
+    "assert_publishable", "assert_no_forbidden_fields", "emitted_spans",
     "assert_rendering_did_not_change_the_decision", "head_binding", "head_of",
 ]
