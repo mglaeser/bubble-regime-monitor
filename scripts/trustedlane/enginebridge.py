@@ -143,6 +143,36 @@ def _resolved(path: str) -> str:
     return os.path.realpath(path)
 
 
+#: A STATIC sentence per engine code, saying what the operator can do next.
+#:
+#: Keyed on the code alone. Nothing the engine returned reaches this text —
+#: not the message, not a path, not an atom id, not a byte of the payload —
+#: so it can be published wherever the code can. That distinction is the
+#: whole design: the message is withheld because it carries the payload, and
+#: a fixed remediation string carries nothing.
+#:
+#: The gap this closes is measured, not hypothetical. The first privileged run
+#: on the pull request that added the readable reviewer refused with
+#: `code=SECRET_PREFLIGHT_FAILED` and nothing else, and finding out why took
+#: rebuilding the trusted runtime in a scratch directory, unmasking the
+#: engine's message in that throwaway copy, and re-running the count against
+#: the real diff. The cause was two credential-SHAPED test fixtures written as
+#: literals — both carrying a `detect-secrets` pragma, which is exactly the
+#: wrong instinct here and produced no signal that it was wrong.
+ENGINE_CODE_REMEDIES = {
+    "SECRET_PREFLIGHT_FAILED": (
+        "a secret-shaped literal in the REVIEWED DIFF could not be mapped to "
+        "an authorized source occurrence. This lane passes "
+        "`authorizations=None` because it has no operator envelope, so no "
+        "clearance exists that could ever authorize one and a "
+        "`detect-secrets` pragma does not help. Do not write "
+        "credential-shaped literals in source; assemble test fixtures at run "
+        "time from a fixed seed. To find the literal, scan the changed files "
+        "with the engine's own `verifier.preflight.scan_text`, which RETURNS "
+        "findings rather than raising"),
+}
+
+
 @contextlib.contextmanager
 def engine_refusals(engine: dict, *, where: str):
     """Translate the engine's typed failure into a lane refusal.
@@ -157,16 +187,28 @@ def engine_refusals(engine: dict, *, where: str):
 
     The engine's CODE is reported and its message is not. The message can carry
     a path, an atom id or a fragment of the scanned payload, and the payload is
-    the thing the preflight just refused to transmit."""
+    the thing the preflight just refused to transmit.
+
+    What IS added is a static remediation sentence looked up by that code —
+    see `ENGINE_CODE_REMEDIES`. Withholding the message was right and stays;
+    withholding every way to act on it was not the same decision, and for
+    `SECRET_PREFLIGHT_FAILED` it left an operator with a code and no next
+    step."""
     blocking = engine["modules"]["verifier.errors"].BlockingError
     try:
         yield
     except blocking as exc:
+        code = str(getattr(exc, "code", "UNKNOWN"))
+        # Looked up by code and nothing else. `.get` rather than a membership
+        # test so an unknown code degrades to the old message rather than to a
+        # KeyError inside an error path.
+        remedy = ENGINE_CODE_REMEDIES.get(code)
         refuse(f"category=engine_refused where={where} "
-               f"code={getattr(exc, 'code', 'UNKNOWN')} — the engine's own "
+               f"code={code} — the engine's own "
                "fail-closed stop; its message is not reported because it can "
                "carry a path, an atom id or a fragment of the payload the "
-               "engine just refused to transmit")
+               "engine just refused to transmit"
+               + (f". What to do: {remedy}" if remedy else ""))
 
 
 def assert_layout(engine_root: str) -> dict:

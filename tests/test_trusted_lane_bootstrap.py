@@ -9910,6 +9910,93 @@ def test_an_engine_refusal_becomes_a_lane_refusal_and_publishes_failure(
     assert "atom" not in published[-1]["description"]
 
 
+class TestARefusalCodeCarriesANextStepAndStillNoPayload:
+    """The message stays withheld; the DEAD END does not.
+
+    The first privileged run on the pull request that added the readable
+    reviewer refused with `code=SECRET_PREFLIGHT_FAILED` and nothing else.
+    Finding out why took rebuilding the trusted runtime in a scratch
+    directory, unmasking the engine's message in that throwaway copy, and
+    re-running the count against the real diff — for a cause (two
+    credential-SHAPED test fixtures written as literals) that a fixed
+    sentence names exactly.
+
+    Withholding the engine's message was right and is unchanged. Withholding
+    every way to act on it was a different decision that nobody made
+    deliberately."""
+
+    #: Named `CODE`, not `SECRET`: a variable called SECRET is what the
+    #: repository's own gate flags, and the answer to that is a better name
+    #: rather than a pragma.
+    CODE = "SECRET_PREFLIGHT_FAILED"
+
+    def _engine(self):
+        class BlockingError(Exception):
+            def __init__(self, code, reason):
+                super().__init__(f"{code}: {reason}")
+                self.code = code
+                self.reason = reason
+
+        module = types.SimpleNamespace(BlockingError=BlockingError)
+        return {"modules": {"verifier.errors": module}}, BlockingError
+
+    def _refuse_with(self, code, reason):
+        engine, blocking = self._engine()
+        with pytest.raises(errors.LaneRefusal) as caught:  # noqa: PT012
+            with enginebridge.engine_refusals(engine, where="probe"):
+                raise blocking(code, reason)
+        return caught.value.reason
+
+    def test_a_secret_preflight_refusal_says_what_to_do(self):
+        reason = self._refuse_with(self.CODE, "anything at all")
+
+        assert f"code={self.CODE}" in reason
+        assert "What to do:" in reason
+        assert "assemble test fixtures at run time" in reason
+
+    def test_an_unknown_code_still_refuses_and_adds_nothing(self):
+        """`.get` rather than a membership test, so a code nobody has written
+        a remedy for degrades to the old message instead of raising a
+        KeyError inside an error path."""
+        reason = self._refuse_with("SOME_FUTURE_CODE", "anything at all")
+
+        assert "code=SOME_FUTURE_CODE" in reason
+        assert "What to do:" not in reason
+
+    def test_nothing_from_the_engines_message_reaches_the_refusal(self):
+        """The property the whole design rests on. The remedy is keyed on the
+        CODE alone, so a message carrying a path, an atom id or a fragment of
+        the refused payload must not survive — including when the code is one
+        that HAS a remedy, which is the case that changed."""
+        payload = ("atom_id=deadbeefcafe path=app/secrets/private.py "
+                   "fragment=sk-" + "proj-AAAABBBBCCCC")
+        for code in (self.CODE, "SOME_FUTURE_CODE"):
+            reason = self._refuse_with(code, payload)
+            for leaked in ("deadbeefcafe", "app/secrets/private.py",
+                           "AAAABBBBCCCC", "atom_id=", "fragment="):
+                assert leaked not in reason, (code, leaked)
+
+    def test_every_remedy_is_a_fixed_string_with_nothing_to_interpolate(self):
+        """A remedy containing a placeholder is a remedy somebody will one day
+        fill in from the exception."""
+        assert enginebridge.ENGINE_CODE_REMEDIES
+        for code, remedy in enginebridge.ENGINE_CODE_REMEDIES.items():
+            assert isinstance(code, str) and isinstance(remedy, str)
+            assert "{" not in remedy and "}" not in remedy
+            assert "%" not in remedy
+
+    def test_the_remedy_is_short_enough_to_survive_a_status_description(self):
+        """Refusal reasons reach a GitHub commit status, which truncates at
+        140 characters. The remedy is deliberately longer than that and lives
+        in the run log — so this asserts the CODE still leads, and a reader
+        who only sees the truncation still gets the identifying part."""
+        reason = self._refuse_with(self.CODE, "anything")
+        head = reason[:140]
+
+        assert "engine_refused" in head
+        assert f"code={self.CODE}" in head
+
+
 def test_the_seam_translates_every_engine_entry_point(d1_engine):
     """Both engine calls that can raise are wrapped. A wrapped planner and an
     unwrapped core would leave exactly one path that crashes."""

@@ -82,16 +82,27 @@ def _nothing_to_review(applicability: dict) -> dict:
     of the declared outputs. An output the workflow's `outputs:` block names
     but this CLI never emits resolves to the empty string with no error at all
     — which is how two digests once arrived blank in a credential-bearing job
-    while every test passed."""
-    return {
+    while every test passed.
+
+    The blank-filling exclusion is DERIVED from the dict of real values, not
+    hand-written beside it. The first version spelled the five names twice —
+    once as keys and once as a tuple of strings to skip — and a name dropped
+    from the tuple would have been silently overwritten with `""` by the
+    `**{...}` that followed. A helper whose whole purpose is that no output
+    arrives unexpectedly blank must not have a way to blank one by typo.
+
+    `explicit` is also merged LAST, so ordering cannot decide the outcome
+    either."""
+    explicit = {
         "proceed": False,
         "applicability": applicability["applicability"],
         "applicability_reason": applicability["reason"],
         "provider_attempts": 0,
         "generation_attempts": 0,
-        **{name: "" for name in PUBLIC_OUTPUTS
-           if name not in ("proceed", "applicability", "applicability_reason",
-                           "provider_attempts", "generation_attempts")},
+    }
+    return {
+        **{name: "" for name in PUBLIC_OUTPUTS if name not in explicit},
+        **explicit,
         "_risk": {"high_risk": False, "high_risk_paths": [],
                   "marker": "", "warning": ""},
     }

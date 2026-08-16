@@ -1019,6 +1019,12 @@ jobs:
           CANDIDATE_HEAD_SHA: ${{ needs.preflight.outputs.head_sha }}
           HIGH_RISK_WORKFLOW_CHANGE: ${{ needs.preflight.outputs.high_risk }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          # Not redundant with the `if:` above. `preflight_never_resolved_a_
+          # candidate` distinguishes "preflight decided there was nothing to
+          # review" from "an output went missing between jobs", and both are a
+          # SUCCESSFUL preflight with a blank head. Passing it here means the
+          # module is right on its own rather than only while that `if:` holds.
+          PREFLIGHT_PROCEED: ${{ needs.preflight.outputs.proceed }}
           COUNT_RESULT: ${{ needs.count.result }}
           PANEL_RESULT: ${{ needs.panel.result }}
           # The attempt ledger, carried from the two jobs that could spend.

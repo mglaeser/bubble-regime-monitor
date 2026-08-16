@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+PANEL_WORKFLOW = ROOT / ".github" / "workflows" / "midterm-panel-review.yml"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import human_merge_gate as gate  # noqa: E402
@@ -642,6 +643,54 @@ class TestFinalizeWhenPreflightNeverResolvedACandidate:
         with pytest.raises(PanelRefusal) as caught:
             self._perform(self._environ(PREFLIGHT_RESULT="success"))
         assert "required_environment_absent" in caught.value.reason
+
+    def test_a_not_applicable_preflight_leaves_nothing_to_finalize(self):
+        """The state every merge now produces.
+
+        `preflight.classify_candidate` answers "the candidate merged, closed,
+        or was pushed past" with an ordinary SUCCESS carrying
+        `proceed=false` and a blank head. Before it landed that outcome was a
+        refusal, so `PREFLIGHT_RESULT` was `failure` and the first clause
+        caught it. Read as a lost output it would turn every post-merge run
+        red — the exact symptom `classify_candidate` removed."""
+        from midtermpanel import finalizecli
+        outcome = self._perform(self._environ(PREFLIGHT_RESULT="success",
+                                              PREFLIGHT_PROCEED="false"))
+        assert outcome["outcome"] == finalizecli.NOTHING_TO_FINALIZE
+        assert outcome["closed"] == []
+
+    def test_a_proceeding_preflight_with_a_blank_head_still_refuses(self):
+        """The half that must stay loud. `proceed=true` with no head is an
+        output that went missing between jobs."""
+        from midtermpanel.errors import PanelRefusal
+        with pytest.raises(PanelRefusal) as caught:
+            self._perform(self._environ(PREFLIGHT_RESULT="success",
+                                        PREFLIGHT_PROCEED="true"))
+        assert "required_environment_absent" in caught.value.reason
+
+    def test_an_absent_proceed_variable_is_read_as_loud_not_as_quiet(self):
+        """A variable the workflow forgot to pass must not silence a missing
+        head. This lane has already lost two digests to an output that
+        arrived as the empty string and was read as a value."""
+        from midtermpanel.errors import PanelRefusal
+        for absent in ("", None, "   "):
+            with pytest.raises(PanelRefusal):
+                self._perform(self._environ(PREFLIGHT_RESULT="success",
+                                            PREFLIGHT_PROCEED=absent))
+
+    def test_the_workflow_actually_passes_the_variable_this_reads(self):
+        """The module being right on its own is worth nothing if the workflow
+        never sets the variable — it would resolve to '' and take the loud
+        path on every merge, which is what this whole change removes."""
+        import yaml
+        with open(PANEL_WORKFLOW, encoding="utf-8") as handle:
+            document = yaml.safe_load(handle)
+        closeout = [step for step in document["jobs"]["finalize"]["steps"]
+                    if "finalizecli" in str(step.get("run", ""))]
+        assert len(closeout) == 1
+        env = closeout[0]["env"]
+        assert env["PREFLIGHT_PROCEED"] == (
+            "${{ needs.preflight.outputs.proceed }}")
 
     def test_a_resolved_head_takes_the_normal_path(self):
         """With a head present, finalize must NOT take the early return.

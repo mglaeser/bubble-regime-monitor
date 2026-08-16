@@ -31,6 +31,14 @@ API_ROOT = "https://api.github.com"
 PULL_REQUEST_PAGE_SIZE = 100
 MAX_PULL_REQUEST_PAGES = 20
 
+#: The same, for the changed-file list. 100 because that is GitHub's cap on
+#: `per_page` for every list endpoint — asking for more is silently clamped,
+#: which is how this read spent its life truncated at 100 while requesting
+#: 300. 40 pages is 4000 changed paths; beyond that the run refuses rather
+#: than classify risk from a partial diff. See `changed_files`.
+CHANGED_FILE_PAGE_SIZE = 100
+MAX_CHANGED_FILE_PAGES = 40
+
 
 class ReadOnlyGitHub:
     """The four reads preflight and finalize need, and nothing else."""
@@ -114,12 +122,44 @@ class ReadOnlyGitHub:
         return runs
 
     def changed_files(self, pr_number: int) -> list:
-        got = self._get(f"/pulls/{int(pr_number)}/files?per_page=300",
-                        where="pull-files")
-        if not isinstance(got, list):
-            refuse("category=pull_files_response_not_a_list")
-        return [str(entry.get("filename") or "") for entry in got
-                if isinstance(entry, dict)]
+        """Every changed path, across pages — or a refusal.
+
+        The same rule as `open_pull_requests`, and this is the read where it
+        actually costs a control rather than a colour. `preflight.
+        classify_changed_files` concludes `high_risk` from what this returns,
+        and it concludes it from ABSENCE: no path under `.github/workflows/`
+        or `scripts/midtermpanel/` in the list means `high_risk=False`, no
+        HIGH_RISK_WORKFLOW_CHANGE marker, and a human merge gate never told
+        that the pull request edits the lane reviewing it. That marker is the
+        sole mitigation this workflow's own header names for the accepted
+        repository-scoped-secret residual.
+
+        This asked for `per_page=300`. GitHub caps `per_page` at 100 and
+        clamps silently, so the request was never honoured: a pull request
+        touching more than 100 files returned a path-sorted first hundred and
+        nothing said so. A diff of 120 files under `app/` plus one under
+        `scripts/midtermpanel/` therefore reported `high_risk=False`.
+
+        Bounded, and the bound is a refusal. Concluding "no risky path" from a
+        list that did not end is the failure this exists to prevent."""
+        collected: list = []
+        for page in range(1, MAX_CHANGED_FILE_PAGES + 1):
+            got = self._get(
+                f"/pulls/{int(pr_number)}/files"
+                f"?per_page={CHANGED_FILE_PAGE_SIZE}&page={page}",
+                where="pull-files")
+            if not isinstance(got, list):
+                refuse("category=pull_files_response_not_a_list")
+            collected.extend(str(entry.get("filename") or "") for entry in got
+                             if isinstance(entry, dict))
+            if len(got) < CHANGED_FILE_PAGE_SIZE:
+                return collected
+        refuse(f"category=changed_files_did_not_end "
+               f"pages={MAX_CHANGED_FILE_PAGES} collected={len(collected)} — "
+               "the changed-file list did not terminate within the page "
+               "bound, so `high_risk=False` cannot be concluded from it; a "
+               "diff this large needs a human source review rather than a "
+               "risk classification drawn from its first pages")
 
     def workflow_run(self, run_id: int) -> dict:
         """The triggering run itself, by exact id.
