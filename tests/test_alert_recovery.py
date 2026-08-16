@@ -287,7 +287,13 @@ def test_recovery_job_records_a_heartbeat(isolated_db, monkeypatch):
     get_settings.cache_clear()
 
 
-def test_recovery_job_skips_when_everything_is_off(isolated_db):
+def test_recovery_job_skips_when_everything_is_off(isolated_db, monkeypatch):
+    """Capture is on by default now (Stage 1), so "everything off" is explicit."""
+    from app.config import get_settings
     from app.jobs.alert_recovery import run_once
 
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "false")
+    monkeypatch.setenv("ALERTS_MODE", "disabled")
+    get_settings.cache_clear()
     assert run_once()["status"] == "skipped"
+    get_settings.cache_clear()

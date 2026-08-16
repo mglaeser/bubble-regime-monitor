@@ -76,10 +76,22 @@ class Settings(BaseSettings):
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully
-    # disabled (that is how Stage 1 collects replay material), and enabling
-    # alerts never implies capture. `live` is never reached automatically: it
-    # requires promoted rule + phrase artifacts and a deliberate operator edit.
-    alert_input_capture: bool = False
+    # disabled, and enabling alerts never implies capture. `live` is never
+    # reached automatically: it requires promoted rule + phrase artifacts and a
+    # deliberate operator edit.
+    #
+    # Capture defaults ON because that is what rollout Stage 1 IS ("schema,
+    # sidecar capture on, alerts disabled, pure evaluator, CAS state, replay").
+    # The default-off rule governs the flags that can make the service ACT —
+    # `alerts_mode` below, which stays `disabled`. Capture is not one of them:
+    # it writes one immutable evidence row per recompute in its own
+    # transaction, calls no provider, sends nothing and cannot alter a score or
+    # roll back a snapshot. Leaving it off would make Stage 1 inert — no
+    # sidecars means nothing to replay — while still claiming to have reached
+    # it. The promoted ruleset declares the same thing in `capture.enabled`,
+    # and that declaration is honoured (see `alert_integration.capture_armed`),
+    # so this is a reviewable artifact decision rather than a bare default.
+    alert_input_capture: bool = True
     alerts_mode: Literal["disabled", "shadow", "live"] = "disabled"
     alerts_live_profile: str = "default"
 

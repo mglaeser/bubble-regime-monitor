@@ -6,10 +6,11 @@ frontend, and — once an operator explicitly turns it on — sends deterministi
 SMS notifications. It never changes scoring.
 
 **Current state: Stages 0 and 1 are implemented and the delivery path is built
-but unreachable. Nothing sends anything.** `ALERT_INPUT_CAPTURE` and
-`ALERTS_MODE` both default off; under `shadow` the whole pipeline runs against
-a `NullSender`, and only an operator setting `ALERTS_MODE=live` can change that
-— which the Stage 2 and Stage 3 gates do not yet permit. See
+but unreachable. Nothing sends anything.** Stage 1 means sidecar capture is on
+(`ALERT_INPUT_CAPTURE` defaults true — it records evidence and nothing else)
+while `ALERTS_MODE` defaults `disabled`. Under `shadow` the whole pipeline runs
+against a `NullSender`, and only an operator setting `ALERTS_MODE=live` can
+change that — which the Stage 2 and Stage 3 gates do not yet permit. See
 [What is not built](#what-is-not-built).
 
 ---
@@ -218,13 +219,29 @@ alert plan rather than a slower one.
 Two **independent** switches:
 
 ```bash
-ALERT_INPUT_CAPTURE=false   # persist the point-in-time sidecar
-ALERTS_MODE=disabled        # disabled | shadow | live
+ALERT_INPUT_CAPTURE=true    # persist the point-in-time sidecar  (Stage 1: ON)
+ALERTS_MODE=disabled        # disabled | shadow | live           (Stage 1: off)
 ```
 
-Capture may run with alerting fully disabled — that is how Stage 1 collects
-replay material. Enabling alerts never implies capture. `live` is never reached
-automatically: it needs promoted artifacts *and* a deliberate edit.
+Capture runs with alerting fully disabled — that is how Stage 1 collects replay
+material, and it is why capture defaults **on**. Leaving it off would make the
+stage inert: no sidecars means nothing to replay, while still claiming the
+stage had been reached. Capture writes one immutable evidence row per recompute
+in its own transaction; it calls no provider, alters no score and cannot roll
+back a snapshot.
+
+`ALERTS_MODE` is the switch that decides whether the service *acts*, and it is
+the one that defaults off. Enabling alerts never implies capture, and `live` is
+never reached automatically: it needs promoted artifacts *and* a deliberate
+edit.
+
+Capture has **two** authorities and they are not interchangeable.
+`ALERT_INPUT_CAPTURE` is the operator's kill switch; `capture.enabled` in the
+promoted ruleset is the artifact's own declaration, and it is read rather than
+decorative — an artifact that says capture is on while the code has it off is
+worse than one that says nothing. A ruleset that fails to load does **not**
+stop capture: the sidecars are exactly what an operator needs to diagnose the
+ruleset that failed, and a lost sidecar can never be backfilled.
 
 ```bash
 ALERTS_READ_API_KEY=        # alert reads (or ALERTS_PUBLIC_READ=true)
