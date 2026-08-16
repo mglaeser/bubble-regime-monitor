@@ -882,7 +882,176 @@ def test_browser_read_token_has_redacted_scope_only(isolated_db, monkeypatch):
                             json={"scope": "rule", "target": "regime.band_to_derisk",
                                   "until": "2026-09-01T00:00:00Z", "reason": "x"})
         assert wrote.status_code in (401, 403, 404, 405)
+        # ...and so must every admin action.
+        for path in ("/api/v1/admin/alerts/promote", "/api/v1/admin/alerts/recover"):
+            assert client.post(path, headers=headers).status_code in (401, 403, 404, 405)
     get_settings.cache_clear()
+
+
+# --- H-05, decided: BROWSER-VISIBLE SCOPED TOKEN ---------------------------
+#
+# The four conditions the review attaches to that choice: redacted projection
+# only, rate-limited, independently rotatable, and no silence/retry/render/
+# admin rights.
+
+
+def test_the_browser_token_posture_is_declared_not_assumed():
+    from app.config import get_settings
+
+    settings = get_settings()
+    assert settings.alerts_read_token_is_public is True, (
+        "the chosen architecture is a browser-visible token; a server-side "
+        "proxy is a different posture and must be stated explicitly")
+
+
+def test_the_browser_token_does_not_grant_message_text(isolated_db, monkeypatch):
+    """"never grant … render" — the SMS sentence is not a read-scope right.
+
+    A dashboard still gets everything it needs about the render: which reviewed
+    phrase codes were chosen, from which phrase set, how long the message was,
+    and whether it fell back. It just does not get the sentence.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from tests.conftest import TEST_ADMIN_KEY
+    from tests.test_alert_addendum_support import seed_render
+    from tests.test_alert_api import READ_KEY, WRITE_KEY
+
+    monkeypatch.setenv("ALERTS_READ_API_KEY", READ_KEY)
+    monkeypatch.setenv("ALERTS_WRITE_API_KEY", WRITE_KEY)
+    monkeypatch.setenv("ALERTS_PUBLIC_READ", "false")
+    get_settings.cache_clear()
+
+    message_body = "Regime: de-risk. Median 63."
+    render_id = seed_render(created_at=NOW, transport=TransportStatus.SENT,
+                            message=message_body)
+    from app.main import create_app
+
+    with TestClient(create_app()) as client:
+        browser = client.get(f"/api/v1/alerts/renders/{render_id}",
+                             headers={"X-API-Key": READ_KEY})
+        assert browser.status_code == 200
+        payload = browser.json()
+        assert payload["final_message"] is None
+        assert message_body not in browser.text
+        assert payload["final_message_withheld_reason"]
+        # The useful metadata survives the redaction.
+        assert payload["selected_phrase_codes"] is not None
+        assert payload["gsm7_septets"] > 0
+        assert payload["planning_phrase_set_sha256"]
+
+        # The operator path — admin only, never a browser — still has it.
+        operator = client.get(f"/api/v1/admin/alerts/renders/{render_id}",
+                              headers={"X-API-Key": TEST_ADMIN_KEY})
+        assert operator.status_code == 200
+        assert operator.json()["final_message"] == message_body
+        assert operator.headers.get("Cache-Control") == "no-store"
+
+        # ...and the browser token cannot reach that path at all.
+        assert client.get(f"/api/v1/admin/alerts/renders/{render_id}",
+                          headers={"X-API-Key": READ_KEY}).status_code == 401
+    get_settings.cache_clear()
+
+
+def test_a_trusted_proxy_posture_restores_message_text(isolated_db, monkeypatch):
+    """The other architecture stays available, but only by declaring it."""
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from tests.test_alert_addendum_support import seed_render
+    from tests.test_alert_api import READ_KEY
+
+    monkeypatch.setenv("ALERTS_READ_API_KEY", READ_KEY)
+    monkeypatch.setenv("ALERTS_PUBLIC_READ", "false")
+    monkeypatch.setenv("ALERTS_READ_TOKEN_IS_PUBLIC", "false")
+    get_settings.cache_clear()
+
+    render_id = seed_render(created_at=NOW, transport=TransportStatus.SENT)
+    from app.main import create_app
+
+    with TestClient(create_app()) as client:
+        payload = client.get(f"/api/v1/alerts/renders/{render_id}",
+                             headers={"X-API-Key": READ_KEY}).json()
+    assert payload["final_message"]
+    get_settings.cache_clear()
+
+
+def test_the_browser_token_rotates_independently(isolated_db, monkeypatch):
+    """Rotation without a synchronized dashboard deploy, or it never happens.
+
+    A single key forces a hard cutover; the outgoing key stays valid until it
+    is cleared, which is its own deliberate edit.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from tests.test_alert_api import READ_KEY, WRITE_KEY
+
+    new_key = WRITE_KEY.replace("write", "rotated")
+    monkeypatch.setenv("ALERTS_READ_API_KEY", new_key)
+    monkeypatch.setenv("ALERTS_READ_API_KEY_PREVIOUS", READ_KEY)
+    monkeypatch.setenv("ALERTS_PUBLIC_READ", "false")
+    get_settings.cache_clear()
+    from app.main import create_app
+
+    with TestClient(create_app()) as client:
+        for key in (new_key, READ_KEY):
+            assert client.get("/api/v1/alerts/health",
+                              headers={"X-API-Key": key}).status_code == 200
+        assert client.get("/api/v1/alerts/health",
+                          headers={"X-API-Key": "neither-of-them"}).status_code == 401
+
+    # Retiring the old key ends the overlap.
+    monkeypatch.setenv("ALERTS_READ_API_KEY_PREVIOUS", "")
+    get_settings.cache_clear()
+    with TestClient(create_app()) as client:
+        assert client.get("/api/v1/alerts/health",
+                          headers={"X-API-Key": READ_KEY}).status_code == 401
+    get_settings.cache_clear()
+
+
+def test_the_previous_key_slot_still_fails_closed_on_the_placeholder(monkeypatch):
+    """Rotation must not become a way to smuggle the placeholder back in."""
+    from fastapi import HTTPException
+
+    from app.config import get_settings
+    from app.security import PLACEHOLDER_ADMIN_KEY, require_alerts_read
+    from tests.test_alert_api import READ_KEY
+
+    monkeypatch.setenv("ALERTS_READ_API_KEY", READ_KEY)
+    monkeypatch.setenv("ALERTS_READ_API_KEY_PREVIOUS", PLACEHOLDER_ADMIN_KEY)
+    monkeypatch.setenv("ALERTS_PUBLIC_READ", "false")
+    get_settings.cache_clear()
+    with pytest.raises(HTTPException) as caught:
+        require_alerts_read(None, x_api_key=PLACEHOLDER_ADMIN_KEY)
+    assert caught.value.status_code == 401
+    get_settings.cache_clear()
+
+
+def test_the_browser_token_is_rate_limited():
+    """A public capability needs a ceiling, and a tighter one than an operator's."""
+    from app.config import get_settings
+    from app.security import READ_RATE_LIMIT
+
+    def per_minute(spec: str) -> int:
+        return int(spec.split("/")[0])
+
+    public = get_settings().alerts_public_read_rate_limit
+    assert per_minute(public) <= per_minute(READ_RATE_LIMIT)
+
+
+def test_every_alert_read_endpoint_is_rate_limited():
+    """Not "the ones we remembered" — every one of them."""
+    import inspect
+
+    from app.routers import alerts as router_module
+
+    source = inspect.getsource(router_module)
+    routes = source.count("@router.get(")
+    limited = source.count("@limiter.limit(")
+    assert routes == limited, (
+        f"{routes} read routes but only {limited} rate limits")
 
 
 def test_read_scope_does_not_fall_back_to_the_admin_key():

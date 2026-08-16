@@ -216,3 +216,38 @@ def admin_recover(response: Response, _: None = Depends(require_admin_key)) -> A
         "needs_operator": report.needs_operator,
         "sidecar_gaps": gaps,
     }
+
+
+@router.get("/admin/alerts/renders/{render_id}", summary="One render, INCLUDING the text")
+def admin_get_render(response: Response, render_id: str,
+                     _: None = Depends(require_admin_key)) -> Any:
+    """The operator path to a rendered message body.
+
+    The read surface withholds `final_message` because the frontend uses a
+    browser-visible scoped token (H-05), and the alert scopes deliberately do
+    not nest — there is no stronger key a caller could present to
+    `/api/v1/alerts/renders/{id}`. So the text lives here, behind admin, and
+    `no-store` keeps it out of any intermediary cache.
+    """
+    from app.alerts.health import iso
+    from app.alerts.models import AlertRender
+
+    _no_store(response)
+    with session_scope() as session:
+        row = session.get(AlertRender, render_id)
+        if row is None:
+            return problem(404, "Unknown render", "no render with that id")
+        return {
+            "render_id": row.render_id,
+            "delivery_id": row.delivery_id,
+            "render_source": row.render_source,
+            "fallback_reason": row.fallback_reason,
+            "planning_phrase_set_version": row.planning_phrase_set_version,
+            "planning_phrase_set_sha256": row.planning_phrase_set_sha256,
+            "selected_phrase_codes": list(row.selected_phrase_codes or []),
+            "selected_fact_ids": list(row.selected_fact_ids or []),
+            "gsm7_septets": row.gsm7_septets,
+            "final_message": row.final_message,
+            "body_redacted_at": iso(row.body_redacted_at),
+            "created_at": iso(row.created_at),
+        }

@@ -244,9 +244,11 @@ stop capture: the sidecars are exactly what an operator needs to diagnose the
 ruleset that failed, and a lost sidecar can never be backfilled.
 
 ```bash
-ALERTS_READ_API_KEY=        # alert reads (or ALERTS_PUBLIC_READ=true)
-ALERTS_WRITE_API_KEY=       # silences and operator actions
-ADMIN_API_KEY=              # promotion, evaluation, recovery
+ALERTS_READ_API_KEY=          # alert reads (or ALERTS_PUBLIC_READ=true)
+ALERTS_READ_API_KEY_PREVIOUS= # rotation overlap; clear it to retire the old key
+ALERTS_WRITE_API_KEY=         # silences and operator actions
+ADMIN_API_KEY=                # promotion, evaluation, recovery, render text
+ALERTS_READ_TOKEN_IS_PUBLIC=true   # the read key is browser-visible (H-05)
 ```
 
 Three separate scopes. **Alert reads do not fall back to the admin key** —
@@ -333,17 +335,40 @@ to be able to see that a rule exists and why it is dark.
 (`python -m scripts.export_alert_openapi`) and CI fails on drift. The
 application's own `/openapi.json` remains the source of truth.
 
-### Browser topology
+### Browser topology — decided: browser-visible scoped token
 
 ```
-browser -> authenticated dashboard backend/proxy -> bubblegauge
+browser (ALERTS_READ_API_KEY) -> bubblegauge alerts API   [redacted projection]
+operator (ADMIN_API_KEY)      -> /api/v1/admin/alerts/*   [message text, no-store]
 ```
 
-A browser-visible read token is not secret and may reach only the redacted
-projection. The app's CORS posture is GET-only, so the write routes are not
-browser-reachable cross-origin without a separate security review. Delivery
-projections carry no recipient, no provider correlation id, no raw provider
-error and no raw model output.
+H-05 offered two architectures. The chosen one is the **browser-visible scoped
+token**, declared in config as `ALERTS_READ_TOKEN_IS_PUBLIC=true` so it is a
+stated posture rather than an assumption — the server-side-proxy alternative is
+still available by setting it false, which asserts the read key never reaches a
+browser.
+
+A static key in browser JavaScript is extractable, so it is treated as a
+**public capability, not a secret**, and the four conditions the review attaches
+to that choice are enforced rather than intended:
+
+| condition | how |
+|---|---|
+| redacted projection only | no recipient, no provider correlation id, no raw provider error, no raw model output — **and no rendered message text** |
+| rate-limited | every alert read route carries a limit; `ALERTS_PUBLIC_READ_RATE_LIMIT` (30/min) is the public ceiling, tighter than the operator read limit |
+| rotates independently | `ALERTS_READ_API_KEY_PREVIOUS` keeps the outgoing key valid during overlap, so rotation needs no synchronized dashboard deploy; clearing it is its own edit |
+| no silence / retry / render / admin | the scopes deliberately do **not** nest — the write key cannot read, the admin key is not a read key, and message text is not on the read surface at all |
+
+That last row is why `GET /api/v1/alerts/renders/{id}` returns
+`final_message: null` with a stated reason. Since no caller can present a
+stronger scope to the read surface (there is one `X-API-Key` header), the text
+lives at `GET /api/v1/admin/alerts/renders/{id}` behind the admin key, served
+`no-store`. The dashboard still gets what it actually needs from a render: the
+reviewed phrase codes chosen, the phrase-set provenance, the septet count, and
+whether it fell back.
+
+The app's CORS posture is GET-only, so the write routes are not browser-reachable
+cross-origin without a separate, deliberate security review.
 
 ---
 

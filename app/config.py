@@ -110,6 +110,26 @@ class Settings(BaseSettings):
     alerts_write_api_key: str = ""
     alerts_public_read: bool = False
 
+    # H-05, decided: the frontend uses a BROWSER-VISIBLE SCOPED TOKEN, not a
+    # server-side proxy. A static key embedded in browser JavaScript is
+    # extractable, so it is treated as a PUBLIC CAPABILITY rather than a
+    # secret: it reaches only the redacted projection, it is rate-limited, it
+    # rotates on its own schedule, and it grants no silence, retry, render-text
+    # or admin right. Setting this false is the assertion that the read key is
+    # only ever held by a trusted server-side proxy — which is a different
+    # architecture, so it must be stated rather than assumed.
+    alerts_read_token_is_public: bool = True
+
+    # Rotation overlap. A public token has to be rotatable without taking the
+    # dashboard down, and a single key forces a hard cutover — which in
+    # practice means the rotation never happens. The previous key stays valid
+    # until it is cleared; it is a SEPARATE variable so retiring it is its own
+    # deliberate edit.
+    alerts_read_api_key_previous: str = ""
+
+    # A public capability gets its own ceiling, tighter than an operator's.
+    alerts_public_read_rate_limit: str = "30/minute"
+
     # Volume governance. P1 is exempt from all three.
     alerts_non_p1_target_168h: int = 2
     alerts_non_p1_cap_24h: int = 3
