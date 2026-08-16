@@ -56,6 +56,7 @@ import contextlib
 import hashlib
 import importlib.util
 import os
+import re
 import sys
 
 from .errors import refuse
@@ -159,7 +160,53 @@ def _resolved(path: str) -> str:
 #: the real diff. The cause was two credential-SHAPED test fixtures written as
 #: literals — both carrying a `detect-secrets` pragma, which is exactly the
 #: wrong instinct here and produced no signal that it was wrong.
+#: The engine's own category token, and nothing else.
+#:
+#: ANCHORED, and the charset admits an identifier only: no `/` for a path, no
+#: `.` for a filename, no space, no `=`, and a length bound. Whatever else the
+#: engine's message carries — a path, an atom id, a fragment of the payload it
+#: just refused to transmit — begins after this match and is discarded.
+#:
+#: Written because the blanket suppression was right about SOME codes and
+#: blinding about others. Every message
+#: `executor.validate_response_envelope` can produce for
+#: PROVIDER_RESPONSE_INVALID is structural — a category name, an HTTP status,
+#: a byte count, a key name — and suppressing all of it turned the panel's
+#: first real generation failure into a run nobody could diagnose.
+#:
+#: The identifier must also be TERMINATED by whitespace or the end of the
+#: message. Without that, `category=has/a/path` matched its leading `has` and
+#: published a prefix of something that was never an engine category — no leak,
+#: but a weaker rule than the one this claims to be. A real category is always
+#: a whole word followed by a space or nothing.
+_ENGINE_CATEGORY = re.compile(r"\Acategory=([a-z_][a-z0-9_]{0,63})(?=\s|\Z)")
+
+
+def engine_category(exc) -> str | None:
+    """The category identifier from an engine refusal, or None.
+
+    Returns None rather than guessing whenever the message does not BEGIN with
+    a literal `category=<identifier>`: 35 of the engine's 154 refusal sites
+    start with prose instead, and prose is exactly the thing that can carry a
+    path. A partial match is not attempted anywhere in the string, because a
+    `category=` appearing mid-message could have been interpolated from
+    content."""
+    reason = getattr(exc, "reason", None)
+    if not isinstance(reason, str):
+        return None
+    match = _ENGINE_CATEGORY.match(reason.strip())
+    return match.group(1) if match else None
+
+
 ENGINE_CODE_REMEDIES = {
+    "PROVIDER_RESPONSE_INVALID": (
+        "the provider replied and the engine rejected the reply's ENVELOPE, "
+        "not its content. Every category this code can carry is structural — "
+        "`generation_status` (a non-200), `generation_body_oversized`, "
+        "`generation_envelope_key_set`, `generation_model_mismatch` (the "
+        "model returned is not the model requested, which a dated model "
+        "alias will do), `generation_usage_key_set`. Read the "
+        "`engine_category=` above: it names which one"),
     "SECRET_PREFLIGHT_FAILED": (
         "a secret-shaped literal in the REVIEWED DIFF could not be mapped to "
         "an authorized source occurrence. This lane passes "
@@ -203,11 +250,14 @@ def engine_refusals(engine: dict, *, where: str):
         # test so an unknown code degrades to the old message rather than to a
         # KeyError inside an error path.
         remedy = ENGINE_CODE_REMEDIES.get(code)
+        category = engine_category(exc)
         refuse(f"category=engine_refused where={where} "
-               f"code={code} — the engine's own "
-               "fail-closed stop; its message is not reported because it can "
-               "carry a path, an atom id or a fragment of the payload the "
-               "engine just refused to transmit"
+               f"code={code}"
+               + (f" engine_category={category}" if category else "")
+               + " — the engine's own fail-closed stop; its message is not "
+               "reported beyond the category identifier above, because the "
+               "rest can carry a path, an atom id or a fragment of the "
+               "payload the engine just refused to transmit"
                + (f". What to do: {remedy}" if remedy else ""))
 
 

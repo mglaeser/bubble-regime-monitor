@@ -9976,6 +9976,108 @@ class TestARefusalCodeCarriesANextStepAndStillNoPayload:
                            "AAAABBBBCCCC", "atom_id=", "fragment="):
                 assert leaked not in reason, (code, leaked)
 
+    def test_the_category_identifier_survives_and_the_rest_does_not(self):
+        """The one thing that IS reported, and the boundary around it.
+
+        Every message `executor.validate_response_envelope` can produce is
+        structural — a category name, an HTTP status, a byte count, a key
+        name. Suppressing all of it turned the panel's first real generation
+        failure into a run nobody could diagnose. So the anchored category
+        identifier is published and everything after it is not."""
+        reason = self._refuse_with(
+            "PROVIDER_RESPONSE_INVALID",
+            "category=generation_model_mismatch expected=gpt-5.3-codex "
+            "atom_id=deadbeefcafe path=app/secrets/private.py")
+
+        assert "engine_category=generation_model_mismatch" in reason
+        for leaked in ("expected=", "gpt-5.3-codex", "deadbeefcafe",
+                       "app/secrets/private.py", "atom_id="):
+            assert leaked not in reason, leaked
+
+    @pytest.mark.parametrize("message", [
+        "the artifact is not parseable canonical JSON (exception_class=X)",
+        "refused: category=not_at_the_start",
+        "category=UPPERCASE_IS_NOT_AN_ENGINE_CATEGORY",
+        "category=9starts_with_a_digit",
+        "category=has/a/path",
+        "category=has.a.dot",
+        "category=trailing-hyphen-is-not-an-identifier",
+        "",
+    ])
+    def test_a_message_that_is_not_an_anchored_identifier_yields_nothing(
+            self, message):
+        """35 of the engine's 154 refusal sites begin with prose, and prose is
+        exactly what can carry a path. A `category=` appearing anywhere but
+        the start could itself have been interpolated from content, so it is
+        never matched — and an identifier that is not terminated by whitespace
+        or end-of-message is not one, so no PREFIX of a longer string is
+        published either."""
+        engine, blocking = self._engine()
+        assert enginebridge.engine_category(
+            blocking("ANY_CODE", message)) is None
+        assert "engine_category=" not in self._refuse_with("ANY_CODE", message)
+
+    def test_leading_whitespace_does_not_defeat_the_anchor(self):
+        """`.strip()` before matching, so a message the engine indented is
+        still read. Deliberate, and separated from the negative table above so
+        that table cannot quietly come to contain a positive case."""
+        engine, blocking = self._engine()
+        assert enginebridge.engine_category(
+            blocking("C", "  category=generation_status status=502")) == (
+                "generation_status")
+
+    def test_the_extracted_token_cannot_contain_a_path_or_a_fragment(self):
+        """Charset, stated as a property rather than trusted from a regex
+        read once. No separator that appears in a path, an id or prose can
+        survive into the token."""
+        engine, blocking = self._engine()
+        token = enginebridge.engine_category(blocking(
+            "C", "category=generation_status status=502 /etc/passwd sk-x"))
+        assert token == "generation_status"
+        for forbidden in "/. =:\\\t\n\"'<>@#$%&*()[]{}":
+            assert forbidden not in token
+
+    def test_no_engine_refusal_interpolates_a_value_inside_its_category(self):
+        """Derived from the ENGINE's own source, not from a list here.
+
+        The token is safe to publish only because it is a source literal at
+        every site. An `f"category={name}"` anywhere in the engine would make
+        it content-derived, and this is the check that would notice."""
+        engine_dir = ROOT / "scripts" / "verifier"
+        checked = 0
+        for path in sorted(engine_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Raise)
+                        and isinstance(node.exc, ast.Call)):
+                    continue
+                func = node.exc.func
+                name = (func.id if isinstance(func, ast.Name)
+                        else getattr(func, "attr", ""))
+                if name != "BlockingError" or len(node.exc.args) < 2:
+                    continue
+                reason = node.exc.args[1]
+                if isinstance(reason, ast.Constant):
+                    literal = reason.value if isinstance(reason.value,
+                                                         str) else ""
+                elif isinstance(reason, ast.JoinedStr):
+                    first = reason.values[0] if reason.values else None
+                    literal = (first.value
+                               if isinstance(first, ast.Constant)
+                               and isinstance(first.value, str) else "")
+                else:
+                    literal = ""
+                match = enginebridge._ENGINE_CATEGORY.match(literal)
+                if match is None:
+                    continue        # prose site; nothing is extracted from it
+                checked += 1
+                # The whole token came out of the LITERAL segment, so no
+                # interpolated value can be inside it.
+                assert match.end() <= len(literal), f"{path.name}:{node.lineno}"
+        assert checked > 50, (
+            "the engine's category sites were not found; this check would "
+            f"pass vacuously (checked={checked})")
+
     def test_every_remedy_is_a_fixed_string_with_nothing_to_interpolate(self):
         """A remedy containing a placeholder is a remedy somebody will one day
         fill in from the exception."""
