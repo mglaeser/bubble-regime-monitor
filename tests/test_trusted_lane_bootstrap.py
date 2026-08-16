@@ -10017,6 +10017,84 @@ class TestARefusalCodeCarriesANextStepAndStillNoPayload:
             blocking("ANY_CODE", message)) is None
         assert "engine_category=" not in self._refuse_with("ANY_CODE", message)
 
+    def test_it_reads_the_attribute_the_REAL_engine_actually_uses(self):
+        """The stub above is not the engine, and this class proved it.
+
+        `engine_category` first read `.reason` only. Every test in this class
+        passed, because the stub defines `.reason` — and against the real
+        `verifier.errors.BlockingError`, which stores its text as `.message`,
+        it returned None on every call. The diagnostic written to end a blind
+        spot was itself blind, and was validated by a fake that did not share
+        the property under test.
+
+        So this one imports the engine's own exception class. It cannot pass
+        against a stub."""
+        from verifier.errors import PROVIDER_RESPONSE_INVALID
+        from verifier.errors import BlockingError as RealBlockingError
+
+        real = RealBlockingError(
+            PROVIDER_RESPONSE_INVALID,
+            "category=generation_body_oversized bytes=1048754")
+
+        assert not hasattr(real, "reason"), (
+            "if the engine grows a `.reason`, this test stops proving what it "
+            "was written to prove — check the attribute list deliberately")
+        assert enginebridge.engine_category(real) == (
+            "generation_body_oversized")
+
+    def test_every_attribute_it_reads_is_one_a_refusal_actually_has(self):
+        """`.message` is the engine's; `.reason` is the lane's own
+        `LaneRefusal`. Both are read, and both must still exist — an attribute
+        list that drifts from the classes it names is the same defect one
+        level up."""
+        from verifier.errors import PROVIDER_RESPONSE_INVALID
+        from verifier.errors import BlockingError as RealBlockingError
+
+        real = RealBlockingError(PROVIDER_RESPONSE_INVALID, "category=x_y")
+        lane = errors.LaneRefusal("LANE", "category=lane_side_refusal")
+        found = {attribute for attribute in enginebridge._MESSAGE_ATTRIBUTES
+                 if hasattr(real, attribute) or hasattr(lane, attribute)}
+        assert found == set(enginebridge._MESSAGE_ATTRIBUTES), (
+            f"unused attribute(s): "
+            f"{set(enginebridge._MESSAGE_ATTRIBUTES) - found}")
+
+    def test_every_remedy_survives_the_never_print_redaction(self):
+        """A remedy that gets the whole reason blanked is worse than none.
+
+        `clibase.sanitized_trusted_reason` fails CLOSED on a bare
+        case-insensitive substring from `NEVER_PRINT`, returning `("", False)`
+        for the ENTIRE reason. The first `SECRET_PREFLIGHT_FAILED` remedy said
+        "this lane passes `authorizations=None`", and `"authorization" in
+        "authorizations=none"` is True — so the text added to explain a
+        refusal silently deleted the refusal, on the exact code path whose
+        incident motivated writing it.
+
+        Checked on the ASSEMBLED line, not the remedy alone: the surrounding
+        prose is what actually gets printed."""
+        from midtermpanel import clibase
+
+        for code, remedy in enginebridge.ENGINE_CODE_REMEDIES.items():
+            text, printable = clibase.sanitized_trusted_reason(remedy)
+            assert printable, (
+                f"{code}: the remedy alone is redacted; offending token(s) "
+                f"{[t for t in clibase.NEVER_PRINT if t.lower() in remedy.lower()]}")
+            assert text == remedy
+
+            whole = self._refuse_with(code, f"category=some_category more")
+            text, printable = clibase.sanitized_trusted_reason(whole)
+            assert printable, f"{code}: the assembled refusal line is redacted"
+            assert remedy in text
+
+    def test_the_redaction_really_is_a_bare_substring_match(self):
+        """The premise of the test above, checked rather than assumed. If
+        `NEVER_PRINT` ever became word-bounded, that test would keep passing
+        while guarding nothing."""
+        from midtermpanel import clibase
+
+        assert clibase.sanitized_trusted_reason(
+            "a reason mentioning authorizations=none") == ("", False)
+        assert clibase.sanitized_trusted_reason("an ordinary reason")[1] is True
+
     def test_leading_whitespace_does_not_defeat_the_anchor(self):
         """`.strip()` before matching, so a message the engine indented is
         still read. Deliberate, and separated from the negative table above so

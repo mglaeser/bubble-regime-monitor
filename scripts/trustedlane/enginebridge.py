@@ -182,6 +182,16 @@ def _resolved(path: str) -> str:
 _ENGINE_CATEGORY = re.compile(r"\Acategory=([a-z_][a-z0-9_]{0,63})(?=\s|\Z)")
 
 
+#: Where an engine refusal keeps its text. `verifier.errors.BlockingError`
+#: stores it as `.message`; the lane's own `LaneRefusal` uses `.reason`. The
+#: first version of this function read `.reason` only — so against the REAL
+#: engine it returned None on every call and published nothing, while its
+#: tests passed against a locally-defined stub that happened to expose
+#: `.reason`. A diagnostic written to end a blind spot, validated against a
+#: fake that did not share the property being tested.
+_MESSAGE_ATTRIBUTES = ("message", "reason")
+
+
 def engine_category(exc) -> str | None:
     """The category identifier from an engine refusal, or None.
 
@@ -191,11 +201,14 @@ def engine_category(exc) -> str | None:
     path. A partial match is not attempted anywhere in the string, because a
     `category=` appearing mid-message could have been interpolated from
     content."""
-    reason = getattr(exc, "reason", None)
-    if not isinstance(reason, str):
-        return None
-    match = _ENGINE_CATEGORY.match(reason.strip())
-    return match.group(1) if match else None
+    for attribute in _MESSAGE_ATTRIBUTES:
+        text = getattr(exc, attribute, None)
+        if not isinstance(text, str):
+            continue
+        match = _ENGINE_CATEGORY.match(text.strip())
+        if match:
+            return match.group(1)
+    return None
 
 
 ENGINE_CODE_REMEDIES = {
@@ -209,12 +222,18 @@ ENGINE_CODE_REMEDIES = {
         "`proof_of_check`, reason length and charset, the lens vocabulary, "
         "identical canned approvals. Content policy is the larger set by far, "
         "so do not read this code as 'a malformed reply'"),
+    # NOTE: every word here passes through `clibase.sanitized_trusted_reason`,
+    # which fails CLOSED on a bare case-insensitive substring from
+    # `NEVER_PRINT`. The first draft said "this lane passes
+    # `authorizations=None`" — and `"authorization" in "authorizations=none"`
+    # is True, so the whole reason was blanked and this path became strictly
+    # worse than saying nothing. The test below runs every remedy through that
+    # function; do not reword these without it.
     "SECRET_PREFLIGHT_FAILED": (
         "a secret-shaped literal in the REVIEWED DIFF could not be mapped to "
-        "an authorized source occurrence. This lane passes "
-        "`authorizations=None` because it has no operator envelope, so no "
-        "clearance exists that could ever authorize one and a "
-        "`detect-secrets` pragma does not help. Do not write "
+        "a cleared source occurrence. This lane holds no operator envelope, "
+        "so the engine's clearance set is empty and nothing can ever clear "
+        "one — a `detect-secrets` pragma does not help. Do not write "
         "credential-shaped literals in source; assemble test fixtures at run "
         "time from a fixed seed. To find the literal, scan the changed files "
         "with the engine's own `verifier.preflight.scan_text`, which RETURNS "
