@@ -40,13 +40,41 @@ def preflight_never_resolved_a_candidate(environ: dict) -> bool:
     The first real privileged run failed here for exactly that reason, turning
     one honest refusal into two red jobs and no summary.
 
-    Deliberately narrow. It requires preflight to have NOT succeeded. If
-    preflight reports success and the head is still blank, that is an output
-    that went missing between jobs — the defect this lane already lost two
-    digests to — and it must keep failing loudly."""
+    Deliberately narrow. If preflight reports success, the head is blank, and
+    preflight also says it PROCEEDED, that is an output that went missing
+    between jobs — the defect this lane already lost two digests to — and it
+    must keep failing loudly.
+
+    ## Why `proceed` had to be read as well
+
+    Until `preflight.classify_candidate` landed, "preflight succeeded and
+    published no head" was unreachable: a merged or moved-on candidate made
+    preflight REFUSE, so the result was `failure` and the first clause caught
+    it. That outcome is now an ordinary success with `proceed=false` and a
+    blank head — the state after every merge — and this predicate called it a
+    lost output.
+
+    Nothing broke, because the workflow gates the closeout step on
+    `proceed == 'true'` and so this function is never reached in that state.
+    But the module and the workflow then held contradictory beliefs about one
+    state, with only an `if:` between them: widening that guard to `always()`
+    — which the finalize job's own header invites, since its obligation is
+    that EVERY context this run touched ends terminal — would turn every
+    post-merge run red with `required_environment_absent`, restoring the exact
+    symptom `classify_candidate` removed.
+
+    An ABSENT `PREFLIGHT_PROCEED` is read as "loud", not as "quiet". A
+    variable the workflow forgot to pass must not silence a missing head."""
     head = str(environ.get("CANDIDATE_HEAD_SHA") or "").strip()
     preflight = str(environ.get("PREFLIGHT_RESULT") or "").strip()
-    return not head and preflight not in ("", "success")
+    proceed = str(environ.get("PREFLIGHT_PROCEED") or "").strip().lower()
+    if head:
+        return False
+    if preflight not in ("", "success"):
+        return True
+    # Preflight SUCCEEDED and published no head. Two different worlds, and
+    # only `proceed` tells them apart.
+    return proceed not in ("", "true")
 
 
 def _as_count(environ: dict, key: str):

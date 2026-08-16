@@ -678,11 +678,43 @@ REQUIRED_PERMISSIONS = {
 }
 
 
+#: The ONE job that may hold a write scope beyond `statuses`, and the ONE extra
+#: scope it may hold.
+#:
+#: `pull-requests: write` exists so the panel can publish its findings as a
+#: readable pull-request comment. Statuses carry a decision and 140 characters;
+#: they cannot carry which file, which lines, which model, or why — so a
+#: governed panel that publishes only statuses is a reviewer nobody can act on,
+#: which is how a real refutation becomes "the bot is broken, merge it".
+#:
+#: Granted at the JOB and never at the workflow, and to one job. The top-level
+#: block stays `pull-requests: read`, so `preflight` (which decides whether the
+#: run may proceed) and `finalize` (which runs on every failure path) still
+#: cannot comment on anything. Widening the top-level block would have been one
+#: line shorter and would have handed the capability to all four jobs.
+PUBLISHER_JOB = "panel"
+PUBLISHER_EXTRA_WRITE = ("pull-requests", "write")
+
+
+def _permitted_job_write(job_id: str, scope: str, value: str) -> bool:
+    """`statuses: write` anywhere; the publisher scope in the publisher job."""
+    if scope == "statuses" and value == "write":
+        return True
+    return (job_id == PUBLISHER_JOB
+            and (scope, value) == PUBLISHER_EXTRA_WRITE)
+
+
 def assert_permissions(document: dict) -> dict:
-    """Exactly five scopes, and `statuses: write` is the only write.
+    """Exactly five scopes at the top, and every job write named and placed.
 
     An unset block inherits the repository default, which on many repositories
-    is write-all — so absence is refused rather than defaulted."""
+    is write-all — so absence is refused rather than defaulted.
+
+    The job-level rule is an ALLOWLIST keyed by job id, not a set of permitted
+    scope names. The difference is the whole control: `pull-requests: write` in
+    `finalize` and `pull-requests: write` in `panel` are the same two words and
+    a completely different capability surface, and only a rule that reads the
+    job id can tell them apart."""
     permissions = document.get("permissions")
     if permissions is None:
         refuse("category=privileged_workflow_permissions_unset — an unset "
@@ -694,20 +726,44 @@ def assert_permissions(document: dict) -> dict:
     if got != REQUIRED_PERMISSIONS:
         refuse(f"category=privileged_workflow_permissions_mismatch got={got} "
                f"expected={REQUIRED_PERMISSIONS} — `statuses: write` is the only "
-               "write scope this panel needs; anything more is a capability "
-               "nobody asked for, and anything less fails after the money is "
-               "already spent")
+               "write scope this panel needs at the workflow level; anything "
+               "more is a capability nobody asked for, and anything less fails "
+               "after the money is already spent")
+    publisher_scopes = []
     for job_id, job in (document.get("jobs") or {}).items():
         job_permissions = (job or {}).get("permissions")
         if job_permissions is None:
             continue
-        writes = sorted(f"{k}={v}" for k, v in job_permissions.items()
-                        if v not in ("read", "none")
-                        and not (k == "statuses" and v == "write"))
+        # GitHub accepts a SCALAR shorthand — `permissions: write-all`,
+        # `read-all`, `{}` — and the allowlist below assumes a mapping, so a
+        # shorthand crashed this validator with an AttributeError instead of
+        # refusing it. `write-all` is the single most dangerous thing that could
+        # appear here, and it was the one shape that produced a stack trace
+        # rather than a named refusal.
+        if not isinstance(job_permissions, dict):
+            refuse(f"category=privileged_job_permissions_not_a_mapping "
+                   f"job={job_id} got={job_permissions!r} — the scalar "
+                   "shorthand grants a whole class at once; this lane names "
+                   "every scope it wants and refuses anything it cannot read "
+                   "scope by scope")
+        writes = sorted(
+            f"{k}={v}" for k, v in job_permissions.items()
+            if v not in ("read", "none")
+            and not _permitted_job_write(str(job_id), str(k), str(v)))
         if writes:
             refuse(f"category=privileged_job_permissions_grant_write "
-                   f"job={job_id} scopes={writes}")
-    return {"permissions": got}
+                   f"job={job_id} scopes={writes} — the only write scopes this "
+                   f"lane grants are `statuses: write`, and "
+                   f"`{PUBLISHER_EXTRA_WRITE[0]}: {PUBLISHER_EXTRA_WRITE[1]}` "
+                   f"in the `{PUBLISHER_JOB}` job alone")
+        if (str(job_permissions.get(PUBLISHER_EXTRA_WRITE[0]) or "")
+                == PUBLISHER_EXTRA_WRITE[1]):
+            publisher_scopes.append(str(job_id))
+    if publisher_scopes not in ([], [PUBLISHER_JOB]):
+        refuse(f"category=privileged_publisher_scope_in_the_wrong_jobs "
+               f"jobs={sorted(publisher_scopes)} expected=[{PUBLISHER_JOB!r}]")
+    return {"permissions": got,
+            "publisher_write_jobs": sorted(publisher_scopes)}
 
 
 def validate(*, root: str = ".") -> dict:

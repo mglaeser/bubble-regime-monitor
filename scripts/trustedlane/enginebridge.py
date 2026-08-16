@@ -56,6 +56,7 @@ import contextlib
 import hashlib
 import importlib.util
 import os
+import re
 import sys
 
 from .errors import refuse
@@ -143,6 +144,84 @@ def _resolved(path: str) -> str:
     return os.path.realpath(path)
 
 
+#: A STATIC sentence per engine code, saying what the operator can do next.
+#:
+#: Keyed on the code alone. Nothing the engine returned reaches this text —
+#: not the message, not a path, not an atom id, not a byte of the payload —
+#: so it can be published wherever the code can. That distinction is the
+#: whole design: the message is withheld because it carries the payload, and
+#: a fixed remediation string carries nothing.
+#:
+#: The gap this closes is measured, not hypothetical. The first privileged run
+#: on the pull request that added the readable reviewer refused with
+#: `code=SECRET_PREFLIGHT_FAILED` and nothing else, and finding out why took
+#: rebuilding the trusted runtime in a scratch directory, unmasking the
+#: engine's message in that throwaway copy, and re-running the count against
+#: the real diff. The cause was two credential-SHAPED test fixtures written as
+#: literals — both carrying a `detect-secrets` pragma, which is exactly the
+#: wrong instinct here and produced no signal that it was wrong.
+#: The engine's own category token, and nothing else.
+#:
+#: ANCHORED, and the charset admits an identifier only: no `/` for a path, no
+#: `.` for a filename, no space, no `=`, and a length bound. Whatever else the
+#: engine's message carries — a path, an atom id, a fragment of the payload it
+#: just refused to transmit — begins after this match and is discarded.
+#:
+#: Written because the blanket suppression was right about SOME codes and
+#: blinding about others. Every message
+#: `executor.validate_response_envelope` can produce for
+#: PROVIDER_RESPONSE_INVALID is structural — a category name, an HTTP status,
+#: a byte count, a key name — and suppressing all of it turned the panel's
+#: first real generation failure into a run nobody could diagnose.
+#:
+#: The identifier must also be TERMINATED by whitespace or the end of the
+#: message. Without that, `category=has/a/path` matched its leading `has` and
+#: published a prefix of something that was never an engine category — no leak,
+#: but a weaker rule than the one this claims to be. A real category is always
+#: a whole word followed by a space or nothing.
+_ENGINE_CATEGORY = re.compile(r"\Acategory=([a-z_][a-z0-9_]{0,63})(?=\s|\Z)")
+
+
+def engine_category(exc) -> str | None:
+    """The category identifier from an engine refusal, or None.
+
+    Returns None rather than guessing whenever the message does not BEGIN with
+    a literal `category=<identifier>`: 35 of the engine's 154 refusal sites
+    start with prose instead, and prose is exactly the thing that can carry a
+    path. A partial match is not attempted anywhere in the string, because a
+    `category=` appearing mid-message could have been interpolated from
+    content."""
+    reason = getattr(exc, "reason", None)
+    if not isinstance(reason, str):
+        return None
+    match = _ENGINE_CATEGORY.match(reason.strip())
+    return match.group(1) if match else None
+
+
+ENGINE_CODE_REMEDIES = {
+    "PROVIDER_RESPONSE_INVALID": (
+        "the provider replied and the engine refused the reply. This code "
+        "spans TWO very different failures and the `engine_category=` above "
+        "is what tells them apart. `generation_*` categories are envelope "
+        "structure, raised by `executor.validate_response_envelope`. "
+        "Everything else comes from `verdicts.py` and is verdict CONTENT "
+        "policy — the unit set answered, the challenge echo in "
+        "`proof_of_check`, reason length and charset, the lens vocabulary, "
+        "identical canned approvals. Content policy is the larger set by far, "
+        "so do not read this code as 'a malformed reply'"),
+    "SECRET_PREFLIGHT_FAILED": (
+        "a secret-shaped literal in the REVIEWED DIFF could not be mapped to "
+        "an authorized source occurrence. This lane passes "
+        "`authorizations=None` because it has no operator envelope, so no "
+        "clearance exists that could ever authorize one and a "
+        "`detect-secrets` pragma does not help. Do not write "
+        "credential-shaped literals in source; assemble test fixtures at run "
+        "time from a fixed seed. To find the literal, scan the changed files "
+        "with the engine's own `verifier.preflight.scan_text`, which RETURNS "
+        "findings rather than raising"),
+}
+
+
 @contextlib.contextmanager
 def engine_refusals(engine: dict, *, where: str):
     """Translate the engine's typed failure into a lane refusal.
@@ -157,16 +236,31 @@ def engine_refusals(engine: dict, *, where: str):
 
     The engine's CODE is reported and its message is not. The message can carry
     a path, an atom id or a fragment of the scanned payload, and the payload is
-    the thing the preflight just refused to transmit."""
+    the thing the preflight just refused to transmit.
+
+    What IS added is a static remediation sentence looked up by that code —
+    see `ENGINE_CODE_REMEDIES`. Withholding the message was right and stays;
+    withholding every way to act on it was not the same decision, and for
+    `SECRET_PREFLIGHT_FAILED` it left an operator with a code and no next
+    step."""
     blocking = engine["modules"]["verifier.errors"].BlockingError
     try:
         yield
     except blocking as exc:
+        code = str(getattr(exc, "code", "UNKNOWN"))
+        # Looked up by code and nothing else. `.get` rather than a membership
+        # test so an unknown code degrades to the old message rather than to a
+        # KeyError inside an error path.
+        remedy = ENGINE_CODE_REMEDIES.get(code)
+        category = engine_category(exc)
         refuse(f"category=engine_refused where={where} "
-               f"code={getattr(exc, 'code', 'UNKNOWN')} — the engine's own "
-               "fail-closed stop; its message is not reported because it can "
-               "carry a path, an atom id or a fragment of the payload the "
-               "engine just refused to transmit")
+               f"code={code}"
+               + (f" engine_category={category}" if category else "")
+               + " — the engine's own fail-closed stop; its message is not "
+               "reported beyond the category identifier above, because the "
+               "rest can carry a path, an atom id or a fragment of the "
+               "payload the engine just refused to transmit"
+               + (f". What to do: {remedy}" if remedy else ""))
 
 
 def assert_layout(engine_root: str) -> dict:
@@ -824,3 +918,22 @@ def required_approver(engine: dict) -> str:
 def pin_names(engine: dict) -> tuple:
     """The twelve PIN names, in order, from the engine."""
     return tuple(engine["modules"]["verifier.policy"].POLICY_PIN_NAMES)
+
+
+def secret_scanner(engine: dict):
+    """The engine's OWN `scan_text`, as a one-argument callable.
+
+    Exposed for the readable-review renderer, which has to scan every field it
+    is about to publish. This is emphatically NOT the second scanner this
+    module's docstring forbids — it is the first one, handed out. A renderer
+    that imported a scanner for itself would be a second implementation of the
+    one check whose disagreement nobody would notice until a credential was in
+    a comment, and it would not be the operator-approved artifact's copy.
+
+    The narrowed signature is deliberate. `scan_text` also takes `allowlist` and
+    `cleared_hashes` — the scoped clearances that let a REVIEWED source literal
+    through on its way to a provider. Nothing published to a pull request has
+    ever been reviewed for that, so the publisher gets the version with no way
+    to clear anything."""
+    scan_text = engine["modules"]["verifier.preflight"].scan_text
+    return lambda text: scan_text(text)

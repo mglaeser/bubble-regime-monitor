@@ -357,10 +357,16 @@ def aggregate(*, votes: list, synthesis: dict, challenge: str = None) -> dict:
         "decision": "blocked" if blocked else "approved",
         "engine_gate": {
             "block": engine_blocked,
-            "reason": ("the engine's synthesis refuted "
-                       f"{synthesis['refuted_unit_count']} unit(s)"
-                       if engine_blocked else
-                       "every unit approved under the governed role gate"),
+            # THREE branches, not two. The engine blocks a unit for the role and
+            # corroboration gates as well as for a refutation — the required
+            # approver has no valid vote, too few distinct models corroborate,
+            # two approvals are near-identical — and in every one of those
+            # `refuted_unit_count` is zero. The two-branch version emitted "the
+            # engine's synthesis refuted 0 unit(s)", which the readable review
+            # now publishes verbatim under "Why this blocked": a sentence that
+            # contradicts itself, beside a decision the reader is asked to
+            # trust.
+            "reason": _engine_gate_reason(engine_blocked, synthesis),
             "refuted_unit_count": synthesis["refuted_unit_count"],
             "approved_unit_count": synthesis["approved_unit_count"],
             "synthesis_sha256": synthesis["synthesis_sha256"],
@@ -377,6 +383,20 @@ def aggregate(*, votes: list, synthesis: dict, challenge: str = None) -> dict:
         "strict_any_refutation": STRICT_ANY_REFUTATION,
         "votes": len(votes),
     }
+
+
+def _engine_gate_reason(blocked: bool, synthesis: dict) -> str:
+    """What the engine's gate actually decided, in words that match the counts."""
+    if not blocked:
+        return "every unit approved under the governed role gate"
+    refuted = int(synthesis.get("refuted_unit_count") or 0)
+    if refuted:
+        return f"the engine's synthesis refuted {refuted} unit(s)"
+    approved = int(synthesis.get("approved_unit_count") or 0)
+    return ("no unit was refuted; the engine's role and corroboration gates "
+            f"cleared {approved} unit(s) and blocked the rest — the required "
+            "approver had no valid vote, too few distinct models corroborated, "
+            "or two approvals were near-identical")
 
 
 def assert_synthesis_cannot_clear_a_refutation(aggregate_record: dict,

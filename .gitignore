@@ -16,3 +16,9 @@ build/
 # MC3 private verifier artifacts: publication_class=private, regenerate via the manifest
 artifacts/verifier/mc3/*-skeleton.json
 artifacts/verifier/mc3/*-plan.json
+
+# Never. Two of these were committed by an over-broad `git add -A` during a
+# session that also touched the credential-bearing workflow; an unreviewed
+# binary in this repository is a supply-chain artifact nobody approved.
+*.whl
+*.tar.gz

@@ -23,7 +23,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import midtermpanel as mp  # noqa: E402
-from midtermpanel import engine, privilegedworkflow, transport  # noqa: E402
+from midtermpanel import (  # noqa: E402
+    engine,
+    githubapi,
+    preflight,
+    privilegedworkflow,
+    transport,
+)
 from midtermpanel import status as statuspublish  # noqa: E402
 from midtermpanel.errors import PanelRefusal  # noqa: E402
 from trustedlane import statusnames  # noqa: E402
@@ -1712,12 +1718,29 @@ class TestOrdinaryCIMustHaveTestedThisExactCombination:
         assert "triggering_run_missing_required_job" in caught.value.reason
 
     def test_an_incomplete_job_is_not_a_green_one(self):
+        """Still refused — under its OWN category now, and that split matters.
+
+        "The job has not finished" and "the job finished badly" were reported
+        as one thing: `triggering_run_job_not_successful jobs=['test
+        (3.12)=incomplete']`, which reads as a failure. They are now separate
+        because `observation.settle` may wait for the first and must never wait
+        for the second; a retry loop that could not tell them apart would be a
+        loop that eventually reported the answer it wanted."""
         jobs = self._jobs()
         jobs[0]["status"] = "in_progress"
         jobs[0]["conclusion"] = None
         with pytest.raises(PanelRefusal) as caught:
             self._assert(jobs=jobs)
-        assert "triggering_run_job_not_successful" in caught.value.reason
+        assert "triggering_run_job_incomplete" in caught.value.reason
+        assert "triggering_run_job_not_successful" not in caught.value.reason
+
+    def test_the_two_job_refusals_land_on_opposite_sides_of_the_retry_rule(self):
+        from midtermpanel import observation
+        assert "triggering_run_job_incomplete" in (
+            observation.RETRYABLE_CATEGORIES)
+        assert "triggering_run_job_not_successful" in observation.NEVER_RETRIED
+        assert not (observation.RETRYABLE_CATEGORIES
+                    & observation.NEVER_RETRIED)
 
     def test_the_workflow_publishes_what_ci_tested(self):
         document = _document()
@@ -1804,6 +1827,9 @@ class _RecordingApi:
     def changed_files(self, pr_number):
         self.calls.append("pull-files")
         return self._files
+
+
+PANEL_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "midterm-panel-review.yml"
 
 
 def _preflight_environ(**overrides):
@@ -1954,7 +1980,370 @@ class TestPreflightStillDecidesEverythingElseCorrectly:
         assert "engine_source_is_the_reviewed_candidate" in caught.value.reason
 
 
-class TestTheForkRefusalHappensBeforeAnyCredentialCouldBeRead:
+class TestACandidateThatMovedOnIsAnOutcomeAndNotAFailure:
+    """Merging a pull request used to leave a red run behind it.
+
+    `midterm-panel-review` fires on ordinary CI completing. Between that green
+    and this preflight reading the pull request, two entirely ordinary things
+    happen constantly: somebody merges, and the author pushes again. Either
+    leaves no OPEN pull request at the triggering head, and the lane's only
+    answer was `category=no_open_pull_request_for_head` — a red run on the
+    most common path there is.
+
+    Nothing here lets a run proceed that could not proceed before. The strict
+    resolver still refuses; it is simply asked second."""
+
+    _MOVED_ON = "d" * 40
+
+    def _pushed_again(self):
+        return _RecordingApi(pulls=[_pull(
+            head={"sha": self._MOVED_ON,
+                  "repo": {"id": mp.REPOSITORY_NUMERIC_ID,
+                           "full_name": "mglaeser/bubble-regime-monitor"}})])
+
+    def test_a_merged_candidate_ends_the_run_quietly(self):
+        from midtermpanel import preflightcli
+        decision = preflightcli.decide(_preflight_environ(),
+                                       api=_RecordingApi(pulls=[]),
+                                       root=str(ROOT))
+        assert decision["proceed"] is False
+        assert decision["applicability"] == (
+            preflight.NOT_APPLICABLE_CANDIDATE_MOVED_ON)
+
+    def test_a_candidate_pushed_again_ends_the_run_quietly(self):
+        from midtermpanel import preflightcli
+        decision = preflightcli.decide(_preflight_environ(),
+                                       api=self._pushed_again(),
+                                       root=str(ROOT))
+        assert decision["proceed"] is False
+        assert decision["applicability"] == (
+            preflight.NOT_APPLICABLE_CANDIDATE_MOVED_ON)
+
+    def test_nothing_further_is_read_once_there_is_no_candidate(self):
+        """"Nothing was spent finding that out" has to be true, not claimed.
+
+        One read of the pull request list, and then the run stops: no CI run
+        read, no jobs read, no check runs, no changed files."""
+        from midtermpanel import preflightcli
+        for api in (_RecordingApi(pulls=[]), self._pushed_again()):
+            preflightcli.decide(_preflight_environ(), api=api, root=str(ROOT))
+            assert api.calls == ["pulls"], api.calls
+
+    def test_the_pull_request_list_is_read_exactly_once(self):
+        """Both questions are asked of ONE observation.
+
+        Two reads would let the operational answer and the security assertion
+        describe two different moments — a candidate present for the
+        classifier and gone for the resolver."""
+        from midtermpanel import preflightcli
+        api = _RecordingApi()
+        preflightcli.decide(_preflight_environ(), api=api, root=str(ROOT))
+        assert api.calls.count("pulls") == 1, api.calls
+
+    def test_every_declared_output_is_still_present_when_nothing_is_reviewed(
+            self):
+        """An output the workflow declares but the CLI never emits resolves to
+        the empty string with no error. The keys must all be there even when
+        the values are deliberately blank."""
+        from midtermpanel import preflightcli
+        decision = preflightcli.decide(_preflight_environ(),
+                                       api=_RecordingApi(pulls=[]),
+                                       root=str(ROOT))
+        public = {k: v for k, v in decision.items() if not k.startswith("_")}
+        assert set(public) == set(preflightcli.PUBLIC_OUTPUTS)
+
+    def test_no_declared_output_can_be_blanked_by_a_typo(self):
+        """`_nothing_to_review` derives its blank-filling exclusion from the
+        dict of real values rather than repeating those names as strings.
+
+        Proved by property, not by reading: every name it fills blank must be
+        one it does NOT also assign, and the five it assigns must be
+        non-blank. A hand-written exclusion tuple could drop a name and
+        silently overwrite it with `""`, which is the exact failure this
+        helper's docstring claims to prevent."""
+        from midtermpanel import preflightcli
+        record = preflightcli._nothing_to_review(
+            {"applicability": preflight.NOT_APPLICABLE_CANDIDATE_MOVED_ON,
+             "reason": "a reason"})
+        assigned = {"proceed", "applicability", "applicability_reason",
+                    "provider_attempts", "generation_attempts"}
+        for name in assigned:
+            assert record[name] != "", name
+        for name in set(preflightcli.PUBLIC_OUTPUTS) - assigned:
+            assert record[name] == "", name
+
+    def test_both_not_applicable_exits_return_the_same_shape(self):
+        """One helper, so a third not-applicable path cannot be added that
+        forgets an output."""
+        from midtermpanel import preflightcli
+        push = preflightcli.decide(
+            _preflight_environ(RUN_EVENT="push"),
+            api=_RecordingApi(pulls=[]), root=str(ROOT))
+        moved = preflightcli.decide(_preflight_environ(),
+                                    api=_RecordingApi(pulls=[]),
+                                    root=str(ROOT))
+        assert set(push) == set(moved)
+        assert push["applicability"] != moved["applicability"]
+
+    def test_no_status_is_published_and_no_credential_job_runs(self):
+        """The whole safety argument for the quiet path, stated as one claim.
+
+        `proceed` is False, and the workflow gates `count`, `panel` and the
+        status close-out on `proceed == 'true'`. So a required panel check
+        stays ABSENT on that head rather than arriving green: branch
+        protection still blocks, and no key is ever read."""
+        from midtermpanel import preflightcli
+        decision = preflightcli.decide(_preflight_environ(),
+                                       api=_RecordingApi(pulls=[]),
+                                       root=str(ROOT))
+        assert decision["proceed"] is False
+        assert decision["applicability"] != preflight.APPLICABLE
+        assert decision["provider_attempts"] == 0
+        assert decision["generation_attempts"] == 0
+        assert decision["head_sha"] == ""
+
+        with open(PANEL_WORKFLOW_PATH, encoding="utf-8") as handle:
+            workflow = yaml.safe_load(handle)
+        for job in ("count", "panel"):
+            assert workflow["jobs"][job]["if"] == (
+                "needs.preflight.outputs.proceed == 'true'")
+        closeout = [s for s in workflow["jobs"]["finalize"]["steps"]
+                    if "finalizecli" in str(s.get("run", ""))]
+        assert len(closeout) == 1
+        assert closeout[0]["if"] == "needs.preflight.outputs.proceed == 'true'"
+
+
+class TestTheOpenPullRequestListIsReadWholeOrNotAtAll:
+    """Absence is now load-bearing, so the read that reports it must be whole.
+
+    `classify_candidate` reads "no open pull request at this head" as "merged,
+    or pushed again" and ends the run quietly. While the only reader refused on
+    absence, a truncated first page was merely a wrong red. Now the same
+    truncation would be a review that silently did not happen."""
+
+    def _client(self, pages):
+        """A real `ReadOnlyGitHub` over a scripted opener."""
+        from midtermpanel.githubapi import ReadOnlyGitHub
+
+        requested = []
+
+        class _Response:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps(self._payload).encode("utf-8")
+
+        def opener(request, timeout=None):
+            requested.append(request.full_url)
+            index = len(requested) - 1
+            return _Response(pages[min(index, len(pages) - 1)])
+
+        client = ReadOnlyGitHub(token="t",
+                                repository_numeric_id=mp.REPOSITORY_NUMERIC_ID,
+                                opener=opener)
+        return client, requested
+
+    def test_it_asks_for_the_size_it_compares_against(self):
+        """Completeness is inferred from `len(got) < PULL_REQUEST_PAGE_SIZE` —
+        whether the server honoured the `per_page` this code SENT. Every other
+        test here manufactures its full page from that same constant, so all
+        of them would pass while the request asked for something else and a
+        clamped-but-full page read as "the list ended".
+
+        That is not hypothetical: `changed_files` asked for `per_page=300`,
+        GitHub clamped it to 100, and the read spent its life truncated."""
+        from midtermpanel import githubapi
+        # 100 as a LITERAL. GitHub caps `per_page` at 100 for every list
+        # endpoint, so a constant above it can never be honoured and the
+        # length comparison below it can never conclude anything.
+        assert githubapi.PULL_REQUEST_PAGE_SIZE == 100
+        client, requested = self._client([[{"number": 1}]])
+        client.open_pull_requests()
+        assert (f"per_page={githubapi.PULL_REQUEST_PAGE_SIZE}"
+                in requested[0]), requested[0]
+
+    def test_a_short_first_page_is_the_whole_answer(self):
+        client, requested = self._client([[{"number": 1}]])
+        assert client.open_pull_requests() == [{"number": 1}]
+        assert len(requested) == 1
+        assert "page=1" in requested[0]
+
+    def test_a_full_page_is_followed_and_concatenated(self):
+        full = [{"number": n} for n in range(githubapi.PULL_REQUEST_PAGE_SIZE)]
+        client, requested = self._client([full, [{"number": 9001}]])
+
+        got = client.open_pull_requests()
+
+        assert len(got) == githubapi.PULL_REQUEST_PAGE_SIZE + 1
+        assert got[-1] == {"number": 9001}
+        assert len(requested) == 2
+        assert "page=2" in requested[1]
+
+    def test_an_exactly_full_list_still_terminates(self):
+        """The boundary a `if not got: break` gets wrong: a final page that is
+        exactly full, then an empty one."""
+        full = [{"number": n} for n in range(githubapi.PULL_REQUEST_PAGE_SIZE)]
+        client, requested = self._client([full, []])
+
+        assert len(client.open_pull_requests()) == (
+            githubapi.PULL_REQUEST_PAGE_SIZE)
+        assert len(requested) == 2
+
+    def test_a_list_that_never_ends_refuses_rather_than_truncating(self):
+        """The bound is a bound on fetching, not a licence to answer from a
+        partial list. Truncating here would report "no candidate" for a real
+        open pull request and skip its review in silence."""
+        full = [{"number": n} for n in range(githubapi.PULL_REQUEST_PAGE_SIZE)]
+        client, requested = self._client([full])
+
+        with pytest.raises(PanelRefusal) as caught:
+            client.open_pull_requests()
+
+        assert "open_pull_requests_did_not_end" in caught.value.reason
+        assert len(requested) == githubapi.MAX_PULL_REQUEST_PAGES
+
+    def test_a_page_that_is_not_a_list_still_refuses(self):
+        client, _ = self._client([{"message": "Not Found"}])
+
+        with pytest.raises(PanelRefusal) as caught:
+            client.open_pull_requests()
+
+        assert "pulls_response_not_a_list" in caught.value.reason
+
+    def test_a_later_page_that_is_not_a_list_still_refuses(self):
+        """A first page that looks fine must not authorise the rest."""
+        full = [{"number": n} for n in range(githubapi.PULL_REQUEST_PAGE_SIZE)]
+        client, _ = self._client([full, {"message": "rate limited"}])
+
+        with pytest.raises(PanelRefusal) as caught:
+            client.open_pull_requests()
+
+        assert "pulls_response_not_a_list" in caught.value.reason
+
+
+class TestTheChangedFileListIsReadWholeOrNotAtAll:
+    """The read where truncation costs a CONTROL rather than a colour.
+
+    `classify_changed_files` concludes `high_risk` from absence: no path under
+    `.github/workflows/` or `scripts/midtermpanel/` means `high_risk=False`,
+    no HIGH_RISK_WORKFLOW_CHANGE marker, and the human merge gate is never
+    told the pull request edits the lane that reviews it. That marker is the
+    only mitigation this workflow's header names for the accepted
+    repository-scoped-secret residual.
+
+    It asked for `per_page=300`. GitHub caps `per_page` at 100 and clamps
+    silently, so the request was never honoured and a 120-file diff was
+    classified from its path-sorted first hundred."""
+
+    def _client(self, pages):
+        from midtermpanel.githubapi import ReadOnlyGitHub
+
+        requested = []
+
+        class _Response:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return json.dumps(self._payload).encode("utf-8")
+
+        def opener(request, timeout=None):
+            requested.append(request.full_url)
+            return _Response(pages[min(len(requested) - 1, len(pages) - 1)])
+
+        return ReadOnlyGitHub(
+            token="t", repository_numeric_id=mp.REPOSITORY_NUMERIC_ID,
+            opener=opener), requested
+
+    def _page(self, n, prefix="app/f"):
+        return [{"filename": f"{prefix}{i}.py"} for i in range(n)]
+
+    def test_it_never_asks_for_a_page_size_github_will_clamp(self):
+        """`per_page=300` was silently reduced to 100, and nothing said so."""
+        from midtermpanel import githubapi
+        assert githubapi.CHANGED_FILE_PAGE_SIZE == 100
+        client, requested = self._client([self._page(3)])
+        client.changed_files(54)
+        assert "per_page=100" in requested[0]
+        assert "per_page=300" not in requested[0]
+
+    def test_a_short_page_is_the_whole_answer(self):
+        client, requested = self._client([self._page(3)])
+        assert client.changed_files(54) == [
+            "app/f0.py", "app/f1.py", "app/f2.py"]
+        assert len(requested) == 1
+
+    def test_a_risky_path_beyond_the_first_page_is_still_seen(self):
+        """The finding, as a test. 100 files under `app/` and one under
+        `scripts/midtermpanel/` used to classify as low risk."""
+        from midtermpanel import githubapi, preflight
+        risky = [{"filename": "scripts/midtermpanel/panelcli.py"}]
+        client, requested = self._client(
+            [self._page(githubapi.CHANGED_FILE_PAGE_SIZE), risky])
+
+        paths = client.changed_files(54)
+
+        assert len(requested) == 2
+        assert "scripts/midtermpanel/panelcli.py" in paths
+        assert preflight.classify_changed_files(paths)["high_risk"] is True
+
+    def test_an_exactly_full_final_page_still_terminates(self):
+        from midtermpanel import githubapi
+        client, requested = self._client(
+            [self._page(githubapi.CHANGED_FILE_PAGE_SIZE), []])
+        assert len(client.changed_files(54)) == (
+            githubapi.CHANGED_FILE_PAGE_SIZE)
+        assert len(requested) == 2
+
+    def test_a_diff_that_never_ends_refuses_rather_than_classifying(self):
+        """Concluding "no risky path" from a list that did not end is the
+        failure this exists to prevent, so the bound is a refusal."""
+        from midtermpanel import githubapi
+        client, requested = self._client(
+            [self._page(githubapi.CHANGED_FILE_PAGE_SIZE)])
+
+        with pytest.raises(PanelRefusal) as caught:
+            client.changed_files(54)
+
+        assert "changed_files_did_not_end" in caught.value.reason
+        assert len(requested) == githubapi.MAX_CHANGED_FILE_PAGES
+
+    def test_a_later_page_that_is_not_a_list_still_refuses(self):
+        from midtermpanel import githubapi
+        client, _ = self._client([self._page(githubapi.CHANGED_FILE_PAGE_SIZE),
+                                  {"message": "rate limited"}])
+        with pytest.raises(PanelRefusal) as caught:
+            client.changed_files(54)
+        assert "pull_files_response_not_a_list" in caught.value.reason
+
+    def test_both_absence_concluding_reads_are_bounded_the_same_way(self):
+        """One rule, stated once: absence may only be concluded from a list
+        that ended. A paginated pull list beside a truncated file list is the
+        shape this pull request had before the critic named it."""
+        from midtermpanel import githubapi
+        for method in ("open_pull_requests", "changed_files"):
+            source = inspect.getsource(
+                getattr(githubapi.ReadOnlyGitHub, method))
+            # Each one bounded, and each one refusing AT its own bound rather
+            # than returning what it had. Asserted per method, so adding a
+            # third absence-concluding read cannot be satisfied by the other
+            # two already saying it.
+            assert "for page in range(1," in source, method
+            assert "did_not_end" in source, method
+            assert "refuse(" in source, method
     """§2.1, the ordering half.
 
     A refusal that happens after the count job started is not a refusal that

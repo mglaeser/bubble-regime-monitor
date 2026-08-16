@@ -49,12 +49,10 @@ TERMINAL = "completed"
 SUCCESS = "success"
 
 
-def _timestamp(value, *, name: str) -> datetime.datetime:
-    if not isinstance(value, str) or not value.strip():
-        refuse(f"category=check_run_has_no_completed_at check={name!r} — a "
-               "record with no timestamp cannot be ordered, and guessing its "
-               "place is how a stale green masks a fresh red")
-    text = value.strip().replace("Z", "+00:00")
+def _timestamp(value, *, name: str, conclusion=None) -> datetime.datetime:
+    """Parse a timestamp that IS present. Absence is `sort_key`'s business."""
+    del conclusion
+    text = str(value).strip().replace("Z", "+00:00")
     try:
         parsed = datetime.datetime.fromisoformat(text)
     except ValueError:
@@ -89,8 +87,67 @@ def _identifier(record: dict, *, name: str) -> int:
     return value
 
 
+#: The place a record that has not finished occupies in the ordering. Sorted
+#: LAST, because a run still going is the most recent activity on its context —
+#: and because sorting it anywhere else would let an older completed green win
+#: over a newer attempt, which is the fail-open this module exists to prevent.
+_STILL_RUNNING = 1
+_FINISHED = 0
+
+#: A record claiming `status: "completed"` with no `completed_at`. RANKED, not
+#: refused, and that distinction is the whole point of this constant.
+#:
+#: Refusing it inside `sort_key` refuses during SORTING — before
+#: `assert_contexts_are_green` has looked at a single conclusion. So a check that
+#: had FINISHED AND FAILED, sitting beside one mid-write sibling, raised the
+#: retryable `check_run_has_no_completed_at` and was polled for thirty seconds
+#: under a category naming the wrong problem. Moving the red check to the front
+#: of `assert_contexts_are_green` did not fix that, because the sort runs first;
+#: the refusal had to leave `sort_key` entirely.
+#:
+#: Sorted NEWEST — newer even than a running attempt — because a record being
+#: written right now is the most recent event on its context.
+_MID_WRITE = 2
+
+#: A constant standing in for the timestamp a non-terminal record does not have.
+#: Never compared against a real one: the rank above already separates them.
+_NO_TIMESTAMP = datetime.datetime.min.replace(tzinfo=datetime.UTC)
+
+
 def sort_key(record: dict, *, name: str) -> tuple:
-    return (_timestamp(record.get("completed_at"), name=name),
+    """Rank first, then time, then attempt, then id.
+
+    The rank exists because a run that has not finished has no `completed_at`
+    BY DESIGN — GitHub writes it when the run completes — and refusing to order
+    such a record reported `check_run_has_no_completed_at` for the ordinary,
+    correct state of a re-run that is still going. That message is about the
+    document; the honest one is `latest_check_not_terminal`, and
+    `assert_contexts_are_green` already says it.
+
+    Nothing is loosened, and the claim is one-directional on purpose: no
+    document that the old ordering PASSED can now produce a green it did not,
+    because a non-terminal record sorts newest, wins its context, and is refused
+    by `assert_contexts_are_green`.
+
+    The reverse direction is not identical, and saying so matters. A record
+    claiming a non-terminal status while carrying a `completed_at` used to be
+    ordered by that timestamp and could be outvoted by a newer completed green;
+    it now sorts newest and refuses. That is a contradictory document, refusing
+    is the fail-CLOSED answer, and it is a deliberate consequence rather than an
+    accident this docstring should have papered over.
+
+    A record claiming `status: "completed"` with no timestamp still refuses
+    here, because that one is not a state anything can be in: it is a document
+    mid-write, and `observation.settle` waits for it."""
+    if str(record.get("status") or "") != TERMINAL:
+        return (_STILL_RUNNING, _NO_TIMESTAMP, _attempt(record),
+                _identifier(record, name=name))
+    stamp = record.get("completed_at")
+    if not isinstance(stamp, str) or not stamp.strip():
+        return (_MID_WRITE, _NO_TIMESTAMP, _attempt(record),
+                _identifier(record, name=name))
+    return (_FINISHED, _timestamp(stamp, name=name,
+                                  conclusion=record.get("conclusion")),
             _attempt(record), _identifier(record, name=name))
 
 
@@ -136,10 +193,62 @@ def latest_by_context(check_runs, *, head_sha: str, contexts) -> dict:
 
 def assert_contexts_are_green(check_runs, *, head_sha: str, contexts,
                               where: str) -> dict:
-    """Every named context present, terminal, and `success`, on this head."""
+    """Every named context present, terminal, and `success`, on this head.
+
+    ORDER IS THE CONTROL, and adversarial review is what established it. These
+    refusals are no longer interchangeable: `observation.settle` waits on the
+    write-lag ones and must never wait on a real failure. With "absent" and
+    "still running" checked first, a check that had FINISHED AND FAILED was
+    masked by a sibling that had not arrived yet — the run polled for thirty
+    seconds and then refused under a category that named the wrong problem.
+
+    So a real red is evaluated FIRST, over whatever was selected, and wins.
+    """
     contexts = tuple(contexts)
     selected = latest_by_context(check_runs, head_sha=head_sha,
                                  contexts=contexts)
+
+    # 1. A RED, over whatever is present. Never retried, never masked.
+    bad = sorted(f"{name}={selected[name].get('conclusion')}"
+                 for name in contexts
+                 if name in selected
+                 and str(selected[name].get("status")) == TERMINAL
+                 and selected[name].get("conclusion") is not None
+                 and str(selected[name].get("conclusion")) != SUCCESS)
+    if bad:
+        refuse(f"category=check_not_successful where={where} checks={bad} "
+               f"head={head_sha[:12]}")
+
+    # 2. TERMINAL WITH NO CONCLUSION. The other half of the same write lag the
+    #    missing `completed_at` comes from, and it used to be absorbed by the
+    #    check above as `test (3.12)=None` — a permanent refusal for a state
+    #    that resolves itself in a second. Its own category, so it can be
+    #    waited on and a real red still cannot.
+    # 2a. TERMINAL WITH NO TIMESTAMP — the originally observed race. Refused
+    #     here rather than during sorting, so a red sibling is reported first.
+    unstamped = sorted(
+        f"{name}={selected[name].get('conclusion')!r}"
+        for name in contexts
+        if name in selected
+        and str(selected[name].get("status")) == TERMINAL
+        and not str(selected[name].get("completed_at") or "").strip())
+    if unstamped:
+        refuse(f"category=check_run_has_no_completed_at where={where} "
+               f"checks={unstamped} head={head_sha[:12]} — a record that says "
+               "it completed and carries no completion time is a document "
+               "mid-write. The observed conclusion is reported with it, so a "
+               "run that never settles does not hide what the record said")
+
+    unwritten = sorted(name for name in contexts
+                       if name in selected
+                       and str(selected[name].get("status")) == TERMINAL
+                       and selected[name].get("conclusion") is None)
+    if unwritten:
+        refuse(f"category=check_conclusion_not_written where={where} "
+               f"checks={unwritten} head={head_sha[:12]} — the record says the "
+               "run completed and does not say how. That is a document "
+               "mid-write, not an outcome")
+
     missing = [name for name in contexts if name not in selected]
     if missing:
         refuse(f"category=check_absent_on_head where={where} checks={missing} "
@@ -152,13 +261,6 @@ def assert_contexts_are_green(check_runs, *, head_sha: str, contexts,
                f"checks={incomplete} head={head_sha[:12]} — the newest attempt "
                "has not finished. Falling back to an older completed record "
                "would report the result of a run that has been superseded")
-
-    bad = sorted(f"{name}={selected[name].get('conclusion')}"
-                 for name in contexts
-                 if str(selected[name].get("conclusion")) != SUCCESS)
-    if bad:
-        refuse(f"category=check_not_successful where={where} checks={bad} "
-               f"head={head_sha[:12]}")
 
     return {"checks": {name: {
                 "conclusion": selected[name].get("conclusion"),

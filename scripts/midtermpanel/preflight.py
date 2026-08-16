@@ -186,6 +186,11 @@ def parse_api_json(raw: bytes, *, where: str):
 APPLICABLE = "APPLICABLE"
 NOT_APPLICABLE_NO_PULL_REQUEST = "NOT_APPLICABLE_NO_PULL_REQUEST"
 NOT_APPLICABLE_CI_NOT_SUCCESSFUL = "NOT_APPLICABLE_CI_NOT_SUCCESSFUL"
+#: The candidate stopped being a candidate between ordinary CI going green and
+#: this panel reading the pull request: merged, closed, or superseded by a
+#: further push. See `classify_candidate` for why this is an outcome and not a
+#: failure.
+NOT_APPLICABLE_CANDIDATE_MOVED_ON = "NOT_APPLICABLE_CANDIDATE_MOVED_ON"
 
 #: Underlying events this lane understands. Anything else still fails closed:
 #: an unrecognised event is a workflow topology nobody designed for, and
@@ -255,22 +260,100 @@ def assert_triggering_run(run: dict) -> dict:
             "head_sha": head}
 
 
-def resolve_pull_request(pulls, *, run_head_sha: str) -> dict:
-    """Exactly one open pull request, whose CURRENT head is the run's head.
+def _open_pull_requests_at(pulls, run_head_sha: str) -> list:
+    """The open pull requests whose CURRENT head is exactly this commit.
 
-    Ambiguity is refused rather than resolved by picking the first. Two open PRs
-    matching one head is a state nobody designed for, and choosing one of them
-    silently means the status lands on a pull request the reviewer was not
-    looking at."""
-    if not isinstance(pulls, list):
-        refuse("category=pull_request_list_not_a_list")
-    open_matching = [
+    One matcher, used by both the operational question (`classify_candidate`)
+    and the security assertion (`resolve_pull_request`), so the two cannot come
+    to disagree about what "the candidate" means. Two copies of this filter is
+    how a classifier says "nothing to review" about a candidate the assertion
+    would happily have reviewed, or the reverse."""
+    return [
         p for p in pulls
         if isinstance(p, dict)
         and str(p.get("state")) == "open"
         and not p.get("merged_at")
         and str((p.get("head") or {}).get("sha") or "") == run_head_sha
     ]
+
+
+def classify_candidate(pulls, *, run_head_sha: str) -> dict:
+    """Is there still something to review at this head — or has it moved on?
+
+    The second half of the applicability question, and the same shape as
+    `classify_triggering_run`: an operational answer with three outcomes, kept
+    apart from the security question `resolve_pull_request` answers.
+
+    ## The signal this repairs
+
+    Between ordinary CI going green and this panel reading the pull request,
+    two entirely ordinary things happen all the time: the author pushes again,
+    and somebody merges. Either one leaves no OPEN pull request at the head the
+    panel was triggered for, and the lane's only answer was
+    `category=no_open_pull_request_for_head` — a RED `midterm-panel-review` run
+    on a pull request whose real state is "already merged" or "superseded, and
+    its replacement has its own CI and its own panel on the way".
+
+    That is the same defect the applicability split above was written for, one
+    step later in the sequence, and it is worse here because it lands on the
+    common path: every merge of a panel-reviewed pull request produced a red
+    run behind it. A permanently-red signal for an expected condition teaches
+    people to ignore the signal.
+
+    ## What is NOT relaxed
+
+    Nothing this returns lets a run proceed that could not proceed before. The
+    two structural refusals stay refusals — a response that is not a list, and
+    two open pull requests sharing one head — because neither is an ordinary
+    development event; both are states nobody designed for.
+
+    And "not applicable" is not "approved". The run publishes NO commit status
+    on this head, exactly as the push path does not. A required panel status
+    therefore stays absent rather than arriving green, so branch protection
+    still blocks. The only thing that changes is the colour of a run that had
+    nothing to do.
+
+    The head cannot be told apart from the merge here, and this does not
+    pretend to: `open_pull_requests()` asks for `state=open`, so a merged
+    candidate is simply missing from the list rather than present and closed.
+    The reason names both possibilities instead of guessing between them."""
+    if not isinstance(pulls, list):
+        refuse("category=pull_request_list_not_a_list")
+    open_matching = _open_pull_requests_at(pulls, run_head_sha)
+    if len(open_matching) > 1:
+        numbers = sorted(int(p.get("number", 0)) for p in open_matching)
+        refuse(f"category=ambiguous_pull_request_mapping numbers={numbers} — "
+               "two open pull requests share this head; publishing a status "
+               "would land it on whichever one this code picked first")
+    if not open_matching:
+        return {"applicability": NOT_APPLICABLE_CANDIDATE_MOVED_ON,
+                "proceed": False,
+                "reason": (f"no open pull request is at {run_head_sha[:12]} any "
+                           "more: it was merged, it was closed, or the author "
+                           "pushed again while this panel was starting. A new "
+                           "head gets its own ordinary CI run and its own "
+                           "panel; nothing was spent finding that out")}
+    return {"applicability": APPLICABLE, "proceed": True,
+            "reason": "an open pull request is still at the reviewed head"}
+
+
+def resolve_pull_request(pulls, *, run_head_sha: str) -> dict:
+    """Exactly one open pull request, whose CURRENT head is the run's head.
+
+    Ambiguity is refused rather than resolved by picking the first. Two open PRs
+    matching one head is a state nobody designed for, and choosing one of them
+    silently means the status lands on a pull request the reviewer was not
+    looking at.
+
+    `classify_candidate` answers the operational form of the first question
+    ahead of this one, so on the ordinary path the refusal below is unreachable.
+    It is kept, and kept a refusal, for the same reason `assert_triggering_run`
+    still refuses a `push` that `classify_triggering_run` already sorted: a
+    caller that skips the classifier must not silently get a candidate-less
+    run reviewed, and this function's contract is not "report what happened"."""
+    if not isinstance(pulls, list):
+        refuse("category=pull_request_list_not_a_list")
+    open_matching = _open_pull_requests_at(pulls, run_head_sha)
     if not open_matching:
         refuse(f"category=no_open_pull_request_for_head "
                f"head={run_head_sha[:12]} — the pull request was closed, "
@@ -473,25 +556,83 @@ def assert_triggering_ci_jobs_are_green(jobs, *, run_id: int) -> dict:
     the caller hoped for."""
     if not isinstance(jobs, list):
         refuse("category=triggering_run_jobs_not_a_list")
+    # WORST-WINS per name, not last-wins. The loop used to overwrite
+    # `observed[name]`, so two records for one job name were resolved by the
+    # order the API happened to return them — and a FAILED `test (3.12)`
+    # followed by a successful one reported green. That is list order deciding a
+    # required gate, which is the exact defect `checkruns` was written to remove
+    # from the check-run side; it survived here.
+    #
+    # A job name can legitimately appear twice: a re-run within one workflow
+    # run, or a matrix leg. There is no `completed_at` on this payload to order
+    # them by, so ordering is not available — but severity is, and taking the
+    # worst is the fail-closed answer that needs no ordering at all.
+    #: Higher is worse. A real failure outranks everything, so it can never be
+    #: overwritten by a later green record for the same name.
+    severity = {"success": 0, "unwritten": 2, "incomplete": 3}
     observed = {}
+
+    def _rank(value) -> int:
+        return severity.get(value, 4)
+
+    def _worse(existing, candidate):
+        if existing is None:
+            return candidate
+        return candidate if _rank(candidate) > _rank(existing) else existing
+
     for job in jobs:
         if not isinstance(job, dict):
             continue
         name = str(job.get("name") or "")
         if name in REQUIRED_CI_JOBS:
             if str(job.get("status")) != "completed":
-                observed[name] = "incomplete"
+                seen = "incomplete"
+            elif job.get("conclusion") is None:
+                # Completed with no conclusion: the same write lag as a check
+                # run with no `completed_at`, and it used to be reported as
+                # `=None` under the not-successful category — a permanent
+                # refusal for a state that resolves itself in a second.
+                seen = "unwritten"
             else:
-                observed[name] = str(job.get("conclusion") or "")
-    missing = [name for name in REQUIRED_CI_JOBS if name not in observed]
-    if missing:
-        refuse(f"category=triggering_run_missing_required_job jobs={missing} "
-               f"run_id={run_id} observed={sorted(observed)}")
+                seen = str(job.get("conclusion"))
+            observed[name] = _worse(observed.get(name), seen)
+    # SAME ORDER, SAME REASON as `checkruns.assert_contexts_are_green`. A red
+    # is evaluated first and wins: with "incomplete" checked ahead of it, a job
+    # that had finished and FAILED was reported under the retryable
+    # `triggering_run_job_incomplete` whenever any sibling was still running,
+    # so the run polled for thirty seconds and then named the wrong problem.
     bad = sorted(f"{name}={observed[name]}" for name in REQUIRED_CI_JOBS
-                 if observed[name] != "success")
+                 if name in observed
+                 and observed[name] not in ("incomplete", "unwritten", "success"))
     if bad:
         refuse(f"category=triggering_run_job_not_successful jobs={bad} "
                f"run_id={run_id}")
+    unwritten = sorted(name for name in REQUIRED_CI_JOBS
+                       if observed.get(name) == "unwritten")
+    if unwritten:
+        refuse(f"category=triggering_run_job_conclusion_not_written "
+               f"jobs={unwritten} run_id={run_id} — the job says it completed "
+               "and does not say how; that is a document mid-write")
+    # STILL RUNNING and FAILED are two different facts, and they were reported
+    # under one category. `triggering_run_job_not_successful jobs=['test
+    # (3.12)=incomplete']` reads as a failure and is a job that has not
+    # finished — and the distinction is now load-bearing, because
+    # `observation.settle` may wait for the first and must never wait for the
+    # second.
+    incomplete = sorted(name for name in REQUIRED_CI_JOBS
+                        if observed.get(name) == "incomplete")
+    if incomplete:
+        refuse(f"category=triggering_run_job_incomplete jobs={incomplete} "
+               f"run_id={run_id} — the job has not finished. This is the one "
+               "state that is worth re-reading: the panel fires within a second "
+               "of the run completing, and a sibling required job can still be "
+               "being written")
+    missing = [name for name in REQUIRED_CI_JOBS if name not in observed]
+    if missing:
+        # LAST, and retryable. The exact analogue of `check_absent_on_head`: a
+        # job the API has not listed yet is not a job that will never exist.
+        refuse(f"category=triggering_run_missing_required_job jobs={missing} "
+               f"run_id={run_id} observed={sorted(observed)}")
     return {"jobs": {name: observed[name] for name in REQUIRED_CI_JOBS},
             "run_id": run_id}
 

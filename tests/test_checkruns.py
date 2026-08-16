@@ -98,11 +98,51 @@ class TestTheOrderingKeys:
 
 class TestWhatIsRefusedRatherThanResolved:
 
-    def test_a_missing_timestamp_is_refused(self):
+    def test_a_missing_timestamp_is_refused_by_THE_GATE_not_by_sorting(self):
+        """The refusal moved, deliberately, and where it lives is the control.
+
+        Refusing inside `latest_by_context` refuses during SORTING — before
+        `assert_contexts_are_green` has looked at a single conclusion. So a
+        check that had FINISHED AND FAILED, beside one mid-write sibling, raised
+        the retryable `check_run_has_no_completed_at` and `observation.settle`
+        polled a hard failure for thirty seconds under a category naming the
+        wrong problem.
+
+        Sorting now RANKS a mid-write record newest and the gate refuses it,
+        after the red check. Same refusal, same category, later."""
+        selected = checkruns.latest_by_context([run(at=None)], head_sha=HEAD,
+                                               contexts=("image",))
+        assert selected["image"]["id"] == run(at=None)["id"]
+
         with pytest.raises(PanelRefusal) as caught:
-            checkruns.latest_by_context([run(at=None)], head_sha=HEAD,
-                                        contexts=("image",))
+            checkruns.assert_contexts_are_green(
+                [run(at=None)], head_sha=HEAD, contexts=("image",),
+                where="test")
         assert "has_no_completed_at" in caught.value.reason
+
+    def test_a_red_beside_a_mid_write_SIBLING_reports_the_red(self):
+        """Two contexts: one finished and failed, one still being written.
+
+        This is the shape adversarial review found. The red must win, or
+        `observation.settle` polls a hard failure for thirty seconds and then
+        refuses under a category that names the wrong problem."""
+        from midtermpanel import observation
+        with pytest.raises(PanelRefusal) as caught:
+            checkruns.assert_contexts_are_green(
+                [run(name="image", identifier=1, conclusion="failure"),
+                 run(name="test (3.12)", identifier=2, at=None)],
+                head_sha=HEAD, contexts=("image", "test (3.12)"), where="test")
+        assert "check_not_successful" in caught.value.reason
+        assert not observation.is_retryable(caught.value)
+
+    def test_a_mid_write_record_supersedes_an_older_red_on_ITS_OWN_context(self):
+        """Within one context the mid-write record legitimately wins: the check
+        re-ran and its result is being written now. That is the ordering doing
+        its job, and it is why the test above needs two contexts."""
+        selected = checkruns.latest_by_context(
+            [run(identifier=1, conclusion="failure"), run(identifier=2, at=None)],
+            head_sha=HEAD, contexts=("image",))
+        assert selected["image"]["id"] == 2
 
     def test_an_unparseable_timestamp_is_refused(self):
         """Unparseable is not oldest and it is not newest."""

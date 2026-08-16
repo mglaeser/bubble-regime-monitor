@@ -9910,6 +9910,201 @@ def test_an_engine_refusal_becomes_a_lane_refusal_and_publishes_failure(
     assert "atom" not in published[-1]["description"]
 
 
+class TestARefusalCodeCarriesANextStepAndStillNoPayload:
+    """The message stays withheld; the DEAD END does not.
+
+    The first privileged run on the pull request that added the readable
+    reviewer refused with `code=SECRET_PREFLIGHT_FAILED` and nothing else.
+    Finding out why took rebuilding the trusted runtime in a scratch
+    directory, unmasking the engine's message in that throwaway copy, and
+    re-running the count against the real diff — for a cause (two
+    credential-SHAPED test fixtures written as literals) that a fixed
+    sentence names exactly.
+
+    Withholding the engine's message was right and is unchanged. Withholding
+    every way to act on it was a different decision that nobody made
+    deliberately."""
+
+    #: Named `CODE`, not `SECRET`: a variable called SECRET is what the
+    #: repository's own gate flags, and the answer to that is a better name
+    #: rather than a pragma.
+    CODE = "SECRET_PREFLIGHT_FAILED"
+
+    def _engine(self):
+        class BlockingError(Exception):
+            def __init__(self, code, reason):
+                super().__init__(f"{code}: {reason}")
+                self.code = code
+                self.reason = reason
+
+        module = types.SimpleNamespace(BlockingError=BlockingError)
+        return {"modules": {"verifier.errors": module}}, BlockingError
+
+    def _refuse_with(self, code, reason):
+        engine, blocking = self._engine()
+        with pytest.raises(errors.LaneRefusal) as caught:  # noqa: PT012
+            with enginebridge.engine_refusals(engine, where="probe"):
+                raise blocking(code, reason)
+        return caught.value.reason
+
+    def test_a_secret_preflight_refusal_says_what_to_do(self):
+        reason = self._refuse_with(self.CODE, "anything at all")
+
+        assert f"code={self.CODE}" in reason
+        assert "What to do:" in reason
+        assert "assemble test fixtures at run time" in reason
+
+    def test_an_unknown_code_still_refuses_and_adds_nothing(self):
+        """`.get` rather than a membership test, so a code nobody has written
+        a remedy for degrades to the old message instead of raising a
+        KeyError inside an error path."""
+        reason = self._refuse_with("SOME_FUTURE_CODE", "anything at all")
+
+        assert "code=SOME_FUTURE_CODE" in reason
+        assert "What to do:" not in reason
+
+    def test_nothing_from_the_engines_message_reaches_the_refusal(self):
+        """The property the whole design rests on. The remedy is keyed on the
+        CODE alone, so a message carrying a path, an atom id or a fragment of
+        the refused payload must not survive — including when the code is one
+        that HAS a remedy, which is the case that changed."""
+        payload = ("atom_id=deadbeefcafe path=app/secrets/private.py "
+                   "fragment=sk-" + "proj-AAAABBBBCCCC")
+        for code in (self.CODE, "SOME_FUTURE_CODE"):
+            reason = self._refuse_with(code, payload)
+            for leaked in ("deadbeefcafe", "app/secrets/private.py",
+                           "AAAABBBBCCCC", "atom_id=", "fragment="):
+                assert leaked not in reason, (code, leaked)
+
+    def test_the_category_identifier_survives_and_the_rest_does_not(self):
+        """The one thing that IS reported, and the boundary around it.
+
+        Every message `executor.validate_response_envelope` can produce is
+        structural — a category name, an HTTP status, a byte count, a key
+        name. Suppressing all of it turned the panel's first real generation
+        failure into a run nobody could diagnose. So the anchored category
+        identifier is published and everything after it is not."""
+        reason = self._refuse_with(
+            "PROVIDER_RESPONSE_INVALID",
+            "category=generation_model_mismatch expected=gpt-5.3-codex "
+            "atom_id=deadbeefcafe path=app/secrets/private.py")
+
+        assert "engine_category=generation_model_mismatch" in reason
+        for leaked in ("expected=", "gpt-5.3-codex", "deadbeefcafe",
+                       "app/secrets/private.py", "atom_id="):
+            assert leaked not in reason, leaked
+
+    @pytest.mark.parametrize("message", [
+        "the artifact is not parseable canonical JSON (exception_class=X)",
+        "refused: category=not_at_the_start",
+        "category=UPPERCASE_IS_NOT_AN_ENGINE_CATEGORY",
+        "category=9starts_with_a_digit",
+        "category=has/a/path",
+        "category=has.a.dot",
+        "category=trailing-hyphen-is-not-an-identifier",
+        "",
+    ])
+    def test_a_message_that_is_not_an_anchored_identifier_yields_nothing(
+            self, message):
+        """35 of the engine's 154 refusal sites begin with prose, and prose is
+        exactly what can carry a path. A `category=` appearing anywhere but
+        the start could itself have been interpolated from content, so it is
+        never matched — and an identifier that is not terminated by whitespace
+        or end-of-message is not one, so no PREFIX of a longer string is
+        published either."""
+        engine, blocking = self._engine()
+        assert enginebridge.engine_category(
+            blocking("ANY_CODE", message)) is None
+        assert "engine_category=" not in self._refuse_with("ANY_CODE", message)
+
+    def test_leading_whitespace_does_not_defeat_the_anchor(self):
+        """`.strip()` before matching, so a message the engine indented is
+        still read. Deliberate, and separated from the negative table above so
+        that table cannot quietly come to contain a positive case."""
+        engine, blocking = self._engine()
+        assert enginebridge.engine_category(
+            blocking("C", "  category=generation_status status=502")) == (
+                "generation_status")
+
+    def test_the_extracted_token_cannot_contain_a_path_or_a_fragment(self):
+        """Charset, stated as a property rather than trusted from a regex
+        read once. No separator that appears in a path, an id or prose can
+        survive into the token."""
+        engine, blocking = self._engine()
+        token = enginebridge.engine_category(blocking(
+            "C", "category=generation_status status=502 /etc/passwd sk-x"))
+        assert token == "generation_status"
+        for forbidden in "/. =:\\\t\n\"'<>@#$%&*()[]{}":
+            assert forbidden not in token
+
+    def test_no_engine_category_is_built_from_an_interpolated_value(self):
+        """Derived from the ENGINE's own source, not from a list here.
+
+        The token is safe to publish only because it is a source literal at
+        every site. An `f"category={name}"` anywhere in the engine would make
+        it content-derived, and this is the check that notices.
+
+        Scans EVERY string that starts a `category=`, not only the ones passed
+        directly to `raise BlockingError(...)`. The first version of this test
+        walked `ast.Raise` nodes and so was blind to `verdicts.py`, whose 26
+        categories all go through a `_fail()` wrapper — including the ones a
+        real panel run is most likely to hit. A check that inspects the
+        delivery mechanism rather than the value is a check that misses every
+        site using a different mechanism."""
+        engine_dir = ROOT / "scripts" / "verifier"
+        checked, modules = 0, set()
+        for path in sorted(engine_dir.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                # A plain literal, or the first segment of an f-string. Those
+                # are the only two ways a category can begin a message.
+                if isinstance(node, ast.Constant) and isinstance(node.value,
+                                                                 str):
+                    literal = node.value
+                elif isinstance(node, ast.JoinedStr):
+                    first = node.values[0] if node.values else None
+                    literal = (first.value
+                               if isinstance(first, ast.Constant)
+                               and isinstance(first.value, str) else "")
+                else:
+                    continue
+                match = enginebridge._ENGINE_CATEGORY.match(literal)
+                if match is None:
+                    continue
+                checked += 1
+                modules.add(path.name)
+                # The whole token came out of the LITERAL segment, so no
+                # interpolated value can be inside it.
+                assert match.end() <= len(literal), f"{path.name}:{node.lineno}"
+        assert checked > 100, (
+            "the engine's category sites were not found; this check would "
+            f"pass vacuously (checked={checked})")
+        assert "verdicts.py" in modules, (
+            "verdicts.py raises through a `_fail()` wrapper and holds the "
+            "categories a real run is most likely to hit; a scan that cannot "
+            "see it is the gap this test was rewritten to close")
+
+    def test_every_remedy_is_a_fixed_string_with_nothing_to_interpolate(self):
+        """A remedy containing a placeholder is a remedy somebody will one day
+        fill in from the exception."""
+        assert enginebridge.ENGINE_CODE_REMEDIES
+        for code, remedy in enginebridge.ENGINE_CODE_REMEDIES.items():
+            assert isinstance(code, str) and isinstance(remedy, str)
+            assert "{" not in remedy and "}" not in remedy
+            assert "%" not in remedy
+
+    def test_the_remedy_is_short_enough_to_survive_a_status_description(self):
+        """Refusal reasons reach a GitHub commit status, which truncates at
+        140 characters. The remedy is deliberately longer than that and lives
+        in the run log — so this asserts the CODE still leads, and a reader
+        who only sees the truncation still gets the identifying part."""
+        reason = self._refuse_with(self.CODE, "anything")
+        head = reason[:140]
+
+        assert "engine_refused" in head
+        assert f"code={self.CODE}" in head
+
+
 def test_the_seam_translates_every_engine_entry_point(d1_engine):
     """Both engine calls that can raise are wrapped. A wrapped planner and an
     unwrapped core would leave exactly one path that crashes."""
