@@ -226,11 +226,20 @@ def test_a_candidate_pushed_again_is_not_applicable_rather_than_an_error():
 
 def test_the_reason_names_both_possibilities_and_guesses_neither():
     """The list cannot tell a merge from a push. Saying which would be a
-    claim about something this function did not observe."""
-    reason = preflight.classify_candidate([], run_head_sha=HEAD)["reason"]
+    claim about something this function did not observe.
 
-    assert "merged" in reason and "pushed again" in reason
-    assert HEAD[:12] in reason
+    "Guesses neither" is checked rather than asserted in the name: the two
+    worlds must produce the SAME reason, which they can only do by not
+    distinguishing between them."""
+    merged = preflight.classify_candidate([], run_head_sha=HEAD)["reason"]
+    pushed = preflight.classify_candidate(
+        [_candidate(head=OTHER_HEAD)], run_head_sha=HEAD)["reason"]
+
+    assert merged == pushed
+    assert "merged" in merged and "pushed again" in merged
+    assert HEAD[:12] in merged
+    # And it does not report the head it did NOT review.
+    assert OTHER_HEAD[:12] not in pushed
 
 
 def test_an_open_candidate_still_at_this_head_is_applicable():
@@ -251,15 +260,12 @@ def test_not_applicable_is_never_spelled_approved():
         assert outcome["proceed"] is False
 
 
-@pytest.mark.parametrize("pulls", [
-    pytest.param([_candidate(number=34), _candidate(number=35)],
-                 id="two-open-at-one-head"),
-])
-def test_ambiguity_still_fails_closed(pulls):
+def test_ambiguity_still_fails_closed():
     """Not an ordinary development event. Nobody designed for it, and
     picking one silently lands the status on the wrong pull request."""
     with pytest.raises(PanelRefusal) as excinfo:
-        preflight.classify_candidate(pulls, run_head_sha=HEAD)
+        preflight.classify_candidate(
+            [_candidate(number=34), _candidate(number=35)], run_head_sha=HEAD)
 
     assert "ambiguous_pull_request_mapping" in str(excinfo.value)
 
