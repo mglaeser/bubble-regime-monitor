@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _SPEC = importlib.util.spec_from_file_location(
     "independent_verify", Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
 iv = importlib.util.module_from_spec(_SPEC)
@@ -245,3 +247,88 @@ class TestPanelFindingsOnItself:
         votes = [canned_approve, sol_good, low_ref]
         assert iv.require_approvals(votes, models, "gpt-5.6-sol", 1, ch)["block"] is False
         assert iv.attest_reasons(votes, 3)["block"] is True   # the conjunctive gate catches it
+
+
+class TestAttestConsistency:
+    """A green vote whose OWN reason names a defect is an inconsistent vote, not
+    an approval. decide() reads only the boolean, so without this gate such a
+    vote both counts toward the quorum and supplies a substantive, distinct
+    reason that helps attest_reasons pass. Found adversarially against a live
+    panel; fail-closed."""
+
+    M3 = ["m-a", "m-b", "m-c"]
+
+    @staticmethod
+    def _green(reason, refuted=False):
+        return {"ok": True, "v": {"refuted": refuted, "reason": reason, "confidence": "high"}}
+
+    def test_ordinary_approvals_pass(self):
+        votes = [self._green("checked auth paths, no issue"),
+                 self._green("docs only change"),
+                 self._green("reviewed diff, behaviour unchanged")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_green_vote_naming_a_defect_blocks(self):
+        votes = [self._green("checked auth paths"),
+                 self._green("auth bypass when key is None"),
+                 self._green("docs only")]
+        out = iv.attest_consistency(votes, self.M3)
+        assert out["block"] is True and "m-b" in out["reason"]
+
+    def test_refuting_vote_may_name_a_defect(self):
+        # Naming the defect is precisely a refutation's job -- only GREEN votes
+        # are inspected, or every real finding would trip its own gate.
+        votes = [self._green("fail-open on missing header", refuted=True),
+                 self._green("docs only"), self._green("no issue found")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_hedging_is_not_a_defect_claim(self):
+        votes = [self._green("could be more defensive; consider hardening"),
+                 self._green("ok looks fine"), self._green("no problems seen")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_errored_vote_is_not_inspected(self):
+        assert iv.attest_consistency([ERR, self._green("docs only"),
+                                      self._green("no issue")], self.M3)["block"] is False
+
+
+class TestAuthHeader:
+    """The gateway's auth header is configurable because inference.klee.me runs
+    providers.openai with authMode="forward" and reserves Authorization for
+    upstream forwarding: Bearer answers 401 "opencodex API key required" for
+    every model, X-OpenCodex-API-Key answers 200. Verified live."""
+
+    def test_defaults_to_bearer(self, monkeypatch):
+        monkeypatch.delenv("VERIFIER_AUTH_HEADER", raising=False)
+        assert "Authorization" in iv.auth_header()
+
+    def test_custom_header_replaces_authorization(self, monkeypatch):
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "X-OpenCodex-API-Key")
+        assert list(iv.auth_header()) == ["X-OpenCodex-API-Key"]
+
+    def test_empty_variable_falls_back(self, monkeypatch):
+        # Actions injects an EMPTY STRING for an unset repo variable; .get() with
+        # a default would keep "" and send a nameless header.
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "")
+        assert "Authorization" in iv.auth_header()
+
+    def test_authorization_by_name_is_the_default_form(self, monkeypatch):
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "authorization")
+        assert "Authorization" in iv.auth_header()
+
+
+class TestReviewRange:
+    """The job runs from the DEFAULT BRANCH under pull_request_target, where
+    HEAD *is* main. Without an explicit candidate sha the diff collapses to
+    main...main, returns empty, and the panel goes permanently FAKE-GREEN --
+    reproduced before this guard existed."""
+
+    def test_non_hex_sha_is_rejected_before_reaching_git(self, monkeypatch):
+        monkeypatch.setenv("VERIFIER_HEAD_SHA", "not-a-sha; rm -rf /")
+        with pytest.raises(iv.DiffError):
+            iv.review_range()
+
+    def test_short_sha_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("VERIFIER_HEAD_SHA", "8d85424")
+        with pytest.raises(iv.DiffError):
+            iv.review_range()
