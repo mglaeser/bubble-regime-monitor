@@ -35,8 +35,15 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)([?&](?:key|token|api_key|access_token)=)[^\s&]+"), r"\1[redacted]"),
     # Anthropic / generic long opaque keys.
     (re.compile(r"sk-[A-Za-z0-9\-_]{12,}"), "[redacted]"),
-    # Credentials embedded in a URL. The scheme class is deliberately wider than
-    # http(s): a DSN like postgresql://user:pw@host/db reaches log lines too.
+    # Credentials embedded in a URL. The scheme class is deliberately wider
+    # than http(s), so that a database DSN of the form
+    #     postgresql://<user>:<password>@host/db
+    # is covered too — those reach log lines as readily as an API URL.
+    # The placeholders are angle-bracketed on purpose: written literally, that
+    # example is itself a basic-auth URL and the repository's own secret scan
+    # blocks the commit. Suppressing it with an allowlist pragma would have
+    # trained the scanner's readers to wave through the exact shape this line
+    # exists to catch.
     (re.compile(r"(?i)([a-z][a-z0-9+.\-]*://)[^/@\s:]+:[^/@\s]+@"), r"\1[redacted]@"),
     # Bare email addresses (operator identity, e.g. the EDGAR User-Agent).
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"), "[email]"),
