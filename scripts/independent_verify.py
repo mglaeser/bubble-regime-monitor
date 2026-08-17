@@ -71,12 +71,21 @@ import urllib.request
 from typing import Any
 
 KEY = os.environ.get("SECOND_VENDOR_API_KEY") or os.environ.get("OPENAI_API_KEY")
+def normalize_base(raw: str) -> str:
+    """Trailing slashes off. Every call site builds f"{BASE}/models" and
+    friends, so a base ending in "/" produces "//models", which this gateway
+    answers 404 — a configuration slip that would otherwise surface as an
+    unexplained panel outage. Verified live: ".../v1/models" 200,
+    ".../v1//models" 404."""
+    return (raw or "").strip().rstrip("/")
+
+
 # `or`, not .get(default): the workflow passes VERIFIER_BASE_URL from a repo
 # VARIABLE, and GitHub Actions injects an EMPTY STRING when the variable is
 # unset — .get(name, default) would keep "" and every request would crash with
 # "unknown url type" (observed live on PR #21). The reference JS used ||,
 # which is empty-string-safe; this is the Python equivalent.
-BASE = os.environ.get("VERIFIER_BASE_URL") or "https://api.openai.com/v1"
+BASE = normalize_base(os.environ.get("VERIFIER_BASE_URL")) or "https://api.openai.com/v1"
 
 
 def auth_header() -> dict[str, str]:
@@ -318,6 +327,13 @@ class DiffError(RuntimeError):
     """A REQUIRED diff command failed — the panel must BLOCK, never green on
     the resulting emptiness (round-6 panel finding: text=True decode errors and
     git failures were silently converted to empty output)."""
+
+
+class ProviderConfigError(RuntimeError):
+    """The endpoint is misconfigured, so no panel can be assembled. Distinct
+    from a vote failure: this must name the CAUSE, because the previous
+    behaviour (fall back to one pinned model for every voice) turned a wrong
+    BASE URL into three identical, unexplained vote errors."""
 
 
 def _sh(args: list[str], *, required: bool = False) -> str:
@@ -606,9 +622,16 @@ def selftest() -> None:
         if _sv is not None:
             os.environ["VERIFIER_HEAD_SHA"] = _sv
 
+    # normalize_base() -- a trailing slash builds "//models", answered 404
+    expect(normalize_base("https://h/v1/") == "https://h/v1", "trailing slash must be stripped")
+    expect(normalize_base("https://h/v1///") == "https://h/v1", "repeated slashes must be stripped")
+    expect(normalize_base("  https://h/v1  ") == "https://h/v1", "surrounding whitespace must be stripped")
+    expect(normalize_base("") == "", "empty stays empty so the `or` default applies")
+    expect(normalize_base(None) == "", "None stays empty so the `or` default applies")
+
     print("   OK selftest: decide() + model_matches() + require_approvals() (required approver Sol "
           "+ corroboration) + attest_reasons() + attest_proof() + attest_consistency() + "
-          "auth_header() + review_range() correct.")
+          "auth_header() + review_range() + normalize_base() correct.")
 
 
 # --------------------------------------------------------------- API plumbing --
@@ -641,20 +664,32 @@ def pick_for_pref(ids: list[str], p: str) -> str | None:
     return dated[-1] if dated else None
 
 
-def fetch_model_ids() -> list[str] | None:
+def fetch_model_ids() -> tuple[list[str] | None, str]:
+    """(model ids, diagnostic). The diagnostic carries the status and a short
+    body so a misconfigured endpoint can be READ from the log rather than
+    guessed at from three identical vote errors."""
     status, data = _http_json(f"{BASE}/models")
     if status == 200 and isinstance(data, dict):
-        return [m.get("id") for m in data.get("data", []) if m.get("id")]
-    return None
+        return [m.get("id") for m in data.get("data", []) if m.get("id")], ""
+    return None, f"GET {BASE}/models -> {status or 'no response'}: {str(data)[:200]}"
 
 
 def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
     if os.environ.get("VERIFIER_MODEL"):
         return [os.environ["VERIFIER_MODEL"]] * panel_size
-    ids = fetch_model_ids()
+    ids, why = fetch_model_ids()
     if not ids:
-        print(f"[independent-verify] /v1/models unavailable -> fallback model {FALLBACK_MODEL} for all voices.")
-        return [FALLBACK_MODEL] * panel_size
+        # An unreachable catalogue used to degrade silently to FALLBACK_MODEL
+        # for every voice; each vote then errored on a model the gateway does
+        # not serve, and the operator saw three identical failures with no hint
+        # that the BASE URL was the cause. The most common cause is exactly
+        # that: a base without the version segment, or with a trailing slash.
+        # Verified live: ".../v1/models" 200, ".../models" 401, ".../v1//models" 404.
+        raise ProviderConfigError(
+            f"model catalogue unreachable, so the panel cannot be resolved -- {why}\n"
+            f"  VERIFIER_BASE_URL is {BASE!r}. It must include the API version "
+            f"segment (e.g. 'https://host/v1'), and the auth header must be the "
+            f"one this gateway expects (VERIFIER_AUTH_HEADER).")
     newest = FALLBACK_MODEL
     for p in MODEL_PREFERENCE:
         hit = pick_for_pref(ids, p)
@@ -821,7 +856,12 @@ def main() -> int:
     except ValueError:
         min_others = 1
 
-    models = resolve_panel_models(panel, wanted)
+    try:
+        models = resolve_panel_models(panel, wanted)
+    except ProviderConfigError as exc:
+        print(f"BLOCK provider configuration — no panel could be assembled, "
+              f"fail-closed: {exc}", file=sys.stderr)
+        return 1
     print(f"[independent-verify] Panel ({len(models)} voices, one model each): {', '.join(models)}"
           + (" (VERIFIER_MODEL pinned)" if os.environ.get("VERIFIER_MODEL") else ""))
     print(f'[independent-verify] Required approver: "{required_approver}" must approve + >= {min_others} other(s).')
