@@ -10,6 +10,13 @@ import structlog
 
 def configure_logging(level: str = "INFO") -> None:
     logging.basicConfig(format="%(message)s", stream=sys.stdout, level=getattr(logging, level.upper(), 20))
+    # httpx logs the FULL request URL at INFO on EVERY request, success
+    # included — and FRED, Alpha Vantage, Polygon and Twelve Data all carry
+    # their API key in that query string. The service runs containerised, so
+    # those lines land in the container log, which deploy.sh tails to the
+    # console on an unhealthy rollout. One line closes all four providers on
+    # both the success and the failure path.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,

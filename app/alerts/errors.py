@@ -8,41 +8,28 @@ where a token or a phone number ends up.
 
 from __future__ import annotations
 
-import re
+# The implementation moved to app/redaction.py so the scoring and source layers
+# can redact without importing this (deliberately provider-free) alert layer.
+# Re-exported here because twenty call sites import it from this module, and
+# because the guarantee in this file's docstring is still the one being made.
+from app.redaction import MAX_STORED_MESSAGE, sanitize
 
-MAX_STORED_MESSAGE = 500
-
-# Patterns that must never survive into persisted or returned text.
-_REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # E.164-ish phone numbers (the recipient).
-    (re.compile(r"\+\d[\d\s\-()]{6,}\d"), "[phone]"),
-    # Bearer / Basic / api-key headers and query parameters.
-    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}"), r"\1 [redacted]"),
-    (re.compile(r"(?i)\b(api[_-]?key|token|secret|password|authorization)"
-                r"\s*[=:]\s*[^\s,&;\"']+"), r"\1=[redacted]"),
-    (re.compile(r"(?i)([?&](?:key|token|api_key|access_token)=)[^\s&]+"), r"\1[redacted]"),
-    # Anthropic / generic long opaque keys.
-    (re.compile(r"sk-[A-Za-z0-9\-_]{12,}"), "[redacted]"),
-    # Basic-auth credentials embedded in a URL.
-    (re.compile(r"(?i)(https?://)[^/@\s:]+:[^/@\s]+@"), r"\1[redacted]@"),
-    # Bare email addresses (operator identity).
-    (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"), "[email]"),
-)
-
-
-def sanitize(value: object, *, limit: int = MAX_STORED_MESSAGE) -> str:
-    """Redact secret- and PII-shaped substrings, then bound the length.
-
-    Applied before persistence and before an API response — never only before
-    logging.
-    """
-    text = "" if value is None else str(value)
-    for pattern, replacement in _REDACTIONS:
-        text = pattern.sub(replacement, text)
-    text = " ".join(text.split())
-    if len(text) > limit:
-        text = text[: limit - 1] + "…"
-    return text
+# Complete, not partial: mypy runs with no-implicit-reexport, so a re-exported
+# name is invisible to importers unless it is listed here — and an __all__ that
+# named only the re-exports would understate the module's surface.
+__all__ = [
+    "MAX_STORED_MESSAGE",
+    "sanitize",
+    "AlertError",
+    "AlertingUnavailable",
+    "EvaluationConflict",
+    "EvaluationDeadlineExceeded",
+    "NotEvaluable",
+    "PhraseSetInvalid",
+    "PinMissing",
+    "RenderRejected",
+    "RulesetInvalid",
+]
 
 
 class AlertError(Exception):
