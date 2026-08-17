@@ -3,16 +3,22 @@ name: ci
 # Audit rebuild (A-01/A-08/A-13/B-01/B-35): the previous pipeline was red on
 # every run and non-blocking ('mypy || true'), so production shipped on red.
 # This version fails closed on lint, tests, dependency CVEs and secret leaks.
-# Type-checking is EXPLICITLY advisory (continue-on-error) — not disguised as a
-# gate — until the 43 tracked mypy errors are driven to zero (A-13).
+# Type-checking is EXPLICITLY advisory — not disguised as a gate — until the
+# tracked mypy errors are driven to zero (A-13). The count is RATCHETED: it may
+# fall, never rise. ("43 tracked errors" stood here and was wrong; the measured
+# figure was 217 in 49 files. A stale number in a governance comment is the
+# same defect class as a decorative gate — it reads as control and is not.)
 #
-# NOTE (honesty, per the mandate): making this the *authoritative* gate also
-# requires branch protection to mark `test` a REQUIRED status check with no
-# bypass. That is a repo-settings action for the human-in-command (B-35), and
-# it is recorded as an open item in audit/06-residual-risk-register.md.
+# ENFORCEMENT (this note is a claim about the repository, so it is kept true):
+# a ruleset on `main` marks `test (3.12)` and `image` REQUIRED, with no bypass
+# actors, and a direct push to main is rejected. That closes the open item this
+# note used to describe.
 
 on:
   push:
+    # main only. A pull request already runs everything below; leaving `push`
+    # unrestricted ran the whole suite twice for every branch commit.
+    branches: [main]
   pull_request:
 
 permissions:
@@ -44,9 +50,27 @@ jobs:
         run: pip install "lppls==0.6.24" || echo "::warning::lppls unavailable — LPPLS paths self-skip (hermetic suite, A-02)"
       - name: Lint (ruff, BLOCKING — E,F,I,W,UP,B,S)
         run: ruff check app tests scripts
-      - name: Type-check (ADVISORY — 43 tracked errors, A-13; not a gate yet)
-        run: mypy app
-        continue-on-error: true
+      - name: Type-check (RATCHET — the error count may fall, never rise; A-13)
+        # Not continue-on-error. The error COUNT is the gate: driving it to zero
+        # is A-13's job, but nothing may add to it in the meantime. Lower the
+        # ceiling in the same commit that lowers the count.
+        env:
+          MYPY_CEILING: "217"
+        run: |
+          set +e
+          mypy app > /tmp/mypy.txt 2>&1
+          set -e
+          tail -1 /tmp/mypy.txt
+          n=$(grep -cE '^[^ ].*: error:' /tmp/mypy.txt || true)
+          echo "mypy errors: $n (ceiling $MYPY_CEILING)"
+          if [ "$n" -gt "$MYPY_CEILING" ]; then
+            echo "::error::mypy errors rose to $n, above the ratchet ceiling $MYPY_CEILING."
+            grep -E '^[^ ].*: error:' /tmp/mypy.txt | head -40
+            exit 1
+          fi
+          if [ "$n" -lt "$MYPY_CEILING" ]; then
+            echo "::notice::mypy errors fell to $n — lower MYPY_CEILING to $n to pin the gain."
+          fi
       - name: Security — dependency audit (BLOCKING)
         run: pip-audit --progress-spinner off
       - name: Security — secret scan over tracked files (BLOCKING)
@@ -77,6 +101,46 @@ jobs:
         # "N passed, 5 skipped" and nobody can tell whether the five are
         # structural preconditions or coverage that quietly stopped running.
         run: pytest -q -rs
+
+      # ---- Level 2 regime gates -------------------------------------------
+      # Each is executable, blocking, and carries its own --selftest. No
+      # `|| true`, no continue-on-error: an override path that exists is a gate
+      # that does not exist.
+      - name: Regime — gate/gated separation (B-35, BLOCKING)
+        run: |
+          python -m scripts.regime.separation_check --selftest
+          python -m scripts.regime.separation_check
+      - name: Regime — authorisation coverage (C-01, BLOCKING)
+        run: |
+          python -m scripts.regime.authz_coverage --selftest
+          python -m scripts.regime.authz_coverage
+      - name: Regime — findings ledger (report during remediation)
+        # Deliberately the reporting mode, not --strict: 4 STOP-SHIP and 11
+        # BLOCKER-1 findings are open and being worked. --strict turns on in
+        # WP9 once they reach zero. A gate that can never pass is a gate
+        # someone deletes under pressure; this one states the tally instead.
+        run: python -m scripts.regime.findings_gate --selftest && python -m scripts.regime.findings_gate
+
+  deploy-admission-proof:
+    # A job whose GREEN CONDITION IS THE REFUSAL. It proves the deploy gate
+    # actually fails closed, rather than trusting that it would — the failure
+    # mode being guarded against is an admission check that silently starts
+    # returning 0 and is never noticed because nothing ever exercises it.
+    runs-on: ubuntu-latest
+    steps:
+      # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # v5.6.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Deploy admission MUST refuse while production_eligible is false
+        run: |
+          if python -m scripts.regime.findings_gate --admission; then
+            echo "::error::Admission was GRANTED while blocking findings are open."
+            exit 1
+          fi
+          echo "Admission correctly refused (fail-closed)."
 
   image:
     runs-on: ubuntu-latest

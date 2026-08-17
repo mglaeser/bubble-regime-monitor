@@ -6,13 +6,38 @@
 # substitute: changes to any protected path below require the owner's own
 # distinct sign-off.
 #
-# NOTE: CODEOWNERS only ENFORCES once branch protection enables
-# "Require review from Code Owners" — a repo-settings action for the
-# human-in-command (same open item as required status checks).
+# ENFORCEMENT STATUS (kept accurate on purpose — a stale note here is a claim
+# the repository makes about itself, and those are what the claims ledger
+# exists to catch):
+#   Required status checks   ACTIVE. A ruleset on main requires "test (3.12)"
+#                            and "image", with no bypass actors. A direct push
+#                            to main is rejected.
+#   Code Owner review        NOT enabled, and deliberately so. GitHub does not
+#                            accept a self-approval, so requiring it in a
+#                            single-maintainer repository would deadlock every
+#                            pull request — and a gate that can never pass is a
+#                            gate someone removes under pressure. Recorded as
+#                            an accepted residual in
+#                            audit/06-residual-risk-register.md, with the
+#                            compensating control named there.
+# So the list below is, today, a machine-checked INVENTORY of the surfaces that
+# must not move without the owner (scripts/regime/separation_check.py fails CI
+# when one is uncovered) rather than a merge-blocking approval rule.
 
 # The deterministic gate and the review panel itself
 /.github/               @mglaeser
 /scripts/               @mglaeser
+
+# The audit ledger and the constitution: the evidence a reader would use to
+# check any of the above. B-35 extends the gate/gated separation to these.
+/governance/            @mglaeser
+/audit/                 @mglaeser
+
+# The alert system's decision surfaces: the rules and phrases are the thing
+# that decides whether a human gets woken up.
+/app/alerts/                        @mglaeser
+/config/alert_rules.v3.2.yaml       @mglaeser
+/config/alert_phrases.v3.2.json     @mglaeser
 
 # The frozen-methodology governance surfaces (F-01/L-07)
 /frozen_methodology.json            @mglaeser
