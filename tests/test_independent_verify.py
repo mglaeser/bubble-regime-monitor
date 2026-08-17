@@ -332,3 +332,70 @@ class TestReviewRange:
         monkeypatch.setenv("VERIFIER_HEAD_SHA", "8d85424")
         with pytest.raises(iv.DiffError):
             iv.review_range()
+
+
+class TestStepSummary:
+    """The panel must publish its findings where a reviewer will see them.
+
+    GITHUB_STEP_SUMMARY renders as markdown on the run page, one click from the
+    pull request's check. The reason text is model-authored from an untrusted
+    diff, so it is hostile input to the RENDERER and must not break out of its
+    table cell."""
+
+    OK = {"ok": True, "v": {"refuted": False, "confidence": "high", "reason": "docs only change"}}
+    REF = {"ok": True, "v": {"refuted": True, "confidence": "high", "reason": "auth bypass"}}
+    ERR = {"ok": False, "reason": "API 504"}
+    MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "deepseek"]
+
+    def _write(self, tmp_path, monkeypatch, votes, gates, blocked):
+        target = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(target))
+        iv.write_step_summary(votes, self.MODELS, gates, blocked=blocked)
+        return target.read_text(encoding="utf-8")
+
+    def test_approved_run_lists_every_voice(self, tmp_path, monkeypatch):
+        out = self._write(tmp_path, monkeypatch, [self.OK, self.OK, self.OK],
+                          [("required-approver", {"block": False, "reason": "sol approves"})], False)
+        assert "**Verdict: APPROVED**" in out
+        for model in self.MODELS:
+            assert model in out
+        assert out.count("approves") >= 3
+
+    def test_blocked_run_names_the_gate_that_blocked(self, tmp_path, monkeypatch):
+        out = self._write(tmp_path, monkeypatch, [self.REF, self.OK, self.OK],
+                          [("required-approver", {"block": True, "reason": "sol vetoes"})], True)
+        assert "**Verdict: BLOCKED**" in out
+        assert "blocked" in out and "sol vetoes" in out
+
+    def test_a_voice_that_errored_is_shown_not_hidden(self, tmp_path, monkeypatch):
+        # A panel that silently drops a failed voice looks like a smaller panel
+        # that agreed, which is the opposite of what happened.
+        out = self._write(tmp_path, monkeypatch, [self.OK, self.ERR, self.OK],
+                          [("required-approver", {"block": False, "reason": "ok"})], False)
+        assert "no vote" in out and "API 504" in out
+
+    def test_written_on_both_paths(self, tmp_path, monkeypatch):
+        for blocked in (True, False):
+            out = self._write(tmp_path, monkeypatch, [self.OK] * 3,
+                              [("g", {"block": blocked, "reason": "r"})], blocked)
+            assert out.strip(), "a panel that only explains itself when it blocks is unreadable"
+
+    def test_model_text_cannot_break_the_table(self, tmp_path, monkeypatch):
+        hostile = {"ok": True, "v": {"refuted": False, "confidence": "high",
+                                     "reason": "a|b\n| evil | row |\n`x`"}}
+        out = self._write(tmp_path, monkeypatch, [hostile, self.OK, self.OK],
+                          [("g", {"block": False, "reason": "r"})], False)
+        body = [line for line in out.splitlines() if line.startswith("| 1 |")]
+        assert len(body) == 1, "the reason injected extra table rows"
+        assert "\\|" in body[0] and "\\`" in body[0]
+
+    def test_absent_env_is_a_no_op(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+        iv.write_step_summary([self.OK], ["m"], [("g", {"block": False, "reason": "r"})],
+                              blocked=False)      # must not raise
+
+    def test_an_unwritable_target_never_breaks_the_verdict(self, tmp_path, monkeypatch):
+        # The REPORT must never turn a clean verdict into a red job.
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "no-such-dir" / "s.md"))
+        iv.write_step_summary([self.OK], ["m"], [("g", {"block": False, "reason": "r"})],
+                              blocked=False)      # must not raise

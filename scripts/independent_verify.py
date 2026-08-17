@@ -800,6 +800,64 @@ def verify_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
 # --------------------------------------------------------------------- main --
 
 
+def _md_cell(value: object, limit: int = 300) -> str:
+    """Model-authored text, made safe for a markdown table cell.
+
+    The reason comes from a language model reading an untrusted diff, so it is
+    treated as hostile input to the RENDERER: pipes would break out of the
+    cell, newlines out of the row, and backticks out of code spans. Collapsing
+    whitespace and escaping the three metacharacters is enough — the value is
+    never interpreted as anything but table text."""
+    text = " ".join(str("" if value is None else value).split())
+    text = text.replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`")
+    return (text[: limit - 1] + "…") if len(text) > limit else (text or "—")
+
+
+def write_step_summary(votes: list[dict], models: list[str], gates: list[tuple[str, dict]],
+                       blocked: bool) -> None:
+    """Publish the panel's findings where a reviewer will actually see them.
+
+    GITHUB_STEP_SUMMARY renders as markdown on the run page, one click from the
+    pull request's check. Chosen over posting a pull-request review because it
+    needs no token, no extra permission and no API call that could itself fail
+    and turn a clean verdict into a red job.
+
+    Written on BOTH paths. A panel that only explains itself when it blocks
+    leaves the reader unable to tell 'three voices examined this and agreed'
+    from 'the panel never ran'."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = [
+        "## Independent-Verify — cross-vendor panel",
+        "",
+        f"**Verdict: {'BLOCKED' if blocked else 'APPROVED'}**",
+        "",
+        "| # | Model | Verdict | Confidence | Finding |",
+        "|---|---|---|---|---|",
+    ]
+    for i, (vote, model) in enumerate(zip(votes, models, strict=False), start=1):
+        if not vote.get("ok"):
+            lines.append(f"| {i} | `{_md_cell(model, 60)}` | ⚠️ no vote | — "
+                         f"| {_md_cell(vote.get('reason'))} |")
+            continue
+        v = vote.get("v") or {}
+        refuted = v.get("refuted")
+        mark = "🔴 refutes" if refuted else ("🟢 approves" if refuted is False else "⚠️ unparsable")
+        lines += [f"| {i} | `{_md_cell(model, 60)}` | {mark} "
+                  f"| {_md_cell(v.get('confidence'), 12)} | {_md_cell(v.get('reason'))} |"]
+    lines += ["", "### Gates", ""]
+    for name, result in gates:
+        state = "⛔ blocked" if result.get("block") else "✅ passed"
+        lines.append(f"- **{name}** — {state}: {_md_cell(result.get('reason'), 400)}")
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        # Never let the REPORT break the VERDICT.
+        print(f"[independent-verify] could not write the step summary: {exc}")
+
+
 def main() -> int:
     if "--selftest" in sys.argv:
         selftest()
@@ -882,29 +940,35 @@ def main() -> int:
         print(f"  Verifier {i + 1}/{panel} ({models[i]}): refuted={v.get('refuted')} "
               f"confidence={v.get('confidence')} — reason: {reason}")
 
-    verdict = require_approvals(votes, models, required_approver, min_others, challenge)
-    if verdict["block"]:
-        print(f"BLOCK required-approver gate: {verdict['reason']}", file=sys.stderr)
-        return 1
-    if (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes"):
-        strict = strict_any_refutation(votes, models)
-        if strict["block"]:
-            print(f"BLOCK strict-mode gate: {strict['reason']}", file=sys.stderr)
+    # Gates in order, short-circuiting on the FIRST block — the order is the
+    # semantics and does not change. What is new is that the gates evaluated so
+    # far are collected, so the summary can name which one blocked and why.
+    strict_on = (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes")
+    pending: list[tuple[str, str, Any]] = [
+        ("required-approver gate", "required-approver",
+         lambda: require_approvals(votes, models, required_approver, min_others, challenge)),
+    ]
+    if strict_on:
+        pending.append(("strict-mode gate", "strict mode",
+                        lambda: strict_any_refutation(votes, models)))
+    pending += [
+        ("consistency gate", "consistency", lambda: attest_consistency(votes, models)),
+        ("integrity gate (sham green)", "reason attestation", lambda: attest_reasons(votes, panel)),
+        ("proof-of-check gate", "proof of check", lambda: attest_proof(votes, challenge, panel)),
+    ]
+
+    gates: list[tuple[str, dict]] = []
+    for log_name, summary_name, run in pending:
+        result = run()
+        gates.append((summary_name, result))
+        if result["block"]:
+            print(f"BLOCK {log_name}: {result['reason']}", file=sys.stderr)
+            write_step_summary(votes, models, gates, blocked=True)
             return 1
-    consistency = attest_consistency(votes, models)
-    if consistency["block"]:
-        print(f"BLOCK consistency gate: {consistency['reason']}", file=sys.stderr)
-        return 1
-    attest = attest_reasons(votes, panel)
-    if attest["block"]:
-        print(f"BLOCK integrity gate (sham green): {attest['reason']}", file=sys.stderr)
-        return 1
-    proof = attest_proof(votes, challenge, panel)
-    if proof["block"]:
-        print(f"BLOCK proof-of-check gate: {proof['reason']}", file=sys.stderr)
-        return 1
-    print(f"[independent-verify] Cross-vendor panel confirms (required approver: {verdict['reason']}; "
-          f"{consistency['reason']}; {attest['reason']}; {proof['reason']}). Green.")
+
+    print("[independent-verify] Cross-vendor panel confirms ("
+          + "; ".join(r["reason"] for _, r in gates) + "). Green.")
+    write_step_summary(votes, models, gates, blocked=False)
     return 0
 
 
