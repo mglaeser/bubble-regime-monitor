@@ -275,8 +275,19 @@ def evaluate_state(
         return decision
 
     # Multi-observation confirmation: latch a candidate, then advance it.
-    if memory.condition_state != ConditionState.PENDING:
-        decision.open_episode = True
+    #
+    # A candidate is in flight whenever one was started and has not been
+    # cleared — which is NOT the same as `condition_state == PENDING`. An
+    # UNKNOWN observation leaves the state reading UNKNOWN while holding the
+    # candidate and its episode, exactly as property 1 requires. Latching again
+    # on the next true observation would open a SECOND episode for a mechanism
+    # that already has one (the unique index rejects it, so an outage followed
+    # by a recovery would wedge the rule) and would silently discard the
+    # confirmation progress the outage was supposed to preserve.
+    candidate_in_flight = (memory.condition_state == ConditionState.PENDING
+                           or memory.candidate_started_input is not None)
+    if not candidate_in_flight:
+        decision.open_episode = memory.current_episode_id is None
         decision.condition_state = ConditionState.PENDING
         decision.candidate_started_input = ctx.current.input_identity
         decision.candidate_from_state = memory.last_known_condition_state \

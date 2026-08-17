@@ -6,10 +6,11 @@ frontend, and — once an operator explicitly turns it on — sends deterministi
 SMS notifications. It never changes scoring.
 
 **Current state: Stages 0 and 1 are implemented and the delivery path is built
-but unreachable. Nothing sends anything.** `ALERT_INPUT_CAPTURE` and
-`ALERTS_MODE` both default off; under `shadow` the whole pipeline runs against
-a `NullSender`, and only an operator setting `ALERTS_MODE=live` can change that
-— which the Stage 2 and Stage 3 gates do not yet permit. See
+but unreachable. Nothing sends anything.** Stage 1 means sidecar capture is on
+(`ALERT_INPUT_CAPTURE` defaults true — it records evidence and nothing else)
+while `ALERTS_MODE` defaults `disabled`. Under `shadow` the whole pipeline runs
+against a `NullSender`, and only an operator setting `ALERTS_MODE=live` can
+change that — which the Stage 2 and Stage 3 gates do not yet permit. See
 [What is not built](#what-is-not-built).
 
 ---
@@ -218,18 +219,36 @@ alert plan rather than a slower one.
 Two **independent** switches:
 
 ```bash
-ALERT_INPUT_CAPTURE=false   # persist the point-in-time sidecar
-ALERTS_MODE=disabled        # disabled | shadow | live
+ALERT_INPUT_CAPTURE=true    # persist the point-in-time sidecar  (Stage 1: ON)
+ALERTS_MODE=disabled        # disabled | shadow | live           (Stage 1: off)
 ```
 
-Capture may run with alerting fully disabled — that is how Stage 1 collects
-replay material. Enabling alerts never implies capture. `live` is never reached
-automatically: it needs promoted artifacts *and* a deliberate edit.
+Capture runs with alerting fully disabled — that is how Stage 1 collects replay
+material, and it is why capture defaults **on**. Leaving it off would make the
+stage inert: no sidecars means nothing to replay, while still claiming the
+stage had been reached. Capture writes one immutable evidence row per recompute
+in its own transaction; it calls no provider, alters no score and cannot roll
+back a snapshot.
+
+`ALERTS_MODE` is the switch that decides whether the service *acts*, and it is
+the one that defaults off. Enabling alerts never implies capture, and `live` is
+never reached automatically: it needs promoted artifacts *and* a deliberate
+edit.
+
+Capture has **two** authorities and they are not interchangeable.
+`ALERT_INPUT_CAPTURE` is the operator's kill switch; `capture.enabled` in the
+promoted ruleset is the artifact's own declaration, and it is read rather than
+decorative — an artifact that says capture is on while the code has it off is
+worse than one that says nothing. A ruleset that fails to load does **not**
+stop capture: the sidecars are exactly what an operator needs to diagnose the
+ruleset that failed, and a lost sidecar can never be backfilled.
 
 ```bash
-ALERTS_READ_API_KEY=        # alert reads (or ALERTS_PUBLIC_READ=true)
-ALERTS_WRITE_API_KEY=       # silences and operator actions
-ADMIN_API_KEY=              # promotion, evaluation, recovery
+ALERTS_READ_API_KEY=          # alert reads (or ALERTS_PUBLIC_READ=true)
+ALERTS_READ_API_KEY_PREVIOUS= # rotation overlap; clear it to retire the old key
+ALERTS_WRITE_API_KEY=         # silences and operator actions
+ADMIN_API_KEY=                # promotion, evaluation, recovery, render text
+ALERTS_READ_TOKEN_IS_PUBLIC=true   # the read key is browser-visible (H-05)
 ```
 
 Three separate scopes. **Alert reads do not fall back to the admin key** —
@@ -316,17 +335,40 @@ to be able to see that a rule exists and why it is dark.
 (`python -m scripts.export_alert_openapi`) and CI fails on drift. The
 application's own `/openapi.json` remains the source of truth.
 
-### Browser topology
+### Browser topology — decided: browser-visible scoped token
 
 ```
-browser -> authenticated dashboard backend/proxy -> bubblegauge
+browser (ALERTS_READ_API_KEY) -> bubblegauge alerts API   [redacted projection]
+operator (ADMIN_API_KEY)      -> /api/v1/admin/alerts/*   [message text, no-store]
 ```
 
-A browser-visible read token is not secret and may reach only the redacted
-projection. The app's CORS posture is GET-only, so the write routes are not
-browser-reachable cross-origin without a separate security review. Delivery
-projections carry no recipient, no provider correlation id, no raw provider
-error and no raw model output.
+H-05 offered two architectures. The chosen one is the **browser-visible scoped
+token**, declared in config as `ALERTS_READ_TOKEN_IS_PUBLIC=true` so it is a
+stated posture rather than an assumption — the server-side-proxy alternative is
+still available by setting it false, which asserts the read key never reaches a
+browser.
+
+A static key in browser JavaScript is extractable, so it is treated as a
+**public capability, not a secret**, and the four conditions the review attaches
+to that choice are enforced rather than intended:
+
+| condition | how |
+|---|---|
+| redacted projection only | no recipient, no provider correlation id, no raw provider error, no raw model output — **and no rendered message text** |
+| rate-limited | every alert read route carries a limit; `ALERTS_PUBLIC_READ_RATE_LIMIT` (30/min) is the public ceiling, tighter than the operator read limit |
+| rotates independently | `ALERTS_READ_API_KEY_PREVIOUS` keeps the outgoing key valid during overlap, so rotation needs no synchronized dashboard deploy; clearing it is its own edit |
+| no silence / retry / render / admin | the scopes deliberately do **not** nest — the write key cannot read, the admin key is not a read key, and message text is not on the read surface at all |
+
+That last row is why `GET /api/v1/alerts/renders/{id}` returns
+`final_message: null` with a stated reason. Since no caller can present a
+stronger scope to the read surface (there is one `X-API-Key` header), the text
+lives at `GET /api/v1/admin/alerts/renders/{id}` behind the admin key, served
+`no-store`. The dashboard still gets what it actually needs from a render: the
+reviewed phrase codes chosen, the phrase-set provenance, the septet count, and
+whether it fell back.
+
+The app's CORS posture is GET-only, so the write routes are not browser-reachable
+cross-origin without a separate, deliberate security review.
 
 ---
 
@@ -337,7 +379,7 @@ Present and honest about it, rather than half-built:
 | stage | scope | status |
 |---|---|---|
 | 0 | typed snapshot contract | **done** |
-| 1 | schema, sidecar capture, pure evaluation, CAS, read API | **done** |
+| 1 | schema, sidecar capture, pure evaluation, CAS, read API, **replay** | **done — gate enforced in CI** |
 | 2 | `[PIN]` calibration, replay budgets, mandatory-event fixtures | not started — needs operator artifacts |
 | 3 | deterministic P1 delivery | planner, outbox, renderer, typed sender and dispatcher **built and off**; not gated |
 | 4 | legacy daily-digest cutover | not started |
@@ -347,8 +389,15 @@ Present and honest about it, rather than half-built:
 
 Concretely absent: the **weekly digest job** (digest ITEMS are created and
 tracked; the job that turns a window's items into one SMS is not written), the
-**statistical monitors**, the **replay/dry-run harness** and its budget and
-mandatory-event reports, and the **actionability review workflow**.
+**statistical monitors**, and the **actionability review workflow**.
+
+The **replay harness** is built (§13). What it cannot yet report is the part
+that depends on artifacts nobody has frozen: non-P1 volume against the caps
+(the planner is a Stage 3 component and does not run in a replay, so every
+count is 0 by construction) and mandatory-event recall (the catalogue ships
+empty). Replay names both in `not_measured` rather than reporting them as
+satisfied — zero non-P1 messages arithmetically satisfies every cap, and
+saying so would turn "nothing ran" into "governance holds".
 
 Built but deliberately unreachable: the planner, the outbox, the renderer, the
 LLM code selector, the typed sipgate sender and the dispatcher. They run end to
@@ -366,7 +415,115 @@ producer is not built.
 
 ---
 
-## 12. Epistemic posture
+## 11a. Retention: two horizons
+
+```bash
+ALERTS_MESSAGE_RETENTION_DAYS=400    # rendered message BODIES
+ALERTS_METADATA_RETENTION_DAYS=800   # the audit trail
+python -m app.alerts.cli retention [--dry-run]
+```
+
+The short sweep **redacts, it does not delete**. An `alert_render` row carries
+the phrase-set provenance it was planned under, the render source, the septet
+count and the validation results — metadata — alongside the text. Dropping the
+row to expire the text would take the provenance with it, so the body is
+emptied in place and `body_redacted_at` is stamped.
+
+That is the one exception to render immutability, and it is enforced rather
+than trusted: migration `0009` replaces the `alert_render_no_update` trigger
+with one that permits *exactly* the transition `final_message -> ''` at the
+same moment `body_redacted_at` goes from NULL to set. A rewrite still aborts, a
+second redaction still aborts, and `gsm7_septets` is left alone so the length
+of what was sent stays auditable after the text is gone.
+
+Two things are never swept: a body whose delivery is not yet terminal (a retry
+could still reuse that exact render), and events belonging to an open episode
+(the trail explaining a still-firing mechanism is the one most likely to be
+needed). Inverted horizons — metadata shorter than messages — are refused
+outright rather than half-applied.
+
+Raw model output needs no sweep at all: `alert_llm_attempt` has never stored
+it, only status, timing, hashes and an already-redacted error string.
+
+---
+
+## 12. Replay (the Stage 1 gate)
+
+Stage 1's gate is *deterministic replay; no PII; no scoring regression*.
+
+```bash
+python -m scripts.alert_replay --state-db /tmp/replay.db          # committed stage
+python -m scripts.alert_replay --state-db /tmp/replay.db --stage 3 --out report.json
+python -m app.alerts.cli dryrun --state-db /tmp/replay.db --from 2026-01-01
+```
+
+Exit 0 means every check the run could make held; exit 1 means one failed, or
+the artifacts are invalid.
+
+Three properties are structural rather than a matter of care:
+
+- **It reads history, not the world.** Replay consumes persisted
+  `alert_input_snapshot` rows and archived artifact bytes. `app/alerts/replay.py`
+  imports no provider, no HTTP client and no sender, and a test walks the
+  import graph so the guarantee cannot be quietly lost.
+- **It cannot touch production.** State goes into a throwaway database opened
+  through its own engine; the source database is only ever selected from. Mode
+  is `dryrun`, which is its own state namespace — shadow and live never see a
+  replay's episodes.
+- **It is deterministic.** `now` comes from each input's own `computed_at`,
+  never from a clock, and the summary carries no id, no run timestamp and no
+  wall-clock duration. Two runs of the same history produce byte-identical
+  JSON.
+
+`--stage N` gates the rules at a rollout stage other than the committed one.
+That is the reason replay exists: the evidence for advancing to stage N is what
+stage N *would have done* over real history, and that cannot be gathered by
+first advancing to it. It is confined to dry-run, and the re-stamped ruleset is
+re-validated and re-hashed, so a forward-looking report can never claim the
+committed ruleset's identity. Nothing in the production path chooses its own
+stage.
+
+### The committed evidence
+
+`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1
+and 3. CI regenerates it and fails on any difference:
+
+```bash
+python -m scripts.export_alert_stage1_gate           # write
+python -m scripts.export_alert_stage1_gate --check   # CI: fail on drift
+```
+
+That check *is* the determinism gate. The committed bytes were produced by a
+different process on a different machine; if the evaluator stops being
+deterministic they stop matching. A behaviour change shows up as a reviewable
+diff rather than as a claim in a commit message.
+
+`tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
+recompute slots through hold → trim → de-risk → recovery, with two blind slots
+(one inside a firing episode) and one transient single-snapshot excursion —
+and `alert_replay_history.py` builds the inputs from it. The serialized inputs
+are deliberately *not* committed: observation keys, revision keys and
+computation fingerprints are all derived from those twenty rows, so committing
+them would trade a reviewable table for two thousand lines of content hashes
+that no reviewer can check.
+
+For the same reason the gate artifact records `rule_version` and
+`phrase_set_version` rather than digests. An entropy detector cannot tell a
+64-hex content digest from a 64-hex token — correctly — and this repository's
+secret baseline is a byte-identical ratchet that may not grow to carry
+digests. Truncating would only look like a fix, since the detector scores
+entropy rather than length. Nothing is lost: exact bytes are gated by the
+*Alert artifacts* CI step, and a ruleset change that the version failed to
+declare still moves the episode counts in the artifact itself.
+
+The history establishes regression coverage, **not** recall. Recall is a Stage
+2 question and needs `config/alert_mandatory_events.v3.2.json`, which ships
+empty on purpose: inventing historical windows would manufacture a recall
+number nothing measured, the same failure mode as inventing a `[PIN]`.
+
+---
+
+## 13. Epistemic posture
 
 The headline is a structured 0–100 regime heuristic. It is **not a
 probability**, it is uncalibrated, and the reference class is far too small for

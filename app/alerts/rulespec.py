@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 Attribution = Literal["MECH", "LIT", "JUDG", "PIN"]
 CompareOp = Literal["ge", "gt", "le", "lt", "eq", "ne"]
@@ -517,12 +517,20 @@ class RulesetDocument(BaseModel):
     """The whole ruleset file. `capture.enabled` is a real boolean — note that
     an unquoted YAML `on` is the string "on" in YAML 1.2 and a boolean in
     YAML 1.1, which is exactly the kind of ambiguity a safety switch must not
-    have."""
+    have.
+
+    `StrictBool`, not `bool`, is what makes that more than a comment. Ordinary
+    pydantic coercion accepts the string "on" and turns it into True, which
+    would move the ambiguity from the YAML parser into the schema rather than
+    removing it: a file that a 1.2 loader reads as a string would still arm
+    capture. Strict mode refuses anything that is not a genuine boolean, so the
+    safety switch means the same thing under either loader (H-04).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     meta: RulesetMeta
-    capture: dict[str, bool] = Field(default_factory=dict)
+    capture: dict[str, StrictBool] = Field(default_factory=dict)
     rules: list[RuleSpec] = Field(default_factory=list)
     constellations: list[ConstellationSpec] = Field(default_factory=list)
 

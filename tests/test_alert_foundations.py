@@ -607,11 +607,85 @@ def test_sidecar_capture_commits_when_alerts_disabled(isolated_db, monkeypatch):
     get_settings.cache_clear()
 
 
-def test_capture_is_off_by_default(isolated_db):
+def test_capture_is_on_by_default_because_that_is_what_stage_1_is(isolated_db):
+    """Stage 1 is "schema, sidecar capture ON, alerts disabled, ... replay".
+
+    Capture off would make the stage inert — no sidecars means nothing to
+    replay — while still claiming to have been reached. The default-off rule
+    governs the flags that make the service ACT; capture writes one evidence
+    row, calls no provider and cannot alter a score.
+    """
+    from app.config import get_settings
+
+    assert get_settings().alert_input_capture is True
+    assert get_settings().alerts_mode == "disabled"      # THIS one stays off
+
+    snap_id = _persist_snapshot(isolated_db)
+    from app.services.alert_integration import capture_alert_input
+
+    assert capture_alert_input(snap_id) is not None
+
+
+def test_the_environment_flag_is_a_kill_switch(isolated_db, monkeypatch):
+    """An operator can still stop capture without editing an artifact."""
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "false")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
     snap_id = _persist_snapshot(isolated_db)
     from app.services.alert_integration import capture_alert_input
 
     assert capture_alert_input(snap_id) is None
+    get_settings.cache_clear()
+
+
+def test_the_ruleset_can_disable_capture(isolated_db, monkeypatch, tmp_path):
+    """`capture.enabled` in the promoted artifact is READ, not decoration.
+
+    An artifact that says capture is on while the code has it off is an
+    artifact that lies, which is worse than one that says nothing.
+    """
+    from pathlib import Path
+
+    from app.config import get_settings
+
+    raw = Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8")
+    assert "capture:\n  enabled: true" in raw
+    off = tmp_path / "rules.yaml"
+    off.write_text(raw.replace("capture:\n  enabled: true",
+                               "capture:\n  enabled: false", 1), encoding="utf-8")
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(off))
+    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.2.json")
+    get_settings.cache_clear()
+
+    snap_id = _persist_snapshot(isolated_db)
+    from app.services.alert_integration import capture_alert_input
+
+    assert capture_alert_input(snap_id) is None
+    get_settings.cache_clear()
+
+
+def test_an_unloadable_ruleset_does_not_stop_capture(isolated_db, monkeypatch, tmp_path):
+    """Evidence collection is never the dangerous direction.
+
+    The sidecars are exactly what an operator needs to diagnose the ruleset
+    that failed to load. Refusing to record them because the rules are broken
+    destroys the record of the period you most need to look at, and a lost
+    sidecar can never be backfilled.
+    """
+    from app.config import get_settings
+
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("meta: {this: is not a ruleset}\n", encoding="utf-8")
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(broken))
+    monkeypatch.setenv("ALERTS_LKG_PATH", str(broken))
+    get_settings.cache_clear()
+
+    snap_id = _persist_snapshot(isolated_db)
+    from app.services.alert_integration import capture_alert_input
+
+    assert capture_alert_input(snap_id) is not None
+    get_settings.cache_clear()
 
 
 def test_capture_is_idempotent(isolated_db, monkeypatch):

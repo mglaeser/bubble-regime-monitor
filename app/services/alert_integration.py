@@ -56,6 +56,39 @@ def _falsification_events(session: Any, limit: int = 50) -> list[dict[str, Any]]
     ]
 
 
+def capture_armed(settings: Any = None) -> bool:
+    """Whether P0a should write a sidecar for this recompute.
+
+    TWO authorities, and they are not interchangeable. The environment flag is
+    the operator's kill switch. The ruleset's `capture.enabled` is the promoted
+    artifact's own declaration, and reading it is what stops that field from
+    being decoration: an artifact that says capture is on while the code has it
+    off is an artifact that lies, which is worse than one that says nothing.
+
+    An unloadable ruleset does NOT stop capture. Evidence collection is never
+    the dangerous direction, and the sidecars are exactly what an operator
+    needs to diagnose the ruleset that failed to load — refusing to record them
+    because the rules are broken destroys the record of the period you most
+    need to look at. A lost sidecar can never be backfilled.
+    """
+    settings = settings or get_settings()
+    if not settings.alert_input_capture:
+        return False
+    try:
+        with session_scope() as session:
+            ruleset = load_active(session).ruleset
+    except Exception as exc:                       # invalid, absent, unreadable
+        log.warning("alert_capture_ruleset_unavailable_capturing_anyway",
+                    error_class=type(exc).__name__, error=sanitize(exc))
+        return True
+    declared = ruleset.document.capture.get("enabled")
+    if declared is False:
+        log.info("alert_capture_disabled_by_ruleset",
+                 rules_sha256=ruleset.rules_sha256)
+        return False
+    return True
+
+
 def capture_alert_input(snapshot_id: int, *, now: datetime | None = None) -> str | None:
     """P0a. Persist the immutable point-in-time sidecar for a COMMITTED snapshot.
 
@@ -65,7 +98,7 @@ def capture_alert_input(snapshot_id: int, *, now: datetime | None = None) -> str
     second one.
     """
     settings = get_settings()
-    if not settings.alert_input_capture:
+    if not capture_armed(settings):
         return None
     built_at = now or datetime.now(UTC)
 

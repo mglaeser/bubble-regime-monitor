@@ -1,0 +1,167 @@
+{
+  "artifact": "alert-stage1-gate",
+  "artifacts": {
+    "digests": "omitted by design — see _DIGEST_FIELDS in scripts/export_alert_stage1_gate.py; exact bytes are gated by the 'Alert artifacts' CI step, and `app.alerts.cli ruleset` prints them",
+    "phrase_set_version": "v3.2",
+    "rule_version": "v3.2.0"
+  },
+  "gate": "deterministic replay; no PII; no scoring regression",
+  "history": {
+    "arc_schema_version": 2,
+    "inputs": 20,
+    "source": "tests/fixtures/alert_replay_history.json",
+    "synthetic": true
+  },
+  "runs": {
+    "stage_1": {
+      "active_stage": 1,
+      "band_excursion_months": 0.1,
+      "cancelled_superseded": 0,
+      "deliveries_by_kind": {},
+      "deliveries_planned": 0,
+      "deliveries_sent": 0,
+      "detection_times_slots": {},
+      "digest_items": 0,
+      "episodes_activated": 2,
+      "episodes_by_bucket": {
+        "ops": 2
+      },
+      "episodes_by_priority": {
+        "P4": 2
+      },
+      "episodes_by_rule": {
+        "ops.indicator_stale": 2
+      },
+      "episodes_cancelled_stale": 0,
+      "episodes_cancelled_unconfirmed": 0,
+      "episodes_opened": 2,
+      "episodes_resolved": 2,
+      "evaluated_at_stage": 1,
+      "evaluations_committed": 20,
+      "evaluations_conflict": 0,
+      "evaluations_failed": 0,
+      "evaluations_timed_out": 0,
+      "failures": [],
+      "held_budget": 0,
+      "held_grouping": 0,
+      "held_quiet": 0,
+      "indeterminate_band_excursions": 1,
+      "inputs_evaluable": 20,
+      "inputs_not_evaluable": 0,
+      "inputs_partial": 0,
+      "inputs_reconstructed": 0,
+      "inputs_total": 20,
+      "mandatory_event_detected": 0,
+      "mandatory_event_not_evaluable": 0,
+      "mandatory_event_total": 0,
+      "max_non_p1_168h": 0,
+      "max_non_p1_24h": 0,
+      "mean_non_p1_per_168h": 0.0,
+      "mode": "dryrun",
+      "not_measured": [
+        "non_p1_volume_targets (24h cap, 168h cap, 168h mean) — the delivery planner does not run at this stage, so every count is 0 by construction rather than by governance",
+        "quiet_hours_and_budget_holds — no delivery was planned to hold",
+        "mandatory_event_recall — the catalogue is empty; recall over zero events is undefined, not 100%",
+        "transient_derisk_p1_rate — the window spans 0.1 months; the target is stated per 24 months and cannot be judged on a shorter history"
+      ],
+      "notes": [
+        "mandatory-event catalogue is empty — recall is not yet measurable (Stage 2 gate input, requires operator-frozen fixtures)"
+      ],
+      "notification_planning_ran": false,
+      "p1_bypasses_of_unknown": 0,
+      "p1_total": 0,
+      "passed": true,
+      "schema_version": 1,
+      "suppressions_by_reason": {},
+      "transient_one_snapshot_band_p1": 1,
+      "unknown_blocks": 0,
+      "window_first": "2026-07-10T02:00:00+00:00",
+      "window_last": "2026-07-13T06:00:00+00:00"
+    },
+    "stage_3": {
+      "active_stage": 1,
+      "band_excursion_months": 0.1,
+      "cancelled_superseded": 0,
+      "deliveries_by_kind": {},
+      "deliveries_planned": 0,
+      "deliveries_sent": 0,
+      "detection_times_slots": {},
+      "digest_items": 0,
+      "episodes_activated": 19,
+      "episodes_by_bucket": {
+        "constellation": 2,
+        "legs": 5,
+        "ops": 4,
+        "regime": 4,
+        "tripwire": 5
+      },
+      "episodes_by_priority": {
+        "P1": 8,
+        "P2": 10,
+        "P4": 2
+      },
+      "episodes_by_rule": {
+        "constellation.execution_armed": 2,
+        "legs.faber_spy_back_in": 1,
+        "legs.faber_spy_out_high_risk": 2,
+        "legs.faber_spy_out_standard": 2,
+        "ops.coverage_risk_masking": 2,
+        "ops.indicator_stale": 2,
+        "regime.band_hold_to_trim": 1,
+        "regime.band_to_derisk": 2,
+        "regime.band_trim_to_hold": 1,
+        "tripwire.rf4_all_clear": 1,
+        "tripwire.rf4_first": 2,
+        "tripwire.rf4_persistent": 2
+      },
+      "episodes_cancelled_stale": 0,
+      "episodes_cancelled_unconfirmed": 1,
+      "episodes_opened": 20,
+      "episodes_resolved": 17,
+      "evaluated_at_stage": 3,
+      "evaluations_committed": 20,
+      "evaluations_conflict": 0,
+      "evaluations_failed": 0,
+      "evaluations_timed_out": 0,
+      "failures": [],
+      "held_budget": 0,
+      "held_grouping": 0,
+      "held_quiet": 0,
+      "indeterminate_band_excursions": 1,
+      "inputs_evaluable": 20,
+      "inputs_not_evaluable": 0,
+      "inputs_partial": 0,
+      "inputs_reconstructed": 0,
+      "inputs_total": 20,
+      "mandatory_event_detected": 0,
+      "mandatory_event_not_evaluable": 0,
+      "mandatory_event_total": 0,
+      "max_non_p1_168h": 0,
+      "max_non_p1_24h": 0,
+      "mean_non_p1_per_168h": 0.0,
+      "mode": "dryrun",
+      "not_measured": [
+        "non_p1_volume_targets (24h cap, 168h cap, 168h mean) — the delivery planner does not run at this stage, so every count is 0 by construction rather than by governance",
+        "quiet_hours_and_budget_holds — no delivery was planned to hold",
+        "mandatory_event_recall — the catalogue is empty; recall over zero events is undefined, not 100%",
+        "transient_derisk_p1_rate — the window spans 0.1 months; the target is stated per 24 months and cannot be judged on a shorter history"
+      ],
+      "notes": [
+        "forward-looking replay: rules gated at stage 3, committed ruleset is at stage 1; production gating is unchanged",
+        "mandatory-event catalogue is empty — recall is not yet measurable (Stage 2 gate input, requires operator-frozen fixtures)"
+      ],
+      "notification_planning_ran": false,
+      "p1_bypasses_of_unknown": 0,
+      "p1_total": 0,
+      "passed": true,
+      "schema_version": 1,
+      "suppressions_by_reason": {
+        "DATA_QUALITY_GUARD": 1
+      },
+      "transient_one_snapshot_band_p1": 1,
+      "unknown_blocks": 0,
+      "window_first": "2026-07-10T02:00:00+00:00",
+      "window_last": "2026-07-13T06:00:00+00:00"
+    }
+  }
+}

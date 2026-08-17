@@ -63,8 +63,42 @@ def require_alerts_read(request: Request, x_api_key: str | None = Header(default
             status_code=503,
             detail="alert reads require ALERTS_READ_API_KEY (or ALERTS_PUBLIC_READ=true)",
         )
-    if not _key_matches(x_api_key, configured):
+    # Rotation overlap: the outgoing key keeps working until it is cleared, so
+    # rotating a browser-visible token does not require a synchronized deploy
+    # of the dashboard. Both are compared in constant time, and the previous
+    # key is subject to the same placeholder guard.
+    previous = settings.alerts_read_api_key_previous
+    accepted = [configured]
+    if previous and previous != PLACEHOLDER_ADMIN_KEY:
+        accepted.append(previous)
+    if not any(_key_matches(x_api_key, candidate) for candidate in accepted):
         raise HTTPException(status_code=401, detail="alert reads require X-API-Key")
+
+
+def alerts_message_text_permitted() -> bool:
+    """Whether the READ surface may return rendered SMS text.
+
+    H-05, browser-token architecture. The read token is browser-visible and
+    therefore a public capability, and the review is explicit that such a token
+    grants no *render* right. Message bodies are the one thing in the alert API
+    that is content rather than state, so the read surface withholds them.
+
+    This is a posture question, not a per-caller one, because the alert scopes
+    here deliberately do NOT nest: the write key cannot read and the admin key
+    is not a read key (`test_write_key_cannot_read_when_reads_are_keyed`,
+    `test_admin_key_is_not_an_alert_read_key`). There is one `X-API-Key`
+    header, so no caller can present a stronger scope to this surface — an
+    operator who needs the text uses the admin render endpoint or the CLI.
+
+    Withholding the field rather than the resource is deliberate: the render's
+    provenance, phrase codes and length are what a dashboard is usually after,
+    and a 403 on the whole object would deny those too.
+
+    When `alerts_read_token_is_public` is false, the read key is asserted to
+    live only behind a trusted server-side proxy and the text is readable with
+    it — a different architecture, deliberately opted into.
+    """
+    return not get_settings().alerts_read_token_is_public
 
 
 def require_alerts_write(x_api_key: str | None = Header(default=None)) -> None:

@@ -40,7 +40,12 @@ from app.alerts.models import (
 from app.alerts.registry import ruleset_summary, unresolved_pins
 from app.config import get_settings
 from app.db import session_scope
-from app.security import READ_RATE_LIMIT, limiter, require_alerts_read
+from app.security import (
+    READ_RATE_LIMIT,
+    alerts_message_text_permitted,
+    limiter,
+    require_alerts_read,
+)
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
@@ -315,14 +320,24 @@ def get_deliveries(request: Request, limit: int = Query(default=100, ge=1, le=MA
         return {"items": [_delivery_projection(r) for r in rows]}
 
 
-def _delivery_projection(row: AlertDelivery) -> dict[str, Any]:
-    """No recipient, no provider correlation id, no raw error text."""
-    return {
+def _delivery_projection(row: AlertDelivery,
+                         members: list[Any] | None = None) -> dict[str, Any]:
+    """No recipient, no provider correlation id, no raw error text.
+
+    Provenance is reported at BOTH layers (A-08). `planning_rules_sha256` is
+    the ruleset that decided to group these episodes into one message; each
+    member carries the ruleset and phrase-set bytes it was itself planned
+    under, which after a promotion need not be the same. One field cannot say
+    both, and a bundle that reported only the planning hash would claim its
+    older members were rendered from rules they never saw.
+    """
+    payload = {
         "delivery_id": row.delivery_id,
         "delivery_kind": row.delivery_kind,
         "priority": row.priority,
         "transport_status": row.transport_status,
         "planning_state": row.planning_state,
+        "planning_rules_sha256": row.planning_rules_sha256,
         "hold_reason_code": row.hold_reason_code,
         "not_before": iso(row.not_before),
         "attempts": row.attempts,
@@ -332,6 +347,21 @@ def _delivery_projection(row: AlertDelivery) -> dict[str, Any]:
         "duplicate_risk_acknowledged": bool(row.duplicate_risk_acknowledged),
         "blocks_replanning": bool(row.blocks_replanning),
     }
+    if members is not None:
+        payload["members"] = [
+            {
+                "episode_id": m.episode_id,
+                "rule_id": m.rule_id,
+                "instance_fingerprint": m.instance_fingerprint,
+                "member_role": m.member_role,
+                "notification_generation": m.notification_generation,
+                "origin_rules_sha256": m.origin_rules_sha256,
+                "origin_phrase_set_version": m.origin_phrase_set_version,
+                "origin_phrase_set_sha256": m.origin_phrase_set_sha256,
+            }
+            for m in members
+        ]
+    return payload
 
 
 @router.get("/deliveries/{delivery_id}", summary="One delivery (redacted)")
@@ -342,18 +372,35 @@ def get_delivery(request: Request, delivery_id: str,
         row = session.get(AlertDelivery, delivery_id)
         if row is None:
             return problem(404, "Unknown delivery", "no delivery with that id")
-        return _delivery_projection(row)
+        from app.alerts.models import AlertDeliveryMember
+
+        members = session.execute(
+            select(AlertDeliveryMember)
+            .where(AlertDeliveryMember.delivery_id == delivery_id)
+            .order_by(AlertDeliveryMember.included_at.asc())
+        ).scalars().all()
+        return _delivery_projection(row, members=list(members))
 
 
 @router.get("/renders/{render_id}", summary="One render (redacted)")
 @limiter.limit(READ_RATE_LIMIT)
 def get_render(request: Request, render_id: str,
-               _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+               _: None = Depends(require_alerts_read),
+               may_read_text: bool = Depends(alerts_message_text_permitted),
+               ) -> dict[str, Any]:
+    """Render provenance for any read scope; the SENTENCE only for write/admin.
+
+    The frontend architecture is a browser-visible scoped token (H-05), so the
+    read key is a public capability and grants no render-text right. What a
+    dashboard actually needs — which phrase codes were chosen, from which
+    reviewed phrase set, how long the message was, whether it fell back — is
+    all here regardless.
+    """
     with session_scope() as session:
         row = session.get(AlertRender, render_id)
         if row is None:
             return problem(404, "Unknown render", "no render with that id")
-        return {
+        payload = {
             "render_id": row.render_id,
             "delivery_id": row.delivery_id,
             "render_source": row.render_source,
@@ -363,9 +410,18 @@ def get_render(request: Request, render_id: str,
             "selected_phrase_codes": list(row.selected_phrase_codes or []),
             "selected_fact_ids": list(row.selected_fact_ids or []),
             "gsm7_septets": row.gsm7_septets,
-            "final_message": row.final_message,
+            "body_redacted_at": iso(row.body_redacted_at),
             "created_at": iso(row.created_at),
         }
+        if may_read_text:
+            payload["final_message"] = row.final_message
+        else:
+            payload["final_message"] = None
+            payload["final_message_withheld_reason"] = (
+                "the alert read token is a browser-visible public capability "
+                "and does not grant message text; use "
+                "GET /api/v1/admin/alerts/renders/{render_id}")
+        return payload
 
 
 @router.get("/ruleset", summary="The active ruleset summary")

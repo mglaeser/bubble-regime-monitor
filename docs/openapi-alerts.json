@@ -286,6 +286,65 @@
         ]
       }
     },
+    "/api/v1/admin/alerts/renders/{render_id}": {
+      "get": {
+        "description": "The operator path to a rendered message body.\n\nThe read surface withholds `final_message` because the frontend uses a\nbrowser-visible scoped token (H-05), and the alert scopes deliberately do\nnot nest \u2014 there is no stronger key a caller could present to\n`/api/v1/alerts/renders/{id}`. So the text lives here, behind admin, and\n`no-store` keeps it out of any intermediary cache.",
+        "operationId": "admin_get_render_api_v1_admin_alerts_renders__render_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "render_id",
+            "required": true,
+            "schema": {
+              "title": "Render Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Admin Get Render Api V1 Admin Alerts Renders  Render Id  Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "One render, INCLUDING the text",
+        "tags": [
+          "alerts-admin"
+        ]
+      }
+    },
     "/api/v1/alerts/deliveries": {
       "get": {
         "operationId": "get_deliveries_api_v1_alerts_deliveries_get",
@@ -919,6 +978,7 @@
     },
     "/api/v1/alerts/renders/{render_id}": {
       "get": {
+        "description": "Render provenance for any read scope; the SENTENCE only for write/admin.\n\nThe frontend architecture is a browser-visible scoped token (H-05), so the\nread key is a public capability and grants no render-text right. What a\ndashboard actually needs \u2014 which phrase codes were chosen, from which\nreviewed phrase set, how long the message was, whether it fell back \u2014 is\nall here regardless.",
         "operationId": "get_render_api_v1_alerts_renders__render_id__get",
         "parameters": [
           {

@@ -76,10 +76,22 @@ class Settings(BaseSettings):
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully
-    # disabled (that is how Stage 1 collects replay material), and enabling
-    # alerts never implies capture. `live` is never reached automatically: it
-    # requires promoted rule + phrase artifacts and a deliberate operator edit.
-    alert_input_capture: bool = False
+    # disabled, and enabling alerts never implies capture. `live` is never
+    # reached automatically: it requires promoted rule + phrase artifacts and a
+    # deliberate operator edit.
+    #
+    # Capture defaults ON because that is what rollout Stage 1 IS ("schema,
+    # sidecar capture on, alerts disabled, pure evaluator, CAS state, replay").
+    # The default-off rule governs the flags that can make the service ACT —
+    # `alerts_mode` below, which stays `disabled`. Capture is not one of them:
+    # it writes one immutable evidence row per recompute in its own
+    # transaction, calls no provider, sends nothing and cannot alter a score or
+    # roll back a snapshot. Leaving it off would make Stage 1 inert — no
+    # sidecars means nothing to replay — while still claiming to have reached
+    # it. The promoted ruleset declares the same thing in `capture.enabled`,
+    # and that declaration is honoured (see `alert_integration.capture_armed`),
+    # so this is a reviewable artifact decision rather than a bare default.
+    alert_input_capture: bool = True
     alerts_mode: Literal["disabled", "shadow", "live"] = "disabled"
     alerts_live_profile: str = "default"
 
@@ -97,6 +109,26 @@ class Settings(BaseSettings):
     alerts_read_api_key: str = ""
     alerts_write_api_key: str = ""
     alerts_public_read: bool = False
+
+    # H-05, decided: the frontend uses a BROWSER-VISIBLE SCOPED TOKEN, not a
+    # server-side proxy. A static key embedded in browser JavaScript is
+    # extractable, so it is treated as a PUBLIC CAPABILITY rather than a
+    # secret: it reaches only the redacted projection, it is rate-limited, it
+    # rotates on its own schedule, and it grants no silence, retry, render-text
+    # or admin right. Setting this false is the assertion that the read key is
+    # only ever held by a trusted server-side proxy — which is a different
+    # architecture, so it must be stated rather than assumed.
+    alerts_read_token_is_public: bool = True
+
+    # Rotation overlap. A public token has to be rotatable without taking the
+    # dashboard down, and a single key forces a hard cutover — which in
+    # practice means the rotation never happens. The previous key stays valid
+    # until it is cleared; it is a SEPARATE variable so retiring it is its own
+    # deliberate edit.
+    alerts_read_api_key_previous: str = ""
+
+    # A public capability gets its own ceiling, tighter than an operator's.
+    alerts_public_read_rate_limit: str = "30/minute"
 
     # Volume governance. P1 is exempt from all three.
     alerts_non_p1_target_168h: int = 2

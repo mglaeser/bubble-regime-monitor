@@ -1,0 +1,73 @@
+{
+  "note": [
+    "SYNTHETIC replay history for the Stage 1 gate artifact.",
+    "Not market data of record, not a forecast, and not derived from any person.",
+    "It exists to exercise the evaluator's state machine across a",
+    "hold -> trim -> de-risk -> recovery arc, with two blind slots (one of them",
+    "inside a firing episode) and one transient single-snapshot de-risk",
+    "excursion.",
+    "",
+    "This file is the ARC, not the serialized inputs. The AlertInput objects are",
+    "built from it by tests/fixtures/alert_replay_history.py, because everything",
+    "a serialized input would add — the observation keys, the revision keys, the",
+    "computation fingerprints — is DERIVED from the values below rather than",
+    "chosen. Committing the derivation would mean committing 2000 lines nobody",
+    "can review to say what these 20 rows say plainly.",
+    "",
+    "Edit deliberately: this is the input to committed gate evidence, so a change",
+    "here changes docs/alert-stage1-gate.json and CI will require the diff."
+  ],
+  "schema_version": 2,
+  "slots_utc": [2, 6, 10, 14, 18, 22],
+  "month": "2026-07",
+  "slots": [
+    {"day": 10, "hour": 2,  "phase": "quiet hold",
+     "effective": "hold", "median": 44.0, "breadth": 58.0},
+    {"day": 10, "hour": 6,
+     "effective": "hold", "median": 44.5, "breadth": 57.5},
+    {"day": 10, "hour": 10,
+     "effective": "hold", "median": 45.0, "breadth": 57.0},
+
+    {"day": 10, "hour": 14, "phase": "drift into trim",
+     "effective": "trim", "median": 52.0, "breadth": 56.0},
+    {"day": 10, "hour": 18,
+     "effective": "trim", "median": 53.0, "breadth": 55.0},
+    {"day": 10, "hour": 22,
+     "effective": "trim", "median": 54.0, "breadth": 54.0},
+
+    {"day": 11, "hour": 2, "phase": "blind slot: coverage degraded, band suppressed",
+     "effective": null, "median": null, "breadth": null, "degraded": true},
+
+    {"day": 11, "hour": 6, "phase": "back to trim",
+     "effective": "trim", "median": 55.0, "breadth": 53.0},
+
+    {"day": 11, "hour": 10, "phase": "de-risk entry that PERSISTS",
+     "effective": "de-risk", "median": 63.0, "breadth": 47.0, "rf4": true},
+    {"day": 11, "hour": 14,
+     "effective": "de-risk", "median": 64.0, "breadth": 46.5, "rf4": true},
+    {"day": 11, "hour": 18,
+     "effective": "de-risk", "median": 64.5, "breadth": 46.0, "rf4": true},
+
+    {"day": 11, "hour": 22, "phase": "blind slot INSIDE a firing episode",
+     "effective": null, "median": null, "breadth": null, "degraded": true},
+
+    {"day": 12, "hour": 2, "phase": "still de-risk: the UNKNOWN resolved nothing",
+     "effective": "de-risk", "median": 63.5, "breadth": 46.0, "rf4": true},
+
+    {"day": 12, "hour": 6, "phase": "recovery back through trim to hold",
+     "effective": "trim", "median": 54.0, "breadth": 52.0},
+    {"day": 12, "hour": 10,
+     "effective": "trim", "median": 51.0, "breadth": 55.0},
+    {"day": 12, "hour": 14,
+     "effective": "hold", "median": 46.0, "breadth": 57.0},
+    {"day": 12, "hour": 18,
+     "effective": "hold", "median": 44.0, "breadth": 58.0},
+
+    {"day": 12, "hour": 22, "phase": "transient one-snapshot de-risk excursion — the thing replay must COUNT rather than assume away",
+     "effective": "de-risk", "median": 62.0, "breadth": 48.0, "rf4": true},
+    {"day": 13, "hour": 2,
+     "effective": "hold", "median": 45.0, "breadth": 57.0},
+    {"day": 13, "hour": 6,
+     "effective": "hold", "median": 44.0, "breadth": 58.0}
+  ]
+}

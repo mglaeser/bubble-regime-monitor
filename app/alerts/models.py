@@ -629,6 +629,11 @@ class AlertRender(Base):
     final_message: Mapped[str] = mapped_column(Text, nullable=False)
     gsm7_septets: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: Set once, by retention, when `final_message` is emptied. The row stays:
+    #: provenance, septet count and validation results are metadata and outlive
+    #: the message text (H-07). NULL means the body is still present.
+    body_redacted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint("gsm7_septets BETWEEN 0 AND 160", name="ck_alert_render_septets"),
@@ -789,6 +794,9 @@ END
 CREATE TRIGGER IF NOT EXISTS alert_render_no_update
 BEFORE UPDATE ON alert_render
 WHEN OLD.final_message <> NEW.final_message
+     AND NOT (NEW.final_message = ''
+              AND NEW.body_redacted_at IS NOT NULL
+              AND OLD.body_redacted_at IS NULL)
 BEGIN
     SELECT RAISE(ABORT, 'a final render is immutable; create a new render instead');
 END
