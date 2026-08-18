@@ -137,7 +137,13 @@ jobs:
       - name: Cross-vendor review panel
         id: panel
         # Fork PRs are refused rather than reviewed — see header.
-        if: github.event.pull_request.head.repo.full_name == github.repository
+        #
+        # `success()` is spelled out, not left implicit. A custom `if` already
+        # carries it by default, so a failed mask step already skips this one --
+        # but that default is invisible at the point it matters, and what it is
+        # holding here is the rule that the panel never runs, and so never prints
+        # the endpoint, unless redaction was registered first.
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
         env:
           SECOND_VENDOR_API_KEY: ${{ secrets.TRUSTED_VERIFIER_API_KEY }}
           # A SECRET, not a `vars.` entry, and the difference is the whole point:
