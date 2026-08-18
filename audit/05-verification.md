@@ -2,7 +2,7 @@
 
 Each repair executed test-first: a test derived from the frozen spec/invariants (not from the code under test), run **red before**, **green after**. Full suite kept green. Clone sweep per fix. Independent adversarial verification (partial S2 — same-vendor, disclosed) in §Independent verifier.
 
-**Suite baseline → after:** `1 failed / 161 passed` (the failure an env-missing-`lppls` hard error) → **`176 passed`** with `lppls` and `Rscript` both absent (the suite is now hermetic) — including 5 regression tests added in response to the adversarial verifier (§Independent verifier). `ruff check app tests scripts` (now incl. `S` rules): **clean**. `pip-audit`: **clean** after the `setuptools>=83` bump (was 1 vuln, PYSEC-2026-3447).
+**Suite baseline → after (as at the engagement, commit `b8d46bc`):** `1 failed / 161 passed` (the failure an env-missing-`lppls` hard error) → **`176 passed`** with `lppls` and `Rscript` both absent (the suite is now hermetic) — including 5 regression tests added in response to the adversarial verifier (§Independent verifier). *These are engagement-time figures and are deliberately not restated as the suite grows; the current count at the time of the iMessage digest transport was **847 passed / 1 xfailed** (807 before it), with `ruff` clean, mypy at the pinned ceiling of 217, and `detect-secrets-hook` exit 0.* `ruff check app tests scripts` (now incl. `S` rules): **clean**. `pip-audit`: **clean** after the `setuptools>=83` bump (was 1 vuln, PYSEC-2026-3447).
 
 ## Fixes with red→green evidence
 
@@ -34,6 +34,7 @@ Each repair executed test-first: a test derived from the frozen spec/invariants 
 ### C-23 — personal phone number in logs → masked
 - **Test:** `tests/test_audit_v331.py::TestRecipientMasking` (red: `_mask_recipient` did not exist).
 - **Fix:** `app/notify/sipgate.py:_mask_recipient` keeps only the last 3 digits; the success log uses it. **Green.**
+- **Clone sweep (extended, iMessage transport):** a second sender now exists. `app/notify/imessage.py:_mask_recipient` mirrors the sipgate one and the success log uses it; the recipient-validation failure path names the setting rather than echoing the value; both senders route error text and rejection bodies through `app.redaction.sanitize()` before logging or returning. **The symmetry is currently convention, not a control** — no test asserts that every module under `app/notify/` masks its recipient, so a third sender could ship without one and nothing would go red. That test is the cheap standing control this entry is missing, and it is the difference between a fix that held and a fix that is held.
 
 ### C-38 / A-16 — three "unverifiable" citations resolved
 - **Evidence:** all three resolve to real sources (WebSearch, `audit/01` #3): Chen et al. arXiv:2604.25826 (2026-04-28), Basele–Phillips–Shi Cowles CFDP 2430, BIS AER 2026 (2026-06-28).
