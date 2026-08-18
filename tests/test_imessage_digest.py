@@ -479,15 +479,41 @@ class TestSendImessage:
         assert result.status_code == status
         assert "202" in (result.error or "")
 
-    def test_malformed_success_body_is_still_a_success(
-            self, isolated_db, imessage_env, monkeypatch):
+    @pytest.mark.parametrize("payload", [
+        None,                                              # unparsable body
+        {},                                                # no fields
+        {"state": "accepted"},                             # no operation_id
+        {"operation_id": "op-1"},                          # no state
+        {"operation_id": "op-1", "state": "queued"},       # wrong state
+        {"operation_id": "", "state": "accepted"},         # empty operation_id
+        {"operation_id": 17, "state": "accepted"},         # wrong type
+        ["not", "a", "dict"],
+    ])
+    def test_202_without_an_accepted_send_operation_is_not_a_success(
+            self, isolated_db, imessage_env, monkeypatch, payload):
+        # Tightening the STATUS to 202 without checking the BODY is half a
+        # control: a gateway that answers 202 to everything passes the status
+        # test for free. The contract's SendOperation requires
+        # [operation_id, state] with state a const "accepted".
         import app.notify.imessage as im
 
         captured: dict = {}
         monkeypatch.setattr(im.httpx, "Client",
-                            _fake_client(captured, _Resp(payload=None)))
+                            _fake_client(captured, _Resp(payload=payload)))
         result = im.send_imessage("hi")
-        assert result.ok is True and result.operation_id is None
+        assert result.ok is False
+        assert result.status_code == 202
+        assert "SendOperation" in (result.error or "")
+
+    def test_a_well_formed_send_operation_is_a_success(
+            self, isolated_db, imessage_env, monkeypatch):
+        import app.notify.imessage as im
+
+        captured: dict = {}
+        monkeypatch.setattr(im.httpx, "Client", _fake_client(captured, _Resp(
+            payload={"operation_id": "op-9", "state": "accepted", "message_id": 3})))
+        result = im.send_imessage("hi")
+        assert result.ok is True and result.operation_id == "op-9"
 
     def test_unconfigured_returns_not_ok_without_calling_out(
             self, isolated_db, monkeypatch):

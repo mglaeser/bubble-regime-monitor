@@ -336,7 +336,18 @@ def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResu
     # reported as a delivered digest. sipgate's sender accepts any 2xx because
     # its contract is looser; this one is not.
     if resp.status_code == 202:
-        operation_id = _operation_id(resp)
+        operation_id = _accepted_operation_id(resp)
+        if operation_id is None:
+            # A 202 whose body is not a SendOperation did not come from the
+            # proxy's send route. Tightening the status without checking the
+            # body would have been half a control: a gateway that answers 202
+            # to everything passes the status test trivially.
+            log.warning("imessage_202_without_send_operation",
+                        hint="202 body is not a SendOperation; is the base URL correct?")
+            return ImessageResult(
+                ok=False, status_code=resp.status_code,
+                error=("202 carried no accepted SendOperation; the reply did not come "
+                       "from the proxy's send route"))
         log.info("imessage_sent", status=resp.status_code, chars=len(text),
                  recipient=_mask_recipient(to), operation_id=operation_id)
         return ImessageResult(ok=True, status_code=resp.status_code, operation_id=operation_id)
@@ -356,17 +367,27 @@ def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResu
     return ImessageResult(ok=False, status_code=resp.status_code, error=detail)
 
 
-def _operation_id(resp: httpx.Response) -> str | None:
-    """The 202 body's operation_id, or None. Never lets a malformed success
-    body turn a delivered message into a reported failure."""
+def _accepted_operation_id(resp: httpx.Response) -> str | None:
+    """The operation_id of a well-formed accepted SendOperation, else None.
+
+    The contract's SendOperation requires `[operation_id, state]` with
+    `state` a const "accepted", so all three conditions below are things a
+    genuine 202 from this route always satisfies. Anything else answering 202
+    — a gateway, a captive portal, a mock — satisfies the status check for
+    free, which is why the status alone is not enough.
+
+    The cost of being strict is a delivered digest occasionally reported as
+    failed if the proxy's schema changes. That is the right side to err on
+    here: the digest does not retry, so a false failure is a wrong log line,
+    whereas a false success is an alert the operator believes was delivered."""
     try:
         payload = resp.json()
     except Exception:
         return None
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or payload.get("state") != "accepted":
         return None
     value = payload.get("operation_id")
-    return value if isinstance(value, str) else None
+    return value if isinstance(value, str) and value else None
 
 
 def _hint(status: int) -> str:
