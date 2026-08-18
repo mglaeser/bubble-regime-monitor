@@ -19,7 +19,7 @@ Every production API key/token was disclosed in the development chat channel; th
     - Full history scan for 9 known live-secret fragments (ANTHROPIC/FRED/TIINGO/TWELVEDATA/ALPHAVANTAGE/ADMIN/SIPGATE/POLYGON/phone): 0 blob-hits across all refs; .env never committed; .gitignore:4 lists .env — repo is clean.
     - config.py:34 default ADMIN_API_KEY='change-me-to-a-long-random-string' — a shipped, guessable credential if unset.
     - No vault, no rotation, no short-lived workload identity (system map §identities).
-- **Impact:** Any party with the chat transcript holds live Anthropic/Polygon/FRED/Tiingo/TwelveData/AlphaVantage keys, the sipgate SMS token (can send SMS as the operator), and the admin key (can trigger recompute/SMS). Spend, SMS abuse, data-source quota theft.
+- **Impact:** Any party with the chat transcript holds live Anthropic/Polygon/FRED/Tiingo/TwelveData/AlphaVantage keys, the sipgate SMS token (can send SMS as the operator), and the admin key (can trigger recompute/digest). Spend, SMS abuse, data-source quota theft. `IMESSAGE_API_KEY` post-dates the disclosure and is **not** in the exposed set — but it is a tenth long-lived static bearer credential in the same un-vaulted `.env` with no rotation machinery, and it is the only one that expires unprompted (90 days by default). Its blast radius if stolen is bounded upstream in a way the others are not: the proxy's recipient allowlist is `admin`-scoped, so a `messages:send` key cannot add a destination — but per imessage-proxy/docs/security.md it is still "authority to spend money and to send unencrypted text", since a holder may select `"service": "sms"` even though this client never does.
 - **Fix:** ROTATE FIRST (revoke+reissue all 9 credentials at the providers), then: make ADMIN_API_KEY fail-closed (refuse the placeholder / empty value at startup); move to a host secret store; document rotation cadence in SECURITY.md.
 - **Substitutions:** S6, S9
 - **Residual:** Rotation is an out-of-band operator action this engagement cannot perform on the providers. · **Compensating:** Startup guard rejecting the placeholder admin key (added Phase 5); reads are public-only, so a leaked read path exposes no secret. · **Tripwire:** Add a startup assertion + a documented rotation date; alert if ADMIN_API_KEY equals the known placeholder.
@@ -41,7 +41,10 @@ Core app security is sound (server-side constant-time auth, rate limiting, locke
 
 No EU personal data of third parties is processed; the single personal datum is the operator's own SMS recipient number, where data subject == controller. Re-banded from STOP-SHIP per §3.
 
-- **N/A basis:** The applicable law is the GDPR (operator is in the EU/DE). The system stores/POSTs exactly one phone number (SIPGATE_RECIPIENT) and one SEC-etiquette contact email — both the operator's own, config-only, not collected from any third party. There is no user base, no data collection, no profiling, no automated decision about any person. GDPR obligations (lawful basis, DPIA, erasure workflow) are de minimis: the controller processes only his own contact detail to text himself. Materiality: negligible. The one hygiene item — the recipient number appearing in an INFO log — is carried under C-23.
+- **N/A basis:** The applicable law is the GDPR (operator is in the EU/DE). The system stores/POSTs **two** contact handles — `SIPGATE_RECIPIENT` (E.164) and `IMESSAGE_RECIPIENT` (+E.164 or an Apple-ID email) — plus one SEC-etiquette contact email. All three are the operator's own, config-only, not collected from any third party. **The addition of the iMessage transport does not disturb this verdict: the owner confirms `IMESSAGE_RECIPIENT` is his own handle, so data subject == controller still holds for every personal datum in the system, and the digest remains the controller messaging himself.** There is no user base, no data collection, no profiling, no automated decision about any person. GDPR obligations (lawful basis, DPIA, erasure workflow) remain de minimis. Materiality: negligible.
+- **What would collapse this N/A** (any one of these re-opens C-04 at STOP-SHIP and must be treated as a re-audit trigger, not a config change): (a) `IMESSAGE_RECIPIENT` set to anyone other than the operator — a family member, a colleague, a test recipient — which makes a third party's phone number or Apple ID into processed personal data; (b) the imessage-proxy instance being operated by anyone other than the operator, which turns a self-send into a disclosure to a processor and pulls in an Art. 28 agreement; (c) any change that sends to more than one destination, or to a `chat_id` rather than a pinned `recipient`; (d) the proxy beginning to retain message bodies or recipients in its audit store — today it records privacy-safe metadata only, no bodies and no recipients (imessage-proxy/docs/security.md), and that is load-bearing here.
+- **New, and carried rather than dismissed:** the digest body now comes to rest in the Messages database on the proxy's Mac, retained indefinitely and outside anything this repository controls. It is the operator's own message to himself, so no third-party subject arises — but it is a second persistent copy of AI-generated content off this host, and it belongs in the retention item under C-23 rather than being silently absorbed here.
+- The hygiene item — a recipient handle reaching an INFO log — is carried under C-23, now across both senders.
 
 
 ---
@@ -154,7 +157,7 @@ Code rolls back via commit-tagged Podman images with deploy.sh auto-rollback; pr
 
 No path exists by which untrusted content reaches the model, and the model controls no outbound channel, so runtime injection/exfiltration detection has nothing to protect.
 
-- **N/A basis:** Exfiltration via a model requires the model to (a) ingest attacker-controlled content and (b) control an outbound channel (URL fetch, markdown/image render, email, PR). Here the model receives only numbers/enums from the operator's own pipeline (judgment.py:139) and emits a <=300-char text with NO tools and NO ability to trigger any fetch/send. The SMS/JSON carrying its output are deterministic, operator-directed sinks. There is no data-exfiltration primitive to detect. (If a tool/connector is ever added, this check re-activates immediately — see C-08.)
+- **N/A basis:** Exfiltration via a model requires the model to (a) ingest attacker-controlled content and (b) control an outbound channel (URL fetch, markdown/image render, email, PR). Here the model receives only numbers/enums from the operator's own pipeline (judgment.py:139) and emits a <=300-char text with NO tools and NO ability to trigger any fetch/send. The JSON API and the digest sinks (sipgate SMS, imessage-proxy) are deterministic, operator-directed sinks. There is no data-exfiltration primitive to detect. **Re-checked when the imessage-proxy connector was added, per this record's own trigger: N/A holds.** The connector is an HTTP client called by application code on a schedule, with host, recipient and service pinned from configuration; the model contributes only the message text and cannot address, route or trigger it. Leg (b) is therefore still unheld by the model. (If a connector is ever added that the model CAN address — a recipient, host or transport chosen from a completion — this check re-activates immediately; see C-08.)
 
 ### B-22 · Agents deployed with least privilege, enforced — ⚪ N/A (P9)
 
@@ -292,12 +295,13 @@ A cold-start agent is well-served by references.py + tests, but there is no AGEN
 
 ### A-34 · Autonomy levels, gates, self-firing kill switch — 🟠 PARTIAL (P8)
 
-Autonomy is inherently low (scheduled recompute + optional SMS; no tools); kill switches exist as config flags (SMS_ENABLED, scheduler) but fire manually, not on a tripwire.
+Autonomy is inherently low (scheduled recompute + optional daily digest; no tools); kill switches exist as config flags but fire manually, not on a tripwire — and the digest's switch moved.
 
 - **Evidence:**
-    - scheduler.py cron; SMS gated by SMS_ENABLED.
+    - scheduler.py cron; the digest job is gated on `Settings.daily_digest_transport`, NOT on `SMS_ENABLED` (app/scheduler.py:110). Stopping the digest now requires `IMESSAGE_ENABLED=false` **and** `SMS_ENABLED=false`/`DAILY_SMS_ENABLED=false`; setting only the SMS switch leaves an iMessage deployment sending.
+    - `extra="ignore"` on Settings means a misspelt switch is dropped without error, so a kill switch can also fail to ARM: `IMESSAG_ENABLED=false` does not disable anything. `near_miss_env_keys()` names a probable misspelling — but only on the no-transport skip path, so it never fires for a deployment that is still sending.
     - No irreversible tool action; no automatic halt tripwire.
-- **Fix:** Document the (minimal) autonomy level per action; optionally wire an SMS/cost tripwire. Low materiality.
+- **Fix:** Document the kill switch as the transport selector, not `SMS_ENABLED`, in whatever runbook an incident reaches for. Wire a send-failure/cost tripwire (shared with B-26). Extend the near-miss check so it also warns when a transport IS selected — the case where a dropped key is most likely to go unnoticed.
 - **Substitutions:** S5, S6, S10
 
 ### B-02 · A paved road an agent can walk — 🟠 PARTIAL (P8)
@@ -387,12 +391,13 @@ No documented, tested backup/restore of the SQLite database; no RPO/RTO.
 
 ### C-02 · Threat model — 🔴 FAIL (P8)
 
-No threat model existed; one is produced in this engagement (audit/threat-model.md). Without it, no CI staleness check catches a new egress path or integration.
+No threat model existed; one is produced in this engagement (audit/threat-model.md). The prescribed staleness check was never built — and has now been demonstrably missed.
 
 - **Evidence:**
     - Repo-wide search: no threat model.
     - audit/threat-model.md (this engagement): STRIDE per trust boundary for the actual architecture.
-- **Impact:** Design-time analysis — the only thing that catches architectural flaws no scanner finds — was absent.
+    - **DEMONSTRATED MISS (iMessage digest transport).** One change added an outbound host (`IMESSAGE_API_BASE_URL` → `POST /api/messages`), a secret name (`IMESSAGE_API_KEY`), a module (`app/notify/imessage.py`) and a trust boundary, and the full pipeline stayed green: `pytest -q` 847 passed / 1 xfailed, `ruff check app tests scripts` clean, mypy 217 at the pinned `MYPY_CEILING`, `detect-secrets-hook` exit 0 with the baseline byte-identical. Nothing in CI reads `audit/threat-model.md`, so nothing could have flagged it.
+- **Impact:** Design-time analysis — the only thing that catches architectural flaws no scanner finds — was absent, and its absence is no longer theoretical. A green pipeline now demonstrably coexists with an architecture the threat model does not describe.
 - **Fix:** Ship the threat model; add a CI check that flags a new outbound host / router / secret without a corresponding threat-model entry.
 - **Substitutions:** S1, S3
 
@@ -407,9 +412,10 @@ No agentic system exists; the priority-10 escalation ('any model can call a tool
 No session combines the dangerous three: the model's only 'untrusted input' is machine-computed numbers, and it holds no tool to act on any 'private data' or 'external communication' leg.
 
 - **Evidence:**
-    - Leg labelling: [untrusted input]=numbers/enums only (not free-text); [private data]=the operator's own readings (not third-party secrets); [external communication]=SMS/JSON are code-driven sinks, not model-controlled.
+    - Leg labelling: [untrusted input]=numbers/enums only (not free-text); [private data]=the operator's own readings (not third-party secrets); [external communication]=the JSON API and the digest sinks (sipgate SMS, imessage-proxy) are code-driven, not model-controlled.
     - The model has no capability to complete the triangle (no tools).
-- **Fix:** Maintain the invariant; the C-07 regression test (no external free-text in the prompt) also defends C-08. Re-audit automatically if any tool/integration is added.
+    - **RE-AUDITED on the iMessage transport addition, per this record's own trigger — PASS holds.** The new outbound HTTP call is issued by `app/services/digest.py` on a schedule or an admin request; `app/notify/imessage.py` pins the host from config, the recipient from config and `"service": "imessage"` as a literal. The model's contribution is the `text` field and nothing else: it cannot select a destination, a transport or a host, so the [external communication] leg remains outside its reach. `tests/test_imessage_digest.py::TestSendImessage::test_posts_exact_contract_shape` holds the body shape.
+- **Fix:** Maintain the invariant; the C-07 regression test (no external free-text in the prompt) also defends C-08. Re-audit automatically if any tool/integration is added, and **record the re-audit in this record even when the verdict does not move** — a re-audit that leaves no trace cannot be distinguished from one that never ran.
 - **Substitutions:** S5, S6
 
 ### C-10 · Evaluation methodology — 🟠 PARTIAL (P8)
@@ -424,12 +430,15 @@ The deterministic core has a versioned golden dataset + frozen seed + a regressi
 
 ### C-23 · Personal data in prompts, logs and traces — 🟠 PARTIAL (P8)
 
-The operator's own SMS recipient number is written to an INFO log (sipgate.py:63); no redaction-at-emitter, no explicit retention limit on that log field.
+Both digest senders now mask the recipient at the emitter, so the redaction half of this check is met; the retention half is not, and the change adds a second personal handle and an off-host copy of the digest body.
 
 - **Evidence:**
-    - sipgate.py:63 log.info('sipgate_sms_sent', ..., recipient=to) — the E.164 number in structured logs.
-- **Impact:** One personal datum (the operator's own) in logs, outside any retention policy. Low materiality (self-data), but it is PII in a log store.
-- **Fix:** Redact/tokenize the recipient at the emitter (log a hash or the last 3 digits); set a retention limit on logs.
+    - RESOLVED (Phase 5): `sipgate.py` no longer logs the bare E.164 — `_mask_recipient` keeps the last 3 characters and the success log uses it.
+    - `app/notify/imessage.py:_mask_recipient` mirrors it for the iMessage handle, and the module never echoes the recipient in an error string (`"IMESSAGE_RECIPIENT is not a +E.164 number or an email handle"` names the setting, not the value).
+    - Both senders route error text and rejection bodies through `app.redaction.sanitize()` before logging or returning, and `sanitize()` before truncating — cutting first can strip an `api_key=` marker while leaving a usable prefix. `_REDACTIONS` covers E.164 shapes and bare emails, so a recipient echoed inside an upstream problem+json body is redacted too. A new `imp_[A-Za-z0-9\-_]{12,}` pattern catches the proxy's bearer key, which arrives bare rather than behind a `Bearer` marker.
+    - NEW: the iMessage recipient handle necessarily leaves the host in plaintext in every POST body. The proxy's audit store records privacy-safe metadata only — no message bodies, no recipients (imessage-proxy/docs/security.md) — which bounds it, and is a fact this record depends on rather than an assurance it can verify.
+- **Impact:** Redaction-at-emitter is now uniform across both transports and both handles. What remains open is unchanged and unaddressed: no retention limit on the log store — and now a second, indefinite copy of the AI-written digest body in the Messages database on the proxy's Mac, outside this repository's retention discussion entirely.
+- **Fix:** Set an explicit retention limit on the log store (the open half). Record the Messages-database copy as an accepted, dated retention location. Keep the masking symmetric: any third sender must carry `_mask_recipient` and `sanitize()` before it ships — the two-sender symmetry is currently discipline, not a test.
 - **Substitutions:** S3
 
 ### C-26 · SBOM, AI-BOM, provenance, cyber-resilience — 🔴 FAIL (P8)
@@ -466,12 +475,15 @@ No clone detector or duplication tripwire in CI; the source-adapter modules shar
 
 ### A-11 · Least-privilege topology for agents/tools (design) — 🟠 PARTIAL (P7)
 
-No agent/tool matrix to build (no tools), but the one side-effecting capability (send-SMS) and the outbound data fetches deserve an explicit irreversibility note; egress is not platform-allowlisted.
+No agent/tool matrix to build (no tools), but the **two** side-effecting capabilities (send-digest over iMessage or SMS) and the outbound data fetches deserve an explicit irreversibility note; egress is not platform-allowlisted, and one destination is now operator data rather than a literal in code.
 
 - **Evidence:**
-    - send-SMS is admin-gated + schedule-gated + rate-bounded but is irreversible (cannot unsend).
+    - Sending the digest is admin-gated + schedule-gated + rate-bounded but is irreversible on either transport (cannot unsend). Exactly one transport fires per run (`Settings.daily_digest_transport`); there is deliberately no fallback, so a failure is a non-send rather than a double-send.
+    - STRENGTHENED, and genuinely: the iMessage credential is a scoped `messages:send` key. The proxy's recipient allowlist is `admin`-scoped, so a stolen key can neither read it nor add a destination to it — a real upstream least-privilege control, of a kind no other egress path here has. The client further pins `"service": "imessage"` and never sends `sender_identifier` (both test-covered, `tests/test_imessage_digest.py`).
+    - WEAKENED: `IMESSAGE_API_BASE_URL` is unvalidated operator data (`app/notify/imessage.py:_base_url()` only strips a trailing slash). No scheme check, no host pin. Every other outbound host in this service is a literal in `app/sources/*.py`.
+    - Per imessage-proxy/docs/security.md, a `messages:send` key is "authority to spend money and to send unencrypted text, not only to write to allowlisted people" — it can select `"service": "sms"`. This client never does; the credential nonetheless carries that authority if stolen.
     - No container egress allowlist.
-- **Fix:** Document send-SMS as the one irreversible action (validated by: admin key + recipient allowlist = the fixed operator number); optionally add a container egress allowlist.
+- **Fix:** Document both sends as the irreversible actions (validated by: admin key + a config-pinned recipient + the proxy's admin-scoped allowlist upstream). Validate `IMESSAGE_API_BASE_URL` at the boundary — require an `https://` scheme and reject a path component — so the one operator-supplied egress host cannot silently become cleartext or a stranger. Then add a container egress allowlist, which is now worth more than it was: it is the only control that would bound a mistyped base URL.
 - **Substitutions:** S5, S6
 
 ### A-12 · Technical debt and the comprehension problem — 🟠 PARTIAL (P7)
@@ -808,19 +820,21 @@ No progressive delivery/canary (single instance, 100% blast radius) — but depl
 
 ### B-21 · The application survives a provider outage — 🟢 PASS (P6)
 
-The application survives an Anthropic outage: the intra-vendor model fallback chain plus deterministic degradation (judgment -> stale/None; SMS -> deterministic template) keep the service up; data sources have their own fallback chains.
+The application survives an Anthropic outage: the intra-vendor model fallback chain plus deterministic degradation (judgment -> stale/None; digest -> deterministic template) keep the service up; data sources have their own fallback chains. The digest's **delivery** path is the one place with no fallback, deliberately.
 
 - **Evidence:**
-    - judgment.py degrades to last-good/None on any API failure; sms_report.py + digest fall back to a deterministic template; README:151 documents 'always sends'.
+    - judgment.py degrades to last-good/None on any API failure; sms_report.py + digest fall back to a deterministic template; README:170 documents that the digest body always builds.
     - Sources: multi-provider fallback chains + circuit breaker.
-- **Fix:** None for continuity; single-vendor for the LLM is a documented, tested-degradation risk, not an outage.
+    - NEW PROVIDER, NO FALLBACK BY DESIGN: with `IMESSAGE_ENABLED=true`, an imessage-proxy outage means the digest does not go out at all — `Settings.daily_digest_transport` returns `"imessage"` and sipgate is never called. This is deliberate (README:172): a silent downgrade would hide the proxy being down at the moment the operator most needs to know. The service itself is unaffected — the digest is not on any request path.
+- **Impact:** Scope matters here. The SERVICE survives every provider outage, which is what this check asks. The DIGEST does not survive a proxy outage, and by design has no second path. That trade is sound, but it means "survives a provider outage" is now true of the application and false of the daily message.
+- **Fix:** None for service continuity. For the digest, the missing piece is detection rather than fallback: nothing currently alerts on repeated send failures, so a proxy outage or an expired key presents as silence. Wire that alert (it is the same tripwire B-26 has been carrying).
 - **Substitutions:** S5
 
 ### B-26 · Feature flags and self-firing kill switches — 🟠 PARTIAL (P6)
 
-Feature flags/kill switches exist as config (SMS_ENABLED, STOOQ_ENABLED, READ_ENDPOINTS_PUBLIC, GSADF_CONTESTED) but flip manually, not on a tripwire.
+Feature flags/kill switches exist as config (IMESSAGE_ENABLED, SMS_ENABLED, DAILY_SMS_ENABLED, STOOQ_ENABLED, READ_ENDPOINTS_PUBLIC, GSADF_CONTESTED) but flip manually, not on a tripwire.
 
-- **Fix:** Wire an automatic tripwire (e.g. disable SMS on repeated send failures / cost spike).
+- **Fix:** Wire an automatic tripwire (e.g. alert or disable on repeated digest-send failures / cost spike). This is now dated rather than hypothetical: imessage-proxy keys expire on a 90-day default, an expired key returns a 401 indistinguishable from a wrong one, and with no fallback transport the failure mode is silence. Absent this tripwire, the digest will stop roughly 90 days after the key is issued and nothing will say so.
 - **Substitutions:** S8, S10
 
 ### B-30 · Capacity, including inference capacity — 🟢 PASS (P6)
@@ -882,7 +896,7 @@ No LICENSE, no license scan of generated code, no written IP position — the co
 
 No user-generated content and no third-party-facing generative feature to abuse.
 
-- **N/A basis:** The only generative output is the operator's own daily note/SMS to himself. There is no user population that could submit content or receive generated content, so content-safety classification/misuse-monitoring has no subject. The public API serves numeric research data, not generated media.
+- **N/A basis:** The only generative output is the operator's own daily note and digest to himself, over whichever single transport is configured (iMessage or SMS). There is no user population that could submit content or receive generated content, so content-safety classification/misuse-monitoring has no subject. The public API serves numeric research data, not generated media.
 
 ### C-30 · Jailbreak resistance — ⚪ N/A (P6)
 
@@ -905,9 +919,9 @@ No published/enforced AI usage policy (same root as A-14).
 
 ### C-36 · Transparency and marking of generated output — 🟠 PARTIAL (P6)
 
-The judgment_call and SMS are AI-generated but not explicitly marked as such to the reader (ties to C-09 Art. 50).
+The judgment_call and the daily digest are AI-generated but not explicitly marked as such to the reader, on either transport (ties to C-09 Art. 50).
 
-- **Fix:** Add an 'ai_generated: true' marker on the judgment_call field + a one-line SMS/UI disclosure.
+- **Fix:** Add an 'ai_generated: true' marker on the judgment_call field + a one-line disclosure in the digest, on both transports. Note the budget changed: over iMessage the 160-char ASCII cap is a deliberate carry-over rather than a physical limit (the proxy accepts 4000 code points), so "a disclaimer will not fit in one segment" is no longer a reason on that path. Note also that the proxy already appends the sending key's `sender_identifier` to every message a `messages:send` key sends — that is a provenance marker for the SENDER, not an AI-generated marking, and it should not be mistaken for discharging this.
 
 ### C-38 · Fabrication and downstream reliance — 🟠 PARTIAL (P6)
 
@@ -967,7 +981,7 @@ No interactive/latency-sensitive inference path.
 
 No third-party personal data, so no right-to-erasure machinery is required.
 
-- **N/A basis:** The only personal datum is the operator's own phone/email (config), deletable by editing .env. There is no user base, no derived personal-data store (no embeddings/training set), so there is nothing to erase on request from a third party.
+- **N/A basis:** The only personal data are the operator's own contact handles (`SIPGATE_RECIPIENT`, `IMESSAGE_RECIPIENT`) and an SEC-etiquette email, all config. There is no user base, no derived personal-data store (no embeddings/training set), so there is nothing to erase on request from a third party. Erasure is nonetheless no longer a single-file operation: the iMessage handle is also held in the imessage-proxy recipient allowlist (admin-scoped, so this service cannot remove it), and every delivered digest leaves a permanent copy in the Messages database on the proxy's Mac. Both are the operator's own data on the operator's own machine, which is why this stays N/A — but a full retirement is now three actions on two hosts, not one edit to `.env`, and should be written down as such rather than rediscovered.
 
 ### B-39 · Design against a named reference framework — 🟠 PARTIAL (P5)
 

@@ -20,7 +20,25 @@ exists yet — Stage 0 only makes the scoring layer *legible* to one.
 | Snapshots carry `methodology_sha256` / `methodology_version` | ✅ | `app/models.py:46-47`, written from the loader at `app/services/compute.py` |
 | `action_band` is a display string with degraded variants | ✅ | `app/services/compute.py` writes `"suppressed (block degraded)"` / `"de-risk (data degraded)"` |
 | `red_flag_detail` holds booleans only | ✅ | `RedFlags.as_dict()` → `dict[str, bool]` (`app/engine/aggregate.py:160`) |
-| Legacy SMS path = `sms_report.py`, `services/digest.py`, `notify/sipgate.py`, `daily_sms` job, `POST /api/v1/admin/send-sms` | ✅ | all five present |
+Leave line 23 exactly as it stands. Append at the end of §1, after the drift list:
+
+### Addendum — post-Stage-0 drift in the legacy path (daily digest over iMessage)
+
+*Recorded after the fact; the table above is pinned to `8d2c3a9` / 3.8.0 and is deliberately not rewritten.*
+
+The legacy digest gained a second delivery transport. The five components listed
+above are all still present and still the SMS path; the inventory is now
+incomplete rather than wrong. Added: `app/notify/imessage.py` (POST to an
+imessage-proxy instance), `Settings.daily_digest_transport` as the scheduler's
+gate in place of `effective_daily_sms_enabled`, and `IMESSAGE_*` settings.
+`POST /api/v1/admin/send-sms` keeps its path and now dispatches over whichever
+transport is configured, naming it in the response.
+
+This does **not** touch Stage 4. The alert system's own delivery path — planner,
+outbox, renderer, typed sipgate sender, dispatcher — is unchanged and still
+unreachable behind `ALERTS_MODE`. What moved is the legacy digest, underneath a
+cutover gate that has not moved, which is worth stating explicitly: the two are
+easy to conflate and only one of them changed.
 | SQLite pragmas: WAL, foreign_keys, synchronous=NORMAL, recursive_triggers | ✅ | `app/db.py:37-45` |
 | `busy_timeout` **not** configured | ✅ (drift confirmed) | absent from `_set_sqlite_pragmas`; must be added before concurrent alert writes |
 | Alembic authoritative, `create_all` as boot fallback | ✅ | `app/db_migrate.py:75-86` |
