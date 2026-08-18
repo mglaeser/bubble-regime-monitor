@@ -377,6 +377,39 @@ class TestRejectionBodyRedaction:
         assert "person@example.net" not in (result.error or "")
 
 
+class TestTimeoutIsNeverFatal:
+    """This module promises never to raise, because a failed digest must not
+    take the scheduler down with it. The timeout was built BEFORE the request's
+    try block, so an absurd setting escaped that promise entirely."""
+
+    @pytest.mark.parametrize("configured", [10**400, 0, -5, 10**9])
+    def test_absurd_timeout_returns_a_result_instead_of_raising(
+            self, isolated_db, imessage_env, monkeypatch, configured):
+        monkeypatch.setenv("IMESSAGE_TIMEOUT_S", str(configured))
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        captured: dict = {}
+        import app.notify.imessage as im
+
+        monkeypatch.setattr(im.httpx, "Client", _fake_client(captured, _Resp()))
+        result = im.send_imessage("hi")     # must not raise
+        assert result.ok is True
+        get_settings.cache_clear()
+
+    @pytest.mark.parametrize("configured,expected", [
+        (10**400, 600.0),   # OverflowError on float() — the reported crash
+        (0, 1.0),           # a zero would fail every send instantly
+        (-5, 1.0),
+        (10**9, 600.0),     # must not outlive the dispatch lease
+        (30, 30.0),         # the documented default passes through untouched
+    ])
+    def test_timeout_is_clamped_not_trusted(self, configured, expected):
+        from app.notify.imessage import _read_timeout_s
+
+        assert _read_timeout_s(configured) == expected
+
+
 class TestSendImessage:
     def test_posts_exact_contract_shape(self, isolated_db, imessage_env, monkeypatch):
         captured: dict = {}

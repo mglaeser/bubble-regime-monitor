@@ -316,7 +316,7 @@ def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResu
         # uuid4 hex is 32 characters and lies inside that class.
         "Idempotency-Key": uuid.uuid4().hex,
     }
-    timeout = httpx.Timeout(float(settings.imessage_timeout_s), connect=10.0)
+    timeout = httpx.Timeout(_read_timeout_s(settings.imessage_timeout_s), connect=10.0)
     # AN AMBIENT HTTP_PROXY DEFEATS check_destination, so plain HTTP does not
     # trust the environment. httpx honours HTTP_PROXY/ALL_PROXY by default and
     # does NOT bypass loopback on its own; measured with HTTP_PROXY set and
@@ -375,6 +375,32 @@ def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResu
     log.warning("imessage_rejected", status=resp.status_code, body=detail,
                 hint=_hint(resp.status_code))
     return ImessageResult(ok=False, status_code=resp.status_code, error=detail)
+
+
+#: Bounds on the read timeout. The floor keeps a 0 or negative value from
+#: making every send fail instantly; the ceiling keeps an absurd one from
+#: outliving the dispatch lease.
+_MIN_TIMEOUT_S, _MAX_TIMEOUT_S = 1.0, 600.0
+
+
+def _read_timeout_s(configured: int) -> float:
+    """The configured read timeout, clamped, and never raising.
+
+    `float()` on an int large enough raises OverflowError, and this is
+    evaluated BEFORE the request's try block — so an absurd IMESSAGE_TIMEOUT_S
+    took the whole call out with an exception instead of returning a result,
+    breaking the promise in this module's docstring that it never raises."""
+    try:
+        value = float(configured)
+    except (OverflowError, ValueError, TypeError):
+        log.warning("imessage_timeout_unusable", fallback_s=_MAX_TIMEOUT_S)
+        return _MAX_TIMEOUT_S
+    if value != value or value in (float("inf"), float("-inf")):   # NaN / inf
+        return _MAX_TIMEOUT_S
+    clamped = min(max(value, _MIN_TIMEOUT_S), _MAX_TIMEOUT_S)
+    if clamped != value:
+        log.warning("imessage_timeout_clamped", configured=configured, used_s=clamped)
+    return clamped
 
 
 def _accepted_operation_id(resp: httpx.Response) -> str | None:
