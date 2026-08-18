@@ -110,6 +110,17 @@ def start() -> BackgroundScheduler:
         # DAILY_SMS_ENABLED remains the migration-friendly alias for the
         # sipgate path; turning the alert system on still never disables this.
         digest_transport = settings.daily_digest_transport
+        if settings.imessage_enabled_but_unconfigured:
+            # Loud at boot, whatever the digest ends up doing: the switch is on
+            # and the credentials are not there, so the operator believes they
+            # configured iMessage and did not.
+            log.warning("imessage_enabled_but_unconfigured",
+                        selected_transport=digest_transport,
+                        missing=[name for name, present in (
+                            ("IMESSAGE_API_BASE_URL", bool(settings.imessage_api_base_url)),
+                            ("IMESSAGE_API_KEY", bool(settings.imessage_api_key)),
+                            ("IMESSAGE_RECIPIENT", bool(settings.imessage_recipient)),
+                        ) if not present])
         if digest_transport != "none":
             _scheduler.add_job(
                 _sms_job,

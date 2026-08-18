@@ -121,6 +121,16 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
     check("no_misspelt_settings", not near,
           "; ".join(f"{actual} looks like {intended}" for actual, intended in near)
           or "no near-miss environment keys")
+    check("imessage_switch_matches_config", not settings.imessage_enabled_but_unconfigured,
+          "IMESSAGE_ENABLED is on but URL/key/recipient are not all set — the digest "
+          "is NOT going over iMessage" if settings.imessage_enabled_but_unconfigured
+          else "iMessage switch and configuration agree")
+    if settings.imessage_configured:
+        from app.notify.imessage import check_destination
+
+        problem = check_destination(settings.imessage_api_base_url.rstrip("/"))
+        check("imessage_destination_safe", problem is None,
+              problem or "IMESSAGE_API_BASE_URL is https (or loopback http)")
 
     if artifacts is not None:
         pins = [r.rule_id for r in artifacts.ruleset.rules()

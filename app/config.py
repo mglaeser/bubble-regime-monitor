@@ -226,14 +226,34 @@ class Settings(BaseSettings):
                     and self.imessage_recipient)
 
     @property
+    def imessage_enabled_but_unconfigured(self) -> bool:
+        """The switch is on and the credentials are not there. Its own property
+        because this state must never look like "iMessage is simply off"."""
+        return self.imessage_enabled and not self.imessage_configured
+
+    @property
     def daily_digest_transport(self) -> Literal["imessage", "sipgate", "none"]:
         """Which transport carries the daily digest.
 
         iMessage wins when both switches are on — see the IMESSAGE_* block. The
         scheduler gates on this rather than on `effective_daily_sms_enabled`,
         because an operator who set SMS_ENABLED=false and IMESSAGE_ENABLED=true
-        means "send my digest over iMessage", not "stop sending my digest"."""
-        if self.imessage_enabled:
+        means "send my digest over iMessage", not "stop sending my digest".
+
+        REQUIRES `imessage_configured`, not merely the switch. Selecting on the
+        switch alone meant that adding IMESSAGE_ENABLED=true to a WORKING SMS
+        deployment silently killed the digest: the transport flipped, the job
+        was still scheduled, and every run skipped with "not configured" while
+        the health projection went on reporting the digest as enabled.
+
+        This is not the fallback the IMESSAGE_* block forbids. That rule is
+        about a send that FAILED — a proxy that is down must never quietly
+        become an SMS, because the silence is the signal. A blank URL is not a
+        failed send; it is a transport that was never set up, and preferring a
+        configured one over nothing loses no information. The unconfigured
+        switch is reported loudly by every operator surface rather than being
+        absorbed here: see `imessage_enabled_but_unconfigured`."""
+        if self.imessage_enabled and self.imessage_configured:
             return "imessage"
         if self.effective_daily_sms_enabled:
             return "sipgate"

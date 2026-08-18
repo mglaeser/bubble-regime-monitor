@@ -34,6 +34,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -109,10 +110,53 @@ class ImessageResult:
     operation_id: str | None = None
 
 
+#: Hosts for which plain HTTP carries nothing off the machine. Everything else
+#: must be HTTPS.
+_LOOPBACK_HOSTS = frozenset({
+    "127.0.0.1", "::1", "[::1]", "localhost",
+    "host.containers.internal", "host.docker.internal",
+})
+
+
 def _base_url() -> str:
     """Origin with any trailing slash removed, so path joining cannot produce
     a double slash the proxy would treat as a different route."""
     return get_settings().imessage_api_base_url.rstrip("/")
+
+
+def check_destination(base_url: str) -> str | None:
+    """None when the destination is safe to POST a bearer key to, else the
+    reason it is not.
+
+    THIS IS THE APP'S FIRST CONFIG-DRIVEN OUTBOUND DESTINATION. Every other
+    outbound host in this service is a literal in code (`app/notify/sipgate.py`
+    and the price sources), which is the app-level control that
+    `audit/00-system-map.md` records as standing in for the missing container
+    egress allowlist. A host that arrives from configuration has no such
+    control, so the scheme check is the only thing between a typo and sending
+    a `messages:send` bearer key plus the digest text in cleartext to whatever
+    answers.
+
+    Plain HTTP is permitted only where it cannot leave the machine. Note that
+    the proxy's own `servers:` block declares `https://{host}` and plain-HTTP
+    loopback appears only in its docs, so this is stricter than the docs and
+    exactly as strict as the contract."""
+    if not base_url:
+        return "IMESSAGE_API_BASE_URL is empty"
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in ("http", "https"):
+        return (f"IMESSAGE_API_BASE_URL scheme must be https (or http on loopback); "
+                f"got {parsed.scheme or 'no scheme'!r}")
+    if not parsed.hostname:
+        return "IMESSAGE_API_BASE_URL has no host"
+    if parsed.path.rstrip("/"):
+        return ("IMESSAGE_API_BASE_URL must be an origin with no path; "
+                f"got a path component {parsed.path!r}")
+    if parsed.scheme == "http" and parsed.hostname.lower() not in _LOOPBACK_HOSTS:
+        return (f"IMESSAGE_API_BASE_URL uses http:// to a non-loopback host "
+                f"({parsed.hostname}); that sends the API key and the digest in "
+                f"cleartext. Use https://, or a tunnel that presents as loopback.")
+    return None
 
 
 #: A hyphen run FOLLOWED BY WHITESPACE is a bullet marker. A hyphen followed by
@@ -160,6 +204,13 @@ def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResu
     if not (base and settings.imessage_api_key):
         return ImessageResult(ok=False, status_code=None,
                               error="imessage proxy URL/key not configured")
+    destination_problem = check_destination(base)
+    if destination_problem:
+        # Refused before a socket opens. A cleartext send cannot be un-sent,
+        # so this is one of the few places where failing the digest outright
+        # is plainly better than delivering it.
+        log.error("imessage_destination_refused", reason=destination_problem)
+        return ImessageResult(ok=False, status_code=None, error=destination_problem)
     to = recipient or settings.imessage_recipient
     if not to:
         return ImessageResult(ok=False, status_code=None, error="no recipient configured")
@@ -197,11 +248,24 @@ def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResu
         log.warning("imessage_send_failed", error_class=type(exc).__name__, error=detail)
         return ImessageResult(ok=False, status_code=None, error=detail)
 
-    if 200 <= resp.status_code < 300:
+    # 202 EXACTLY, not any 2xx. The contract documents one success status for
+    # this route, so another 2xx means something other than the proxy answered
+    # — a base URL pointing at a different service, a captive portal, a
+    # load balancer's health page — and every one of those would otherwise be
+    # reported as a delivered digest. sipgate's sender accepts any 2xx because
+    # its contract is looser; this one is not.
+    if resp.status_code == 202:
         operation_id = _operation_id(resp)
         log.info("imessage_sent", status=resp.status_code, chars=len(text),
                  recipient=_mask_recipient(to), operation_id=operation_id)
         return ImessageResult(ok=True, status_code=resp.status_code, operation_id=operation_id)
+    if 200 <= resp.status_code < 300:
+        log.warning("imessage_unexpected_success_status", status=resp.status_code,
+                    hint="contract specifies 202 for this route; is the base URL correct?")
+        return ImessageResult(
+            ok=False, status_code=resp.status_code,
+            error=(f"unexpected {resp.status_code}; the contract specifies 202 for "
+                   f"/api/messages, so this reply did not come from the proxy's send route"))
 
     # problem+json bodies quote the offending value, which for a 401 can be the
     # key itself. sanitize() before this reaches a log or an admin response.

@@ -12,6 +12,7 @@ import pytest
 from app.config import Settings, near_miss_env_keys
 from app.notify.imessage import (
     MAX_TEXT_LEN,
+    check_destination,
     is_valid_recipient,
     normalise_text,
     strip_control,
@@ -165,6 +166,52 @@ class TestRecipientGrammar:
         assert is_valid_recipient(f"a{chr(0xFEFF)}b@example.net") is False
 
 
+class TestDestinationSafety:
+    """IMESSAGE_API_BASE_URL is the app's first config-driven outbound host.
+    Every other outbound host is a literal in code, so nothing else stands
+    between a typo and a cleartext bearer key."""
+
+    @pytest.mark.parametrize("url", [
+        "https://messages.example.com",
+        "https://messages.example.com:8443",
+        "http://127.0.0.1:8765",
+        "http://localhost:8765",
+        "http://host.containers.internal:8765",
+        "http://host.docker.internal:8765",
+    ])
+    def test_permits(self, url):
+        assert check_destination(url) is None
+
+    @pytest.mark.parametrize("url,fragment", [
+        ("http://messages.example.com", "cleartext"),
+        ("http://192.168.1.50:8765", "cleartext"),
+        ("ftp://messages.example.com", "scheme"),
+        ("messages.example.com", "scheme"),
+        ("", "empty"),
+        ("https://messages.example.com/api", "path"),
+    ])
+    def test_refuses(self, url, fragment):
+        problem = check_destination(url)
+        assert problem is not None, url
+        assert fragment in problem.lower()
+
+    def test_refused_destination_never_opens_a_socket(
+            self, isolated_db, imessage_env, monkeypatch):
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://messages.example.com")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        import app.notify.imessage as im
+
+        def _explode(*a, **k):
+            raise AssertionError("a cleartext send cannot be un-sent")
+
+        monkeypatch.setattr(im.httpx, "Client", _explode)
+        result = im.send_imessage("hi")
+        assert result.ok is False and "cleartext" in (result.error or "")
+        get_settings.cache_clear()
+
+
 class TestSendImessage:
     def test_posts_exact_contract_shape(self, isolated_db, imessage_env, monkeypatch):
         captured: dict = {}
@@ -261,6 +308,23 @@ class TestSendImessage:
         assert result.ok is False and result.status_code is None
         assert _KEY not in (result.error or "")
 
+    @pytest.mark.parametrize("status", [200, 201, 204])
+    def test_non_202_success_status_is_not_treated_as_sent(
+            self, isolated_db, imessage_env, monkeypatch, status):
+        # A base URL pointing at something that is not the proxy's send route —
+        # a health page, a load balancer, a captive portal — answers 2xx. The
+        # contract documents exactly one success status for /api/messages, so
+        # anything else means the digest did NOT go out.
+        import app.notify.imessage as im
+
+        captured: dict = {}
+        monkeypatch.setattr(im.httpx, "Client",
+                            _fake_client(captured, _Resp(status_code=status)))
+        result = im.send_imessage("hi")
+        assert result.ok is False
+        assert result.status_code == status
+        assert "202" in (result.error or "")
+
     def test_malformed_success_body_is_still_a_success(
             self, isolated_db, imessage_env, monkeypatch):
         import app.notify.imessage as im
@@ -308,8 +372,14 @@ class TestSendImessage:
 
 
 class TestTransportSelection:
-    def test_imessage_wins_when_both_enabled(self, isolated_db, monkeypatch):
+    def test_imessage_wins_when_both_enabled_and_imessage_is_configured(
+            self, isolated_db, monkeypatch):
+        # "Enabled" alone is deliberately not enough — see
+        # test_enabling_imessage_never_kills_a_working_sms_digest.
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "https://messages.example.com")
+        monkeypatch.setenv("IMESSAGE_API_KEY", _KEY)
+        monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
         monkeypatch.setenv("SMS_ENABLED", "true")
         from app.config import get_settings
 
@@ -324,6 +394,50 @@ class TestTransportSelection:
 
         get_settings.cache_clear()
         assert get_settings().daily_digest_transport == "sipgate"
+        get_settings.cache_clear()
+
+    def test_enabling_imessage_never_kills_a_working_sms_digest(
+            self, isolated_db, monkeypatch):
+        # The regression the review caught: selecting on the switch ALONE meant
+        # adding IMESSAGE_ENABLED=true to a working SMS deployment flipped the
+        # transport, kept the job scheduled, and skipped every run.
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "")
+        monkeypatch.setenv("IMESSAGE_API_KEY", "")
+        monkeypatch.setenv("IMESSAGE_RECIPIENT", "")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        assert settings.daily_digest_transport == "sipgate"
+        # ...and the operator is told, rather than the state being absorbed.
+        assert settings.imessage_enabled_but_unconfigured is True
+        get_settings.cache_clear()
+
+    def test_half_configured_imessage_is_not_selected(self, isolated_db, monkeypatch):
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "https://messages.example.com")
+        monkeypatch.setenv("IMESSAGE_API_KEY", _KEY)
+        monkeypatch.setenv("IMESSAGE_RECIPIENT", "")     # the missing one
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        assert get_settings().daily_digest_transport == "sipgate"
+        assert get_settings().imessage_enabled_but_unconfigured is True
+        get_settings.cache_clear()
+
+    def test_unconfigured_imessage_with_sms_off_is_none_not_imessage(
+            self, isolated_db, monkeypatch):
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        for var in ("IMESSAGE_API_BASE_URL", "IMESSAGE_API_KEY", "IMESSAGE_RECIPIENT"):
+            monkeypatch.setenv(var, "")
+        monkeypatch.setenv("SMS_ENABLED", "false")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        assert get_settings().daily_digest_transport == "none"
         get_settings.cache_clear()
 
     def test_none_when_both_off(self, isolated_db, monkeypatch):

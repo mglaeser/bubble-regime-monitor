@@ -447,10 +447,14 @@ def health_projection(
         "legacy_daily_digest_enabled": settings.daily_digest_transport != "none",
         "legacy_daily_digest_transport": settings.daily_digest_transport,
         "legacy_daily_digest_configured": (
-            settings.imessage_configured
-            if settings.daily_digest_transport == "imessage"
-            else bool(settings.sipgate_token_id and settings.sipgate_token
-                      and settings.sipgate_recipient)
+            bool(settings.sipgate_token_id and settings.sipgate_token
+                 and settings.sipgate_recipient)
             if settings.daily_digest_transport == "sipgate"
-            else False),
+            else settings.daily_digest_transport == "imessage"),
+        # IMESSAGE_ENABLED is on but the URL/key/recipient are not all set. The
+        # transport selector deliberately does NOT pick iMessage in this state
+        # — otherwise adding the switch to a working SMS deployment would kill
+        # the digest — so without this field the operator would see a healthy
+        # sipgate digest and never learn their iMessage config is incomplete.
+        "imessage_enabled_but_unconfigured": settings.imessage_enabled_but_unconfigured,
     }
