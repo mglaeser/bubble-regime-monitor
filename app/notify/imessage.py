@@ -261,8 +261,18 @@ def normalise_text(body: str) -> str:
         cleaned = without_bullet
     if cleaned.startswith("-"):
         rest = cleaned.lstrip("-").lstrip()
-        cleaned = f"minus {rest}" if rest[:1].isdigit() else rest
+        cleaned = f"minus {rest}" if _starts_with_number(rest) else rest
     return cleaned[:MAX_TEXT_LEN]
+
+
+def _starts_with_number(text: str) -> bool:
+    """Whether a hyphen in front of this was a MINUS SIGN rather than a bullet.
+
+    `.isdigit()` on the first character alone is not enough: a leading
+    fractional like "-.5% breadth" has "." next, so the sign was dropped and
+    the digest reported a fall as a rise — the exact inversion this whole
+    branch of normalise_text exists to prevent."""
+    return text[:1].isdigit() or (text[:1] == "." and text[1:2].isdigit())
 
 
 def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResult:

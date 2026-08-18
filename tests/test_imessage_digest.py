@@ -109,6 +109,17 @@ class TestTextNormalisation:
             once = normalise_text(body)
             assert normalise_text(once) == once, body
 
+    @pytest.mark.parametrize("body,expected_start", [
+        ("- -.5% breadth this week", "minus .5%"),
+        ("-.75pp move", "minus .75pp"),
+        ("- -.5", "minus .5"),
+    ])
+    def test_leading_fractional_negative_keeps_its_sign(self, body, expected_start):
+        # `.isdigit()` on the first character alone missed "-.5%", so the sign
+        # was dropped and a fall was reported as a rise — the exact inversion
+        # this branch of normalise_text exists to prevent.
+        assert normalise_text(body).startswith(expected_start)
+
     def test_leading_minus_sign_is_spelled_not_deleted(self):
         # Deleting it would turn "-3.1% breadth" into "3.1% breadth" and invert
         # the reading of a financial digest — silently wrong beats undelivered.
