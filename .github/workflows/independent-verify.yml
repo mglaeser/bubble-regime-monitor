@@ -125,6 +125,19 @@ jobs:
           if host.startswith("[") and host.endswith("]"):
               # What a connection error prints, brackets being URL syntax.
               forms.add(host[1:-1])
+          else:
+              # A Unicode host is resolved under its IDNA form, and that form is
+              # what a resolver or socket error names -- same host, a different
+              # literal, so it needs its own mask. ASCII encodes to itself, so
+              # this is a no-op for an ordinary hostname.
+              try:
+                  puny = host.encode("idna").decode("ascii")
+              except (UnicodeError, ValueError):
+                  puny = ""
+              if puny:
+                  forms.add(puny)
+                  if hostport != host:
+                      forms.add(puny + hostport[len(host) :])
 
           for form in sorted(forms):
               if not form:
