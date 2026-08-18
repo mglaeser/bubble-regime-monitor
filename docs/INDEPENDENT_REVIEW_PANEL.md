@@ -16,7 +16,7 @@ deterministic gate plus the operator alone.
 
 ## Mechanism
 
-On every `pull_request` (workflow `Independent-Verify`, job `cross-vendor`):
+On every `pull_request_target` (workflow `Independent-Verify`, job `panel`):
 
 1. **Panel, one DIFFERENT model per voice** (default
    `gpt-5.3-codex, gpt-5.6-sol, gpt-4.1-mini`, resolved against the account's
