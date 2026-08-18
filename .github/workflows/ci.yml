@@ -56,11 +56,42 @@ jobs:
         # ceiling in the same commit that lowers the count.
         env:
           MYPY_CEILING: "217"
+          # The ceiling is only meaningful if mypy actually read the tree. This
+          # floor is what makes a LOW count mean "little is wrong" rather than
+          # "little was checked". 112 files today; the floor sits below that so
+          # ordinary file movement does not trip it.
+          MYPY_MIN_FILES: "100"
         run: |
           set +e
           mypy app > /tmp/mypy.txt 2>&1
+          rc=$?
           set -e
           tail -1 /tmp/mypy.txt
+          # A COUNT OF ERROR LINES IS NOT A MEASURE OF WORK DONE. Two ways this
+          # gate passed while type-checking nothing, both reproduced:
+          #   mypy absent          -> rc 127, no output, "mypy errors: 0" -> PASSED,
+          #                           and advised lowering the ceiling to 0.
+          #   target path moved    -> rc 2, "errors prevented further checking",
+          #                           "mypy errors: 1"  -> PASSED at 1, advising a
+          #                           ceiling of 1 -- which then makes RESTORING
+          #                           real checking fail the build at 217.
+          # rc 0 and 1 are verdicts (clean / errors found). Anything else means
+          # mypy could not run, and an unrunnable checker is a refusal, never a
+          # low score. Fail-closed, as every other gate in this file.
+          if [ "$rc" -ge 2 ]; then
+            echo "::error::mypy exited $rc without type-checking the tree — this is a refusal, not a pass."
+            cat /tmp/mypy.txt
+            exit 1
+          fi
+          checked=$(grep -oE '[0-9]+ source files?' /tmp/mypy.txt | tail -1 | grep -oE '^[0-9]+' || true)
+          checked=${checked:-0}
+          echo "mypy checked $checked source files (floor $MYPY_MIN_FILES)"
+          if [ "$checked" -lt "$MYPY_MIN_FILES" ]; then
+            echo "::error::mypy checked only $checked source files, below the floor $MYPY_MIN_FILES."
+            echo "::error::The error count below is not trustworthy — mypy did not read the tree."
+            cat /tmp/mypy.txt
+            exit 1
+          fi
           n=$(grep -cE '^[^ ].*: error:' /tmp/mypy.txt || true)
           echo "mypy errors: $n (ceiling $MYPY_CEILING)"
           if [ "$n" -gt "$MYPY_CEILING" ]; then

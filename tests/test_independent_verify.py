@@ -323,15 +323,77 @@ class TestReviewRange:
     main...main, returns empty, and the panel goes permanently FAKE-GREEN --
     reproduced before this guard existed."""
 
+    @staticmethod
+    def _record_git(monkeypatch) -> list[list[str]]:
+        """Record every subprocess argv rather than raising on one.
+
+        Deliberately not a raising sentinel: `_sh` wraps subprocess.run in a
+        bare `except Exception` and converts whatever it catches into DiffError
+        -- so a sentinel that raised would be laundered into the very exception
+        these tests expect, and they would pass for the wrong reason twice
+        over. Recording keeps the assertion about REACHING git separate from
+        the assertion about the error."""
+        calls: list[list[str]] = []
+
+        class _Proc:
+            returncode = 0
+            stdout = b"0" * 40
+            stderr = b""
+
+        def fake_run(args, *_a, **_kw):
+            calls.append(list(args))
+            return _Proc()
+
+        monkeypatch.setattr(iv.subprocess, "run", fake_run)
+        return calls
+
     def test_non_hex_sha_is_rejected_before_reaching_git(self, monkeypatch):
+        # The name claims two things -- rejected, and rejected BEFORE git sees
+        # it. Asserting only `raises(DiffError)` checked neither: with the
+        # 40-hex guard deleted, `git merge-base` fails on the garbage ref and
+        # _sh(required=True) raises DiffError anyway. Verified by mutation --
+        # the guard removed, all 44 tests stayed green. Both halves are now
+        # asserted, and the argv assertion is what the name is really about.
+        calls = self._record_git(monkeypatch)
         monkeypatch.setenv("VERIFIER_HEAD_SHA", "not-a-sha; rm -rf /")
-        with pytest.raises(iv.DiffError):
+        with pytest.raises(iv.DiffError, match="not a 40-hex sha"):
             iv.review_range()
+        assert calls == [], f"the unvalidated sha was passed to git: {calls}"
 
     def test_short_sha_is_rejected(self, monkeypatch):
+        calls = self._record_git(monkeypatch)
         monkeypatch.setenv("VERIFIER_HEAD_SHA", "8d85424")
-        with pytest.raises(iv.DiffError):
+        with pytest.raises(iv.DiffError, match="not a 40-hex sha"):
             iv.review_range()
+        assert calls == [], f"the unvalidated sha was passed to git: {calls}"
+
+    def test_a_candidate_that_is_an_ancestor_of_the_base_blocks(self, monkeypatch):
+        """Nothing to review is a FAULT in a PR context, not an approval.
+
+        Untested until now: deleting the ancestor check left all 44 tests
+        green. It is the guard that stops a collapsed range greening the
+        panel, which is the failure this whole class exists to describe."""
+        sha = "a" * 40
+        monkeypatch.setenv("VERIFIER_HEAD_SHA", sha)
+        monkeypatch.setattr(iv, "_sh", lambda _args, **_kw: sha + "\n")
+        with pytest.raises(iv.DiffError, match="ancestor"):
+            iv.review_range()
+
+    def test_an_empty_merge_base_blocks(self, monkeypatch):
+        monkeypatch.setenv("VERIFIER_HEAD_SHA", "a" * 40)
+        monkeypatch.setattr(iv, "_sh", lambda _args, **_kw: "  \n")
+        with pytest.raises(iv.DiffError, match="empty merge-base"):
+            iv.review_range()
+
+    def test_a_candidate_ahead_of_the_base_is_accepted(self, monkeypatch):
+        """The complement, so the two blocking tests above cannot be satisfied
+        by a guard that simply refuses everything."""
+        head, mb = "b" * 40, "c" * 40
+        monkeypatch.setenv("VERIFIER_HEAD_SHA", head)
+        monkeypatch.setattr(
+            iv, "_sh",
+            lambda args, **_kw: (mb + "\n") if args[1] == "merge-base" else (head + "\n"))
+        assert iv.review_range() == (mb, head)
 
 
 class TestStepSummary:
@@ -399,3 +461,65 @@ class TestStepSummary:
         monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "no-such-dir" / "s.md"))
         iv.write_step_summary([self.OK], ["m"], [("g", {"block": False, "reason": "r"})],
                               blocked=False)      # must not raise
+
+
+class TestMainFailsClosedOnAnUnreviewableDiff:
+    """main()'s own refusals, none of which had a test.
+
+    The parts of this script are well covered; the ASSEMBLY was not. A mutation
+    run drove fourteen edits through the suite: eleven were caught, and the
+    three survivors were all here or in review_range -- including the guard the
+    source itself calls "the fake-green path". These tests drive main() with
+    build_diff stubbed so the refusal, not the plumbing, is what is asserted."""
+
+    @staticmethod
+    def _armed(monkeypatch):
+        """A run that has a key and is not a selftest -- i.e. past every early
+        return, so what follows is genuinely main()'s diff handling."""
+        monkeypatch.setattr(iv, "KEY", "test-key")
+        monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
+
+    def test_empty_diff_with_an_explicit_candidate_sha_blocks(self, monkeypatch, capsys):
+        # THE FAKE-GREEN PATH. Under pull_request_target the job runs from the
+        # default branch, where HEAD is main: if the range collapses, the diff
+        # is empty and greening it approves the candidate without reading it.
+        self._armed(monkeypatch)
+        monkeypatch.setattr(iv, "build_diff", lambda: "")
+        monkeypatch.setenv("VERIFIER_HEAD_SHA", "a" * 40)
+        assert iv.main() == 1
+        assert "review range" in capsys.readouterr().err
+
+    def test_empty_diff_without_a_candidate_sha_is_green(self, monkeypatch, capsys):
+        # The complement: with no candidate sha there is genuinely nothing to
+        # review, and blocking every such run would make the gate unusable.
+        self._armed(monkeypatch)
+        monkeypatch.setattr(iv, "build_diff", lambda: "")
+        monkeypatch.delenv("VERIFIER_HEAD_SHA", raising=False)
+        assert iv.main() == 0
+        assert "No diff to review" in capsys.readouterr().out
+
+    def test_a_failed_diff_assembly_blocks(self, monkeypatch, capsys):
+        self._armed(monkeypatch)
+
+        def boom() -> str:
+            raise iv.DiffError("merge-base unavailable")
+
+        monkeypatch.setattr(iv, "build_diff", boom)
+        assert iv.main() == 1
+        assert "fail-closed" in capsys.readouterr().err
+
+    def test_a_fork_run_without_a_key_blocks(self, monkeypatch, capsys):
+        # Secrets are withheld from fork PRs, so "no key" there is an untrusted
+        # origin, not the operator's documented residual.
+        monkeypatch.setattr(iv, "KEY", "")
+        monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
+        monkeypatch.setenv("VERIFIER_REQUIRE_KEY", "true")
+        assert iv.main() == 1
+        assert "fork-origin" in capsys.readouterr().err
+
+    def test_a_same_repo_run_without_a_key_reports_the_residual(self, monkeypatch, capsys):
+        monkeypatch.setattr(iv, "KEY", "")
+        monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
+        monkeypatch.delenv("VERIFIER_REQUIRE_KEY", raising=False)
+        assert iv.main() == 0
+        assert "RESIDUAL" in capsys.readouterr().out
