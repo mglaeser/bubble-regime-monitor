@@ -293,8 +293,15 @@ class TestBothBaselineTestsShareOneReference:
     """The defect this whole file exists because of: two copies of one
     authority."""
 
-    GUARDED = ("tests/test_secret_gate_policy.py",
-               "tests/test_verifier_mc4_passc.py")
+    # test_verifier_mc4_passc.py was retired with the verifier package. The
+    # tuple is still enumerated EXPLICITLY rather than discovered, so that
+    # deleting the last consumer makes this list empty and trips the guard
+    # below — a check must not be satisfied by having nothing left to check.
+    GUARDED = ("tests/test_secret_gate_policy.py",)
+
+    def test_the_guarded_set_is_not_empty(self):
+        """Deleting every consumer must fail loudly, not silently pass."""
+        assert self.GUARDED, "no file guards the shared baseline reference"
 
     def test_both_read_the_shared_reference_module(self):
         for name in self.GUARDED:
@@ -303,11 +310,11 @@ class TestBothBaselineTestsShareOneReference:
                 f"{name} does not use the shared baseline reference")
 
     def test_neither_carries_its_own_baseline_commit_literal(self):
-        """No bare 40-hex commit may sit in either file's baseline code.
+        """No bare 40-hex commit may sit in a guarded file's baseline code.
 
-        `test_verifier_mc4_passc.py` legitimately pins OTHER commits (PR #25's
-        base and head), so the check is scoped to the accepted-baseline value
-        and to the retired pin it replaced."""
+        Scoped to the accepted-baseline value and the retired pin it replaced,
+        rather than to any 40-hex string: a guarded file may legitimately pin
+        OTHER commits for unrelated reasons."""
         retired = "b08844a0755710035d62830faa84902d9d85d3fe"  # pragma: allowlist secret
         for name in self.GUARDED:
             source = (ROOT / name).read_text(encoding="utf-8")

@@ -63,7 +63,9 @@ class _FakeLPPLS:
 def test_compute_confidence_valid_zero_producer(monkeypatch):
     """A genuinely computed 0.0 must ship as state=VALID_ZERO with FULL quality
     (>=100 windows) — the previously untested producer branch."""
-    import lppls.lppls as lppls_mod
+    # ci.yml installs lppls best-effort and claims these paths self-skip;
+    # a bare import made that claim false and hard-failed the suite instead.
+    lppls_mod = pytest.importorskip("lppls.lppls")
 
     from app.indicators import d4_lppls
 
@@ -81,7 +83,9 @@ def test_compute_confidence_valid_zero_producer(monkeypatch):
 
 def test_compute_confidence_valid_nonzero_producer(monkeypatch):
     """Contrast case through the same stub: some windows qualify -> VALID."""
-    import lppls.lppls as lppls_mod
+    # ci.yml installs lppls best-effort and claims these paths self-skip;
+    # a bare import made that claim false and hard-failed the suite instead.
+    lppls_mod = pytest.importorskip("lppls.lppls")
 
     from app.indicators import d4_lppls
 

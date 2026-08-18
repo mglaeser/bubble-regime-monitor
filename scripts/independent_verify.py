@@ -71,12 +71,35 @@ import urllib.request
 from typing import Any
 
 KEY = os.environ.get("SECOND_VENDOR_API_KEY") or os.environ.get("OPENAI_API_KEY")
+def normalize_base(raw: str) -> str:
+    """Trailing slashes off. Every call site builds f"{BASE}/models" and
+    friends, so a base ending in "/" produces "//models", which this gateway
+    answers 404 — a configuration slip that would otherwise surface as an
+    unexplained panel outage. Verified live: ".../v1/models" 200,
+    ".../v1//models" 404."""
+    return (raw or "").strip().rstrip("/")
+
+
 # `or`, not .get(default): the workflow passes VERIFIER_BASE_URL from a repo
 # VARIABLE, and GitHub Actions injects an EMPTY STRING when the variable is
 # unset — .get(name, default) would keep "" and every request would crash with
 # "unknown url type" (observed live on PR #21). The reference JS used ||,
 # which is empty-string-safe; this is the Python equivalent.
-BASE = os.environ.get("VERIFIER_BASE_URL") or "https://api.openai.com/v1"
+BASE = normalize_base(os.environ.get("VERIFIER_BASE_URL")) or "https://api.openai.com/v1"
+
+
+def auth_header() -> dict[str, str]:
+    """The configured gateway's auth header. Defaults to the OpenAI convention
+    ``Authorization: Bearer``. VERIFIER_AUTH_HEADER names a DIFFERENT header for
+    gateways that reserve Authorization for upstream forwarding — verified live
+    against inference.klee.me, whose providers.openai runs authMode="forward"
+    and answers Bearer with 401 "opencodex API key required" while accepting
+    X-OpenCodex-API-Key. Same `or`-not-`.get(default)` reason as BASE above:
+    Actions injects an EMPTY STRING for an unset repo variable."""
+    name = (os.environ.get("VERIFIER_AUTH_HEADER") or "").strip()
+    if name and name.lower() != "authorization":
+        return {name: KEY or ""}
+    return {"Authorization": f"Bearer {KEY}"}
 
 # Preference order (new -> old): without an explicit VERIFIER_MODEL the panel
 # resolves each wanted ID against the account's /v1/models list.
@@ -221,6 +244,35 @@ def strict_any_refutation(votes: list[dict], models: list[str]) -> dict[str, Any
     return {"block": False, "reason": "strict mode: no high/medium refutation"}
 
 
+# Words that name a DEFECT rather than describe a review. Deliberately narrow:
+# each denotes a concrete failure, not a hedge ("could", "consider", "prefer"),
+# so ordinary approving prose does not trip the gate.
+_DEFECT_WORDS = re.compile(
+    r"\b(bypass|fail-open|unauthenticated|injection|vulnerab\w*|exploitab\w*|"
+    r"race condition|deadlock|regress\w*|data loss|privilege escalation)\b", re.I)
+
+
+def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
+    """A GREEN vote whose OWN reason names a defect is not an approval — it is a
+    model that analysed correctly and then set the boolean wrong. decide() reads
+    only ``refuted``, so without this gate that vote counts toward the quorum
+    AND supplies a substantive, distinct reason that helps attest_reasons pass.
+
+    Found adversarially: a panelist returned refuted=false with a reason that
+    named two concrete defects. Fail-CLOSED — an inconsistent vote is discarded
+    as a parse failure, not resolved in favour of green."""
+    for i, x in enumerate(votes):
+        if not _is_valid(x) or x["v"]["refuted"] is not False:
+            continue
+        hit = _DEFECT_WORDS.search(norm_reason(x["v"].get("reason")))
+        if hit:
+            return {"block": True,
+                    "reason": f'{models[i]}: refuted=false but its own reason names a '
+                              f'defect ("{hit.group(0)}") -> inconsistent vote, fail-closed'}
+    return {"block": False,
+            "reason": f"{len(_green(votes))} green reason(s) free of defect claims"}
+
+
 def attest_reasons(votes: list[dict], panel_size: int) -> dict[str, Any]:
     """Anti sham-green gate: a MAJORITY of the green-carrying votes must have a
     substantive reason, and a MAJORITY of those must be mutually DISTINCT after
@@ -277,6 +329,13 @@ class DiffError(RuntimeError):
     git failures were silently converted to empty output)."""
 
 
+class ProviderConfigError(RuntimeError):
+    """The endpoint is misconfigured, so no panel can be assembled. Distinct
+    from a vote failure: this must name the CAUSE, because the previous
+    behaviour (fall back to one pinned model for every voice) turned a wrong
+    BASE URL into three identical, unexplained vote errors."""
+
+
 def _sh(args: list[str], *, required: bool = False) -> str:
     """Run a git command; decode with errors="replace" so invalid UTF-8 becomes
     VISIBLE replacement characters instead of an empty (falsely reviewable)
@@ -302,16 +361,42 @@ def base_branch() -> str:
     return os.environ.get("GITHUB_BASE_REF") or "main"
 
 
-def diff_commands(merge_base: str) -> dict[str, list[str]]:
+def review_range() -> tuple[str, str]:
+    """(merge_base, head) for the review.
+
+    The head comes EXPLICITLY from VERIFIER_HEAD_SHA, because the job runs from
+    the DEFAULT BRANCH (pull_request_target) where HEAD *is* main: without this
+    merge-base(main, HEAD) diffs main against itself, yields an empty diff and
+    goes permanently FAKE-GREEN. Reproduced before this guard existed, so the
+    empty-diff path is fail-CLOSED whenever a candidate sha was supplied.
+
+    The sha is validated as 40-hex and must not be an ancestor of the base --
+    an ancestor means there is nothing to review, which in a PR context is a
+    fault, not an approval."""
+    head = (os.environ.get("VERIFIER_HEAD_SHA") or "").strip() or "HEAD"
+    base = (os.environ.get("VERIFIER_BASE_BRANCH") or "").strip() or base_branch()
+    if head != "HEAD" and not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise DiffError(f"VERIFIER_HEAD_SHA is not a 40-hex sha: {head!r}")
+    mb = _sh(["git", "merge-base", f"origin/{base}", head], required=True).strip()
+    if not mb:
+        raise DiffError(f"empty merge-base for origin/{base}...{head}")
+    if mb == _sh(["git", "rev-parse", head], required=True).strip():
+        raise DiffError(
+            f"candidate {head[:12]} is an ancestor of origin/{base} — nothing to "
+            f"review; in a PR context that is a fault, fail-closed")
+    return mb, head
+
+
+def diff_commands(merge_base: str, head: str = "HEAD") -> dict[str, list[str]]:
     """The three diff invocations. The NAME-STATUS list carries ALL changed
     paths WITHOUT excludes (round-4 panel finding: filtering the authoritative
     list let an excluded-only PR return an empty diff and auto-green with zero
     votes) — paths are not content; the privacy excludes protect CONTENTS and
     stay on stat/body."""
     return {
-        "names": ["git", "diff", "--name-status", f"{merge_base}...HEAD"],
-        "stat": ["git", "diff", "--stat", f"{merge_base}...HEAD", "--", "."] + _EXCLUDES,
-        "body": ["git", "diff", f"{merge_base}...HEAD", "--", "."] + _EXCLUDES,
+        "names": ["git", "diff", "--name-status", f"{merge_base}...{head}"],
+        "stat": ["git", "diff", "--stat", f"{merge_base}...{head}", "--", "."] + _EXCLUDES,
+        "body": ["git", "diff", f"{merge_base}...{head}", "--", "."] + _EXCLUDES,
     }
 
 
@@ -331,10 +416,8 @@ def build_diff() -> str:
     # multi-commit PR would silently shrink the review to the TIP commit only.
     # checkout runs with fetch-depth: 0, so origin/<base> is always present in
     # CI; a merge-base failure is a real fault and must BLOCK.
-    mb = _sh(["git", "merge-base", f"origin/{base_branch()}", "HEAD"], required=True).strip()
-    if not mb:
-        raise DiffError(f"empty merge-base for origin/{base_branch()}...HEAD")
-    cmds = diff_commands(mb)
+    mb, head = review_range()
+    cmds = diff_commands(mb, head)
     names = _sh(cmds["names"], required=True)
     stat = _sh(cmds["stat"], required=True)
     body = _sh(cmds["body"], required=True)
@@ -491,8 +574,64 @@ def selftest() -> None:
            "refuting vote needs no proof while green majority has valid proofs")
     expect(attest_proof([PR(f"{CH}-7")], CH, 1)["block"] is False, "panel=1 with valid proof passes")
     expect(attest_proof([PR(f"{CH}-7"), PR(f"{CH}-8"), PR(f"{CH}-9")], "", 3)["block"] is True, "empty challenge -> no proof valid -> fail-closed")
+    # attest_consistency() -- a green vote whose own reason names a defect
+    def GV(reason: Any, refuted: bool = False) -> dict:
+        return {"ok": True, "v": {"refuted": refuted, "reason": reason, "confidence": "high"}}
+    M3 = ["m-a", "m-b", "m-c"]
+    expect(attest_consistency([GV("checked auth paths, no issue"), GV("docs only change"),
+                               GV("reviewed diff, behaviour unchanged")], M3)["block"] is False,
+           "ordinary approving reasons must pass")
+    expect(attest_consistency([GV("checked auth paths"), GV("auth bypass when key is None"),
+                               GV("docs only")], M3)["block"] is True,
+           "green vote naming a bypass must fail-closed")
+    expect(attest_consistency([GV("fail-open on missing header", True), GV("docs only"),
+                               GV("no issue found")], M3)["block"] is False,
+           "a REFUTING vote may name a defect -- that is its job")
+    expect(attest_consistency([GV("could be more defensive; consider hardening"), GV("ok looks fine"),
+                               GV("no problems seen")], M3)["block"] is False,
+           "hedging words are not defect claims")
+    expect(attest_consistency([E, GV("docs only"), GV("no issue")], M3)["block"] is False,
+           "an errored vote is not inspected for consistency")
+
+    # auth_header() -- both branches
+    _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)
+    try:
+        expect("Authorization" in auth_header(), "default must be Authorization: Bearer")
+        os.environ["VERIFIER_AUTH_HEADER"] = "X-OpenCodex-API-Key"
+        expect(list(auth_header()) == ["X-OpenCodex-API-Key"], "custom header must replace Authorization")
+        os.environ["VERIFIER_AUTH_HEADER"] = ""
+        expect("Authorization" in auth_header(), "empty variable (unset Actions var) -> default")
+        os.environ["VERIFIER_AUTH_HEADER"] = "authorization"
+        expect("Authorization" in auth_header(), "case-insensitive 'authorization' -> default Bearer form")
+    finally:
+        os.environ.pop("VERIFIER_AUTH_HEADER", None)
+        if _saved is not None:
+            os.environ["VERIFIER_AUTH_HEADER"] = _saved
+
+    # review_range() -- a non-hex candidate sha must never reach git
+    _sv = os.environ.get("VERIFIER_HEAD_SHA")
+    try:
+        os.environ["VERIFIER_HEAD_SHA"] = "not-a-sha; rm -rf /"
+        try:
+            review_range()
+            expect(False, "non-hex VERIFIER_HEAD_SHA must raise DiffError")
+        except DiffError:
+            pass
+    finally:
+        os.environ.pop("VERIFIER_HEAD_SHA", None)
+        if _sv is not None:
+            os.environ["VERIFIER_HEAD_SHA"] = _sv
+
+    # normalize_base() -- a trailing slash builds "//models", answered 404
+    expect(normalize_base("https://h/v1/") == "https://h/v1", "trailing slash must be stripped")
+    expect(normalize_base("https://h/v1///") == "https://h/v1", "repeated slashes must be stripped")
+    expect(normalize_base("  https://h/v1  ") == "https://h/v1", "surrounding whitespace must be stripped")
+    expect(normalize_base("") == "", "empty stays empty so the `or` default applies")
+    expect(normalize_base(None) == "", "None stays empty so the `or` default applies")
+
     print("   OK selftest: decide() + model_matches() + require_approvals() (required approver Sol "
-          "+ corroboration) + attest_reasons() + attest_proof() correct.")
+          "+ corroboration) + attest_reasons() + attest_proof() + attest_consistency() + "
+          "auth_header() + review_range() + normalize_base() correct.")
 
 
 # --------------------------------------------------------------- API plumbing --
@@ -500,7 +639,7 @@ def selftest() -> None:
 
 def _http_json(url: str, payload: dict | None = None, timeout: int = 180) -> tuple[int, Any]:
     req = urllib.request.Request(  # noqa: S310 -- operator-configured https endpoint (VERIFIER_BASE_URL)
-        url, headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"},
+        url, headers={"Content-Type": "application/json", **auth_header()},
         data=json.dumps(payload).encode() if payload is not None else None,
         method="POST" if payload is not None else "GET")
     try:
@@ -525,20 +664,32 @@ def pick_for_pref(ids: list[str], p: str) -> str | None:
     return dated[-1] if dated else None
 
 
-def fetch_model_ids() -> list[str] | None:
+def fetch_model_ids() -> tuple[list[str] | None, str]:
+    """(model ids, diagnostic). The diagnostic carries the status and a short
+    body so a misconfigured endpoint can be READ from the log rather than
+    guessed at from three identical vote errors."""
     status, data = _http_json(f"{BASE}/models")
     if status == 200 and isinstance(data, dict):
-        return [m.get("id") for m in data.get("data", []) if m.get("id")]
-    return None
+        return [m.get("id") for m in data.get("data", []) if m.get("id")], ""
+    return None, f"GET {BASE}/models -> {status or 'no response'}: {str(data)[:200]}"
 
 
 def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
     if os.environ.get("VERIFIER_MODEL"):
         return [os.environ["VERIFIER_MODEL"]] * panel_size
-    ids = fetch_model_ids()
+    ids, why = fetch_model_ids()
     if not ids:
-        print(f"[independent-verify] /v1/models unavailable -> fallback model {FALLBACK_MODEL} for all voices.")
-        return [FALLBACK_MODEL] * panel_size
+        # An unreachable catalogue used to degrade silently to FALLBACK_MODEL
+        # for every voice; each vote then errored on a model the gateway does
+        # not serve, and the operator saw three identical failures with no hint
+        # that the BASE URL was the cause. The most common cause is exactly
+        # that: a base without the version segment, or with a trailing slash.
+        # Verified live: ".../v1/models" 200, ".../models" 401, ".../v1//models" 404.
+        raise ProviderConfigError(
+            f"model catalogue unreachable, so the panel cannot be resolved -- {why}\n"
+            f"  VERIFIER_BASE_URL is {BASE!r}. It must include the API version "
+            f"segment (e.g. 'https://host/v1'), and the auth header must be the "
+            f"one this gateway expects (VERIFIER_AUTH_HEADER).")
     newest = FALLBACK_MODEL
     for p in MODEL_PREFERENCE:
         hit = pick_for_pref(ids, p)
@@ -619,6 +770,13 @@ def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
     return {"ok": False, "status": status, "reason": f"API {status}: {str(data)[:300]}"}
 
 
+# A 401 whose body names an exhausted upstream account pool is a DETERMINISTIC
+# gateway state, not a flaky auth hiccup: retrying burns the backoff budget and
+# still fails. Observed live on inference.klee.me while its OpenAI account pool
+# was empty ("OpenAI account pool has no usable account credential").
+_POOL_EXHAUSTED = re.compile(r"no usable account credential", re.I)
+
+
 def verify_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
     last: dict = {"ok": False, "reason": "no attempt executed"}
     for a in range(1, 4):
@@ -627,30 +785,80 @@ def verify_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
             return last
         if last.get("status") and not is_transient(last["status"]):
             return last            # deterministic error -> no retry
+        if last.get("status") == 401 and _POOL_EXHAUSTED.search(str(last.get("reason", ""))):
+            return last            # deterministic gateway state -> no retry
         if a < 3:
-            time.sleep(0.5 * a)
+            # 4s, then 16s. The old 0.5s/1.0s was far too short for the real
+            # failures seen against this gateway: 429 rate limits and a 504
+            # gateway timeout on a model that had answered correctly minutes
+            # before. A voice lost to an under-short backoff silently shrinks
+            # the panel and can trip the fail-closed quorum gates.
+            time.sleep(min(30.0, float(4 ** a)))
     return last
 
 
 # --------------------------------------------------------------------- main --
 
 
+def _md_cell(value: object, limit: int = 300) -> str:
+    """Model-authored text, made safe for a markdown table cell.
+
+    The reason comes from a language model reading an untrusted diff, so it is
+    treated as hostile input to the RENDERER: pipes would break out of the
+    cell, newlines out of the row, and backticks out of code spans. Collapsing
+    whitespace and escaping the three metacharacters is enough — the value is
+    never interpreted as anything but table text."""
+    text = " ".join(str("" if value is None else value).split())
+    text = text.replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`")
+    return (text[: limit - 1] + "…") if len(text) > limit else (text or "—")
+
+
+def write_step_summary(votes: list[dict], models: list[str], gates: list[tuple[str, dict]],
+                       blocked: bool) -> None:
+    """Publish the panel's findings where a reviewer will actually see them.
+
+    GITHUB_STEP_SUMMARY renders as markdown on the run page, one click from the
+    pull request's check. Chosen over posting a pull-request review because it
+    needs no token, no extra permission and no API call that could itself fail
+    and turn a clean verdict into a red job.
+
+    Written on BOTH paths. A panel that only explains itself when it blocks
+    leaves the reader unable to tell 'three voices examined this and agreed'
+    from 'the panel never ran'."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    lines = [
+        "## Independent-Verify — cross-vendor panel",
+        "",
+        f"**Verdict: {'BLOCKED' if blocked else 'APPROVED'}**",
+        "",
+        "| # | Model | Verdict | Confidence | Finding |",
+        "|---|---|---|---|---|",
+    ]
+    for i, (vote, model) in enumerate(zip(votes, models, strict=False), start=1):
+        if not vote.get("ok"):
+            lines.append(f"| {i} | `{_md_cell(model, 60)}` | ⚠️ no vote | — "
+                         f"| {_md_cell(vote.get('reason'))} |")
+            continue
+        v = vote.get("v") or {}
+        refuted = v.get("refuted")
+        mark = "🔴 refutes" if refuted else ("🟢 approves" if refuted is False else "⚠️ unparsable")
+        lines += [f"| {i} | `{_md_cell(model, 60)}` | {mark} "
+                  f"| {_md_cell(v.get('confidence'), 12)} | {_md_cell(v.get('reason'))} |"]
+    lines += ["", "### Gates", ""]
+    for name, result in gates:
+        state = "⛔ blocked" if result.get("block") else "✅ passed"
+        lines.append(f"- **{name}** — {state}: {_md_cell(result.get('reason'), 400)}")
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        # Never let the REPORT break the VERDICT.
+        print(f"[independent-verify] could not write the step summary: {exc}")
+
+
 def main() -> int:
-    if "--plan" in sys.argv:
-        # Stage-1 structural planning (verifier package): STRICTLY zero
-        # network, no key read, no panel involvement. Dispatched before any
-        # key/endpoint logic so `--plan` can never depend on either.
-        from verifier import plan as _plan
-        return _plan.main(sys.argv[1:])
-
-    if "--finalize-mock" in sys.argv:
-        # Stage-2 MOCK finalization. Dispatched here for the same reason as
-        # --plan: it must never inherit key or endpoint state. Local-only by
-        # construction — mock transport, zero provider and zero generation
-        # calls, a non-executable report (MC4 A2-F07).
-        from verifier import finalize as _finalize
-        return _finalize.main(sys.argv[1:])
-
     if "--selftest" in sys.argv:
         selftest()
         return 0
@@ -679,6 +887,13 @@ def main() -> int:
         print(f"BLOCK diff assembly failed — cannot review, fail-closed: {exc}", file=sys.stderr)
         return 1
     if not d.strip():
+        # Defence in depth behind review_range()'s ancestor check: in a PR run
+        # (candidate sha supplied) an empty diff means the range collapsed, not
+        # that the change is harmless. Greening here is the fake-green path.
+        if (os.environ.get("VERIFIER_HEAD_SHA") or "").strip():
+            print("BLOCK empty diff for an explicit candidate sha — the review range "
+                  "collapsed; fail-closed.", file=sys.stderr)
+            return 1
         print("[independent-verify] No diff to review. Green.")
         return 0
 
@@ -699,7 +914,12 @@ def main() -> int:
     except ValueError:
         min_others = 1
 
-    models = resolve_panel_models(panel, wanted)
+    try:
+        models = resolve_panel_models(panel, wanted)
+    except ProviderConfigError as exc:
+        print(f"BLOCK provider configuration — no panel could be assembled, "
+              f"fail-closed: {exc}", file=sys.stderr)
+        return 1
     print(f"[independent-verify] Panel ({len(models)} voices, one model each): {', '.join(models)}"
           + (" (VERIFIER_MODEL pinned)" if os.environ.get("VERIFIER_MODEL") else ""))
     print(f'[independent-verify] Required approver: "{required_approver}" must approve + >= {min_others} other(s).')
@@ -720,25 +940,35 @@ def main() -> int:
         print(f"  Verifier {i + 1}/{panel} ({models[i]}): refuted={v.get('refuted')} "
               f"confidence={v.get('confidence')} — reason: {reason}")
 
-    verdict = require_approvals(votes, models, required_approver, min_others, challenge)
-    if verdict["block"]:
-        print(f"BLOCK required-approver gate: {verdict['reason']}", file=sys.stderr)
-        return 1
-    if (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes"):
-        strict = strict_any_refutation(votes, models)
-        if strict["block"]:
-            print(f"BLOCK strict-mode gate: {strict['reason']}", file=sys.stderr)
+    # Gates in order, short-circuiting on the FIRST block — the order is the
+    # semantics and does not change. What is new is that the gates evaluated so
+    # far are collected, so the summary can name which one blocked and why.
+    strict_on = (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes")
+    pending: list[tuple[str, str, Any]] = [
+        ("required-approver gate", "required-approver",
+         lambda: require_approvals(votes, models, required_approver, min_others, challenge)),
+    ]
+    if strict_on:
+        pending.append(("strict-mode gate", "strict mode",
+                        lambda: strict_any_refutation(votes, models)))
+    pending += [
+        ("consistency gate", "consistency", lambda: attest_consistency(votes, models)),
+        ("integrity gate (sham green)", "reason attestation", lambda: attest_reasons(votes, panel)),
+        ("proof-of-check gate", "proof of check", lambda: attest_proof(votes, challenge, panel)),
+    ]
+
+    gates: list[tuple[str, dict]] = []
+    for log_name, summary_name, run in pending:
+        result = run()
+        gates.append((summary_name, result))
+        if result["block"]:
+            print(f"BLOCK {log_name}: {result['reason']}", file=sys.stderr)
+            write_step_summary(votes, models, gates, blocked=True)
             return 1
-    attest = attest_reasons(votes, panel)
-    if attest["block"]:
-        print(f"BLOCK integrity gate (sham green): {attest['reason']}", file=sys.stderr)
-        return 1
-    proof = attest_proof(votes, challenge, panel)
-    if proof["block"]:
-        print(f"BLOCK proof-of-check gate: {proof['reason']}", file=sys.stderr)
-        return 1
-    print(f"[independent-verify] Cross-vendor panel confirms (required approver: {verdict['reason']}; "
-          f"{attest['reason']}; {proof['reason']}). Green.")
+
+    print("[independent-verify] Cross-vendor panel confirms ("
+          + "; ".join(r["reason"] for _, r in gates) + "). Green.")
+    write_step_summary(votes, models, gates, blocked=False)
     return 0
 
 

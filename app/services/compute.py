@@ -81,6 +81,7 @@ from app.indicators import (
 )
 from app.logging_conf import get_logger
 from app.models import HyOasHistory, Snapshot, SourceHealth
+from app.redaction import sanitize
 from app.references import REGISTRY
 
 log = get_logger(__name__)
@@ -442,13 +443,21 @@ def _track(raw: RawInputs, source: str, fn: Any) -> Any:
         })
         return result
     except Exception as exc:
+        # SANITIZE, do not merely truncate. FRED, Alpha Vantage, Polygon and
+        # Twelve Data all carry their API key in the request QUERY STRING, and
+        # httpx puts the full URL into HTTPStatusError's message. This note is
+        # persisted to SourceHealth.note and served verbatim by GET /readyz,
+        # which is UNAUTHENTICATED — so an upstream 4xx used to hand the FRED
+        # key to any anonymous caller. Reproduced before this line existed.
+        # One chokepoint closes every provider, present and future.
+        note = sanitize(exc, limit=400)
         raw.source_health.append({
             "source": source, "ok": False,
             "latency_ms": (time.monotonic() - start) * 1000.0,
-            "http_status": None, "note": str(exc)[:400],
+            "http_status": None, "note": note,
         })
-        raw.gather_errors[source] = str(exc)[:300]
-        log.warning("gather_failed", source=source, error=str(exc))
+        raw.gather_errors[source] = sanitize(exc, limit=300)
+        log.warning("gather_failed", source=source, error=sanitize(exc))
         return None
 
 

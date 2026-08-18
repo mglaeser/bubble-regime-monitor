@@ -1,72 +1,124 @@
-# Independent cross-vendor PR review panel — CURRENTLY INACTIVE, BY DESIGN.
+# Independent cross-vendor PR review panel (mandate A-39, Article IV).
 #
-# This workflow used to inject SECOND_VENDOR_API_KEY and OPENAI_API_KEY into a
-# job that runs `on: pull_request`, checks out the PR merge ref, and executes
-# `python scripts/independent_verify.py` FROM THAT CHECKOUT. Every one of those
-# is PR-controlled: a pull request that edits that script runs its own code
-# with both provider credentials in the environment. Opening a PR was
-# sufficient — no approval step stood between an untrusted diff and the keys.
+# THE INVARIANT THIS FILE EXISTS TO HOLD:
+#   the reviewed artifact must never hold the reviewer's credentials, and
+#   candidate code must never authenticate its own review.
 #
-# That is the defect the trusted-lane programme exists to close, stated in one
-# line: the reviewed artifact must never hold the reviewer's credentials, and
-# candidate code must never authenticate its own review.
+# The predecessor ran `on: pull_request`, checked out the PR merge ref, and
+# executed scripts/independent_verify.py FROM THAT CHECKOUT with the provider
+# key in the environment. Opening a PR that edited that script was sufficient to
+# run arbitrary code with the credential. That is a real defect, and it is why a
+# 39,000-line "trusted lane" was built to work around it.
 #
-# So the secrets are gone from here. What remains is the deterministic CI gate
-# in ci.yml as the sole merge authority, and this job reporting the residual
-# out loud rather than a fake green from a panel that did not run.
+# It does not need 39,000 lines. It needs three properties, and this file has
+# all three:
 #
-# The replacement is NOT a repair of this workflow — it is the phased trusted
-# lane in scripts/trustedlane/, where the credential-bearing run executes from
-# a protected ref, holds credentials the candidate branch never sees, and takes
-# the candidate in as inert data. D1 (trusted count) and D2 (trusted
-# generation) are staged as `.yml.template` and are each a separate operator
-# approval; neither is deployable from a pull request.
+#   1. `pull_request_target` — the workflow DEFINITION is read from the default
+#      branch, never from the pull request. A PR cannot edit its own reviewer.
+#   2. `checkout` carries NO `ref:` — so the tree we execute is the default
+#      branch's, i.e. reviewed code. THE CANDIDATE IS NEVER CHECKED OUT.
+#   3. the candidate enters as INERT GIT OBJECTS via `git fetch` and is read
+#      only through `git diff`. It is data, never an execution target.
 #
-# VERIFIER_REQUIRE_KEY is deliberately false now. Its purpose was to tell
-# "operator chose not to provision a key" (residual, green) apart from "secrets
-# were withheld because the origin is a fork" (fail closed, since a required
-# check must not pass with zero review). With no secret referenced at all that
-# distinction no longer exists: every run is keyless by construction, not by
-# withholding. Leaving it true would block every fork and Dependabot PR
-# permanently with no operator remedy — the documented remedy was to mirror the
-# key into the Dependabot secrets store, which cannot work when the workflow
-# reads no key at all. A gate that can never pass is a gate someone deletes
-# under pressure. The script's fail-closed branch is untouched and still tested
-# (tests/test_independent_verify.py::test_fork_origin_without_key_fails_closed).
+# Because pull_request_target grants secrets to fork PRs too, and because the
+# candidate diff is fed to a language model, fork-originated pull requests are
+# NOT panel-reviewed automatically: they report failure and need a maintainer.
+# Untrusted prose reaching a model that holds a merge verdict is a prompt-
+# injection surface, and no amount of prompt hardening makes it a safe default.
+#
+# Under pull_request_target the check run attaches to the DEFAULT BRANCH, not to
+# the pull request (verified: PR #58's panel check runs landed on main). So the
+# verdict is POSTed as a commit status onto the candidate head explicitly —
+# without that step this can never become a required status check.
 #
 # Actions are pinned to immutable commit SHAs, not moving tags: `@v4` is
 # whatever that tag points at today, which is a supply-chain decision made by
-# someone else at a time of their choosing. Pins and their release mapping are
-# recorded in scripts/trustedlane/actionpolicy.py.
+# someone else at a time of their choosing.
 name: Independent-Verify
 
 on:
-  pull_request:
-  workflow_dispatch: {}
+  pull_request_target:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
+  statuses: write        # required: see header — the check lands on main otherwise
+
+concurrency:
+  group: independent-verify-${{ github.event.number }}
+  cancel-in-progress: true
 
 jobs:
-  independent-verify-inactive:
+  panel:
     runs-on: ubuntu-latest
+    # Holds the provider credential. Its deployment-branch policy is `main`, so
+    # the secret is unreachable from any ref a pull request can create.
+    environment: trusted-verifier
     steps:
-      # v4.4.0
+      # v4.4.0 — NO `ref:`. Checks out the DEFAULT BRANCH deliberately (header,
+      # property 2). Adding `ref: ${{ github.event.pull_request.head.sha }}` here
+      # would hand the candidate the credential and undo this entire file.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
+
+      - name: Fetch the candidate as inert objects (never checked out, never run)
+        env:
+          PR_NUMBER: ${{ github.event.number }}
+        run: |
+          git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/candidate"
+          echo "candidate object present: $(git rev-parse refs/candidate)"
+
       # v5.6.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
-      - name: Cross-vendor review panel (inactive — no provider credential here)
+
+      - name: Cross-vendor review panel
+        id: panel
+        # Fork PRs are refused rather than reviewed — see header.
+        if: github.event.pull_request.head.repo.full_name == github.repository
         env:
-          # No SECOND_VENDOR_API_KEY. No OPENAI_API_KEY. This job runs
-          # PR-controlled code, so it holds no provider credential — see header.
+          SECOND_VENDOR_API_KEY: ${{ secrets.TRUSTED_VERIFIER_API_KEY }}
           VERIFIER_BASE_URL: ${{ vars.VERIFIER_BASE_URL }}
-          VERIFIER_MODEL: ${{ vars.VERIFIER_MODEL }}
+          # Gateways that reserve Authorization for upstream forwarding need a
+          # different header; inference.klee.me answers Bearer with 401.
+          VERIFIER_AUTH_HEADER: ${{ vars.VERIFIER_AUTH_HEADER }}
           VERIFIER_PANEL_MODELS: ${{ vars.VERIFIER_PANEL_MODELS }}
           VERIFIER_REQUIRED_APPROVER: ${{ vars.VERIFIER_REQUIRED_APPROVER }}
           VERIFIER_MIN_OTHER_APPROVERS: ${{ vars.VERIFIER_MIN_OTHER_APPROVERS }}
-          VERIFIER_REQUIRE_KEY: "false"
+          VERIFIER_STRICT_ANY_REFUTATION: "true"
+          # Explicit range. The job runs from the default branch, where HEAD IS
+          # main — without these two the diff collapses to main...main, comes
+          # back empty, and the panel goes permanently fake-green.
+          VERIFIER_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          VERIFIER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # A missing key is the operator's documented residual on a same-repo
+          # PR, but never a silent pass when a credential was expected.
+          VERIFIER_REQUIRE_KEY: "true"
         run: python scripts/independent_verify.py
+
+      - name: Publish the verdict onto the candidate head
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OUTCOME: ${{ steps.panel.outcome }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          if [ "$IS_FORK" = "true" ]; then
+            state=failure
+            desc="fork PR: panel not run — maintainer review required"
+          elif [ "$OUTCOME" = "success" ]; then
+            state=success
+            desc="cross-vendor panel approved"
+          else
+            state=failure
+            desc="cross-vendor panel refused — see job log"
+          fi
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state="$state" \
+            -f context="independent-verify" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            -f description="$desc"
+          [ "$state" = "success" ] || exit 1

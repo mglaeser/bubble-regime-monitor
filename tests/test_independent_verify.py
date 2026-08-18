@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _SPEC = importlib.util.spec_from_file_location(
     "independent_verify", Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
 iv = importlib.util.module_from_spec(_SPEC)
@@ -245,3 +247,155 @@ class TestPanelFindingsOnItself:
         votes = [canned_approve, sol_good, low_ref]
         assert iv.require_approvals(votes, models, "gpt-5.6-sol", 1, ch)["block"] is False
         assert iv.attest_reasons(votes, 3)["block"] is True   # the conjunctive gate catches it
+
+
+class TestAttestConsistency:
+    """A green vote whose OWN reason names a defect is an inconsistent vote, not
+    an approval. decide() reads only the boolean, so without this gate such a
+    vote both counts toward the quorum and supplies a substantive, distinct
+    reason that helps attest_reasons pass. Found adversarially against a live
+    panel; fail-closed."""
+
+    M3 = ["m-a", "m-b", "m-c"]
+
+    @staticmethod
+    def _green(reason, refuted=False):
+        return {"ok": True, "v": {"refuted": refuted, "reason": reason, "confidence": "high"}}
+
+    def test_ordinary_approvals_pass(self):
+        votes = [self._green("checked auth paths, no issue"),
+                 self._green("docs only change"),
+                 self._green("reviewed diff, behaviour unchanged")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_green_vote_naming_a_defect_blocks(self):
+        votes = [self._green("checked auth paths"),
+                 self._green("auth bypass when key is None"),
+                 self._green("docs only")]
+        out = iv.attest_consistency(votes, self.M3)
+        assert out["block"] is True and "m-b" in out["reason"]
+
+    def test_refuting_vote_may_name_a_defect(self):
+        # Naming the defect is precisely a refutation's job -- only GREEN votes
+        # are inspected, or every real finding would trip its own gate.
+        votes = [self._green("fail-open on missing header", refuted=True),
+                 self._green("docs only"), self._green("no issue found")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_hedging_is_not_a_defect_claim(self):
+        votes = [self._green("could be more defensive; consider hardening"),
+                 self._green("ok looks fine"), self._green("no problems seen")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_errored_vote_is_not_inspected(self):
+        assert iv.attest_consistency([ERR, self._green("docs only"),
+                                      self._green("no issue")], self.M3)["block"] is False
+
+
+class TestAuthHeader:
+    """The gateway's auth header is configurable because inference.klee.me runs
+    providers.openai with authMode="forward" and reserves Authorization for
+    upstream forwarding: Bearer answers 401 "opencodex API key required" for
+    every model, X-OpenCodex-API-Key answers 200. Verified live."""
+
+    def test_defaults_to_bearer(self, monkeypatch):
+        monkeypatch.delenv("VERIFIER_AUTH_HEADER", raising=False)
+        assert "Authorization" in iv.auth_header()
+
+    def test_custom_header_replaces_authorization(self, monkeypatch):
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "X-OpenCodex-API-Key")
+        assert list(iv.auth_header()) == ["X-OpenCodex-API-Key"]
+
+    def test_empty_variable_falls_back(self, monkeypatch):
+        # Actions injects an EMPTY STRING for an unset repo variable; .get() with
+        # a default would keep "" and send a nameless header.
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "")
+        assert "Authorization" in iv.auth_header()
+
+    def test_authorization_by_name_is_the_default_form(self, monkeypatch):
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "authorization")
+        assert "Authorization" in iv.auth_header()
+
+
+class TestReviewRange:
+    """The job runs from the DEFAULT BRANCH under pull_request_target, where
+    HEAD *is* main. Without an explicit candidate sha the diff collapses to
+    main...main, returns empty, and the panel goes permanently FAKE-GREEN --
+    reproduced before this guard existed."""
+
+    def test_non_hex_sha_is_rejected_before_reaching_git(self, monkeypatch):
+        monkeypatch.setenv("VERIFIER_HEAD_SHA", "not-a-sha; rm -rf /")
+        with pytest.raises(iv.DiffError):
+            iv.review_range()
+
+    def test_short_sha_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("VERIFIER_HEAD_SHA", "8d85424")
+        with pytest.raises(iv.DiffError):
+            iv.review_range()
+
+
+class TestStepSummary:
+    """The panel must publish its findings where a reviewer will see them.
+
+    GITHUB_STEP_SUMMARY renders as markdown on the run page, one click from the
+    pull request's check. The reason text is model-authored from an untrusted
+    diff, so it is hostile input to the RENDERER and must not break out of its
+    table cell."""
+
+    OK = {"ok": True, "v": {"refuted": False, "confidence": "high", "reason": "docs only change"}}
+    REF = {"ok": True, "v": {"refuted": True, "confidence": "high", "reason": "auth bypass"}}
+    ERR = {"ok": False, "reason": "API 504"}
+    MODELS = ["gpt-5.6-sol", "gpt-5.6-terra", "deepseek"]
+
+    def _write(self, tmp_path, monkeypatch, votes, gates, blocked):
+        target = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(target))
+        iv.write_step_summary(votes, self.MODELS, gates, blocked=blocked)
+        return target.read_text(encoding="utf-8")
+
+    def test_approved_run_lists_every_voice(self, tmp_path, monkeypatch):
+        out = self._write(tmp_path, monkeypatch, [self.OK, self.OK, self.OK],
+                          [("required-approver", {"block": False, "reason": "sol approves"})], False)
+        assert "**Verdict: APPROVED**" in out
+        for model in self.MODELS:
+            assert model in out
+        assert out.count("approves") >= 3
+
+    def test_blocked_run_names_the_gate_that_blocked(self, tmp_path, monkeypatch):
+        out = self._write(tmp_path, monkeypatch, [self.REF, self.OK, self.OK],
+                          [("required-approver", {"block": True, "reason": "sol vetoes"})], True)
+        assert "**Verdict: BLOCKED**" in out
+        assert "blocked" in out and "sol vetoes" in out
+
+    def test_a_voice_that_errored_is_shown_not_hidden(self, tmp_path, monkeypatch):
+        # A panel that silently drops a failed voice looks like a smaller panel
+        # that agreed, which is the opposite of what happened.
+        out = self._write(tmp_path, monkeypatch, [self.OK, self.ERR, self.OK],
+                          [("required-approver", {"block": False, "reason": "ok"})], False)
+        assert "no vote" in out and "API 504" in out
+
+    def test_written_on_both_paths(self, tmp_path, monkeypatch):
+        for blocked in (True, False):
+            out = self._write(tmp_path, monkeypatch, [self.OK] * 3,
+                              [("g", {"block": blocked, "reason": "r"})], blocked)
+            assert out.strip(), "a panel that only explains itself when it blocks is unreadable"
+
+    def test_model_text_cannot_break_the_table(self, tmp_path, monkeypatch):
+        hostile = {"ok": True, "v": {"refuted": False, "confidence": "high",
+                                     "reason": "a|b\n| evil | row |\n`x`"}}
+        out = self._write(tmp_path, monkeypatch, [hostile, self.OK, self.OK],
+                          [("g", {"block": False, "reason": "r"})], False)
+        body = [line for line in out.splitlines() if line.startswith("| 1 |")]
+        assert len(body) == 1, "the reason injected extra table rows"
+        assert "\\|" in body[0] and "\\`" in body[0]
+
+    def test_absent_env_is_a_no_op(self, monkeypatch):
+        monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+        iv.write_step_summary([self.OK], ["m"], [("g", {"block": False, "reason": "r"})],
+                              blocked=False)      # must not raise
+
+    def test_an_unwritable_target_never_breaks_the_verdict(self, tmp_path, monkeypatch):
+        # The REPORT must never turn a clean verdict into a red job.
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "no-such-dir" / "s.md"))
+        iv.write_step_summary([self.OK], ["m"], [("g", {"block": False, "reason": "r"})],
+                              blocked=False)      # must not raise

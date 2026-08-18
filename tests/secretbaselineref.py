@@ -121,6 +121,14 @@ import subprocess
 #: correct default; JSON has no comment syntax, so the disposition is recorded
 #: here rather than inline. Nothing was regenerated beyond the `generated_at`
 #: stamp, which moves because the scanned file changed.
+#:
+#: HISTORICAL NOTE: the `midtermpanel` package named above was retired when the
+#: review lane was simplified to scripts/independent_verify.py. The record is
+#: left as written — it states correctly what recomputed those digests at the
+#: time, and a governance ledger that edits its own history is worth less than
+#: one carrying a stale package name. The baseline entries it accepted still
+#: exist in .secrets.baseline; a stale entry cannot weaken the ratchet, which
+#: only ever asserts that the file has not GROWN.
 ACCEPTED_SECRET_BASELINE_COMMIT = \
     "b047c3d61b4999e8f1b387a2d933d1ad787bd8bd"  # pragma: allowlist secret
 
