@@ -76,8 +76,13 @@ gates that judge it.
    `SECOND_VENDOR_API_KEY` (or reuse an existing `OPENAI_API_KEY` secret).
 2. Optionally set repo **variables**: `VERIFIER_PANEL_MODELS`,
    `VERIFIER_MODEL` (single pin), `VERIFIER_REQUIRED_APPROVER`,
-   `VERIFIER_MIN_OTHER_APPROVERS`, `VERIFIER_BASE_URL`.
-3. Branch protection (the standing B-35 item, repo settings): mark
+   `VERIFIER_MIN_OTHER_APPROVERS`.
+3. If the panel votes through a gateway rather than the vendor directly, store
+   that endpoint as the `trusted-verifier` **environment secret**
+   `VERIFIER_BASE_URL` — NOT as a variable. The runner prints every env block
+   into the job log, and this log is public: it redacts secrets there and
+   never variables, so a variable publishes the endpoint on every run.
+4. Branch protection (the standing B-35 item, repo settings): mark
    `cross-vendor` (and `test`) as **required status checks**, and enable
    **Require review from Code Owners** so CODEOWNERS actually enforces.
 
