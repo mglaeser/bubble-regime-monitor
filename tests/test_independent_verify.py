@@ -625,3 +625,61 @@ class TestResolutionFailsClosed:
         self._catalogue(monkeypatch, self.CATALOGUE)
         with pytest.raises(iv.ProviderConfigError, match="combo/SOTA-A"):
             iv.resolve_panel_models(3, ["nope/one", "nope/two", "nope/three"])
+
+
+class TestConsistencyGateNegation:
+    """A green vote naming a defect must still block. An ALL-CLEAR must not.
+
+    The gate matched defect words by substring, so "security gates reviewed; no
+    concrete regression" -- an explicit statement that nothing is wrong -- was
+    scored as a defect claim. On run 32181953531 all three voices approved and
+    the panel blocked anyway, on that word.
+
+    These tests pin both directions, because the loosening is the dangerous
+    half: the control exists because a panelist once returned refuted=false
+    with a reason that named two concrete defects.
+    """
+
+    M3 = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+
+    @staticmethod
+    def _green(reason: str, refuted: bool = False) -> dict:
+        return {"ok": True, "v": {"refuted": refuted, "reason": reason, "confidence": "high"}}
+
+    def test_a_negated_defect_word_is_an_all_clear(self):
+        votes = [self._green("security gates reviewed; no concrete regression"),
+                 self._green("docs only"), self._green("looks fine")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_an_unnegated_defect_word_still_blocks(self):
+        votes = [self._green("this introduces a regression in the dispatcher"),
+                 self._green("docs only"), self._green("fine")]
+        out = iv.attest_consistency(votes, self.M3)
+        assert out["block"] is True
+        assert "regression" in out["reason"]
+
+    def test_one_negation_does_not_launder_a_later_claim(self):
+        # The dangerous case for this change: a reason that opens with an
+        # all-clear and then names a real defect must still block.
+        votes = [self._green("no bypass here, but there is an injection in the parser"),
+                 self._green("docs only"), self._green("fine")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is True
+
+    def test_the_original_attack_still_blocks(self):
+        # The vote the gate was built for: green, with two concrete defects.
+        votes = [self._green("auth bypass when key is None and a race condition on refresh"),
+                 self._green("docs only"), self._green("fine")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is True
+
+    def test_a_refuting_vote_may_name_defects(self):
+        votes = [self._green("fail-open on missing header", refuted=True),
+                 self._green("docs only"), self._green("no issue found")]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_defect_claims_directly(self):
+        assert iv.defect_claims("no regression, no bypass") == []
+        assert iv.defect_claims("regression in the dispatcher") == ["regression"]
+        assert iv.defect_claims("without any vulnerability") == []
+        assert "injection" in iv.defect_claims("no bypass, but an injection exists")
+        assert iv.defect_claims("") == []
+        assert iv.defect_claims(None) == []

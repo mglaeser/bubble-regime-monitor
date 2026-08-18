@@ -285,6 +285,27 @@ _DEFECT_WORDS = re.compile(
     r"\b(bypass|fail-open|unauthenticated|injection|vulnerab\w*|exploitab\w*|"
     r"race condition|deadlock|regress\w*|data loss|privilege escalation)\b", re.I)
 
+# A defect word is only a defect CLAIM when it is not negated. "no concrete
+# regression" is an explicit all-clear, and scoring it as a claim blocked a
+# panel on run 32181953531 in which all three voices had approved -- the gate
+# refused a unanimous green because one reason contained the word "regression"
+# immediately after the word "no".
+#
+# The window is deliberately three words. A negation anywhere in a long reason
+# must NOT launder a real claim later in it, which is why this is a per-match
+# check and why every match has to be negated for the vote to pass.
+_NEGATORS = re.compile(r"\b(no|not|none|never|without|free of|absent|zero|nothing|n't)\b", re.I)
+
+
+def defect_claims(reason: str) -> list[str]:
+    """Defect words in ``reason`` that are NOT negated in their own context."""
+    claims = []
+    for m in _DEFECT_WORDS.finditer(reason or ""):
+        preceding = " ".join((reason[max(0, m.start() - 40):m.start()]).split()[-3:])
+        if not _NEGATORS.search(preceding):
+            claims.append(m.group(0))
+    return claims
+
 
 def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
     """A GREEN vote whose OWN reason names a defect is not an approval — it is a
@@ -298,11 +319,11 @@ def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
     for i, x in enumerate(votes):
         if not _is_valid(x) or x["v"]["refuted"] is not False:
             continue
-        hit = _DEFECT_WORDS.search(norm_reason(x["v"].get("reason")))
-        if hit:
+        claims = defect_claims(norm_reason(x["v"].get("reason")))
+        if claims:
             return {"block": True,
                     "reason": f'{models[i]}: refuted=false but its own reason names a '
-                              f'defect ("{hit.group(0)}") -> inconsistent vote, fail-closed'}
+                              f'defect ("{claims[0]}") -> inconsistent vote, fail-closed'}
     return {"block": False,
             "reason": f"{len(_green(votes))} green reason(s) free of defect claims"}
 
@@ -626,6 +647,16 @@ def selftest() -> None:
            "hedging words are not defect claims")
     expect(attest_consistency([E, GV("docs only"), GV("no issue")], M3)["block"] is False,
            "an errored vote is not inspected for consistency")
+    expect(attest_consistency([GV("security gates reviewed; no concrete regression"),
+                               GV("docs only"), GV("looks fine")], M3)["block"] is False,
+           "a NEGATED defect word is an all-clear, not a defect claim (run 32181953531)")
+    expect(attest_consistency([GV("no bypass here, but there is an injection in the parser"),
+                               GV("docs only"), GV("fine")], M3)["block"] is True,
+           "one negation must not launder a real claim later in the same reason")
+    expect(defect_claims("no regression, no bypass") == [],
+           "every match negated -> no claims")
+    expect(defect_claims("regression in the dispatcher") == ["regression"],
+           "an unnegated defect word is still a claim")
 
     # auth_header() -- both branches
     _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)
