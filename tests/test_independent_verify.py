@@ -525,80 +525,103 @@ class TestMainFailsClosedOnAnUnreviewableDiff:
         assert "RESIDUAL" in capsys.readouterr().out
 
 
-class TestVendorIndependence:
-    """Distinct MODEL STRINGS are not distinct VENDORS.
+class TestPanelComposition:
+    """Independence is a property of the PANEL'S COMPOSITION, and this script
+    cannot see it.
 
-    require_approvals counts model strings, and was credited with the property
-    docs/INDEPENDENT_REVIEW_PANEL.md actually claims: Article IV asks for a
-    verifier fleet from a DIFFERENT VENDOR. Reproduced live in run 32121148827
-    -- the panel was gpt-5.6-sol, gpt-5.6-terra and a deepseek voice, deepseek
-    returned API 504, the two gpt siblings approved, and the run printed
-    "Cross-vendor panel confirms" and posted independent-verify=success.
+    Two attempts to derive a vendor from a model id were refuted by the panel
+    itself, on the pull request that carried each. The first keyed a single
+    token, so `gpt-5.6-sol` -> "gpt" and `openai/gpt-4.1-mini` -> "openai" made
+    one vendor look like two. The second used token sets, and the live
+    catalogue killed it from the other side: `nvidia/` is a HOST prefix, so
+    `nvidia/meta/muse-glimmer-30b` and `nvidia/deepseek-ai/deepseek-v4` are Meta
+    and DeepSeek sharing a token. Wrong in both directions -- the id does not
+    carry the fact.
 
-    The FIRST fix for this was itself refuted, by the panel, on the pull request
-    that carried it: a single vendor KEY made `gpt-5.6-sol` -> "gpt" and
-    `openai/gpt-4.1-mini` -> "openai", so one vendor in two spellings passed a
-    cross-vendor gate. Hence token SETS and disjointness, below.
+    Each voice is now an inference-server GROUP that rotates over its own
+    members. Probed live: a call to `combo/SOTA-A` answers `"model":
+    "combo/SOTA-A"`, never the member that served it. So the operator attests
+    that the groups are independent, and the script enforces the checkable part
+    -- that two voices are not the same group -- and states the voices instead
+    of claiming a vendor.
     """
 
-    PANEL = ["gpt-5.6-sol", "gpt-5.6-terra", "nvidia/deepseek-ai/deepseek-v4-flash-0731"]
+    GROUPS = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
 
-    def test_every_segment_of_a_namespaced_id_contributes_a_token(self):
-        assert iv.vendor_tokens("nvidia/deepseek-ai/deepseek-v4-flash-0731") == frozenset(
-            {"nvidia", "deepseek"})
+    def test_three_distinct_groups_are_three_voices(self):
+        assert iv.require_distinct_voices(self.GROUPS)["block"] is False
 
-    def test_sibling_models_share_a_vendor(self):
-        assert iv.same_vendor("gpt-5.6-sol", "gpt-5.6-terra")
-        assert iv.same_vendor("gpt-5.6-sol", "gpt-4.1-mini")
-
-    def test_one_vendor_in_two_spellings_is_one_vendor(self):
-        # The panel's refutation of the first version of this gate, as a test.
-        assert iv.same_vendor("gpt-5.6-sol", "openai/gpt-4.1-mini")
-        assert iv.same_vendor("openai/gpt-5.6-sol", "gpt-5.6-terra")
-
-    def test_genuinely_different_vendors_are_separable(self):
-        assert not iv.same_vendor("gpt-5.6-sol", "nvidia/deepseek-ai/deepseek-v4-flash-0731")
-        assert not iv.same_vendor("gpt-5.6-sol", "claude-opus-5")
-
-    def test_unknown_provenance_reads_as_the_same_vendor(self):
-        # Fail-closed: a blank or unparsable id must never count as independent.
-        assert iv.same_vendor("", "gpt-5.6-sol")
-        assert iv.same_vendor("gpt-5.6-sol", None)
-
-    def test_case_and_surrounding_space_do_not_make_a_new_vendor(self):
-        assert iv.same_vendor("  GPT-5.6-Sol  ", "gpt-5.6-terra")
-
-    def test_the_live_outage_is_refused(self):
-        out = iv.require_cross_vendor([A, A2, ERR], self.PANEL, "gpt-5.6-sol")
+    def test_the_same_group_twice_is_one_opinion(self):
+        out = iv.require_distinct_voices(["combo/SOTA-A", "combo/SOTA-A", "combo/SOTA-C"])
         assert out["block"] is True
-        assert "not cross-vendor" in out["reason"]
-        assert "deepseek" in out["reason"], "the refusal must name the voice that was lost"
+        assert "more than once" in out["reason"]
+        assert "combo/SOTA-A" in out["reason"], "the refusal must name the repeated voice"
 
-    def test_the_alias_hole_is_refused(self):
-        # Two OpenAI models, one namespaced, plus an unreachable third.
-        panel = ["gpt-5.6-sol", "openai/gpt-4.1-mini", "nvidia/deepseek-ai/deepseek-v4"]
-        assert iv.require_cross_vendor([A, A2, ERR], panel, "gpt-5.6-sol")["block"] is True
+    def test_all_three_identical_blocks(self):
+        assert iv.require_distinct_voices(["combo/SOTA-A"] * 3)["block"] is True
 
-    def test_a_reachable_approving_other_vendor_corroborates(self):
-        assert iv.require_cross_vendor([A, A2, A2], self.PANEL, "gpt-5.6-sol")["block"] is False
+    def test_the_reason_names_the_voices_on_the_passing_path(self):
+        # A gate that explains itself only when it blocks leaves a reader unable
+        # to tell "three voices agreed" from "the gate never ran".
+        r = iv.require_distinct_voices(self.GROUPS)
+        assert all(g in r["reason"] for g in self.GROUPS)
 
-    def test_an_other_vendor_that_refutes_does_not_corroborate(self):
-        assert iv.require_cross_vendor([A, A2, RF], self.PANEL, "gpt-5.6-sol")["block"] is True
-
-    def test_the_required_approver_cannot_corroborate_itself(self):
-        same = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-4.1-mini"]
-        assert iv.require_cross_vendor([A, A2, A2], same, "gpt-5.6-sol")["block"] is True
-
-    def test_configuration_may_accept_a_same_vendor_panel_but_not_the_label(self):
-        out = iv.require_cross_vendor([A, A2, ERR], self.PANEL, "gpt-5.6-sol", enabled=False)
-        assert out["block"] is False
-        assert "SAME-VENDOR" in out["reason"], "an opt-out must still be named honestly"
-
-    def test_is_cross_vendor_needs_two_separable_approvals(self):
-        assert iv.is_cross_vendor(["gpt-5.6-sol", "nvidia/deepseek-ai/deepseek-v4"]) is True
-        assert iv.is_cross_vendor(["gpt-5.6-sol", "openai/gpt-4.1-mini"]) is False
-        assert iv.is_cross_vendor(["gpt-5.6-sol"]) is False
+    def test_group_ids_are_matched_exactly_not_by_prefix(self):
+        # SOTA-A and SOTA-C share every character but the last. A prefix match
+        # would let the required approver be satisfied by the wrong group.
+        assert iv.model_matches("combo/SOTA-A", "combo/SOTA-A") is True
+        assert iv.model_matches("combo/SOTA-C", "combo/SOTA-A") is False
+        assert iv.model_matches("combo/SOAT-B", "combo/SOTA-A") is False
 
     def test_approving_models_ignores_errored_and_refuting_voices(self):
-        assert iv.approving_models([A, ERR, RF], self.PANEL) == ["gpt-5.6-sol"]
-        assert iv.approving_models([A, A2, A2], self.PANEL) == self.PANEL
+        assert iv.approving_models([A, ERR, RF], self.GROUPS) == ["combo/SOTA-A"]
+        assert iv.approving_models([A, A2, A2], self.GROUPS) == self.GROUPS
+
+    def test_group_a_plus_one_other_is_the_quorum(self):
+        # The user's rule: A must always agree, plus either B or C.
+        assert iv.require_approvals([A, A2, ERR], self.GROUPS, "combo/SOTA-A", 1)["block"] is False
+        assert iv.require_approvals([A, ERR, A2], self.GROUPS, "combo/SOTA-A", 1)["block"] is False
+        # A alone is not enough...
+        assert iv.require_approvals([A, ERR, ERR], self.GROUPS, "combo/SOTA-A", 1)["block"] is True
+        # ...and B+C without A is not enough either.
+        assert iv.require_approvals([ERR, A, A2], self.GROUPS, "combo/SOTA-A", 1)["block"] is True
+
+    def test_a_refusing_group_a_vetoes_however_many_others_agree(self):
+        assert iv.require_approvals([RF, A, A2], self.GROUPS, "combo/SOTA-A", 1)["block"] is True
+
+
+class TestResolutionFailsClosed:
+    """A voice that cannot be resolved is a panel that cannot be assembled.
+
+    Substitution was fail-open: an id the account does not serve printed a
+    WARNING and was replaced by the newest available model, so the panel
+    reviewed with voices the operator never chose and the run went green. Two
+    cheap ways to trigger it -- a group not yet published to /v1/models, and a
+    transposition (`combo/SOAT-B` and `combo/SOTA-B` differ by two characters,
+    and only one of them exists)."""
+
+    CATALOGUE = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C", "gpt-5.6-sol"]
+
+    def _catalogue(self, monkeypatch, ids):
+        monkeypatch.setattr(iv, "fetch_model_ids", lambda: (ids, ""))
+        monkeypatch.delenv("VERIFIER_MODEL", raising=False)
+
+    def test_all_present_resolves_exactly(self, monkeypatch):
+        self._catalogue(monkeypatch, self.CATALOGUE)
+        assert iv.resolve_panel_models(3, ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]) == [
+            "combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+
+    def test_an_unpublished_group_refuses(self, monkeypatch):
+        self._catalogue(monkeypatch, ["gpt-5.6-sol"])
+        with pytest.raises(iv.ProviderConfigError, match="not enabled on this account"):
+            iv.resolve_panel_models(3, ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"])
+
+    def test_a_transposed_id_refuses_rather_than_substituting(self, monkeypatch):
+        self._catalogue(monkeypatch, self.CATALOGUE)
+        with pytest.raises(iv.ProviderConfigError, match="combo/SOTA-B"):
+            iv.resolve_panel_models(3, ["combo/SOTA-A", "combo/SOTA-B", "combo/SOTA-C"])
+
+    def test_the_refusal_lists_what_is_available(self, monkeypatch):
+        self._catalogue(monkeypatch, self.CATALOGUE)
+        with pytest.raises(iv.ProviderConfigError, match="combo/SOTA-A"):
+            iv.resolve_panel_models(3, ["nope/one", "nope/two", "nope/three"])

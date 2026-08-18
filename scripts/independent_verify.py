@@ -168,44 +168,6 @@ def _is_valid(x: Any) -> bool:
                 and isinstance(x["v"].get("refuted"), bool))
 
 
-def vendor_tokens(model: str) -> frozenset[str]:
-    """Every token that could name the VENDOR behind a model id.
-
-    A SET, not a single key, and that is the whole design. The single-key form
-    of this function was refuted by the panel on the pull request that
-    introduced it, correctly: `gpt-5.6-sol` keyed to "gpt" while
-    `openai/gpt-4.1-mini` keyed to "openai", so two models from ONE vendor,
-    written in two spellings, satisfied a CROSS-vendor requirement. A gate whose
-    answer depends on how a model id happens to be spelt is the same defect it
-    was built to close.
-
-    Two models count as different vendors only when their token sets are
-    DISJOINT, so ambiguity resolves to "same vendor" -- it blocks rather than
-    admits, which is the direction every other gate in this file fails.
-
-      gpt-5.6-sol                            -> {gpt}
-      openai/gpt-4.1-mini                    -> {openai, gpt}   (intersects, same vendor)
-      nvidia/deepseek-ai/deepseek-v4-flash   -> {nvidia, deepseek}
-    """
-    m = (model or "").strip().lower()
-    if not m:
-        return frozenset()
-    toks = {lead for seg in m.split("/")
-            if (lead := re.split(r"[^a-z]", seg, maxsplit=1)[0])}
-    return frozenset(toks)
-
-
-def same_vendor(a: str, b: str) -> bool:
-    """True when two model ids cannot be shown to come from different vendors.
-
-    Unknown provenance (either side yielding no tokens) reads as SAME, so a
-    blank or unparsable model can never be counted as independent corroboration."""
-    ta, tb = vendor_tokens(a), vendor_tokens(b)
-    if not ta or not tb:
-        return True
-    return bool(ta & tb)
-
-
 def approving_models(votes: list[dict], models: list[str]) -> list[str]:
     """Models with a VALID, APPROVING voice. An errored voice never approves, so
     an outage shrinks this list -- which is the point."""
@@ -213,44 +175,31 @@ def approving_models(votes: list[dict], models: list[str]) -> list[str]:
             if _is_valid(x) and x["v"]["refuted"] is False and models[i]]
 
 
-def is_cross_vendor(approving: list[str]) -> bool:
-    """True when two approving voices are demonstrably from different vendors."""
-    return any(not same_vendor(a, b)
-               for i, a in enumerate(approving) for b in approving[i + 1:])
+def require_distinct_voices(models: list[str]) -> dict[str, Any]:
+    """Every voice must be a DIFFERENT configured id.
 
+    Independence here is a property of the panel's composition, not of anything
+    this script can inspect: each voice is an inference-server GROUP that
+    rotates over its own members, and the server reports the group id back as
+    the model, never the member that served the call. Probed live -- a request
+    to `combo/SOTA-A` answers with `"model": "combo/SOTA-A"`.
 
-def require_cross_vendor(votes: list[dict], models: list[str], required_approver: str,
-                         enabled: bool = True) -> dict[str, Any]:
-    """At least one APPROVING voice from a vendor other than the required
-    approver's own. Fail-closed, and blocking by default.
+    So the operator attests that the groups are independent, and this gate
+    enforces the one part that IS checkable: that two voices are not the same
+    group. Two identical ids are one opinion counted twice, which is precisely
+    the shape the required-approver gate exists to prevent.
 
-    Disabling it via VERIFIER_REQUIRE_CROSS_VENDOR=false is legitimate -- a
-    same-vendor panel is still a panel -- but it does NOT buy the cross-vendor
-    label: main() names what actually happened either way. The defect this
-    closes is not that a same-vendor panel ran, it is that a same-vendor panel
-    was announced as cross-vendor.
-
-    NOTE for operators: DEFAULT_PANEL_MODELS is same-vendor (all `gpt`), so a
-    run that falls back to the defaults cannot satisfy this gate. That is the
-    intended reading -- an unconfigured panel has not earned the claim."""
-    approving = approving_models(votes, models)
-    others = sorted({m for m in approving if not same_vendor(m, required_approver)})
-    if others:
-        return {"block": False,
-                "reason": f'cross-vendor corroboration from {", ".join(others)} '
-                          f'(required approver "{required_approver}")'}
-    unreachable = [models[i] for i, x in enumerate(votes)
-                   if not x.get("ok") and not same_vendor(models[i], required_approver)]
-    detail = (f"; the only other-vendor voice(s) were unreachable: {', '.join(unreachable)}"
-              if unreachable else "")
-    if not enabled:
-        return {"block": False,
-                "reason": f'SAME-VENDOR panel accepted by configuration '
-                          f'(VERIFIER_REQUIRE_CROSS_VENDOR=false); every approving voice shares '
-                          f'a vendor with "{required_approver}"{detail}'}
-    return {"block": True,
-            "reason": f'no approving voice from a vendor other than "{required_approver}"'
-                      f'{detail} -> the panel is not cross-vendor, fail-closed'}
+    RESIDUAL, and it cannot be closed from here: if two groups share a member,
+    rotation can land both voices on one model. Nothing in the API distinguishes
+    that from genuine agreement. It is bounded by how the groups are built."""
+    seen = [m for m in models if m]
+    dupes = sorted({m for m in seen if seen.count(m) > 1})
+    if dupes:
+        return {"block": True,
+                "reason": f"the panel lists the same voice more than once ({', '.join(dupes)}) "
+                          "-- one opinion counted twice is not corroboration, fail-closed"}
+    return {"block": False,
+            "reason": f"{len(seen)} distinct voices ({', '.join(seen)})"}
 
 
 def require_approvals(votes: list[dict], models: list[str], required_approver: str,
@@ -714,33 +663,31 @@ def selftest() -> None:
     expect(normalize_base("") == "", "empty stays empty so the `or` default applies")
     expect(normalize_base(None) == "", "None stays empty so the `or` default applies")
 
-    # Vendor independence. The live failure this encodes: run 32121148827 lost
-    # its only other-vendor voice to an API 504 and still printed "Cross-vendor".
-    expect(vendor_tokens("nvidia/deepseek-ai/deepseek-v4-flash-0731") == frozenset({"nvidia", "deepseek"}),
-           "every segment of a namespaced id contributes a vendor token")
-    expect(same_vendor("gpt-5.6-sol", "gpt-5.6-terra"),
-           "sibling models share a vendor -- this is the whole point")
-    # The panel's own refutation of the first version of this gate: one vendor,
-    # two spellings, must never read as two vendors.
-    expect(same_vendor("gpt-5.6-sol", "openai/gpt-4.1-mini"),
-           "bare and namespaced spellings of ONE vendor must not satisfy cross-vendor")
-    expect(not same_vendor("gpt-5.6-sol", "nvidia/deepseek-ai/deepseek-v4-flash-0731"),
-           "genuinely different vendors must be separable")
-    expect(same_vendor("", "gpt-5.6-sol") and same_vendor("gpt-5.6-sol", None),
-           "unknown provenance reads as SAME vendor -- fail-closed, never independent")
-    _PANEL = ["gpt-5.6-sol", "gpt-5.6-terra", "nvidia/deepseek-ai/deepseek-v4-flash-0731"]
-    _out = require_cross_vendor([A, A2, {"ok": False, "reason": "API 504"}], _PANEL, "gpt-5.6-sol")
-    expect(_out["block"] and "not cross-vendor" in _out["reason"],
-           "two gpt siblings approving while the deepseek voice errored is NOT cross-vendor")
-    expect("deepseek" in _out["reason"], "the refusal must name the voice that was lost")
-    expect(not require_cross_vendor([A, A2, A2], _PANEL, "gpt-5.6-sol")["block"],
-           "a reachable, approving other-vendor voice corroborates")
-    expect(require_cross_vendor([A, A2, RF], _PANEL, "gpt-5.6-sol")["block"],
-           "an other-vendor voice that REFUTES does not corroborate")
-    _off = require_cross_vendor([A, A2, {"ok": False, "reason": "x"}], _PANEL, "gpt-5.6-sol",
-                                enabled=False)
-    expect(not _off["block"] and "SAME-VENDOR" in _off["reason"],
-           "configuration may accept a same-vendor panel, but never under the cross-vendor label")
+    # Voice distinctness. Each configured voice is an inference-server GROUP that
+    # rotates over its own members; the server answers with the group id, never
+    # the member, so this script cannot see a vendor at all. What it CAN check is
+    # that two voices are not the same group.
+    expect(require_distinct_voices(["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"])["block"] is False,
+           "three distinct groups are three voices")
+    _dup = require_distinct_voices(["combo/SOTA-A", "combo/SOTA-A", "combo/SOTA-C"])
+    expect(_dup["block"] and "more than once" in _dup["reason"],
+           "one opinion counted twice is not corroboration")
+    expect(require_distinct_voices(["combo/SOTA-A", "", "combo/SOTA-C"])["block"] is False,
+           "an empty slot is not a duplicate; resolution failure is caught before this gate")
+    _G = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+    expect(approving_models([A, {"ok": False, "reason": "504"}, RF], _G) == ["combo/SOTA-A"],
+           "an errored or refuting voice never counts as approving")
+    # The composition rule: A must agree, plus either B or C.
+    expect(not require_approvals([A, A2, {"ok": False, "reason": "504"}], _G, "combo/SOTA-A", 1)["block"],
+           "group A plus one other is the quorum")
+    expect(require_approvals([A, {"ok": False, "reason": "504"}, {"ok": False, "reason": "504"}],
+                             _G, "combo/SOTA-A", 1)["block"],
+           "group A alone is not corroboration")
+    expect(require_approvals([{"ok": False, "reason": "504"}, A, A2], _G, "combo/SOTA-A", 1)["block"],
+           "B and C without A cannot carry the panel")
+    # NOTE: resolve_panel_models fails closed on an unresolvable voice, but it
+    # needs the model catalogue, so its coverage is in tests/test_independent_verify.py
+    # (TestResolutionFailsClosed) rather than here.
 
     print("   OK selftest: decide() + model_matches() + require_approvals() (required approver Sol "
           "+ corroboration) + attest_reasons() + attest_proof() + attest_consistency() + "
@@ -803,22 +750,25 @@ def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
             f"  VERIFIER_BASE_URL is {BASE!r}. It must include the API version "
             f"segment (e.g. 'https://host/v1'), and the auth header must be the "
             f"one this gateway expects (VERIFIER_AUTH_HEADER).")
-    newest = FALLBACK_MODEL
-    for p in MODEL_PREFERENCE:
-        hit = pick_for_pref(ids, p)
-        if hit:
-            newest = hit
-            break
-    out = []
-    for want in wanted:
-        hit = pick_for_pref(ids, want)
-        if hit:
-            out.append(hit)
-        else:
-            print(f'[independent-verify] WARNING: panel model "{want}" not enabled on this account '
-                  f"-> fallback {newest} (adjust VERIFIER_PANEL_MODELS).")
-            out.append(newest)
-    return out
+    # SUBSTITUTION IS FAIL-OPEN, so it is gone. A configured voice that the
+    # account does not serve used to print a WARNING and be replaced by the
+    # newest available model. In a merge gate that is the worst possible
+    # degradation: the panel reviews with voices the operator did not choose,
+    # every gate downstream passes, and the run goes green. Two ways it fires
+    # in practice, both cheap: a group not yet published to /v1/models, and a
+    # one-character slip in an id -- `combo/SOAT-B` and `combo/SOTA-B` differ by
+    # a transposition, and only one of them exists.
+    #
+    # A voice that cannot be resolved is a panel that cannot be assembled.
+    missing = [w for w in wanted if not pick_for_pref(ids, w)]
+    if missing:
+        raise ProviderConfigError(
+            "panel model(s) not enabled on this account: " + ", ".join(repr(m) for m in missing)
+            + "\n  Refusing to substitute: reviewing with a voice the operator did not choose "
+            "is a green run that reviewed the wrong thing.\n  Enabled ids are: "
+            + ", ".join(sorted(ids)[:40])
+            + "\n  Set VERIFIER_PANEL_MODELS to ids from that list.")
+    return [pick_for_pref(ids, w) for w in wanted]
 
 
 def parse_verdict(content: str) -> Any:
@@ -1057,13 +1007,10 @@ def main() -> int:
     # semantics and does not change. What is new is that the gates evaluated so
     # far are collected, so the summary can name which one blocked and why.
     strict_on = (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes")
-    cross_vendor_required = (os.environ.get("VERIFIER_REQUIRE_CROSS_VENDOR")
-                             or "true").lower() not in ("0", "false", "no")
     pending: list[tuple[str, str, Any]] = [
+        ("distinct-voices gate", "distinct voices", lambda: require_distinct_voices(models)),
         ("required-approver gate", "required-approver",
          lambda: require_approvals(votes, models, required_approver, min_others, challenge)),
-        ("cross-vendor gate", "cross-vendor",
-         lambda: require_cross_vendor(votes, models, required_approver, cross_vendor_required)),
     ]
     if strict_on:
         pending.append(("strict-mode gate", "strict mode",
@@ -1086,9 +1033,14 @@ def main() -> int:
     # The label is COMPUTED, never asserted. Printing "Cross-vendor" over a
     # single-vendor result is the defect this whole gate exists to close, and a
     # green run that hides a lost voice looks like a smaller panel that agreed.
+    # NAME WHAT APPROVED. The previous form printed "Cross-vendor panel confirms"
+    # unconditionally, and run 32121148827 printed it over two sibling models from
+    # one vendor while the only other-vendor voice was returning API 504. This
+    # script cannot see which vendor served a voice -- each voice is a group id
+    # that the server resolves internally -- so it states the voices and leaves
+    # the independence claim to whoever composed the groups.
     approving = approving_models(votes, models)
-    label = ("Cross-vendor panel confirms" if is_cross_vendor(approving)
-             else f"SAME-VENDOR panel ({', '.join(approving) or 'no vendor'}) confirms")
+    label = f"Panel confirms on {len(approving)} of {panel} voices ({', '.join(approving)})"
     unreachable = [models[i] for i, x in enumerate(votes) if not x.get("ok")]
     note = (f"\n[independent-verify] NOTE: {len(unreachable)} of {panel} voices were "
             f"unreachable and did not vote: {', '.join(unreachable)}." if unreachable else "")
