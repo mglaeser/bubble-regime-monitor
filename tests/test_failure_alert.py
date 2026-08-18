@@ -282,3 +282,80 @@ class TestPanelFindings:
         monkeypatch.setattr(failure_alert, "send_imessage", _spy)
         notify_recompute_outcome(EBP_ERROR)
         assert observed == [True]
+
+
+class TestPanelFindingsSecondRound:
+    def test_the_all_clear_survives_a_signature_change(self, monkeypatch, sent):
+        """`announced` is not `last_sent`.
+
+        Told about failure A, the operator is owed an all-clear even if the
+        service went on to fail with B and B's alert never left the host.
+        Deriving "were they told?" from the throttle clock — which resets on a
+        signature change — dropped that all-clear silently."""
+        notify_recompute_outcome(EBP_ERROR)          # A: delivered
+        assert failure_alert._current.announced is True
+
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome("Rscript not found")   # B: new signature, undelivered
+        assert failure_alert._current.last_sent is None   # throttle clock reset
+        assert failure_alert._current.announced is True   # but they WERE told
+
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result())
+        result = notify_recompute_outcome(None)
+        assert result["kind"] == "recovery"
+        assert "OK" in sent[-1]
+
+
+class TestRecomputeHook:
+    """The wiring in app/routers/admin.py."""
+
+    @pytest.fixture()
+    def hook(self, monkeypatch):
+        from app.routers import admin
+        from app.services import compute
+        from app.services import failure_alert as fa
+
+        observed: dict[str, object] = {}
+
+        def _spy(error):
+            observed["locked"] = admin.recompute_lock.locked()
+            observed["error"] = error
+            return {"status": "noop"}
+
+        monkeypatch.setattr(fa, "notify_recompute_outcome", _spy)
+        return admin, compute, observed
+
+    def test_the_outcome_is_reported_before_the_lock_is_released(self, hook, monkeypatch):
+        """The single-flight lock is what orders recompute outcomes, so it has
+        to cover the reporting too — otherwise a later run's message can
+        overtake an earlier one's."""
+        admin, compute, observed = hook
+        monkeypatch.setattr(compute, "run_recompute", lambda: 7)
+        admin.run_recompute_guarded()
+        assert observed["locked"] is True
+        assert observed["error"] is None
+
+    def test_the_lock_is_released_even_so(self, hook, monkeypatch):
+        admin, compute, observed = hook
+        monkeypatch.setattr(compute, "run_recompute", lambda: 7)
+        admin.run_recompute_guarded()
+        assert not admin.recompute_lock.locked()
+
+    def test_a_raising_recompute_reports_its_error(self, hook, monkeypatch):
+        admin, compute, observed = hook
+
+        def _boom():
+            raise ValueError(EBP_ERROR)
+
+        monkeypatch.setattr(compute, "run_recompute", _boom)
+        admin.run_recompute_guarded()
+        assert observed["error"] == EBP_ERROR
+        assert not admin.recompute_lock.locked()
+
+    def test_a_run_that_scores_nothing_reports_a_failure(self, hook, monkeypatch):
+        admin, compute, observed = hook
+        monkeypatch.setattr(compute, "run_recompute", lambda: None)
+        admin.run_recompute_guarded()
+        assert "recompute impossible" in str(observed["error"])

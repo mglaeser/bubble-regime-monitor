@@ -57,14 +57,23 @@ def run_recompute_guarded() -> None:
         failure = str(exc)
         _last.update(finished_at=datetime.now(UTC).isoformat(), error=str(exc)[:400])
     finally:
-        recompute_lock.release()
-    # AFTER the lock is released, deliberately. The transport is a network call
-    # to an operator-configured host, and holding the single-flight lock across
-    # it would let a hung proxy delay the next scheduled slot. The alerter
-    # never raises, so nothing here can escape into the scheduler thread.
-    from app.services.failure_alert import notify_recompute_outcome
+        # BEFORE the lock is released, deliberately. This lock is the only
+        # thing that totally orders recompute outcomes, so it has to cover the
+        # reporting too. Releasing first let a manual POST /refresh start,
+        # succeed and report "nothing to stand down" while the failing run
+        # ahead of it had not yet sent anything — and then that run's FAILING
+        # landed last, opening a phantom outage on a healthy service.
+        #
+        # The added hold is one bounded HTTP call (both transports set their
+        # own timeouts) against a run that takes minutes, on a four-hour
+        # schedule whose job carries misfire_grace_time=3600. The alerter never
+        # raises; the nested finally guarantees the release even if it did.
+        try:
+            from app.services.failure_alert import notify_recompute_outcome
 
-    notify_recompute_outcome(failure)
+            notify_recompute_outcome(failure)
+        finally:
+            recompute_lock.release()
 
 
 @router.post(

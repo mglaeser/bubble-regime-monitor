@@ -34,9 +34,10 @@ often reporting the death of.
 
 ORDER AND CLOSURE. Every wrong belief this can leave an operator with is worse
 than leaving them with none, so two rules hold throughout: messages are
-delivered in the order the recomputes they describe completed (the send runs
-under the state lock), and an outage closes only when its all-clear has
-actually been delivered — never when it was merely attempted.
+delivered in the order the recomputes they describe completed (the caller
+reports before releasing the single-flight lock), and an outage closes only
+when its all-clear has actually been delivered — never when it was merely
+attempted.
 """
 
 from __future__ import annotations
@@ -67,12 +68,22 @@ _MIN_REASON_CHARS = 16
 
 @dataclass
 class _Outage:
-    """One run of consecutive failures sharing a signature."""
+    """One unbroken run of failures — not necessarily one signature.
+
+    `last_sent` and `announced` answer DIFFERENT questions and must not be
+    conflated. `last_sent` is the throttle clock for the CURRENT signature and
+    resets when the signature changes, so a new kind of failure alerts at once.
+    `announced` is whether the operator was ever told about THIS outage at all,
+    and it carries forward, because it decides whether they are owed an
+    all-clear. Deriving the second from the first meant that an outage which
+    was announced, then changed signature, then failed to send, was treated as
+    never announced — and its all-clear was silently dropped."""
 
     signature: str
     first_seen: datetime
     failures: int
     last_sent: datetime | None = None
+    announced: bool = False
 
 
 _lock = threading.Lock()
@@ -206,15 +217,12 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
     `error=None` means the run produced a snapshot. Returns a status dict and
     NEVER raises — the caller is the scheduler's only worker thread.
 
-    THE SEND HAPPENS UNDER THE LOCK, deliberately. Recompute outcomes are
-    totally ordered (the single-flight lock guarantees one run at a time), and
-    the messages describing them have to arrive in that same order. Deciding
-    under the lock but sending outside it let a manual POST /refresh that
-    SUCCEEDED overtake the FAILING message of the scheduled run before it,
-    leaving "FAILING" as the last thing the operator saw about a service that
-    was fine. The cost is that a second outcome waits out a slow transport;
-    that thread has already released the recompute lock, so no scheduled slot
-    is delayed by it."""
+    THE SEND HAPPENS UNDER THE STATE LOCK, so that two callers can never
+    interleave a decision with someone else's send. That alone does not order
+    the MESSAGES, though — ordering comes from the caller reporting before it
+    releases the recompute lock (see app/routers/admin.py). Both are needed:
+    without the caller's lock a later success overtakes an earlier failure,
+    and without this one two concurrent callers race the same outage state."""
     global _current
     try:
         settings = get_settings()
@@ -227,7 +235,7 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
         with _lock:
             if error is None:
                 outage = _current
-                if outage is None or outage.last_sent is None:
+                if outage is None or not outage.announced:
                     # Nothing was ever announced, so there is nothing to stand
                     # down. Drop an unannounced outage: the service is fine and
                     # nobody was told otherwise.
@@ -247,9 +255,13 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                     # FORWARD — the service has been failing continuously since
                     # `first_seen`, and restarting the clock here would
                     # under-report an outage whose first alert may never have
-                    # been delivered at all.
+                    # been delivered at all. `announced` carries too: the
+                    # operator is owed an all-clear for anything they were told
+                    # about, whatever the error has since changed into.
+                    # `last_sent` does NOT — a new signature is news now.
                     outage = _Outage(signature=signature, first_seen=outage.first_seen,
-                                     failures=outage.failures + 1)
+                                     failures=outage.failures + 1,
+                                     announced=outage.announced)
                     _current = outage
                 else:
                     outage.failures += 1
@@ -289,8 +301,10 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                 _current = None
             elif ok:
                 # Only a DELIVERED alert starts the quiet period; a failed send
-                # must be retried at the next slot, not throttled away.
+                # must be retried at the next slot, not throttled away. It is
+                # also the only thing that makes the operator owed an all-clear.
                 outage.last_sent = now
+                outage.announced = True
 
         log.info("failure_alert", kind=kind, transport=transport, sent=ok,
                  failures=outage.failures, chars=len(text), status=status_code)
