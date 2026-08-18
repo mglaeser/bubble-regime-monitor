@@ -19,6 +19,7 @@ import httpx
 
 from app.config import get_settings
 from app.logging_conf import get_logger
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 
@@ -63,8 +64,12 @@ def send_sms(message: str, *, recipient: str | None = None) -> SmsResult:
                 auth=(settings.sipgate_token_id, settings.sipgate_token),
             )
     except Exception as exc:
-        log.warning("sipgate_send_failed", error_class=type(exc).__name__, error=str(exc)[:200])
-        return SmsResult(ok=False, status_code=None, error=str(exc)[:200])
+        # sanitize() before truncating, never `[:200]` alone: cutting first can
+        # strip an `api_key=` marker while leaving a usable prefix behind it,
+        # and sipgate auth is a Basic-auth pair an error string can echo.
+        detail = sanitize(str(exc), limit=200)
+        log.warning("sipgate_send_failed", error_class=type(exc).__name__, error=detail)
+        return SmsResult(ok=False, status_code=None, error=detail)
 
     # The endpoint returns 204 No Content on success; accept any 2xx.
     ok = 200 <= resp.status_code < 300
@@ -72,5 +77,6 @@ def send_sms(message: str, *, recipient: str | None = None) -> SmsResult:
         log.info("sipgate_sms_sent", status=resp.status_code, chars=len(message),
                  recipient=_mask_recipient(to))
         return SmsResult(ok=True, status_code=resp.status_code)
-    log.warning("sipgate_sms_rejected", status=resp.status_code, body=resp.text[:200])
-    return SmsResult(ok=False, status_code=resp.status_code, error=resp.text[:200])
+    detail = sanitize(resp.text, limit=200)
+    log.warning("sipgate_sms_rejected", status=resp.status_code, body=detail)
+    return SmsResult(ok=False, status_code=resp.status_code, error=detail)

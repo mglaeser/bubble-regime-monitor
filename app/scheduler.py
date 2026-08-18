@@ -102,21 +102,35 @@ def start() -> BackgroundScheduler:
                            CronTrigger(minute="15,45", timezone="UTC"),
                            id="alert_recovery", replace_existing=True,
                            coalesce=True, misfire_grace_time=1800, max_instances=1)
-        sms_schedule = "disabled"
-        # DAILY_SMS_ENABLED is the migration-friendly alias; until the explicit
-        # Stage 4 cutover the legacy digest keeps its own switch, and turning
-        # the alert system on never silently disables it.
-        if settings.effective_daily_sms_enabled:
+        digest_schedule = "disabled"
+        # Gated on the TRANSPORT, not on effective_daily_sms_enabled: an
+        # operator who sets SMS_ENABLED=false and IMESSAGE_ENABLED=true means
+        # "send my digest over iMessage", and gating on the SMS switch alone
+        # would silently unschedule the job they just reconfigured.
+        # DAILY_SMS_ENABLED remains the migration-friendly alias for the
+        # sipgate path; turning the alert system on still never disables this.
+        digest_transport = settings.daily_digest_transport
+        if digest_transport != "none":
             _scheduler.add_job(
                 _sms_job,
                 CronTrigger(hour=settings.sms_daily_hour, minute=settings.sms_daily_minute,
                             timezone="UTC"),
                 id="daily_sms", replace_existing=True,
                 coalesce=True, misfire_grace_time=3600, max_instances=1)
-            sms_schedule = f"{settings.sms_daily_hour:02d}:{settings.sms_daily_minute:02d} UTC"
+            digest_schedule = (f"{settings.sms_daily_hour:02d}:"
+                               f"{settings.sms_daily_minute:02d} UTC via {digest_transport}")
+        else:
+            # The ONLY place a "no transport" state is actually observed at
+            # runtime: the digest job is not registered, so its own skip path
+            # never runs and would never report the reason. Boot is also when
+            # an operator is watching, which is when a misspelt IMESSAGE_* key
+            # is cheapest to fix.
+            from app.services.digest import no_transport_reason
+
+            log.warning("daily_digest_disabled", reason=no_transport_reason())
         _scheduler.start()
         log.info("scheduler_started", recompute="every 4h (02/06/10/14/18/22 UTC)",
-                 breadth_refresh="01:00/13:00 UTC", daily_sms=sms_schedule,
+                 breadth_refresh="01:00/13:00 UTC", daily_digest=digest_schedule,
                  alert_recovery="every 30min (:15/:45)",
                  alert_dispatch=f"every {max(20, settings.alerts_dispatch_poll_s)}s "
                                f"(mode={settings.alerts_mode})")
