@@ -168,37 +168,55 @@ def _is_valid(x: Any) -> bool:
                 and isinstance(x["v"].get("refuted"), bool))
 
 
-def vendor_key(model: str) -> str:
-    """The VENDOR a model belongs to, for independence counting.
+def vendor_tokens(model: str) -> frozenset[str]:
+    """Every token that could name the VENDOR behind a model id.
 
-    require_approvals counts DISTINCT MODEL STRINGS. That is not the property
-    docs/INDEPENDENT_REVIEW_PANEL.md claims -- Article IV asks for "a verifier
-    fleet from a DIFFERENT VENDOR", and two sibling models from one vendor
-    share the training lineage and the failure modes the whole mechanism exists
-    to cross-check.
+    A SET, not a single key, and that is the whole design. The single-key form
+    of this function was refuted by the panel on the pull request that
+    introduced it, correctly: `gpt-5.6-sol` keyed to "gpt" while
+    `openai/gpt-4.1-mini` keyed to "openai", so two models from ONE vendor,
+    written in two spellings, satisfied a CROSS-vendor requirement. A gate whose
+    answer depends on how a model id happens to be spelt is the same defect it
+    was built to close.
 
-    Reproduced live, run 32121148827: the panel was gpt-5.6-sol, gpt-5.6-terra
-    and nvidia/deepseek-ai/deepseek-v4-flash-0731; the deepseek voice returned
-    API 504; the two gpt siblings approved; the run printed "Cross-vendor panel
-    confirms" and posted independent-verify=success. Two distinct model
-    strings, one vendor, and nothing said so.
+    Two models count as different vendors only when their token sets are
+    DISJOINT, so ambiguity resolves to "same vendor" -- it blocks rather than
+    admits, which is the direction every other gate in this file fails.
 
-    A namespaced id names its vendor directly (nvidia/deepseek-ai/... -> nvidia).
-    A bare id keys on its leading alphabetic token, which is what groups a
-    vendor's family: gpt-5.6-sol, gpt-5.6-terra, gpt-4.1-mini -> gpt."""
+      gpt-5.6-sol                            -> {gpt}
+      openai/gpt-4.1-mini                    -> {openai, gpt}   (intersects, same vendor)
+      nvidia/deepseek-ai/deepseek-v4-flash   -> {nvidia, deepseek}
+    """
     m = (model or "").strip().lower()
     if not m:
-        return ""
-    if "/" in m:
-        return m.split("/", 1)[0]
-    return re.split(r"[^a-z]", m, maxsplit=1)[0] or m
+        return frozenset()
+    toks = {lead for seg in m.split("/")
+            if (lead := re.split(r"[^a-z]", seg, maxsplit=1)[0])}
+    return frozenset(toks)
 
 
-def approving_vendors(votes: list[dict], models: list[str]) -> set[str]:
-    """Vendors with at least one VALID, APPROVING voice. An errored voice never
-    approves, so an outage shrinks this set -- which is the point."""
-    return {vendor_key(models[i]) for i, x in enumerate(votes)
-            if _is_valid(x) and x["v"]["refuted"] is False and models[i]}
+def same_vendor(a: str, b: str) -> bool:
+    """True when two model ids cannot be shown to come from different vendors.
+
+    Unknown provenance (either side yielding no tokens) reads as SAME, so a
+    blank or unparsable model can never be counted as independent corroboration."""
+    ta, tb = vendor_tokens(a), vendor_tokens(b)
+    if not ta or not tb:
+        return True
+    return bool(ta & tb)
+
+
+def approving_models(votes: list[dict], models: list[str]) -> list[str]:
+    """Models with a VALID, APPROVING voice. An errored voice never approves, so
+    an outage shrinks this list -- which is the point."""
+    return [models[i] for i, x in enumerate(votes)
+            if _is_valid(x) and x["v"]["refuted"] is False and models[i]]
+
+
+def is_cross_vendor(approving: list[str]) -> bool:
+    """True when two approving voices are demonstrably from different vendors."""
+    return any(not same_vendor(a, b)
+               for i, a in enumerate(approving) for b in approving[i + 1:])
 
 
 def require_cross_vendor(votes: list[dict], models: list[str], required_approver: str,
@@ -215,24 +233,23 @@ def require_cross_vendor(votes: list[dict], models: list[str], required_approver
     NOTE for operators: DEFAULT_PANEL_MODELS is same-vendor (all `gpt`), so a
     run that falls back to the defaults cannot satisfy this gate. That is the
     intended reading -- an unconfigured panel has not earned the claim."""
-    req_vendor = vendor_key(required_approver)
-    vendors = approving_vendors(votes, models)
-    others = sorted(v for v in vendors if v and v != req_vendor)
+    approving = approving_models(votes, models)
+    others = sorted({m for m in approving if not same_vendor(m, required_approver)})
     if others:
         return {"block": False,
                 "reason": f'cross-vendor corroboration from {", ".join(others)} '
-                          f'(required approver is "{req_vendor}")'}
+                          f'(required approver "{required_approver}")'}
     unreachable = [models[i] for i, x in enumerate(votes)
-                   if not x.get("ok") and vendor_key(models[i]) != req_vendor]
+                   if not x.get("ok") and not same_vendor(models[i], required_approver)]
     detail = (f"; the only other-vendor voice(s) were unreachable: {', '.join(unreachable)}"
               if unreachable else "")
     if not enabled:
         return {"block": False,
                 "reason": f'SAME-VENDOR panel accepted by configuration '
-                          f'(VERIFIER_REQUIRE_CROSS_VENDOR=false); every approving voice is '
-                          f'"{req_vendor}"{detail}'}
+                          f'(VERIFIER_REQUIRE_CROSS_VENDOR=false); every approving voice shares '
+                          f'a vendor with "{required_approver}"{detail}'}
     return {"block": True,
-            "reason": f'no approving voice from a vendor other than "{req_vendor}"'
+            "reason": f'no approving voice from a vendor other than "{required_approver}"'
                       f'{detail} -> the panel is not cross-vendor, fail-closed'}
 
 
@@ -699,11 +716,18 @@ def selftest() -> None:
 
     # Vendor independence. The live failure this encodes: run 32121148827 lost
     # its only other-vendor voice to an API 504 and still printed "Cross-vendor".
-    expect(vendor_key("nvidia/deepseek-ai/deepseek-v4-flash-0731") == "nvidia",
-           "a namespaced id names its vendor")
-    expect(vendor_key("gpt-5.6-sol") == vendor_key("gpt-5.6-terra") == "gpt",
+    expect(vendor_tokens("nvidia/deepseek-ai/deepseek-v4-flash-0731") == frozenset({"nvidia", "deepseek"}),
+           "every segment of a namespaced id contributes a vendor token")
+    expect(same_vendor("gpt-5.6-sol", "gpt-5.6-terra"),
            "sibling models share a vendor -- this is the whole point")
-    expect(vendor_key("") == "" and vendor_key(None) == "", "no model -> no vendor")
+    # The panel's own refutation of the first version of this gate: one vendor,
+    # two spellings, must never read as two vendors.
+    expect(same_vendor("gpt-5.6-sol", "openai/gpt-4.1-mini"),
+           "bare and namespaced spellings of ONE vendor must not satisfy cross-vendor")
+    expect(not same_vendor("gpt-5.6-sol", "nvidia/deepseek-ai/deepseek-v4-flash-0731"),
+           "genuinely different vendors must be separable")
+    expect(same_vendor("", "gpt-5.6-sol") and same_vendor("gpt-5.6-sol", None),
+           "unknown provenance reads as SAME vendor -- fail-closed, never independent")
     _PANEL = ["gpt-5.6-sol", "gpt-5.6-terra", "nvidia/deepseek-ai/deepseek-v4-flash-0731"]
     _out = require_cross_vendor([A, A2, {"ok": False, "reason": "API 504"}], _PANEL, "gpt-5.6-sol")
     expect(_out["block"] and "not cross-vendor" in _out["reason"],
@@ -1062,9 +1086,9 @@ def main() -> int:
     # The label is COMPUTED, never asserted. Printing "Cross-vendor" over a
     # single-vendor result is the defect this whole gate exists to close, and a
     # green run that hides a lost voice looks like a smaller panel that agreed.
-    vendors = sorted(v for v in approving_vendors(votes, models) if v)
-    label = ("Cross-vendor panel confirms" if len(vendors) > 1
-             else f"SAME-VENDOR panel ({vendors[0] if vendors else 'no vendor'}) confirms")
+    approving = approving_models(votes, models)
+    label = ("Cross-vendor panel confirms" if is_cross_vendor(approving)
+             else f"SAME-VENDOR panel ({', '.join(approving) or 'no vendor'}) confirms")
     unreachable = [models[i] for i, x in enumerate(votes) if not x.get("ok")]
     note = (f"\n[independent-verify] NOTE: {len(unreachable)} of {panel} voices were "
             f"unreachable and did not vote: {', '.join(unreachable)}." if unreachable else "")

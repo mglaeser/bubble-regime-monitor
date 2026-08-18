@@ -534,23 +534,39 @@ class TestVendorIndependence:
     -- the panel was gpt-5.6-sol, gpt-5.6-terra and a deepseek voice, deepseek
     returned API 504, the two gpt siblings approved, and the run printed
     "Cross-vendor panel confirms" and posted independent-verify=success.
+
+    The FIRST fix for this was itself refuted, by the panel, on the pull request
+    that carried it: a single vendor KEY made `gpt-5.6-sol` -> "gpt" and
+    `openai/gpt-4.1-mini` -> "openai", so one vendor in two spellings passed a
+    cross-vendor gate. Hence token SETS and disjointness, below.
     """
 
     PANEL = ["gpt-5.6-sol", "gpt-5.6-terra", "nvidia/deepseek-ai/deepseek-v4-flash-0731"]
 
-    def test_a_namespaced_id_names_its_vendor(self):
-        assert iv.vendor_key("nvidia/deepseek-ai/deepseek-v4-flash-0731") == "nvidia"
+    def test_every_segment_of_a_namespaced_id_contributes_a_token(self):
+        assert iv.vendor_tokens("nvidia/deepseek-ai/deepseek-v4-flash-0731") == frozenset(
+            {"nvidia", "deepseek"})
 
     def test_sibling_models_share_a_vendor(self):
-        assert iv.vendor_key("gpt-5.6-sol") == iv.vendor_key("gpt-5.6-terra") == "gpt"
-        assert iv.vendor_key("gpt-4.1-mini") == "gpt"
+        assert iv.same_vendor("gpt-5.6-sol", "gpt-5.6-terra")
+        assert iv.same_vendor("gpt-5.6-sol", "gpt-4.1-mini")
+
+    def test_one_vendor_in_two_spellings_is_one_vendor(self):
+        # The panel's refutation of the first version of this gate, as a test.
+        assert iv.same_vendor("gpt-5.6-sol", "openai/gpt-4.1-mini")
+        assert iv.same_vendor("openai/gpt-5.6-sol", "gpt-5.6-terra")
+
+    def test_genuinely_different_vendors_are_separable(self):
+        assert not iv.same_vendor("gpt-5.6-sol", "nvidia/deepseek-ai/deepseek-v4-flash-0731")
+        assert not iv.same_vendor("gpt-5.6-sol", "claude-opus-5")
+
+    def test_unknown_provenance_reads_as_the_same_vendor(self):
+        # Fail-closed: a blank or unparsable id must never count as independent.
+        assert iv.same_vendor("", "gpt-5.6-sol")
+        assert iv.same_vendor("gpt-5.6-sol", None)
 
     def test_case_and_surrounding_space_do_not_make_a_new_vendor(self):
-        assert iv.vendor_key("  GPT-5.6-Sol  ") == "gpt"
-
-    def test_no_model_is_never_a_vendor(self):
-        # An empty vendor must not accidentally count as "different".
-        assert iv.vendor_key("") == "" and iv.vendor_key(None) == ""
+        assert iv.same_vendor("  GPT-5.6-Sol  ", "gpt-5.6-terra")
 
     def test_the_live_outage_is_refused(self):
         out = iv.require_cross_vendor([A, A2, ERR], self.PANEL, "gpt-5.6-sol")
@@ -558,12 +574,15 @@ class TestVendorIndependence:
         assert "not cross-vendor" in out["reason"]
         assert "deepseek" in out["reason"], "the refusal must name the voice that was lost"
 
+    def test_the_alias_hole_is_refused(self):
+        # Two OpenAI models, one namespaced, plus an unreachable third.
+        panel = ["gpt-5.6-sol", "openai/gpt-4.1-mini", "nvidia/deepseek-ai/deepseek-v4"]
+        assert iv.require_cross_vendor([A, A2, ERR], panel, "gpt-5.6-sol")["block"] is True
+
     def test_a_reachable_approving_other_vendor_corroborates(self):
         assert iv.require_cross_vendor([A, A2, A2], self.PANEL, "gpt-5.6-sol")["block"] is False
 
     def test_an_other_vendor_that_refutes_does_not_corroborate(self):
-        # Refuting is not approving. Counting it would let a dissenting voice
-        # satisfy the very gate its dissent should trip.
         assert iv.require_cross_vendor([A, A2, RF], self.PANEL, "gpt-5.6-sol")["block"] is True
 
     def test_the_required_approver_cannot_corroborate_itself(self):
@@ -575,6 +594,11 @@ class TestVendorIndependence:
         assert out["block"] is False
         assert "SAME-VENDOR" in out["reason"], "an opt-out must still be named honestly"
 
-    def test_approving_vendors_ignores_errored_and_refuting_voices(self):
-        assert iv.approving_vendors([A, ERR, RF], self.PANEL) == {"gpt"}
-        assert iv.approving_vendors([A, A2, A2], self.PANEL) == {"gpt", "nvidia"}
+    def test_is_cross_vendor_needs_two_separable_approvals(self):
+        assert iv.is_cross_vendor(["gpt-5.6-sol", "nvidia/deepseek-ai/deepseek-v4"]) is True
+        assert iv.is_cross_vendor(["gpt-5.6-sol", "openai/gpt-4.1-mini"]) is False
+        assert iv.is_cross_vendor(["gpt-5.6-sol"]) is False
+
+    def test_approving_models_ignores_errored_and_refuting_voices(self):
+        assert iv.approving_models([A, ERR, RF], self.PANEL) == ["gpt-5.6-sol"]
+        assert iv.approving_models([A, A2, A2], self.PANEL) == self.PANEL

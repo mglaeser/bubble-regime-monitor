@@ -109,6 +109,15 @@ jobs:
         # re-emits an updated baseline) — it does NOT gate. `detect-secrets-hook`
         # exits 1 when a tracked file contains a secret absent from the baseline.
         # (This distinction was caught by adversarial verification.)
+        #
+        # SCOPE — this is an INDEX-TIME control, not a presence check. The input
+        # is `git ls-files`, so an UNTRACKED file is invisible to it: the gate is
+        # green for the whole life of a new file before `git add`, which is
+        # exactly the window in which a pasted credential is most likely to be
+        # sitting in one. Reproduced: a new test file containing a fake
+        # "ANTHROPIC_API_KEY" passed while untracked and failed on commit.
+        # A green run here means "no new secret in the index", never "no secret
+        # in the working tree".
         run: git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
       - name: Alert artifacts — validate the shipped ruleset + phrase set (BLOCKING)
         # The rule inventory is DATA. A ruleset that no longer validates is a
