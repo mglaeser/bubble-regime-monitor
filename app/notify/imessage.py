@@ -111,12 +111,14 @@ class ImessageResult:
     operation_id: str | None = None
 
 
-#: Hosts for which plain HTTP carries nothing off the machine. Everything else
-#: must be HTTPS.
-_LOOPBACK_HOSTS = frozenset({
-    "127.0.0.1", "::1", "[::1]", "localhost",
-    "host.containers.internal", "host.docker.internal",
-})
+#: The ONLY name permitted for a plain-HTTP destination.
+#:
+#: Everything else must be an IP literal in a loopback range. The distinction
+#: is whether the guarantee rests on DNS: `localhost` is fixed in /etc/hosts,
+#: and anything able to rewrite that file inside this container already has
+#: code execution here, so trusting it adds no exposure. Runtime-injected names
+#: are a different matter and are deliberately NOT here — see check_destination.
+_LOOPBACK_NAMES = frozenset({"localhost"})
 
 
 def _base_url() -> str:
@@ -180,11 +182,25 @@ def check_destination(base_url: str) -> str | None:
 
 
 def _is_loopback(hostname: str) -> bool:
-    """The whole of 127.0.0.0/8 and ::1, not just the canonical spellings —
-    http://127.0.0.2 leaves the machine no more than http://127.0.0.1 does,
-    and refusing it would be a false negative an operator would work around."""
+    """True only where plain HTTP provably cannot leave this machine.
+
+    An IP LITERAL in a loopback range, or `localhost`. The whole of
+    127.0.0.0/8 counts, not just the canonical spelling — http://127.0.0.2
+    leaves the machine no more than http://127.0.0.1 does, and a check with
+    false negatives is one an operator learns to route around.
+
+    `host.docker.internal` and `host.containers.internal` are deliberately
+    ABSENT, though they are the obvious way to reach a proxy on the container
+    host. Two reasons, either sufficient. They are resolved by DNS the
+    container runtime injects, so treating them as loopback makes the
+    cleartext guarantee depend on name resolution staying honest — and a
+    resolve-then-connect check cannot close that, because the two steps are not
+    atomic. And even when they resolve correctly they address the host gateway
+    across a bridge interface, which is not loopback in the first place. A
+    container that must reach a host-side proxy over plain HTTP should name the
+    gateway by address; anything else should use https."""
     host = hostname.lower().strip("[]")
-    if host in _LOOPBACK_HOSTS:
+    if host in _LOOPBACK_NAMES:
         return True
     try:
         return ipaddress.ip_address(host).is_loopback

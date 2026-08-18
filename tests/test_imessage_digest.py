@@ -176,8 +176,6 @@ class TestDestinationSafety:
         "https://messages.example.com:8443",
         "http://127.0.0.1:8765",
         "http://localhost:8765",
-        "http://host.containers.internal:8765",
-        "http://host.docker.internal:8765",
     ])
     def test_permits(self, url):
         assert check_destination(url) is None
@@ -190,6 +188,25 @@ class TestDestinationSafety:
         # Refusing these would be a false negative an operator works around,
         # and working around a safety check is worse than the check being wide.
         assert check_destination(url) is None
+
+    @pytest.mark.parametrize("url", [
+        "http://host.docker.internal:8765",
+        "http://host.containers.internal:8765",
+    ])
+    def test_refuses_runtime_injected_names_over_plain_http(self, url):
+        # These are the obvious way to reach a proxy on the container host, and
+        # they are refused on purpose: they are resolved by DNS the runtime
+        # injects, so honouring them would make the cleartext guarantee depend
+        # on name resolution staying honest. A resolve-then-connect check
+        # cannot close that either — the two steps are not atomic. They also
+        # address the host gateway across a bridge, which is not loopback.
+        problem = check_destination(url)
+        assert problem is not None
+        assert "cleartext" in problem.lower()
+
+    def test_the_same_names_are_fine_over_https(self):
+        # The objection is to plain HTTP trusting DNS, not to the names.
+        assert check_destination("https://host.docker.internal:8765") is None
 
     @pytest.mark.parametrize("url,fragment", [
         ("http://messages.example.com", "cleartext"),
