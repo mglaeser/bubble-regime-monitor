@@ -244,6 +244,40 @@ class TestDestinationSafety:
             f"{joined} does not address the send route")
         assert check_destination(base) is not None
 
+    @pytest.mark.parametrize("url,secret", [
+        ("https://host?token=SUPERSECRET123", "SUPERSECRET123"),
+        ("https://host#tok=SUPERSECRET123", "SUPERSECRET123"),
+        ("https://host/private/inbox", "/private/inbox"),
+    ])
+    def test_refusal_never_echoes_the_offending_value(self, url, secret):
+        # This reason string is logged, returned by the admin endpoint AND
+        # printed by `alerts preflight`. A base URL rejected for carrying a
+        # query is exactly the one most likely to have a credential in it, so
+        # quoting the value would persist a secret in all three places.
+        problem = check_destination(url)
+        assert problem is not None
+        assert secret not in problem
+
+    @pytest.mark.parametrize("url", ["https://[", "http://[::1", "https://[]:x"])
+    def test_unparsable_url_is_reported_not_raised(self, url):
+        # urlsplit raises ValueError on a malformed IPv6 literal. This function
+        # is called BEFORE the sender's try block and directly by preflight, so
+        # a raise here would crash the scheduled digest instead of skipping it.
+        problem = check_destination(url)
+        assert problem is not None and "parsable" in problem
+
+    def test_unparsable_url_does_not_crash_the_send(
+            self, isolated_db, imessage_env, monkeypatch):
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "https://[")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        import app.notify.imessage as im
+
+        result = im.send_imessage("hi")   # must not raise
+        assert result.ok is False
+        get_settings.cache_clear()
+
     def test_refused_destination_never_opens_a_socket(
             self, isolated_db, imessage_env, monkeypatch):
         monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://messages.example.com")

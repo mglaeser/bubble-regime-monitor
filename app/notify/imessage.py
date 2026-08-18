@@ -146,20 +146,36 @@ def check_destination(base_url: str) -> str | None:
     exactly as strict as the contract."""
     if not base_url:
         return "IMESSAGE_API_BASE_URL is empty"
-    parsed = urlsplit(base_url)
+    try:
+        parsed = urlsplit(base_url)
+        # .hostname re-parses the netloc and is where a malformed IPv6 literal
+        # such as "https://[" actually raises, so touch it inside the guard.
+        hostname = parsed.hostname
+    except ValueError as exc:
+        # This function is called BEFORE the sender's try block and directly by
+        # `alerts preflight`, and the module promises never to raise. urlsplit
+        # raises on a malformed IPv6 URL, which would have taken down the
+        # scheduled digest rather than skipping it.
+        return f"IMESSAGE_API_BASE_URL is not a parsable URL ({type(exc).__name__})"
     if parsed.scheme not in ("http", "https"):
+        # The scheme is safe to echo; nothing else here is. See below.
         return (f"IMESSAGE_API_BASE_URL scheme must be https (or http on loopback); "
                 f"got {parsed.scheme or 'no scheme'!r}")
-    if not parsed.hostname:
+    if not hostname:
         return "IMESSAGE_API_BASE_URL has no host"
     if parsed.username or parsed.password:
         # Credentials in the URL would be sent on every request and would ride
         # along in any exception string. `sanitize` masks that shape, but not
         # accepting it in the first place is the stronger control.
         return "IMESSAGE_API_BASE_URL must not carry credentials in the URL"
+    # NOTHING BELOW ECHOES THE OFFENDING VALUE. This reason string is logged,
+    # returned from the admin endpoint and printed by `alerts preflight`, and a
+    # setting rejected for carrying a query is precisely the setting most
+    # likely to have a credential in it — "https://host?token=..." would
+    # otherwise persist that token in all three places. The component is named
+    # so the operator knows what to remove; its content is never quoted.
     if parsed.path.rstrip("/"):
-        return ("IMESSAGE_API_BASE_URL must be an origin with no path; "
-                f"got a path component {parsed.path!r}")
+        return "IMESSAGE_API_BASE_URL must be an origin with no path component"
     # ORIGIN-ONLY MEANS NO QUERY AND NO FRAGMENT EITHER. This is not pedantry:
     # SEND_PATH is appended by string concatenation, so a base of
     # "https://host?x=1" produces "https://host?x=1/api/messages" — the path
@@ -167,16 +183,20 @@ def check_destination(base_url: str) -> str | None:
     # send route, and the bearer key plus the digest text go with it. A
     # fragment does the same. Both pass a path-only check.
     if parsed.query:
-        return ("IMESSAGE_API_BASE_URL must be an origin with no query string; "
-                f"got {parsed.query!r} — appending {SEND_PATH} to it would misroute "
-                f"the request and send the API key to the wrong path")
+        return (f"IMESSAGE_API_BASE_URL must be an origin with no query string; "
+                f"appending {SEND_PATH} to one would misroute the request and send "
+                f"the API key to the wrong path")
     if parsed.fragment:
-        return ("IMESSAGE_API_BASE_URL must be an origin with no fragment; "
-                f"got {parsed.fragment!r} — appending {SEND_PATH} to it would misroute "
-                f"the request and send the API key to the wrong path")
-    if parsed.scheme == "http" and not _is_loopback(parsed.hostname):
+        return (f"IMESSAGE_API_BASE_URL must be an origin with no fragment; "
+                f"appending {SEND_PATH} to one would misroute the request and send "
+                f"the API key to the wrong path")
+    if parsed.scheme == "http" and not _is_loopback(hostname):
+        # The hostname IS echoed, deliberately: it is the one component an
+        # operator cannot act on without seeing, it is not a credential (a
+        # userinfo URL was refused above), and it is the DNS name a network
+        # observer would see anyway. Everything else stays unquoted.
         return (f"IMESSAGE_API_BASE_URL uses http:// to a non-loopback host "
-                f"({parsed.hostname}); that sends the API key and the digest in "
+                f"({hostname}); that sends the API key and the digest in "
                 f"cleartext. Use https://, or a tunnel that presents as loopback.")
     return None
 
