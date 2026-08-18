@@ -570,15 +570,23 @@ def gather_inputs() -> RawInputs:
         raw.gsadf_note = "no Nasdaq-100/QQQ series this run"
 
     # HY OAS: FRED latest + own persisted history (FRED 3-yr truncation).
-    r = _track(raw, "fred_BAMLH0A0HYM2", lambda: fred_src.observations("BAMLH0A0HYM2"))
+    # The date parse lives INSIDE the tracked callable, like `_ebp` below:
+    # `date.fromisoformat` on a vendor string can raise, and out in the gather
+    # body that would abort every remaining source instead of degrading this
+    # one. Parsing here also makes the ingest all-or-nothing — no half-written
+    # history from a series that goes malformed midway.
+    def _hy_oas() -> list[tuple[date, float]]:
+        return [(date.fromisoformat(d), v)
+                for d, v in fred_src.observations("BAMLH0A0HYM2")]
+
+    r = _track(raw, "fred_BAMLH0A0HYM2", _hy_oas)
     with session_scope() as session:
         if r:
             latest_stored = session.execute(
                 select(HyOasHistory.date).order_by(HyOasHistory.date.desc()).limit(1)
             ).scalar_one_or_none()
             cutoff = latest_stored - timedelta(days=7) if latest_stored else None
-            for d, v in r:
-                day = date.fromisoformat(d)
+            for day, v in r:
                 if cutoff is None or day >= cutoff:  # 7-day overlap absorbs FRED revisions
                     session.merge(HyOasHistory(date=day, oas_bps=v * 100.0))
             session.flush()
@@ -617,14 +625,28 @@ def gather_inputs() -> RawInputs:
 
     # Gilchrist-Zakrajsek Excess Bond Premium (monthly, 1973+) — PREFERRED S5
     # input (v3.3.1). Free Fed CSV, no key; degrades to the BAA proxy on failure.
-    ebp = _track(raw, "fed_ebp", fed_ebp_src.fetch_ebp)
-    if ebp:
-        raw.ebp_history = [v for _, v in ebp]
-        raw.ebp_history_dated = [(_month_end_iso(d[:7]), v)
-                                 for d, v in ebp]   # shadow-only (PIN-H)
+    #
+    # THE DERIVATION RUNS INSIDE `_track`, NOT AFTER IT. It used to sit outside:
+    # the fetch succeeded, and `_month_end_iso` then raised on a `date` column
+    # the adapter had not been taught to read (2026-08-06, `M/D/YYYY`). Nothing
+    # between here and the scheduler catches that, so one low-weight indicator's
+    # date format aborted the entire gather — no snapshot at all, six times a
+    # day, for twelve days. A source's post-fetch transform shares that source's
+    # failure domain and belongs inside its error boundary, exactly as
+    # `_baa_spread` above already does it.
+    def _ebp() -> tuple[list[float], list[tuple[str, float]], str]:
+        pairs = fed_ebp_src.fetch_ebp()
         # C-04: EBP is monthly (dated at month start); age s5 from the month END
         # so the freshest published month is not spuriously stale under the SLA.
-        raw.ebp_as_of = _month_end_iso(ebp[-1][0][:7])
+        return (
+            [v for _, v in pairs],
+            [(_month_end_iso(d[:7]), v) for d, v in pairs],   # shadow-only (PIN-H)
+            _month_end_iso(pairs[-1][0][:7]),
+        )
+
+    ebp = _track(raw, "fed_ebp", _ebp)
+    if ebp:
+        raw.ebp_history, raw.ebp_history_dated, raw.ebp_as_of = ebp
 
     r = _track(raw, "breadth", breadth_src.pct_above_200dma)
     if r:
