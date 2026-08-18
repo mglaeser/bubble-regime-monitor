@@ -31,6 +31,12 @@ would have delivered seventy-two identical texts. The state is per-process and
 is not persisted: a restart may cost one duplicate, which is the right side to
 err on — the alternative is a monitor whose memory lives in the database it is
 often reporting the death of.
+
+ORDER AND CLOSURE. Every wrong belief this can leave an operator with is worse
+than leaving them with none, so two rules hold throughout: messages are
+delivered in the order the recomputes they describe completed (the send runs
+under the state lock), and an outage closes only when its all-clear has
+actually been delivered — never when it was merely attempted.
 """
 
 from __future__ import annotations
@@ -198,7 +204,17 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
     """Record the outcome of one recompute and alert if that changed anything.
 
     `error=None` means the run produced a snapshot. Returns a status dict and
-    NEVER raises — the caller is the scheduler's only worker thread."""
+    NEVER raises — the caller is the scheduler's only worker thread.
+
+    THE SEND HAPPENS UNDER THE LOCK, deliberately. Recompute outcomes are
+    totally ordered (the single-flight lock guarantees one run at a time), and
+    the messages describing them have to arrive in that same order. Deciding
+    under the lock but sending outside it let a manual POST /refresh that
+    SUCCEEDED overtake the FAILING message of the scheduled run before it,
+    leaving "FAILING" as the last thing the operator saw about a service that
+    was fine. The cost is that a second outcome waits out a slow transport;
+    that thread has already released the recompute lock, so no scheduled slot
+    is delayed by it."""
     global _current
     try:
         settings = get_settings()
@@ -208,22 +224,32 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
         now = datetime.now(UTC)
         repeat_after = timedelta(hours=max(1, settings.failure_alert_repeat_h))
 
-        announced: _Outage | None = None
         with _lock:
             if error is None:
-                outage, _current = _current, None
+                outage = _current
                 if outage is None or outage.last_sent is None:
-                    # Nothing was ever announced, so there is nothing to stand down.
+                    # Nothing was ever announced, so there is nothing to stand
+                    # down. Drop an unannounced outage: the service is fine and
+                    # nobody was told otherwise.
+                    _current = None
                     return {"status": "noop", "reason": "no announced outage"}
-                kind, failures, first_seen = "recovery", outage.failures, outage.first_seen
+                kind = "recovery"
             else:
                 signature = failure_signature(error)
                 outage = _current
-                if outage is None or outage.signature != signature:
+                if outage is None:
+                    outage = _Outage(signature=signature, first_seen=now, failures=1)
+                    _current = outage
+                elif outage.signature != signature:
                     # A DIFFERENT failure is news even mid-outage: the operator
                     # fixed one thing and hit the next, and waiting out the
-                    # repeat window would hide that.
-                    outage = _Outage(signature=signature, first_seen=now, failures=1)
+                    # repeat window would hide that. The TIMELINE CARRIES
+                    # FORWARD — the service has been failing continuously since
+                    # `first_seen`, and restarting the clock here would
+                    # under-report an outage whose first alert may never have
+                    # been delivered at all.
+                    outage = _Outage(signature=signature, first_seen=outage.first_seen,
+                                     failures=outage.failures + 1)
                     _current = outage
                 else:
                     outage.failures += 1
@@ -231,40 +257,45 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                             and now - outage.last_sent < repeat_after):
                         return {"status": "throttled", "failures": outage.failures,
                                 "signature": signature}
-                announced = outage
-                kind, failures, first_seen = "failure", outage.failures, outage.first_seen
+                kind = "failure"
 
-        transport, problem = _select_transport()
-        if problem:
-            # Logged loudly: a failing recompute AND nowhere to say so is the
-            # state this whole module exists to make impossible to reach quietly.
-            log.error("failure_alert_undeliverable", kind=kind, reason=problem,
-                      transport=transport)
-            return {"status": "skipped", "reason": problem, "transport": transport,
-                    "kind": kind}
+            transport, problem = _select_transport()
+            if problem:
+                # Logged loudly: a failing recompute AND nowhere to say so is
+                # the state this whole module exists to make unreachable
+                # quietly. State is LEFT INTACT so a later run retries.
+                log.error("failure_alert_undeliverable", kind=kind, reason=problem,
+                          transport=transport)
+                return {"status": "skipped", "reason": problem, "transport": transport,
+                        "kind": kind}
 
-        limit = settings.sms_max_len
-        if kind == "recovery":
-            text = build_recovery_message(failures=failures, first_seen=first_seen, limit=limit)
-        else:
-            text = build_failure_message(
-                failures=failures, first_seen=first_seen,
-                snapshot_age=_last_snapshot_age(),
-                reason=_compress_reason(error or ""), limit=limit)
+            limit = settings.sms_max_len
+            if kind == "recovery":
+                text = build_recovery_message(failures=outage.failures,
+                                              first_seen=outage.first_seen, limit=limit)
+            else:
+                text = build_failure_message(
+                    failures=outage.failures, first_seen=outage.first_seen,
+                    snapshot_age=_last_snapshot_age(),
+                    reason=_compress_reason(error or ""), limit=limit)
 
-        ok, status_code, send_error = _send(transport, text)
-        if ok and announced is not None:
-            with _lock:
+            ok, status_code, send_error = _send(transport, text)
+            if ok and kind == "recovery":
+                # The outage closes only once the all-clear is actually out.
+                # Clearing it first meant a failed recovery send was never
+                # retried — every later success returned "noop" and the last
+                # thing the operator held was "FAILING" for a service that had
+                # been healthy for days.
+                _current = None
+            elif ok:
                 # Only a DELIVERED alert starts the quiet period; a failed send
-                # must be retried at the next slot, not silently throttled away.
-                # Identity, not equality: if the outage was replaced while the
-                # transport was blocking, the new one has not been announced.
-                if _current is announced:
-                    announced.last_sent = now
+                # must be retried at the next slot, not throttled away.
+                outage.last_sent = now
+
         log.info("failure_alert", kind=kind, transport=transport, sent=ok,
-                 failures=failures, chars=len(text), status=status_code)
+                 failures=outage.failures, chars=len(text), status=status_code)
         return {"status": "sent" if ok else "failed", "kind": kind, "transport": transport,
-                "chars": len(text), "message": text, "failures": failures,
+                "chars": len(text), "message": text, "failures": outage.failures,
                 "error": send_error}
     except Exception as exc:   # the module's whole contract, in one place
         log.error("failure_alert_unexpected_error", error=sanitize(exc, limit=200))

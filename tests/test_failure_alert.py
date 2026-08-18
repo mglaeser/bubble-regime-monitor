@@ -228,3 +228,57 @@ class TestMessageBuilders:
         first = datetime.now(UTC) - timedelta(days=12)
         body = build_recovery_message(failures=72, first_seen=first, limit=160)
         assert "72 failures" in body and "12d" in body
+
+
+class TestPanelFindings:
+    """Three defects the cross-vendor review panel refused the first cut over.
+
+    All concern the state machine rather than the message, and all three are
+    ways an operator ends up holding a WRONG belief about the service — which
+    is worse than holding none, and is the failure mode this feature exists to
+    remove."""
+
+    def test_a_failed_all_clear_is_retried_on_the_next_success(self, monkeypatch, sent):
+        """Clearing the outage before the all-clear landed meant a dropped
+        recovery was never retried: every later success returned noop and the
+        last thing the operator held was FAILING, for days, wrongly."""
+        notify_recompute_outcome(EBP_ERROR)          # announced
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        assert notify_recompute_outcome(None)["status"] == "failed"
+        assert failure_alert._current is not None    # outage stays open
+
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result())
+        result = notify_recompute_outcome(None)
+        assert result["status"] == "sent" and result["kind"] == "recovery"
+        assert "OK" in sent[-1]
+        assert failure_alert._current is None        # and only now does it close
+
+    def test_the_outage_timeline_survives_a_signature_change(self, monkeypatch, sent):
+        """An undelivered first alert must not reset the clock: the service has
+        been failing continuously, and the replacement alert has to say so."""
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome(EBP_ERROR)                 # never delivered
+        started = failure_alert._current.first_seen
+
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result())
+        result = notify_recompute_outcome("Rscript not found")
+        assert result["failures"] == 2                      # both runs counted
+        assert failure_alert._current.first_seen == started  # not restarted
+
+    def test_the_send_is_serialised_with_the_state_decision(self, monkeypatch, sent):
+        """Recompute outcomes are totally ordered and their messages must be
+        too. Deciding under the lock but sending outside it let a later success
+        overtake an earlier failure."""
+        observed: list[bool] = []
+
+        def _spy(text):
+            observed.append(failure_alert._lock.locked())
+            return _Result()
+
+        monkeypatch.setattr(failure_alert, "send_imessage", _spy)
+        notify_recompute_outcome(EBP_ERROR)
+        assert observed == [True]
