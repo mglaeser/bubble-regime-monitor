@@ -523,3 +523,58 @@ class TestMainFailsClosedOnAnUnreviewableDiff:
         monkeypatch.delenv("VERIFIER_REQUIRE_KEY", raising=False)
         assert iv.main() == 0
         assert "RESIDUAL" in capsys.readouterr().out
+
+
+class TestVendorIndependence:
+    """Distinct MODEL STRINGS are not distinct VENDORS.
+
+    require_approvals counts model strings, and was credited with the property
+    docs/INDEPENDENT_REVIEW_PANEL.md actually claims: Article IV asks for a
+    verifier fleet from a DIFFERENT VENDOR. Reproduced live in run 32121148827
+    -- the panel was gpt-5.6-sol, gpt-5.6-terra and a deepseek voice, deepseek
+    returned API 504, the two gpt siblings approved, and the run printed
+    "Cross-vendor panel confirms" and posted independent-verify=success.
+    """
+
+    PANEL = ["gpt-5.6-sol", "gpt-5.6-terra", "nvidia/deepseek-ai/deepseek-v4-flash-0731"]
+
+    def test_a_namespaced_id_names_its_vendor(self):
+        assert iv.vendor_key("nvidia/deepseek-ai/deepseek-v4-flash-0731") == "nvidia"
+
+    def test_sibling_models_share_a_vendor(self):
+        assert iv.vendor_key("gpt-5.6-sol") == iv.vendor_key("gpt-5.6-terra") == "gpt"
+        assert iv.vendor_key("gpt-4.1-mini") == "gpt"
+
+    def test_case_and_surrounding_space_do_not_make_a_new_vendor(self):
+        assert iv.vendor_key("  GPT-5.6-Sol  ") == "gpt"
+
+    def test_no_model_is_never_a_vendor(self):
+        # An empty vendor must not accidentally count as "different".
+        assert iv.vendor_key("") == "" and iv.vendor_key(None) == ""
+
+    def test_the_live_outage_is_refused(self):
+        out = iv.require_cross_vendor([A, A2, ERR], self.PANEL, "gpt-5.6-sol")
+        assert out["block"] is True
+        assert "not cross-vendor" in out["reason"]
+        assert "deepseek" in out["reason"], "the refusal must name the voice that was lost"
+
+    def test_a_reachable_approving_other_vendor_corroborates(self):
+        assert iv.require_cross_vendor([A, A2, A2], self.PANEL, "gpt-5.6-sol")["block"] is False
+
+    def test_an_other_vendor_that_refutes_does_not_corroborate(self):
+        # Refuting is not approving. Counting it would let a dissenting voice
+        # satisfy the very gate its dissent should trip.
+        assert iv.require_cross_vendor([A, A2, RF], self.PANEL, "gpt-5.6-sol")["block"] is True
+
+    def test_the_required_approver_cannot_corroborate_itself(self):
+        same = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-4.1-mini"]
+        assert iv.require_cross_vendor([A, A2, A2], same, "gpt-5.6-sol")["block"] is True
+
+    def test_configuration_may_accept_a_same_vendor_panel_but_not_the_label(self):
+        out = iv.require_cross_vendor([A, A2, ERR], self.PANEL, "gpt-5.6-sol", enabled=False)
+        assert out["block"] is False
+        assert "SAME-VENDOR" in out["reason"], "an opt-out must still be named honestly"
+
+    def test_approving_vendors_ignores_errored_and_refuting_voices(self):
+        assert iv.approving_vendors([A, ERR, RF], self.PANEL) == {"gpt"}
+        assert iv.approving_vendors([A, A2, A2], self.PANEL) == {"gpt", "nvidia"}
