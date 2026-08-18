@@ -897,3 +897,65 @@ class TestDefectWordInflections:
     ])
     def test_widening_does_not_un_negate_an_all_clear(self, reason):
         assert iv.defect_claims(reason) == []
+
+
+class TestRequiredLedgerMeansRequired:
+    """Group A's refutation, as tests.
+
+    With VERIFIER_REQUIRE_DEFECT_LIST=true the gate claimed every approving vote
+    carries `defects: string[]`. It did not: a bare sentinel string
+    (`"defects": "none"`) and an alias-only key (`"findings": []`) both satisfied
+    it, because declared_defects() tolerates those shapes. Tolerating a shape is
+    not the schema being answered.
+
+    The tolerance itself is deliberate and stays: those sentinels cannot name a
+    defect, and reading every key spelling is what stops an alias from hiding an
+    entry. What changed is that TOLERATED is no longer mistaken for CONFORMANT.
+    """
+
+    M = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+
+    @staticmethod
+    def _green(**kw) -> dict:
+        return {"ok": True, "v": {"refuted": False, "reason": "docs only change", **kw}}
+
+    def test_an_array_is_conformant(self):
+        assert iv.has_conformant_ledger({"defects": []}) is True
+        assert iv.has_conformant_ledger({"defects": ["auth bypass on /admin"]}) is True
+
+    def test_a_sentinel_string_is_not_an_array(self):
+        for bad in ("none", "n/a", "", "nothing found"):
+            assert iv.has_conformant_ledger({"defects": bad}) is False
+
+    def test_an_alias_alone_does_not_answer_the_schema(self):
+        assert iv.has_conformant_ledger({"findings": []}) is False
+        assert iv.has_conformant_ledger({"defects_found": []}) is False
+
+    def test_a_non_dict_vote_is_not_conformant(self):
+        assert iv.has_conformant_ledger(None) is False
+        assert iv.has_conformant_ledger("defects") is False
+
+    def test_required_mode_refuses_every_non_conformant_shape(self):
+        for bad in ({"defects": "none"}, {"findings": []}, {"defects": "n/a"},
+                    {"defects_found": ["x"]}):
+            votes = [self._green(**bad), self._green(defects=[]), self._green(defects=[])]
+            assert iv.attest_consistency(votes, self.M, True)["block"] is True, bad
+
+    def test_required_mode_accepts_a_conformant_empty_ledger(self):
+        votes = [self._green(defects=[])] * 3
+        assert iv.attest_consistency(votes, self.M, True)["block"] is False
+
+    def test_the_alias_still_cannot_hide_an_entry(self):
+        # The safety property the tolerance exists for must survive the fix: a
+        # conformant empty `defects` PLUS an alias naming a defect still blocks.
+        votes = [self._green(defects=[], findings=["auth bypass on /admin"]),
+                 self._green(defects=[]), self._green(defects=[])]
+        out = iv.attest_consistency(votes, self.M, True)
+        assert out["block"] is True
+        assert "bypass" in out["reason"]
+
+    def test_the_switch_off_path_is_unchanged(self):
+        # No forced rollout: a fork whose models answer with a sentinel keeps
+        # working until it opts in.
+        votes = [self._green(defects="none"), self._green(), self._green()]
+        assert iv.attest_consistency(votes, self.M, False)["block"] is False

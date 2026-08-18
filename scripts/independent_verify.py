@@ -357,6 +357,31 @@ def _ledger_fields(v: Any) -> list[Any]:
             if isinstance(k, str) and k.strip().lower() in _LEDGER_KEYS]
 
 
+def has_conformant_ledger(v: Any) -> bool:
+    """True only when the CANONICAL ``defects`` key is present AND is a list.
+
+    declared_defects() reads every accepted spelling and tolerates the enumerated
+    empty-sentinels on purpose: none of those strings can name a defect, so
+    reading them is safe in the P1 direction, and reading every spelling stops an
+    alias from hiding an entry. But TOLERATING a shape is not the same as the
+    schema having been ANSWERED, and require_ledger claims the latter.
+
+    Group A refuted exactly that gap: with VERIFIER_REQUIRE_DEFECT_LIST=true,
+    ``"defects": "none"`` and an alias-only ``"findings": []`` both passed while
+    carrying no ``defects: string[]`` at all -- "required" did not mean required.
+    Measured before the fix:
+
+        "defects": []       -> passes   (conformant)
+        "defects": "none"   -> passes   (NOT conformant, should block)
+        "findings": []      -> passes   (NOT conformant, should block)
+        no ledger           -> blocks
+    """
+    if not isinstance(v, dict):
+        return False
+    return any(isinstance(k, str) and k.strip().lower() == "defects" and isinstance(val, list)
+               for k, val in v.items())
+
+
 def declared_defects(v: Any) -> tuple[str, list[str]]:
     """Read a vote's MACHINE-DECLARED defect ledger.
 
@@ -496,6 +521,12 @@ def attest_consistency(votes: list[dict], models: list[str],
                     "reason": f'{models[i]}: refuted=false without the required "defects" '
                               "ledger while VERIFIER_REQUIRE_DEFECT_LIST=true "
                               "-> unverifiable green, fail-closed"}
+        if require_ledger and not has_conformant_ledger(x["v"]):
+            return {"block": True,
+                    "reason": f'{models[i]}: refuted=false without a conformant "defects" '
+                              "array -- VERIFIER_REQUIRE_DEFECT_LIST=true requires "
+                              "defects: string[], not a sentinel string and not an alias key "
+                              "-> schema not answered, fail-closed"}
         if declared:
             return {"block": True,
                     "reason": f'{models[i]}: refuted=false but its own defects ledger declares '
@@ -904,6 +935,24 @@ def selftest() -> None:
            "every match negated -> no claims")
     expect(defect_claims("regression in the dispatcher") == ["regression"],
            "an unnegated defect word is still a claim")
+    # Group A's refutation of the ledger: "required" must mean required.
+    _GM = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+
+    def _gv(**kw):
+        return {"ok": True, "v": {"refuted": False, "reason": "docs only change", **kw}}
+    expect(has_conformant_ledger({"defects": []}) and has_conformant_ledger({"defects": ["x"]}),
+           "a defects ARRAY is conformant")
+    expect(not has_conformant_ledger({"defects": "none"}),
+           "a bare sentinel string is not defects: string[]")
+    expect(not has_conformant_ledger({"findings": []}),
+           "an alias key alone does not answer the schema")
+    expect(not attest_consistency([_gv(defects=[])] * 3, _GM, True)["block"],
+           "conformant empty ledgers pass in required mode")
+    for _bad in ({"defects": "none"}, {"findings": []}, {"defects": "n/a"}):
+        expect(attest_consistency([_gv(**_bad), _gv(defects=[]), _gv(defects=[])], _GM, True)["block"],
+               f"required mode must refuse a non-conformant ledger: {_bad}")
+    expect(not attest_consistency([_gv(defects="none"), _gv(), _gv()], _GM, False)["block"],
+           "with the switch OFF the tolerant reading is unchanged -- no forced rollout")
     # Ordinary inflections of the SAME published terms are matched too. Widening
     # a term is monotone (PASS -> BLOCK only), which is the direction this file
     # resolves P1/P2 conflicts in.
