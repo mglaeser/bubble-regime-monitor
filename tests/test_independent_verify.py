@@ -683,3 +683,217 @@ class TestConsistencyGateNegation:
         assert "injection" in iv.defect_claims("no bypass, but an injection exists")
         assert iv.defect_claims("") == []
         assert iv.defect_claims(None) == []
+
+
+class TestDeclaredDefectLedger:
+    """The MECHANISM: the model declares its findings in a typed field and the
+    gate compares that field with the boolean.
+
+    Three predecessors inferred a fact from a string -- a vendor from a model
+    id, a vendor from token sets, a defect claim from a negation window -- and
+    each was defeated by an input its author had not imagined. This channel
+    infers nothing: ``len(defects) > 0`` next to ``refuted is False`` is a
+    comparison of two values the model itself supplied about one fact. Its
+    input domain is {list of strings} + {everything else}, both handled."""
+
+    M3 = ["m-a", "m-b", "m-c"]
+
+    @staticmethod
+    def _vote(reason="reviewed diff, behaviour unchanged", refuted=False, **kw):
+        v = {"refuted": refuted, "reason": reason, "confidence": "high"}
+        if "defects" in kw:
+            v["defects"] = kw["defects"]
+        return {"ok": True, "v": v}
+
+    def test_reads_a_well_formed_ledger(self):
+        assert iv.declared_defects({"defects": []}) == ("ok", [])
+        assert iv.declared_defects({"defects": ["a.py:1 — x — y"]}) == ("ok", ["a.py:1 — x — y"])
+
+    def test_absent_or_garbage_is_reported_not_guessed(self):
+        assert iv.declared_defects({})[0] == "missing"
+        assert iv.declared_defects(None)[0] == "missing"
+        assert iv.declared_defects({"defects": "auth bypass"})[0] == "malformed"
+        assert iv.declared_defects({"defects": None})[0] == "malformed"
+        assert iv.declared_defects({"defects": {"a": 1}})[0] == "malformed"
+        assert iv.declared_defects({"defects": [{"file": "a.py"}]})[0] == "malformed"
+
+    def test_empty_sentinels_are_an_empty_ledger(self):
+        assert iv.declared_defects({"defects": ["none", "", " N/A ", "nothing found"]}) == ("ok", [])
+        assert iv.declared_defects({"defects": ["none", "a.py:2 — real"]})[1] == ["a.py:2 — real"]
+
+    @pytest.mark.parametrize("key", ["defects", "Defects", "DEFECTS", " defects ",
+                                     "defect", "findings", "defects_found"])
+    def test_a_key_spelling_slip_does_not_silently_disarm_the_gate(self, key):
+        # A mis-cased key read as "absent" would turn the gate into a silent
+        # no-op on exactly the votes that answered the schema.
+        assert iv.declared_defects({key: ["auth bypass when key is None"]}) == (
+            "ok", ["auth bypass when key is None"])
+
+    def test_a_declared_defect_on_a_green_vote_blocks(self):
+        votes = [self._vote(defects=[]),
+                 self._vote("looks fine to me",
+                            defects=["api.py:7 — authz skipped — any user reads /admin"]),
+                 self._vote(defects=[])]
+        out = iv.attest_consistency(votes, self.M3)
+        assert out["block"] is True
+        assert "m-b" in out["reason"] and "ledger declares" in out["reason"]
+
+    def test_the_ledger_blocks_even_when_the_prose_is_spotless(self):
+        # The point of the field: no phrasing of `reason` hides the finding,
+        # because this rung never reads `reason`.
+        votes = [self._vote("all good, nothing of note", defects=["x.py:1 — y — z"]),
+                 self._vote(defects=[]), self._vote(defects=[])]
+        assert iv.attest_consistency(votes, self.M3)["block"] is True
+
+    def test_a_bare_string_sentinel_is_an_empty_ledger(self):
+        # '"defects": "none"' cannot name a defect, so reading it as [] is safe
+        # in the P1 direction and removes the likeliest rollout wedge.
+        assert iv.declared_defects({"defects": "none"}) == ("ok", [])
+        assert iv.declared_defects({"defects": " N/A "}) == ("ok", [])
+
+    def test_a_second_accepted_key_cannot_hide_a_finding(self):
+        assert iv.declared_defects({"defects": [], "findings": ["auth bypass"]}) == (
+            "ok", ["auth bypass"])
+        votes = [self._vote(defects=[]), self._vote(defects=[]), self._vote(defects=[])]
+        votes[0]["v"]["findings"] = ["svc.py:2 — token unchecked"]
+        assert iv.attest_consistency(votes, self.M3)["block"] is True
+
+    def test_a_malformed_ledger_fails_closed(self):
+        votes = [self._vote(defects="auth bypass on /admin"), self._vote(defects=[]),
+                 self._vote(defects=[])]
+        out = iv.attest_consistency(votes, self.M3)
+        assert out["block"] is True and "not a" in out["reason"]
+
+    def test_an_absent_ledger_is_tolerated_by_default(self):
+        # P2 / rollout: a voice that has not seen the new prompt must not block
+        # a unanimous green. The prose tripwire still applies to it.
+        votes = [self._vote(), self._vote(), self._vote()]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_an_absent_ledger_blocks_when_the_operator_requires_it(self):
+        votes = [self._vote(), self._vote(), self._vote()]
+        out = iv.attest_consistency(votes, self.M3, require_ledger=True)
+        assert out["block"] is True and "unverifiable green" in out["reason"]
+
+    def test_a_refuting_vote_may_declare_defects(self):
+        votes = [self._vote("fail-open on missing header", refuted=True,
+                            defects=["h.py:3 — fail-open"]),
+                 self._vote(defects=[]), self._vote(defects=[])]
+        assert iv.attest_consistency(votes, self.M3)["block"] is False
+
+    def test_an_errored_vote_has_no_ledger_to_read(self):
+        assert iv.attest_consistency([ERR, self._vote(defects=[]), self._vote(defects=[])],
+                                     self.M3, require_ledger=True)["block"] is False
+
+
+class TestSharedAttackCorpus:
+    """The shared corpus, scored through the real gate in all three modes.
+
+    Mode B (the voice declares its finding) is what the design ships for: 7/7.
+    Mode C (the voice hides the finding in prose and declares []) is what the
+    demoted tripwire alone can do: 4/7, with three holes pinned as holes. The
+    numbers are asserted here so that no future edit can silently claim the
+    mode-B score for mode C."""
+
+    M3 = ["m-a", "m-b", "m-c"]
+
+    MUST_BLOCK = [
+        "auth bypass when key is None and a race condition on refresh",
+        "without fixing auth bypass",
+        "merged without addressing the injection",
+        "not fixed: privilege escalation in admin",
+        "no bypass here, but there is an injection in the parser",
+        "looks good; minor: unauthenticated /readyz leaks the key",
+        "approved, though the deadlock on shutdown remains",
+    ]
+    MUST_PASS = [
+        "security gates reviewed; no concrete regression",
+        "docs only change",
+        "reviewed diff, behaviour unchanged",
+        "could be more defensive; consider hardening",
+        "checked auth paths, no issue",
+        "no regression, no bypass, no injection",
+    ]
+    # The one MUST PASS row the demoted tripwire gets wrong, and has always got
+    # wrong. Pinned as a KNOWN COST, not fixed: every rewrite that fixed it
+    # shipped a new bypass. The operator remedy is a re-vote, or the ledger.
+    KNOWN_FALSE_BLOCK = "none of the auth paths bypass the check"
+    # The three MUST BLOCK rows the tripwire misses when the finding is hidden.
+    KNOWN_TRIPWIRE_HOLES = [
+        "without fixing auth bypass",
+        "merged without addressing the injection",
+        "not fixed: privilege escalation in admin",
+    ]
+
+    @staticmethod
+    def _panel(reason, defects):
+        clean = {"ok": True, "v": {"refuted": False, "reason": "docs only change",
+                                   "confidence": "high", "defects": []}}
+        return [{"ok": True, "v": {"refuted": False, "reason": reason,
+                                   "confidence": "high", "defects": list(defects)}},
+                clean, clean]
+
+    @pytest.mark.parametrize("reason", MUST_BLOCK)
+    def test_mode_b_declared_finding_always_blocks(self, reason):
+        # The voice routes its finding into the ledger. 7/7, independent of
+        # phrasing, negation, inflection, unicode or language.
+        assert iv.attest_consistency(self._panel(reason, [reason]), self.M3)["block"] is True
+
+    @pytest.mark.parametrize("reason", MUST_PASS)
+    def test_p2_an_ordinary_approval_passes(self, reason):
+        assert iv.attest_consistency(self._panel(reason, []), self.M3)["block"] is False
+
+    def test_p2_known_false_block_is_a_cost_not_a_bug(self):
+        assert iv.attest_consistency(self._panel(self.KNOWN_FALSE_BLOCK, []),
+                                     self.M3)["block"] is True
+
+    @pytest.mark.parametrize("reason", [
+        "auth bypass when key is None and a race condition on refresh",
+        "no bypass here, but there is an injection in the parser",
+        "looks good; minor: unauthenticated /readyz leaks the key",
+        "approved, though the deadlock on shutdown remains",
+    ])
+    def test_mode_c_hidden_finding_what_the_tripwire_still_catches(self, reason):
+        assert iv.attest_consistency(self._panel(reason, []), self.M3)["block"] is True
+
+    @pytest.mark.parametrize("reason", KNOWN_TRIPWIRE_HOLES)
+    def test_mode_c_hidden_finding_documented_holes(self, reason):
+        # DO NOT "fix" these by rewriting defect_claims(). Three such rewrites
+        # were refuted, each buying these three back at the price of a new
+        # bypass ("no blockers and an auth bypass on /admin", "no injection
+        # sanitisation on the query builder", "auth is bypassed when key is
+        # None"). The repair for this class is the ledger, not the parser.
+        assert iv.attest_consistency(self._panel(reason, []), self.M3)["block"] is False
+
+    def test_p1_beats_p2_when_the_ledger_disagrees(self):
+        # An ordinary approving reason with a declared finding blocks anyway.
+        votes = self._panel("docs only change", ["svc.py:9 — token never checked"])
+        assert iv.attest_consistency(votes, self.M3)["block"] is True
+
+
+class TestDefectWordInflections:
+    """Widening a published term to its ordinary inflections is MONOTONE: it can
+    only turn a PASS into a BLOCK. These are measured breaks of the pre-existing
+    bare-word form, found by the panel against three separate proposals."""
+
+    @pytest.mark.parametrize("reason", [
+        "auth is bypassed when key is None",
+        "the expired token bypasses validation entirely",
+        "the auth check is bypassable with a null key",
+        "two sql injections in the parser remain unfixed",
+        "deadlocks on shutdown remain",
+        "the handler deadlocked on shutdown",
+        "race conditions on refresh",
+        "privilege escalations in admin",
+        "the gate fails open when the header is missing",
+    ])
+    def test_inflected_defect_words_are_claims(self, reason):
+        assert iv.defect_claims(reason) != []
+
+    @pytest.mark.parametrize("reason", [
+        "no bypasses, no regressions",
+        "no injections found",
+        "no race conditions observed",
+    ])
+    def test_widening_does_not_un_negate_an_all_clear(self, reason):
+        assert iv.defect_claims(reason) == []

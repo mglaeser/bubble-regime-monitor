@@ -21,6 +21,16 @@ ROLES (identical to the reference):
 
 INTEGRITY GATES (all fail-closed, in order):
   1. require_approvals() — the role gate above.
+  1a. attest_consistency() — a GREEN vote must not itself report a defect. Two
+                           channels, in this order: (a) the DECLARED DEFECT
+                           LEDGER, a required typed ``defects: string[]`` in the
+                           verdict schema — refuted=false with a non-empty
+                           ledger is a self-contradicting vote and blocks; this
+                           channel reads len(), never prose, so no phrasing
+                           defeats it. (b) a demoted PROSE TRIPWIRE over the
+                           vote's own reason — a heuristic, known-evadable,
+                           retained only because the ledger is only as good as
+                           the model that fills it.
   2. attest_reasons()    — a majority of the GREEN votes must carry substantive,
                            mutually distinct reasons (anti canned-green).
   3. attest_proof()      — a majority of the GREEN votes must echo the per-run
@@ -51,6 +61,10 @@ ENV (same contract as the reference):
   VERIFIER_PANEL          voice count in single-pin mode (default 3, cap 64)
   VERIFIER_REQUIRED_APPROVER      required-approver model prefix (default gpt-5.6-sol)
   VERIFIER_MIN_OTHER_APPROVERS    independent corroborations required (default 1)
+  VERIFIER_REQUIRE_DEFECT_LIST    a GREEN vote MUST carry a "defects" ledger (default
+                                  off; turn on only once the run logs show every
+                                  configured voice emitting the field, then it is on
+                                  for good — see docs/INDEPENDENT_REVIEW_PANEL.md)
 
 Usage:
   python scripts/independent_verify.py             verify the PR diff (exit != 0 on block)
@@ -278,12 +292,126 @@ def strict_any_refutation(votes: list[dict], models: list[str]) -> dict[str, Any
     return {"block": False, "reason": "strict mode: no high/medium refutation"}
 
 
+# --------------------------------------------------- declared defect ledger --
+#
+# WHY THIS FIELD EXISTS — read before touching anything below it.
+#
+# THREE predecessors of this gate tried to INFER A FACT FROM A STRING, and the
+# panel refuted every one of them with an input its author had not imagined:
+#   * vendor_key()    — a vendor from a model id's leading token. "gpt-5.6-sol"
+#                       -> "gpt" but "openai/gpt-4.1-mini" -> "openai", so ONE
+#                       vendor in two spellings satisfied a CROSS-vendor gate.
+#   * vendor_tokens() — vendor identity from token-set disjointness. "nvidia/"
+#                       is a HOST prefix, so Meta and DeepSeek read as one
+#                       vendor. Wrong in both directions.
+#   * defect_claims() — a defect CLAIM from a negator within three words. Also
+#                       wrong in both directions, because the negator negates a
+#                       different word than the defect one:
+#                         "without fixing auth bypass"               -> no claim
+#                         "not fixed: privilege escalation in admin" -> no claim
+#                         "none of the auth paths bypass the check"  -> claim
+#
+# The common shape is not a bad word list. It is that a STRING WRITTEN BY THE
+# REVIEWER was asked a question only the REVIEWER can answer. So the verdict
+# schema now MAKES THE REVIEWER ANSWER IT in a typed field, and the gate reads
+# the field instead of parsing the prose:
+#
+#     "defects": string[]   one entry per concrete defect found, [] iff none
+#     refuted == False  AND  len(defects) > 0   ->  self-contradicting, BLOCK
+#
+# That decision is an integer comparison over a value the model itself declared.
+# There is no vocabulary to miss, no negation to scope, no phrasing to shape:
+# its input domain is {list of strings} + {everything else} and both halves are
+# handled explicitly, so it has no "unimagined input" class at all.
+#
+# WHAT IT DOES NOT DO, stated here so nobody reads it as more than it is: a
+# model that finds a defect, writes clean prose and declares [] is invisible to
+# this channel. It converts a ONE-channel failure into a TWO-channel one (the
+# model must now get the same fact wrong twice, in two representations, having
+# been told they must agree) — it does not eliminate it. That residual is why
+# the prose tripwire below is retained rather than deleted.
+
+# Ledger entries a model writes when it means "empty". CLOSED set, and safe in
+# the P1 direction because none of these strings can name a defect.
+_LEDGER_NULLS = frozenset({
+    "", "-", "--", "n/a", "na", "nil", "null", "none", "nothing", "empty", "[]",
+    "no defect", "no defects", "no defects found", "none found", "nothing found",
+    "no issue", "no issues", "no issues found", "no findings", "no concerns",
+})
+
+# Accepted spellings of the ledger key, in priority order. A model that answers
+# the schema with "Defects" or "findings" HAS answered it; treating that as an
+# absent field would silently disarm the gate on a capitalisation slip.
+_LEDGER_KEYS = ("defects", "defect", "findings", "defects_found")
+
+
+def _ledger_fields(v: Any) -> list[Any]:
+    """EVERY accepted spelling of the ledger present on the vote.
+
+    All of them, not the first one: a vote carrying both ``"defects": []`` and
+    ``"findings": ["auth bypass"]`` has declared a defect, and reading only the
+    higher-priority key would let the other one hide it."""
+    if not isinstance(v, dict):
+        return []
+    return [v[k] for k in v
+            if isinstance(k, str) and k.strip().lower() in _LEDGER_KEYS]
+
+
+def declared_defects(v: Any) -> tuple[str, list[str]]:
+    """Read a vote's MACHINE-DECLARED defect ledger.
+
+    Returns ("ok", items) | ("missing", []) | ("malformed", []). Total on every
+    input: no parsing, no inference, no natural language. ``items`` is the
+    union of the declared lists with the enumerated empty-sentinels removed."""
+    raws = _ledger_fields(v)
+    if not raws:
+        return ("missing", [])
+    items: list[str] = []
+    for raw in raws:
+        # A bare string is a schema error, but a bare string that IS one of the
+        # enumerated empty-sentinels ('"defects": "none"') cannot name a defect,
+        # so reading it as [] is safe in the P1 direction and removes the most
+        # likely rollout wedge. Any OTHER non-list fails closed.
+        if isinstance(raw, str):
+            if re.sub(r"\s+", " ", raw).strip().lower() in _LEDGER_NULLS:
+                continue
+            return ("malformed", [])
+        if not isinstance(raw, list):
+            return ("malformed", [])
+        for entry in raw:
+            if not isinstance(entry, str):
+                return ("malformed", [])
+            s = re.sub(r"\s+", " ", entry).strip()
+            if s.lower() not in _LEDGER_NULLS:
+                items.append(s)
+    return ("ok", items)
+
+
+# ------------------------------------------------------- prose tripwire ------
+#
+# SECONDARY, DEMOTED, AND HONESTLY LABELLED: everything from here to
+# defect_claims() IS a heuristic and a determined writer evades it. It is kept
+# unchanged — deliberately NOT rewritten — because three rewrites of exactly
+# this rule have now been refuted, each shipping a fresh BYPASS in exchange for
+# the false positives it fixed. The known holes are documented on
+# defect_claims() itself. It is the belt to the ledger's braces, not the
+# mechanism.
+
 # Words that name a DEFECT rather than describe a review. Deliberately narrow:
 # each denotes a concrete failure, not a hedge ("could", "consider", "prefer"),
 # so ordinary approving prose does not trip the gate.
+#
+# INFLECTIONS: the list is matched in the ordinary inflections of the SAME
+# terms ("bypassed", "injections", "deadlocks"), which the earlier bare-\b form
+# missed. Widening a term is MONOTONE — it can only turn a PASS into a BLOCK,
+# never the reverse — so it trades P2 for P1 in the direction this file
+# resolves conflicts. Adding a NEW concept here is not monotone in the same
+# way and is a separate, reviewed decision.
 _DEFECT_WORDS = re.compile(
-    r"\b(bypass|fail-open|unauthenticated|injection|vulnerab\w*|exploitab\w*|"
-    r"race condition|deadlock|regress\w*|data loss|privilege escalation)\b", re.I)
+    r"\b(bypass\w*|fail-open\w*|fails? open|unauthenticated|"
+    r"inject(?:ions|ion|ed|able|s)|vulnerab\w*|exploitab\w*|"
+    r"race conditions?|deadlock\w*|regress\w*|data loss(?:es)?|"
+    r"privilege escalations?)\b", re.I)
 
 # A defect word is only a defect CLAIM when it is not negated. "no concrete
 # regression" is an explicit all-clear, and scoring it as a claim blocked a
@@ -298,7 +426,26 @@ _NEGATORS = re.compile(r"\b(no|not|none|never|without|free of|absent|zero|nothin
 
 
 def defect_claims(reason: str) -> list[str]:
-    """Defect words in ``reason`` that are NOT negated in their own context."""
+    """Defect words in ``reason`` that are NOT negated in their own context.
+
+    DEMOTED HEURISTIC — the second channel of attest_consistency(), never the
+    mechanism. Its measured holes, kept in the source so no future reader
+    mistakes it for a decision procedure:
+
+        defect_claims("without fixing auth bypass")               == []
+        defect_claims("merged without addressing the injection")  == []
+        defect_claims("not fixed: privilege escalation in admin") == []
+        defect_claims("none of the auth paths bypass the check")  == ["bypass"]
+
+    Three attempts to repair those (a scope-terminator list, an anchored
+    all-clear recogniser, a published reserved-word contract) were each refuted
+    by the panel with a NEW bypass the author had not imagined — an unbounded
+    left-scan that let "no blockers and an auth bypass on /admin" through, an
+    anchor that quantified the wrong noun in "no injection sanitisation", and a
+    published wordlist that missed "auth is bypassed". The three-word window is
+    crude, but it is BOUNDED, and boundedness is what stops one all-clear from
+    laundering a claim later in the same string. DO NOT rewrite this rule to
+    win back false positives; move the finding into the ledger instead."""
     claims = []
     for m in _DEFECT_WORDS.finditer(reason or ""):
         preceding = " ".join((reason[max(0, m.start() - 40):m.start()]).split()[-3:])
@@ -307,25 +454,62 @@ def defect_claims(reason: str) -> list[str]:
     return claims
 
 
-def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
-    """A GREEN vote whose OWN reason names a defect is not an approval — it is a
+def attest_consistency(votes: list[dict], models: list[str],
+                       require_ledger: bool = False) -> dict[str, Any]:
+    """A GREEN vote that itself reports a defect is not an approval — it is a
     model that analysed correctly and then set the boolean wrong. decide() reads
     only ``refuted``, so without this gate that vote counts toward the quorum
     AND supplies a substantive, distinct reason that helps attest_reasons pass.
 
     Found adversarially: a panelist returned refuted=false with a reason that
-    named two concrete defects. Fail-CLOSED — an inconsistent vote is discarded
-    as a parse failure, not resolved in favour of green."""
+    named two concrete defects.
+
+    THE LADDER, per green vote, first hit wins, every rung fail-CLOSED:
+      1. a ``defects`` ledger that is present but is not a list of strings
+         -> the schema was not answered, BLOCK.
+      2. NO ledger at all -> BLOCK only under VERIFIER_REQUIRE_DEFECT_LIST
+         (``require_ledger``). Tolerated by default ON PURPOSE: a voice that
+         has not seen the new prompt would otherwise block every unanimous
+         green, which is the failure mode that gets a gate deleted. Rung 3
+         still applies to it, so tolerating absence costs nothing that the
+         file did not already cost before the ledger existed.
+      3. ledger non-empty -> the model declared a defect and greened anyway,
+         BLOCK. THIS RUNG IS THE MECHANISM: two declarations about one fact,
+         compared as values, no prose read, nothing inferred.
+      4. ledger empty (or absent) but the vote's own prose names an uncleared
+         defect word -> BLOCK. Demoted heuristic, evadable by construction;
+         retained because P1 outranks P2 and rung 3 is only as good as the
+         model that fills the ledger.
+
+    WHERE P1 AND P2 CONFLICT, P1 WINS, at every rung. A false block costs one
+    re-vote; a false pass costs a merged defect that three voices signed."""
     for i, x in enumerate(votes):
         if not _is_valid(x) or x["v"]["refuted"] is not False:
             continue
+        state, declared = declared_defects(x["v"])
+        if state == "malformed":
+            return {"block": True,
+                    "reason": f'{models[i]}: refuted=false and its "defects" ledger is not a '
+                              "JSON array of strings -> schema not answered, fail-closed"}
+        if state == "missing" and require_ledger:
+            return {"block": True,
+                    "reason": f'{models[i]}: refuted=false without the required "defects" '
+                              "ledger while VERIFIER_REQUIRE_DEFECT_LIST=true "
+                              "-> unverifiable green, fail-closed"}
+        if declared:
+            return {"block": True,
+                    "reason": f'{models[i]}: refuted=false but its own defects ledger declares '
+                              f'{len(declared)} defect(s) ("{declared[0][:120]}") '
+                              "-> the boolean contradicts the vote's own findings, fail-closed"}
         claims = defect_claims(norm_reason(x["v"].get("reason")))
         if claims:
             return {"block": True,
-                    "reason": f'{models[i]}: refuted=false but its own reason names a '
-                              f'defect ("{claims[0]}") -> inconsistent vote, fail-closed'}
+                    "reason": f'{models[i]}: refuted=false with an empty defects ledger, but '
+                              f'its own reason names a defect ("{claims[0]}") '
+                              "-> inconsistent vote, fail-closed"}
     return {"block": False,
-            "reason": f"{len(_green(votes))} green reason(s) free of defect claims"}
+            "reason": f"{len(_green(votes))} green vote(s): empty defect ledger, "
+                      "no defect claim in their prose"}
 
 
 def attest_reasons(votes: list[dict], panel_size: int) -> dict[str, Any]:
@@ -518,7 +702,14 @@ def build_system_prompt(challenge: str) -> str:
         "compensated by the deterministic CI gate; it is not a defect of THIS diff. "
         "Answer ONLY as JSON, no prose/markdown: "
         '{"refuted": boolean, "confidence": "high"|"medium"|"low", "reason": string, '
-        '"proof": string}. ALWAYS fill reason (also for refuted=false), maximally terse/'
+        '"defects": string[], "proof": string}. '
+        'DEFECT LEDGER: "defects" is REQUIRED on every answer and is a JSON array of '
+        "strings — ONE ENTRY PER CONCRETE DEFECT you found, each in the schema "
+        "'path/file:line — defect — misbehavior', and the EMPTY array [] if you found "
+        'none. Every defect you can name anywhere in your answer MUST also appear in '
+        '"defects", and refuted MUST be true whenever "defects" is non-empty. Never '
+        "leave a finding out because you judged it minor: if you can name it, list it "
+        "and refute on it. ALWAYS fill reason (also for refuted=false), maximally terse/"
         "machine-like, abbreviations fine, no full sentences, but technically informative. "
         "Name ALL defects found — each EXTREMELY compact, separated by ' ; '; rather abbreviate "
         "each point harder than drop one. Upper bound ~800 chars. For refuted=true use the "
@@ -629,10 +820,66 @@ def selftest() -> None:
            "refuting vote needs no proof while green majority has valid proofs")
     expect(attest_proof([PR(f"{CH}-7")], CH, 1)["block"] is False, "panel=1 with valid proof passes")
     expect(attest_proof([PR(f"{CH}-7"), PR(f"{CH}-8"), PR(f"{CH}-9")], "", 3)["block"] is True, "empty challenge -> no proof valid -> fail-closed")
-    # attest_consistency() -- a green vote whose own reason names a defect
+    # attest_consistency() -- the DECLARED LEDGER is the mechanism; the prose
+    # tripwire is the demoted second channel. GV() omits the ledger (the
+    # tolerated pre-rollout shape); GL() declares one.
     def GV(reason: Any, refuted: bool = False) -> dict:
         return {"ok": True, "v": {"refuted": refuted, "reason": reason, "confidence": "high"}}
+
+    def GL(reason: Any, refuted: bool = False, defects: Any = ()) -> dict:
+        return {"ok": True, "v": {"refuted": refuted, "reason": reason,
+                                  "confidence": "high", "defects": list(defects)}}
     M3 = ["m-a", "m-b", "m-c"]
+    # -- declared_defects(): total on every input, nothing inferred
+    expect(declared_defects({"defects": []}) == ("ok", []), "an empty ledger reads as ok/[]")
+    expect(declared_defects({"defects": ["a.py:1 — x — y"]})[1] == ["a.py:1 — x — y"],
+           "a declared defect is returned verbatim")
+    expect(declared_defects({})[0] == "missing", "an absent ledger is missing")
+    expect(declared_defects(None)[0] == "missing", "a non-dict vote has no ledger")
+    expect(declared_defects({"defects": "none"}) == ("ok", []),
+           "a bare-string sentinel ledger reads as empty -- it cannot name a defect")
+    expect(declared_defects({"defects": "auth bypass"})[0] == "malformed",
+           "any OTHER bare string is an unanswered schema, fail-closed")
+    expect(declared_defects({"defects": [], "findings": ["auth bypass"]})[1] == ["auth bypass"],
+           "every accepted key is read -- one must not hide behind another")
+    expect(declared_defects({"defects": None})[0] == "malformed", "a null ledger is malformed")
+    expect(declared_defects({"defects": [{"f": 1}]})[0] == "malformed",
+           "non-string entries are malformed")
+    expect(declared_defects({"defects": ["none", "", " N/A "]}) == ("ok", []),
+           "enumerated empty-sentinels are an empty ledger, not defects")
+    expect(declared_defects({"Defects": ["x"]}) == ("ok", ["x"]),
+           "a capitalisation slip must not silently disarm the ledger")
+    expect(declared_defects({"findings": ["x"]}) == ("ok", ["x"]),
+           "an accepted alias key is still an answered schema")
+    # -- rung 3: the ledger itself. No prose is read on this rung.
+    _d = attest_consistency([GL("looks fine to me",
+                                defects=["api.py:7 — authz skipped — any user reads /admin"]),
+                             GL("docs only"), GL("fine")], M3)
+    expect(_d["block"] is True and "ledger declares" in _d["reason"],
+           "refuted=false with a NON-EMPTY declared ledger is the inconsistency -> block")
+    expect(attest_consistency([GL("all good, nothing of note", defects=["x.py:1 — y — z"]),
+                               GL("docs only"), GL("fine")], M3)["block"] is True,
+           "the ledger blocks even when the prose is spotless -- no prose parsing involved")
+    expect(attest_consistency([GL("fail-open on missing header", True, defects=["h.py:3 — fo"]),
+                               GL("docs only"), GL("no issue found")], M3)["block"] is False,
+           "a REFUTING vote may declare defects -- that is its job")
+    expect(attest_consistency([GL("docs only change", defects=["none"]), GL("docs only"),
+                               GL("fine")], M3)["block"] is False,
+           "a sentinel-only ledger is an empty ledger, not a declared defect")
+    # -- rungs 1 and 2: schema posture
+    expect(attest_consistency([{"ok": True, "v": {"refuted": False, "reason": "docs only",
+                                                  "defects": "auth bypass on /admin"}},
+                               GL("docs only"), GL("fine")], M3)["block"] is True,
+           "a malformed (non-array) ledger fails closed, with or without the env switch")
+    expect(attest_consistency([GV("docs only change"), GV("docs only"), GV("fine")],
+                              M3)["block"] is False,
+           "an ABSENT ledger is tolerated by default -- a pre-rollout voice must not block")
+    expect(attest_consistency([GV("docs only change"), GV("docs only"), GV("fine")],
+                              M3, require_ledger=True)["block"] is True,
+           "VERIFIER_REQUIRE_DEFECT_LIST=true makes an absent ledger an unverifiable green")
+    expect(attest_consistency([E, GL("docs only"), GL("no issue")], M3,
+                              require_ledger=True)["block"] is False,
+           "an errored vote has no ledger to read")
     expect(attest_consistency([GV("checked auth paths, no issue"), GV("docs only change"),
                                GV("reviewed diff, behaviour unchanged")], M3)["block"] is False,
            "ordinary approving reasons must pass")
@@ -657,6 +904,60 @@ def selftest() -> None:
            "every match negated -> no claims")
     expect(defect_claims("regression in the dispatcher") == ["regression"],
            "an unnegated defect word is still a claim")
+    # Ordinary inflections of the SAME published terms are matched too. Widening
+    # a term is monotone (PASS -> BLOCK only), which is the direction this file
+    # resolves P1/P2 conflicts in.
+    expect(defect_claims("auth is bypassed when key is None") == ["bypassed"],
+           "an inflected defect word is still a claim")
+    expect(defect_claims("deadlocks on shutdown remain") == ["deadlocks"],
+           "a plural defect word is still a claim")
+    expect(defect_claims("two sql injections in the parser remain") == ["injections"],
+           "a plural defect word is still a claim")
+    expect(defect_claims("no bypasses, no regressions") == [],
+           "monotone widening does not un-negate an all-clear")
+    # THE SHARED ATTACK CORPUS, scored through the REAL gate in the two modes
+    # that matter. Mode B: the voice fills the ledger honestly -> 7/7 blocked,
+    # and the boolean never has to be read out of prose at all.
+    _CORPUS_BLOCK = [
+        "auth bypass when key is None and a race condition on refresh",
+        "without fixing auth bypass",
+        "merged without addressing the injection",
+        "not fixed: privilege escalation in admin",
+        "no bypass here, but there is an injection in the parser",
+        "looks good; minor: unauthenticated /readyz leaks the key",
+        "approved, though the deadlock on shutdown remains",
+    ]
+    _CORPUS_PASS = [
+        "security gates reviewed; no concrete regression",
+        "docs only change",
+        "reviewed diff, behaviour unchanged",
+        "could be more defensive; consider hardening",
+        "checked auth paths, no issue",
+        "no regression, no bypass, no injection",
+    ]
+    for _r in _CORPUS_BLOCK:
+        expect(attest_consistency([GL(_r, defects=[_r]), GL("docs only"), GL("fine")],
+                                  M3)["block"] is True,
+               f"P1, declared ledger: a green that declares its finding must block: {_r!r}")
+    for _r in _CORPUS_PASS:
+        expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is False,
+               f"P2: an ordinary approval must not block: {_r!r}")
+    # Mode C: the voice HIDES the finding (declares [] and writes the defect in
+    # prose). Only the demoted tripwire is left, and it catches 4 of 7. These
+    # three are its DOCUMENTED, UNREPAIRED holes -- pinned so that a future
+    # rewrite of defect_claims() has to confront them rather than rediscover
+    # them, and so that nobody reports 7/7 for a mode that measures 4/7.
+    for _r in ("auth bypass when key is None and a race condition on refresh",
+               "no bypass here, but there is an injection in the parser",
+               "looks good; minor: unauthenticated /readyz leaks the key",
+               "approved, though the deadlock on shutdown remains"):
+        expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is True,
+               f"P1, hidden finding: the tripwire still catches: {_r!r}")
+    for _r in ("without fixing auth bypass",
+               "merged without addressing the injection",
+               "not fixed: privilege escalation in admin"):
+        expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is False,
+               f"KNOWN HOLE of the demoted tripwire, do not paper over it: {_r!r}")
 
     # auth_header() -- both branches
     _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)
@@ -721,8 +1022,9 @@ def selftest() -> None:
     # (TestResolutionFailsClosed) rather than here.
 
     print("   OK selftest: decide() + model_matches() + require_approvals() (required approver Sol "
-          "+ corroboration) + attest_reasons() + attest_proof() + attest_consistency() + "
-          "auth_header() + review_range() + normalize_base() correct.")
+          "+ corroboration) + attest_reasons() + attest_proof() + declared_defects() + "
+          "attest_consistency() (ledger 7/7 on the shared corpus; demoted prose tripwire 4/7, "
+          "3 known holes pinned) + auth_header() + review_range() + normalize_base() correct.")
 
 
 # --------------------------------------------------------------- API plumbing --
@@ -927,19 +1229,26 @@ def write_step_summary(votes: list[dict], models: list[str], gates: list[tuple[s
         "",
         f"**Verdict: {'BLOCKED' if blocked else 'APPROVED'}**",
         "",
-        "| # | Model | Verdict | Confidence | Finding |",
-        "|---|---|---|---|---|",
+        "| # | Model | Verdict | Confidence | Declared defects | Finding |",
+        "|---|---|---|---|---|---|",
     ]
     for i, (vote, model) in enumerate(zip(votes, models, strict=False), start=1):
         if not vote.get("ok"):
-            lines.append(f"| {i} | `{_md_cell(model, 60)}` | ⚠️ no vote | — "
+            lines.append(f"| {i} | `{_md_cell(model, 60)}` | ⚠️ no vote | — | — "
                          f"| {_md_cell(vote.get('reason'))} |")
             continue
         v = vote.get("v") or {}
         refuted = v.get("refuted")
         mark = "🔴 refutes" if refuted else ("🟢 approves" if refuted is False else "⚠️ unparsable")
+        # The ledger is the field the consistency gate now reads, so it is shown
+        # next to the verdict: a reader must see BOTH declarations the gate
+        # compares, not only the prose.
+        state, declared = declared_defects(v)
+        ledger = ("⚠️ " + state if state != "ok"
+                  else ("none" if not declared else f"{len(declared)}: " + "; ".join(declared)))
         lines += [f"| {i} | `{_md_cell(model, 60)}` | {mark} "
-                  f"| {_md_cell(v.get('confidence'), 12)} | {_md_cell(v.get('reason'))} |"]
+                  f"| {_md_cell(v.get('confidence'), 12)} | {_md_cell(ledger, 200)} "
+                  f"| {_md_cell(v.get('reason'))} |"]
     lines += ["", "### Gates", ""]
     for name, result in gates:
         state = "⛔ blocked" if result.get("block") else "✅ passed"
@@ -1046,8 +1355,11 @@ def main() -> int:
     if strict_on:
         pending.append(("strict-mode gate", "strict mode",
                         lambda: strict_any_refutation(votes, models)))
+    require_ledger = (os.environ.get("VERIFIER_REQUIRE_DEFECT_LIST") or "").lower() in (
+        "1", "true", "yes")
     pending += [
-        ("consistency gate", "consistency", lambda: attest_consistency(votes, models)),
+        ("consistency gate", "consistency",
+         lambda: attest_consistency(votes, models, require_ledger)),
         ("integrity gate (sham green)", "reason attestation", lambda: attest_reasons(votes, panel)),
         ("proof-of-check gate", "proof of check", lambda: attest_proof(votes, challenge, panel)),
     ]
