@@ -74,13 +74,31 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Redaction covers the full base URL wherever it appears, but not the bare
+      # hostname on its own — which is exactly what a gateway error body or a
+      # name-resolution failure prints. Masks are job-scoped and apply only to
+      # lines written after they register, so this has to run before the panel.
+      - name: Mask the verifier hostname in the log
+        env:
+          VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
+        run: |
+          [ -n "$VERIFIER_BASE_URL" ] || exit 0
+          host="${VERIFIER_BASE_URL#*://}"
+          echo "::add-mask::${host%%/*}"
+
       - name: Cross-vendor review panel
         id: panel
         # Fork PRs are refused rather than reviewed — see header.
         if: github.event.pull_request.head.repo.full_name == github.repository
         env:
           SECOND_VENDOR_API_KEY: ${{ secrets.TRUSTED_VERIFIER_API_KEY }}
-          VERIFIER_BASE_URL: ${{ vars.VERIFIER_BASE_URL }}
+          # A SECRET, not a `vars.` entry, and the difference is the whole point:
+          # the runner echoes every env block into the log, redacting secrets
+          # there and never variables. As a variable this published the gateway
+          # endpoint in clear text, in a public log, on every panel run. As a
+          # secret the runner also redacts it from whatever the script prints,
+          # which is where the URL otherwise surfaces on a failed call.
+          VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
           # Gateways that reserve Authorization for upstream forwarding need a
           # different header; inference.klee.me answers Bearer with 401.
           VERIFIER_AUTH_HEADER: ${{ vars.VERIFIER_AUTH_HEADER }}
