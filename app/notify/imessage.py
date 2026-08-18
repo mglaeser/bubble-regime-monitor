@@ -31,6 +31,7 @@ imessage-proxy/docs/api.md.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import uuid
 from dataclasses import dataclass
@@ -149,14 +150,46 @@ def check_destination(base_url: str) -> str | None:
                 f"got {parsed.scheme or 'no scheme'!r}")
     if not parsed.hostname:
         return "IMESSAGE_API_BASE_URL has no host"
+    if parsed.username or parsed.password:
+        # Credentials in the URL would be sent on every request and would ride
+        # along in any exception string. `sanitize` masks that shape, but not
+        # accepting it in the first place is the stronger control.
+        return "IMESSAGE_API_BASE_URL must not carry credentials in the URL"
     if parsed.path.rstrip("/"):
         return ("IMESSAGE_API_BASE_URL must be an origin with no path; "
                 f"got a path component {parsed.path!r}")
-    if parsed.scheme == "http" and parsed.hostname.lower() not in _LOOPBACK_HOSTS:
+    # ORIGIN-ONLY MEANS NO QUERY AND NO FRAGMENT EITHER. This is not pedantry:
+    # SEND_PATH is appended by string concatenation, so a base of
+    # "https://host?x=1" produces "https://host?x=1/api/messages" — the path
+    # is swallowed into the query, the request lands on "/" instead of the
+    # send route, and the bearer key plus the digest text go with it. A
+    # fragment does the same. Both pass a path-only check.
+    if parsed.query:
+        return ("IMESSAGE_API_BASE_URL must be an origin with no query string; "
+                f"got {parsed.query!r} — appending {SEND_PATH} to it would misroute "
+                f"the request and send the API key to the wrong path")
+    if parsed.fragment:
+        return ("IMESSAGE_API_BASE_URL must be an origin with no fragment; "
+                f"got {parsed.fragment!r} — appending {SEND_PATH} to it would misroute "
+                f"the request and send the API key to the wrong path")
+    if parsed.scheme == "http" and not _is_loopback(parsed.hostname):
         return (f"IMESSAGE_API_BASE_URL uses http:// to a non-loopback host "
                 f"({parsed.hostname}); that sends the API key and the digest in "
                 f"cleartext. Use https://, or a tunnel that presents as loopback.")
     return None
+
+
+def _is_loopback(hostname: str) -> bool:
+    """The whole of 127.0.0.0/8 and ::1, not just the canonical spellings —
+    http://127.0.0.2 leaves the machine no more than http://127.0.0.1 does,
+    and refusing it would be a false negative an operator would work around."""
+    host = hostname.lower().strip("[]")
+    if host in _LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 #: A hyphen run FOLLOWED BY WHITESPACE is a bullet marker. A hyphen followed by

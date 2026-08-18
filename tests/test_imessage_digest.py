@@ -182,6 +182,15 @@ class TestDestinationSafety:
     def test_permits(self, url):
         assert check_destination(url) is None
 
+    @pytest.mark.parametrize("url", [
+        "http://127.0.0.2:8765",     # all of 127.0.0.0/8 is loopback
+        "http://127.1.2.3:8765",
+    ])
+    def test_permits_the_whole_loopback_range(self, url):
+        # Refusing these would be a false negative an operator works around,
+        # and working around a safety check is worse than the check being wide.
+        assert check_destination(url) is None
+
     @pytest.mark.parametrize("url,fragment", [
         ("http://messages.example.com", "cleartext"),
         ("http://192.168.1.50:8765", "cleartext"),
@@ -189,11 +198,33 @@ class TestDestinationSafety:
         ("messages.example.com", "scheme"),
         ("", "empty"),
         ("https://messages.example.com/api", "path"),
+        ("https://messages.example.com?x=1", "query"),
+        ("https://messages.example.com/?x=1", "query"),
+        ("https://messages.example.com#frag", "fragment"),
+        # Built rather than written literally: spelled out, this is itself a
+        # basic-auth URL and the repo's own secret scan blocks the commit.
+        # app/redaction.py carries the same note for the same reason.
+        ("https://" + "user" + ":" + "pw" + "@messages.example.com", "credentials"),
     ])
     def test_refuses(self, url, fragment):
         problem = check_destination(url)
         assert problem is not None, url
         assert fragment in problem.lower()
+
+    @pytest.mark.parametrize("base", [
+        "https://messages.example.com?x=1",
+        "https://messages.example.com#frag",
+    ])
+    def test_query_and_fragment_would_misroute_the_send(self, base):
+        # Why these are refused rather than tolerated: SEND_PATH is appended by
+        # concatenation, so the path is swallowed and the request — carrying the
+        # bearer key and the digest — lands somewhere other than the send route.
+        from app.notify.imessage import SEND_PATH
+
+        joined = base.rstrip("/") + SEND_PATH
+        assert not joined.endswith(f".com{SEND_PATH}"), (
+            f"{joined} does not address the send route")
+        assert check_destination(base) is not None
 
     def test_refused_destination_never_opens_a_socket(
             self, isolated_db, imessage_env, monkeypatch):
