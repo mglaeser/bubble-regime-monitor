@@ -152,6 +152,12 @@ jobs:
           # endpoint in clear text, in a public log, on every panel run. As a
           # secret the runner also redacts it from whatever the script prints,
           # which is where the URL otherwise surfaces on a failed call.
+          #
+          # The repo VARIABLE of the same name is retired by this change. The
+          # secret was set to the value that variable holds, and the variable is
+          # deleted once this lands -- not before, because main's copy of this
+          # file is what pull_request_target executes, so emptying it early would
+          # starve every open PR's panel including the one carrying the fix.
           VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
           # Gateways that reserve Authorization for upstream forwarding need a
           # different header; inference.klee.me answers Bearer with 401.
