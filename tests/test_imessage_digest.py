@@ -58,6 +58,7 @@ def _fake_client(captured, resp):
     class _Client:
         def __init__(self, *a, **k):
             captured["timeout"] = k.get("timeout")
+            captured["trust_env"] = k.get("trust_env")
 
         def __enter__(self):
             return self
@@ -258,6 +259,77 @@ class TestDestinationSafety:
         result = im.send_imessage("hi")
         assert result.ok is False and "cleartext" in (result.error or "")
         get_settings.cache_clear()
+
+
+class TestAmbientProxyCannotExfiltrate:
+    """httpx honours HTTP_PROXY by default and does NOT bypass loopback. With
+    HTTP_PROXY set and NO_PROXY unset, a request to http://127.0.0.1 is routed
+    to the proxy — bearer header and digest body in cleartext to a third host,
+    which is exactly what permitting loopback http was supposed to preclude."""
+
+    def test_httpx_really_does_route_loopback_through_http_proxy(self, monkeypatch):
+        # The premise, asserted rather than assumed: if a future httpx starts
+        # bypassing loopback on its own, this test says so.
+        import httpx
+
+        monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:3128")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        with httpx.Client() as trusting:
+            transport = trusting._transport_for_url(httpx.URL("http://127.0.0.1:8765/x"))
+        assert getattr(transport._pool, "_proxy_url", None) is not None, (
+            "httpx no longer proxies loopback; the trust_env guard may be revisitable")
+
+    def test_plain_http_send_does_not_trust_the_environment(
+            self, isolated_db, imessage_env, monkeypatch):
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:8765")
+        monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:3128")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        captured: dict = {}
+        import app.notify.imessage as im
+
+        monkeypatch.setattr(im.httpx, "Client", _fake_client(captured, _Resp()))
+        im.send_imessage("hi")
+        assert captured["trust_env"] is False
+        get_settings.cache_clear()
+
+    def test_https_send_still_honours_a_corporate_proxy(
+            self, isolated_db, imessage_env, monkeypatch):
+        # Over https the proxy is reached by CONNECT and TLS is end-to-end, so
+        # the key stays sealed. Disabling trust_env here would break real
+        # deployments to prevent nothing.
+        captured: dict = {}
+        import app.notify.imessage as im
+
+        monkeypatch.setattr(im.httpx, "Client", _fake_client(captured, _Resp()))
+        im.send_imessage("hi")
+        assert captured["trust_env"] is True
+
+
+class TestRejectionBodyRedaction:
+    """The panel claimed a proxy 4xx echoing a valid recipient leaks the phone
+    number or Apple ID past sanitize. It does not: sanitize is not
+    secret-only. Asserted here so the claim stays refuted by evidence."""
+
+    @pytest.mark.parametrize("body,expected", [
+        ('{"detail":"recipient +491510000000 is not allowlisted"}', "[phone]"),
+        ('{"detail":"recipient person@example.net is not allowlisted"}', "[email]"),
+        ('{"detail":"+49 151 000 0000 rejected"}', "[phone]"),
+    ])
+    def test_recipient_pii_in_a_rejection_body_is_redacted(
+            self, isolated_db, imessage_env, monkeypatch, body, expected):
+        import app.notify.imessage as im
+
+        captured: dict = {}
+        monkeypatch.setattr(im.httpx, "Client",
+                            _fake_client(captured, _Resp(status_code=403, text=body)))
+        result = im.send_imessage("hi")
+        assert result.ok is False
+        assert expected in (result.error or "")
+        assert "491510000000" not in (result.error or "")
+        assert "person@example.net" not in (result.error or "")
 
 
 class TestSendImessage:

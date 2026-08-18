@@ -287,8 +287,20 @@ def send_imessage(message: str, *, recipient: str | None = None) -> ImessageResu
         "Idempotency-Key": uuid.uuid4().hex,
     }
     timeout = httpx.Timeout(float(settings.imessage_timeout_s), connect=10.0)
+    # AN AMBIENT HTTP_PROXY DEFEATS check_destination, so plain HTTP does not
+    # trust the environment. httpx honours HTTP_PROXY/ALL_PROXY by default and
+    # does NOT bypass loopback on its own; measured with HTTP_PROXY set and
+    # NO_PROXY unset, a request to http://127.0.0.1:8765 is routed to the proxy
+    # — bearer header and digest body in cleartext to a third host. That is
+    # precisely the exposure permitting loopback http was supposed to preclude.
+    #
+    # Only for the plain-HTTP case. Over https a proxy is reached by CONNECT
+    # and TLS is end-to-end, so the key stays sealed and a deployment behind a
+    # corporate proxy keeps working; taking the environment away there would
+    # break real setups to prevent nothing.
+    plain_http = urlsplit(base).scheme == "http"
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, trust_env=not plain_http) as client:
             resp = client.post(base + SEND_PATH, json=body, headers=headers)
     except Exception as exc:
         # sanitize(): an httpx exception message embeds the request URL, and a
