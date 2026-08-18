@@ -97,6 +97,24 @@ class Settings(BaseSettings):
     imessage_recipient: str = ""     # allowlisted handle: +E.164 or an Apple-ID email
     imessage_timeout_s: int = 30     # read cap; the proxy's own deadline is longer
 
+    # --- SYSTEM-FAILURE ALERTS ----------------------------------------------
+    # "The recompute is failing" over whichever digest transport is configured.
+    # Distinct from the ALERT SYSTEM below, which is about the SCORE (a regime
+    # crossing) and is off by default: this one is about the SERVICE, and its
+    # whole purpose is to fire when the machinery it would otherwise depend on
+    # is the broken thing. It shares no state, no ruleset and no outbox with it.
+    #
+    # ON by default, unlike every other flag that makes the service act. It
+    # sends only where a transport is already configured and a recipient the
+    # operator chose is already on file, so it can reach nobody new; and the
+    # failure it reports is one the operator learned about, last time, twelve
+    # days late. A monitor that must be switched on is a monitor that is off.
+    failure_alerts_enabled: bool = True
+    # How long the SAME failure stays quiet before repeating. A new failure
+    # signature always sends immediately; this only throttles repeats, which
+    # would otherwise arrive six times a day for as long as the outage lasts.
+    failure_alert_repeat_h: int = 24
+
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully
     # disabled, and enabling alerts never implies capture. `live` is never

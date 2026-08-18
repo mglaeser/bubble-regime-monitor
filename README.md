@@ -203,7 +203,26 @@ SMS_DAILY_HOUR=8                   # UTC hour (default 08:00)
 
 The 160-character ASCII cap is an SMS constraint: one GSM-7 segment, ASCII-coerced so a stray Unicode character cannot halve the limit. It still applies over iMessage, where the proxy would accept 4000 Unicode code points — the shared cap keeps the digest identical across transports, and raising it is a product decision rather than part of the migration.
 
-Test either without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms` — the path is unchanged so existing operator scripts keep working, and the response names the `transport` that actually carried it. Example body: `bubblegauge 41/100 hold. IQR 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
+### System-failure alerts
+
+The digest tells you the score. This tells you when there is no new score to tell you about.
+
+```dotenv
+FAILURE_ALERTS_ENABLED=true    # default; sends over whichever transport above is on
+FAILURE_ALERT_REPEAT_H=24      # quiet period before the SAME failure repeats
+```
+
+Every recompute — scheduled or manual — reports its outcome. A run that raises, or that completes without producing a snapshot, sends one compressed message over the transport the digest uses:
+
+```
+bubblegauge FAILING: recompute x72 since 06 Aug 14:00Z; no new score 12d; invalid literal for int() with base 10: '1/1/'
+```
+
+A **new** failure signature sends immediately. A **repeat** of the same one waits out `FAILURE_ALERT_REPEAT_H`, so an outage costs one message a day rather than one every four hours; digits are normalised out of the signature, so the same defect reached on two different rows is one outage. When the recompute succeeds again you get a single all-clear — but only if you were told about the failure in the first place. A send that fails is retried at the next slot rather than being silently throttled away, and the error text is redacted before it leaves the host.
+
+**Why it defaults on.** It can only reach a transport and recipient you already configured, so it adds no destination; with both transports off it does nothing but log. This exists because between 2026-08-06 and 2026-08-18 every scheduled recompute failed and nothing said so: `/healthz` returned `ok`, `/readyz` listed all eighteen sources green (source health is only persisted *by* a successful snapshot, so it was replaying the last good run), the science audit counted zero errors because it has no snapshot-age flag, and the daily digest kept sending the same twelve-day-old score. A monitor you have to remember to switch on is a monitor that is off.
+
+Test either digest without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms` — the path is unchanged so existing operator scripts keep working, and the response names the `transport` that actually carried it. Example body: `bubblegauge 41/100 hold. IQR 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
 
 ## Falsification criteria
 

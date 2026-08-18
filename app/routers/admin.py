@@ -29,10 +29,17 @@ _last: dict[str, Any] = {"started_at": None, "finished_at": None, "snapshot_id":
 
 
 def run_recompute_guarded() -> None:
-    """Run one recompute if none is in flight; silently skip otherwise."""
+    """Run one recompute if none is in flight; silently skip otherwise.
+
+    This is the single choke point every recompute passes through — the
+    scheduler's 4-hourly job and the manual POST /refresh alike — so it is also
+    where the outcome is reported to the operator. A run that produces no
+    snapshot used to leave nothing behind but a log line on a box nobody was
+    tailing, which is how twelve days of failures went unnoticed."""
     if not recompute_lock.acquire(blocking=False):
         log.info("recompute_skipped", reason="already running")
         return
+    failure: str | None = None
     try:
         _last.update(started_at=datetime.now(UTC).isoformat(), finished_at=None,
                      snapshot_id=None, error=None)
@@ -41,12 +48,23 @@ def run_recompute_guarded() -> None:
         snapshot_id = run_recompute()
         _last.update(finished_at=datetime.now(UTC).isoformat(), snapshot_id=snapshot_id)
         if snapshot_id is None:
-            _last.update(error="recompute impossible: an entire block had no usable source")
+            # A completed run that scored nothing is a failure for alerting
+            # purposes: the API keeps serving, but the number stops moving.
+            failure = "recompute impossible: an entire block had no usable source"
+            _last.update(error=failure)
     except Exception as exc:  # never let a recompute error escape the worker thread
         log.error("recompute_failed", error=str(exc))
+        failure = str(exc)
         _last.update(finished_at=datetime.now(UTC).isoformat(), error=str(exc)[:400])
     finally:
         recompute_lock.release()
+    # AFTER the lock is released, deliberately. The transport is a network call
+    # to an operator-configured host, and holding the single-flight lock across
+    # it would let a hung proxy delay the next scheduled slot. The alerter
+    # never raises, so nothing here can escape into the scheduler thread.
+    from app.services.failure_alert import notify_recompute_outcome
+
+    notify_recompute_outcome(failure)
 
 
 @router.post(
