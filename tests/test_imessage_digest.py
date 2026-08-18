@@ -826,6 +826,18 @@ class TestMisspeltEnvDetection:
     def test_catches_other_single_edits(self, typo):
         assert near_miss_env_keys({typo: "x"}), f"{typo} should be flagged"
 
+    @pytest.mark.parametrize("key", [
+        "SES_ENABLED",      # Amazon SES — one edit from SMS_ENABLED, unrelated
+        "SSH_ENABLED",
+        "TLS_ENABLED",
+    ])
+    def test_does_not_flag_a_correctly_spelled_unrelated_setting(self, key):
+        # The whole container environment is searched, so unrelated services'
+        # variables are in scope. A check that fires on those is one an
+        # operator learns to ignore — which costs more than the typo it exists
+        # to catch. Real typos share a long prefix; these share one character.
+        assert near_miss_env_keys({key: "true"}) == [], key
+
     def test_ignores_correct_and_unrelated_keys(self):
         assert near_miss_env_keys({
             "IMESSAGE_ENABLED": "true",

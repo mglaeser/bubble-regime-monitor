@@ -285,12 +285,39 @@ def near_miss_env_keys(environ: Mapping[str, str]) -> list[tuple[str, str]]:
         for candidate in _TYPO_PRONE:
             if upper == candidate:
                 continue
-            # One edit apart: a dropped, added or substituted character. That
-            # covers IMESSAG_ENABLED, IMESSAGEE_ENABLED and IMESSAGE_ENABLE.
-            if abs(len(upper) - len(candidate)) <= 1 and _within_one_edit(upper, candidate):
+            # One edit apart AND sharing a real prefix. The edit test alone
+            # flags SES_ENABLED as a misspelling of SMS_ENABLED — a correctly
+            # spelled variable belonging to an unrelated service, since a
+            # container's whole environment is searched. A misconfiguration
+            # check that cries wolf on legitimate settings is one an operator
+            # learns to ignore, which costs more than the typo it was added to
+            # catch. Every real case shares a long prefix: IMESSAG_ENABLED (7),
+            # IMESSAGE_ENABLE (15), IMESSAGEE_ENABLED (8). SES/SMS share one
+            # character. The cost is that a typo in the first few characters is
+            # no longer caught, which is the rarer and more visible mistake.
+            if (abs(len(upper) - len(candidate)) <= 1
+                    and _common_prefix_len(upper, candidate) >= _MIN_SHARED_PREFIX
+                    and _within_one_edit(upper, candidate)):
                 hits.append((key, candidate))
                 break
     return hits
+
+
+#: Characters a candidate and a suspected typo of it must share up front. Every
+#: name in _TYPO_PRONE is at least 11 characters, so this is not restrictive.
+_MIN_SHARED_PREFIX = 4
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    n = 0
+    # strict=False on purpose: the inputs have different lengths whenever the
+    # edit is an insertion or a deletion, which is most of the cases this
+    # exists to serve.
+    for x, y in zip(a, b, strict=False):
+        if x != y:
+            break
+        n += 1
+    return n
 
 
 def _within_one_edit(a: str, b: str) -> bool:
