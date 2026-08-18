@@ -78,13 +78,36 @@ jobs:
       # hostname on its own — which is exactly what a gateway error body or a
       # name-resolution failure prints. Masks are job-scoped and apply only to
       # lines written after they register, so this has to run before the panel.
-      - name: Mask the verifier hostname in the log
+      - name: Mask the verifier endpoint's authority and hostname in the log
         env:
           VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
         run: |
           [ -n "$VERIFIER_BASE_URL" ] || exit 0
-          host="${VERIFIER_BASE_URL#*://}"
-          echo "::add-mask::${host%%/*}"
+
+          # BOTH forms, because a mask matches a literal substring and nothing
+          # else. The authority is what a URL echo carries; the bare hostname is
+          # what a resolver failure or a gateway error body carries. Masking only
+          # the authority leaves the hostname readable the moment the endpoint
+          # gains a port or userinfo -- the two happen to coincide today, which
+          # is the kind of coincidence that stops being true without warning.
+          authority="${VERIFIER_BASE_URL#*://}"
+          authority="${authority%%/*}"
+
+          host="${authority##*@}"
+          case "$host" in
+            # A bracketed IPv6 literal owns its colons; only a port follows the
+            # closing bracket. Cutting at the first colon would leave "[".
+            \[*\]*) host="${host%%]*}]" ;;
+            *)      host="${host%%:*}"  ;;
+          esac
+
+          # A loop, not `[ -n x ] && echo`: under `bash -e` a false test makes
+          # the AND-list the step's exit status, and the step fails.
+          for value in "$authority" "$host"; do
+            if [ -n "$value" ]; then
+              echo "::add-mask::$value"
+            fi
+          done
 
       - name: Cross-vendor review panel
         id: panel
