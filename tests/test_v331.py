@@ -61,12 +61,18 @@ class TestFedEbpParser:
     def test_parses_date_ebp_pairs(self):
         from app.sources.fed_ebp import _parse_ebp_csv
 
-        # 24-row minimum guard: pad with synthetic months, then check the real rows
-        pad = "".join(f"19{80+i:02d}-01,1.0,0.0\n" for i in range(24))
+        # 24-row minimum guard: pad with synthetic months, then check the real rows.
+        # `19{80+i:02d}` produced "19100-01" past i=19 — five-digit years that the
+        # old parser passed through unvalidated and that left this test clearing the
+        # 24-row floor by exactly nothing. Real years, so the padding is padding.
+        pad = "".join(f"{1980+i}-01,1.0,0.0\n" for i in range(24))
         pairs = _parse_ebp_csv(self.CSV + pad)
         d = dict(pairs)
-        assert d["2026-05"] == pytest.approx(-0.39)   # negative EBP preserved
-        assert "2026-06" not in d                      # NA skipped
+        # Dates are normalised to ISO `YYYY-MM-DD` at the source boundary now
+        # (a bare `YYYY-MM` means the 1st), so the vendor's spelling — whichever
+        # of the two it currently is — never reaches a consumer.
+        assert d["2026-05-01"] == pytest.approx(-0.39)   # negative EBP preserved
+        assert "2026-06-01" not in d                      # NA skipped
         assert pairs == sorted(pairs, key=lambda p: p[0])  # oldest first
 
     def test_low_ebp_scores_high_fragility(self):
