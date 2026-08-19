@@ -251,81 +251,21 @@ _DEFECT_WORDS = re.compile(
     r"\b(bypass|fail-open|unauthenticated|injection|vulnerab\w*|exploitab\w*|"
     r"race condition|deadlock|regress\w*|data loss|privilege escalation)\b", re.I)
 
-#: A negation governs only its own clause. In "no security hole, but a race
-#: condition at x.py:12" the second half is a live defect claim, and letting
-#: the leading "no" reach across the comma would launder it into an approval.
-#: The colon is a boundary too — this panel writes "Checked: ..." and
-#: "no auth: privilege escalation via /admin", where the text AFTER the colon
-#: is the finding, not part of what was negated before it.
+
+#: Clause delimiters, for quoting the offending fragment back to the operator.
 _CLAUSE_BOUNDARY = re.compile(r"[;,.:]")
-
-#: The ONLY shape that counts as "this defect is absent": a negator IMMEDIATELY
-#: before the defect word, which then IMMEDIATELY ends its assertion. Nothing
-#: may sit on either side — no determiner, no coordination, no suffix — and the
-#: assertion must be finished, so a trailing colon does not qualify.
-#:
-#: There is deliberately no `_NEGATORS` set beside this. One earlier revision
-#: kept both, they drifted (the set listed "free"/"nil" that the live pattern
-#: never honoured), and a stale constant next to a security rule is an
-#: invitation to re-widen the rule to match it. This regex is the only place
-#: the vocabulary is written down.
-#:
-#: This is deliberately far narrower than English negation, and it is the third
-#: attempt. The first two tried to FOLLOW negation scope — a proximity window,
-#: then adjacency with determiners, coordination and an "X-free" suffix — and
-#: the panel broke both, five times, every time correctly:
-#:
-#:   "no auth: privilege escalation via /admin"   negator binds another noun
-#:   "without auth privilege escalation"          same, no punctuation
-#:   "no injection protection: raw query ..."     head of the phrase is the DEFENCE
-#:   "not regression-free"                        the suffix itself was negated
-#:   "no regression and an actual injection"      a live conjunct, laundered
-#:
-#: Each of those was a hole in a fail-closed control, which is a worse defect
-#: than the false positive being fixed. Parsing negation scope out of free
-#: prose is not a thing a regex can be trusted to do, so this stops trying:
-#: one exact shape is recognised and everything else is a claim. That
-#: over-blocks real absences ("free of data loss", "no obvious race
-#: condition"), and over-blocking is the safe direction — it is also what
-#: `build_system_prompt` now steers green votes away from needing.
-_ABSENCE_PREFIX = re.compile(r"\b(?:no|not|zero|none|never|without)\s+$")
-
-
-def _clause_bounds(text: str, start: int) -> int:
-    """Offset where the clause containing ``start`` begins."""
-    return max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:start])), default=0)
 
 
 def _clause_at(text: str, start: int) -> str:
-    """The clause containing offset ``start`` — the context a human needs to
-    tell a defect claim from an assertion that the defect is absent."""
+    """The clause containing offset ``start``.
+
+    Reported with the block so an operator can tell a real inconsistency from a
+    phrasing artefact WITHOUT opening the raw job log. A bare word could not:
+    deciding whether `("fail-open")` was a confession or the tail of "no
+    fail-open" took reading the log by hand (PR #64)."""
+    lo = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:start])), default=0)
     tail = _CLAUSE_BOUNDARY.search(text, start)
-    return text[_clause_bounds(text, start):tail.start() if tail else len(text)].strip()
-
-
-def asserts_absence(text: str, hit: re.Match[str]) -> bool:
-    """Whether this occurrence says the defect is ABSENT rather than found.
-
-    Recognises exactly one shape — `<negator> <defect-word>` ending its clause —
-    and reads everything else as a claim. See `_ABSENCE_PREFIX` for why the
-    scope-following versions were withdrawn.
-
-    Callers must test EVERY occurrence: one unnegated hit anywhere in a green
-    reason is enough to discard the vote."""
-    clause_start = _clause_bounds(text, hit.start())
-    if not _ABSENCE_PREFIX.search(text[clause_start:hit.start()]):
-        return False
-    # The word must END its clause: in "no injection protection" the head of
-    # the phrase is `protection`, so a missing DEFENCE is the defect present.
-    boundary = _CLAUSE_BOUNDARY.search(text, hit.end())
-    if text[hit.end():boundary.start() if boundary else len(text)].strip():
-        return False
-    # ...and a COLON does not finish an assertion, it introduces the
-    # elaboration of one. "no injection: raw query reaches SQL" contradicts
-    # itself, and reading the half before the colon as an absence approved the
-    # half after it (panel, PR #65). A `;`, a `.` or the end of the reason ends
-    # an assertion; a `:` means the sentence has not made its point yet.
-    return boundary is None or boundary.group(0) != ":"
+    return text[lo:tail.start() if tail else len(text)].strip()
 
 
 def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
@@ -338,25 +278,31 @@ def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
     named two concrete defects. Fail-CLOSED — an inconsistent vote is discarded
     as a parse failure, not resolved in favour of green.
 
-    NAMING a defect is not the same as CLAIMING one. Every occurrence is tested
-    individually and an occurrence the vote explicitly negates is not a claim;
-    a single unnegated one still blocks, so this narrows what counts as a claim
-    without widening what counts as an approval. The blocking reason now quotes
-    the clause, because the last thing an operator needs at 2am is a lone word
-    with no way to tell a real inconsistency from a parser artefact."""
+    THE MATCH IS DELIBERATELY LITERAL, and stays that way. A green reason saying
+    "no fail-open" is discarded even though it asserts the OPPOSITE of a defect,
+    which cost a unanimous 3/3 approval on PR #64. The fix for that is upstream,
+    in `build_system_prompt`: a green vote is now asked to name code paths and
+    no defect term at all, so the ambiguous phrasing is never produced. Teaching
+    THIS function to read negation was tried and withdrawn — seven laundering
+    paths in five review rounds, each one an inconsistent green vote the gate
+    would have accepted ("no auth: privilege escalation via /admin", "not
+    regression-free", "not without injection", ...). Negation scope in free
+    prose is not something a regex can be trusted to decide, and every attempt
+    traded a safe over-block for an unsafe under-block. If this ever needs to
+    change again, change what the models are ASKED to write, not what this
+    reads."""
     for i, x in enumerate(votes):
         if not _is_valid(x) or x["v"]["refuted"] is not False:
             continue
         reason = norm_reason(x["v"].get("reason"))
-        for hit in _DEFECT_WORDS.finditer(reason):
-            if asserts_absence(reason, hit):
-                continue
+        hit = _DEFECT_WORDS.search(reason)
+        if hit:
             return {"block": True,
                     "reason": f'{models[i]}: refuted=false but its own reason names a '
                               f'defect ("{hit.group(0)}" in "{_clause_at(reason, hit.start())}") '
                               f'-> inconsistent vote, fail-closed'}
     return {"block": False,
-            "reason": f"{len(_green(votes))} green reason(s) make no defect claim"}
+            "reason": f"{len(_green(votes))} green reason(s) free of defect claims"}
 
 
 def attest_reasons(votes: list[dict], panel_size: int) -> dict[str, Any]:
@@ -682,54 +628,7 @@ def selftest() -> None:
            "hedging words are not defect claims")
     expect(attest_consistency([E, GV("docs only"), GV("no issue")], M3)["block"] is False,
            "an errored vote is not inspected for consistency")
-    # ... and NAMING a defect is not CLAIMING one. The prompt used to ask a
-    # green vote for "why no defect", so the protocol itself produced "no
-    # fail-open" and this gate read it as a confession, blocking a UNANIMOUS
-    # panel (PR #64). Exactly one absence shape is recognised now.
-    expect(attest_consistency([GV("checked state machine - no fail-open; lock release ok"),
-                               GV("docs only"), GV("reviewed diff")], M3)["block"] is False,
-           "'<negator> <defect>' ending its clause is an asserted ABSENCE")
-    expect(attest_consistency([GV("no regression, no data loss"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is False,
-           "each occurrence may carry its own negator")
-    # The half that matters more: narrowing what counts as a CLAIM must not
-    # widen what counts as an APPROVAL. Every string below was found by the
-    # panel against an earlier, scope-following version of this gate.
-    expect(attest_consistency([GV("no security hole, but a race condition at x.py:12"),
-                               GV("docs only"), GV("reviewed diff")], M3)["block"] is True,
-           "a negation must NOT reach across a clause boundary")
-    expect(attest_consistency([GV("no fail-open; data loss on retry path"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is True,
-           "one negated claim must not absolve a second, real one")
-    expect(attest_consistency([GV("looks fine. privilege escalation via /admin"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is True,
-           "a negation must NOT reach across a sentence boundary")
-    expect(attest_consistency([GV("checked for injection"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is True,
-           "an unqualified defect word still fails closed")
-    expect(attest_consistency([GV("no auth: privilege escalation via /admin"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is True,
-           "a negator bound to another noun must not launder a live claim")
-    expect(attest_consistency([GV("without auth privilege escalation"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is True,
-           "'without X <defect>' is a claim, not an absence")
-    expect(attest_consistency([GV("no injection protection: raw query reaches SQL"),
-                               GV("docs only"), GV("reviewed diff")], M3)["block"] is True,
-           "'no <defect> protection' asserts a missing DEFENCE, not an absent defect")
-    expect(attest_consistency([GV("not regression-free"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is True,
-           "a NEGATED absence-suffix is a claim")
-    expect(attest_consistency([GV("no regression and an actual injection"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is True,
-           "a live conjunct must not ride along on an earlier negator")
-    # Over-blocking is the SAFE direction, and is asserted so a future edit
-    # cannot widen the recognised shape without saying so here.
-    expect(attest_consistency([GV("checked writes, free of data loss"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is True,
-           "only '<negator> <defect>' is recognised -- 'free of X' over-blocks, by design")
-    expect(attest_consistency([GV("no injection: raw query reaches SQL"), GV("docs only"),
-                               GV("reviewed diff")], M3)["block"] is True,
-           "a colon introduces an elaboration -- the assertion is not finished")
+
     # auth_header() -- both branches
     _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)
     try:
