@@ -132,3 +132,76 @@ class TestAuthzCoverage:
                             ("IN_HANDLER_AUTH", authz_coverage.IN_HANDLER_AUTH)):
             for key, reason in table.items():
                 assert reason and len(reason) > 20, f"{name}[{key!r}] has no substantive reason"
+
+
+class TestStrictModeIsActuallyReachable:
+    """`--strict` is the findings gate's END STATE, and until now nothing drove it.
+
+    Mutation against the pre-existing coverage (`--selftest` plus this file):
+    deleting the blocking-band clause, the unrecognised-verdict clause, the
+    PASS-without-control clause, or the entire `--strict` block, each left
+    selftest=0 and 23 tests passing. The mode CI does not run and no test
+    exercises is a mode that can be deleted by accident.
+
+    ci.yml deliberately runs the reporting mode, not `--strict`, while 4
+    STOP-SHIP and 11 BLOCKER-1 findings are open -- a gate that can never pass
+    is a gate someone removes under pressure. That is a scheduling decision;
+    it is not a reason for the code path to be untested.
+    """
+
+    import json as _json
+
+    @staticmethod
+    def _gate_with(tmp_path, monkeypatch, records):
+        import json
+
+        from scripts.regime import findings_gate as fg
+        path = tmp_path / "03-findings.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        # load_findings binds FINDINGS_PATH as a DEFAULT ARGUMENT, so patching
+        # the module attribute does not reach it -- the gate reads the real
+        # 119-record ledger and the assertions silently describe production
+        # instead of the fixture. Patching load_findings is what redirects it,
+        # and that binding is a fair part of why --strict went uncovered.
+        monkeypatch.setattr(fg, "FINDINGS_PATH", path)
+        monkeypatch.setattr(fg, "load_findings", lambda p=path: json.loads(p.read_text()))
+        return fg
+
+    def test_strict_blocks_on_an_open_blocking_band(self, tmp_path, monkeypatch, capsys):
+        fg = self._gate_with(tmp_path, monkeypatch, [
+            {"id": "A-1", "verdict": "FAIL", "band": "STOP-SHIP"}])
+        assert fg.main(["--strict"]) == 1
+        assert "STOP-SHIP/BLOCKER-1" in capsys.readouterr().err
+
+    def test_strict_blocks_on_an_unrecognised_verdict(self, tmp_path, monkeypatch, capsys):
+        # The clause this branch added, and the one that shipped uncovered.
+        fg = self._gate_with(tmp_path, monkeypatch, [
+            {"id": "A-1", "verdict": "FAILED", "band": "MUST-FIX"}])
+        assert fg.main(["--strict"]) == 1
+        assert "unrecognised verdict" in capsys.readouterr().err
+
+    def test_strict_blocks_on_a_pass_without_a_standing_control(self, tmp_path, monkeypatch, capsys):
+        fg = self._gate_with(tmp_path, monkeypatch, [
+            {"id": "A-1", "verdict": "PASS", "band": "PLAN"}])
+        assert fg.main(["--strict"]) == 1
+        assert "standing control" in capsys.readouterr().err
+
+    def test_strict_passes_a_clean_ledger(self, tmp_path, monkeypatch):
+        # The complement: three blocking clauses that refuse everything would
+        # satisfy the tests above and be useless.
+        fg = self._gate_with(tmp_path, monkeypatch, [
+            {"id": "A-1", "verdict": "PASS", "band": "PLAN", "standing_control": "ci"},
+            {"id": "A-2", "verdict": "NOT-APPLICABLE", "band": "PLAN", "tripwire": "n/a"}])
+        assert fg.main(["--strict"]) == 0
+
+    def test_the_reporting_mode_stays_non_blocking_on_the_same_ledger(self, tmp_path, monkeypatch):
+        # The repair lane: honest while findings are still open, exit 0.
+        fg = self._gate_with(tmp_path, monkeypatch, [
+            {"id": "A-1", "verdict": "FAIL", "band": "STOP-SHIP"}])
+        assert fg.main([]) == 0
+
+    def test_admission_still_refuses_where_strict_does(self, tmp_path, monkeypatch, capsys):
+        fg = self._gate_with(tmp_path, monkeypatch, [
+            {"id": "A-1", "verdict": "FAIL", "band": "STOP-SHIP"}])
+        assert fg.main(["--admission"]) == 1
+        assert "REFUSE deploy admission" in capsys.readouterr().err

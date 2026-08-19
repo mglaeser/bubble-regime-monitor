@@ -42,6 +42,11 @@ BANDS = ("STOP-SHIP", "BLOCKER-1", "BLOCKER-2", "MUST-FIX", "SHOULD-FIX", "PLAN"
 # mandate treats a partially satisfied check as unsatisfied.
 OPEN_VERDICTS = ("FAIL", "PARTIAL")
 
+# The ONLY two verdicts that take a record out of the open count. Anything else
+# — including a typo — is open. See is_open for why this is a tuple of its own
+# rather than "not in OPEN_VERDICTS".
+CLOSED_VERDICTS = ("PASS", "NOT-APPLICABLE")
+
 # Bands that block production. BLOCKER-2 deliberately does not: the mandate
 # bands it below the production bar, and folding it in here would mean the gate
 # never opens, which is its own failure mode.
@@ -71,8 +76,32 @@ def effective_band(record: dict) -> str | None:
     return normalize_band(record.get("escalated_band")) or normalize_band(record.get("band"))
 
 
+def normalize_verdict(raw: Any) -> str | None:
+    """The verdict as a known token, or None if it names no known verdict.
+
+    None is NOT "no problem" — the same contract normalize_band carries, for
+    the same reason. A ledger entry whose verdict cannot be read is a check
+    whose state is unknown."""
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip().upper()
+    return text if text in OPEN_VERDICTS + CLOSED_VERDICTS else None
+
+
 def is_open(record: dict) -> bool:
-    return str(record.get("verdict", "")).strip().upper() in OPEN_VERDICTS
+    """Open unless the record explicitly PASSes or does not apply.
+
+    Fail-closed, and this is the whole point of the function. The previous form
+    asked whether the verdict was IN OPEN_VERDICTS, so an unrecognised verdict
+    fell out of the tally entirely: not counted open, not counted PASS, not
+    counted NOT-APPLICABLE, not counted anywhere. Rewriting the ledger's 80
+    open verdicts to plausible synonyms ("FAILED", "PARTIALLY") therefore
+    reported `open findings 0`, computed production_eligible TRUE and granted
+    deploy admission.
+
+    normalize_band already refuses to let a typo shrink the count. This is the
+    same defence on the sibling field, which is where it was missing."""
+    return normalize_verdict(record.get("verdict")) not in CLOSED_VERDICTS
 
 
 def load_findings(path: Path = FINDINGS_PATH) -> list[dict]:
@@ -88,12 +117,19 @@ def tally(records: list[dict]) -> dict[str, Any]:
     unbanded: a record whose band matches nothing known. Counted and reported
     rather than ignored, because an unreadable band is an uncounted finding.
 
+    unrecognised_verdict: the same fault on the verdict field. Such a record is
+    counted OPEN (is_open fails closed) and listed here as well, so a ledger
+    typo can never be mistaken for a genuine FAIL — nor hidden among them.
+
     pass_without_control: §9.10.1 — a PASS with no standing control is a claim,
     not a control, and the mandate downgrades it to PARTIAL. All 8 PASS records
     currently lack one, which is why --strict stays red until they are written."""
     counts = dict.fromkeys(BANDS, 0)
     unbanded: list[str] = []
+    unrecognised: list[str] = []
     for r in records:
+        if normalize_verdict(r.get("verdict")) is None:
+            unrecognised.append(str(r.get("id", "?")))
         if not is_open(r):
             continue
         band = effective_band(r)
@@ -101,14 +137,15 @@ def tally(records: list[dict]) -> dict[str, Any]:
             unbanded.append(str(r.get("id", "?")))
         else:
             counts[band] += 1
-    passes = [r for r in records if str(r.get("verdict", "")).strip().upper() == "PASS"]
+    passes = [r for r in records if normalize_verdict(r.get("verdict")) == "PASS"]
     not_applicable = [r for r in records
-                      if str(r.get("verdict", "")).strip().upper() == "NOT-APPLICABLE"]
+                      if normalize_verdict(r.get("verdict")) == "NOT-APPLICABLE"]
     return {
         "registered_check_count": len(records),
         "open_by_band": counts,
         "open_total": sum(counts.values()) + len(unbanded),
         "unbanded_open": unbanded,
+        "unrecognised_verdict": unrecognised,
         "pass_without_standing_control": [str(r.get("id", "?")) for r in passes
                                           if not r.get("standing_control")],
         "not_applicable_without_tripwire": [str(r.get("id", "?")) for r in not_applicable
@@ -122,6 +159,9 @@ def production_eligible(t: dict) -> tuple[bool, str]:
     An unbanded open record blocks: it is a finding whose severity is unknown,
     and unknown severity cannot be assumed harmless."""
     blocking = {b: t["open_by_band"][b] for b in BLOCKING_BANDS if t["open_by_band"][b]}
+    if t["unrecognised_verdict"]:
+        return False, (f"{len(t['unrecognised_verdict'])} finding(s) carry an unrecognised verdict "
+                       f"({', '.join(t['unrecognised_verdict'][:5])}) — state unknown, treated as blocking")
     if t["unbanded_open"]:
         return False, (f"{len(t['unbanded_open'])} open finding(s) carry an unrecognised band "
                        f"({', '.join(t['unbanded_open'][:5])}) — severity unknown, treated as blocking")
@@ -142,6 +182,9 @@ def _render(t: dict, eligible: bool, why: str) -> str:
             lines.append(f"  {band:<12} {n}{mark}")
     if t["unbanded_open"]:
         lines.append(f"  {'UNBANDED':<12} {len(t['unbanded_open'])}  <-- blocks production")
+    if t["unrecognised_verdict"]:
+        lines.append(f"  {'UNREADABLE':<12} {len(t['unrecognised_verdict'])}  "
+                     f"<-- unrecognised verdict, blocks production")
     lines += [
         f"PASS without standing control        {len(t['pass_without_standing_control'])}",
         f"NOT-APPLICABLE without tripwire      {len(t['not_applicable_without_tripwire'])}",
@@ -175,6 +218,29 @@ def selftest() -> int:
     expect(is_open({"verdict": "FAIL"}) and is_open({"verdict": "PARTIAL"}), "FAIL/PARTIAL are open")
     expect(not is_open({"verdict": "PASS"}), "PASS is not open")
     expect(not is_open({"verdict": "NOT-APPLICABLE"}), "NOT-APPLICABLE is not open")
+    expect(is_open({"verdict": "FAILED"}) and is_open({"verdict": "PARTIALLY"}),
+           "an unrecognised verdict must count as OPEN -- a typo must not shrink the count")
+    expect(is_open({}) and is_open({"verdict": None}) and is_open({"verdict": 7}),
+           "missing/None/non-string verdict is open, never silently closed")
+    expect(normalize_verdict("pass") == "PASS" and normalize_verdict(" fail ") == "FAIL",
+           "verdicts normalise on case and surrounding space")
+    expect(normalize_verdict("FAILED") is None and normalize_verdict("PASSED") is None,
+           "a near-miss verdict resolves to None, not to the token it resembles")
+
+    typo = tally([{"id": "X-6", "verdict": "FAILED", "band": "MUST-FIX"}])
+    expect(typo["unrecognised_verdict"] == ["X-6"], "an unreadable verdict is reported by id")
+    expect(typo["open_total"] == 1, "and is still counted among the open findings")
+    ok, why = production_eligible(typo)
+    expect(not ok and "unrecognised verdict" in why,
+           "an unreadable verdict must block: unknown state is not harmless")
+
+    # The regression this gate exists to refuse: rewriting every open verdict to
+    # a plausible synonym previously reported `open findings 0` and granted
+    # deploy admission. Two records, one FAIL and one PARTIAL, both misspelt.
+    forged = tally([{"id": "X-7", "verdict": "FAILED", "band": "STOP-SHIP"},
+                    {"id": "X-8", "verdict": "PARTIALLY", "band": "BLOCKER-1"}])
+    expect(forged["open_total"] == 2, "misspelt verdicts stay counted, not dropped")
+    expect(not production_eligible(forged)[0], "and cannot compute production_eligible true")
 
     clean = tally([{"id": "X-1", "verdict": "PASS", "band": "PLAN", "standing_control": "ci"}])
     ok, _ = production_eligible(clean)
@@ -227,6 +293,8 @@ def main(argv: list[str]) -> int:
         blocking = sum(t["open_by_band"][b] for b in BLOCKING_BANDS) + len(t["unbanded_open"])
         if blocking:
             problems.append(f"{blocking} open STOP-SHIP/BLOCKER-1 finding(s)")
+        if t["unrecognised_verdict"]:
+            problems.append(f"{len(t['unrecognised_verdict'])} finding(s) with an unrecognised verdict")
         if t["pass_without_standing_control"]:
             problems.append(f"{len(t['pass_without_standing_control'])} PASS record(s) with no "
                             f"standing control (§9.10.1 downgrades these to PARTIAL)")

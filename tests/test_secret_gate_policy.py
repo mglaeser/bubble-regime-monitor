@@ -1,5 +1,13 @@
 """The blocking secret gate, and the ways it has silently stopped working.
 
+SCOPE FIRST, because it is the easiest thing here to misread: the gate is fed
+by `git ls-files`, so it is an INDEX-TIME control. An untracked file is invisible
+to it. A green run means "no new secret in the index", never "no secret in the
+working tree" — and the blind window is precisely while a new file is being
+drafted, which is when a pasted credential is most likely to be in one.
+Reproduced: a new test file carrying a fake "ANTHROPIC_API_KEY" passed the gate
+while untracked and failed the moment it was committed.
+
 Macro-Cycle 3 added a second `should_exclude_file` filter to the baseline to
 quiet the verifier artifacts. detect-secrets keys filters by FUNCTION PATH, so
 the new entry did not join the existing one — it REPLACED it, silently

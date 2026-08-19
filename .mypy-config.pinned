@@ -1,0 +1,22 @@
+# The [tool.mypy] section, pinned BYTE-IDENTICAL.
+#
+# The type-check gate in .github/workflows/ci.yml counts ERRORS and can only
+# ever block a RISE. It cannot see STRICTNESS. Measured: flipping
+# `strict = true` to false drops 217 errors to 84 with the file count
+# unchanged at 113 and the MYPY_MIN_FILES floor satisfied -- the count falls,
+# the gate passes, and it then advises lowering MYPY_CEILING to match, which
+# would lock the loosening in.
+#
+# So depth is pinned the same way .secrets.baseline pins the secret gate:
+# by bytes. Changing [tool.mypy] fails the build until this file is updated
+# in the same commit, with MYPY_CEILING re-derived under the new config.
+#
+# A SHA-256 of the section was the first attempt. The repository's own secret
+# scan rejected it -- a 64-char hex digest is indistinguishable from a
+# credential -- and a `pragma: allowlist secret` would have taught the next
+# reader to wave that shape through (see commit 391aead). Bytes, not a hash.
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

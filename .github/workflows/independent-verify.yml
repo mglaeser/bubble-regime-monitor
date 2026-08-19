@@ -179,6 +179,14 @@ jobs:
           VERIFIER_REQUIRED_APPROVER: ${{ vars.VERIFIER_REQUIRED_APPROVER }}
           VERIFIER_MIN_OTHER_APPROVERS: ${{ vars.VERIFIER_MIN_OTHER_APPROVERS }}
           VERIFIER_STRICT_ANY_REFUTATION: "true"
+          # Require every APPROVING voice to carry a machine-readable "defects"
+          # ledger, and block when that ledger contradicts the boolean. Hardcoded
+          # rather than a repo variable for the same reason as the line above: a
+          # merge control that a variable can silently switch off is not a control.
+          # Compliance measured against all three panel groups before enabling --
+          # planted defect: 3/3 refuted with a populated ledger; clean diff: empty
+          # ledgers. Set to "false" only in a fork whose models do not answer it.
+          VERIFIER_REQUIRE_DEFECT_LIST: "true"
           # Explicit range. The job runs from the default branch, where HEAD IS
           # main — without these two the diff collapses to main...main, comes
           # back empty, and the panel goes permanently fake-green.

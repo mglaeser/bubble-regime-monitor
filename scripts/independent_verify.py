@@ -21,6 +21,16 @@ ROLES (identical to the reference):
 
 INTEGRITY GATES (all fail-closed, in order):
   1. require_approvals() — the role gate above.
+  1a. attest_consistency() — a GREEN vote must not itself report a defect. Two
+                           channels, in this order: (a) the DECLARED DEFECT
+                           LEDGER, a required typed ``defects: string[]`` in the
+                           verdict schema — refuted=false with a non-empty
+                           ledger is a self-contradicting vote and blocks; this
+                           channel reads len(), never prose, so no phrasing
+                           defeats it. (b) a demoted PROSE TRIPWIRE over the
+                           vote's own reason — a heuristic, known-evadable,
+                           retained only because the ledger is only as good as
+                           the model that fills it.
   2. attest_reasons()    — a majority of the GREEN votes must carry substantive,
                            mutually distinct reasons (anti canned-green).
   3. attest_proof()      — a majority of the GREEN votes must echo the per-run
@@ -51,6 +61,10 @@ ENV (same contract as the reference):
   VERIFIER_PANEL          voice count in single-pin mode (default 3, cap 64)
   VERIFIER_REQUIRED_APPROVER      required-approver model prefix (default gpt-5.6-sol)
   VERIFIER_MIN_OTHER_APPROVERS    independent corroborations required (default 1)
+  VERIFIER_REQUIRE_DEFECT_LIST    a GREEN vote MUST carry a "defects" ledger (default
+                                  off; turn on only once the run logs show every
+                                  configured voice emitting the field, then it is on
+                                  for good — see docs/INDEPENDENT_REVIEW_PANEL.md)
 
 Usage:
   python scripts/independent_verify.py             verify the PR diff (exit != 0 on block)
@@ -66,6 +80,7 @@ import secrets
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from typing import Any
@@ -101,16 +116,14 @@ def auth_header() -> dict[str, str]:
         return {name: KEY or ""}
     return {"Authorization": f"Bearer {KEY}"}
 
-# Preference order (new -> old): without an explicit VERIFIER_MODEL the panel
-# resolves each wanted ID against the account's /v1/models list.
-MODEL_PREFERENCE = [
-    "gpt-5.6-sol", "gpt-5.6", "gpt-5.5", "gpt-5.1", "gpt-5",
-    "gpt-4.1", "gpt-4o-2024-08-06", "gpt-4o",
-]
-
-# Broadly available, pinned fallback (NOT the newest/scarcest — a rejected model
-# would turn every vote into an API error and block the control permanently).
-FALLBACK_MODEL = "gpt-4o-2024-08-06"
+# MODEL_PREFERENCE and FALLBACK_MODEL used to live here. Both existed to choose
+# a SUBSTITUTE when a configured voice was not served by the account, and that
+# substitution was removed as fail-open: the panel reviewed with voices the
+# operator never chose and the run went green. resolve_panel_models() now
+# refuses instead, so nothing reads either constant. They are deleted rather
+# than left in place, because a merge-gate file whose constants describe a
+# deleted mechanism is exactly the reading-versus-behaviour gap this file keeps
+# being audited for.
 
 # One DIFFERENT model per voice (override via VERIFIER_PANEL_MODELS).
 DEFAULT_PANEL_MODELS = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
@@ -166,6 +179,40 @@ def has_valid_proof(v: Any, challenge: str | None) -> bool:
 def _is_valid(x: Any) -> bool:
     return bool(x and x.get("ok") and isinstance(x.get("v"), dict)
                 and isinstance(x["v"].get("refuted"), bool))
+
+
+def approving_models(votes: list[dict], models: list[str]) -> list[str]:
+    """Models with a VALID, APPROVING voice. An errored voice never approves, so
+    an outage shrinks this list -- which is the point."""
+    return [models[i] for i, x in enumerate(votes)
+            if _is_valid(x) and x["v"]["refuted"] is False and models[i]]
+
+
+def require_distinct_voices(models: list[str]) -> dict[str, Any]:
+    """Every voice must be a DIFFERENT configured id.
+
+    Independence here is a property of the panel's composition, not of anything
+    this script can inspect: each voice is an inference-server GROUP that
+    rotates over its own members, and the server reports the group id back as
+    the model, never the member that served the call. Probed live -- a request
+    to `combo/SOTA-A` answers with `"model": "combo/SOTA-A"`.
+
+    So the operator attests that the groups are independent, and this gate
+    enforces the one part that IS checkable: that two voices are not the same
+    group. Two identical ids are one opinion counted twice, which is precisely
+    the shape the required-approver gate exists to prevent.
+
+    RESIDUAL, and it cannot be closed from here: if two groups share a member,
+    rotation can land both voices on one model. Nothing in the API distinguishes
+    that from genuine agreement. It is bounded by how the groups are built."""
+    seen = [m for m in models if m]
+    dupes = sorted({m for m in seen if seen.count(m) > 1})
+    if dupes:
+        return {"block": True,
+                "reason": f"the panel lists the same voice more than once ({', '.join(dupes)}) "
+                          "-- one opinion counted twice is not corroboration, fail-closed"}
+    return {"block": False,
+            "reason": f"{len(seen)} distinct voices ({', '.join(seen)})"}
 
 
 def require_approvals(votes: list[dict], models: list[str], required_approver: str,
@@ -244,12 +291,230 @@ def strict_any_refutation(votes: list[dict], models: list[str]) -> dict[str, Any
     return {"block": False, "reason": "strict mode: no high/medium refutation"}
 
 
+# --------------------------------------------------- declared defect ledger --
+#
+# WHY THIS FIELD EXISTS — read before touching anything below it.
+#
+# THREE predecessors of this gate tried to INFER A FACT FROM A STRING, and the
+# panel refuted every one of them with an input its author had not imagined:
+#   * vendor_key()    — a vendor from a model id's leading token. "gpt-5.6-sol"
+#                       -> "gpt" but "openai/gpt-4.1-mini" -> "openai", so ONE
+#                       vendor in two spellings satisfied a CROSS-vendor gate.
+#   * vendor_tokens() — vendor identity from token-set disjointness. "nvidia/"
+#                       is a HOST prefix, so Meta and DeepSeek read as one
+#                       vendor. Wrong in both directions.
+#   * rung 4 — a LITERAL defect-word match in an approving reason. Also
+#                       wrong in both directions, because the negator negates a
+#                       different word than the defect one:
+#                         "without fixing auth bypass"               -> no claim
+#                         "not fixed: privilege escalation in admin" -> no claim
+#                         "none of the auth paths bypass the check"  -> claim
+#
+# The common shape is not a bad word list. It is that a STRING WRITTEN BY THE
+# REVIEWER was asked a question only the REVIEWER can answer. So the verdict
+# schema now MAKES THE REVIEWER ANSWER IT in a typed field, and the gate reads
+# the field instead of parsing the prose:
+#
+#     "defects": string[]   one entry per concrete defect found, [] iff none
+#     refuted == False  AND  len(defects) > 0   ->  self-contradicting, BLOCK
+#
+# That decision is an integer comparison over a value the model itself declared.
+# There is no vocabulary to miss, no negation to scope, no phrasing to shape:
+# its input domain is {list of strings} + {everything else} and both halves are
+# handled explicitly, so it has no "unimagined input" class at all.
+#
+# WHAT IT DOES NOT DO, stated here so nobody reads it as more than it is: a
+# model that finds a defect, writes clean prose and declares [] is invisible to
+# this channel. It converts a ONE-channel failure into a TWO-channel one (the
+# model must now get the same fact wrong twice, in two representations, having
+# been told they must agree) — it does not eliminate it. That residual is why
+# the prose tripwire below is retained rather than deleted.
+
+# Ledger entries a model writes when it means "empty". CLOSED set, and safe in
+# the P1 direction because none of these strings can name a defect.
+_LEDGER_NULLS = frozenset({
+    "", "-", "--", "n/a", "na", "nil", "null", "none", "nothing", "empty", "[]",
+    "no defect", "no defects", "no defects found", "none found", "nothing found",
+    "no issue", "no issues", "no issues found", "no findings", "no concerns",
+})
+
+# Accepted spellings of the ledger key, in priority order. A model that answers
+# the schema with "Defects" or "findings" HAS answered it; treating that as an
+# absent field would silently disarm the gate on a capitalisation slip.
+_LEDGER_KEYS = ("defects", "defect", "findings", "defects_found")
+
+
+def _ledger_key_state(k: Any) -> str:
+    """"accepted" | "lookalike" | "other" for one key of a verdict object.
+
+    LOOKALIKE is the one worth explaining. A key that NFKC-normalises into an
+    accepted spelling but is not byte-identical to it is not a typo, it is a
+    key wearing the ledger's name:
+
+        {"defects": [], "defe\u0441ts": ["app/a.py:1 - auth bypass"]}
+
+    (Cyrillic \u0441). Measured before this function existed: rung 3 was
+    satisfied by the real, empty ``defects``, the lookalike was not recognised
+    as a ledger key at all, and the vote PASSED with a declared defect in it.
+    Such a key is treated as MALFORMED rather than ignored -- an object that
+    carries two keys normalising to one name is ambiguous, and ambiguity in the
+    verdict fails closed, the same way a duplicate key does.
+
+    Everything else is "other", and an "other" key is genuinely not read. That
+    is a stated limit, not an oversight: a defect written under a name nobody
+    agreed on cannot be found by matching names. Rung 4's prose scan is what
+    covers the vote that describes a defect somewhere this does not look."""
+    if not isinstance(k, str):
+        return "other"
+    flat = k.strip().lower()
+    if flat in _LEDGER_KEYS:
+        return "accepted"
+    # A NON-ASCII KEY IS A LOOKALIKE, whatever it spells. NFKC was the first
+    # attempt and it is the wrong tool: it folds compatibility forms (fullwidth,
+    # ligatures) but NOT cross-script confusables, so Cyrillic \u0441 in
+    # "defe\u0441ts" survived it untouched and the vote still passed. A
+    # confusables table would rot; this contract's keys are ASCII by definition,
+    # so a key outside ASCII cannot be matched reliably and the object carrying
+    # it is ambiguous. Ambiguity fails closed here, as it does for a duplicate.
+    if not flat.isascii():
+        return "lookalike"
+    if unicodedata.normalize("NFKC", flat) in _LEDGER_KEYS:
+        return "lookalike"
+    return "other"
+
+
+def _ledger_fields(v: Any) -> tuple[list[Any], bool]:
+    """(values under EVERY accepted spelling, saw_a_lookalike).
+
+    All of them, not the first one: a vote carrying both ``"defects": []`` and
+    ``"findings": ["auth bypass"]`` has declared a defect, and reading only the
+    higher-priority key would let the other one hide it."""
+    if not isinstance(v, dict):
+        return [], False
+    states = {k: _ledger_key_state(k) for k in v}
+    return ([v[k] for k, st in states.items() if st == "accepted"],
+            any(st == "lookalike" for st in states.values()))
+
+
+def has_conformant_ledger(v: Any) -> bool:
+    """True only when the CANONICAL ``defects`` key is present AND is a list.
+
+    declared_defects() reads every accepted spelling and tolerates the enumerated
+    empty-sentinels on purpose: none of those strings can name a defect, so
+    reading them is safe in the P1 direction, and reading every spelling stops an
+    alias from hiding an entry. But TOLERATING a shape is not the same as the
+    schema having been ANSWERED, and require_ledger claims the latter.
+
+    Group A refuted exactly that gap: with VERIFIER_REQUIRE_DEFECT_LIST=true,
+    ``"defects": "none"`` and an alias-only ``"findings": []`` both passed while
+    carrying no ``defects: string[]`` at all -- "required" did not mean required.
+    Measured before the fix:
+
+        "defects": []       -> passes   (conformant)
+        "defects": "none"   -> passes   (NOT conformant, should block)
+        "findings": []      -> passes   (NOT conformant, should block)
+        no ledger           -> blocks
+    """
+    if not isinstance(v, dict):
+        return False
+    return any(isinstance(k, str) and k.strip().lower() == "defects" and isinstance(val, list)
+               for k, val in v.items())
+
+
+def declared_defects(v: Any) -> tuple[str, list[str]]:
+    """Read a vote's MACHINE-DECLARED defect ledger.
+
+    Returns ("ok", items) | ("missing", []) | ("malformed", []). Total on every
+    input: no parsing, no inference, no natural language. ``items`` is the
+    union of the declared lists with the enumerated empty-sentinels removed."""
+    raws, lookalike = _ledger_fields(v)
+    if lookalike:
+        return ("malformed", [])
+    if not raws:
+        return ("missing", [])
+    items: list[str] = []
+    for raw in raws:
+        # A bare string is a schema error, but a bare string that IS one of the
+        # enumerated empty-sentinels ('"defects": "none"') cannot name a defect,
+        # so reading it as [] is safe in the P1 direction and removes the most
+        # likely rollout wedge. Any OTHER non-list fails closed.
+        if isinstance(raw, str):
+            if re.sub(r"\s+", " ", raw).strip().lower() in _LEDGER_NULLS:
+                continue
+            return ("malformed", [])
+        if not isinstance(raw, list):
+            return ("malformed", [])
+        for entry in raw:
+            if not isinstance(entry, str):
+                return ("malformed", [])
+            s = re.sub(r"\s+", " ", entry).strip()
+            if s.lower() not in _LEDGER_NULLS:
+                items.append(s)
+    return ("ok", items)
+
+
+# ------------------------------------------------------- prose tripwire ------
+#
+# SECONDARY, DEMOTED, AND HONESTLY LABELLED: everything from here to
+# defect_claims() IS a heuristic and a determined writer evades it. It is kept
+# unchanged — deliberately NOT rewritten — because three rewrites of exactly
+# this rule have now been refuted, each shipping a fresh BYPASS in exchange for
+# the false positives it fixed. The known holes are documented on
+# defect_claims() itself. It is the belt to the ledger's braces, not the
+# mechanism.
+
 # Words that name a DEFECT rather than describe a review. Deliberately narrow:
 # each denotes a concrete failure, not a hedge ("could", "consider", "prefer"),
 # so ordinary approving prose does not trip the gate.
-_DEFECT_WORDS = re.compile(
-    r"\b(bypass|fail-open|unauthenticated|injection|vulnerab\w*|exploitab\w*|"
-    r"race condition|deadlock|regress\w*|data loss|privilege escalation)\b", re.I)
+#
+# INFLECTIONS: the list is matched in the ordinary inflections of the SAME
+# terms ("bypassed", "injections", "deadlocks"), which the earlier bare-\b form
+# missed. Widening a term is MONOTONE — it can only turn a PASS into a BLOCK,
+# never the reverse — so it trades P2 for P1 in the direction this file
+# resolves conflicts. Adding a NEW concept here is not monotone in the same
+# way and is a separate, reviewed decision.
+# ONE definition, TWO consumers: the regex that BLOCKS is built from this list,
+# and the sentence in build_system_prompt() that tells a voice what to avoid is
+# rendered from the same list. The two cannot drift.
+#
+# They did drift, and it was measured: the prompt named six terms and trailed
+# off with "...", while the regex also blocked `fails open`, `vulnerable`,
+# `exploitable`, `regressed`, `deadlocked` and `privilege escalations`. Three
+# natural approvals -- "verified the header path does not fail open",
+# "confirmed the gate cannot fail open on a missing key", "the substitution path
+# no longer fails open" -- were blocked by a rule the voice was never shown. A
+# gate that publishes a rule narrower than the one it enforces is unanswerable
+# by the reviewer it judges.
+#
+# (published term, regex alternative)
+_DEFECT_VOCAB: tuple[tuple[str, str], ...] = (
+    # EVERY alternative is a stem plus \w*, without exception. Enumerating
+    # inflections was the previous form and it leaked exactly the way an
+    # enumeration does: `fails? open` missed "failed open" and "failing open",
+    # `inject(?:ions|ion|ed|able|s)` missed "injecting". combo/SOTA-A found all
+    # three. Those are not regressions -- main misses them too -- but a list of
+    # endings is a list somebody has to keep complete, and the next inflection
+    # is always the one nobody wrote down. A stem cannot be incomplete that way.
+    ("bypass",              r"bypass\w*"),
+    ("fail-open",           r"fail-open\w*"),
+    ("fails open",          r"fail\w* open"),
+    ("unauthenticated",     r"unauthenticated\w*"),
+    ("injection",           r"inject\w*"),
+    ("vulnerability",       r"vulnerab\w*"),
+    ("exploitable",         r"exploitab\w*"),
+    ("race condition",      r"race condition\w*"),
+    ("deadlock",            r"deadlock\w*"),
+    ("regression",          r"regress\w*"),
+    ("data loss",           r"data loss\w*"),
+    ("privilege escalation", r"privilege escalation\w*"),
+)
+
+_DEFECT_WORDS = re.compile(r"\b(" + "|".join(a for _, a in _DEFECT_VOCAB) + r")\b", re.I)
+
+#: Every published term, for the prompt. No ellipsis: the voice is told the
+#: whole rule it is judged by.
+_DEFECT_VOCAB_PUBLISHED = ", ".join(t for t, _ in _DEFECT_VOCAB)
+
 
 
 #: Clause delimiters, for quoting the offending fragment back to the operator.
@@ -268,8 +533,9 @@ def _clause_at(text: str, start: int) -> str:
     return text[lo:tail.start() if tail else len(text)].strip()
 
 
-def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
-    """A GREEN vote whose OWN reason names a defect is not an approval — it is a
+def attest_consistency(votes: list[dict], models: list[str],
+                       require_ledger: bool = False) -> dict[str, Any]:
+    """A GREEN vote that itself reports a defect is not an approval — it is a
     model that analysed correctly and then set the boolean wrong. decide() reads
     only ``refuted``, so without this gate that vote counts toward the quorum
     AND supplies a substantive, distinct reason that helps attest_reasons pass.
@@ -278,31 +544,74 @@ def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
     named two concrete defects. Fail-CLOSED — an inconsistent vote is discarded
     as a parse failure, not resolved in favour of green.
 
-    THE MATCH IS DELIBERATELY LITERAL, and stays that way. A green reason saying
-    "no fail-open" is discarded even though it asserts the OPPOSITE of a defect,
-    which cost a unanimous 3/3 approval on PR #64. The fix for that is upstream,
-    in `build_system_prompt`: a green vote is now asked to name code paths and
-    no defect term at all, so the ambiguous phrasing is never produced. Teaching
-    THIS function to read negation was tried and withdrawn — seven laundering
-    paths in five review rounds, each one an inconsistent green vote the gate
-    would have accepted ("no auth: privilege escalation via /admin", "not
-    regression-free", "not without injection", ...). Negation scope in free
+    THE LADDER, per green vote, first hit wins, every rung fail-CLOSED:
+      1. a ``defects`` ledger present but not a list of strings -> the schema
+         was not answered, BLOCK.
+      2. NO ledger at all -> BLOCK only under VERIFIER_REQUIRE_DEFECT_LIST
+         (``require_ledger``). Tolerated by default ON PURPOSE: a voice that has
+         not seen the new prompt would otherwise block every unanimous green,
+         which is the failure mode that gets a gate deleted. Rung 4 still
+         applies to it, so tolerating absence costs nothing this file did not
+         already cost before the ledger existed.
+      3. ledger non-empty -> the model declared a defect and greened anyway,
+         BLOCK. THIS RUNG IS THE MECHANISM: two declarations about one fact,
+         compared as values, no prose read, nothing inferred.
+      4. the vote's own prose names a defect word -> BLOCK.
+
+    RUNG 4'S MATCH IS DELIBERATELY LITERAL, and stays that way. A green reason
+    saying "no fail-open" is discarded even though it asserts the OPPOSITE of a
+    defect, which cost a unanimous 3/3 approval on PR #64. The fix for that is
+    upstream, in `build_system_prompt`: a green vote is asked to name code paths
+    and no defect term at all, so the ambiguous phrasing is never produced.
+
+    Teaching this function to read negation was tried, in two repositories and
+    two independent attempts, and withdrawn both times. Seven laundering paths
+    in five review rounds on one side ("no auth: privilege escalation via
+    /admin", "not regression-free", "not without injection", ...); on the other,
+    a three-word negator window that measured WEAKER THAN MAIN on 71 of 165
+    defect-affirming reasons, shipped with tests that asserted the fail-open and
+    a comment telling the next reviewer not to repair it. Negation scope in free
     prose is not something a regex can be trusted to decide, and every attempt
-    traded a safe over-block for an unsafe under-block. If this ever needs to
-    change again, change what the models are ASKED to write, not what this
-    reads."""
+    traded a safe over-block for an unsafe under-block. If this needs to change
+    again, change what the models are ASKED to write, not what this reads.
+
+    WHERE P1 AND P2 CONFLICT, P1 WINS, at every rung. A false block costs one
+    re-vote; a false pass costs a merged defect that three voices signed."""
     for i, x in enumerate(votes):
         if not _is_valid(x) or x["v"]["refuted"] is not False:
             continue
+        state, declared = declared_defects(x["v"])
+        if state == "malformed":
+            return {"block": True,
+                    "reason": f'{models[i]}: refuted=false and its "defects" ledger is not a '
+                              "JSON array of strings -> schema not answered, fail-closed"}
+        if state == "missing" and require_ledger:
+            return {"block": True,
+                    "reason": f'{models[i]}: refuted=false without the required "defects" '
+                              "ledger while VERIFIER_REQUIRE_DEFECT_LIST=true "
+                              "-> unverifiable green, fail-closed"}
+        if require_ledger and not has_conformant_ledger(x["v"]):
+            return {"block": True,
+                    "reason": f'{models[i]}: refuted=false without a conformant "defects" '
+                              "array -- VERIFIER_REQUIRE_DEFECT_LIST=true requires "
+                              "defects: string[], not a sentinel string and not an alias key "
+                              "-> schema not answered, fail-closed"}
+        if declared:
+            return {"block": True,
+                    "reason": f'{models[i]}: refuted=false but its own defects ledger declares '
+                              f'{len(declared)} defect(s) ("{declared[0][:120]}") '
+                              "-> the boolean contradicts the vote's own findings, fail-closed"}
         reason = norm_reason(x["v"].get("reason"))
         hit = _DEFECT_WORDS.search(reason)
         if hit:
             return {"block": True,
-                    "reason": f'{models[i]}: refuted=false but its own reason names a '
-                              f'defect ("{hit.group(0)}" in "{_clause_at(reason, hit.start())}") '
-                              f'-> inconsistent vote, fail-closed'}
+                    "reason": f'{models[i]}: refuted=false with an empty defects ledger, but '
+                              f'its own reason names a defect ("{hit.group(0)}" in '
+                              f'"{_clause_at(reason, hit.start())}") '
+                              "-> inconsistent vote, fail-closed"}
     return {"block": False,
-            "reason": f"{len(_green(votes))} green reason(s) free of defect claims"}
+            "reason": f"{len(_green(votes))} green vote(s): empty defect ledger, "
+                      "no defect claim in their prose"}
 
 
 def attest_reasons(votes: list[dict], panel_size: int) -> dict[str, Any]:
@@ -461,7 +770,7 @@ def build_diff() -> str:
             f"{truncate_marked(names, 100_000, 'FILE LIST')}\n\n"
             f"# Diffstat:\n{truncate_marked(stat, 8_000, 'DIFFSTAT')}\n\n"
             f"# Code changes (binaries/assets/data excluded):\n"
-            f"{truncate_marked(body, 50_000, 'DIFF BODY')}")
+            f"{truncate_marked(body, 200_000, 'DIFF BODY')}")
 
 
 # ------------------------------------------------------------------ prompts --
@@ -495,14 +804,21 @@ def build_system_prompt(challenge: str) -> str:
         "compensated by the deterministic CI gate; it is not a defect of THIS diff. "
         "Answer ONLY as JSON, no prose/markdown: "
         '{"refuted": boolean, "confidence": "high"|"medium"|"low", "reason": string, '
-        '"proof": string}. ALWAYS fill reason (also for refuted=false), maximally terse/'
+        '"defects": string[], "proof": string}. '
+        'DEFECT LEDGER: "defects" is REQUIRED on every answer and is a JSON array of '
+        "strings — ONE ENTRY PER CONCRETE DEFECT you found, each in the schema "
+        "'path/file:line — defect — misbehavior', and the EMPTY array [] if you found "
+        'none. Every defect you can name anywhere in your answer MUST also appear in '
+        '"defects", and refuted MUST be true whenever "defects" is non-empty. Never '
+        "leave a finding out because you judged it minor: if you can name it, list it "
+        "and refute on it. ALWAYS fill reason (also for refuted=false), maximally terse/"
         "machine-like, abbreviations fine, no full sentences, but technically informative. "
         "Name ALL defects found — each EXTREMELY compact, separated by ' ; '; rather abbreviate "
         "each point harder than drop one. Upper bound ~800 chars. For refuted=true use the "
         "schema 'path/file:line — defect — misbehavior' per point. For refuted=false say in "
         "3-8 words WHAT WAS CHECKED — name the code paths, not defects. A green reason "
-        "must contain NO defect term (bypass, fail-open, injection, race condition, "
-        "regression, data loss, ...) EVEN NEGATED: a green vote naming one is discarded "
+        "must contain NO defect term (" + _DEFECT_VOCAB_PUBLISHED + ") OR ANY "
+        "INFLECTION OF ONE, EVEN NEGATED: a green vote naming one is discarded "
         "as self-contradictory, so write 'throttle + lock ordering verified', never "
         "'no race condition'. "
         "PROOF-OF-CHECK: for refuted=false, proof MUST be EXACTLY '" + challenge + "-<tier>' "
@@ -610,10 +926,66 @@ def selftest() -> None:
            "refuting vote needs no proof while green majority has valid proofs")
     expect(attest_proof([PR(f"{CH}-7")], CH, 1)["block"] is False, "panel=1 with valid proof passes")
     expect(attest_proof([PR(f"{CH}-7"), PR(f"{CH}-8"), PR(f"{CH}-9")], "", 3)["block"] is True, "empty challenge -> no proof valid -> fail-closed")
-    # attest_consistency() -- a green vote whose own reason names a defect
+    # attest_consistency() -- the DECLARED LEDGER is the mechanism; the prose
+    # tripwire is the demoted second channel. GV() omits the ledger (the
+    # tolerated pre-rollout shape); GL() declares one.
     def GV(reason: Any, refuted: bool = False) -> dict:
         return {"ok": True, "v": {"refuted": refuted, "reason": reason, "confidence": "high"}}
+
+    def GL(reason: Any, refuted: bool = False, defects: Any = ()) -> dict:
+        return {"ok": True, "v": {"refuted": refuted, "reason": reason,
+                                  "confidence": "high", "defects": list(defects)}}
     M3 = ["m-a", "m-b", "m-c"]
+    # -- declared_defects(): total on every input, nothing inferred
+    expect(declared_defects({"defects": []}) == ("ok", []), "an empty ledger reads as ok/[]")
+    expect(declared_defects({"defects": ["a.py:1 — x — y"]})[1] == ["a.py:1 — x — y"],
+           "a declared defect is returned verbatim")
+    expect(declared_defects({})[0] == "missing", "an absent ledger is missing")
+    expect(declared_defects(None)[0] == "missing", "a non-dict vote has no ledger")
+    expect(declared_defects({"defects": "none"}) == ("ok", []),
+           "a bare-string sentinel ledger reads as empty -- it cannot name a defect")
+    expect(declared_defects({"defects": "auth bypass"})[0] == "malformed",
+           "any OTHER bare string is an unanswered schema, fail-closed")
+    expect(declared_defects({"defects": [], "findings": ["auth bypass"]})[1] == ["auth bypass"],
+           "every accepted key is read -- one must not hide behind another")
+    expect(declared_defects({"defects": None})[0] == "malformed", "a null ledger is malformed")
+    expect(declared_defects({"defects": [{"f": 1}]})[0] == "malformed",
+           "non-string entries are malformed")
+    expect(declared_defects({"defects": ["none", "", " N/A "]}) == ("ok", []),
+           "enumerated empty-sentinels are an empty ledger, not defects")
+    expect(declared_defects({"Defects": ["x"]}) == ("ok", ["x"]),
+           "a capitalisation slip must not silently disarm the ledger")
+    expect(declared_defects({"findings": ["x"]}) == ("ok", ["x"]),
+           "an accepted alias key is still an answered schema")
+    # -- rung 3: the ledger itself. No prose is read on this rung.
+    _d = attest_consistency([GL("looks fine to me",
+                                defects=["api.py:7 — authz skipped — any user reads /admin"]),
+                             GL("docs only"), GL("fine")], M3)
+    expect(_d["block"] is True and "ledger declares" in _d["reason"],
+           "refuted=false with a NON-EMPTY declared ledger is the inconsistency -> block")
+    expect(attest_consistency([GL("all good, nothing of note", defects=["x.py:1 — y — z"]),
+                               GL("docs only"), GL("fine")], M3)["block"] is True,
+           "the ledger blocks even when the prose is spotless -- no prose parsing involved")
+    expect(attest_consistency([GL("fail-open on missing header", True, defects=["h.py:3 — fo"]),
+                               GL("docs only"), GL("no issue found")], M3)["block"] is False,
+           "a REFUTING vote may declare defects -- that is its job")
+    expect(attest_consistency([GL("docs only change", defects=["none"]), GL("docs only"),
+                               GL("fine")], M3)["block"] is False,
+           "a sentinel-only ledger is an empty ledger, not a declared defect")
+    # -- rungs 1 and 2: schema posture
+    expect(attest_consistency([{"ok": True, "v": {"refuted": False, "reason": "docs only",
+                                                  "defects": "auth bypass on /admin"}},
+                               GL("docs only"), GL("fine")], M3)["block"] is True,
+           "a malformed (non-array) ledger fails closed, with or without the env switch")
+    expect(attest_consistency([GV("docs only change"), GV("docs only"), GV("fine")],
+                              M3)["block"] is False,
+           "an ABSENT ledger is tolerated by default -- a pre-rollout voice must not block")
+    expect(attest_consistency([GV("docs only change"), GV("docs only"), GV("fine")],
+                              M3, require_ledger=True)["block"] is True,
+           "VERIFIER_REQUIRE_DEFECT_LIST=true makes an absent ledger an unverifiable green")
+    expect(attest_consistency([E, GL("docs only"), GL("no issue")], M3,
+                              require_ledger=True)["block"] is False,
+           "an errored vote has no ledger to read")
     expect(attest_consistency([GV("checked auth paths, no issue"), GV("docs only change"),
                                GV("reviewed diff, behaviour unchanged")], M3)["block"] is False,
            "ordinary approving reasons must pass")
@@ -628,6 +1000,90 @@ def selftest() -> None:
            "hedging words are not defect claims")
     expect(attest_consistency([E, GV("docs only"), GV("no issue")], M3)["block"] is False,
            "an errored vote is not inspected for consistency")
+    expect(attest_consistency([GV("security gates reviewed; no concrete regression"),
+                               GV("docs only"), GV("looks fine")], M3)["block"] is True,
+           "the match is LITERAL: a negated defect word still blocks. The relief for "
+           "this is in build_system_prompt, not here -- reading negation was tried "
+           "twice and withdrawn twice, the second time measured WEAKER THAN MAIN on "
+           "71 of 165 defect-affirming reasons")
+    expect(attest_consistency([GV("no bypass here, but there is an injection in the parser"),
+                               GV("docs only"), GV("fine")], M3)["block"] is True,
+           "one negation must not launder a real claim later in the same reason")
+    # Group A's refutation of the ledger: "required" must mean required.
+    _GM = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+
+    def _gv(**kw):
+        return {"ok": True, "v": {"refuted": False, "reason": "docs only change", **kw}}
+    expect(has_conformant_ledger({"defects": []}) and has_conformant_ledger({"defects": ["x"]}),
+           "a defects ARRAY is conformant")
+    expect(not has_conformant_ledger({"defects": "none"}),
+           "a bare sentinel string is not defects: string[]")
+    expect(not has_conformant_ledger({"findings": []}),
+           "an alias key alone does not answer the schema")
+    expect(not attest_consistency([_gv(defects=[])] * 3, _GM, True)["block"],
+           "conformant empty ledgers pass in required mode")
+    for _bad in ({"defects": "none"}, {"findings": []}, {"defects": "n/a"}):
+        expect(attest_consistency([_gv(**_bad), _gv(defects=[]), _gv(defects=[])], _GM, True)["block"],
+               f"required mode must refuse a non-conformant ledger: {_bad}")
+    expect(not attest_consistency([_gv(defects="none"), _gv(), _gv()], _GM, False)["block"],
+           "with the switch OFF the tolerant reading is unchanged -- no forced rollout")
+    # Ordinary inflections of the SAME published terms are matched too. Widening
+    # a term is monotone (PASS -> BLOCK only), which is the direction this file
+    # resolves P1/P2 conflicts in.
+    expect(attest_consistency([GV("deadlocks on shutdown remain"), GV("docs only"),
+                               GV("fine")], M3)["block"] is True,
+           "a plural defect word is still a claim")
+    expect(attest_consistency([GV("no bypasses, no regressions"), GV("docs only"),
+                               GV("fine")], M3)["block"] is True,
+           "and so is a negated one -- literal, by design")
+    # THE SHARED ATTACK CORPUS, scored through the REAL gate in the two modes
+    # that matter. Mode B: the voice fills the ledger honestly -> 7/7 blocked,
+    # and the boolean never has to be read out of prose at all.
+    _CORPUS_BLOCK = [
+        "auth bypass when key is None and a race condition on refresh",
+        "without fixing auth bypass",
+        "merged without addressing the injection",
+        "not fixed: privilege escalation in admin",
+        "no bypass here, but there is an injection in the parser",
+        "looks good; minor: unauthenticated /readyz leaks the key",
+        "approved, though the deadlock on shutdown remains",
+    ]
+    # P2 rows carry NO defect term, not even negated -- which is exactly what
+    # build_system_prompt now asks a green vote for. The three phrasings that
+    # used to sit here ("no concrete regression", "no regression, no bypass, no
+    # injection", "checked auth paths, no issue") block under the literal match
+    # and are listed below as the accepted, measured cost.
+    _CORPUS_PASS = [
+        "docs only change",
+        "reviewed diff, behaviour unchanged",
+        "could be more defensive; consider hardening",
+        "gates re-checked, all five fire",
+        "verified the retry path is unchanged",
+        "checked auth paths, no issue",
+    ]
+    _CORPUS_P2_COST = [
+        "security gates reviewed; no concrete regression",
+        "no regression, no bypass, no injection",
+    ]
+    for _r in _CORPUS_BLOCK:
+        expect(attest_consistency([GL(_r, defects=[_r]), GL("docs only"), GL("fine")],
+                                  M3)["block"] is True,
+               f"P1, declared ledger: a green that declares its finding must block: {_r!r}")
+    for _r in _CORPUS_PASS:
+        expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is False,
+               f"P2: an ordinary approval must not block: {_r!r}")
+    for _r in _CORPUS_P2_COST:
+        expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is True,
+               f"P2 COST, accepted and measured: a negated defect term still blocks: {_r!r}")
+    # Mode C: the voice HIDES the finding (declares [] and writes the defect in
+    # prose). Rung 4 is main's literal scan, so ALL SEVEN corpus attacks block --
+    # including the three that a negation window used to let through. Those three
+    # were never pre-existing holes: main blocked them, this branch briefly did
+    # not, and the tests here asserted the bypass. That is the regression
+    # combo/SOTA-A refuted.
+    for _r in _CORPUS_BLOCK:
+        expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is True,
+               f"P1, hidden finding: the literal scan still catches: {_r!r}")
 
     # auth_header() -- both branches
     _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)
@@ -665,8 +1121,35 @@ def selftest() -> None:
     expect(normalize_base("") == "", "empty stays empty so the `or` default applies")
     expect(normalize_base(None) == "", "None stays empty so the `or` default applies")
 
+    # Voice distinctness. Each configured voice is an inference-server GROUP that
+    # rotates over its own members; the server answers with the group id, never
+    # the member, so this script cannot see a vendor at all. What it CAN check is
+    # that two voices are not the same group.
+    expect(require_distinct_voices(["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"])["block"] is False,
+           "three distinct groups are three voices")
+    _dup = require_distinct_voices(["combo/SOTA-A", "combo/SOTA-A", "combo/SOTA-C"])
+    expect(_dup["block"] and "more than once" in _dup["reason"],
+           "one opinion counted twice is not corroboration")
+    expect(require_distinct_voices(["combo/SOTA-A", "", "combo/SOTA-C"])["block"] is False,
+           "an empty slot is not a duplicate; resolution failure is caught before this gate")
+    _G = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+    expect(approving_models([A, {"ok": False, "reason": "504"}, RF], _G) == ["combo/SOTA-A"],
+           "an errored or refuting voice never counts as approving")
+    # The composition rule: A must agree, plus either B or C.
+    expect(not require_approvals([A, A2, {"ok": False, "reason": "504"}], _G, "combo/SOTA-A", 1)["block"],
+           "group A plus one other is the quorum")
+    expect(require_approvals([A, {"ok": False, "reason": "504"}, {"ok": False, "reason": "504"}],
+                             _G, "combo/SOTA-A", 1)["block"],
+           "group A alone is not corroboration")
+    expect(require_approvals([{"ok": False, "reason": "504"}, A, A2], _G, "combo/SOTA-A", 1)["block"],
+           "B and C without A cannot carry the panel")
+    # NOTE: resolve_panel_models fails closed on an unresolvable voice, but it
+    # needs the model catalogue, so its coverage is in tests/test_independent_verify.py
+    # (TestResolutionFailsClosed) rather than here.
+
     print("   OK selftest: decide() + model_matches() + require_approvals() (required approver Sol "
-          "+ corroboration) + attest_reasons() + attest_proof() + attest_consistency() + "
+          "+ corroboration) + attest_reasons() + attest_proof() + declared_defects() + "
+          "attest_consistency() (ledger 7/7; literal prose scan 7/7 on the shared corpus) + "
           "auth_header() + review_range() + normalize_base() correct.")
 
 
@@ -715,7 +1198,7 @@ def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
         return [os.environ["VERIFIER_MODEL"]] * panel_size
     ids, why = fetch_model_ids()
     if not ids:
-        # An unreachable catalogue used to degrade silently to FALLBACK_MODEL
+        # An unreachable catalogue used to degrade silently to a pinned fallback
         # for every voice; each vote then errored on a model the gateway does
         # not serve, and the operator saw three identical failures with no hint
         # that the BASE URL was the cause. The most common cause is exactly
@@ -726,35 +1209,67 @@ def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
             f"  VERIFIER_BASE_URL is {BASE!r}. It must include the API version "
             f"segment (e.g. 'https://host/v1'), and the auth header must be the "
             f"one this gateway expects (VERIFIER_AUTH_HEADER).")
-    newest = FALLBACK_MODEL
-    for p in MODEL_PREFERENCE:
-        hit = pick_for_pref(ids, p)
-        if hit:
-            newest = hit
-            break
-    out = []
-    for want in wanted:
-        hit = pick_for_pref(ids, want)
-        if hit:
-            out.append(hit)
-        else:
-            print(f'[independent-verify] WARNING: panel model "{want}" not enabled on this account '
-                  f"-> fallback {newest} (adjust VERIFIER_PANEL_MODELS).")
-            out.append(newest)
-    return out
+    # SUBSTITUTION IS FAIL-OPEN, so it is gone. A configured voice that the
+    # account does not serve used to print a WARNING and be replaced by the
+    # newest available model. In a merge gate that is the worst possible
+    # degradation: the panel reviews with voices the operator did not choose,
+    # every gate downstream passes, and the run goes green. Two ways it fires
+    # in practice, both cheap: a group not yet published to /v1/models, and a
+    # one-character slip in an id -- `combo/SOAT-B` and `combo/SOTA-B` differ by
+    # a transposition, and only one of them exists.
+    #
+    # A voice that cannot be resolved is a panel that cannot be assembled.
+    missing = [w for w in wanted if not pick_for_pref(ids, w)]
+    if missing:
+        raise ProviderConfigError(
+            "panel model(s) not enabled on this account: " + ", ".join(repr(m) for m in missing)
+            + "\n  Refusing to substitute: reviewing with a voice the operator did not choose "
+            "is a green run that reviewed the wrong thing.\n  Enabled ids are: "
+            + ", ".join(sorted(ids)[:40])
+            + "\n  Set VERIFIER_PANEL_MODELS to ids from that list.")
+    return [pick_for_pref(ids, w) for w in wanted]
+
+
+class DuplicateKey(ValueError):
+    """A verdict object carrying the same key twice."""
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict:
+    """json.loads keeps the LAST of duplicate keys, silently.
+
+    That is a bypass of the whole ledger, measured before this hook existed:
+
+        {"refuted": false, ..., "defects": ["admin.py:83 - auth bypass"], "defects": []}
+
+    parses to defects == [] and the gate PASSES a vote that declared a defect in
+    the same object it erased it from. The two declarations this gate compares
+    are only comparable if the object says one thing per key, so a duplicate is
+    not resolved -- it is refused."""
+    seen: set[str] = set()
+    for k, _ in pairs:
+        if k in seen:
+            raise DuplicateKey(f"duplicate key {k!r} in the verdict object")
+        seen.add(k)
+    return dict(pairs)
 
 
 def parse_verdict(content: str) -> Any:
     if not content:
         return None
+    decoder = json.JSONDecoder(object_pairs_hook=_no_duplicate_keys)
     try:
-        return json.loads(content)
+        return decoder.decode(content)
+    except DuplicateKey:
+        # Ambiguous by construction. Returning None makes _is_valid() false, and
+        # a vote that cannot be parsed is discarded rather than counted -- the
+        # same fail-closed route an unparsable reply already takes.
+        return None
     except ValueError:
         m = re.search(r"\{[\s\S]*\}", content)
         if m:
             try:
-                return json.loads(m.group(0))
-            except ValueError:
+                return decoder.decode(m.group(0))
+            except (ValueError, DuplicateKey):
                 return None
     return None
 
@@ -869,19 +1384,31 @@ def write_step_summary(votes: list[dict], models: list[str], gates: list[tuple[s
         "",
         f"**Verdict: {'BLOCKED' if blocked else 'APPROVED'}**",
         "",
-        "| # | Model | Verdict | Confidence | Finding |",
-        "|---|---|---|---|---|",
+        "| # | Model | Verdict | Confidence | Declared defects | Finding |",
+        "|---|---|---|---|---|---|",
     ]
     for i, (vote, model) in enumerate(zip(votes, models, strict=False), start=1):
         if not vote.get("ok"):
-            lines.append(f"| {i} | `{_md_cell(model, 60)}` | ⚠️ no vote | — "
+            lines.append(f"| {i} | `{_md_cell(model, 60)}` | ⚠️ no vote | — | — "
                          f"| {_md_cell(vote.get('reason'))} |")
             continue
         v = vote.get("v") or {}
         refuted = v.get("refuted")
-        mark = "🔴 refutes" if refuted else ("🟢 approves" if refuted is False else "⚠️ unparsable")
+        # `is True` / `is False`, never truthiness: decide() fails closed on a
+        # non-bool at :142, so {"refuted": "maybe"} is discarded -- but this table
+        # used to label it "refutes", telling the reader a model objected when in
+        # fact its vote was unreadable.
+        mark = ("🔴 refutes" if refuted is True
+                else "🟢 approves" if refuted is False else "⚠️ unparsable")
+        # The ledger is the field the consistency gate now reads, so it is shown
+        # next to the verdict: a reader must see BOTH declarations the gate
+        # compares, not only the prose.
+        state, declared = declared_defects(v)
+        ledger = ("⚠️ " + state if state != "ok"
+                  else ("none" if not declared else f"{len(declared)}: " + "; ".join(declared)))
         lines += [f"| {i} | `{_md_cell(model, 60)}` | {mark} "
-                  f"| {_md_cell(v.get('confidence'), 12)} | {_md_cell(v.get('reason'))} |"]
+                  f"| {_md_cell(v.get('confidence'), 12)} | {_md_cell(ledger, 200)} "
+                  f"| {_md_cell(v.get('reason'))} |"]
     lines += ["", "### Gates", ""]
     for name, result in gates:
         state = "⛔ blocked" if result.get("block") else "✅ passed"
@@ -981,14 +1508,18 @@ def main() -> int:
     # far are collected, so the summary can name which one blocked and why.
     strict_on = (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes")
     pending: list[tuple[str, str, Any]] = [
+        ("distinct-voices gate", "distinct voices", lambda: require_distinct_voices(models)),
         ("required-approver gate", "required-approver",
          lambda: require_approvals(votes, models, required_approver, min_others, challenge)),
     ]
     if strict_on:
         pending.append(("strict-mode gate", "strict mode",
                         lambda: strict_any_refutation(votes, models)))
+    require_ledger = (os.environ.get("VERIFIER_REQUIRE_DEFECT_LIST") or "").lower() in (
+        "1", "true", "yes")
     pending += [
-        ("consistency gate", "consistency", lambda: attest_consistency(votes, models)),
+        ("consistency gate", "consistency",
+         lambda: attest_consistency(votes, models, require_ledger)),
         ("integrity gate (sham green)", "reason attestation", lambda: attest_reasons(votes, panel)),
         ("proof-of-check gate", "proof of check", lambda: attest_proof(votes, challenge, panel)),
     ]
@@ -1002,8 +1533,22 @@ def main() -> int:
             write_step_summary(votes, models, gates, blocked=True)
             return 1
 
-    print("[independent-verify] Cross-vendor panel confirms ("
-          + "; ".join(r["reason"] for _, r in gates) + "). Green.")
+    # The label is COMPUTED, never asserted. Printing "Cross-vendor" over a
+    # single-vendor result is the defect this whole gate exists to close, and a
+    # green run that hides a lost voice looks like a smaller panel that agreed.
+    # NAME WHAT APPROVED. The previous form printed "Cross-vendor panel confirms"
+    # unconditionally, and run 32121148827 printed it over two sibling models from
+    # one vendor while the only other-vendor voice was returning API 504. This
+    # script cannot see which vendor served a voice -- each voice is a group id
+    # that the server resolves internally -- so it states the voices and leaves
+    # the independence claim to whoever composed the groups.
+    approving = approving_models(votes, models)
+    label = f"Panel confirms on {len(approving)} of {panel} voices ({', '.join(approving)})"
+    unreachable = [models[i] for i, x in enumerate(votes) if not x.get("ok")]
+    note = (f"\n[independent-verify] NOTE: {len(unreachable)} of {panel} voices were "
+            f"unreachable and did not vote: {', '.join(unreachable)}." if unreachable else "")
+    print(f"[independent-verify] {label} ("
+          + "; ".join(r["reason"] for _, r in gates) + f"). Green.{note}")
     write_step_summary(votes, models, gates, blocked=False)
     return 0
 
