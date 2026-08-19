@@ -265,12 +265,21 @@ _NEGATORS = frozenset({"no", "not", "none", "never", "without", "zero", "free", 
 #: A negation governs only its own clause. In "no security hole, but a race
 #: condition at x.py:12" the second half is a live defect claim, and letting
 #: the leading "no" reach across the comma would launder it into an approval.
-_CLAUSE_BOUNDARY = re.compile(r"[;,.]")
+#: The colon is a boundary too — this panel writes "Checked: ..." and
+#: "no auth: privilege escalation via /admin", where the text AFTER the colon
+#: is the finding, not part of what was negated before it.
+_CLAUSE_BOUNDARY = re.compile(r"[;,.:]")
 
-#: How many tokens back a negator may sit and still govern the defect word.
-#: Small on purpose: "no fail-open" and "free of data loss" are the shapes that
-#: occur, and a wide window starts absolving words it should not.
-_NEGATION_WINDOW = 3
+#: Words that may sit between a negator and the word it negates. Negation
+#: attaches to the NOUN it modifies, so the negator has to be ADJACENT to the
+#: defect word, not merely nearby: in "no auth: privilege escalation via
+#: /admin" the "no" negates `auth`, and the escalation is the live finding it
+#: leads to. A proximity window cannot see that difference and read the whole
+#: thing as an absence — a laundering path into the gate, caught by the panel
+#: (PR #65, combo/SOTA-A). Only determiners and degree adjectives are skipped.
+_NEGATION_FILLER = frozenset({"of", "a", "an", "the", "any", "further", "additional",
+                              "new", "other", "obvious", "apparent", "known", "such",
+                              "real", "concrete", "actual"})
 
 
 def _clause_at(text: str, start: int) -> str:
@@ -284,13 +293,20 @@ def _clause_at(text: str, start: int) -> str:
 def asserts_absence(text: str, hit: re.Match[str]) -> bool:
     """Whether this occurrence says the defect is ABSENT rather than found.
 
-    Fail-CLOSED in both directions that matter: a negator must be inside the
-    same clause AND within `_NEGATION_WINDOW` tokens, so an unqualified defect
-    word is still a defect claim. Callers must test EVERY occurrence — one
-    unnegated hit anywhere in a green reason is enough to discard the vote."""
+    The negator must MODIFY this word: inside the same clause, and adjacent to
+    it once determiners and degree adjectives are skipped. Anything else is
+    read as a claim. "no fail-open" and "free of data loss" are absences;
+    "without auth privilege escalation" is not — there the negator belongs to
+    `auth`, and the escalation is what that absence causes.
+
+    Fail-CLOSED: an unqualified defect word is still a defect claim, and
+    callers must test EVERY occurrence — one unnegated hit anywhere in a green
+    reason is enough to discard the vote."""
     lo = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:hit.start()])), default=0)
     tokens = re.findall(r"[a-z0-9-]+", text[lo:hit.start()])
-    if any(t in _NEGATORS for t in tokens[-_NEGATION_WINDOW:]):
+    while tokens and tokens[-1] in _NEGATION_FILLER:
+        tokens.pop()
+    if tokens and tokens[-1] in _NEGATORS:
         return True
     # Terse suffix form the panel actually writes: "regression-free".
     return text[hit.end():].startswith("-free")
@@ -672,6 +688,18 @@ def selftest() -> None:
     expect(attest_consistency([GV("checked for injection"), GV("docs only"),
                                GV("reviewed diff")], M3)["block"] is True,
            "an unqualified defect word still fails closed")
+    # The negator must MODIFY the defect word, not merely precede it: here it
+    # belongs to another noun and the defect is what its absence CAUSES. A
+    # proximity window read both as approvals (found by the panel, PR #65).
+    expect(attest_consistency([GV("no auth: privilege escalation via /admin"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is True,
+           "a negator bound to another noun must not launder a live claim")
+    expect(attest_consistency([GV("without auth privilege escalation"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is True,
+           "'without X <defect>' is a claim, not an absence")
+    expect(attest_consistency([GV("no obvious race condition"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is False,
+           "a determiner between negator and word is still an absence")
 
     # auth_header() -- both branches
     _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)

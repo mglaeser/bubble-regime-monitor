@@ -342,6 +342,12 @@ class TestConsistencyReadsNegation:
         "looks fine. privilege escalation via /admin",         # new sentence
         "checked for injection",                               # unqualified: fail closed
         "fail-open on missing header",
+        # The negator modifies a DIFFERENT noun, and the defect is what its
+        # absence causes. Caught by the panel on this very PR (#65/SOTA-A):
+        # a proximity window read both of these as approvals.
+        "no auth: privilege escalation via /admin",
+        "without auth privilege escalation",
+        "no rate limit - injection via query",
     ])
     def test_a_real_claim_still_blocks(self, reason):
         """The control's whole purpose. A negation governs its own clause only —
@@ -356,6 +362,17 @@ class TestConsistencyReadsNegation:
         assert "data loss" in out["reason"]
         assert "data loss on retry" in out["reason"]      # the clause, not just the word
         assert "no fail-open" not in out["reason"]        # and not the negated one
+
+    @pytest.mark.parametrize("reason", [
+        "no obvious race condition",
+        "no concrete data loss",
+        "no further regression",
+        "no known injection",
+    ])
+    def test_determiners_may_sit_between_negator_and_word(self, reason):
+        """Adjacency is measured after skipping determiners and degree
+        adjectives — otherwise the rule would reject ordinary English."""
+        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is False
 
     def test_negation_does_not_reach_backwards(self):
         """`asserts_absence` looks only at what PRECEDES the word."""
