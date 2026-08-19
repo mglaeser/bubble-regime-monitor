@@ -8,6 +8,7 @@ times (the obvious overcorrection).
 
 from __future__ import annotations
 
+import pathlib
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -38,7 +39,7 @@ class _Result:
 
 
 @pytest.fixture()
-def sent(monkeypatch):
+def sent(monkeypatch, tmp_path):
     """A configured iMessage deployment, a captured outbox, no clock games."""
     monkeypatch.setenv("IMESSAGE_ENABLED", "true")
     monkeypatch.setenv("IMESSAGE_API_BASE_URL", "https://messages.example.com")
@@ -47,6 +48,7 @@ def sent(monkeypatch):
     monkeypatch.setenv("SMS_ENABLED", "false")
     monkeypatch.setenv("FAILURE_ALERTS_ENABLED", "true")
     monkeypatch.setenv("FAILURE_ALERT_REPEAT_H", "24")
+    monkeypatch.setenv("FAILURE_ALERT_STATE_PATH", str(tmp_path / "failure-alert-state.json"))
 
     from app.config import get_settings
 
@@ -359,3 +361,80 @@ class TestRecomputeHook:
         monkeypatch.setattr(compute, "run_recompute", lambda: None)
         admin.run_recompute_guarded()
         assert "recompute impossible" in str(observed["error"])
+
+
+class TestTheOutageSurvivesARestart:
+    """The all-clear must not be lost when the process dies mid-outage.
+
+    Panel finding on #64 (combo/SOTA-A). The state was process-local, so a
+    restart erased the fact that a FAILING had been DELIVERED and the next
+    success took the "no announced outage" branch — leaving the operator
+    holding FAILING for a service that had recovered. Not an exotic path: the
+    usual way an outage ends is that someone deploys a fix, which IS a restart.
+
+    The earlier docstring called the residual "one duplicate, the right side to
+    err on". It was the wrong side."""
+
+    @staticmethod
+    def _restart():
+        """Everything a new process would lose, and nothing it would keep."""
+        failure_alert._current = None
+        failure_alert._loaded = False
+
+    def test_the_all_clear_still_fires_after_a_restart(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        assert len(sent) == 1
+        self._restart()
+        result = notify_recompute_outcome(None)
+        assert result["status"] == "sent" and result["kind"] == "recovery"
+        assert "OK" in sent[-1]
+
+    def test_the_restored_outage_keeps_its_timeline(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        notify_recompute_outcome(EBP_ERROR)      # throttled, but counted
+        self._restart()
+        result = notify_recompute_outcome(None)
+        assert result["failures"] == 2           # not reset to 0 or 1
+
+    def test_the_quiet_period_survives_a_restart(self, sent):
+        """Otherwise a restart loop becomes a message loop — the failure mode
+        the throttle exists to prevent."""
+        notify_recompute_outcome(EBP_ERROR)
+        for _ in range(5):
+            self._restart()
+            notify_recompute_outcome(EBP_ERROR)
+        assert len(sent) == 1
+
+    def test_an_unannounced_outage_still_stands_down_silently(self, monkeypatch, sent):
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome(EBP_ERROR)      # never delivered
+        self._restart()
+        assert notify_recompute_outcome(None)["status"] == "noop"
+
+    def test_a_corrupt_state_file_cannot_invent_an_all_clear(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        failure_alert._state_path().write_text("{not json at all")
+        self._restart()
+        assert notify_recompute_outcome(None)["status"] == "noop"
+        assert failure_alert._current is None
+
+    def test_a_missing_state_file_is_simply_no_outage(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        failure_alert._state_path().unlink()
+        self._restart()
+        assert notify_recompute_outcome(None)["status"] == "noop"
+
+    def test_an_unwritable_path_never_costs_the_alert(self, monkeypatch, sent):
+        """Being TOLD about the outage matters more than remembering it."""
+        monkeypatch.setattr(failure_alert, "_state_path",
+                            lambda: pathlib.Path("/proc/nonexistent/state.json"))
+        result = notify_recompute_outcome(EBP_ERROR)
+        assert result["status"] == "sent"
+        assert len(sent) == 1
+
+    def test_reset_state_clears_the_file_too(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        assert failure_alert._state_path().exists()
+        failure_alert.reset_state()
+        assert not failure_alert._state_path().exists()

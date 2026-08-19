@@ -27,10 +27,22 @@ scheduler thread this is supposed to be protecting.
 
 THROTTLING. A NEW failure signature always sends at once; a repeat of the same
 one waits `FAILURE_ALERT_REPEAT_H` (default 24h). Without that, this incident
-would have delivered seventy-two identical texts. The state is per-process and
-is not persisted: a restart may cost one duplicate, which is the right side to
-err on — the alternative is a monitor whose memory lives in the database it is
-often reporting the death of.
+would have delivered seventy-two identical texts.
+
+THE OUTAGE SURVIVES A RESTART, in one small file. It did not, and an earlier
+version of this docstring claimed the residual was "one duplicate, the right
+side to err on". That was wrong in the direction that matters. Process-local
+state loses the fact that a FAILING was DELIVERED, so the next success took the
+"no announced outage" branch and sent nothing — leaving the operator holding
+"bubblegauge FAILING" for a service that had recovered. And it is not a rare
+path: the usual way an outage ends is that someone deploys a fix, which IS a
+restart, so the all-clear would have gone missing in the common case rather
+than the exotic one.
+
+It is a plain JSON file, not a table, and every touch of it is best-effort: an
+unwritable or corrupt file degrades to the old in-memory behaviour and never
+fails a send. A monitor whose memory lives in the database it is often
+reporting the death of would be worse than one that occasionally forgets.
 
 ORDER AND CLOSURE. Every wrong belief this can leave an operator with is worse
 than leaving them with none, so two rules hold throughout: messages are
@@ -42,6 +54,8 @@ attempted.
 
 from __future__ import annotations
 
+import json
+import pathlib
 import re
 import threading
 from dataclasses import dataclass
@@ -88,13 +102,68 @@ class _Outage:
 
 _lock = threading.Lock()
 _current: _Outage | None = None
+_loaded = False
+
+
+def _state_path() -> pathlib.Path:
+    return pathlib.Path(get_settings().failure_alert_state_path)
+
+
+def _persist_locked() -> None:
+    """Write the outage to disk. Caller holds `_lock`. Never raises.
+
+    A failure here must not fail the ALERT — the operator being told about the
+    outage matters more than remembering that they were told."""
+    path = _state_path()
+    try:
+        if _current is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "signature": _current.signature,
+            "first_seen": _current.first_seen.isoformat(),
+            "failures": _current.failures,
+            "last_sent": _current.last_sent.isoformat() if _current.last_sent else None,
+            "announced": _current.announced,
+        }))
+    except Exception as exc:
+        log.warning("failure_alert_state_unwritable", error=str(exc)[:200])
+
+
+def _load_locked() -> None:
+    """Restore the outage left by a previous process. Caller holds `_lock`.
+
+    Anything unreadable is treated as "no outage": a corrupt file must not be
+    able to invent an all-clear, and must never take down the alerter."""
+    global _current, _loaded
+    _loaded = True
+    try:
+        raw = json.loads(_state_path().read_text())
+        _current = _Outage(
+            signature=str(raw["signature"]),
+            first_seen=datetime.fromisoformat(raw["first_seen"]),
+            failures=int(raw["failures"]),
+            last_sent=datetime.fromisoformat(raw["last_sent"]) if raw.get("last_sent") else None,
+            announced=bool(raw.get("announced")),
+        )
+        log.info("failure_alert_state_restored", failures=_current.failures,
+                 announced=_current.announced)
+    except FileNotFoundError:
+        _current = None
+    except Exception as exc:
+        log.warning("failure_alert_state_unreadable", error=str(exc)[:200])
+        _current = None
 
 
 def reset_state() -> None:
-    """Forget the current outage. For tests and for a deliberate operator reset."""
-    global _current
+    """Forget the current outage, on disk as well as in memory. For tests and
+    for a deliberate operator reset."""
+    global _current, _loaded
     with _lock:
         _current = None
+        _loaded = True          # do not resurrect what was just discarded
+        _persist_locked()
 
 
 def failure_signature(error: str) -> str:
@@ -233,6 +302,10 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
         repeat_after = timedelta(hours=max(1, settings.failure_alert_repeat_h))
 
         with _lock:
+            if not _loaded:
+                # A previous process may have delivered a FAILING that this one
+                # would otherwise never stand down.
+                _load_locked()
             if error is None:
                 outage = _current
                 if outage is None or not outage.announced:
@@ -240,6 +313,7 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                     # down. Drop an unannounced outage: the service is fine and
                     # nobody was told otherwise.
                     _current = None
+                    _persist_locked()
                     return {"status": "noop", "reason": "no announced outage"}
                 kind = "recovery"
             else:
@@ -248,6 +322,7 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                 if outage is None:
                     outage = _Outage(signature=signature, first_seen=now, failures=1)
                     _current = outage
+                    _persist_locked()
                 elif outage.signature != signature:
                     # A DIFFERENT failure is news even mid-outage: the operator
                     # fixed one thing and hit the next, and waiting out the
@@ -263,8 +338,10 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                                      failures=outage.failures + 1,
                                      announced=outage.announced)
                     _current = outage
+                    _persist_locked()
                 else:
                     outage.failures += 1
+                    _persist_locked()
                     if (outage.last_sent is not None
                             and now - outage.last_sent < repeat_after):
                         return {"status": "throttled", "failures": outage.failures,
@@ -299,12 +376,14 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                 # thing the operator held was "FAILING" for a service that had
                 # been healthy for days.
                 _current = None
+                _persist_locked()
             elif ok:
                 # Only a DELIVERED alert starts the quiet period; a failed send
                 # must be retried at the next slot, not throttled away. It is
                 # also the only thing that makes the operator owed an all-clear.
                 outage.last_sent = now
                 outage.announced = True
+                _persist_locked()
 
         log.info("failure_alert", kind=kind, transport=transport, sent=ok,
                  failures=outage.failures, chars=len(text), status=status_code)

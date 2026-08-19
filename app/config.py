@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     # signature always sends immediately; this only throttles repeats, which
     # would otherwise arrive six times a day for as long as the outage lasts.
     failure_alert_repeat_h: int = 24
+    # Where the current outage is remembered across a restart. Deploying a fix
+    # IS a restart, and that is the usual way an outage ends — without this the
+    # all-clear goes missing in the common case. Best-effort: an unwritable
+    # path degrades to in-memory state and never fails a send.
+    failure_alert_state_path: str = "/data/failure-alert-state.json"
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully

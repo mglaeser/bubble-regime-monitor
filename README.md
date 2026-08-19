@@ -210,6 +210,7 @@ The digest tells you the score. This tells you when there is no new score to tel
 ```dotenv
 FAILURE_ALERTS_ENABLED=true    # default; sends over whichever transport above is on
 FAILURE_ALERT_REPEAT_H=24      # quiet period before the SAME failure repeats
+FAILURE_ALERT_STATE_PATH=/data/failure-alert-state.json   # outage memory across restarts
 ```
 
 Every recompute — scheduled or manual — reports its outcome. A run that raises, or that completes without producing a snapshot, sends one compressed message over the transport the digest uses:
@@ -218,7 +219,7 @@ Every recompute — scheduled or manual — reports its outcome. A run that rais
 bubblegauge FAILING: recompute x72 since 06 Aug 14:00Z; no new score 12d; invalid literal for int() with base 10: '1/1/'
 ```
 
-A **new** failure signature sends immediately. A **repeat** of the same one waits out `FAILURE_ALERT_REPEAT_H`, so an outage costs one message a day rather than one every four hours; digits are normalised out of the signature, so the same defect reached on two different rows is one outage. When the recompute succeeds again you get a single all-clear — but only if you were told about the failure in the first place. A send that fails is retried at the next slot rather than being silently throttled away, and the error text is redacted before it leaves the host.
+A **new** failure signature sends immediately. A **repeat** of the same one waits out `FAILURE_ALERT_REPEAT_H`, so an outage costs one message a day rather than one every four hours; digits are normalised out of the signature, so the same defect reached on two different rows is one outage. When the recompute succeeds again you get a single all-clear — but only if you were told about the failure in the first place. **The outage is remembered across a restart**, in one small best-effort JSON file: deploying a fix *is* a restart, and that is the usual way an outage ends, so process-local memory would have dropped the all-clear in the common case rather than the exotic one. An unwritable or corrupt file degrades to in-memory state and never fails a send. A send that fails is retried at the next slot rather than being silently throttled away, and the error text is redacted before it leaves the host.
 
 **Why it defaults on.** It can only reach a transport and recipient you already configured, so it adds no destination; with both transports off it does nothing but log. This exists because between 2026-08-06 and 2026-08-18 every scheduled recompute failed and nothing said so: `/healthz` returned `ok`, `/readyz` listed all eighteen sources green (source health is only persisted *by* a successful snapshot, so it was replaying the last good run), the science audit counted zero errors because it has no snapshot-age flag, and the daily digest kept sending the same twelve-day-old score. A monitor you have to remember to switch on is a monitor that is off.
 
