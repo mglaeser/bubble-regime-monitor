@@ -115,16 +115,14 @@ def auth_header() -> dict[str, str]:
         return {name: KEY or ""}
     return {"Authorization": f"Bearer {KEY}"}
 
-# Preference order (new -> old): without an explicit VERIFIER_MODEL the panel
-# resolves each wanted ID against the account's /v1/models list.
-MODEL_PREFERENCE = [
-    "gpt-5.6-sol", "gpt-5.6", "gpt-5.5", "gpt-5.1", "gpt-5",
-    "gpt-4.1", "gpt-4o-2024-08-06", "gpt-4o",
-]
-
-# Broadly available, pinned fallback (NOT the newest/scarcest — a rejected model
-# would turn every vote into an API error and block the control permanently).
-FALLBACK_MODEL = "gpt-4o-2024-08-06"
+# MODEL_PREFERENCE and FALLBACK_MODEL used to live here. Both existed to choose
+# a SUBSTITUTE when a configured voice was not served by the account, and that
+# substitution was removed as fail-open: the panel reviewed with voices the
+# operator never chose and the run went green. resolve_panel_models() now
+# refuses instead, so nothing reads either constant. They are deleted rather
+# than left in place, because a merge-gate file whose constants describe a
+# deleted mechanism is exactly the reading-versus-behaviour gap this file keeps
+# being audited for.
 
 # One DIFFERENT model per voice (override via VERIFIER_PANEL_MODELS).
 DEFAULT_PANEL_MODELS = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
@@ -432,11 +430,40 @@ def declared_defects(v: Any) -> tuple[str, list[str]]:
 # never the reverse — so it trades P2 for P1 in the direction this file
 # resolves conflicts. Adding a NEW concept here is not monotone in the same
 # way and is a separate, reviewed decision.
-_DEFECT_WORDS = re.compile(
-    r"\b(bypass\w*|fail-open\w*|fails? open|unauthenticated|"
-    r"inject(?:ions|ion|ed|able|s)|vulnerab\w*|exploitab\w*|"
-    r"race conditions?|deadlock\w*|regress\w*|data loss(?:es)?|"
-    r"privilege escalations?)\b", re.I)
+# ONE definition, TWO consumers: the regex that BLOCKS is built from this list,
+# and the sentence in build_system_prompt() that tells a voice what to avoid is
+# rendered from the same list. The two cannot drift.
+#
+# They did drift, and it was measured: the prompt named six terms and trailed
+# off with "...", while the regex also blocked `fails open`, `vulnerable`,
+# `exploitable`, `regressed`, `deadlocked` and `privilege escalations`. Three
+# natural approvals -- "verified the header path does not fail open",
+# "confirmed the gate cannot fail open on a missing key", "the substitution path
+# no longer fails open" -- were blocked by a rule the voice was never shown. A
+# gate that publishes a rule narrower than the one it enforces is unanswerable
+# by the reviewer it judges.
+#
+# (published term, regex alternative)
+_DEFECT_VOCAB: tuple[tuple[str, str], ...] = (
+    ("bypass",              r"bypass\w*"),
+    ("fail-open",           r"fail-open\w*"),
+    ("fails open",          r"fails? open"),
+    ("unauthenticated",     r"unauthenticated"),
+    ("injection",           r"inject(?:ions|ion|ed|able|s)"),
+    ("vulnerability",       r"vulnerab\w*"),
+    ("exploitable",         r"exploitab\w*"),
+    ("race condition",      r"race conditions?"),
+    ("deadlock",            r"deadlock\w*"),
+    ("regression",          r"regress\w*"),
+    ("data loss",           r"data loss(?:es)?"),
+    ("privilege escalation", r"privilege escalations?"),
+)
+
+_DEFECT_WORDS = re.compile(r"\b(" + "|".join(a for _, a in _DEFECT_VOCAB) + r")\b", re.I)
+
+#: Every published term, for the prompt. No ellipsis: the voice is told the
+#: whole rule it is judged by.
+_DEFECT_VOCAB_PUBLISHED = ", ".join(t for t, _ in _DEFECT_VOCAB)
 
 
 
@@ -740,8 +767,8 @@ def build_system_prompt(challenge: str) -> str:
         "each point harder than drop one. Upper bound ~800 chars. For refuted=true use the "
         "schema 'path/file:line — defect — misbehavior' per point. For refuted=false say in "
         "3-8 words WHAT WAS CHECKED — name the code paths, not defects. A green reason "
-        "must contain NO defect term (bypass, fail-open, injection, race condition, "
-        "regression, data loss, ...) EVEN NEGATED: a green vote naming one is discarded "
+        "must contain NO defect term (" + _DEFECT_VOCAB_PUBLISHED + ") OR ANY "
+        "INFLECTION OF ONE, EVEN NEGATED: a green vote naming one is discarded "
         "as self-contradictory, so write 'throttle + lock ordering verified', never "
         "'no race condition'. "
         "PROOF-OF-CHECK: for refuted=false, proof MUST be EXACTLY '" + challenge + "-<tier>' "
@@ -1121,7 +1148,7 @@ def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
         return [os.environ["VERIFIER_MODEL"]] * panel_size
     ids, why = fetch_model_ids()
     if not ids:
-        # An unreachable catalogue used to degrade silently to FALLBACK_MODEL
+        # An unreachable catalogue used to degrade silently to a pinned fallback
         # for every voice; each vote then errored on a model the gateway does
         # not serve, and the operator saw three identical failures with no hint
         # that the BASE URL was the cause. The most common cause is exactly
@@ -1317,7 +1344,12 @@ def write_step_summary(votes: list[dict], models: list[str], gates: list[tuple[s
             continue
         v = vote.get("v") or {}
         refuted = v.get("refuted")
-        mark = "🔴 refutes" if refuted else ("🟢 approves" if refuted is False else "⚠️ unparsable")
+        # `is True` / `is False`, never truthiness: decide() fails closed on a
+        # non-bool at :142, so {"refuted": "maybe"} is discarded -- but this table
+        # used to label it "refutes", telling the reader a model objected when in
+        # fact its vote was unreadable.
+        mark = ("🔴 refutes" if refuted is True
+                else "🟢 approves" if refuted is False else "⚠️ unparsable")
         # The ledger is the field the consistency gate now reads, so it is shown
         # next to the verdict: a reader must see BOTH declarations the gate
         # compares, not only the prose.

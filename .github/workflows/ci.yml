@@ -56,12 +56,28 @@ jobs:
         # ceiling in the same commit that lowers the count.
         env:
           MYPY_CEILING: "217"
-          # The ceiling is only meaningful if mypy actually read the tree. This
-          # floor is what makes a LOW count mean "little is wrong" rather than
-          # "little was checked". 112 files today; the floor sits below that so
-          # ordinary file movement does not trip it.
+          # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
+          # It does NOT make a low count mean "little is wrong" -- an earlier
+          # version of this comment claimed that, and it is false. Measured:
+          # flipping `strict = true` to false in pyproject.toml drops 217 errors
+          # to 84 with the file count unchanged at 113 and this floor satisfied.
+          # 113 files today; the floor sits below that so ordinary file movement
+          # does not trip it.
           MYPY_MIN_FILES: "100"
+          # DEPTH is pinned separately, because the ratchet only ever blocks a
+          # RISE -- so a config loosening lowers the count, passes, and then
+          # invites lowering the ceiling to match, locking the loosening in.
+          # Same shape as the byte-identical .secrets.baseline: [tool.mypy] is
+          # pinned in .mypy-config.pinned, and changing it fails the build until
+          # that file is updated in the same commit, deliberately.
         run: |
+          python -c "import pathlib,re; s=pathlib.Path('pyproject.toml').read_text(); m=re.search(r'(?ms)^\[tool\.mypy\].*?(?=^\[(?!tool\.mypy)|\Z)', s); pathlib.Path('/tmp/mypy-config.actual').write_text(m.group(0).rstrip()+chr(10) if m else 'MISSING')"
+          if ! diff -u <(grep -v '^#' .mypy-config.pinned | sed '/^$/d') /tmp/mypy-config.actual; then
+            echo "::error::[tool.mypy] no longer matches .mypy-config.pinned."
+            echo "::error::This gate counts errors; it cannot see strictness. Re-derive"
+            echo "::error::MYPY_CEILING under the new config and update both in one commit."
+            exit 1
+          fi
           set +e
           mypy app > /tmp/mypy.txt 2>&1
           rc=$?
