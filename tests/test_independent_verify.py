@@ -348,6 +348,12 @@ class TestConsistencyReadsNegation:
         "no auth: privilege escalation via /admin",
         "without auth privilege escalation",
         "no rate limit - injection via query",
+        # The negator IS adjacent, but the head of the phrase is the DEFENCE —
+        # so the sentence asserts a missing guard, i.e. the defect is present.
+        # Panel finding on this PR (#65/SOTA-A, second round).
+        "no injection protection: raw query parameter reaches SQL",
+        "no fail-open protection in the new path",
+        "no auth or privilege escalation check",
     ])
     def test_a_real_claim_still_blocks(self, reason):
         """The control's whole purpose. A negation governs its own clause only —
@@ -362,6 +368,14 @@ class TestConsistencyReadsNegation:
         assert "data loss" in out["reason"]
         assert "data loss on retry" in out["reason"]      # the clause, not just the word
         assert "no fail-open" not in out["reason"]        # and not the negated one
+
+    @pytest.mark.parametrize("reason", [
+        "no regression or data loss",      # one negator governs both conjuncts
+        "no fail-open on missing header",  # a preposition keeps the word the head
+        "zero regressions observed",
+    ])
+    def test_the_word_may_still_end_its_phrase(self, reason):
+        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is False
 
     @pytest.mark.parametrize("reason", [
         "no obvious race condition",

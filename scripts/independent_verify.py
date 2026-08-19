@@ -281,35 +281,84 @@ _NEGATION_FILLER = frozenset({"of", "a", "an", "the", "any", "further", "additio
                               "new", "other", "obvious", "apparent", "known", "such",
                               "real", "concrete", "actual"})
 
+#: Negation distributes over coordination: in "no regression or data loss" the
+#: single "no" governs both conjuncts. Skipped along with the defect word each
+#: conjunct contains, so the walk back can reach the negator.
+_COORDINATORS = frozenset({"or", "and", "nor"})
+
+#: What may FOLLOW the defect word while it remains the HEAD of its phrase.
+#:
+#: This is the other half of binding, and the half that "no injection
+#: protection: raw query parameter reaches SQL" defeats (PR #65, combo/SOTA-A,
+#: second finding). There the negator IS adjacent, but the head of the phrase
+#: is `protection` — so the sentence asserts the absence of a DEFENCE, which is
+#: the presence of the defect. An absence therefore requires the defect word to
+#: end its phrase: the clause ends, or the next word is one that cannot be a
+#: head noun. Anything unrecognised is read as a claim, so this list can only
+#: over-block, never launder.
+_ABSENCE_TAIL = frozenset({
+    "found", "seen", "observed", "detected", "identified", "noted", "present",
+    "possible", "introduced", "added", "anywhere", "here", "evident",
+    "in", "on", "at", "via", "from", "for", "of", "to", "with", "within",
+    "under", "across", "after", "before", "since", "between",
+    "and", "or", "nor",
+    "path", "paths", "risk", "risks", "issue", "issues",
+})
+
+
+def _clause_bounds(text: str, start: int) -> int:
+    """Offset where the clause containing ``start`` begins."""
+    return max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:start])), default=0)
+
 
 def _clause_at(text: str, start: int) -> str:
     """The clause containing offset ``start`` — the context a human needs to
     tell a defect claim from an assertion that the defect is absent."""
-    lo = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:start])), default=0)
     tail = _CLAUSE_BOUNDARY.search(text, start)
-    return text[lo:tail.start() if tail else len(text)].strip()
+    return text[_clause_bounds(text, start):tail.start() if tail else len(text)].strip()
+
+
+def _tail_word(text: str, end: int) -> str | None:
+    """The next word after ``end``, or None when the clause ends first."""
+    boundary = _CLAUSE_BOUNDARY.search(text, end)
+    segment = text[end:boundary.start() if boundary else len(text)]
+    words = re.findall(r"[a-z0-9-]+", segment)
+    return words[0] if words else None
 
 
 def asserts_absence(text: str, hit: re.Match[str]) -> bool:
     """Whether this occurrence says the defect is ABSENT rather than found.
 
-    The negator must MODIFY this word: inside the same clause, and adjacent to
-    it once determiners and degree adjectives are skipped. Anything else is
-    read as a claim. "no fail-open" and "free of data loss" are absences;
-    "without auth privilege escalation" is not — there the negator belongs to
-    `auth`, and the escalation is what that absence causes.
+    An absence is a negator BOUND to this word on both sides:
 
-    Fail-CLOSED: an unqualified defect word is still a defect claim, and
-    callers must test EVERY occurrence — one unnegated hit anywhere in a green
-    reason is enough to discard the vote."""
-    lo = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:hit.start()])), default=0)
-    tokens = re.findall(r"[a-z0-9-]+", text[lo:hit.start()])
-    while tokens and tokens[-1] in _NEGATION_FILLER:
-        tokens.pop()
-    if tokens and tokens[-1] in _NEGATORS:
-        return True
+      * before — same clause, adjacent once determiners and coordinated
+        conjuncts are skipped, so "no fail-open" and "no regression or data
+        loss" qualify while "without auth privilege escalation" does not (there
+        the negator belongs to `auth`);
+      * after — the word ENDS its phrase, so "no injection" qualifies while
+        "no injection protection" does not (there the head is `protection`, and
+        a missing defence is the presence of the defect).
+
+    Fail-CLOSED throughout: an unrecognised word on either side makes this a
+    claim, and callers must test EVERY occurrence — one unnegated hit anywhere
+    in a green reason is enough to discard the vote."""
     # Terse suffix form the panel actually writes: "regression-free".
-    return text[hit.end():].startswith("-free")
+    if text[hit.end():].startswith("-free"):
+        return True
+    clause = text[_clause_bounds(text, hit.start()):hit.start()]
+    defects = [m.span() for m in _DEFECT_WORDS.finditer(clause)]
+    words = list(re.finditer(r"[a-z0-9-]+", clause))
+    while words:
+        word = words[-1]
+        in_defect = any(lo <= word.start() and word.end() <= hi for lo, hi in defects)
+        if word.group(0) in _NEGATION_FILLER or word.group(0) in _COORDINATORS or in_defect:
+            words.pop()
+            continue
+        break
+    if not words or words[-1].group(0) not in _NEGATORS:
+        return False
+    tail = _tail_word(text, hit.end())
+    return tail is None or tail in _ABSENCE_TAIL
 
 
 def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
@@ -700,6 +749,14 @@ def selftest() -> None:
     expect(attest_consistency([GV("no obvious race condition"), GV("docs only"),
                                GV("reviewed diff")], M3)["block"] is False,
            "a determiner between negator and word is still an absence")
+    # The negator is adjacent, but the HEAD of the phrase is the defence: a
+    # missing guard is the presence of the defect (panel, PR #65, round 2).
+    expect(attest_consistency([GV("no injection protection: raw query reaches SQL"),
+                               GV("docs only"), GV("reviewed diff")], M3)["block"] is True,
+           "'no <defect> protection' asserts a missing DEFENCE, not an absent defect")
+    expect(attest_consistency([GV("no regression or data loss"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is False,
+           "one negator distributes over coordinated conjuncts")
 
     # auth_header() -- both branches
     _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)
