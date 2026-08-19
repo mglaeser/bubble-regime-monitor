@@ -140,6 +140,19 @@ def _persist_locked() -> None:
         log.warning("failure_alert_state_unwritable", error=str(exc)[:200])
 
 
+def _aware(value: object) -> datetime:
+    """An ISO timestamp from the state file, always timezone-aware.
+
+    A NAIVE timestamp is the dangerous shape: it parses cleanly, so the load
+    succeeds, and then every `now - first_seen` raises TypeError on an
+    aware/naive subtraction — inside the alerter's own catch-all, which returns
+    "failed" and moves on. The result is an alerter that is permanently and
+    silently deaf until someone clears the file by hand. Naive input is read as
+    UTC, which is what this service writes and the only clock it has."""
+    parsed = datetime.fromisoformat(str(value))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _load_locked() -> None:
     """Restore the outage left by a previous process. Caller holds `_lock`.
 
@@ -151,10 +164,15 @@ def _load_locked() -> None:
         raw = json.loads(_state_path().read_text())
         _current = _Outage(
             signature=str(raw["signature"]),
-            first_seen=datetime.fromisoformat(raw["first_seen"]),
+            first_seen=_aware(raw["first_seen"]),
             failures=int(raw["failures"]),
-            last_sent=datetime.fromisoformat(raw["last_sent"]) if raw.get("last_sent") else None,
-            announced=bool(raw.get("announced")),
+            last_sent=_aware(raw["last_sent"]) if raw.get("last_sent") else None,
+            # `is True`, not bool(): a legacy or hand-edited file holding the
+            # STRING "false" is truthy, and would have bought an unearned
+            # all-clear for an outage nobody was ever told about. Anything that
+            # is not exactly true means "not announced", which is the direction
+            # that stays silent rather than the one that lies.
+            announced=raw.get("announced") is True,
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
                  announced=_current.announced)

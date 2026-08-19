@@ -8,6 +8,7 @@ times (the obvious overcorrection).
 
 from __future__ import annotations
 
+import json
 import pathlib
 from datetime import UTC, datetime, timedelta
 
@@ -551,3 +552,56 @@ class TestTheStateFileIsWrittenAtomically:
         failure_alert._current = None
         failure_alert._loaded = False
         assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+
+class TestAMalformedStateFileCannotSilenceOrLie:
+    """The state file is the alerter's memory, and a file that PARSES but is
+    wrong is worse than one that does not.
+
+    Panel finding on #64 (combo/SOTA-A): naive timestamps load cleanly and then
+    raise TypeError on every aware/naive subtraction — inside the alerter's own
+    catch-all, so it returns "failed" and moves on, permanently and silently
+    deaf. And bool("false") is True, which buys an unearned all-clear."""
+
+    @staticmethod
+    def _write(sent_fixture, **overrides):
+        payload = {
+            # the REAL signature of EBP_ERROR, so the throttle path is exercised
+            # rather than the new-signature path
+            "signature": failure_signature(EBP_ERROR),
+            "first_seen": datetime.now(UTC).isoformat(),
+            "failures": 3,
+            "last_sent": datetime.now(UTC).isoformat(),
+            "announced": True,
+        }
+        payload.update(overrides)
+        failure_alert._state_path().write_text(json.dumps(payload))
+        failure_alert._current = None
+        failure_alert._loaded = False
+
+    def test_naive_timestamps_do_not_silence_the_alerter(self, sent):
+        naive = datetime.now(UTC).replace(tzinfo=None).isoformat()
+        self._write(sent, first_seen=naive, last_sent=naive)
+        result = notify_recompute_outcome(None)
+        assert result["status"] == "sent" and result["kind"] == "recovery"
+
+    def test_a_naive_timestamp_does_not_break_the_throttle(self, sent):
+        naive = (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None).isoformat()
+        self._write(sent, first_seen=naive, last_sent=naive)
+        result = notify_recompute_outcome(EBP_ERROR)
+        assert result["status"] == "throttled"      # not "failed"
+
+    @pytest.mark.parametrize("announced", ["false", "no", 0, "", None, "true"])
+    def test_only_a_real_true_earns_an_all_clear(self, sent, announced):
+        """A string, an int or a null must never buy an unearned OK."""
+        self._write(sent, announced=announced)
+        assert notify_recompute_outcome(None)["status"] == "noop"
+
+    def test_a_genuine_true_still_earns_one(self, sent):
+        self._write(sent, announced=True)
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+    def test_a_garbage_timestamp_is_read_as_no_outage(self, sent):
+        self._write(sent, first_seen="not-a-timestamp")
+        assert notify_recompute_outcome(None)["status"] == "noop"
+        assert failure_alert._current is None
