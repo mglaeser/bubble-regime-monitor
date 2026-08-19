@@ -56,11 +56,58 @@ jobs:
         # ceiling in the same commit that lowers the count.
         env:
           MYPY_CEILING: "217"
+          # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
+          # It does NOT make a low count mean "little is wrong" -- an earlier
+          # version of this comment claimed that, and it is false. Measured:
+          # flipping `strict = true` to false in pyproject.toml drops 217 errors
+          # to 84 with the file count unchanged at 113 and this floor satisfied.
+          # 113 files today; the floor sits below that so ordinary file movement
+          # does not trip it.
+          MYPY_MIN_FILES: "100"
+          # DEPTH is pinned separately, because the ratchet only ever blocks a
+          # RISE -- so a config loosening lowers the count, passes, and then
+          # invites lowering the ceiling to match, locking the loosening in.
+          # Same shape as the byte-identical .secrets.baseline: [tool.mypy] is
+          # pinned in .mypy-config.pinned, and changing it fails the build until
+          # that file is updated in the same commit, deliberately.
         run: |
+          python -c "import pathlib,re; s=pathlib.Path('pyproject.toml').read_text(); m=re.search(r'(?ms)^\[tool\.mypy\].*?(?=^\[(?!tool\.mypy)|\Z)', s); pathlib.Path('/tmp/mypy-config.actual').write_text(m.group(0).rstrip()+chr(10) if m else 'MISSING')"
+          if ! diff -u <(grep -v '^#' .mypy-config.pinned | sed '/^$/d') /tmp/mypy-config.actual; then
+            echo "::error::[tool.mypy] no longer matches .mypy-config.pinned."
+            echo "::error::This gate counts errors; it cannot see strictness. Re-derive"
+            echo "::error::MYPY_CEILING under the new config and update both in one commit."
+            exit 1
+          fi
           set +e
           mypy app > /tmp/mypy.txt 2>&1
+          rc=$?
           set -e
           tail -1 /tmp/mypy.txt
+          # A COUNT OF ERROR LINES IS NOT A MEASURE OF WORK DONE. Two ways this
+          # gate passed while type-checking nothing, both reproduced:
+          #   mypy absent          -> rc 127, no output, "mypy errors: 0" -> PASSED,
+          #                           and advised lowering the ceiling to 0.
+          #   target path moved    -> rc 2, "errors prevented further checking",
+          #                           "mypy errors: 1"  -> PASSED at 1, advising a
+          #                           ceiling of 1 -- which then makes RESTORING
+          #                           real checking fail the build at 217.
+          # rc 0 and 1 are verdicts (clean / errors found). Anything else means
+          # mypy could not run, and an unrunnable checker is a refusal, never a
+          # low score. Fail-closed, as every other gate in this file.
+          if [ "$rc" -ge 2 ]; then
+            echo "::error::mypy exited $rc without type-checking the tree — this is a refusal, not a pass."
+            cat /tmp/mypy.txt
+            exit 1
+          fi
+          checked=$(grep -oE '[0-9]+ source files?' /tmp/mypy.txt | tail -1 | grep -oE '^[0-9]+' || true)
+          checked=${checked:-0}
+          echo "mypy checked $checked source files (floor $MYPY_MIN_FILES)"
+          if [ "$checked" -lt "$MYPY_MIN_FILES" ]; then
+            echo "::error::mypy checked only $checked source files, below the floor $MYPY_MIN_FILES."
+            echo "::error::The error count below is not trustworthy — mypy did not read the tree."
+            cat /tmp/mypy.txt
+            exit 1
+          fi
           n=$(grep -cE '^[^ ].*: error:' /tmp/mypy.txt || true)
           echo "mypy errors: $n (ceiling $MYPY_CEILING)"
           if [ "$n" -gt "$MYPY_CEILING" ]; then
@@ -78,6 +125,15 @@ jobs:
         # re-emits an updated baseline) — it does NOT gate. `detect-secrets-hook`
         # exits 1 when a tracked file contains a secret absent from the baseline.
         # (This distinction was caught by adversarial verification.)
+        #
+        # SCOPE — this is an INDEX-TIME control, not a presence check. The input
+        # is `git ls-files`, so an UNTRACKED file is invisible to it: the gate is
+        # green for the whole life of a new file before `git add`, which is
+        # exactly the window in which a pasted credential is most likely to be
+        # sitting in one. Reproduced: a new test file containing a fake
+        # "ANTHROPIC_API_KEY" passed while untracked and failed on commit.
+        # A green run here means "no new secret in the index", never "no secret
+        # in the working tree".
         run: git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
       - name: Alert artifacts — validate the shipped ruleset + phrase set (BLOCKING)
         # The rule inventory is DATA. A ruleset that no longer validates is a
