@@ -252,6 +252,22 @@ _DEFECT_WORDS = re.compile(
     r"race condition|deadlock|regress\w*|data loss|privilege escalation)\b", re.I)
 
 
+#: Clause delimiters, for quoting the offending fragment back to the operator.
+_CLAUSE_BOUNDARY = re.compile(r"[;,.:]")
+
+
+def _clause_at(text: str, start: int) -> str:
+    """The clause containing offset ``start``.
+
+    Reported with the block so an operator can tell a real inconsistency from a
+    phrasing artefact WITHOUT opening the raw job log. A bare word could not:
+    deciding whether `("fail-open")` was a confession or the tail of "no
+    fail-open" took reading the log by hand (PR #64)."""
+    lo = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:start])), default=0)
+    tail = _CLAUSE_BOUNDARY.search(text, start)
+    return text[lo:tail.start() if tail else len(text)].strip()
+
+
 def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
     """A GREEN vote whose OWN reason names a defect is not an approval — it is a
     model that analysed correctly and then set the boolean wrong. decide() reads
@@ -260,15 +276,31 @@ def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
 
     Found adversarially: a panelist returned refuted=false with a reason that
     named two concrete defects. Fail-CLOSED — an inconsistent vote is discarded
-    as a parse failure, not resolved in favour of green."""
+    as a parse failure, not resolved in favour of green.
+
+    THE MATCH IS DELIBERATELY LITERAL, and stays that way. A green reason saying
+    "no fail-open" is discarded even though it asserts the OPPOSITE of a defect,
+    which cost a unanimous 3/3 approval on PR #64. The fix for that is upstream,
+    in `build_system_prompt`: a green vote is now asked to name code paths and
+    no defect term at all, so the ambiguous phrasing is never produced. Teaching
+    THIS function to read negation was tried and withdrawn — seven laundering
+    paths in five review rounds, each one an inconsistent green vote the gate
+    would have accepted ("no auth: privilege escalation via /admin", "not
+    regression-free", "not without injection", ...). Negation scope in free
+    prose is not something a regex can be trusted to decide, and every attempt
+    traded a safe over-block for an unsafe under-block. If this ever needs to
+    change again, change what the models are ASKED to write, not what this
+    reads."""
     for i, x in enumerate(votes):
         if not _is_valid(x) or x["v"]["refuted"] is not False:
             continue
-        hit = _DEFECT_WORDS.search(norm_reason(x["v"].get("reason")))
+        reason = norm_reason(x["v"].get("reason"))
+        hit = _DEFECT_WORDS.search(reason)
         if hit:
             return {"block": True,
                     "reason": f'{models[i]}: refuted=false but its own reason names a '
-                              f'defect ("{hit.group(0)}") -> inconsistent vote, fail-closed'}
+                              f'defect ("{hit.group(0)}" in "{_clause_at(reason, hit.start())}") '
+                              f'-> inconsistent vote, fail-closed'}
     return {"block": False,
             "reason": f"{len(_green(votes))} green reason(s) free of defect claims"}
 
@@ -468,7 +500,11 @@ def build_system_prompt(challenge: str) -> str:
         "Name ALL defects found — each EXTREMELY compact, separated by ' ; '; rather abbreviate "
         "each point harder than drop one. Upper bound ~800 chars. For refuted=true use the "
         "schema 'path/file:line — defect — misbehavior' per point. For refuted=false say in "
-        "3-8 words WHAT was checked + why no defect. "
+        "3-8 words WHAT WAS CHECKED — name the code paths, not defects. A green reason "
+        "must contain NO defect term (bypass, fail-open, injection, race condition, "
+        "regression, data loss, ...) EVEN NEGATED: a green vote naming one is discarded "
+        "as self-contradictory, so write 'throttle + lock ordering verified', never "
+        "'no race condition'. "
         "PROOF-OF-CHECK: for refuted=false, proof MUST be EXACTLY '" + challenge + "-<tier>' "
         "where <tier> is an integer 1-9999 you choose at random (e.g. '" + challenge + "-4213'). "
         "That proves you really executed this check; a missing/wrong proof invalidates a green. "
