@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     # all-clear goes missing in the common case. Best-effort: an unwritable
     # path degrades to in-memory state and never fails a send.
     failure_alert_state_path: str = "/data/failure-alert-state.json"
+    # How long a recompute may hold the single-flight lock before a skipped slot
+    # is reported as a wedged run. Slots are 4h apart and a full gather runs
+    # well under an hour, so a run still in flight at the next slot is stuck.
+    failure_alert_stuck_after_h: int = 4
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully

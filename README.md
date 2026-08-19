@@ -211,6 +211,7 @@ The digest tells you the score. This tells you when there is no new score to tel
 FAILURE_ALERTS_ENABLED=true    # default; sends over whichever transport above is on
 FAILURE_ALERT_REPEAT_H=24      # quiet period before the SAME failure repeats
 FAILURE_ALERT_STATE_PATH=/data/failure-alert-state.json   # outage memory across restarts
+FAILURE_ALERT_STUCK_AFTER_H=4  # a run holding the lock this long is reported wedged
 ```
 
 Every recompute — scheduled or manual — reports its outcome. A run that raises, or that completes without producing a snapshot, sends one compressed message over the transport the digest uses:

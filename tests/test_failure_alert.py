@@ -438,3 +438,78 @@ class TestTheOutageSurvivesARestart:
         assert failure_alert._state_path().exists()
         failure_alert.reset_state()
         assert not failure_alert._state_path().exists()
+
+
+class TestAWedgedRecomputeIsNotSilent:
+    """A recompute that hangs holds the single-flight lock forever, so every
+    later slot hits the "already running" skip.
+
+    That path returned before the notifier — no snapshot AND no alert, which is
+    the original twelve-day outage wearing a different costume and invisible for
+    the same reason. Panel finding on #64 (combo/SOTA-A)."""
+
+    @pytest.fixture()
+    def wedged(self, monkeypatch, sent):
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        admin.recompute_lock.acquire(blocking=False)     # simulate a run in flight
+        yield admin, sent
+        if admin.recompute_lock.locked():
+            admin.recompute_lock.release()
+        admin._last.update(started_at=None, finished_at=None)
+        get_settings.cache_clear()
+
+    def test_an_ordinary_overlap_says_nothing(self, wedged):
+        """A manual refresh landing on a scheduled run is normal."""
+        admin, sent = wedged
+        admin._last.update(started_at=datetime.now(UTC).isoformat(), finished_at=None)
+        admin.run_recompute_guarded()
+        assert sent == []
+
+    def test_a_run_wedged_past_the_threshold_alerts(self, wedged):
+        admin, sent = wedged
+        admin._last.update(started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
+                           finished_at=None)
+        admin.run_recompute_guarded()
+        assert len(sent) == 1
+        assert "stuck" in sent[0] or "FAILING" in sent[0]
+
+    def test_the_wedged_run_is_one_outage_not_one_per_slot(self, wedged):
+        """The elapsed hours are in the message but not in the signature, so the
+        24h throttle still collapses them."""
+        admin, sent = wedged
+        for hours in (5, 9, 13, 17):
+            admin._last.update(
+                started_at=(datetime.now(UTC) - timedelta(hours=hours)).isoformat(),
+                finished_at=None)
+            admin.run_recompute_guarded()
+        assert len(sent) == 1
+
+    def test_a_finished_run_is_never_reported_as_stuck(self, wedged):
+        admin, sent = wedged
+        admin._last.update(started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
+                           finished_at=datetime.now(UTC).isoformat())
+        admin.run_recompute_guarded()
+        assert sent == []
+
+    def test_the_skip_still_does_not_run_a_recompute(self, monkeypatch, wedged):
+        """The watchdog must not turn a skip into a second concurrent gather."""
+        admin, sent = wedged
+        from app.services import compute
+
+        ran = []
+        monkeypatch.setattr(compute, "run_recompute", lambda: ran.append(1))
+        admin._last.update(started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
+                           finished_at=None)
+        admin.run_recompute_guarded()
+        assert ran == []
+
+    def test_a_broken_clock_never_breaks_the_scheduler(self, wedged):
+        admin, sent = wedged
+        admin._last.update(started_at="not-a-timestamp", finished_at=None)
+        admin.run_recompute_guarded()          # must not raise
+        assert sent == []

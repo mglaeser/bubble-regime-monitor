@@ -11,11 +11,12 @@ one is running reports `already_running` instead of stacking another.
 from __future__ import annotations
 
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from app.config import get_settings
 from app.logging_conf import get_logger
 from app.security import require_admin_key
 
@@ -28,6 +29,33 @@ recompute_lock = threading.Lock()
 _last: dict[str, Any] = {"started_at": None, "finished_at": None, "snapshot_id": None, "error": None}
 
 
+def _notify_if_stuck() -> None:
+    """Report a recompute that has held the single-flight lock too long.
+
+    The elapsed time is deliberately part of the message but not of the outage
+    identity: `failure_signature` collapses digits, so "stuck after 5h" and
+    "stuck after 9h" are one outage and the operator gets one alert a day, not
+    one per slot. Never raises — this runs on the scheduler thread."""
+    try:
+        started_at = _last.get("started_at")
+        if not started_at or _last.get("finished_at"):
+            return
+        started = datetime.fromisoformat(str(started_at))
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        elapsed = datetime.now(UTC) - started
+        threshold = timedelta(hours=max(1, get_settings().failure_alert_stuck_after_h))
+        if elapsed < threshold:
+            return          # an ordinary overlap, not a wedged run
+        from app.services.failure_alert import notify_recompute_outcome
+
+        hours = int(elapsed.total_seconds() // 3600)
+        notify_recompute_outcome(
+            f"recompute stuck: in flight {hours}h with no result, later slots skipped")
+    except Exception as exc:  # a broken watchdog must not break the scheduler
+        log.warning("stuck_check_failed", error=str(exc)[:200])
+
+
 def run_recompute_guarded() -> None:
     """Run one recompute if none is in flight; silently skip otherwise.
 
@@ -38,6 +66,12 @@ def run_recompute_guarded() -> None:
     tailing, which is how twelve days of failures went unnoticed."""
     if not recompute_lock.acquire(blocking=False):
         log.info("recompute_skipped", reason="already running")
+        # A skip is normal when a manual refresh overlaps a scheduled run. It is
+        # NOT normal hours later: the run is wedged, the lock is never released,
+        # and every subsequent slot lands here. Returning straight out was the
+        # one path that produced no snapshot AND no alert — the original outage
+        # in a different costume, and invisible for the same reason.
+        _notify_if_stuck()
         return
     failure: str | None = None
     try:
