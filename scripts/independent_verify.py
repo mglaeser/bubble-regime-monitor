@@ -304,7 +304,7 @@ def strict_any_refutation(votes: list[dict], models: list[str]) -> dict[str, Any
 #   * vendor_tokens() — vendor identity from token-set disjointness. "nvidia/"
 #                       is a HOST prefix, so Meta and DeepSeek read as one
 #                       vendor. Wrong in both directions.
-#   * defect_claims() — a defect CLAIM from a negator within three words. Also
+#   * rung 4 — a LITERAL defect-word match in an approving reason. Also
 #                       wrong in both directions, because the negator negates a
 #                       different word than the defect one:
 #                         "without fixing auth bypass"               -> no claim
@@ -438,45 +438,22 @@ _DEFECT_WORDS = re.compile(
     r"race conditions?|deadlock\w*|regress\w*|data loss(?:es)?|"
     r"privilege escalations?)\b", re.I)
 
-# A defect word is only a defect CLAIM when it is not negated. "no concrete
-# regression" is an explicit all-clear, and scoring it as a claim blocked a
-# panel on run 32181953531 in which all three voices had approved -- the gate
-# refused a unanimous green because one reason contained the word "regression"
-# immediately after the word "no".
-#
-# The window is deliberately three words. A negation anywhere in a long reason
-# must NOT launder a real claim later in it, which is why this is a per-match
-# check and why every match has to be negated for the vote to pass.
-_NEGATORS = re.compile(r"\b(no|not|none|never|without|free of|absent|zero|nothing|n't)\b", re.I)
 
 
-def defect_claims(reason: str) -> list[str]:
-    """Defect words in ``reason`` that are NOT negated in their own context.
+#: Clause delimiters, for quoting the offending fragment back to the operator.
+_CLAUSE_BOUNDARY = re.compile(r"[;,.:]")
 
-    DEMOTED HEURISTIC — the second channel of attest_consistency(), never the
-    mechanism. Its measured holes, kept in the source so no future reader
-    mistakes it for a decision procedure:
 
-        defect_claims("without fixing auth bypass")               == []
-        defect_claims("merged without addressing the injection")  == []
-        defect_claims("not fixed: privilege escalation in admin") == []
-        defect_claims("none of the auth paths bypass the check")  == ["bypass"]
+def _clause_at(text: str, start: int) -> str:
+    """The clause containing offset ``start``.
 
-    Three attempts to repair those (a scope-terminator list, an anchored
-    all-clear recogniser, a published reserved-word contract) were each refuted
-    by the panel with a NEW bypass the author had not imagined — an unbounded
-    left-scan that let "no blockers and an auth bypass on /admin" through, an
-    anchor that quantified the wrong noun in "no injection sanitisation", and a
-    published wordlist that missed "auth is bypassed". The three-word window is
-    crude, but it is BOUNDED, and boundedness is what stops one all-clear from
-    laundering a claim later in the same string. DO NOT rewrite this rule to
-    win back false positives; move the finding into the ledger instead."""
-    claims = []
-    for m in _DEFECT_WORDS.finditer(reason or ""):
-        preceding = " ".join((reason[max(0, m.start() - 40):m.start()]).split()[-3:])
-        if not _NEGATORS.search(preceding):
-            claims.append(m.group(0))
-    return claims
+    Reported with the block so an operator can tell a real inconsistency from a
+    phrasing artefact WITHOUT opening the raw job log. A bare word could not:
+    deciding whether `("fail-open")` was a confession or the tail of "no
+    fail-open" took reading the log by hand (PR #64)."""
+    lo = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:start])), default=0)
+    tail = _CLAUSE_BOUNDARY.search(text, start)
+    return text[lo:tail.start() if tail else len(text)].strip()
 
 
 def attest_consistency(votes: list[dict], models: list[str],
@@ -487,24 +464,39 @@ def attest_consistency(votes: list[dict], models: list[str],
     AND supplies a substantive, distinct reason that helps attest_reasons pass.
 
     Found adversarially: a panelist returned refuted=false with a reason that
-    named two concrete defects.
+    named two concrete defects. Fail-CLOSED — an inconsistent vote is discarded
+    as a parse failure, not resolved in favour of green.
 
     THE LADDER, per green vote, first hit wins, every rung fail-CLOSED:
-      1. a ``defects`` ledger that is present but is not a list of strings
-         -> the schema was not answered, BLOCK.
+      1. a ``defects`` ledger present but not a list of strings -> the schema
+         was not answered, BLOCK.
       2. NO ledger at all -> BLOCK only under VERIFIER_REQUIRE_DEFECT_LIST
-         (``require_ledger``). Tolerated by default ON PURPOSE: a voice that
-         has not seen the new prompt would otherwise block every unanimous
-         green, which is the failure mode that gets a gate deleted. Rung 3
-         still applies to it, so tolerating absence costs nothing that the
-         file did not already cost before the ledger existed.
+         (``require_ledger``). Tolerated by default ON PURPOSE: a voice that has
+         not seen the new prompt would otherwise block every unanimous green,
+         which is the failure mode that gets a gate deleted. Rung 4 still
+         applies to it, so tolerating absence costs nothing this file did not
+         already cost before the ledger existed.
       3. ledger non-empty -> the model declared a defect and greened anyway,
          BLOCK. THIS RUNG IS THE MECHANISM: two declarations about one fact,
          compared as values, no prose read, nothing inferred.
-      4. ledger empty (or absent) but the vote's own prose names an uncleared
-         defect word -> BLOCK. Demoted heuristic, evadable by construction;
-         retained because P1 outranks P2 and rung 3 is only as good as the
-         model that fills the ledger.
+      4. the vote's own prose names a defect word -> BLOCK.
+
+    RUNG 4'S MATCH IS DELIBERATELY LITERAL, and stays that way. A green reason
+    saying "no fail-open" is discarded even though it asserts the OPPOSITE of a
+    defect, which cost a unanimous 3/3 approval on PR #64. The fix for that is
+    upstream, in `build_system_prompt`: a green vote is asked to name code paths
+    and no defect term at all, so the ambiguous phrasing is never produced.
+
+    Teaching this function to read negation was tried, in two repositories and
+    two independent attempts, and withdrawn both times. Seven laundering paths
+    in five review rounds on one side ("no auth: privilege escalation via
+    /admin", "not regression-free", "not without injection", ...); on the other,
+    a three-word negator window that measured WEAKER THAN MAIN on 71 of 165
+    defect-affirming reasons, shipped with tests that asserted the fail-open and
+    a comment telling the next reviewer not to repair it. Negation scope in free
+    prose is not something a regex can be trusted to decide, and every attempt
+    traded a safe over-block for an unsafe under-block. If this needs to change
+    again, change what the models are ASKED to write, not what this reads.
 
     WHERE P1 AND P2 CONFLICT, P1 WINS, at every rung. A false block costs one
     re-vote; a false pass costs a merged defect that three voices signed."""
@@ -532,11 +524,13 @@ def attest_consistency(votes: list[dict], models: list[str],
                     "reason": f'{models[i]}: refuted=false but its own defects ledger declares '
                               f'{len(declared)} defect(s) ("{declared[0][:120]}") '
                               "-> the boolean contradicts the vote's own findings, fail-closed"}
-        claims = defect_claims(norm_reason(x["v"].get("reason")))
-        if claims:
+        reason = norm_reason(x["v"].get("reason"))
+        hit = _DEFECT_WORDS.search(reason)
+        if hit:
             return {"block": True,
                     "reason": f'{models[i]}: refuted=false with an empty defects ledger, but '
-                              f'its own reason names a defect ("{claims[0]}") '
+                              f'its own reason names a defect ("{hit.group(0)}" in '
+                              f'"{_clause_at(reason, hit.start())}") '
                               "-> inconsistent vote, fail-closed"}
     return {"block": False,
             "reason": f"{len(_green(votes))} green vote(s): empty defect ledger, "
@@ -745,7 +739,11 @@ def build_system_prompt(challenge: str) -> str:
         "Name ALL defects found — each EXTREMELY compact, separated by ' ; '; rather abbreviate "
         "each point harder than drop one. Upper bound ~800 chars. For refuted=true use the "
         "schema 'path/file:line — defect — misbehavior' per point. For refuted=false say in "
-        "3-8 words WHAT was checked + why no defect. "
+        "3-8 words WHAT WAS CHECKED — name the code paths, not defects. A green reason "
+        "must contain NO defect term (bypass, fail-open, injection, race condition, "
+        "regression, data loss, ...) EVEN NEGATED: a green vote naming one is discarded "
+        "as self-contradictory, so write 'throttle + lock ordering verified', never "
+        "'no race condition'. "
         "PROOF-OF-CHECK: for refuted=false, proof MUST be EXACTLY '" + challenge + "-<tier>' "
         "where <tier> is an integer 1-9999 you choose at random (e.g. '" + challenge + "-4213'). "
         "That proves you really executed this check; a missing/wrong proof invalidates a green. "
@@ -926,15 +924,14 @@ def selftest() -> None:
     expect(attest_consistency([E, GV("docs only"), GV("no issue")], M3)["block"] is False,
            "an errored vote is not inspected for consistency")
     expect(attest_consistency([GV("security gates reviewed; no concrete regression"),
-                               GV("docs only"), GV("looks fine")], M3)["block"] is False,
-           "a NEGATED defect word is an all-clear, not a defect claim (run 32181953531)")
+                               GV("docs only"), GV("looks fine")], M3)["block"] is True,
+           "the match is LITERAL: a negated defect word still blocks. The relief for "
+           "this is in build_system_prompt, not here -- reading negation was tried "
+           "twice and withdrawn twice, the second time measured WEAKER THAN MAIN on "
+           "71 of 165 defect-affirming reasons")
     expect(attest_consistency([GV("no bypass here, but there is an injection in the parser"),
                                GV("docs only"), GV("fine")], M3)["block"] is True,
            "one negation must not launder a real claim later in the same reason")
-    expect(defect_claims("no regression, no bypass") == [],
-           "every match negated -> no claims")
-    expect(defect_claims("regression in the dispatcher") == ["regression"],
-           "an unnegated defect word is still a claim")
     # Group A's refutation of the ledger: "required" must mean required.
     _GM = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
 
@@ -956,14 +953,12 @@ def selftest() -> None:
     # Ordinary inflections of the SAME published terms are matched too. Widening
     # a term is monotone (PASS -> BLOCK only), which is the direction this file
     # resolves P1/P2 conflicts in.
-    expect(defect_claims("auth is bypassed when key is None") == ["bypassed"],
-           "an inflected defect word is still a claim")
-    expect(defect_claims("deadlocks on shutdown remain") == ["deadlocks"],
+    expect(attest_consistency([GV("deadlocks on shutdown remain"), GV("docs only"),
+                               GV("fine")], M3)["block"] is True,
            "a plural defect word is still a claim")
-    expect(defect_claims("two sql injections in the parser remain") == ["injections"],
-           "a plural defect word is still a claim")
-    expect(defect_claims("no bypasses, no regressions") == [],
-           "monotone widening does not un-negate an all-clear")
+    expect(attest_consistency([GV("no bypasses, no regressions"), GV("docs only"),
+                               GV("fine")], M3)["block"] is True,
+           "and so is a negated one -- literal, by design")
     # THE SHARED ATTACK CORPUS, scored through the REAL gate in the two modes
     # that matter. Mode B: the voice fills the ledger honestly -> 7/7 blocked,
     # and the boolean never has to be read out of prose at all.
@@ -976,12 +971,21 @@ def selftest() -> None:
         "looks good; minor: unauthenticated /readyz leaks the key",
         "approved, though the deadlock on shutdown remains",
     ]
+    # P2 rows carry NO defect term, not even negated -- which is exactly what
+    # build_system_prompt now asks a green vote for. The three phrasings that
+    # used to sit here ("no concrete regression", "no regression, no bypass, no
+    # injection", "checked auth paths, no issue") block under the literal match
+    # and are listed below as the accepted, measured cost.
     _CORPUS_PASS = [
-        "security gates reviewed; no concrete regression",
         "docs only change",
         "reviewed diff, behaviour unchanged",
         "could be more defensive; consider hardening",
+        "gates re-checked, all five fire",
+        "verified the retry path is unchanged",
         "checked auth paths, no issue",
+    ]
+    _CORPUS_P2_COST = [
+        "security gates reviewed; no concrete regression",
         "no regression, no bypass, no injection",
     ]
     for _r in _CORPUS_BLOCK:
@@ -991,22 +995,18 @@ def selftest() -> None:
     for _r in _CORPUS_PASS:
         expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is False,
                f"P2: an ordinary approval must not block: {_r!r}")
-    # Mode C: the voice HIDES the finding (declares [] and writes the defect in
-    # prose). Only the demoted tripwire is left, and it catches 4 of 7. These
-    # three are its DOCUMENTED, UNREPAIRED holes -- pinned so that a future
-    # rewrite of defect_claims() has to confront them rather than rediscover
-    # them, and so that nobody reports 7/7 for a mode that measures 4/7.
-    for _r in ("auth bypass when key is None and a race condition on refresh",
-               "no bypass here, but there is an injection in the parser",
-               "looks good; minor: unauthenticated /readyz leaks the key",
-               "approved, though the deadlock on shutdown remains"):
+    for _r in _CORPUS_P2_COST:
         expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is True,
-               f"P1, hidden finding: the tripwire still catches: {_r!r}")
-    for _r in ("without fixing auth bypass",
-               "merged without addressing the injection",
-               "not fixed: privilege escalation in admin"):
-        expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is False,
-               f"KNOWN HOLE of the demoted tripwire, do not paper over it: {_r!r}")
+               f"P2 COST, accepted and measured: a negated defect term still blocks: {_r!r}")
+    # Mode C: the voice HIDES the finding (declares [] and writes the defect in
+    # prose). Rung 4 is main's literal scan, so ALL SEVEN corpus attacks block --
+    # including the three that a negation window used to let through. Those three
+    # were never pre-existing holes: main blocked them, this branch briefly did
+    # not, and the tests here asserted the bypass. That is the regression
+    # combo/SOTA-A refuted.
+    for _r in _CORPUS_BLOCK:
+        expect(attest_consistency([GL(_r), GL("docs only"), GL("fine")], M3)["block"] is True,
+               f"P1, hidden finding: the literal scan still catches: {_r!r}")
 
     # auth_header() -- both branches
     _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)
@@ -1072,8 +1072,8 @@ def selftest() -> None:
 
     print("   OK selftest: decide() + model_matches() + require_approvals() (required approver Sol "
           "+ corroboration) + attest_reasons() + attest_proof() + declared_defects() + "
-          "attest_consistency() (ledger 7/7 on the shared corpus; demoted prose tripwire 4/7, "
-          "3 known holes pinned) + auth_header() + review_range() + normalize_base() correct.")
+          "attest_consistency() (ledger 7/7; literal prose scan 7/7 on the shared corpus) + "
+          "auth_header() + review_range() + normalize_base() correct.")
 
 
 # --------------------------------------------------------------- API plumbing --
