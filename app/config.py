@@ -222,7 +222,7 @@ class Settings(BaseSettings):
     db_url: str = "sqlite:////data/bubble.db"
     log_level: str = "INFO"
     gsadf_contested: bool = True
-    lppls_timeout_s: int = 1500  # generous headroom (background recompute; API serves the last snapshot meanwhile)
+    lppls_timeout_s: int = 1500  # generous headroom for the Atom N2800 (background recompute; API serves the last snapshot meanwhile)
     gsadf_timeout_s: int = 1800
 
     service_version: str = "3.8.0"
