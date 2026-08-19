@@ -297,7 +297,7 @@ rationale · estimated effect · backward-compat/freeze implications · recommen
    (b) Seed numpy's global RNG in the LPPLS subprocess immediately before
    `mp_compute_nested_fits` with a frozen constant.
    (c) Increase `max_searches` to shrink the variance without full determinism
-   (partial mitigation, more CPU — affordable on the current host).
+   (partial mitigation, more CPU — bad on the Atom N2800).
 4. **Estimated effect.** No effect on the golden (D4 sub-score is fixed in the
    fixture). On live runs, (b) makes D4 reproducible; the *level* of D4 could shift
    from today's unseeded expected value to the specific seed's realization — a
@@ -307,7 +307,7 @@ rationale · estimated effect · backward-compat/freeze implications · recommen
    reproducible → v4. Caveat: lppls 0.6.24 uses Python `multiprocessing` workers;
    the seed must be set so each worker inherits it deterministically (verify the
    package respects a global seed across `workers > 1`, else pin `LPPLS_WORKERS = 1`
-   for reproducibility — a CPU/latency trade).
+   for reproducibility — a CPU/latency trade on the Atom).
 6. **Recommendation.** Option (b) with the existing house seed for consistency, and
    validate worker-inheritance empirically before committing; if workers break
    determinism, pin `workers = 1` in the reproducible path. **Requires a probe** of

@@ -1,9 +1,10 @@
 """The single delivery worker: claim, revalidate, render, send, classify.
 
-One worker. That is a deliberate choice, and it means the budget recheck does
-not have to be distributed-safe. If a second worker is ever enabled, that
-recheck and the lease claim both need a fresh concurrency review — the code
-says so rather than leaving it implicit.
+One worker. On the Atom N2800 target this is a capacity decision as much as a
+correctness one, but it also means the budget recheck does not have to be
+distributed-safe. If a second worker is ever enabled, that recheck and the
+lease claim both need a fresh concurrency review — the code says so rather than
+leaving it implicit.
 
 Order matters, and every step can still stop the send:
 

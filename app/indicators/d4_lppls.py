@@ -81,9 +81,10 @@ FILTER_CONDITIONS: dict[str, float] = _M.as_dict("indicators", "d4", "filter_con
 # times shrink the window from LPPLS_WINDOW_MAX down to LPPLS_SMALLEST_WINDOW
 # in LPPLS_INNER_INCREMENT-day steps -> ~144 start-time windows at ONE endpoint
 # (the library grid yields dt in {34, 39, ..., 749} for a 750-close window).
-# Budget: ~144 fits x max_searches=15, against the v3.2 calibration of 675k
-# point-searches ~ 64 s on a dev core — comfortably inside the 1500 s subprocess
-# timeout. Raise max_searches only after a timed run on the deploy host.
+# Atom N2800 budget: ~144 fits x max_searches=15 projects ~650-850 s (measured
+# against the v3.2 calibration of 675k point-searches ~ 64 s on a dev core,
+# Atom ~8x slower) — inside the 1500 s subprocess timeout with margin. Raise
+# max_searches only after a timed host run.
 LPPLS_WORKERS = _M.get_path("indicators", "d4", "workers")
 LPPLS_WINDOW_MAX = _M.get_path("indicators", "d4", "window_max")          # 750 trading days
 LPPLS_SMALLEST_WINDOW = _M.get_path("indicators", "d4", "smallest_window")      # 30
@@ -265,8 +266,8 @@ def compute_confidence_isolated(daily_closes: list[float], timeout_s: int = 1800
     """Run the LPPLS fit in a SUBPROCESS and return the state-dict result.
 
     Isolation exists because the lppls dependency stack (scipy, scikit-learn,
-    numba) ships native wheels whose crashes are uncatchable in-process, and
-    because a pathological fit can hang past any useful deadline.
+    numba) ships native wheels that can die with SIGILL on CPUs below their
+    build baseline (e.g. pre-SSE4.2 Atoms) — an uncatchable in-process crash.
     A crash or timeout maps to state="FLOOR" (quality 0.0): the caller keeps
     the payload row visible but EXCLUDES d4 from the aggregation and
     renormalizes Block D — an uncomputed indicator must never masquerade as a

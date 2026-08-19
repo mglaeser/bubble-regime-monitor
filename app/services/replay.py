@@ -476,8 +476,8 @@ def s5_dual_report() -> dict[str, Any]:
 
 def assemble_decision_packages() -> dict[str, Any]:
     """Collate the per-PIN evidence packages. Studies that need the production
-    host's network/data (EDGAR PIT grid, ALFRED vintages, price seeds, G1-vs-mp
-    runtime benchmarks) are explicitly PENDING_HOST — never silently omitted."""
+    host's network/data (EDGAR PIT grid, ALFRED vintages, price seeds, Atom
+    G1-vs-mp benchmarks) are explicitly PENDING_HOST — never silently omitted."""
     sufficiency = s5_tier_sufficiency()
     pending = {"status": "PENDING_HOST",
                "run_on": "production host (network + data access required)"}
@@ -492,7 +492,7 @@ def assemble_decision_packages() -> dict[str, Any]:
         "F_ath_basis": {**pending,
                         "harness": "docs/harnesses/f_ath_continuity_harness.py"},
         "G_lppls_execution": {**pending,
-                              "needs": "host runtime benchmark: G1 deterministic "
+                              "needs": "Atom runtime benchmark: G1 deterministic "
                                        "reference vs multiprocessing path"},
         "H_s5_calendar": {
             # Never a mechanical GATE_MET (panel finding): the day condition is

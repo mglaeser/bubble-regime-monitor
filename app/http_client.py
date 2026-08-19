@@ -3,8 +3,8 @@
 Design notes:
 - ONE pooled, thread-safe httpx.Client for the whole process. Per-request
   clients would re-do TCP+TLS for every call — the breadth sweep alone makes
-  ~500 requests to one host, and TLS handshake cost dominates there.
-  Keep-alive makes those a single connection.
+  ~500 requests to one host, and on low-power deploy targets handshake CPU
+  dominates. Keep-alive makes those a single connection.
 - Retries are reserved for failures that can actually heal: transport errors,
   HTTP 5xx, and 429. A 404 for a delisted ticker or a 403 from a scraper wall
   will not improve on attempt three — retrying those tripled the latency of
