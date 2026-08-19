@@ -251,17 +251,6 @@ _DEFECT_WORDS = re.compile(
     r"\b(bypass|fail-open|unauthenticated|injection|vulnerab\w*|exploitab\w*|"
     r"race condition|deadlock|regress\w*|data loss|privilege escalation)\b", re.I)
 
-#: Tokens asserting the ABSENCE of the defect word that follows them.
-#:
-#: This gate and `build_system_prompt` were in direct conflict. The prompt ASKS
-#: a green vote to say "WHAT was checked + why no defect", so a conscientious
-#: panelist writes "— no fail-open;" — and the gate read the word, ignored the
-#: "no", and discarded the vote as self-contradictory. On PR #64 that turned a
-#: UNANIMOUS 3/3 approval into a fail-closed BLOCK, and it punished precisely
-#: the most specific reviewer: the voice that wrote only "no concrete defect"
-#: sailed through, while the one that listed what it had ruled out did not.
-_NEGATORS = frozenset({"no", "not", "none", "never", "without", "zero", "free", "nil"})
-
 #: A negation governs only its own clause. In "no security hole, but a race
 #: condition at x.py:12" the second half is a live defect claim, and letting
 #: the leading "no" reach across the comma would launder it into an approval.
@@ -271,8 +260,15 @@ _NEGATORS = frozenset({"no", "not", "none", "never", "without", "zero", "free", 
 _CLAUSE_BOUNDARY = re.compile(r"[;,.:]")
 
 #: The ONLY shape that counts as "this defect is absent": a negator IMMEDIATELY
-#: before the defect word, which then IMMEDIATELY ends its clause. Nothing may
-#: sit on either side — no determiner, no coordination, no suffix.
+#: before the defect word, which then IMMEDIATELY ends its assertion. Nothing
+#: may sit on either side — no determiner, no coordination, no suffix — and the
+#: assertion must be finished, so a trailing colon does not qualify.
+#:
+#: There is deliberately no `_NEGATORS` set beside this. One earlier revision
+#: kept both, they drifted (the set listed "free"/"nil" that the live pattern
+#: never honoured), and a stale constant next to a security rule is an
+#: invitation to re-widen the rule to match it. This regex is the only place
+#: the vocabulary is written down.
 #:
 #: This is deliberately far narrower than English negation, and it is the third
 #: attempt. The first two tried to FOLLOW negation scope — a proximity window,
@@ -322,8 +318,14 @@ def asserts_absence(text: str, hit: re.Match[str]) -> bool:
     # The word must END its clause: in "no injection protection" the head of
     # the phrase is `protection`, so a missing DEFENCE is the defect present.
     boundary = _CLAUSE_BOUNDARY.search(text, hit.end())
-    rest = text[hit.end():boundary.start() if boundary else len(text)]
-    return not rest.strip()
+    if text[hit.end():boundary.start() if boundary else len(text)].strip():
+        return False
+    # ...and a COLON does not finish an assertion, it introduces the
+    # elaboration of one. "no injection: raw query reaches SQL" contradicts
+    # itself, and reading the half before the colon as an absence approved the
+    # half after it (panel, PR #65). A `;`, a `.` or the end of the reason ends
+    # an assertion; a `:` means the sentence has not made its point yet.
+    return boundary is None or boundary.group(0) != ":"
 
 
 def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
@@ -725,6 +727,45 @@ def selftest() -> None:
     expect(attest_consistency([GV("checked writes, free of data loss"), GV("docs only"),
                                GV("reviewed diff")], M3)["block"] is True,
            "only '<negator> <defect>' is recognised -- 'free of X' over-blocks, by design")
+    expect(attest_consistency([GV("no injection: raw query reaches SQL"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is True,
+           "a colon introduces an elaboration -- the assertion is not finished")
+    # auth_header() -- both branches
+    _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)
+    try:
+        expect("Authorization" in auth_header(), "default must be Authorization: Bearer")
+        os.environ["VERIFIER_AUTH_HEADER"] = "X-OpenCodex-API-Key"
+        expect(list(auth_header()) == ["X-OpenCodex-API-Key"], "custom header must replace Authorization")
+        os.environ["VERIFIER_AUTH_HEADER"] = ""
+        expect("Authorization" in auth_header(), "empty variable (unset Actions var) -> default")
+        os.environ["VERIFIER_AUTH_HEADER"] = "authorization"
+        expect("Authorization" in auth_header(), "case-insensitive 'authorization' -> default Bearer form")
+    finally:
+        os.environ.pop("VERIFIER_AUTH_HEADER", None)
+        if _saved is not None:
+            os.environ["VERIFIER_AUTH_HEADER"] = _saved
+
+    # review_range() -- a non-hex candidate sha must never reach git
+    _sv = os.environ.get("VERIFIER_HEAD_SHA")
+    try:
+        os.environ["VERIFIER_HEAD_SHA"] = "not-a-sha; rm -rf /"
+        try:
+            review_range()
+            expect(False, "non-hex VERIFIER_HEAD_SHA must raise DiffError")
+        except DiffError:
+            pass
+    finally:
+        os.environ.pop("VERIFIER_HEAD_SHA", None)
+        if _sv is not None:
+            os.environ["VERIFIER_HEAD_SHA"] = _sv
+
+    # normalize_base() -- a trailing slash builds "//models", answered 404
+    expect(normalize_base("https://h/v1/") == "https://h/v1", "trailing slash must be stripped")
+    expect(normalize_base("https://h/v1///") == "https://h/v1", "repeated slashes must be stripped")
+    expect(normalize_base("  https://h/v1  ") == "https://h/v1", "surrounding whitespace must be stripped")
+    expect(normalize_base("") == "", "empty stays empty so the `or` default applies")
+    expect(normalize_base(None) == "", "None stays empty so the `or` default applies")
+
     print("   OK selftest: decide() + model_matches() + require_approvals() (required approver Sol "
           "+ corroboration) + attest_reasons() + attest_proof() + attest_consistency() + "
           "auth_header() + review_range() + normalize_base() correct.")

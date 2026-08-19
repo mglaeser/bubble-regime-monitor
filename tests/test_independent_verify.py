@@ -388,6 +388,9 @@ class TestConsistencyStillBlocksRealClaims:
         "not regression-free",
         # PANEL: a live conjunct riding along on an earlier negator.
         "no regression and an actual injection",
+        # PANEL: a colon introduces the elaboration of an assertion, so the
+        # half before it is not a finished absence.
+        "no injection: raw query reaches SQL",
     ])
     def test_a_real_claim_still_blocks(self, reason):
         assert iv.attest_consistency(self._votes(reason), self.M)["block"] is True
@@ -407,6 +410,37 @@ class TestConsistencyStillBlocksRealClaims:
 
     def test_negation_does_not_reach_backwards(self):
         assert iv.attest_consistency(self._votes("deadlock, no"), self.M)["block"] is True
+
+
+class TestSelftestAttestsOnlyWhatItRan:
+    """`--selftest` prints the list of functions it checked, and CI reads that
+    line as the attestation.
+
+    Rewriting the consistency block silently deleted the auth_header,
+    review_range and normalize_base coverage — including the guard that keeps a
+    non-hex VERIFIER_HEAD_SHA out of a git argv — while the print went on
+    naming all three. A false green attestation on a security gate, caught by
+    the panel (PR #65/SOAT-B). This pins the print against the code."""
+
+    @staticmethod
+    def _selftest_source():
+        import inspect
+
+        return inspect.getsource(iv.selftest)
+
+    @pytest.mark.parametrize("checked", [
+        "decide(", "model_matches(", "require_approvals(", "attest_reasons(",
+        "attest_proof(", "attest_consistency(", "auth_header(", "review_range(",
+        "normalize_base(",
+    ])
+    def test_every_function_the_summary_names_is_actually_exercised(self, checked):
+        assert checked in self._selftest_source(), (
+            f"--selftest claims to check {checked} but never calls it")
+
+    def test_the_shell_injection_guard_is_still_covered(self):
+        """The one deletion that mattered most: a non-hex candidate SHA must
+        never reach a git argv."""
+        assert "not-a-sha; rm -rf /" in self._selftest_source()
 
 
 class TestGreenPromptDoesNotAskForDefectWords:
