@@ -292,6 +292,140 @@ class TestAttestConsistency:
                                       self._green("no issue")], self.M3)["block"] is False
 
 
+class TestGreenVotesAreNotAskedForDefectWords:
+    """The fix for PR #64, and it is upstream of the gate.
+
+    `build_system_prompt` used to ask a green vote to say "WHAT was checked +
+    why no defect". The gate matches defect terms literally, so the protocol
+    itself manufactured "no fail-open" and the gate discarded the vote — turning
+    a UNANIMOUS 3/3 approval into a fail-closed BLOCK, and punishing the most
+    specific reviewer while the vaguest one passed.
+
+    Teaching the gate to read negation was tried and withdrawn: the panel found
+    seven laundering paths in five rounds (see TestConsistencyMatchIsLiteral).
+    So the ambiguous phrasing is prevented instead of interpreted."""
+
+    def test_prompt_forbids_defect_terms_in_a_green_reason(self):
+        prompt = iv.build_system_prompt("ch-1")
+        assert "EVEN NEGATED" in prompt
+        assert "no race condition" in prompt      # the worked counter-example
+
+    def test_prompt_still_demands_the_refutation_schema(self):
+        assert "path/file:line" in iv.build_system_prompt("ch-1")
+
+    def test_prompt_still_carries_the_proof_of_check_challenge(self):
+        assert "ch-1-<tier>" in iv.build_system_prompt("ch-1")
+
+
+class TestConsistencyMatchIsLiteral:
+    """The gate must keep matching defect terms LITERALLY.
+
+    Every string below was proposed by the review panel against a version of
+    this gate that tried to read negation, and every one was a real laundering
+    path — an inconsistent green vote naming a live defect that the gate would
+    have accepted. They are pinned here so a future attempt to make the gate
+    "smarter" has to break this test first and explain why.
+
+    `no fail-open` is in the list deliberately: it is a genuine assertion of
+    ABSENCE and it still blocks. That is the accepted cost of a literal match,
+    and the reason the prompt now steers green votes away from the phrasing."""
+
+    M = ["m-a", "m-b", "m-c"]
+
+    @staticmethod
+    def _votes(reason):
+        return [{"ok": True, "v": {"refuted": False, "reason": reason, "confidence": "medium"}},
+                {"ok": True, "v": {"refuted": False, "reason": "docs only", "confidence": "low"}},
+                {"ok": True, "v": {"refuted": False, "reason": "reviewed diff", "confidence": "low"}}]
+
+    @pytest.mark.parametrize("reason", [
+        "no fail-open",                                              # the false positive, accepted
+        "no auth: privilege escalation via /admin",                  # negator binds another noun
+        "without auth privilege escalation",                         # same, unpunctuated
+        "no injection protection: raw query parameter reaches SQL",   # head of phrase is the DEFENCE
+        "not regression-free",                                       # the absence-suffix, negated
+        "no regression and an actual injection",                     # live conjunct
+        "no injection: raw query reaches SQL",                       # colon elaboration
+        "not without injection",                                     # double negation
+        "auth bypass when key is None",                              # plain claim
+    ])
+    def test_every_defect_term_in_a_green_vote_blocks(self, reason):
+        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is True
+
+    def test_a_reason_with_no_defect_term_passes(self):
+        assert iv.attest_consistency(
+            self._votes("throttle + lock ordering verified"), self.M)["block"] is False
+
+    def test_the_block_quotes_the_clause_not_just_the_word(self):
+        """Deciding whether a block was a real inconsistency or a phrasing
+        artefact took reading the raw job log by hand. The summary now carries
+        enough to tell them apart."""
+        out = iv.attest_consistency(self._votes("checked writes; data loss on retry"), self.M)
+        assert out["block"] is True
+        assert "data loss on retry" in out["reason"]
+
+
+class TestSelftestAttestsOnlyWhatItRan:
+    """`--selftest` prints the functions it checked and CI reads that line as
+    the attestation, so the print must not outlive the code.
+
+    Editing the consistency block once sliced past its own boundary and deleted
+    the auth_header, review_range and normalize_base coverage — including the
+    guard keeping a non-hex VERIFIER_HEAD_SHA out of a git argv — while the
+    print went on naming all three. A false green on a security gate, which is
+    the very defect class this file exists to catch.
+
+    THESE TESTS RUN selftest AND COUNT CALLS. The first version searched its
+    SOURCE for "auth_header(" — which the summary string it prints contains, so
+    deleting every real call still passed. A check that cannot fail for the
+    reason it exists is the same defect it is meant to catch, one level up."""
+
+    #: Exactly the functions the closing summary claims were checked.
+    ATTESTED = ("decide", "model_matches", "require_approvals", "attest_reasons",
+                "attest_proof", "attest_consistency", "auth_header", "review_range",
+                "normalize_base")
+
+    @staticmethod
+    def _run_recording(monkeypatch):
+        """Run selftest() with every attested function wrapped, and report what
+        was actually invoked (plus the argv-critical env review_range saw)."""
+        called: set[str] = set()
+        head_shas: list[str] = []
+
+        def wrap(name, original):
+            def recorder(*args, **kwargs):
+                called.add(name)
+                if name == "review_range":
+                    import os
+
+                    head_shas.append(os.environ.get("VERIFIER_HEAD_SHA", ""))
+                return original(*args, **kwargs)
+            return recorder
+
+        for name in TestSelftestAttestsOnlyWhatItRan.ATTESTED:
+            monkeypatch.setattr(iv, name, wrap(name, getattr(iv, name)))
+        iv.selftest()
+        return called, head_shas
+
+    def test_every_function_the_summary_names_is_actually_called(self, monkeypatch, capsys):
+        called, _ = self._run_recording(monkeypatch)
+        missing = set(self.ATTESTED) - called
+        assert not missing, f"--selftest claims to check {sorted(missing)}, but never calls them"
+
+    def test_the_summary_names_exactly_what_ran(self, monkeypatch, capsys):
+        """And nothing is exercised that the summary forgets to mention."""
+        self._run_recording(monkeypatch)
+        summary = capsys.readouterr().out
+        for name in self.ATTESTED:
+            assert f"{name}()" in summary, f"{name} runs but the attestation omits it"
+
+    def test_the_shell_injection_guard_runs_against_the_malicious_value(self, monkeypatch, capsys):
+        """Not that the string appears somewhere — that review_range was
+        actually entered while it was set."""
+        _, head_shas = self._run_recording(monkeypatch)
+        assert any("rm -rf /" in sha for sha in head_shas), (
+            "review_range() is never exercised with a non-hex VERIFIER_HEAD_SHA")
+
 class TestAuthHeader:
     """The gateway's auth header is configurable because inference.klee.me runs
     providers.openai with authMode="forward" and reserves Authorization for
