@@ -293,16 +293,25 @@ class TestAttestConsistency:
 
 
 class TestConsistencyReadsNegation:
-    """NAMING a defect is not CLAIMING one.
+    """NAMING a defect is not CLAIMING one — but only one shape is recognised.
 
-    `build_system_prompt` asks a green vote to say "WHAT was checked + why no
-    defect", so the protocol itself invites "no fail-open". The gate matched the
-    word, ignored the "no", and discarded the vote — turning a unanimous 3/3
-    approval into a fail-closed BLOCK on PR #64 (2026-08-19) and punishing the
-    most specific reviewer while the vaguest one passed.
+    `build_system_prompt` used to ask a green vote for "WHAT was checked + why
+    no defect", so the protocol itself produced "no fail-open"; the gate matched
+    the word, ignored the "no", and discarded the vote. On PR #64 that turned a
+    UNANIMOUS 3/3 approval into a fail-closed BLOCK, and it punished the most
+    specific reviewer while the vaguest one passed.
 
-    The half of this that matters more is the second class below: narrowing what
-    counts as a CLAIM must not widen what counts as an APPROVAL."""
+    Two earlier fixes tried to FOLLOW negation scope — a proximity window, then
+    adjacency with determiners, coordination and an "X-free" suffix — and the
+    panel broke both, five times, every time correctly. Each hole was a
+    laundering path INTO a fail-closed control: a worse defect than the false
+    positive being fixed. So the gate no longer parses scope. It recognises
+    `<negator> <defect-word>` ending its clause and reads everything else as a
+    claim, and the prompt now steers green votes away from defect vocabulary
+    altogether.
+
+    The second class below is the one that matters: narrowing what counts as a
+    CLAIM must not widen what counts as an APPROVAL."""
 
     M = ["m-a", "m-b", "m-c"]
 
@@ -312,7 +321,7 @@ class TestConsistencyReadsNegation:
                 {"ok": True, "v": {"refuted": False, "reason": "docs only", "confidence": "low"}},
                 {"ok": True, "v": {"refuted": False, "reason": "reviewed diff", "confidence": "low"}}]
 
-    #: The vote that was actually blocked, trimmed to the clause that did it.
+    #: The vote that was actually blocked on PR #64.
     REAL_BLOCKED_VOTE = (
         "Checked: alert throttle/announced state machine (new-sig immediate, repeat gated, "
         "failed send not marked sent, recovery only after delivered ack) - no fail-open; "
@@ -325,40 +334,18 @@ class TestConsistencyReadsNegation:
     @pytest.mark.parametrize("reason", [
         "no fail-open",
         "no fail-open; lock release guaranteed",
-        "checked writes, free of data loss",
-        "suite regression-free after change",
-        "no regression, no data loss",
+        "no regression, no data loss",          # each occurrence carries its own
         "not exploitable",
-        "zero regressions observed",
-        "no race condition: single writer",
+        "checked auth paths, no issue",         # no defect term at all
     ])
     def test_an_asserted_absence_is_not_a_defect_claim(self, reason):
         assert iv.attest_consistency(self._votes(reason), self.M)["block"] is False
 
-    @pytest.mark.parametrize("reason", [
-        "auth bypass when key is None",                        # bare claim
-        "no security hole, but a race condition at x.py:12",   # negation is in the PRIOR clause
-        "no fail-open; data loss on retry path",               # one negated, one real
-        "looks fine. privilege escalation via /admin",         # new sentence
-        "checked for injection",                               # unqualified: fail closed
-        "fail-open on missing header",
-        # The negator modifies a DIFFERENT noun, and the defect is what its
-        # absence causes. Caught by the panel on this very PR (#65/SOTA-A):
-        # a proximity window read both of these as approvals.
-        "no auth: privilege escalation via /admin",
-        "without auth privilege escalation",
-        "no rate limit - injection via query",
-        # The negator IS adjacent, but the head of the phrase is the DEFENCE —
-        # so the sentence asserts a missing guard, i.e. the defect is present.
-        # Panel finding on this PR (#65/SOTA-A, second round).
-        "no injection protection: raw query parameter reaches SQL",
-        "no fail-open protection in the new path",
-        "no auth or privilege escalation check",
-    ])
-    def test_a_real_claim_still_blocks(self, reason):
-        """The control's whole purpose. A negation governs its own clause only —
-        it must never reach across a boundary and launder a live claim."""
-        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is True
+    def test_a_refuting_vote_is_still_never_inspected(self):
+        votes = self._votes("docs only")
+        votes[0]["v"].update(refuted=True, confidence="high",
+                             reason="x.py:1 - fail-open - control stops firing")
+        assert iv.attest_consistency(votes, self.M)["block"] is False
 
     def test_the_blocking_reason_quotes_the_clause(self):
         """A lone word gave an operator no way to tell a real inconsistency from
@@ -369,34 +356,73 @@ class TestConsistencyReadsNegation:
         assert "data loss on retry" in out["reason"]      # the clause, not just the word
         assert "no fail-open" not in out["reason"]        # and not the negated one
 
-    @pytest.mark.parametrize("reason", [
-        "no regression or data loss",      # one negator governs both conjuncts
-        "no fail-open on missing header",  # a preposition keeps the word the head
-        "zero regressions observed",
-    ])
-    def test_the_word_may_still_end_its_phrase(self, reason):
-        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is False
+
+class TestConsistencyStillBlocksRealClaims:
+    """The control's purpose, and the regression surface of every fix above.
+
+    The five parametrised strings marked PANEL were each found by the review
+    panel against an earlier version of this gate, and each was a real
+    laundering path: an inconsistent green vote naming a live defect that the
+    gate would have accepted."""
+
+    M = TestConsistencyReadsNegation.M
+    _votes = staticmethod(TestConsistencyReadsNegation._votes)
 
     @pytest.mark.parametrize("reason", [
-        "no obvious race condition",
-        "no concrete data loss",
-        "no further regression",
-        "no known injection",
+        "auth bypass when key is None",                              # bare claim
+        "no security hole, but a race condition at x.py:12",         # prior clause
+        "no fail-open; data loss on retry path",                     # second, real claim
+        "looks fine. privilege escalation via /admin",               # new sentence
+        "checked for injection",                                     # unqualified
+        "fail-open on missing header",
+        # PANEL: the negator binds a DIFFERENT noun, and the defect is what its
+        # absence causes.
+        "no auth: privilege escalation via /admin",
+        "without auth privilege escalation",
+        "no rate limit - injection via query",
+        # PANEL: the negator is adjacent, but the head of the phrase is the
+        # DEFENCE — a missing guard is the defect PRESENT.
+        "no injection protection: raw query parameter reaches SQL",
+        "no fail-open protection in the new path",
+        # PANEL: the absence-suffix itself negated.
+        "not regression-free",
+        # PANEL: a live conjunct riding along on an earlier negator.
+        "no regression and an actual injection",
     ])
-    def test_determiners_may_sit_between_negator_and_word(self, reason):
-        """Adjacency is measured after skipping determiners and degree
-        adjectives — otherwise the rule would reject ordinary English."""
-        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is False
+    def test_a_real_claim_still_blocks(self, reason):
+        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is True
+
+    @pytest.mark.parametrize("reason", [
+        "checked writes, free of data loss",
+        "suite regression-free after change",
+        "no obvious race condition",
+        "no regression or data loss",
+    ])
+    def test_unrecognised_absence_phrasings_over_block(self, reason):
+        """Asserted, not tolerated. Only `<negator> <defect>` ending a clause is
+        recognised; every other phrasing fails CLOSED. Pinned so a future edit
+        cannot widen the shape without changing this test and saying why —
+        which is how the five laundering paths above got in."""
+        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is True
 
     def test_negation_does_not_reach_backwards(self):
-        """`asserts_absence` looks only at what PRECEDES the word."""
         assert iv.attest_consistency(self._votes("deadlock, no"), self.M)["block"] is True
 
-    def test_a_refuting_vote_is_still_never_inspected(self):
-        votes = self._votes("docs only")
-        votes[0]["v"].update(refuted=True, confidence="high",
-                             reason="x.py:1 - fail-open - control stops firing")
-        assert iv.attest_consistency(votes, self.M)["block"] is False
+
+class TestGreenPromptDoesNotAskForDefectWords:
+    """The root conflict: the prompt ASKED for the phrasing the gate punished.
+
+    Fixing only the gate leaves the protocol generating reasons it has to be
+    lenient about, and leniency is where all five laundering paths lived."""
+
+    def test_prompt_forbids_defect_terms_in_a_green_reason(self):
+        prompt = iv.build_system_prompt("ch-1")
+        assert "EVEN NEGATED" in prompt
+        assert "no race condition" in prompt        # the worked counter-example
+
+    def test_prompt_still_demands_the_refutation_schema(self):
+        prompt = iv.build_system_prompt("ch-1")
+        assert "path/file:line" in prompt
 
 
 class TestAuthHeader:
