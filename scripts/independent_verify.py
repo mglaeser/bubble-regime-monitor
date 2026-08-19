@@ -693,7 +693,7 @@ def build_diff() -> str:
             f"{truncate_marked(names, 100_000, 'FILE LIST')}\n\n"
             f"# Diffstat:\n{truncate_marked(stat, 8_000, 'DIFFSTAT')}\n\n"
             f"# Code changes (binaries/assets/data excluded):\n"
-            f"{truncate_marked(body, 50_000, 'DIFF BODY')}")
+            f"{truncate_marked(body, 200_000, 'DIFF BODY')}")
 
 
 # ------------------------------------------------------------------ prompts --
@@ -1153,17 +1153,46 @@ def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
     return [pick_for_pref(ids, w) for w in wanted]
 
 
+class DuplicateKey(ValueError):
+    """A verdict object carrying the same key twice."""
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict:
+    """json.loads keeps the LAST of duplicate keys, silently.
+
+    That is a bypass of the whole ledger, measured before this hook existed:
+
+        {"refuted": false, ..., "defects": ["admin.py:83 - auth bypass"], "defects": []}
+
+    parses to defects == [] and the gate PASSES a vote that declared a defect in
+    the same object it erased it from. The two declarations this gate compares
+    are only comparable if the object says one thing per key, so a duplicate is
+    not resolved -- it is refused."""
+    seen: set[str] = set()
+    for k, _ in pairs:
+        if k in seen:
+            raise DuplicateKey(f"duplicate key {k!r} in the verdict object")
+        seen.add(k)
+    return dict(pairs)
+
+
 def parse_verdict(content: str) -> Any:
     if not content:
         return None
+    decoder = json.JSONDecoder(object_pairs_hook=_no_duplicate_keys)
     try:
-        return json.loads(content)
+        return decoder.decode(content)
+    except DuplicateKey:
+        # Ambiguous by construction. Returning None makes _is_valid() false, and
+        # a vote that cannot be parsed is discarded rather than counted -- the
+        # same fail-closed route an unparsable reply already takes.
+        return None
     except ValueError:
         m = re.search(r"\{[\s\S]*\}", content)
         if m:
             try:
-                return json.loads(m.group(0))
-            except ValueError:
+                return decoder.decode(m.group(0))
+            except (ValueError, DuplicateKey):
                 return None
     return None
 

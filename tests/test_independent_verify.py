@@ -1117,3 +1117,39 @@ class TestRequiredLedgerMeansRequired:
         # working until it opts in.
         votes = [self._green(defects="none"), self._green(), self._green()]
         assert iv.attest_consistency(votes, self.M, False)["block"] is False
+
+
+class TestDuplicateKeysCannotEraseADeclaration:
+    """`json.loads` keeps the LAST of duplicate keys, silently.
+
+    Measured before the hook existed: a verdict declaring a defect and repeating
+    the key empty in the same object parsed to `defects == []`, and the gate
+    PASSED it. The ledger compares two declarations about one fact; that is only
+    meaningful if the object says one thing per key.
+    """
+
+    M3 = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+    ATTACK = ('{"refuted": false, "confidence": "high", "reason": "docs only change", '
+              '"defects": ["admin.py:83 - auth bypass"], "defects": []}')
+
+    def test_a_repeated_ledger_key_is_refused_not_resolved(self):
+        assert iv.parse_verdict(self.ATTACK) is None
+
+    def test_a_repeated_key_anywhere_is_refused(self):
+        # Not only the ledger: any duplicate makes the object ambiguous.
+        assert iv.parse_verdict('{"refuted": false, "refuted": true, "reason": "x"}') is None
+
+    def test_an_ordinary_verdict_still_parses(self):
+        v = iv.parse_verdict('{"refuted": false, "confidence": "high", '
+                             '"reason": "docs only change", "defects": []}')
+        assert v == {"refuted": False, "confidence": "high",
+                     "reason": "docs only change", "defects": []}
+
+    def test_a_duplicate_inside_an_embedded_object_is_refused(self):
+        assert iv.parse_verdict('prose {"refuted": false, "reason": "x", '
+                                '"defects": ["a"], "defects": []} trailing') is None
+
+    def test_the_unparsable_vote_is_discarded_not_counted(self):
+        # _is_valid() is false for a None verdict, so the vote cannot approve,
+        # cannot corroborate, and cannot feed attest_reasons.
+        assert iv._is_valid({"ok": True, "v": iv.parse_verdict(self.ATTACK)}) is False
