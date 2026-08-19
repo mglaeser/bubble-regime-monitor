@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -68,7 +69,7 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
     """Everything that must be true before a stage is advanced."""
     from app.alerts.artifacts import validate_from_disk
     from app.alerts.errors import AlertError
-    from app.config import get_settings
+    from app.config import get_settings, near_miss_env_keys
     from app.db import session_scope
     from app.models import Snapshot
 
@@ -110,7 +111,26 @@ def cmd_preflight(_args: argparse.Namespace) -> int:
           f"ALERT_INPUT_CAPTURE={settings.alert_input_capture}")
     check("alerts_mode_recorded", True, f"ALERTS_MODE={settings.alerts_mode}")
     check("legacy_daily_digest", True,
-          f"effective_daily_sms_enabled={settings.effective_daily_sms_enabled}")
+          f"transport={settings.daily_digest_transport} "
+          f"(effective_daily_sms_enabled={settings.effective_daily_sms_enabled}, "
+          f"imessage_enabled={settings.imessage_enabled})")
+    # Fails the preflight rather than merely reporting: a digest configured
+    # under a misspelt key is indistinguishable from one deliberately off, and
+    # this is the house mechanism for surfacing exactly that.
+    near = near_miss_env_keys(os.environ)
+    check("no_misspelt_settings", not near,
+          "; ".join(f"{actual} looks like {intended}" for actual, intended in near)
+          or "no near-miss environment keys")
+    check("imessage_switch_matches_config", not settings.imessage_enabled_but_unconfigured,
+          "IMESSAGE_ENABLED is on but URL/key/recipient are not all set — the digest "
+          "is NOT going over iMessage" if settings.imessage_enabled_but_unconfigured
+          else "iMessage switch and configuration agree")
+    if settings.imessage_configured:
+        from app.notify.imessage import check_destination
+
+        problem = check_destination(settings.imessage_api_base_url.rstrip("/"))
+        check("imessage_destination_safe", problem is None,
+              problem or "IMESSAGE_API_BASE_URL is https (or loopback http)")
 
     if artifacts is not None:
         pins = [r.rule_id for r in artifacts.ruleset.rules()

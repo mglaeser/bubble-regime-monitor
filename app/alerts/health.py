@@ -436,5 +436,25 @@ def health_projection(
         },
         "heartbeats": heartbeats,
         "sqlite": sqlite_info,
-        "legacy_daily_digest_enabled": bool(settings.effective_daily_sms_enabled),
+        # `_enabled` reports whether the digest is SCHEDULED, on any transport
+        # — not whether it can actually send. Reading the SMS switch alone
+        # would report "disabled" for a deployment that sends over iMessage
+        # daily, but the switch being on does not imply credentials exist:
+        # IMESSAGE_ENABLED=true with a blank URL schedules a job that fires
+        # every day and skips every time. `_configured` is the difference, and
+        # an operator surface that collapsed the two would hide exactly the
+        # half-configured deployment worth noticing.
+        "legacy_daily_digest_enabled": settings.daily_digest_transport != "none",
+        "legacy_daily_digest_transport": settings.daily_digest_transport,
+        "legacy_daily_digest_configured": (
+            bool(settings.sipgate_token_id and settings.sipgate_token
+                 and settings.sipgate_recipient)
+            if settings.daily_digest_transport == "sipgate"
+            else settings.daily_digest_transport == "imessage"),
+        # IMESSAGE_ENABLED is on but the URL/key/recipient are not all set. The
+        # transport selector deliberately does NOT pick iMessage in this state
+        # — otherwise adding the switch to a working SMS deployment would kill
+        # the digest — so without this field the operator would see a healthy
+        # sipgate digest and never learn their iMessage config is incomplete.
+        "imessage_enabled_but_unconfigured": settings.imessage_enabled_but_unconfigured,
     }

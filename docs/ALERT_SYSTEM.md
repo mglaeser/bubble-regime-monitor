@@ -256,8 +256,16 @@ unlike the scoring API, which does. That fallback is exactly what would put an
 admin credential in a browser.
 
 `DAILY_SMS_ENABLED` is a migration-friendly alias for `SMS_ENABLED`. The legacy
-daily digest keeps its own switch; turning the alert system on never disables
-it. Cutover is the explicit Stage 4 gate.
+daily digest keeps its own switches — plural since it gained an iMessage
+transport: `IMESSAGE_ENABLED` and `SMS_ENABLED`/`DAILY_SMS_ENABLED`, with the
+scheduler gating on `Settings.daily_digest_transport` rather than on the SMS
+alias. iMessage wins when both are on, and there is no fallback. **Stopping the
+legacy digest therefore needs both switches off; clearing only the SMS one
+leaves an iMessage deployment sending.** Turning the alert system on still never
+disables the legacy digest. Cutover to the alert system's own delivery path is
+still the explicit Stage 4 gate — and note that the transport change did not
+advance it: the legacy digest simply moved transports underneath a gate that has
+not moved.
 
 Volume, lease, retention and LLM settings: see `app/config.py` — every one has
 a safe default and none of them is read by anything that sends.

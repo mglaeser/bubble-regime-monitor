@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import Literal
 
@@ -73,6 +74,28 @@ class Settings(BaseSettings):
     sms_daily_hour: int = 8          # UTC hour for the daily digest
     sms_daily_minute: int = 0
     sms_max_len: int = 160           # single-SMS GSM-7 ceiling (hard cap)
+
+    # Daily digest over iMessage via an imessage-proxy instance
+    # (POST {base}/api/messages). Auth is ONE scoped bearer key holding
+    # `messages:send` — never `admin`, which would also grant the key the
+    # ability to widen its own recipient allowlist. The destination must ALSO
+    # be on the proxy's allowlist, which that scope can neither read nor
+    # change, so a stolen key cannot pick a new recipient.
+    #
+    # The digest sends over exactly ONE transport. When both switches are on
+    # iMessage wins and sipgate is NOT called: delivering the same digest twice
+    # is a defect, not a fallback, and a silent downgrade to SMS would hide the
+    # proxy being down precisely when the operator needs to know.
+    #
+    # Shares SMS_DAILY_HOUR/MINUTE and SMS_MAX_LEN — the schedule and the body
+    # are transport-independent. The proxy accepts 4000 Unicode code points,
+    # so the 160-char ASCII cap is now a self-imposed SMS-era limit rather
+    # than a physical one; raising it is a product decision, not a migration.
+    imessage_enabled: bool = False
+    imessage_api_base_url: str = ""  # origin only, e.g. https://messages.example.com
+    imessage_api_key: str = ""       # scoped `messages:send` key, `imp_` prefix
+    imessage_recipient: str = ""     # allowlisted handle: +E.164 or an Apple-ID email
+    imessage_timeout_s: int = 30     # read cap; the proxy's own deadline is longer
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully
@@ -193,6 +216,131 @@ class Settings(BaseSettings):
         if self.daily_sms_enabled is not None:
             return self.daily_sms_enabled
         return self.sms_enabled
+
+    @property
+    def imessage_configured(self) -> bool:
+        """Credentials + destination present. Independent of the switch, so a
+        half-configured deployment reports "enabled but not configured" rather
+        than looking identical to one that was never turned on."""
+        return bool(self.imessage_api_base_url and self.imessage_api_key
+                    and self.imessage_recipient)
+
+    @property
+    def imessage_enabled_but_unconfigured(self) -> bool:
+        """The switch is on and the credentials are not there. Its own property
+        because this state must never look like "iMessage is simply off"."""
+        return self.imessage_enabled and not self.imessage_configured
+
+    @property
+    def daily_digest_transport(self) -> Literal["imessage", "sipgate", "none"]:
+        """Which transport carries the daily digest.
+
+        iMessage wins when both switches are on — see the IMESSAGE_* block. The
+        scheduler gates on this rather than on `effective_daily_sms_enabled`,
+        because an operator who set SMS_ENABLED=false and IMESSAGE_ENABLED=true
+        means "send my digest over iMessage", not "stop sending my digest".
+
+        REQUIRES `imessage_configured`, not merely the switch. Selecting on the
+        switch alone meant that adding IMESSAGE_ENABLED=true to a WORKING SMS
+        deployment silently killed the digest: the transport flipped, the job
+        was still scheduled, and every run skipped with "not configured" while
+        the health projection went on reporting the digest as enabled.
+
+        This is not the fallback the IMESSAGE_* block forbids. That rule is
+        about a send that FAILED — a proxy that is down must never quietly
+        become an SMS, because the silence is the signal. A blank URL is not a
+        failed send; it is a transport that was never set up, and preferring a
+        configured one over nothing loses no information. The unconfigured
+        switch is reported loudly by every operator surface rather than being
+        absorbed here: see `imessage_enabled_but_unconfigured`."""
+        if self.imessage_enabled and self.imessage_configured:
+            return "imessage"
+        if self.effective_daily_sms_enabled:
+            return "sipgate"
+        return "none"
+
+
+#: Settings whose absence disables a transport silently. `extra="ignore"`
+#: (model_config, above) means pydantic drops an unrecognised environment key
+#: without a word, so `IMESSAG_ENABLED=true` — one character short — reads as
+#: "iMessage off". Paired with SMS_ENABLED=false that yields a service which
+#: sends nothing and says nothing about why.
+_TYPO_PRONE = ("IMESSAGE_ENABLED", "IMESSAGE_API_BASE_URL", "IMESSAGE_API_KEY",
+               "IMESSAGE_RECIPIENT", "SMS_ENABLED")
+
+
+def near_miss_env_keys(environ: Mapping[str, str]) -> list[tuple[str, str]]:
+    """Environment keys that look like a misspelling of a known setting.
+
+    Returns (actual_key, probable_intent) pairs. Deliberately a plain function
+    and not a pydantic validator: app/config.py has no validators, every gate
+    in this codebase lives at its use site, and a boot-time hard failure over a
+    stray environment key would be a worse outcome than a loud log line."""
+    known = {k.lower() for k in Settings.model_fields}
+    hits: list[tuple[str, str]] = []
+    for key in environ:
+        upper = key.upper()
+        if upper.lower() in known:
+            continue
+        for candidate in _TYPO_PRONE:
+            if upper == candidate:
+                continue
+            # One edit apart AND sharing a real prefix. The edit test alone
+            # flags SES_ENABLED as a misspelling of SMS_ENABLED — a correctly
+            # spelled variable belonging to an unrelated service, since a
+            # container's whole environment is searched. A misconfiguration
+            # check that cries wolf on legitimate settings is one an operator
+            # learns to ignore, which costs more than the typo it was added to
+            # catch. Every real case shares a long prefix: IMESSAG_ENABLED (7),
+            # IMESSAGE_ENABLE (15), IMESSAGEE_ENABLED (8). SES/SMS share one
+            # character. The cost is that a typo in the first few characters is
+            # no longer caught, which is the rarer and more visible mistake.
+            if (abs(len(upper) - len(candidate)) <= 1
+                    and _common_prefix_len(upper, candidate) >= _MIN_SHARED_PREFIX
+                    and _within_one_edit(upper, candidate)):
+                hits.append((key, candidate))
+                break
+    return hits
+
+
+#: Characters a candidate and a suspected typo of it must share up front. Every
+#: name in _TYPO_PRONE is at least 11 characters, so this is not restrictive.
+_MIN_SHARED_PREFIX = 4
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    n = 0
+    # strict=False on purpose: the inputs have different lengths whenever the
+    # edit is an insertion or a deletion, which is most of the cases this
+    # exists to serve.
+    for x, y in zip(a, b, strict=False):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def _within_one_edit(a: str, b: str) -> bool:
+    """True when `a` becomes `b` with at most one insertion, deletion or
+    substitution. Kept explicit rather than pulling in a Levenshtein
+    dependency for a five-line predicate."""
+    if a == b:
+        return True
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b, strict=True)) == 1
+    shorter, longer = (a, b) if len(a) < len(b) else (b, a)
+    i = j = 0
+    skipped = False
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] == longer[j]:
+            i += 1
+            j += 1
+            continue
+        if skipped:
+            return False
+        skipped = True
+        j += 1
+    return True
 
 
 @lru_cache

@@ -24,7 +24,7 @@
 | Host | bare-metal **Intel Atom N2800** (x86-64-v1, no AVX/SSE4.2 — drives the `numpy<2.3`, no-`pyarrow` pins), hostname referred to as `greenbox` |
 | Container | **rootless Podman**, `container_name: bubblegauge`, Python 3.12-slim base (`Containerfile`) |
 | Reverse proxy | **Nginx Proxy Manager**, public origin `bubblegauge.klee.me`; a dashboard origin `crash.klee.me` is the sole CORS allow-origin (`app/main.py:101`) |
-| Process model | uvicorn (single instance) + **APScheduler** in-process: recompute twice daily (06:00/18:00 UTC), optional daily SMS digest |
+| Process model | uvicorn (single instance) + **APScheduler** in-process: recompute every 4h (02/06/10/14/18/22 UTC), optional daily digest carried by **exactly one** transport — iMessage (imessage-proxy) or sipgate SMS — selected by `Settings.daily_digest_transport`. iMessage wins when both switches are on, and there is deliberately no fallback: a silent downgrade would hide the proxy being down. |
 | Scaling / rollout | single instance; **no canary, no progressive delivery — blast radius of any change is 100%** |
 | Heavy compute | R **`exuber` 1.1.0** subprocess for GSADF (`r/gsadf.R`); Python **`lppls==0.6.24`** subprocess for LPPLS (`app/indicators/d4_lppls.py`) — both subprocess-isolated with timeouts (SIGILL/hang protection) |
 
@@ -36,8 +36,8 @@
 | Model (primary) | alias **`claude-opus-4-8`** (config default, `app/config.py:15`) | — |
 | Fallback chain | `claude-sonnet-5` → `claude-sonnet-4-6` → plain retry on primary | `app/engine/judgment.py:88` |
 | Inference config | `effort=max`, `thinking={"type":"adaptive"}`, `max_tokens=8000` | `judgment.py` |
-| **What the model does** | Generates a **≤300-char plain-language "judgment call"** and a **≤160-char SMS digest**, *from computed numeric readings only*. | `judgment.py:PROMPT_TEMPLATE`, `sms_report.py` |
-| **Tools the model can call** | **NONE.** No function-calling, no tool schema, no agent loop. Output is a text string consumed by the JSON API and the SMS body. | full read of `judgment.py`, `sms_report.py` |
+| **What the model does** | Generates a **≤300-char plain-language "judgment call"** and a **≤160-char daily digest**, *from computed numeric readings only*. The 160-char ASCII cap is transport-independent and now self-imposed: it is a physical GSM-7 limit only on the sipgate path, and a deliberate carry-over on the iMessage path (the proxy accepts 4000 code points). | `judgment.py:PROMPT_TEMPLATE`, `sms_report.py` |
+| **Tools the model can call** | **NONE.** No function-calling, no tool schema, no agent loop. Output is a text string consumed by the JSON API and the digest body — which is POSTed either to sipgate or to an imessage-proxy instance. Both sinks are code-driven: `app/services/digest.py` picks the transport from config and `app/notify/imessage.py` pins the recipient, the host and `"service": "imessage"`; nothing in the completion selects any of the three. | full read of `judgment.py`, `sms_report.py`, `notify/imessage.py`, `services/digest.py` |
 | Fine-tuning / custom model | **None.** All inference is against the hosted API. | — |
 | Embeddings / vector store / RAG | **None.** No retrieval corpus, no vector DB, no memory store. | repo-wide search |
 | Prompt provenance | Prompt is a fixed template interpolated with **numbers and enum strings** (`median`, `iqr`, `band`, per-indicator floats, trend states `in`/`out`). **No free-text from any external source reaches the prompt.** | `judgment.py:139` |
@@ -53,21 +53,21 @@
 | Caches | none external (no Redis/Memcached) | — |
 | Vector store | **none** | — |
 
-No personal data of third parties is stored. The only PII in the system is the **operator's own SMS recipient phone number** (`SIPGATE_RECIPIENT`, config-only) and an SEC-etiquette contact email in the User-Agent — the data subject is the operator/controller himself (see C-04, C-23).
+No personal data of third parties is stored. The PII in the system is **two of the operator's own contact handles** — the SMS recipient number (`SIPGATE_RECIPIENT`) and the iMessage recipient handle (`IMESSAGE_RECIPIENT`, a +E.164 number or an Apple-ID email) — both config-only, plus an SEC-etiquette contact email in the User-Agent. The data subject is the operator/controller himself for all three (see C-04, C-23). The iMessage handle additionally leaves the host: it is the `recipient` field of every POST to the imessage-proxy instance, whose own audit store records privacy-safe metadata only — no message bodies and no recipients (imessage-proxy/docs/security.md).
 
 ## External egress paths (all outbound HTTPS)
 
-Anthropic · FRED (`fredgraph.csv` + api) · Tiingo · Twelve Data · Alpha Vantage · **Polygon/Massive** (grouped-daily breadth) · **SSGA** (SPDR holdings XLSX → S&P 500 constituents) · SEC EDGAR · FINRA (margin debt) · multpl / GuruFocus / shillerdata (CAPE) · CBOE (VIX) · Stooq (disabled by default) · **sipgate** (SMS).
+Anthropic · FRED (`fredgraph.csv` + api) · Tiingo · Twelve Data · Alpha Vantage · **Polygon/Massive** (grouped-daily breadth) · **SSGA** (SPDR holdings XLSX → S&P 500 constituents) · SEC EDGAR · FINRA (margin debt) · multpl / GuruFocus / shillerdata (CAPE) · CBOE (VIX) · Stooq (disabled by default) · **sipgate** (SMS) · **imessage-proxy** (`POST {IMESSAGE_API_BASE_URL}/api/messages`, Bearer `IMESSAGE_API_KEY`).
 
-**Egress is not allowlisted at the platform** (no egress firewall / no network policy on the container). Control is app-level only (each `app/sources/*.py` targets a fixed host). See A-11, B-22, C-08.
+**Egress is not allowlisted at the platform** (no egress firewall / no network policy on the container). Control is app-level, and for the first time it is no longer uniform: every `app/sources/*.py` targets a host that is a literal in code, but the digest's iMessage destination is operator DATA — `app/notify/imessage.py:_base_url()` takes `IMESSAGE_API_BASE_URL` verbatim and only strips a trailing slash, with no scheme check and no host pin. The section heading's "all outbound HTTPS" therefore holds by operator discipline on that one path, not by construction: an `http://` typo would put the Bearer key and the digest on the wire in cleartext. See A-11, B-22, C-08, and the new B7 row in `audit/threat-model.md`.
 
 ## Identities and credentials
 
 All credentials are **long-lived static API keys/tokens** held in the host `.env` (gitignored — confirmed never committed to any git object, see B-06 evidence). There is **no vault, no rotation, no short-lived workload identity**:
 
-`ANTHROPIC_API_KEY` · `FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN`.
+`ANTHROPIC_API_KEY` · `FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN` · `IMESSAGE_API_KEY` (scoped `messages:send`, `imp_` prefix — the only credential here that **expires**, 90 days by default, surfacing as a 401 indistinguishable from a wrong key).
 
-> **Exposure (B-06, STOP-SHIP):** every one of these secrets was **pasted into the development chat channel** during this project's construction. The git repository is clean, but a secret disclosed to a third-party channel is **published**. All of them must be **rotated** (revoke + reissue), not merely kept out of git. This was flagged repeatedly during development and is restated here as a formal finding.
+> **Exposure (B-06, STOP-SHIP):** the **nine** credentials listed above other than `IMESSAGE_API_KEY` were **pasted into the development chat channel** during this project's construction. The git repository is clean, but a secret disclosed to a third-party channel is **published**. All nine must be **rotated** (revoke + reissue), not merely kept out of git. This was flagged repeatedly during development and is restated here as a formal finding. `IMESSAGE_API_KEY` post-dates that disclosure and is **not** on the rotation list — but it sits in the same un-vaulted `.env` under the same absence of rotation machinery, and it is the one credential that will expire on its own and take the digest down silently when it does.
 
 ## The merge / deploy gate — *the artifact this operating model lives or dies on*
 

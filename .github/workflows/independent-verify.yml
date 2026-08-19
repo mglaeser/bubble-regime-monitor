@@ -74,13 +74,104 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Redaction covers the full base URL wherever it appears, but never the
+      # pieces of it that surface on their own: the authority in a URL echo, the
+      # bare hostname in a resolver failure, an unbracketed IPv6 literal in a
+      # socket error. A mask matches one literal and nothing else, so each form
+      # needs its own. Masks are job-scoped and apply only to lines written
+      # after they register, so this has to run before the panel.
+      #
+      # A real parser rather than shell parameter expansion, because userinfo, a
+      # port, a bracketed IPv6 literal, and a query with no path each defeat a
+      # hand-rolled split -- and getting one wrong silently republishes the
+      # endpoint that this step is the only thing hiding.
+      - name: Mask the verifier endpoint in the log
+        env:
+          VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          from urllib.parse import urlsplit
+
+          raw = os.environ.get("VERIFIER_BASE_URL", "").strip()
+          if not raw:
+              # No gateway configured. The script falls back to the vendor
+              # default and there is nothing endpoint-shaped to hide.
+              sys.exit(0)
+
+          try:
+              parts = urlsplit(raw)
+              if not parts.netloc:
+                  # Scheme-less: urlsplit puts the whole value in path, so read
+                  # it again as a network-relative reference.
+                  parts = urlsplit("//" + raw)
+              authority = parts.netloc
+              hostport = authority.rsplit("@", 1)[-1]
+              if hostport.startswith("[") and "]" in hostport:
+                  host = hostport[: hostport.index("]") + 1]
+              else:
+                  host = hostport.split(":", 1)[0]
+          except ValueError:
+              host = ""
+
+          if not host:
+              # Fail closed. An endpoint we cannot parse is one we cannot promise
+              # to redact, and the panel would print it moments later.
+              print("::error::VERIFIER_BASE_URL is set but no host could be parsed from it; refusing to run the panel unmasked")
+              sys.exit(1)
+
+          forms = {authority, hostport, host}
+          if host.startswith("[") and host.endswith("]"):
+              # What a connection error prints, brackets being URL syntax.
+              forms.add(host[1:-1])
+          else:
+              # A Unicode host is resolved under its IDNA form, and that form is
+              # what a resolver or socket error names -- same host, a different
+              # literal, so it needs its own mask. ASCII encodes to itself, so
+              # this is a no-op for an ordinary hostname.
+              try:
+                  puny = host.encode("idna").decode("ascii")
+              except (UnicodeError, ValueError):
+                  puny = ""
+              if puny:
+                  forms.add(puny)
+                  if hostport != host:
+                      forms.add(puny + hostport[len(host) :])
+
+          for form in sorted(forms):
+              if not form:
+                  continue
+              # Case-folded as well: masks match literally, and a host can be
+              # echoed back in a different case than it was configured in.
+              for value in sorted({form, form.lower()}):
+                  print(f"::add-mask::{value}")
+          PY
       - name: Cross-vendor review panel
         id: panel
         # Fork PRs are refused rather than reviewed — see header.
-        if: github.event.pull_request.head.repo.full_name == github.repository
+        #
+        # `success()` is spelled out, not left implicit. A custom `if` already
+        # carries it by default, so a failed mask step already skips this one --
+        # but that default is invisible at the point it matters, and what it is
+        # holding here is the rule that the panel never runs, and so never prints
+        # the endpoint, unless redaction was registered first.
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
         env:
           SECOND_VENDOR_API_KEY: ${{ secrets.TRUSTED_VERIFIER_API_KEY }}
-          VERIFIER_BASE_URL: ${{ vars.VERIFIER_BASE_URL }}
+          # A SECRET, not a `vars.` entry, and the difference is the whole point:
+          # the runner echoes every env block into the log, redacting secrets
+          # there and never variables. As a variable this published the gateway
+          # endpoint in clear text, in a public log, on every panel run. As a
+          # secret the runner also redacts it from whatever the script prints,
+          # which is where the URL otherwise surfaces on a failed call.
+          #
+          # The repo VARIABLE of the same name is retired by this change. The
+          # secret was set to the value that variable holds, and the variable is
+          # deleted once this lands -- not before, because main's copy of this
+          # file is what pull_request_target executes, so emptying it early would
+          # starve every open PR's panel including the one carrying the fix.
+          VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
           # Gateways that reserve Authorization for upstream forwarding need a
           # different header; inference.klee.me answers Bearer with 401.
           VERIFIER_AUTH_HEADER: ${{ vars.VERIFIER_AUTH_HEADER }}

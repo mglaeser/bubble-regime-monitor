@@ -129,7 +129,7 @@ Base path `/api/v1`; every response is `{"data": ..., "meta": ...}` with the fiv
 | `GET /healthz` · `GET /readyz` | Liveness; per-source health matrix |
 | `POST /api/v1/admin/refresh` | Start a recompute in the background — returns 202 immediately; single-flight (X-API-Key) |
 | `GET /api/v1/admin/refresh/status` | Running state + last recompute outcome (X-API-Key) |
-| `POST /api/v1/admin/send-sms` | Send the daily SMS digest now — test path (X-API-Key) |
+| `POST /api/v1/admin/send-sms` | Send the daily digest now over the configured transport (iMessage or SMS) — test path (X-API-Key) |
 | `POST /api/v1/admin/falsification` | Record a falsification outcome — append-only (X-API-Key) |
 | `POST /api/v1/admin/deploy` | Write a deploy-trigger for the host watchdog — manual auto-deploy path (X-API-Key) |
 | `POST /api/v1/webhooks/github` | GitHub auto-deploy webhook — HMAC-verified, fail-closed (v3.5.0, `docs/AUTO_DEPLOY.md`) |
@@ -164,11 +164,33 @@ A self-contained status dashboard is served at **`/`** (and `/status`) on the sa
 
 The same data is available as JSON at **`GET /api/v1/status`**. The page is fully self-contained (no external assets, CSP-friendly) and renders all dynamic/external strings via `textContent` so upstream error messages and source notes cannot inject markup.
 
-## Daily SMS digest (optional)
+## Daily digest — iMessage or SMS (optional)
 
-The service recomputes the score **every 4 hours (02/06/10/14/18/22 UTC)** and can additionally **text a once-a-day digest** — the headline score, action band, and a tiny LLM-written report — as a single SMS via the [sipgate REST API v2](https://api.sipgate.com/v2/doc). The report body is produced by the same Anthropic model-fallback chain as the judgment call and hard-capped to one GSM-7 SMS (160 chars, ASCII-coerced so a stray Unicode character cannot halve the limit); if the LLM is unavailable it degrades to a deterministic template built from the snapshot, so the digest always sends. It is disabled by default.
+The service recomputes the score **every 4 hours (02/06/10/14/18/22 UTC)** and can additionally send a **once-a-day digest** — the headline score, action band, and a tiny LLM-written report. The report body is produced by the same Anthropic model-fallback chain as the judgment call and hard-capped to 160 ASCII characters; if the LLM is unavailable it degrades to a deterministic template built from the snapshot, so the digest always sends. It is disabled by default.
 
-To enable: create a sipgate **Personal Access Token** with the `sessions:sms:write` scope, then set in `.env`:
+Two transports can carry it, and **exactly one sends**. If both switches are on, iMessage wins and sipgate is not called: delivering the same digest twice is a defect, and silently downgrading to SMS would hide the proxy being down at the moment you most need to know. There is no fallback by design.
+
+### Over iMessage, via [imessage-proxy](https://github.com/mglaeser/imessage-proxy)
+
+```dotenv
+IMESSAGE_ENABLED=true
+IMESSAGE_API_BASE_URL=https://messages.example.com   # origin only, no path
+IMESSAGE_API_KEY=imp_...                             # scoped key: messages:send, NOT admin
+IMESSAGE_RECIPIENT=+49151...                         # or an Apple-ID email
+SMS_DAILY_HOUR=8                                     # UTC hour (default 08:00)
+```
+
+**The switch alone does nothing.** iMessage is selected only when the URL, key and recipient are *all* set. Turning it on with any of them blank leaves a working SMS digest sending over SMS rather than silently stopping it, and the incomplete state is reported at boot, on the health projection as `imessage_enabled_but_unconfigured`, and by `alerts preflight`.
+
+**`https://` is required** unless the host is a loopback IP literal (`127.0.0.0/8`, `::1`) or `localhost`. Runtime-injected names such as `host.docker.internal` are refused over plain HTTP — they resolve through DNS the container runtime supplies, so honouring them would make the cleartext guarantee depend on name resolution staying honest, and they address the host gateway across a bridge rather than loopback. Over `https://` they are fine. This is the only outbound host in the service that comes from configuration rather than being a literal in code, so an `http://` typo would put the API key and your digest on the wire in cleartext. The send is refused before a socket opens.
+
+Three more things that bite in practice. The recipient must **also** be on the proxy's own allowlist, which is `admin`-scoped — a `messages:send` key can neither read that list nor add itself to it, so a destination missing from it fails `403` no matter what you set here. Proxy keys **expire** (90 days by default), and an expired key is a `401` indistinguishable from one that is simply wrong. And a `202` from the proxy means Messages.app accepted the command — it is explicitly *not* delivery confirmation, and it is the *only* status treated as sent: any other 2xx means something that is not the proxy's send route answered.
+
+Mind the spelling: settings load with `extra="ignore"`, so an unrecognised key is dropped **without any error**. `IMESSAG_ENABLED=true` reads as "iMessage off", and paired with `SMS_ENABLED=false` you get a service that sends nothing at all. The digest job now names a probable misspelling in its skip reason instead of going quiet.
+
+### Over SMS, via the [sipgate REST API v2](https://api.sipgate.com/v2/doc)
+
+Create a sipgate **Personal Access Token** with the `sessions:sms:write` scope, then set:
 
 ```dotenv
 SMS_ENABLED=true
@@ -179,7 +201,9 @@ SIPGATE_RECIPIENT=+49151...        # E.164
 SMS_DAILY_HOUR=8                   # UTC hour (default 08:00)
 ```
 
-Test it immediately without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms`. Example body: `bubblegauge 41/100 hold. IQR 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
+The 160-character ASCII cap is an SMS constraint: one GSM-7 segment, ASCII-coerced so a stray Unicode character cannot halve the limit. It still applies over iMessage, where the proxy would accept 4000 Unicode code points — the shared cap keeps the digest identical across transports, and raising it is a product decision rather than part of the migration.
+
+Test either without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms` — the path is unchanged so existing operator scripts keep working, and the response names the `transport` that actually carried it. Example body: `bubblegauge 41/100 hold. IQR 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
 
 ## Falsification criteria
 

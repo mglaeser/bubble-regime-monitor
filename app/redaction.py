@@ -35,6 +35,11 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)([?&](?:key|token|api_key|access_token)=)[^\s&]+"), r"\1[redacted]"),
     # Anthropic / generic long opaque keys.
     (re.compile(r"sk-[A-Za-z0-9\-_]{12,}"), "[redacted]"),
+    # imessage-proxy bearer keys. These do not always arrive behind a `Bearer`
+    # or `key=` marker that the patterns above would catch — a problem+json
+    # body echoing the offending credential, or an httpx exception string,
+    # carries one bare. Without this the key would persist verbatim.
+    (re.compile(r"\bimp_[A-Za-z0-9\-_]{12,}"), "[redacted]"),
     # Credentials embedded in a URL. The scheme class is deliberately wider
     # than http(s), so that a database DSN of the form
     #     postgresql://<user>:<password>@host/db
