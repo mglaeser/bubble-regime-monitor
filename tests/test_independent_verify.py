@@ -373,25 +373,58 @@ class TestSelftestAttestsOnlyWhatItRan:
     the auth_header, review_range and normalize_base coverage — including the
     guard keeping a non-hex VERIFIER_HEAD_SHA out of a git argv — while the
     print went on naming all three. A false green on a security gate, which is
-    the very defect class this file exists to catch."""
+    the very defect class this file exists to catch.
+
+    THESE TESTS RUN selftest AND COUNT CALLS. The first version searched its
+    SOURCE for "auth_header(" — which the summary string it prints contains, so
+    deleting every real call still passed. A check that cannot fail for the
+    reason it exists is the same defect it is meant to catch, one level up."""
+
+    #: Exactly the functions the closing summary claims were checked.
+    ATTESTED = ("decide", "model_matches", "require_approvals", "attest_reasons",
+                "attest_proof", "attest_consistency", "auth_header", "review_range",
+                "normalize_base")
 
     @staticmethod
-    def _source():
-        import inspect
+    def _run_recording(monkeypatch):
+        """Run selftest() with every attested function wrapped, and report what
+        was actually invoked (plus the argv-critical env review_range saw)."""
+        called: set[str] = set()
+        head_shas: list[str] = []
 
-        return inspect.getsource(iv.selftest)
+        def wrap(name, original):
+            def recorder(*args, **kwargs):
+                called.add(name)
+                if name == "review_range":
+                    import os
 
-    @pytest.mark.parametrize("checked", [
-        "decide(", "model_matches(", "require_approvals(", "attest_reasons(",
-        "attest_proof(", "attest_consistency(", "auth_header(", "review_range(",
-        "normalize_base(",
-    ])
-    def test_every_function_the_summary_names_is_exercised(self, checked):
-        assert checked in self._source(), f"--selftest claims to check {checked}, but never calls it"
+                    head_shas.append(os.environ.get("VERIFIER_HEAD_SHA", ""))
+                return original(*args, **kwargs)
+            return recorder
 
-    def test_the_shell_injection_guard_is_still_covered(self):
-        assert "not-a-sha; rm -rf /" in self._source()
+        for name in TestSelftestAttestsOnlyWhatItRan.ATTESTED:
+            monkeypatch.setattr(iv, name, wrap(name, getattr(iv, name)))
+        iv.selftest()
+        return called, head_shas
 
+    def test_every_function_the_summary_names_is_actually_called(self, monkeypatch, capsys):
+        called, _ = self._run_recording(monkeypatch)
+        missing = set(self.ATTESTED) - called
+        assert not missing, f"--selftest claims to check {sorted(missing)}, but never calls them"
+
+    def test_the_summary_names_exactly_what_ran(self, monkeypatch, capsys):
+        """And nothing is exercised that the summary forgets to mention."""
+        self._run_recording(monkeypatch)
+        summary = capsys.readouterr().out
+        for name in self.ATTESTED:
+            assert f"{name}()" in summary, f"{name} runs but the attestation omits it"
+
+    def test_the_shell_injection_guard_runs_against_the_malicious_value(self, monkeypatch, capsys):
+        """Not that the string appears somewhere — that review_range was
+        actually entered while it was set."""
+        _, head_shas = self._run_recording(monkeypatch)
+        assert any("rm -rf /" in sha for sha in head_shas), (
+            "review_range() is never exercised with a non-hex VERIFIER_HEAD_SHA")
 
 class TestAuthHeader:
     """The gateway's auth header is configurable because inference.klee.me runs
