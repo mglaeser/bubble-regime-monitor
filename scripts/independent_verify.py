@@ -488,18 +488,25 @@ def declared_defects(v: Any) -> tuple[str, list[str]]:
 #
 # (published term, regex alternative)
 _DEFECT_VOCAB: tuple[tuple[str, str], ...] = (
+    # EVERY alternative is a stem plus \w*, without exception. Enumerating
+    # inflections was the previous form and it leaked exactly the way an
+    # enumeration does: `fails? open` missed "failed open" and "failing open",
+    # `inject(?:ions|ion|ed|able|s)` missed "injecting". combo/SOTA-A found all
+    # three. Those are not regressions -- main misses them too -- but a list of
+    # endings is a list somebody has to keep complete, and the next inflection
+    # is always the one nobody wrote down. A stem cannot be incomplete that way.
     ("bypass",              r"bypass\w*"),
     ("fail-open",           r"fail-open\w*"),
-    ("fails open",          r"fails? open"),
-    ("unauthenticated",     r"unauthenticated"),
-    ("injection",           r"inject(?:ions|ion|ed|able|s)"),
+    ("fails open",          r"fail\w* open"),
+    ("unauthenticated",     r"unauthenticated\w*"),
+    ("injection",           r"inject\w*"),
     ("vulnerability",       r"vulnerab\w*"),
     ("exploitable",         r"exploitab\w*"),
-    ("race condition",      r"race conditions?"),
+    ("race condition",      r"race condition\w*"),
     ("deadlock",            r"deadlock\w*"),
     ("regression",          r"regress\w*"),
-    ("data loss",           r"data loss(?:es)?"),
-    ("privilege escalation", r"privilege escalations?"),
+    ("data loss",           r"data loss\w*"),
+    ("privilege escalation", r"privilege escalation\w*"),
 )
 
 _DEFECT_WORDS = re.compile(r"\b(" + "|".join(a for _, a in _DEFECT_VOCAB) + r")\b", re.I)

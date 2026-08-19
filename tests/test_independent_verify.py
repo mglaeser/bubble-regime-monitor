@@ -10,6 +10,7 @@ runtime; here the same guarantees ride the normal pytest suite.
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1044,6 +1045,12 @@ class TestDefectWordInflections:
         "race conditions on refresh",
         "privilege escalations in admin",
         "the gate fails open when the header is missing",
+        # combo/SOTA-A, run 32312272105: the enumerated form missed these three.
+        # Not regressions -- main misses them too -- but a list of endings is a
+        # list somebody has to keep complete. Every alternative is a stem now.
+        "the header path failed open on a missing key",
+        "the gate is failing open when the header is absent",
+        "injecting untrusted input into the query builder",
     ])
     def test_inflected_defect_words_are_claims(self, reason):
         assert iv.attest_consistency(self._panel(reason, []), self.M3)["block"] is True
@@ -1153,3 +1160,35 @@ class TestDuplicateKeysCannotEraseADeclaration:
         # _is_valid() is false for a None verdict, so the vote cannot approve,
         # cannot corroborate, and cannot feed attest_reasons.
         assert iv._is_valid({"ok": True, "v": iv.parse_verdict(self.ATTACK)}) is False
+
+
+class TestEveryVocabularyAlternativeIsAStem:
+    """No alternative may enumerate endings.
+
+    The published vocabulary and the enforced regex are one list, but a list of
+    inflections is still a list somebody has to keep complete -- and the next
+    inflection is always the one nobody wrote down. `fails? open` missed "failed
+    open" and "failing open"; `inject(?:ions|ion|ed|able|s)` missed "injecting".
+    This test is what stops the enumeration coming back.
+    """
+
+    def test_no_alternative_enumerates_inflections(self):
+        # The variable part must be \w* and may sit mid-alternative
+        # (`fail\w* open`); what is banned is a CLOSED set of endings -- an
+        # optional-letter suffix (`conditions?`) or a group of spelt-out
+        # alternatives (`(?:ions|ion|ed|able|s)`). Those are the two forms that
+        # leaked.
+        offenders = [(term, alt) for term, alt in iv._DEFECT_VOCAB
+                     if r"\w*" not in alt or "(?:" in alt
+                     or re.search(r"[A-Za-z]\?", alt)]
+        assert not offenders, (
+            "these alternatives enumerate endings instead of stemming; a stem "
+            f"cannot be incomplete the way a list can: {offenders}")
+
+    def test_the_regex_is_built_from_the_published_list(self):
+        assert iv._DEFECT_WORDS.pattern == (
+            r"\b(" + "|".join(a for _, a in iv._DEFECT_VOCAB) + r")\b")
+
+    def test_every_published_term_is_blocked_by_the_regex_it_publishes(self):
+        missed = [t for t, _ in iv._DEFECT_VOCAB if not iv._DEFECT_WORDS.search(t)]
+        assert not missed, missed
