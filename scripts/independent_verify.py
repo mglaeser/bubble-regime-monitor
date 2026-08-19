@@ -80,6 +80,7 @@ import secrets
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from typing import Any
@@ -343,16 +344,56 @@ _LEDGER_NULLS = frozenset({
 _LEDGER_KEYS = ("defects", "defect", "findings", "defects_found")
 
 
-def _ledger_fields(v: Any) -> list[Any]:
-    """EVERY accepted spelling of the ledger present on the vote.
+def _ledger_key_state(k: Any) -> str:
+    """"accepted" | "lookalike" | "other" for one key of a verdict object.
+
+    LOOKALIKE is the one worth explaining. A key that NFKC-normalises into an
+    accepted spelling but is not byte-identical to it is not a typo, it is a
+    key wearing the ledger's name:
+
+        {"defects": [], "defe\u0441ts": ["app/a.py:1 - auth bypass"]}
+
+    (Cyrillic \u0441). Measured before this function existed: rung 3 was
+    satisfied by the real, empty ``defects``, the lookalike was not recognised
+    as a ledger key at all, and the vote PASSED with a declared defect in it.
+    Such a key is treated as MALFORMED rather than ignored -- an object that
+    carries two keys normalising to one name is ambiguous, and ambiguity in the
+    verdict fails closed, the same way a duplicate key does.
+
+    Everything else is "other", and an "other" key is genuinely not read. That
+    is a stated limit, not an oversight: a defect written under a name nobody
+    agreed on cannot be found by matching names. Rung 4's prose scan is what
+    covers the vote that describes a defect somewhere this does not look."""
+    if not isinstance(k, str):
+        return "other"
+    flat = k.strip().lower()
+    if flat in _LEDGER_KEYS:
+        return "accepted"
+    # A NON-ASCII KEY IS A LOOKALIKE, whatever it spells. NFKC was the first
+    # attempt and it is the wrong tool: it folds compatibility forms (fullwidth,
+    # ligatures) but NOT cross-script confusables, so Cyrillic \u0441 in
+    # "defe\u0441ts" survived it untouched and the vote still passed. A
+    # confusables table would rot; this contract's keys are ASCII by definition,
+    # so a key outside ASCII cannot be matched reliably and the object carrying
+    # it is ambiguous. Ambiguity fails closed here, as it does for a duplicate.
+    if not flat.isascii():
+        return "lookalike"
+    if unicodedata.normalize("NFKC", flat) in _LEDGER_KEYS:
+        return "lookalike"
+    return "other"
+
+
+def _ledger_fields(v: Any) -> tuple[list[Any], bool]:
+    """(values under EVERY accepted spelling, saw_a_lookalike).
 
     All of them, not the first one: a vote carrying both ``"defects": []`` and
     ``"findings": ["auth bypass"]`` has declared a defect, and reading only the
     higher-priority key would let the other one hide it."""
     if not isinstance(v, dict):
-        return []
-    return [v[k] for k in v
-            if isinstance(k, str) and k.strip().lower() in _LEDGER_KEYS]
+        return [], False
+    states = {k: _ledger_key_state(k) for k in v}
+    return ([v[k] for k, st in states.items() if st == "accepted"],
+            any(st == "lookalike" for st in states.values()))
 
 
 def has_conformant_ledger(v: Any) -> bool:
@@ -386,7 +427,9 @@ def declared_defects(v: Any) -> tuple[str, list[str]]:
     Returns ("ok", items) | ("missing", []) | ("malformed", []). Total on every
     input: no parsing, no inference, no natural language. ``items`` is the
     union of the declared lists with the enumerated empty-sentinels removed."""
-    raws = _ledger_fields(v)
+    raws, lookalike = _ledger_fields(v)
+    if lookalike:
+        return ("malformed", [])
     if not raws:
         return ("missing", [])
     items: list[str] = []

@@ -18,6 +18,12 @@ import sqlite3
 #
 # Note what is ABSENT: every alert table (migrations 0007/0008/0009) matches
 # exactly. The divergence is entirely pre-alert, from 0001-0004.
+# value = the waived (migration_notnull, create_all_notnull) pair. Every entry
+# is (0, 1): nullable under Alembic, NOT NULL under create_all. Recording the
+# DIRECTION is the point -- the predicate used to skip the nullability field
+# entirely, so it waived the REVERSE divergence too, which is a different
+# defect (a migration stricter than the model rejects rows the model allows).
+WAIVED_DIRECTION = (0, 1)
 KNOWN_NOTNULL_DIVERGENCES: dict[str, set[str]] = {
     "breadth_symbol_cache": {"as_of", "last_close", "sma200"},
     "daily_close": {"close", "fetched_at", "provider"},
@@ -67,15 +73,45 @@ def _schema(db_path: str) -> dict[str, object]:
         "and name not like 'sqlite_%' and name != 'alembic_version'")]
     cols = {t: {r[1]: (r[2], r[3], r[4], r[5])          # type, notnull, default, pk
                 for r in c.execute(f"pragma table_info('{t}')")} for t in tables}
-    fks = {t: sorted((r[2], r[3], r[4])                 # target table, from, to
+    # The FULL pragma row from `on_update` onward, not just the target: an FK
+    # whose ON DELETE changes from CASCADE to NO ACTION is a different
+    # constraint with the same three columns, and comparing the triple could
+    # not see it.
+    fks = {t: sorted((r[2], r[3], r[4], r[5], r[6], r[7])   # table, from, to, on_update, on_delete, match
                      for r in c.execute(f"pragma foreign_key_list('{t}')")) for t in tables}
 
-    def named(kind: str) -> set[str]:
-        return {r[0] for r in c.execute(
-            f"select name from sqlite_master where type='{kind}' and name not like 'sqlite_%'")}
+    def indexes() -> dict[str, tuple]:
+        """Indexes by DEFINITION, not by name.
+
+        Name-only comparison was a proxy, and it was measured: giving the
+        migration an index of the SAME NAME on a DIFFERENT COLUMN passed, and so
+        did making it unique in the migration only. The name is the label; the
+        columns and the uniqueness are the index.
+
+        `partial` (the WHERE clause) rides in via sqlite_master.sql, which is
+        NULL for auto-indexes -- and auto-indexes are kept rather than filtered,
+        because that is how a UNIQUE table constraint shows up: dropping
+        `sqlite_%` hid exactly the divergence a UNIQUE constraint creates."""
+        out: dict[str, tuple] = {}
+        for t in tables:
+            for r in c.execute(f"pragma index_list('{t}')"):
+                name, unique, origin, partial = r[1], r[2], r[3], r[4]
+                colnames = [ir[2] for ir in c.execute(f"pragma index_info('{name}')")]
+                sql = next((x[0] for x in c.execute(
+                    "select sql from sqlite_master where type='index' and name=?", (name,))), None)
+                out[f"{t}.{name}"] = (t, tuple(colnames), unique, origin, partial,
+                                      " ".join((sql or "").split()))
+        return out
+
+    def named(kind: str) -> dict[str, str]:
+        """Name AND normalised SQL: a trigger rewritten under the same name is a
+        different trigger, and comparing names alone could not see that."""
+        return {r[0]: " ".join((r[1] or "").split()) for r in c.execute(
+            f"select name, sql from sqlite_master where type='{kind}' "
+            "and name not like 'sqlite_%'")}
 
     out = {"columns": cols, "foreign_keys": fks,
-           "indexes": named("index"), "triggers": named("trigger"), "views": named("view")}
+           "indexes": indexes(), "triggers": named("trigger"), "views": named("view")}
     c.close()
     return out
 
@@ -141,7 +177,9 @@ def test_migrations_match_models(tmp_path):
             # A waiver covers the NOT NULL flag and nothing else. Type, default
             # and primary-key membership must still agree, or the ledger would
             # become a blanket exemption for the columns it lists.
-            if col in KNOWN_NOTNULL_DIVERGENCES.get(t, set()) and (a[0], a[2], a[3]) == (b[0], b[2], b[3]):
+            if (col in KNOWN_NOTNULL_DIVERGENCES.get(t, set())
+                    and (a[0], a[2], a[3]) == (b[0], b[2], b[3])
+                    and (a[1], b[1]) == WAIVED_DIRECTION):
                 continue
             unexpected.append(f"{t}.{col}: migration={a} create_all={b}")
     assert not unexpected, (
@@ -150,15 +188,23 @@ def test_migrations_match_models(tmp_path):
     # The ledger may shrink, never grow: a divergence that has been fixed must
     # be struck from it, or it silently re-authorises a future regression.
     stale = [f"{t}.{col}" for t, cs in KNOWN_NOTNULL_DIVERGENCES.items() for col in sorted(cs)
-             if m["columns"].get(t, {}).get(col) == c["columns"].get(t, {}).get(col)]
+             if (m["columns"].get(t, {}).get(col) or (None,) * 4)[1]
+             == (c["columns"].get(t, {}).get(col) or (None,) * 4)[1]]
     assert not stale, ("these divergences are fixed -- remove them from "
                        f"KNOWN_NOTNULL_DIVERGENCES: {stale}")
 
     assert m["foreign_keys"] == c["foreign_keys"], "foreign keys differ between the bootstraps"
-    assert m["indexes"] - c["indexes"] == KNOWN_MIGRATION_ONLY_INDEXES, (
-        f"migration-only indexes changed: {sorted(m['indexes'] - c['indexes'])}")
-    assert c["indexes"] - m["indexes"] == set(), (
-        f"create_all builds indexes the migration does not: {sorted(c['indexes'] - m['indexes'])}")
+    mig_only = {k for k in m["indexes"] if k not in c["indexes"]}
+    ca_only = {k for k in c["indexes"] if k not in m["indexes"]}
+    assert {k.split(".", 1)[1] for k in mig_only} == KNOWN_MIGRATION_ONLY_INDEXES, (
+        f"migration-only indexes changed: {sorted(mig_only)}")
+    assert ca_only == set(), (
+        f"create_all builds indexes the migration does not: {sorted(ca_only)}")
+    differing = {k: (m["indexes"][k], c["indexes"][k]) for k in m["indexes"]
+                 if k in c["indexes"] and m["indexes"][k] != c["indexes"][k]}
+    assert not differing, ("indexes share a name but not a definition:\n  "
+                           + "\n  ".join(f"{k}: migration={a} create_all={b}"
+                                          for k, (a, b) in differing.items()))
     assert m["triggers"] == c["triggers"], "triggers differ between the bootstraps"
     assert m["views"] == c["views"], "views differ between the bootstraps"
 
