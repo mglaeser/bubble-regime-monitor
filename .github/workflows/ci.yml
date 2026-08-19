@@ -44,7 +44,7 @@ jobs:
           python -m pip install --upgrade pip "setuptools>=83"   # setuptools>=83 clears PYSEC-2026-3447
           pip install fastapi "uvicorn[standard]" "pydantic>=2.7" pydantic-settings \
             SQLAlchemy alembic httpx tenacity "APScheduler<4" structlog slowapi \
-            "numpy<2.3" "pandas<3.0" openpyxl xlrd beautifulsoup4 lxml anthropic PyYAML \
+            numpy pandas pyarrow openpyxl xlrd beautifulsoup4 lxml anthropic PyYAML \
             pytest ruff mypy pip-audit detect-secrets
       - name: Install optional LPPLS engine (best-effort; suite skips it if absent)
         run: pip install "lppls==0.6.24" || echo "::warning::lppls unavailable — LPPLS paths self-skip (hermetic suite, A-02)"

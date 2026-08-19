@@ -89,7 +89,7 @@ Acceptance: one JSON report per study, reproducible from pinned inputs.
 ### RM-5 — Activation-gate evidence assembly
 
 Collates RM-2/RM-3/RM-4 outputs into the per-PIN decision packages the
-operator's gates require (H activation; G execution-model decision with Atom
+operator's gates require (H activation; G execution-model decision with host
 runtime benchmarks of the **G1 deterministic reference implementation** vs the
 current multiprocessing path; B/D/E/F constants).
 

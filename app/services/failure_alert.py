@@ -135,6 +135,12 @@ def _persist_locked() -> None:
         # directory, so a reader sees either the old state or the new one.
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(payload)
+        # 0600 before it is visible under its real name. The signature is
+        # derived from an exception string: sanitize() strips secret- and
+        # PII-shaped substrings, but "what sanitize did not recognise" is a
+        # weaker guarantee than "only the service can read it", and the default
+        # 0644 under umask 022 hands that difference to every local account.
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except Exception as exc:
         log.warning("failure_alert_state_unwritable", error=str(exc)[:200])

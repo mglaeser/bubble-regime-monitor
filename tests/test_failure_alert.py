@@ -605,3 +605,63 @@ class TestAMalformedStateFileCannotSilenceOrLie:
         self._write(sent, first_seen="not-a-timestamp")
         assert notify_recompute_outcome(None)["status"] == "noop"
         assert failure_alert._current is None
+
+
+class TestTheWatchdogCannotInventAnOutage:
+    """The stuck check reads state the wedged run owns, and that run can finish
+    while the check is deciding.
+
+    Reporting anyway opens a phantom FAILING outage on a service that just
+    succeeded — the wrong-belief failure this feature exists to prevent,
+    manufactured by its own watchdog. Panel finding on #64 (combo/SOTA-A)."""
+
+    @pytest.fixture()
+    def wedged(self, monkeypatch, sent):
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        admin.recompute_lock.acquire(blocking=False)
+        admin._last.update(started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
+                           finished_at=None)
+        yield admin, sent
+        if admin.recompute_lock.locked():
+            admin.recompute_lock.release()
+        admin._last.update(started_at=None, finished_at=None)
+        get_settings.cache_clear()
+
+    def test_a_run_that_lands_first_is_not_reported_stuck(self, wedged):
+        """The lock is released the moment the run completes."""
+        admin, sent = wedged
+        admin.recompute_lock.release()
+        admin._notify_if_stuck()
+        assert sent == []
+
+    def test_a_finished_stamp_beats_the_watchdog(self, wedged):
+        admin, sent = wedged
+        admin._last.update(finished_at=datetime.now(UTC).isoformat())
+        admin._notify_if_stuck()
+        assert sent == []
+
+    def test_a_new_run_is_not_reported_as_the_old_one(self, wedged):
+        """started_at moving means this report is about a run that is gone."""
+        admin, sent = wedged
+        admin._last.update(started_at=datetime.now(UTC).isoformat())
+        admin._notify_if_stuck()
+        assert sent == []
+
+    def test_a_genuinely_wedged_run_is_still_reported(self, wedged):
+        admin, sent = wedged
+        admin._notify_if_stuck()
+        assert len(sent) == 1
+
+
+class TestTheStateFileIsNotWorldReadable:
+    def test_mode_is_owner_only(self, sent):
+        """The signature is derived from an exception string; sanitize() is a
+        weaker guarantee than "only the service can read it"."""
+        notify_recompute_outcome(EBP_ERROR)
+        mode = failure_alert._state_path().stat().st_mode & 0o777
+        assert mode == 0o600, oct(mode)

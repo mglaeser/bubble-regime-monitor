@@ -47,6 +47,17 @@ def _notify_if_stuck() -> None:
         threshold = timedelta(hours=max(1, get_settings().failure_alert_stuck_after_h))
         if elapsed < threshold:
             return          # an ordinary overlap, not a wedged run
+        # RE-CHECK IMMEDIATELY BEFORE REPORTING. Everything above is a read of
+        # state the wedged run owns, and that run can finish while we are
+        # deciding. Reporting anyway would open a phantom FAILING outage on a
+        # service that had just succeeded — the wrong-belief failure this whole
+        # feature exists to prevent, manufactured by its own watchdog. A
+        # released lock or a stamped finished_at both mean "it landed".
+        if not recompute_lock.locked() or _last.get("finished_at"):
+            return
+        if _last.get("started_at") != started_at:
+            return          # a NEW run began; this report is about a dead one
+
         from app.services.failure_alert import notify_recompute_outcome
 
         hours = int(elapsed.total_seconds() // 3600)

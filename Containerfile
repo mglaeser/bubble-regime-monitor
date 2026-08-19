@@ -17,18 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml .
-# pyarrow is an optional extra: pandas imports it EAGERLY when present
-# (pandas/compat/pyarrow.py), and pyarrow's Arrow C++ wheels require SSE4.2 —
-# on older CPUs that is an uncatchable SIGILL at pandas import, i.e. at
-# service boot. The build host is the run host for self-hosted deploys, so
-# probe here: keep pyarrow where it works, remove it where it would crash
-# (Parquet export then disables itself via its own runtime probe), and fail
-# the build loudly if pandas still cannot import.
-RUN pip install --no-cache-dir ".[parquet]" && \
-    (python -c "import pandas" 2>/dev/null || \
-     (echo "pyarrow unusable on this CPU; removing (Parquet export will disable itself)" && \
-      pip uninstall -y pyarrow)) && \
-    python -c "import numpy, pandas; print('core numeric stack OK:', numpy.__version__, pandas.__version__)"
+RUN pip install --no-cache-dir "." && \
+    python -c "import numpy, pandas, pyarrow; print('core numeric stack OK:', numpy.__version__, pandas.__version__, pyarrow.__version__)"
 COPY . .
 RUN mkdir -p /data
 # B-12 hardening note (audit): an in-image `USER appuser` (uid 10001) was tried

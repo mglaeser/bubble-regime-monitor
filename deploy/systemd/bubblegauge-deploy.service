@@ -17,8 +17,9 @@ ExecStart=%h/playground/bubble-regime-monitor/deploy/deploy-watch.sh
 # to run podman + git in the repo, so we keep it modest rather than locked down.
 NoNewPrivileges=true
 
-# A cold image build on a low-power host (Atom N2800) can exceed 30 min; the
-# original 1800 s killed a deploy 70 s before it finished (2026-07-17 incident).
+# A cold image build (R + exuber compile) can exceed 30 min; the original 1800 s
+# killed a deploy 70 s before it finished (2026-07-17 incident, on the slower
+# host of the time). Kept generous — headroom costs nothing when builds are fast.
 TimeoutStartSec=3600
 
 # CRITICAL: deploy.sh starts the long-lived rootless-podman container from
