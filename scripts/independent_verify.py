@@ -251,6 +251,50 @@ _DEFECT_WORDS = re.compile(
     r"\b(bypass|fail-open|unauthenticated|injection|vulnerab\w*|exploitab\w*|"
     r"race condition|deadlock|regress\w*|data loss|privilege escalation)\b", re.I)
 
+#: Tokens asserting the ABSENCE of the defect word that follows them.
+#:
+#: This gate and `build_system_prompt` were in direct conflict. The prompt ASKS
+#: a green vote to say "WHAT was checked + why no defect", so a conscientious
+#: panelist writes "— no fail-open;" — and the gate read the word, ignored the
+#: "no", and discarded the vote as self-contradictory. On PR #64 that turned a
+#: UNANIMOUS 3/3 approval into a fail-closed BLOCK, and it punished precisely
+#: the most specific reviewer: the voice that wrote only "no concrete defect"
+#: sailed through, while the one that listed what it had ruled out did not.
+_NEGATORS = frozenset({"no", "not", "none", "never", "without", "zero", "free", "nil"})
+
+#: A negation governs only its own clause. In "no security hole, but a race
+#: condition at x.py:12" the second half is a live defect claim, and letting
+#: the leading "no" reach across the comma would launder it into an approval.
+_CLAUSE_BOUNDARY = re.compile(r"[;,.]")
+
+#: How many tokens back a negator may sit and still govern the defect word.
+#: Small on purpose: "no fail-open" and "free of data loss" are the shapes that
+#: occur, and a wide window starts absolving words it should not.
+_NEGATION_WINDOW = 3
+
+
+def _clause_at(text: str, start: int) -> str:
+    """The clause containing offset ``start`` — the context a human needs to
+    tell a defect claim from an assertion that the defect is absent."""
+    lo = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:start])), default=0)
+    tail = _CLAUSE_BOUNDARY.search(text, start)
+    return text[lo:tail.start() if tail else len(text)].strip()
+
+
+def asserts_absence(text: str, hit: re.Match[str]) -> bool:
+    """Whether this occurrence says the defect is ABSENT rather than found.
+
+    Fail-CLOSED in both directions that matter: a negator must be inside the
+    same clause AND within `_NEGATION_WINDOW` tokens, so an unqualified defect
+    word is still a defect claim. Callers must test EVERY occurrence — one
+    unnegated hit anywhere in a green reason is enough to discard the vote."""
+    lo = max((m.end() for m in _CLAUSE_BOUNDARY.finditer(text[:hit.start()])), default=0)
+    tokens = re.findall(r"[a-z0-9-]+", text[lo:hit.start()])
+    if any(t in _NEGATORS for t in tokens[-_NEGATION_WINDOW:]):
+        return True
+    # Terse suffix form the panel actually writes: "regression-free".
+    return text[hit.end():].startswith("-free")
+
 
 def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
     """A GREEN vote whose OWN reason names a defect is not an approval — it is a
@@ -260,17 +304,27 @@ def attest_consistency(votes: list[dict], models: list[str]) -> dict[str, Any]:
 
     Found adversarially: a panelist returned refuted=false with a reason that
     named two concrete defects. Fail-CLOSED — an inconsistent vote is discarded
-    as a parse failure, not resolved in favour of green."""
+    as a parse failure, not resolved in favour of green.
+
+    NAMING a defect is not the same as CLAIMING one. Every occurrence is tested
+    individually and an occurrence the vote explicitly negates is not a claim;
+    a single unnegated one still blocks, so this narrows what counts as a claim
+    without widening what counts as an approval. The blocking reason now quotes
+    the clause, because the last thing an operator needs at 2am is a lone word
+    with no way to tell a real inconsistency from a parser artefact."""
     for i, x in enumerate(votes):
         if not _is_valid(x) or x["v"]["refuted"] is not False:
             continue
-        hit = _DEFECT_WORDS.search(norm_reason(x["v"].get("reason")))
-        if hit:
+        reason = norm_reason(x["v"].get("reason"))
+        for hit in _DEFECT_WORDS.finditer(reason):
+            if asserts_absence(reason, hit):
+                continue
             return {"block": True,
                     "reason": f'{models[i]}: refuted=false but its own reason names a '
-                              f'defect ("{hit.group(0)}") -> inconsistent vote, fail-closed'}
+                              f'defect ("{hit.group(0)}" in "{_clause_at(reason, hit.start())}") '
+                              f'-> inconsistent vote, fail-closed'}
     return {"block": False,
-            "reason": f"{len(_green(votes))} green reason(s) free of defect claims"}
+            "reason": f"{len(_green(votes))} green reason(s) make no defect claim"}
 
 
 def attest_reasons(votes: list[dict], panel_size: int) -> dict[str, Any]:
@@ -592,6 +646,32 @@ def selftest() -> None:
            "hedging words are not defect claims")
     expect(attest_consistency([E, GV("docs only"), GV("no issue")], M3)["block"] is False,
            "an errored vote is not inspected for consistency")
+    # ... and NAMING a defect is not CLAIMING one. The prompt asks a green vote
+    # to say "why no defect", so the protocol itself produces "no fail-open";
+    # reading that as a claim blocked a unanimous panel (PR #64, 2026-08-19).
+    expect(attest_consistency([GV("checked state machine - no fail-open; lock release ok"),
+                               GV("docs only"), GV("reviewed diff")], M3)["block"] is False,
+           "an asserted ABSENCE must not read as a defect claim")
+    expect(attest_consistency([GV("checked writes, free of data loss"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is False,
+           "'free of X' is an assertion of absence")
+    expect(attest_consistency([GV("suite regression-free"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is False,
+           "'X-free' is an assertion of absence")
+    # The half that matters more: narrowing what counts as a CLAIM must not
+    # widen what counts as an APPROVAL.
+    expect(attest_consistency([GV("no security hole, but a race condition at x.py:12"),
+                               GV("docs only"), GV("reviewed diff")], M3)["block"] is True,
+           "a negation must NOT reach across a clause boundary")
+    expect(attest_consistency([GV("no fail-open; data loss on retry path"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is True,
+           "one negated claim must not absolve a second, real one")
+    expect(attest_consistency([GV("looks fine. privilege escalation via /admin"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is True,
+           "a negation must NOT reach across a sentence boundary")
+    expect(attest_consistency([GV("checked for injection"), GV("docs only"),
+                               GV("reviewed diff")], M3)["block"] is True,
+           "an unqualified defect word still fails closed")
 
     # auth_header() -- both branches
     _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)

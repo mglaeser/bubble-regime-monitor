@@ -292,6 +292,82 @@ class TestAttestConsistency:
                                       self._green("no issue")], self.M3)["block"] is False
 
 
+class TestConsistencyReadsNegation:
+    """NAMING a defect is not CLAIMING one.
+
+    `build_system_prompt` asks a green vote to say "WHAT was checked + why no
+    defect", so the protocol itself invites "no fail-open". The gate matched the
+    word, ignored the "no", and discarded the vote — turning a unanimous 3/3
+    approval into a fail-closed BLOCK on PR #64 (2026-08-19) and punishing the
+    most specific reviewer while the vaguest one passed.
+
+    The half of this that matters more is the second class below: narrowing what
+    counts as a CLAIM must not widen what counts as an APPROVAL."""
+
+    M = ["m-a", "m-b", "m-c"]
+
+    @staticmethod
+    def _votes(reason):
+        return [{"ok": True, "v": {"refuted": False, "reason": reason, "confidence": "medium"}},
+                {"ok": True, "v": {"refuted": False, "reason": "docs only", "confidence": "low"}},
+                {"ok": True, "v": {"refuted": False, "reason": "reviewed diff", "confidence": "low"}}]
+
+    #: The vote that was actually blocked, trimmed to the clause that did it.
+    REAL_BLOCKED_VOTE = (
+        "Checked: alert throttle/announced state machine (new-sig immediate, repeat gated, "
+        "failed send not marked sent, recovery only after delivered ack) - no fail-open; "
+        "lock release still guaranteed via nested finally; notify wrapped in try/except so "
+        "scheduler thread safe. No concrete reproducible misbehavior found.")
+
+    def test_the_vote_that_blocked_pr_64_now_passes(self):
+        assert iv.attest_consistency(self._votes(self.REAL_BLOCKED_VOTE), self.M)["block"] is False
+
+    @pytest.mark.parametrize("reason", [
+        "no fail-open",
+        "no fail-open; lock release guaranteed",
+        "checked writes, free of data loss",
+        "suite regression-free after change",
+        "no regression, no data loss",
+        "not exploitable",
+        "zero regressions observed",
+        "no race condition: single writer",
+    ])
+    def test_an_asserted_absence_is_not_a_defect_claim(self, reason):
+        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is False
+
+    @pytest.mark.parametrize("reason", [
+        "auth bypass when key is None",                        # bare claim
+        "no security hole, but a race condition at x.py:12",   # negation is in the PRIOR clause
+        "no fail-open; data loss on retry path",               # one negated, one real
+        "looks fine. privilege escalation via /admin",         # new sentence
+        "checked for injection",                               # unqualified: fail closed
+        "fail-open on missing header",
+    ])
+    def test_a_real_claim_still_blocks(self, reason):
+        """The control's whole purpose. A negation governs its own clause only —
+        it must never reach across a boundary and launder a live claim."""
+        assert iv.attest_consistency(self._votes(reason), self.M)["block"] is True
+
+    def test_the_blocking_reason_quotes_the_clause(self):
+        """A lone word gave an operator no way to tell a real inconsistency from
+        a parser artefact — which is exactly the call that had to be made here."""
+        out = iv.attest_consistency(self._votes("no fail-open; data loss on retry"), self.M)
+        assert out["block"] is True
+        assert "data loss" in out["reason"]
+        assert "data loss on retry" in out["reason"]      # the clause, not just the word
+        assert "no fail-open" not in out["reason"]        # and not the negated one
+
+    def test_negation_does_not_reach_backwards(self):
+        """`asserts_absence` looks only at what PRECEDES the word."""
+        assert iv.attest_consistency(self._votes("deadlock, no"), self.M)["block"] is True
+
+    def test_a_refuting_vote_is_still_never_inspected(self):
+        votes = self._votes("docs only")
+        votes[0]["v"].update(refuted=True, confidence="high",
+                             reason="x.py:1 - fail-open - control stops firing")
+        assert iv.attest_consistency(votes, self.M)["block"] is False
+
+
 class TestAuthHeader:
     """The gateway's auth header is configurable because inference.klee.me runs
     providers.openai with authMode="forward" and reserves Authorization for
