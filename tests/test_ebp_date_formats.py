@@ -107,7 +107,12 @@ class TestUnreadableFormatDegradesInsteadOfCrashing:
         escaping from a consumer three layers up."""
         with pytest.raises(SourceError) as exc:
             _parse_ebp_csv(HEADER + _rows([f"Jan {y}" for y in range(1990, 2026)]))
-        assert "unreadable date format" in str(exc.value)
+        # A wholly unknown format is also a format change reaching the newest
+        # rows, so it now trips the tail guard before the 24-row floor. Either
+        # message is a correct refusal; both must name the unreadable dates,
+        # because "the Fed is down" and "the Fed changed the format again" need
+        # different responses from the operator.
+        assert "unreadable" in str(exc.value)
 
     def test_one_bad_row_never_costs_the_series(self):
         dates = _us_months(2024) + ["not-a-date"] + _us_months(2025)
@@ -119,3 +124,30 @@ class TestUnreadableFormatDegradesInsteadOfCrashing:
         body += "6/1/2026,1.02,NA,0.12\n7/1/2026,1.02,,0.12\n"
         pairs = _parse_ebp_csv(HEADER + body)
         assert [d for d, _ in pairs if d.startswith("2026")] == []
+
+
+class TestAPartialFormatChangeFailsOver:
+    """The dangerous shape is a format change that only affects RECENT rows.
+
+    The Fed appends, so unreadable rows at the end of the file mean the current
+    months are being dropped while a fifty-year legacy tail sails past the
+    24-row floor — handing S5 a silently stale series instead of failing over
+    to the BAA proxy. Panel finding on #64 (combo/SOTA-A)."""
+
+    def test_unreadable_rows_at_the_end_fail_the_fetch(self):
+        body = _rows(_us_months(2024) + _us_months(2025))       # 24 readable
+        body += _rows(["Jan 2026", "Feb 2026", "Mar 2026"])     # the new format
+        with pytest.raises(SourceError) as exc:
+            _parse_ebp_csv(HEADER + body)
+        assert "most recent" in str(exc.value)
+
+    def test_a_stray_bad_row_in_the_middle_is_still_tolerated(self):
+        """One bad row among fifty years is not a format change."""
+        body = _rows(_us_months(2024)) + _rows(["not-a-date"]) + _rows(_us_months(2025))
+        pairs = _parse_ebp_csv(HEADER + body)
+        assert len(pairs) == 24
+        assert pairs[-1][0] == "2025-12-01"
+
+    def test_the_live_shape_is_unaffected(self):
+        pairs = _parse_ebp_csv(HEADER + _rows(_us_months(2025) + _us_months(2026)))
+        assert pairs[-1][0] == "2026-12-01"

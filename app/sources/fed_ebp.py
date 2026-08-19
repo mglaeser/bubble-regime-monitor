@@ -93,7 +93,8 @@ def _parse_ebp_csv(text: str) -> list[tuple[str, float]]:
     date_col, ebp_col = cols["date"], cols["ebp"]
     pairs: list[tuple[str, float]] = []
     unreadable_dates = 0
-    for row in reader:
+    last_readable = last_unreadable = -1
+    for index, row in enumerate(reader):
         raw_date = (row.get(date_col) or "").strip()
         raw_ebp = (row.get(ebp_col) or "").strip()
         if not raw_date or raw_ebp in ("", "NA", "."):
@@ -101,11 +102,24 @@ def _parse_ebp_csv(text: str) -> list[tuple[str, float]]:
         iso_date = normalise_date(raw_date)
         if iso_date is None:
             unreadable_dates += 1
+            last_unreadable = index
             continue
         try:
             pairs.append((iso_date, float(raw_ebp)))
+            last_readable = index
         except ValueError:
             continue
+    # A PARTIAL format change is the dangerous one. The Fed appends, so if the
+    # unreadable rows are at the END of the file we are dropping the CURRENT
+    # months and keeping a long legacy tail — which sails past the 24-row floor
+    # and hands S5 a silently stale series instead of failing over to the BAA
+    # proxy. One stray bad row in the middle of fifty years is tolerable; an
+    # unreadable row after the last readable one means the series has moved on
+    # without us.
+    if last_unreadable > last_readable:
+        raise SourceError(
+            f"Fed EBP CSV: {unreadable_dates} unreadable date(s), the most recent rows "
+            f"among them — the current series is not being read (format change?)")
     if len(pairs) < 24:
         # Naming the unreadable-date count is the difference between "the Fed is
         # down" and "the Fed changed the date format again"; the first needs

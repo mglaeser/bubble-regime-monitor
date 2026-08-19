@@ -513,3 +513,41 @@ class TestAWedgedRecomputeIsNotSilent:
         admin._last.update(started_at="not-a-timestamp", finished_at=None)
         admin.run_recompute_guarded()          # must not raise
         assert sent == []
+
+
+class TestTheStateFileIsWrittenAtomically:
+    """A crash mid-write must not corrupt the outage memory.
+
+    `write_text` truncates before writing, so an interrupted save leaves a
+    partial file — which loads as "no outage" and suppresses the all-clear,
+    reintroducing the defect the file exists to prevent. Panel finding on #64
+    (combo/SOTA-A)."""
+
+    def test_no_temp_file_is_left_behind(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        state = failure_alert._state_path()
+        assert state.exists()
+        assert not state.with_name(state.name + ".tmp").exists()
+
+    def test_the_previous_state_survives_a_failed_write(self, monkeypatch, sent):
+        """os.replace is atomic: a save that dies leaves the OLD state readable,
+        never a truncated one."""
+        notify_recompute_outcome(EBP_ERROR)
+        good = failure_alert._state_path().read_text()
+
+        def _die(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(failure_alert.os, "replace", _die)
+        notify_recompute_outcome(EBP_ERROR)          # must not raise
+        assert failure_alert._state_path().read_text() == good
+
+    def test_a_delivered_outage_still_reloads_after_the_failed_write(self, monkeypatch, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setattr(failure_alert.os, "replace",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.undo()
+        failure_alert._current = None
+        failure_alert._loaded = False
+        assert notify_recompute_outcome(None)["kind"] == "recovery"

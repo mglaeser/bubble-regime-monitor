@@ -55,6 +55,7 @@ attempted.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import threading
@@ -120,13 +121,21 @@ def _persist_locked() -> None:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
+        payload = json.dumps({
             "signature": _current.signature,
             "first_seen": _current.first_seen.isoformat(),
             "failures": _current.failures,
             "last_sent": _current.last_sent.isoformat() if _current.last_sent else None,
             "announced": _current.announced,
-        }))
+        })
+        # WRITE-THEN-RENAME, not write_text: that truncates first, so a process
+        # killed mid-write leaves a partial file, which loads as "no outage" and
+        # suppresses the all-clear — the exact defect this file exists to fix,
+        # reintroduced through a crash window. os.replace is atomic within a
+        # directory, so a reader sees either the old state or the new one.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(payload)
+        os.replace(tmp, path)
     except Exception as exc:
         log.warning("failure_alert_state_unwritable", error=str(exc)[:200])
 
