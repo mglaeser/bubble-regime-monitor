@@ -659,6 +659,27 @@ class TestTheWatchdogCannotInventAnOutage:
 
 
 class TestTheStateFileIsNotWorldReadable:
+    def test_the_temp_file_is_never_world_readable_either(self, monkeypatch, sent):
+        """The mode has to be right at CREATION. write_text() made the temp file
+        at the umask default and chmod'ed it after, which left exactly the
+        window the chmod existed to close (panel finding, #64)."""
+        monkeypatch.setattr(failure_alert.os, "replace",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("stop here")))
+        notify_recompute_outcome(EBP_ERROR)
+        state = failure_alert._state_path()
+        tmp = state.with_name(state.name + ".tmp")
+        assert tmp.exists(), "the temp file should still be here for this check"
+        assert tmp.stat().st_mode & 0o777 == 0o600, oct(tmp.stat().st_mode & 0o777)
+
+    def test_a_stale_world_readable_temp_is_replaced_not_reused(self, sent):
+        state = failure_alert._state_path()
+        tmp = state.with_name(state.name + ".tmp")
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text("stale")
+        tmp.chmod(0o644)
+        notify_recompute_outcome(EBP_ERROR)
+        assert state.stat().st_mode & 0o777 == 0o600
+
     def test_mode_is_owner_only(self, sent):
         """The signature is derived from an exception string; sanitize() is a
         weaker guarantee than "only the service can read it"."""

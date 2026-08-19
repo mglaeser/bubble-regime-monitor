@@ -133,14 +133,21 @@ def _persist_locked() -> None:
         # suppresses the all-clear — the exact defect this file exists to fix,
         # reintroduced through a crash window. os.replace is atomic within a
         # directory, so a reader sees either the old state or the new one.
+        # CREATED 0600, not chmod'ed to it. write_text() makes the file at the
+        # umask default first, so under umask 022 there was a window in which
+        # the temp file was world-readable — the exposure the chmod was there to
+        # prevent, just narrower. O_CREAT|O_EXCL after unlinking any stale temp
+        # guarantees a fresh inode whose mode was never wider, and 0o600 is not
+        # reduced by a normal umask.
+        #
+        # The signature is derived from an exception string: sanitize() strips
+        # secret- and PII-shaped substrings, but "what sanitize did not
+        # recognise" is a weaker guarantee than "only the service can read it".
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(payload)
-        # 0600 before it is visible under its real name. The signature is
-        # derived from an exception string: sanitize() strips secret- and
-        # PII-shaped substrings, but "what sanitize did not recognise" is a
-        # weaker guarantee than "only the service can read it", and the default
-        # 0644 under umask 022 hands that difference to every local account.
-        os.chmod(tmp, 0o600)
+        tmp.unlink(missing_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(payload)
         os.replace(tmp, path)
     except Exception as exc:
         log.warning("failure_alert_state_unwritable", error=str(exc)[:200])
