@@ -1047,7 +1047,7 @@ class TestASignatureChangeCarriesTheWholeDeliveryState:
         fields = {f.name for f in dataclasses.fields(failure_alert._Outage)}
         assert fields == {"signature", "first_seen", "failures", "last_sent",
                           "announced", "sending", "bypasses_used",
-                          "announced_on"}, (
+                          "announced_on", "pending_destination"}, (
             "a new _Outage field must be given an explicit carry/reset decision "
             "in the signature-change branch")
 
@@ -1282,11 +1282,11 @@ class TestTheAllClearFollowsTheAlarm:
         assert result["kind"] == "recovery"
         assert result["transport"] == "sipgate", "the all-clear follows the alarm"
 
-    def test_a_switched_off_channel_is_not_preferred(self, monkeypatch, sent):
-        """A preference must never route over a transport the operator has
-        DISABLED — `imessage_configured` answers "credentials present", not
-        "switched on", so preferring on configuration alone would send over a
-        channel that was deliberately turned off."""
+    def test_a_switched_off_channel_is_not_used(self, monkeypatch, sent):
+        """A channel the operator DISABLED is not a destination, and the channel
+        they switched TO never heard the alarm — so there is nobody left to
+        clear, and the outage closes silently rather than announcing itself to
+        the wrong audience."""
         from app.config import get_settings
 
         assert notify_recompute_outcome(EBP_ERROR)["transport"] == "imessage"
@@ -1298,10 +1298,12 @@ class TestTheAllClearFollowsTheAlarm:
         get_settings.cache_clear()
 
         result = notify_recompute_outcome(None)
-        assert result["transport"] == "sipgate"
+        assert result["status"] == "noop"
+        assert not any("OK" in m for m in sent)
 
-    def test_it_falls_back_when_that_channel_is_gone(self, monkeypatch, sent):
-        """A preference cannot resurrect a transport the operator removed."""
+    def test_a_removed_channel_leaves_nobody_to_clear(self, monkeypatch, sent):
+        """A preference cannot resurrect a transport the operator removed, and
+        the replacement never heard the alarm."""
         from app.config import get_settings
 
         notify_recompute_outcome(EBP_ERROR)
@@ -1312,8 +1314,7 @@ class TestTheAllClearFollowsTheAlarm:
         monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
         get_settings.cache_clear()
 
-        result = notify_recompute_outcome(None)
-        assert result["kind"] == "recovery" and result["transport"] == "sipgate"
+        assert notify_recompute_outcome(None)["status"] == "noop"
 
     def test_it_survives_a_restart(self, sent):
         notify_recompute_outcome(EBP_ERROR)
@@ -1411,7 +1412,8 @@ class TestAnUnknownTransportIsNotAnSMS:
         failure_alert._loaded = False
 
         result = notify_recompute_outcome(None)
-        assert result["transport"] == "imessage", "an unrecognised preference is ignored"
+        assert result["status"] == "noop", "an unrecognised destination is not a fallback"
+        assert not any("OK" in m for m in sent)
 
     def test_a_known_but_unavailable_preference_is_ignored(self, monkeypatch, sent):
         from app.config import get_settings
@@ -1447,7 +1449,8 @@ class TestEveryChannelThatHeardTheAlarmHearsTheAllClear:
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")     # both live now
         get_settings.cache_clear()
         assert notify_recompute_outcome("Rscript not found")["transport"] == "imessage"
-        assert set(failure_alert._current.announced_on) == {"sipgate", "imessage"}
+        assert {d.split("#")[0] for d in failure_alert._current.announced_on} == {
+            "sipgate", "imessage"}
 
         result = notify_recompute_outcome(None)
         assert result["kind"] == "recovery"
@@ -1494,5 +1497,81 @@ class TestEveryChannelThatHeardTheAlarmHearsTheAllClear:
 
     def test_a_single_channel_outage_is_unchanged(self, sent):
         notify_recompute_outcome(EBP_ERROR)
-        assert failure_alert._current.announced_on == ["imessage"]
+        assert [d.split("#")[0] for d in failure_alert._current.announced_on] == ["imessage"]
         assert notify_recompute_outcome(None)["transport"] == "imessage"
+
+
+class TestTheRecipientIsPartOfTheDestination:
+    """A transport is not a destination.
+
+    An operator who changes IMESSAGE_RECIPIENT mid-outage keeps the channel and
+    changes the audience: the all-clear would reach someone who never heard the
+    alarm, while the person who did keeps "FAILING". Panel finding on #64.
+
+    The recipient is a phone number or an Apple ID and this module masks it
+    everywhere it appears, so identity is a DIGEST — enough to answer "same
+    destination?", never enough to record who it is."""
+
+    def test_a_changed_recipient_is_a_different_destination(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491519999999")
+        get_settings.cache_clear()
+        result = notify_recompute_outcome(None)
+        assert result["status"] == "noop", (
+            "the new recipient never heard the alarm and is owed no all-clear")
+        assert not any("OK" in m for m in sent)
+
+    def test_the_same_recipient_still_gets_it(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+    def test_no_recipient_handle_is_written_to_disk(self, sent):
+        """The digest exists so the state file never carries a handle."""
+        notify_recompute_outcome(EBP_ERROR)
+        raw = failure_alert._state_path().read_text()
+        assert "+491510000000" not in raw
+        assert "imessage#" in raw          # the channel is named, the audience is not
+
+    def test_a_crash_mid_send_still_knows_where_it_was_going(self, monkeypatch, sent):
+        """The destination is written BEFORE the send, so an interrupted attempt
+        can still route its all-clear. Without it the crash-gap fix would know
+        an all-clear was owed and be unable to say to whom."""
+        import json
+
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
+        with pytest.raises(KeyboardInterrupt):
+            notify_recompute_outcome(EBP_ERROR)
+        state = json.loads(failure_alert._state_path().read_text())
+        assert state["sending"] is True
+        assert state["pending_destination"].startswith("imessage#")
+
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result())
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+    def test_a_refused_send_records_no_destination(self, monkeypatch, sent):
+        """Known-not-delivered: nobody was told there, so nothing is owed."""
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome(EBP_ERROR)
+        assert failure_alert._current.announced_on == []
+        assert failure_alert._current.pending_destination is None
+
+    def test_an_outage_that_knows_nothing_falls_back(self, sent):
+        """A state file from an older version knows it was announced and not
+        where. Dropping the all-clear over a bookkeeping gap would be worse than
+        sending it to the current channel."""
+        import json
+
+        notify_recompute_outcome(EBP_ERROR)
+        state = json.loads(failure_alert._state_path().read_text())
+        state["announced_on"] = []                     # as an older version wrote it
+        failure_alert._state_path().write_text(json.dumps(state))
+        failure_alert._current = None
+        failure_alert._loaded = False
+        assert notify_recompute_outcome(None)["kind"] == "recovery"

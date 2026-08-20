@@ -54,6 +54,7 @@ attempted.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -128,6 +129,12 @@ class _Outage:
     #: live and still being watched. The all-clear is owed to everyone who heard
     #: the alarm.
     announced_on: list[str] = field(default_factory=list)
+    #: The destination of an attempt currently in flight, written BEFORE the
+    #: send. A crash between the send and the record would otherwise lose WHERE
+    #: the alarm went, and an outage that cannot name a destination cannot have
+    #: its all-clear routed. Promoted into `announced_on` when the send lands,
+    #: or at load if a `sending` marker survived.
+    pending_destination: str | None = None
 
     @property
     def operator_may_be_waiting(self) -> bool:
@@ -203,6 +210,21 @@ def _aware(value: object) -> datetime:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def _restore_destinations(raw: dict[str, Any]) -> list[str]:
+    """The destinations an outage was announced on, including the one an
+    interrupted attempt was in flight to.
+
+    A `sending` marker on disk means the process died mid-send, which
+    `_load_locked` reads as "the operator may have been told". They may have
+    been told AT `pending_destination`, so it is promoted alongside — otherwise
+    the outage knows it owes an all-clear and cannot say where to send it."""
+    known = [d for d in (raw.get("announced_on") or []) if isinstance(d, str)]
+    pending = raw.get("pending_destination")
+    if raw.get("sending") is True and isinstance(pending, str) and pending not in known:
+        known.append(pending)
+    return known
+
+
 def _load_locked() -> None:
     """Restore the outage left by a previous process. Caller holds `_lock`.
 
@@ -234,7 +256,8 @@ def _load_locked() -> None:
             announced=(raw.get("announced") is True) or (raw.get("sending") is True),
             sending=False,
             bypasses_used=max(0, int(raw.get("bypasses_used") or 0)),
-            announced_on=[t for t in (raw.get("announced_on") or []) if isinstance(t, str)],
+            announced_on=_restore_destinations(raw),
+            pending_destination=None,
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
                  announced=_current.announced)
@@ -374,6 +397,24 @@ def _unconfigured(transport: str, settings: Any) -> str | None:
                                        and settings.sipgate_recipient):
         return "sipgate credentials/recipient not configured"
     return None
+
+
+def _destination_id(transport: str, settings: Any) -> str:
+    """A stable, non-reversible id for "who this transport currently reaches".
+
+    A TRANSPORT IS NOT A DESTINATION. An operator who changes IMESSAGE_RECIPIENT
+    mid-outage keeps the channel and changes the audience: the all-clear would
+    reach someone who never heard the alarm, while the person who did hear it
+    keeps "FAILING". Identity has to include the recipient.
+
+    HASHED, NOT STORED. The recipient is a phone number or an Apple ID, and this
+    module masks it everywhere it appears (C-23); writing it to a state file
+    would undo that for the sake of a comparison. A digest answers "is this the
+    same destination as before" without recording who it is."""
+    recipient = (settings.imessage_recipient if transport == "imessage"
+                 else settings.sipgate_recipient)
+    digest = hashlib.sha256(f"{transport}\x00{recipient}".encode()).hexdigest()[:16]
+    return f"{transport}#{digest}"
 
 
 def _available_transports(settings: Any) -> frozenset[str]:
@@ -568,11 +609,28 @@ def notify_recompute_outcome(error: str | None,
                 # To EVERY channel that heard the alarm and is still live. Not a
                 # duplicated message — the same statement owed separately to
                 # each audience that was told the bad news.
-                targets = [t for t in outage.announced_on
-                           if t in _available_transports(settings)]
-                if not targets:
+                live = {_destination_id(t, settings): t
+                        for t in _available_transports(settings)}
+                targets = [live[d] for d in outage.announced_on if d in live]
+                if not targets and not outage.announced_on:
+                    # We know they were told and NOT where — a state file from an
+                    # older version, or one edited by hand. The current channel
+                    # is the best available answer; dropping the all-clear over
+                    # a bookkeeping gap would be the worse one.
                     fallback, problem = _select_transport()
                     targets = [fallback]
+                if not targets:
+                    # NOBODY LEFT TO TELL. Every destination that heard the alarm
+                    # has been reconfigured away, and the destinations configured
+                    # now never heard it — an all-clear would be a message about
+                    # an outage they do not know happened. The outage closes
+                    # silently rather than being announced to the wrong audience.
+                    _current = None
+                    _persist_locked()
+                    log.info("failure_alert_recovery_unreachable",
+                             announced_on=len(outage.announced_on))
+                    return {"status": "noop", "reason": "no announced destination still configured",
+                            "kind": "recovery"}
                 transport = ", ".join(targets)
             else:
                 transport, problem = _select_transport()
@@ -600,6 +658,7 @@ def notify_recompute_outcome(error: str | None,
                 # of it, the surviving marker is what tells the next process
                 # that an all-clear may be owed. Written first, resolved after.
                 outage.sending = True
+                outage.pending_destination = _destination_id(transport, settings)
                 _persist_locked()
 
             if targets is None:
@@ -629,14 +688,18 @@ def notify_recompute_outcome(error: str | None,
                 outage.last_sent = now
                 outage.announced = True
                 outage.sending = False
-                if transport not in outage.announced_on:
-                    outage.announced_on = [*outage.announced_on, transport]
+                destination = outage.pending_destination or _destination_id(transport, settings)
+                if destination not in outage.announced_on:
+                    outage.announced_on = [*outage.announced_on, destination]
+                outage.pending_destination = None
                 _persist_locked()
             elif kind == "failure":
                 # A transport that answered "not ok" is the KNOWN-not-delivered
                 # case, which is not the crash gap: clear the marker so it does
-                # not later buy an all-clear for a message nobody received.
+                # not later buy an all-clear for a message nobody received, and
+                # drop the destination with it — nobody was told there.
                 outage.sending = False
+                outage.pending_destination = None
                 _persist_locked()
 
         log.info("failure_alert", kind=kind, transport=transport, sent=ok,
