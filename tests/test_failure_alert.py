@@ -864,3 +864,83 @@ class TestThePreconditionIsHonouredUnderTheLock:
         admin._notify_if_stuck()
         assert sent == []
         get_settings.cache_clear()
+
+
+class TestTheSignatureSeparatesDefectFromData:
+    """Two failures are the same outage when the DEFECT is the same, not when
+    the text merely looks alike.
+
+    The first version replaced every digit run with `#`, so "HTTP 500 from FRED"
+    and "HTTP 429 from FRED" merged: the operator was told about the server
+    error, the rate limit was throttled away for 24h, and they went on debugging
+    the wrong thing. Panel finding on #64 (combo/SOTA-A). In a message like that
+    the number IS the meaning; inside quotes it is the row that tripped first."""
+
+    @pytest.mark.parametrize(("a", "b"), [
+        ("invalid literal for int() with base 10: '1/1/'",
+         "invalid literal for int() with base 10: '2/1/'"),          # one defect, two rows
+        ('bad date "3/1/2026" in column 0', 'bad date "7/1/2026" in column 0'),
+    ])
+    def test_the_same_defect_on_different_data_is_one_outage(self, a, b):
+        assert failure_signature(a) == failure_signature(b)
+
+    @pytest.mark.parametrize(("a", "b"), [
+        ("HTTP 500 from fred", "HTTP 429 from fred"),                # server error vs rate limit
+        ("s1 valuation dropped", "s5 credit dropped"),
+        ("timeout after 30s", "timeout after 1800s"),
+    ])
+    def test_different_defects_stay_different_outages(self, a, b):
+        assert failure_signature(a) != failure_signature(b)
+
+    def test_a_second_distinct_failure_is_not_throttled_away(self, sent):
+        """The end-to-end consequence: the operator hears about both."""
+        notify_recompute_outcome("HTTP 500 from fred")
+        notify_recompute_outcome("HTTP 429 from fred")
+        assert len(sent) == 2
+
+    def test_the_same_failure_on_a_new_row_still_is(self, sent):
+        notify_recompute_outcome("invalid literal for int() with base 10: '1/1/'")
+        notify_recompute_outcome("invalid literal for int() with base 10: '2/1/'")
+        assert len(sent) == 1
+
+
+class TestAMovingNumberDoesNotReAlert:
+    """A caller whose own message counts something must state its identity.
+
+    The stuck watchdog reports hours in flight, and those move every slot while
+    the condition does not. Deriving the signature from that text would re-alert
+    every four hours; flattening all digits to avoid it merged genuinely
+    different failures. The caller knows which it has, so it says so."""
+
+    def test_an_explicit_signature_survives_a_changing_message(self, sent):
+        for hours in (5, 9, 13, 17):
+            notify_recompute_outcome(f"recompute stuck: in flight {hours}h",
+                                     signature="recompute stuck holding the single-flight lock")
+        assert len(sent) == 1
+
+    def test_without_one_the_moving_number_would_re_alert(self, sent):
+        """Pins WHY the parameter exists — remove it and this is the behaviour."""
+        for hours in (5, 9):
+            notify_recompute_outcome(f"recompute stuck: in flight {hours}h")
+        assert len(sent) == 2
+
+    def test_the_watchdog_passes_one(self, monkeypatch, sent):
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        admin.recompute_lock.acquire(blocking=False)
+        try:
+            for hours in (5, 9, 13):
+                admin._last.update(
+                    started_at=(datetime.now(UTC) - timedelta(hours=hours)).isoformat(),
+                    finished_at=None)
+                admin.run_recompute_guarded()
+            assert len(sent) == 1
+        finally:
+            if admin.recompute_lock.locked():
+                admin.recompute_lock.release()
+            admin._last.update(started_at=None, finished_at=None)
+            get_settings.cache_clear()

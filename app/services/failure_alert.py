@@ -231,15 +231,27 @@ def reset_state() -> None:
         _persist_locked()
 
 
+#: Quoted literals in an exception message are the DATA the failure was reached
+#: on, not the failure itself. Collapsing them is what makes `int('1/1/')` and
+#: `int('2/1/')` — one defect, two rows — a single outage.
+_QUOTED_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
 def failure_signature(error: str) -> str:
     """A stable identity for "this same failure again".
 
-    Digits collapse to `#` so that `int('1/1/')` and `int('2/1/')` — the same
-    defect reached on two different rows — are one outage rather than two, and
-    do not each earn their own immediate alert."""
+    ONLY QUOTED LITERALS ARE COLLAPSED. This used to replace every digit run
+    with `#`, which merged failures that merely looked alike: "HTTP 500 from
+    FRED" and "HTTP 429 from FRED" became one outage, so the operator was told
+    about the server error, the rate limit was throttled away for 24h, and they
+    went on debugging the wrong thing. In a message like that the number IS the
+    meaning; inside quotes it is the row that happened to trip first.
+
+    Callers whose own message carries a moving number should pass an explicit
+    signature rather than rely on this — see `notify_recompute_outcome`."""
     # sanitize() redacts secret-shaped substrings and already collapses runs of
     # whitespace, so the signature cannot be split by a reflowed error string.
-    return re.sub(r"\d+", "#", sanitize(error, limit=300)).strip().lower()[:160]
+    return _QUOTED_LITERAL.sub("'#'", sanitize(error, limit=300)).strip().lower()[:160]
 
 
 def _compact_age(delta: timedelta) -> str:
@@ -346,7 +358,8 @@ def _send(transport: str, text: str) -> tuple[bool, int | None, str | None]:
 
 
 def notify_recompute_outcome(error: str | None,
-                             precondition: Callable[[], bool] | None = None) -> dict[str, Any]:
+                             precondition: Callable[[], bool] | None = None,
+                             signature: str | None = None) -> dict[str, Any]:
     """Record the outcome of one recompute and alert if that changed anything.
 
     `error=None` means the run produced a snapshot. Returns a status dict and
@@ -394,7 +407,13 @@ def notify_recompute_outcome(error: str | None,
                     return {"status": "noop", "reason": "no announced outage"}
                 kind = "recovery"
             else:
-                signature = failure_signature(error)
+                # An explicit signature is for a caller whose message carries
+                # a number that MOVES while the condition does not — the stuck
+                # watchdog counts hours, and "stuck 5h" and "stuck 9h" are one
+                # outage. Deriving it from such a message would re-alert every
+                # slot; deriving it by flattening all digits would merge
+                # genuinely different failures. The caller knows which it has.
+                signature = signature or failure_signature(error)
                 outage = _current
                 if outage is None:
                     outage = _Outage(signature=signature, first_seen=now, failures=1)

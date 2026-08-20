@@ -63,6 +63,9 @@ def _notify_if_stuck() -> None:
         hours = int(elapsed.total_seconds() // 3600)
         notify_recompute_outcome(
             f"recompute stuck: in flight {hours}h with no result, later slots skipped",
+            # The hours move every slot while the condition does not, so the
+            # identity is stated rather than derived from the text.
+            signature="recompute stuck holding the single-flight lock",
             # Re-evaluated inside the alerter's lock, immediately before the
             # send. The checks above are necessary but raced: the run can land
             # between them and the transport call, and its own success report
