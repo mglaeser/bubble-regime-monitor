@@ -59,6 +59,7 @@ import os
 import pathlib
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -92,13 +93,33 @@ class _Outage:
     and it carries forward, because it decides whether they are owed an
     all-clear. Deriving the second from the first meant that an outage which
     was announced, then changed signature, then failed to send, was treated as
-    never announced — and its all-clear was silently dropped."""
+    never announced — and its all-clear was silently dropped.
+
+    THERE ARE THREE DELIVERY STATES, not two. `announced` says the operator was
+    told; a transport that returned not-ok says they were not; and a process
+    that died mid-send says NOBODY KNOWS. Collapsing the third into the second
+    dropped the all-clear for an outage that had in fact been delivered — the
+    crash gap. `sending` records the attempt BEFORE it is made, so a marker that
+    survives a restart is exactly the unknown case.
+
+    Unknown is resolved as ANNOUNCED, because the two mistakes are not equal.
+    Treating it as announced can produce an "OK, recompute succeeded after N
+    failures" the operator has no context for — a true statement, merely
+    unexplained. Treating it as unannounced leaves them holding "FAILING" for a
+    service that recovered, indefinitely, which is a false belief. Only one of
+    those is worth risking."""
 
     signature: str
     first_seen: datetime
     failures: int
     last_sent: datetime | None = None
     announced: bool = False
+    sending: bool = False
+
+    @property
+    def operator_may_be_waiting(self) -> bool:
+        """Whether an all-clear is owed: told, or possibly told."""
+        return self.announced or self.sending
 
 
 _lock = threading.Lock()
@@ -127,6 +148,7 @@ def _persist_locked() -> None:
             "failures": _current.failures,
             "last_sent": _current.last_sent.isoformat() if _current.last_sent else None,
             "announced": _current.announced,
+            "sending": _current.sending,
         })
         # WRITE-THEN-RENAME, not write_text: that truncates first, so a process
         # killed mid-write leaves a partial file, which loads as "no outage" and
@@ -186,6 +208,9 @@ def _load_locked() -> None:
             # is not exactly true means "not announced", which is the direction
             # that stays silent rather than the one that lies.
             announced=raw.get("announced") is True,
+            # A marker that survived a restart means the process died between
+            # handing the message to the transport and recording the result.
+            sending=raw.get("sending") is True,
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
                  announced=_current.announced)
@@ -320,7 +345,8 @@ def _send(transport: str, text: str) -> tuple[bool, int | None, str | None]:
         return False, None, detail
 
 
-def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
+def notify_recompute_outcome(error: str | None,
+                             precondition: Callable[[], bool] | None = None) -> dict[str, Any]:
     """Record the outcome of one recompute and alert if that changed anything.
 
     `error=None` means the run produced a snapshot. Returns a status dict and
@@ -342,13 +368,24 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
         repeat_after = timedelta(hours=max(1, settings.failure_alert_repeat_h))
 
         with _lock:
+            # FIRST, and holding the lock: before any state is touched, not
+            # merely before the send. The stuck watchdog reports on state a
+            # running recompute owns, and that run reports its own outcome
+            # through this same lock — checking outside it left a window where
+            # a completed run's all-clear was overtaken by a FAILING about the
+            # run that had just succeeded. Checking after the state machine was
+            # better but still wrong: a superseded report left an outage open
+            # with a first_seen that would later inflate a genuine one's
+            # timeline. A report that is superseded must leave no trace at all.
+            if precondition is not None and not precondition():
+                return {"status": "superseded", "reason": "precondition no longer holds"}
             if not _loaded:
                 # A previous process may have delivered a FAILING that this one
                 # would otherwise never stand down.
                 _load_locked()
             if error is None:
                 outage = _current
-                if outage is None or not outage.announced:
+                if outage is None or not outage.operator_may_be_waiting:
                     # Nothing was ever announced, so there is nothing to stand
                     # down. Drop an unannounced outage: the service is fine and
                     # nobody was told otherwise.
@@ -414,6 +451,13 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                     snapshot_age=_last_snapshot_age(),
                     reason=_compress_reason(error or ""), limit=limit)
 
+            if kind == "failure":
+                # BEFORE the transport call: if this process dies in the middle
+                # of it, the surviving marker is what tells the next process
+                # that an all-clear may be owed. Written first, resolved after.
+                outage.sending = True
+                _persist_locked()
+
             ok, status_code, send_error = _send(transport, text)
             if ok and kind == "recovery":
                 # The outage closes only once the all-clear is actually out.
@@ -429,6 +473,13 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                 # also the only thing that makes the operator owed an all-clear.
                 outage.last_sent = now
                 outage.announced = True
+                outage.sending = False
+                _persist_locked()
+            elif kind == "failure":
+                # A transport that answered "not ok" is the KNOWN-not-delivered
+                # case, which is not the crash gap: clear the marker so it does
+                # not later buy an all-clear for a message nobody received.
+                outage.sending = False
                 _persist_locked()
 
         log.info("failure_alert", kind=kind, transport=transport, sent=ok,

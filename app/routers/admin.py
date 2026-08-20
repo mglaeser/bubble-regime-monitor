@@ -62,7 +62,15 @@ def _notify_if_stuck() -> None:
 
         hours = int(elapsed.total_seconds() // 3600)
         notify_recompute_outcome(
-            f"recompute stuck: in flight {hours}h with no result, later slots skipped")
+            f"recompute stuck: in flight {hours}h with no result, later slots skipped",
+            # Re-evaluated inside the alerter's lock, immediately before the
+            # send. The checks above are necessary but raced: the run can land
+            # between them and the transport call, and its own success report
+            # goes through that same lock. Inside it, the two are ordered and a
+            # landed run simply supersedes this report.
+            precondition=lambda: (recompute_lock.locked()
+                                  and not _last.get("finished_at")
+                                  and _last.get("started_at") == started_at))
     except Exception as exc:  # a broken watchdog must not break the scheduler
         log.warning("stuck_check_failed", error=str(exc)[:200])
 

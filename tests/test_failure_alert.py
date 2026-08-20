@@ -775,3 +775,92 @@ class TestAFutureTimestampCannotMuteTheAlerter:
         failure_alert._current = None
         failure_alert._loaded = False
         assert notify_recompute_outcome(EBP_ERROR)["status"] == "sent"
+
+
+class TestTheCrashGapBetweenSendingAndRecording:
+    """A process that dies between handing the message to the transport and
+    recording the result leaves the delivery state UNKNOWN.
+
+    Collapsing unknown into "not delivered" dropped the all-clear for an outage
+    that had in fact reached the operator — raised three times by the panel and
+    dismissed twice by me as irreducible. It is not irreducible: it is a third
+    state, and it only needed writing down."""
+
+    def test_a_crash_mid_send_still_earns_an_all_clear(self, monkeypatch, sent):
+        """The marker is written BEFORE the transport call, so it survives."""
+        def _die_during_send(text):
+            raise KeyboardInterrupt("killed mid-send")
+
+        monkeypatch.setattr(failure_alert, "send_imessage", _die_during_send)
+        with pytest.raises(KeyboardInterrupt):
+            notify_recompute_outcome(EBP_ERROR)
+
+        state = json.loads(failure_alert._state_path().read_text())
+        assert state["sending"] is True, "the attempt must be on disk before the send"
+        assert state["announced"] is False
+
+        # a new process
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result())
+        result = notify_recompute_outcome(None)
+        assert result["kind"] == "recovery"
+        assert "OK" in sent[-1]
+
+    def test_a_transport_that_says_no_does_not_earn_one(self, monkeypatch, sent):
+        """Known-not-delivered is NOT the crash gap: the marker is cleared."""
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome(EBP_ERROR)
+        state = json.loads(failure_alert._state_path().read_text())
+        assert state["sending"] is False and state["announced"] is False
+        failure_alert._current = None
+        failure_alert._loaded = False
+        assert notify_recompute_outcome(None)["status"] == "noop"
+
+    def test_a_delivered_send_clears_the_marker(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        state = json.loads(failure_alert._state_path().read_text())
+        assert state["announced"] is True and state["sending"] is False
+
+
+class TestThePreconditionIsHonouredUnderTheLock:
+    """The stuck watchdog reports on state a running recompute owns, and that
+    run reports its own outcome through the same lock. Checking outside it left
+    a window where a completed run's all-clear was overtaken by a FAILING about
+    the very run that had just succeeded."""
+
+    def test_a_false_precondition_sends_nothing(self, sent):
+        result = notify_recompute_outcome("recompute stuck: in flight 9h",
+                                          precondition=lambda: False)
+        assert result["status"] == "superseded"
+        assert sent == []
+        assert failure_alert._current is None, "a superseded report must not open an outage"
+
+    def test_a_true_precondition_sends(self, sent):
+        result = notify_recompute_outcome("recompute stuck: in flight 9h",
+                                          precondition=lambda: True)
+        assert result["status"] == "sent"
+
+    def test_the_precondition_runs_while_the_lock_is_held(self, sent):
+        observed = []
+        notify_recompute_outcome("recompute stuck: in flight 9h",
+                                 precondition=lambda: observed.append(
+                                     failure_alert._lock.locked()) or True)
+        assert observed == [True]
+
+    def test_a_landed_run_supersedes_the_watchdog(self, monkeypatch, sent):
+        """End to end: the run completes and reports success, then the watchdog
+        fires. It must find its precondition false rather than open a phantom."""
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        admin._last.update(started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
+                           finished_at=datetime.now(UTC).isoformat())
+        admin._notify_if_stuck()
+        assert sent == []
+        get_settings.cache_clear()
