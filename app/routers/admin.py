@@ -66,6 +66,11 @@ def notify_if_stuck() -> None:
             # The hours move every slot while the condition does not, so the
             # identity is stated rather than derived from the text.
             signature="recompute stuck holding the single-flight lock",
+            # NOT a new failed attempt. This job runs every 30 minutes while a
+            # recompute is wedged, and recomputes are four hours apart, so
+            # counting each check would report "x18" for two actual attempts.
+            # It reports an ONGOING condition, not another occurrence of it.
+            occurrence=False,
             # Re-evaluated inside the alerter's lock, immediately before the
             # send. The checks above are necessary but raced: the run can land
             # between them and the transport call, and its own success report

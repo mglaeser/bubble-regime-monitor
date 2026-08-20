@@ -1047,7 +1047,7 @@ class TestASignatureChangeCarriesTheWholeDeliveryState:
         fields = {f.name for f in dataclasses.fields(failure_alert._Outage)}
         assert fields == {"signature", "first_seen", "failures", "last_sent",
                           "announced", "sending", "bypasses_used",
-                          "announced_on", "pending_destination"}, (
+                          "announced_on", "pending_destination", "cleared_on"}, (
             "a new _Outage field must be given an explicit carry/reset decision "
             "in the signature-change branch")
 
@@ -1575,3 +1575,92 @@ class TestTheRecipientIsPartOfTheDestination:
         failure_alert._current = None
         failure_alert._loaded = False
         assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+
+class TestTheWatchdogDoesNotInflateTheCount:
+    """The watchdog runs every 30 minutes; recomputes are four hours apart.
+
+    Counting each check as a failed attempt reported "recompute x18" for two
+    actual attempts — a number the operator would reasonably act on. It reports
+    an ONGOING condition, not another occurrence of one. Panel finding on #64."""
+
+    @pytest.fixture()
+    def wedged(self, monkeypatch, sent):
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        admin.recompute_lock.acquire(blocking=False)
+        admin._last.update(started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
+                           finished_at=None)
+        yield admin
+        if admin.recompute_lock.locked():
+            admin.recompute_lock.release()
+        admin._last.update(started_at=None, finished_at=None)
+        get_settings.cache_clear()
+
+    def test_repeated_checks_do_not_count_as_failures(self, wedged, sent):
+        admin = wedged
+        for _ in range(18):                      # nine hours of half-hourly checks
+            admin.notify_if_stuck()
+        assert len(sent) == 1
+        assert failure_alert._current.failures <= 1, (
+            f"reported x{failure_alert._current.failures} for one wedged run")
+
+    def test_a_real_recompute_failure_still_counts(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        notify_recompute_outcome(EBP_ERROR)
+        assert failure_alert._current.failures == 2
+
+
+class TestAPartialRecoveryDoesNotReTellTheCleared:
+    """A channel that got the all-clear must not get it again every cycle.
+
+    The outage stays open while any channel is still holding FAILING, so it is
+    retried — but the retry re-told the channels that had already heard, once
+    per recompute, for as long as the failing one stayed down. Panel finding."""
+
+    @staticmethod
+    def _two_channels(monkeypatch):
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        notify_recompute_outcome(EBP_ERROR)                # announced on sipgate
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome("Rscript not found")      # announced on imessage
+
+    def test_a_cleared_channel_is_not_told_twice(self, monkeypatch, sent):
+        self._two_channels(monkeypatch)
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        imessage_sends = []
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: imessage_sends.append(text) or _Result())
+
+        for _ in range(5):                                  # five recompute cycles
+            notify_recompute_outcome(None)
+        assert len(imessage_sends) == 1, (
+            f"the cleared channel was re-told {len(imessage_sends)} times")
+        assert failure_alert._current is not None           # sipgate still owed
+
+    def test_the_missing_channel_is_still_retried_and_closes(self, monkeypatch, sent):
+        self._two_channels(monkeypatch)
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome(None)
+        assert failure_alert._current is not None
+
+        sms_sends = []
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda text: sms_sends.append(text) or _Result())
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+        assert len(sms_sends) == 1
+        assert failure_alert._current is None
