@@ -1046,7 +1046,8 @@ class TestASignatureChangeCarriesTheWholeDeliveryState:
 
         fields = {f.name for f in dataclasses.fields(failure_alert._Outage)}
         assert fields == {"signature", "first_seen", "failures", "last_sent",
-                          "announced", "sending", "bypasses_used"}, (
+                          "announced", "sending", "bypasses_used",
+                          "announced_transport"}, (
             "a new _Outage field must be given an explicit carry/reset decision "
             "in the signature-change branch")
 
@@ -1252,3 +1253,115 @@ class TestAFailedBypassIsRetriedNotMuted:
         for n in range(12):
             notify_recompute_outcome(f"persist failed for snapshot {n}")
         assert len(sent) == 4
+
+
+class TestTheAllClearFollowsTheAlarm:
+    """The recovery belongs on the channel the alarm went out on.
+
+    An operator who switches transports mid-outage would otherwise keep
+    "FAILING" on the channel they were told on — forever — while the all-clear
+    arrived somewhere they were not watching. Panel finding on #64."""
+
+    def test_the_recovery_uses_the_announcing_transport(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        assert notify_recompute_outcome(EBP_ERROR)["transport"] == "imessage"
+
+        # the operator moves to SMS while the outage is still open
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+
+        result = notify_recompute_outcome(None)
+        assert result["kind"] == "recovery"
+        assert result["transport"] == "imessage", (
+            "the all-clear must go where the alarm went")
+
+    def test_it_falls_back_when_that_channel_is_gone(self, monkeypatch, sent):
+        """A preference cannot resurrect a transport the operator removed."""
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_API_KEY", "")          # iMessage now unconfigured
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+
+        result = notify_recompute_outcome(None)
+        assert result["kind"] == "recovery" and result["transport"] == "sipgate"
+
+    def test_it_survives_a_restart(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        failure_alert._current = None
+        failure_alert._loaded = False
+        assert notify_recompute_outcome(None)["transport"] == "imessage"
+
+    def test_a_failure_alert_never_prefers_a_stale_channel(self, monkeypatch, sent):
+        """Only the recovery follows the alarm; a NEW alarm goes wherever the
+        operator is configured now."""
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        assert notify_recompute_outcome("Rscript not found")["transport"] == "sipgate"
+
+
+class TestTheWatchdogRaceUnderRealThreads:
+    """Driven with real threads rather than reasoned about.
+
+    The panel reported that a run landing mid-watchdog leaves a stale FAILING.
+    It does not: the alerter's lock orders the two, so either the watchdog is
+    superseded, or its FAILING is followed by the run's all-clear. Pinned here
+    because "I thought about it and it's fine" is how the first two versions of
+    this were wrong."""
+
+    @pytest.mark.parametrize("delay", [0.0, 0.05, 0.12])
+    def test_a_landing_run_never_leaves_a_stale_failing(self, monkeypatch, sent, delay):
+        import threading
+        import time
+
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: (time.sleep(0.05), sent.append(text))[-1] or _Result())
+
+        admin.recompute_lock.acquire(blocking=False)
+        admin._last.update(started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
+                           finished_at=None)
+
+        def run_lands():
+            time.sleep(delay)
+            admin._last.update(finished_at=datetime.now(UTC).isoformat())
+            notify_recompute_outcome(None)
+            if admin.recompute_lock.locked():
+                admin.recompute_lock.release()
+
+        worker = threading.Thread(target=run_lands)
+        worker.start()
+        try:
+            admin.notify_if_stuck()
+            worker.join(timeout=5)
+        finally:
+            if admin.recompute_lock.locked():
+                admin.recompute_lock.release()
+            admin._last.update(started_at=None, finished_at=None)
+            get_settings.cache_clear()
+
+        if any("FAILING" in m for m in sent):
+            assert any("OK" in m for m in sent), "a FAILING must not be left standing"
+            assert sent.index(next(m for m in sent if "OK" in m)) > \
+                   sent.index(next(m for m in sent if "FAILING" in m))

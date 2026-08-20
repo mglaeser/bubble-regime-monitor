@@ -121,6 +121,11 @@ class _Outage:
     #: Times a changed signature has skipped the quiet period in this outage.
     #: Refilled when an ordinary, window-elapsed alert goes out.
     bypasses_used: int = 0
+    #: Where the alarm actually went. The all-clear belongs on the same channel:
+    #: an operator who switched transports mid-outage would otherwise be left
+    #: holding "FAILING" on the one they were told on, forever, while the
+    #: recovery went somewhere they were not looking for it.
+    announced_transport: str | None = None
 
     @property
     def operator_may_be_waiting(self) -> bool:
@@ -227,6 +232,8 @@ def _load_locked() -> None:
             announced=(raw.get("announced") is True) or (raw.get("sending") is True),
             sending=False,
             bypasses_used=max(0, int(raw.get("bypasses_used") or 0)),
+            announced_transport=(raw["announced_transport"]
+                                 if isinstance(raw.get("announced_transport"), str) else None),
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
                  announced=_current.announced)
@@ -356,19 +363,33 @@ def _compress_reason(error: str) -> str:
     return sanitize(error, limit=300).strip()
 
 
-def _select_transport() -> tuple[str, str | None]:
-    """(transport, reason it cannot send). Mirrors the daily digest: whichever
-    transport the operator turned on, exactly one, no silent downgrade."""
-    settings = get_settings()
-    transport = settings.daily_digest_transport
+def _unconfigured(transport: str, settings: Any) -> str | None:
+    """Why `transport` cannot send, or None if it can."""
     if transport == "none":
-        return transport, "no transport enabled (IMESSAGE_ENABLED/SMS_ENABLED both false)"
+        return "no transport enabled (IMESSAGE_ENABLED/SMS_ENABLED both false)"
     if transport == "imessage" and not settings.imessage_configured:
-        return transport, "imessage proxy URL/key/recipient not configured"
+        return "imessage proxy URL/key/recipient not configured"
     if transport == "sipgate" and not (settings.sipgate_token_id and settings.sipgate_token
                                        and settings.sipgate_recipient):
-        return transport, "sipgate credentials/recipient not configured"
-    return transport, None
+        return "sipgate credentials/recipient not configured"
+    return None
+
+
+def _select_transport(prefer: str | None = None) -> tuple[str, str | None]:
+    """(transport, reason it cannot send). Mirrors the daily digest: whichever
+    transport the operator turned on, exactly one, no silent downgrade.
+
+    `prefer` is the channel an outage was ANNOUNCED on. The all-clear belongs
+    where the alarm went: an operator who switched transports mid-outage would
+    otherwise keep "FAILING" on the channel they were told on while the recovery
+    arrived somewhere they were not watching. It is honoured only while that
+    channel is still configured — a preference cannot resurrect a transport the
+    operator has taken away."""
+    settings = get_settings()
+    if prefer and _unconfigured(prefer, settings) is None:
+        return prefer, None
+    transport = settings.daily_digest_transport
+    return transport, _unconfigured(transport, settings)
 
 
 def _send(transport: str, text: str) -> tuple[bool, int | None, str | None]:
@@ -516,7 +537,8 @@ def notify_recompute_outcome(error: str | None,
                 _persist_locked()
                 kind = "failure"
 
-            transport, problem = _select_transport()
+            transport, problem = _select_transport(
+                outage.announced_transport if kind == "recovery" else None)
             if problem:
                 # Logged loudly: a failing recompute AND nowhere to say so is
                 # the state this whole module exists to make unreachable
@@ -559,6 +581,7 @@ def notify_recompute_outcome(error: str | None,
                 outage.last_sent = now
                 outage.announced = True
                 outage.sending = False
+                outage.announced_transport = transport
                 _persist_locked()
             elif kind == "failure":
                 # A transport that answered "not ok" is the KNOWN-not-delivered
