@@ -2363,3 +2363,97 @@ class TestTheWedgedRunIsDatedFromWhenItStuck:
                 admin.recompute_lock.release()
             admin._last.update(started_at=None, finished_at=None)
             get_settings.cache_clear()
+
+
+class TestTheCrashMarkerNamesOnlyWhatWasAttempted:
+    """The marker says who an all-clear may be owed to, so it must name what was
+    ATTEMPTED, not the whole audience.
+
+    Written all up front, a crash on the FIRST target promoted a channel that
+    was never contacted — and that channel then received an all-clear for an
+    alarm it had never been sent. Panel finding on #64."""
+
+    @staticmethod
+    def _alarm_both(monkeypatch):
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        notify_recompute_outcome("boom A")                  # sipgate only
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+
+    def test_a_channel_never_contacted_is_not_recorded(self, monkeypatch, sent):
+        import json
+
+        self._alarm_both(monkeypatch)
+
+        def _die(text):
+            raise KeyboardInterrupt("killed on the first target")
+
+        monkeypatch.setattr(failure_alert, "send_sms", _die)
+        with pytest.raises(KeyboardInterrupt):
+            notify_recompute_outcome("boom B")              # audience is both
+
+        pending = json.loads(failure_alert._state_path().read_text())["pending_destinations"]
+        assert {d.split("#")[0] for d in pending} == {"sipgate"}, (
+            "only the target actually attempted may be recorded")
+
+    def test_and_therefore_receives_no_all_clear(self, monkeypatch, sent):
+        self._alarm_both(monkeypatch)
+        im = []
+        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im.append(t) or _Result())
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda t: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
+        with pytest.raises(KeyboardInterrupt):
+            notify_recompute_outcome("boom B")
+
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setattr(failure_alert, "send_sms", lambda t: sent.append(t) or _Result())
+        notify_recompute_outcome(None)
+        assert not any(m.startswith("bubblegauge OK") for m in im), (
+            "a channel that was never contacted is owed nothing"
+        )
+
+    def test_the_attempted_target_still_gets_one(self, monkeypatch, sent):
+        """Its delivery is genuinely unknown, which still resolves to owed."""
+        self._alarm_both(monkeypatch)
+        sms = []
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda t: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
+        with pytest.raises(KeyboardInterrupt):
+            notify_recompute_outcome("boom B")
+
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setattr(failure_alert, "send_sms", lambda t: sms.append(t) or _Result())
+        notify_recompute_outcome(None)
+        assert any(m.startswith("bubblegauge OK") for m in sms)
+
+    def test_the_ordinary_case_does_not_pay_for_the_multi_target_fix(self, monkeypatch, sent):
+        """One target writes the marker once.
+
+        Three writes total for a single-target alert — the throttle decision,
+        the marker, and the outcome — which is what it was before the marker
+        moved into the loop. The property under test is that the loop adds
+        nothing per target beyond the one it must."""
+        writes = []
+        original = failure_alert._persist_locked
+        monkeypatch.setattr(failure_alert, "_persist_locked",
+                            lambda: (writes.append(1), original())[1])
+        notify_recompute_outcome(EBP_ERROR)
+        assert len(writes) == 3, f"{len(writes)} writes for one single-target alert"
+
+    def test_two_targets_write_one_marker_each(self, monkeypatch, sent):
+        self._alarm_both(monkeypatch)
+        writes = []
+        original = failure_alert._persist_locked
+        monkeypatch.setattr(failure_alert, "_persist_locked",
+                            lambda: (writes.append(1), original())[1])
+        notify_recompute_outcome("boom B")                  # audience of two
+        assert len(writes) == 4, f"{len(writes)} writes for a two-target alert"

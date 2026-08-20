@@ -779,18 +779,26 @@ def notify_recompute_outcome(error: str | None,
             # producing a destination id that matches nothing and a crash that
             # loses its own recovery route.
             send_targets = targets if targets is not None else [transport]
-            attempted = [_destination_id(t, settings) for t in send_targets]
-
             if kind == "failure":
-                # BEFORE the transport call: if this process dies in the middle
-                # of it, the surviving marker is what tells the next process
-                # that an all-clear may be owed, and to whom. Written first,
-                # resolved after.
                 outage.sending = True
-                outage.pending_destinations = attempted
-                _persist_locked()
+                outage.pending_destinations = []
 
-            results = [(t, _send(t, text)) for t in send_targets]
+            results = []
+            for target in send_targets:
+                if kind == "failure":
+                    # RECORDED PER TARGET, immediately before its own send. The
+                    # marker tells the next process that an all-clear may be
+                    # owed and to whom, so it must name what was ATTEMPTED —
+                    # written all up front it named the whole audience, and a
+                    # crash on the first target promoted a channel that was
+                    # never contacted, which then received an all-clear for an
+                    # alarm it had never been sent. One write per target, and
+                    # for the ordinary single-target alert that is the same one
+                    # write as before.
+                    outage.pending_destinations = [*outage.pending_destinations,
+                                                   _destination_id(target, settings)]
+                    _persist_locked()
+                results.append((target, _send(target, text)))
             delivered_to = [_destination_id(t, settings)
                             for t, (was_sent, _s, _e) in results if was_sent]
             if kind == "recovery":
