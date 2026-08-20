@@ -505,6 +505,14 @@ def notify_recompute_outcome(error: str | None,
                     outage.bypasses_used = 0
                 else:
                     outage.bypasses_used += 1
+                    # The inherited clock belongs to the PREVIOUS cause, and a
+                    # send that fails must be retried rather than silenced. Left
+                    # in place, a changed cause whose alert did not leave the
+                    # host was then muted for the remainder of the old cause's
+                    # quiet period — contradicting the rule that an undelivered
+                    # alert is always retried. Cleared AFTER `quiet_elapsed` is
+                    # computed, so the budget accounting above is unaffected.
+                    outage.last_sent = None
                 _persist_locked()
                 kind = "failure"
 

@@ -166,13 +166,28 @@ class TestAnUnreadableValueIsNotAGap:
         ("provisional marker", "1/1/2026,1.03,-0.31 (p),0.12\n"),
         ("unicode minus",      "1/1/2026,1.03,\u22120.31,0.12\n"),
         ("thousands comma",    '1/1/2026,1.03,"1,031",0.12\n'),
-        ("NaN",                "1/1/2026,1.03,NaN,0.12\n"),
         ("infinity",           "1/1/2026,1.03,inf,0.12\n"),
     ])
     def test_a_trailing_unreadable_value_fails_the_fetch(self, label, trailing):
         with pytest.raises(SourceError) as exc:
             _parse_ebp_csv(HEADER + self._GOOD + trailing)
         assert "unreadable value" in str(exc.value)
+
+    @pytest.mark.parametrize("spelling", ["NaN", "nan", "NAN", "N/A"])
+    def test_a_nan_spelling_is_a_gap_not_a_format_change(self, spelling):
+        """NaN is what a float64 missing cell serialises to when an exporter's
+        na_rep changes — the same class of vendor re-spelling that produced the
+        date break. Refusing the fetch over the Fed's ordinary trailing gap
+        would be a false alarm; ingesting it read as maximum credit fragility.
+        It is neither: it is absent data."""
+        pairs = _parse_ebp_csv(HEADER + self._GOOD + f"1/1/2026,1.03,{spelling},0.12\n")
+        assert len(pairs) == 24
+        assert all(v == v for _, v in pairs)
+
+    def test_infinity_is_still_a_wrong_number_not_a_gap(self):
+        """`inf` is not a missing marker; it is a wrong value."""
+        with pytest.raises(SourceError):
+            _parse_ebp_csv(HEADER + self._GOOD + "1/1/2026,1.03,inf,0.12\n")
 
     def test_a_documented_gap_is_still_a_gap(self):
         """NA / blank / '.' are what the Fed publishes for a month it has not

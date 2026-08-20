@@ -41,9 +41,18 @@ from app.sources import SourceError
 
 EBP_URL = "https://www.federalreserve.gov/econres/notes/feds-notes/ebp_csv.csv"
 
-#: Values the Fed publishes for a month it has not computed. Absent data, not
+#: Values that mean "this month is not computed yet". Absent data, not
 #: unreadable data — the distinction the tail guard turns on.
-_MISSING_VALUE = ("", "NA", ".")
+#:
+#: The NaN spellings are here rather than among the unreadable values because
+#: that is what a float64 missing cell serialises to when an exporter's na_rep
+#: changes — the same class of vendor re-spelling that produced the date break.
+#: Reading them as a format change would fail the whole fetch over the Fed's
+#: ordinary trailing gap; reading them as DATA is what let a NaN reach the
+#: percentile and read as maximum credit fragility. Neither: they are a gap.
+#: `inf` is deliberately NOT here. It is not a missing marker, it is a wrong
+#: number, and `math.isfinite` below still refuses it.
+_MISSING_VALUE = ("", "NA", ".", "NaN", "nan", "NAN", "N/A")
 
 #: `YYYY-MM` or `YYYY-MM-DD`, the shape the file carried until 2026-08-06.
 _ISO_DATE_RE = re.compile(r"(?P<y>\d{4})-(?P<m>\d{1,2})(?:-(?P<d>\d{1,2}))?")

@@ -1217,3 +1217,38 @@ class TestABoundedBudgetNeverBecomesSilence:
         for _ in range(20):
             notify_recompute_outcome(EBP_ERROR)
         assert len(sent) == 1
+
+
+class TestAFailedBypassIsRetriedNotMuted:
+    """An undelivered alert is always retried — including one for a CHANGED
+    cause, which inherits the previous cause's throttle clock.
+
+    Left in place, that clock muted the new cause for the remainder of the old
+    one's quiet period: the operator was never told what the service had started
+    failing with. Panel finding on #64 (combo/SOTA-A)."""
+
+    def test_a_changed_cause_whose_send_fails_is_retried(self, monkeypatch, sent):
+        notify_recompute_outcome(EBP_ERROR)                 # cause A, delivered
+        assert len(sent) == 1
+
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome("Rscript not found")       # cause B, undelivered
+        assert len(sent) == 1
+
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result())
+        notify_recompute_outcome("Rscript not found")       # B again, must retry
+        assert len(sent) == 2, "an undelivered alert must never inherit a quiet period"
+
+    def test_a_delivered_changed_cause_does_start_one(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        notify_recompute_outcome("Rscript not found")       # delivered
+        notify_recompute_outcome("Rscript not found")       # same cause, throttled
+        assert len(sent) == 2
+
+    def test_the_budget_is_still_bounded_across_failed_sends(self, monkeypatch, sent):
+        """Clearing the clock must not hand back budget."""
+        for n in range(12):
+            notify_recompute_outcome(f"persist failed for snapshot {n}")
+        assert len(sent) == 4
