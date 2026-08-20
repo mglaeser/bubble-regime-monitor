@@ -1047,7 +1047,7 @@ class TestASignatureChangeCarriesTheWholeDeliveryState:
         fields = {f.name for f in dataclasses.fields(failure_alert._Outage)}
         assert fields == {"signature", "first_seen", "failures", "last_sent",
                           "announced", "sending", "bypasses_used",
-                          "announced_on", "pending_destination", "cleared_on"}, (
+                          "announced_on", "pending_destinations", "cleared_on"}, (
             "a new _Outage field must be given an explicit carry/reset decision "
             "in the signature-change branch")
 
@@ -1549,7 +1549,7 @@ class TestTheRecipientIsPartOfTheDestination:
             notify_recompute_outcome(EBP_ERROR)
         state = json.loads(failure_alert._state_path().read_text())
         assert state["sending"] is True
-        assert state["pending_destination"].startswith("imessage#")
+        assert any(d.startswith("imessage#") for d in state["pending_destinations"])
 
         failure_alert._current = None
         failure_alert._loaded = False
@@ -1563,7 +1563,7 @@ class TestTheRecipientIsPartOfTheDestination:
                             lambda text: _Result(ok=False, status_code=503, error="down"))
         notify_recompute_outcome(EBP_ERROR)
         assert failure_alert._current.announced_on == []
-        assert failure_alert._current.pending_destination is None
+        assert failure_alert._current.pending_destinations == []
 
     def test_an_outage_that_knows_nothing_falls_back(self, sent):
         """A state file from an older version knows it was announced and not
@@ -1894,3 +1894,71 @@ class TestAnAudienceIsNotAChannel:
         """With no audience yet, there is nothing to broadcast to."""
         result = notify_recompute_outcome(EBP_ERROR)
         assert result["transport"] == "imessage"
+
+
+class TestOnlyDeliveredDestinationsAreRecorded:
+    """A channel that REFUSED the alarm was written down as having heard it, and
+    was later sent an all-clear for an outage it was never told about.
+
+    The attempted list and the delivered list are different lists. Panel finding
+    on #64, in my own multi-target alarm."""
+
+    @staticmethod
+    def _two_channels(monkeypatch):
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+
+    def test_a_refused_channel_is_not_recorded_as_told(self, monkeypatch, sent):
+        self._two_channels(monkeypatch)
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda t: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome("Rscript not found")       # sipgate ok, imessage refuses
+        channels = {d.split("#")[0] for d in failure_alert._current.announced_on}
+        assert channels == {"sipgate"}, f"recorded {channels}"
+
+    def test_and_therefore_gets_no_all_clear(self, monkeypatch, sent):
+        self._two_channels(monkeypatch)
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda t: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome("Rscript not found")
+
+        im = []
+        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im.append(t) or _Result())
+        notify_recompute_outcome(None)
+        assert im == [], "a channel never told of the outage is owed no all-clear"
+
+    def test_a_crash_records_every_destination_it_was_attempting(self, monkeypatch, sent):
+        """The marker must name real destinations. Hashing the joined display
+        string "sipgate, imessage" produced an id matching nothing, so a crash
+        lost its own recovery route."""
+        import json
+
+        self._two_channels(monkeypatch)
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda t: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
+        with pytest.raises(KeyboardInterrupt):
+            notify_recompute_outcome("Rscript not found")
+
+        pending = json.loads(failure_alert._state_path().read_text())["pending_destinations"]
+        assert {d.split("#")[0] for d in pending} == {"sipgate", "imessage"}
+        assert not any("," in d for d in pending), "a joined display string is not a destination"
+
+    def test_the_crash_route_still_delivers_an_all_clear(self, monkeypatch, sent):
+        self._two_channels(monkeypatch)
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda t: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
+        with pytest.raises(KeyboardInterrupt):
+            notify_recompute_outcome("Rscript not found")
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: sent.append(t) or _Result())
+        assert notify_recompute_outcome(None)["kind"] == "recovery"

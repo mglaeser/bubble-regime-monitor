@@ -134,7 +134,7 @@ class _Outage:
     #: the alarm went, and an outage that cannot name a destination cannot have
     #: its all-clear routed. Promoted into `announced_on` when the send lands,
     #: or at load if a `sending` marker survived.
-    pending_destination: str | None = None
+    pending_destinations: list[str] = field(default_factory=list)
     #: Destinations that have already received the all-clear. A partial recovery
     #: leaves the outage open so the channels that missed it are retried; without
     #: this the retry re-told the ones that had already heard, every cycle, for
@@ -238,9 +238,10 @@ def _restore_destinations(raw: dict[str, Any]) -> list[str]:
     been told AT `pending_destination`, so it is promoted alongside — otherwise
     the outage knows it owes an all-clear and cannot say where to send it."""
     known = _destination_list(raw.get("announced_on"))
-    pending = raw.get("pending_destination")
-    if raw.get("sending") is True and isinstance(pending, str) and pending not in known:
-        known.append(pending)
+    if raw.get("sending") is True:
+        for pending in _destination_list(raw.get("pending_destinations")):
+            if pending not in known:
+                known.append(pending)
     return known
 
 
@@ -276,7 +277,7 @@ def _load_locked() -> None:
             sending=False,
             bypasses_used=max(0, int(raw.get("bypasses_used") or 0)),
             announced_on=_restore_destinations(raw),
-            pending_destination=None,
+            pending_destinations=[],
             cleared_on=_destination_list(raw.get("cleared_on")),
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
@@ -712,35 +713,40 @@ def notify_recompute_outcome(error: str | None,
                     snapshot_age=_last_snapshot_age(),
                     reason=_compress_reason(error or ""), limit=limit)
 
+            # ONE PATH, always a list — a single transport is a list of one.
+            # The special case was where both of the last two defects lived: it
+            # recorded ATTEMPTED targets as delivered, and it hashed the joined
+            # display string "sipgate, imessage" as though it were a transport,
+            # producing a destination id that matches nothing and a crash that
+            # loses its own recovery route.
+            send_targets = targets if targets is not None else [transport]
+            attempted = [_destination_id(t, settings) for t in send_targets]
+
             if kind == "failure":
                 # BEFORE the transport call: if this process dies in the middle
                 # of it, the surviving marker is what tells the next process
-                # that an all-clear may be owed. Written first, resolved after.
+                # that an all-clear may be owed, and to whom. Written first,
+                # resolved after.
                 outage.sending = True
-                outage.pending_destination = _destination_id(transport, settings)
+                outage.pending_destinations = attempted
                 _persist_locked()
 
-            if targets is None:
-                ok, status_code, send_error = _send(transport, text)
-            else:
-                results = [(t, _send(t, text)) for t in targets]
-                for target, (delivered, _status, _err) in results:
-                    if delivered:
-                        cleared = _destination_id(target, settings)
-                        if cleared not in outage.cleared_on:
-                            outage.cleared_on = [*outage.cleared_on, cleared]
-                # ALL of them, not any: a channel that did not get the all-clear
-                # is a channel still holding FAILING, so the outage stays open
-                # and is retried — but only to the channels that missed it.
-                # For a RECOVERY: all of them. A channel that did not get the
-                # all-clear is still holding FAILING, so the outage stays open.
-                # For an ALARM: any of them. The operator has been reached; a
-                # channel that missed it is picked up by the next alert rather
-                # than by re-sending the same alarm on every slot.
-                ok = (all(r[1][0] for r in results) if kind == "recovery"
-                      else any(r[1][0] for r in results))
-                status_code = results[0][1][1] if results else None
-                send_error = next((r[1][2] for r in results if not r[1][0]), None)
+            results = [(t, _send(t, text)) for t in send_targets]
+            delivered_to = [_destination_id(t, settings)
+                            for t, (was_sent, _s, _e) in results if was_sent]
+            if kind == "recovery":
+                for cleared in delivered_to:
+                    if cleared not in outage.cleared_on:
+                        outage.cleared_on = [*outage.cleared_on, cleared]
+            # For a RECOVERY: all of them. A channel that did not get the
+            # all-clear is still holding FAILING, so the outage stays open.
+            # For an ALARM: any of them. The operator has been reached; a
+            # channel that missed it is picked up by the next alert rather than
+            # by re-sending the same alarm on every slot.
+            ok = (all(r[1][0] for r in results) if kind == "recovery"
+                  else any(r[1][0] for r in results))
+            status_code = results[0][1][1] if results else None
+            send_error = next((r[1][2] for r in results if not r[1][0]), None)
             if kind == "recovery":
                 if ok:
                     # The outage closes only once the all-clear is actually out.
@@ -761,11 +767,11 @@ def notify_recompute_outcome(error: str | None,
                 outage.last_sent = now
                 outage.announced = True
                 outage.sending = False
-                if targets is not None:
-                    reached = [_destination_id(t, settings) for t in targets]
-                else:
-                    reached = [outage.pending_destination
-                               or _destination_id(transport, settings)]
+                # ONLY WHAT WAS DELIVERED. Recording every attempted target
+                # meant a channel that refused the alarm was written down as
+                # having heard it, and was later sent an all-clear for an outage
+                # it was never told about.
+                reached = delivered_to
                 for destination in reached:
                     if destination not in outage.announced_on:
                         outage.announced_on = [*outage.announced_on, destination]
@@ -776,7 +782,7 @@ def notify_recompute_outcome(error: str | None,
                 # permanently: partial recovery clears A, a new alarm goes to A,
                 # and the closing all-clear then went only to B.
                 outage.cleared_on = [d for d in outage.cleared_on if d not in reached]
-                outage.pending_destination = None
+                outage.pending_destinations = []
                 _persist_locked()
             else:
                 # A transport that answered "not ok" is the KNOWN-not-delivered
@@ -784,7 +790,7 @@ def notify_recompute_outcome(error: str | None,
                 # not later buy an all-clear for a message nobody received, and
                 # drop the destination with it — nobody was told there.
                 outage.sending = False
-                outage.pending_destination = None
+                outage.pending_destinations = []
                 _persist_locked()
 
         log.info("failure_alert", kind=kind, transport=transport, sent=ok,
