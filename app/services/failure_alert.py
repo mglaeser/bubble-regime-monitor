@@ -714,7 +714,8 @@ def notify_recompute_outcome(error: str | None,
                     # remains. Recording that keeps the obligation alive without
                     # keeping the timeline: a later failure starts fresh rather
                     # than adopting a fortnight-old first_seen and failure count.
-                    outage.recovered_at = now
+                    if outage.recovered_at is None:
+                        outage.recovered_at = now
                     _persist_locked()
                     log.warning("failure_alert_recovery_unreachable",
                                 announced_on=len(outage.announced_on),
@@ -780,13 +781,26 @@ def notify_recompute_outcome(error: str | None,
             status_code = results[0][1][1] if results else None
             send_error = next((r[1][2] for r in results if not r[1][0]), None)
             if kind == "recovery":
-                if ok:
+                # CLOSES WHEN EVERY ANNOUNCED DESTINATION HAS BEEN TOLD, not
+                # when every REACHABLE one has. Asking only about the targets it
+                # could reach meant a mixed recovery — one channel live, another
+                # down for a restart — delivered to the live one and closed, and
+                # the channel that was merely unreachable at that moment never
+                # got an all-clear at all. The same defect as the
+                # all-unreachable case, hiding behind a sibling that succeeded.
+                outstanding = [d for d in outage.announced_on if d not in outage.cleared_on]
+                if ok and not outstanding:
                     # The outage closes only once the all-clear is actually out.
                     # Clearing it first meant a failed recovery send was never
                     # retried — every later success returned "noop" and the last
                     # thing the operator held was "FAILING" for a service that
                     # had been healthy for days.
                     _current = None
+                elif outage.recovered_at is None:
+                    # Still owed to someone, so the outage stays open — but the
+                    # service HAS recovered, and the timeline must stop here or
+                    # a later failure inherits it.
+                    outage.recovered_at = now
                 # PERSISTED EITHER WAY. A partial recovery records which
                 # channels have been told, and that progress only survives a
                 # restart if it is written on the failing path too — otherwise

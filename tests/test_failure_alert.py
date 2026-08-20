@@ -2170,3 +2170,67 @@ class TestTheAllClearReportsTheOutageNotTheWait:
         get_settings.cache_clear()
         notify_recompute_outcome(None)
         assert recovered is not None
+
+
+class TestAMixedRecoveryDoesNotAbandonTheUnreachable:
+    """A recovery closes when every ANNOUNCED destination has been told, not
+    when every REACHABLE one has.
+
+    Asking only about the targets it could reach meant a mixed recovery — one
+    channel live, another down for a restart — delivered to the live one and
+    closed, and the channel that was merely unreachable at that moment never got
+    an all-clear at all. The same defect as the all-unreachable case, hiding
+    behind a sibling that succeeded. Panel finding on #64."""
+
+    @staticmethod
+    def _alarm_both(monkeypatch):
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        notify_recompute_outcome("boom A")                  # sipgate
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome("boom B")                  # audience: both
+
+    def test_the_unreachable_channel_still_gets_its_all_clear(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        self._alarm_both(monkeypatch)
+        sms, im = [], []
+        monkeypatch.setattr(failure_alert, "send_sms", lambda t: sms.append(t) or _Result())
+        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im.append(t) or _Result())
+
+        monkeypatch.setenv("SMS_ENABLED", "false")          # sipgate down for a restart
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)
+        assert failure_alert._current is not None, "an untold audience keeps it open"
+
+        monkeypatch.setenv("SMS_ENABLED", "true")           # sipgate returns
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)
+
+        assert sum(1 for m in sms if m.startswith("bubblegauge OK")) == 1
+        assert sum(1 for m in im if m.startswith("bubblegauge OK")) == 1
+        assert failure_alert._current is None
+
+    def test_the_reachable_channel_is_not_told_twice(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        self._alarm_both(monkeypatch)
+        im = []
+        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im.append(t) or _Result())
+        monkeypatch.setenv("SMS_ENABLED", "false")
+        get_settings.cache_clear()
+        for _ in range(4):
+            notify_recompute_outcome(None)
+        assert sum(1 for m in im if m.startswith("bubblegauge OK")) == 1
+
+    def test_a_fully_reachable_recovery_still_closes_at_once(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+        assert failure_alert._current is None
