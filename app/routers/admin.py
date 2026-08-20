@@ -66,11 +66,15 @@ def notify_if_stuck() -> None:
             # The hours move every slot while the condition does not, so the
             # identity is stated rather than derived from the text.
             signature="recompute stuck holding the single-flight lock",
-            # NOT a new failed attempt. This job runs every 30 minutes while a
-            # recompute is wedged, and recomputes are four hours apart, so
-            # counting each check would report "x18" for two actual attempts.
-            # It reports an ONGOING condition, not another occurrence of it.
-            occurrence=False,
+            # The attempt this is about, and when it began. Naming the attempt
+            # keeps repeated checks — this job runs every 30 minutes while a
+            # recompute is wedged, against four-hourly recomputes — and the
+            # wedged run's own eventual report from counting the same failure
+            # twice. `since` dates the outage from when the run STUCK rather
+            # than when it was noticed, a nine-hour difference on a nine-hour
+            # wedge.
+            attempt=str(started_at),
+            since=started,
             # Re-evaluated inside the alerter's lock, immediately before the
             # send. The checks above are necessary but raced: the run can land
             # between them and the transport call, and its own success report
@@ -144,7 +148,9 @@ def run_recompute_guarded() -> None:
         try:
             from app.services.failure_alert import notify_recompute_outcome
 
-            notify_recompute_outcome(failure)
+            # The attempt this run IS, so a wedged run already reported by the
+            # watchdog is not counted a second time when it finally gives up.
+            notify_recompute_outcome(failure, attempt=str(_last.get("started_at") or ""))
         finally:
             recompute_lock.release()
 

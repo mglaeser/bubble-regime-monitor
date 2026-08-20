@@ -328,7 +328,7 @@ class TestRecomputeHook:
 
         observed: dict[str, object] = {}
 
-        def _spy(error):
+        def _spy(error, **kw):
             observed["locked"] = admin.recompute_lock.locked()
             observed["error"] = error
             return {"status": "noop"}
@@ -709,7 +709,8 @@ class TestAnAbortIsNotASuccess:
 
         seen: dict[str, object] = {}
         monkeypatch.setattr(fa, "notify_recompute_outcome",
-                            lambda error: seen.update(error=error) or {"status": "noop"})
+                            lambda error, **kw: seen.update(error=error, **kw)
+                            or {"status": "noop"})
         return admin, compute, seen
 
     @pytest.mark.parametrize("exc", [SystemExit, KeyboardInterrupt])
@@ -1044,7 +1045,7 @@ class TestASignatureChangeCarriesTheWholeDeliveryState:
         assert fields == {"signature", "first_seen", "failures", "last_sent",
                           "announced", "sending", "bypasses_used",
                           "announced_on", "pending_destinations", "cleared_on",
-                          "recovered_at"}, (
+                          "recovered_at", "counted_attempt"}, (
             "a new _Outage field must be given an explicit carry/reset decision "
             "in the signature-change branch")
 
@@ -1578,11 +1579,13 @@ class TestTheRecipientIsPartOfTheDestination:
 
 
 class TestTheWatchdogDoesNotInflateTheCount:
-    """The watchdog runs every 30 minutes; recomputes are four hours apart.
+    """One attempt is one failure however many times it is reported.
 
-    Counting each check as a failed attempt reported "recompute x18" for two
-    actual attempts — a number the operator would reasonably act on. It reports
-    an ONGOING condition, not another occurrence of one. Panel finding on #64."""
+    The watchdog runs every 30 minutes against four-hourly recomputes, so
+    counting each check reported "recompute x18" for two actual attempts. And
+    the wedged run itself reports the SAME attempt when it finally gives up, so
+    that one was counted twice more. Both are settled by naming the attempt.
+    Panel findings on #64."""
 
     @pytest.fixture()
     def wedged(self, monkeypatch, sent):
@@ -2295,3 +2298,68 @@ class TestAnUnreachableAudienceIsReportedOnce:
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
         get_settings.cache_clear()
         assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+
+class TestOneAttemptIsOneFailure:
+    """The watchdog and the wedged run describe the SAME attempt — the watchdog
+    while it hangs, the run when it finally gives up — and it was counted twice.
+    Panel finding on #64."""
+
+    @pytest.fixture()
+    def wedged(self, monkeypatch, sent):
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        started = datetime.now(UTC) - timedelta(hours=9)
+        admin.recompute_lock.acquire(blocking=False)
+        admin._last.update(started_at=started.isoformat(), finished_at=None)
+        yield admin, started
+        if admin.recompute_lock.locked():
+            admin.recompute_lock.release()
+        admin._last.update(started_at=None, finished_at=None)
+        get_settings.cache_clear()
+
+    def test_the_run_reporting_itself_does_not_count_again(self, wedged, sent):
+        admin, started = wedged
+        admin.notify_if_stuck()
+        assert failure_alert._current.failures == 1
+
+        admin.recompute_lock.release()
+        admin._last.update(finished_at=datetime.now(UTC).isoformat())
+        notify_recompute_outcome("gather timed out after 9h",
+                                 attempt=str(admin._last["started_at"]))
+        assert failure_alert._current.failures == 1, "one attempt, one failure"
+
+    def test_a_different_attempt_does_count(self, wedged, sent):
+        admin, started = wedged
+        admin.notify_if_stuck()
+        notify_recompute_outcome("gather timed out", attempt="a-later-run")
+        assert failure_alert._current.failures == 2
+
+
+class TestTheWedgedRunIsDatedFromWhenItStuck:
+    """A wedged run is reported hours after it sticks, and dating the outage
+    from the report told the operator it had only just started. Panel finding
+    on #64."""
+
+    def test_the_alert_says_when_the_run_stuck(self, monkeypatch, sent):
+        from app.config import get_settings
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        get_settings.cache_clear()
+        started = datetime.now(UTC) - timedelta(hours=9)
+        admin.recompute_lock.acquire(blocking=False)
+        admin._last.update(started_at=started.isoformat(), finished_at=None)
+        try:
+            admin.notify_if_stuck()
+            assert started.strftime("%d %b %H:%MZ") in sent[-1], sent[-1]
+            assert failure_alert._current.first_seen == started
+        finally:
+            if admin.recompute_lock.locked():
+                admin.recompute_lock.release()
+            admin._last.update(started_at=None, finished_at=None)
+            get_settings.cache_clear()

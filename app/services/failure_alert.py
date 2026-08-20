@@ -139,6 +139,13 @@ class _Outage:
     #: this the retry re-told the ones that had already heard, every cycle, for
     #: as long as the failing channel stayed down.
     cleared_on: list[str] = field(default_factory=list)
+    #: The recompute attempt this outage has already counted, identified by its
+    #: start time. The stuck watchdog and the wedged run itself report the SAME
+    #: attempt — the watchdog while it hangs, the run when it finally gives up —
+    #: and without this the one attempt was counted twice. It also makes
+    #: repeated watchdog checks free, which is what the `occurrence` flag did
+    #: less precisely.
+    counted_attempt: str | None = None
     #: WHEN the service recovered, if the all-clear could not be delivered then —
     #: the audience was unreachable. A timestamp rather than a flag because the
     #: obligation outlives the outage and the duration must not: an all-clear
@@ -286,6 +293,8 @@ def _load_locked() -> None:
             announced_on=_restore_destinations(raw),
             pending_destinations=[],
             cleared_on=_destination_list(raw.get("cleared_on")),
+            counted_attempt=(raw["counted_attempt"]
+                             if isinstance(raw.get("counted_attempt"), str) else None),
             recovered_at=(_aware(raw["recovered_at"])
                           if raw.get("recovered_at") else None),
         )
@@ -507,7 +516,8 @@ def _send(transport: str, text: str) -> tuple[bool, int | None, str | None]:
 def notify_recompute_outcome(error: str | None,
                              precondition: Callable[[], bool] | None = None,
                              signature: str | None = None,
-                             occurrence: bool = True) -> dict[str, Any]:
+                             attempt: str | None = None,
+                             since: datetime | None = None) -> dict[str, Any]:
     """Record the outcome of one recompute and alert if that changed anything.
 
     `error=None` means the run produced a snapshot. Returns a status dict and
@@ -578,15 +588,22 @@ def notify_recompute_outcome(error: str | None,
                     outage = None
                     _current = None
                 changed = outage is not None and outage.signature != signature
+                already_counted = (attempt is not None
+                                   and outage is not None
+                                   and attempt == outage.counted_attempt)
                 if outage is None:
-                    # ALWAYS 1, even from the watchdog. `occurrence=False` means
-                    # "do not count this check as another attempt", not "no
-                    # attempt has failed" — and the watchdog is precisely the
-                    # reporter that arrives FIRST when a scheduled run wedges,
-                    # because that run's own job never fires. Starting at 0 made
-                    # the opening alert read "recompute x0".
-                    outage = _Outage(signature=signature, first_seen=now, failures=1)
+                    # `since` is when the FAILING began, which is not always when
+                    # it was NOTICED: a wedged run is reported hours after it
+                    # stuck, and dating the outage from the report told the
+                    # operator it had only just started.
+                    outage = _Outage(signature=signature, first_seen=since or now,
+                                     failures=1, counted_attempt=attempt)
                     _current = outage
+                elif already_counted and not changed:
+                    # The same attempt described again — the watchdog while the
+                    # run hangs, or that run finally giving up. One attempt is
+                    # one failure however many times it is reported.
+                    pass
                 elif changed:
                     # A DIFFERENT failure is news even mid-outage: the operator
                     # fixed one thing and hit the next. The TIMELINE CARRIES
@@ -601,10 +618,12 @@ def notify_recompute_outcome(error: str | None,
                     # becomes a field carrying when it should not — visible —
                     # rather than a field vanishing.
                     outage = replace(outage, signature=signature,
-                                     failures=outage.failures + (1 if occurrence else 0))
+                                     failures=outage.failures + (0 if already_counted else 1))
                     _current = outage
-                elif occurrence:
+                else:
                     outage.failures += 1
+                if attempt is not None:
+                    outage.counted_attempt = attempt
 
                 # ONE QUIET-PERIOD DECISION, shared by both paths. Written twice
                 # they diverged: the changed-signature path returned "throttled"
