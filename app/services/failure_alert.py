@@ -58,7 +58,6 @@ import hashlib
 import json
 import os
 import pathlib
-import re
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -305,35 +304,29 @@ def reset_state() -> None:
 #: exactly what a prefix cut throws away.
 _SIGNATURE_CHARS = 2000
 
-#: Quoted literals in an exception message are the DATA the failure was reached
-#: on, not the failure itself. Collapsing them is what makes `int('1/1/')` and
-#: `int('2/1/')` — one defect, two rows — a single outage.
-_QUOTED_LITERAL = re.compile(r"'[^']*'|\"[^\"]*\"")
-
 
 def failure_signature(error: str) -> str:
     """A stable identity for "this same failure again".
 
-    ONLY QUOTED LITERALS ARE COLLAPSED. This used to replace every digit run
-    with `#`, which merged failures that merely looked alike: "HTTP 500 from
-    FRED" and "HTTP 429 from FRED" became one outage, so the operator was told
-    about the server error, the rate limit was throttled away for 24h, and they
-    went on debugging the wrong thing. In a message like that the number IS the
-    meaning; inside quotes it is the row that happened to trip first.
+    LOSSLESS. Two earlier versions tried to make one identity cover several
+    messages — first by flattening every digit run, which merged "HTTP 500 from
+    FRED" with "HTTP 429 from FRED", then by flattening quoted literals, which
+    merged `KeyError: 'spy'` with `KeyError: 'qqq'`. Each was a distinct cause
+    suppressed for a day behind another one's quiet period, and each was found
+    by the panel rather than by reasoning.
 
-    NOTHING ELSE IS DISCARDED. This used to truncate to 160 characters, which
-    merged any two failures agreeing that far: "provider chain exhausted ...
-    FINAL CAUSE: rate limit" and the same chain ending "FINAL CAUSE: bad api
-    key" are one outage under that cut, so the operator hears the first and the
-    second is throttled away for a day. A prefix is not an identity. The bound
-    is now generous enough that the distinguishing part of a real message
-    survives, and it is the SIGNATURE's own bound rather than the message's.
+    The collapse existed to stop `int('1/1/')` and `int('2/1/')` — one defect
+    reached on two rows — alerting twice. That job now belongs entirely to the
+    signature-change BUDGET, which bounds a moving identity to a few immediate
+    alerts and then applies the ordinary quiet period. A bound is a better tool
+    than a lossy identity: it limits how often you are told without ever
+    deciding, wrongly, that two failures are the same one.
 
-    Callers whose own message carries a moving number should pass an explicit
-    signature rather than rely on this — see `notify_recompute_outcome`."""
+    Callers whose own message carries a moving number should still pass an
+    explicit signature — see `notify_recompute_outcome`."""
     # sanitize() redacts secret-shaped substrings and already collapses runs of
     # whitespace, so the signature cannot be split by a reflowed error string.
-    return _QUOTED_LITERAL.sub("'#'", sanitize(error, limit=_SIGNATURE_CHARS)).strip().lower()
+    return sanitize(error, limit=_SIGNATURE_CHARS).strip().lower()
 
 
 def _compact_age(delta: timedelta) -> str:
@@ -620,21 +613,31 @@ def notify_recompute_outcome(error: str | None,
                     _persist_locked()
                     return {"status": "throttled", "failures": outage.failures,
                             "signature": signature}
-                if quiet_elapsed:
-                    # An ordinary alert refills the budget: it exists to bound a
-                    # burst, not to run out once and stay out for the life of a
-                    # long outage.
-                    outage.bypasses_used = 0
-                else:
+                # THREE STATES, not two. Spending and refilling are not each
+                # other's else-branch, and writing them that way charged a
+                # bypass to the very first alert of an outage.
+                if not quiet_elapsed:
+                    # Sending inside the quiet period: this is a bypass, and it
+                    # costs one.
                     outage.bypasses_used += 1
                     # The inherited clock belongs to the PREVIOUS cause, and a
                     # send that fails must be retried rather than silenced. Left
                     # in place, a changed cause whose alert did not leave the
-                    # host was then muted for the remainder of the old cause's
-                    # quiet period — contradicting the rule that an undelivered
-                    # alert is always retried. Cleared AFTER `quiet_elapsed` is
-                    # computed, so the budget accounting above is unaffected.
+                    # host was muted for the remainder of the old cause's quiet
+                    # period — contradicting the rule that an undelivered alert
+                    # is always retried. Cleared AFTER `quiet_elapsed` is
+                    # computed, so the accounting above is unaffected.
                     outage.last_sent = None
+                elif (outage.last_sent is not None and outage.last_sent <= now
+                        and now - outage.last_sent >= repeat_after):
+                    # A quiet period that genuinely ELAPSED refills the budget.
+                    # `quiet_elapsed` is also true when `last_sent` is None —
+                    # which is what a never-delivered or failed send leaves
+                    # behind — and refilling on that handed the budget back on
+                    # every failed attempt, letting a moving identity burst
+                    # without bound against a flaky transport. Time is what
+                    # distinguishes a spent quiet period from an absent one.
+                    outage.bypasses_used = 0
                 _persist_locked()
                 kind = "failure"
 

@@ -107,11 +107,14 @@ class TestItDoesNotShout:
         notify_recompute_outcome(EBP_ERROR)
         assert len(sent) == 2
 
-    def test_digits_do_not_split_one_outage_into_many(self, sent):
-        notify_recompute_outcome("invalid literal for int() with base 10: '1/1/'")
-        notify_recompute_outcome("invalid literal for int() with base 10: '2/1/'")
-        assert len(sent) == 1
-        assert failure_signature("int('1/1/')") == failure_signature("int('2/1/')")
+    def test_one_defect_on_many_rows_is_bounded_not_merged(self, sent):
+        """The identity is LOSSLESS, so these are two causes and both are news.
+        What stops the spam is the budget, not a lossy signature — every attempt
+        to make one identity cover several messages merged a distinct cause into
+        another one's quiet period instead."""
+        for row in range(12):
+            notify_recompute_outcome(f"invalid literal for int() with base 10: '{row}/1/'")
+        assert len(sent) == 4       # first alert + three bypasses, then throttled
 
     def test_a_different_failure_is_news_even_inside_the_quiet_period(self, sent):
         notify_recompute_outcome(EBP_ERROR)
@@ -869,43 +872,36 @@ class TestThePreconditionIsHonouredUnderTheLock:
         get_settings.cache_clear()
 
 
-class TestTheSignatureSeparatesDefectFromData:
-    """Two failures are the same outage when the DEFECT is the same, not when
-    the text merely looks alike.
+class TestTheSignatureIsLossless:
+    """Two failures are the same outage when their sanitised text is the same.
 
-    The first version replaced every digit run with `#`, so "HTTP 500 from FRED"
-    and "HTTP 429 from FRED" merged: the operator was told about the server
-    error, the rate limit was throttled away for 24h, and they went on debugging
-    the wrong thing. Panel finding on #64 (combo/SOTA-A). In a message like that
-    the number IS the meaning; inside quotes it is the row that tripped first."""
-
-    @pytest.mark.parametrize(("a", "b"), [
-        ("invalid literal for int() with base 10: '1/1/'",
-         "invalid literal for int() with base 10: '2/1/'"),          # one defect, two rows
-        ('bad date "3/1/2026" in column 0', 'bad date "7/1/2026" in column 0'),
-    ])
-    def test_the_same_defect_on_different_data_is_one_outage(self, a, b):
-        assert failure_signature(a) == failure_signature(b)
+    Two earlier versions tried to make one identity cover several messages —
+    flattening digit runs merged "HTTP 500 from FRED" with "HTTP 429 from FRED";
+    flattening quoted literals merged `KeyError: 'spy'` with `KeyError: 'qqq'`.
+    Each suppressed a distinct cause behind another one's quiet period, and each
+    was found by the panel. Bounding how often you are told is a better tool
+    than deciding, wrongly, that two failures are the same one."""
 
     #: Same for 160 characters, different root cause at the end — the shape a
     #: chain-of-fallbacks message actually has.
     _LONG = "provider chain exhausted for SPY: " + "tiingo timeout; " * 12 + "FINAL CAUSE: "
 
     @pytest.mark.parametrize(("a", "b"), [
-        ("HTTP 500 from fred", "HTTP 429 from fred"),                # server error vs rate limit
+        ("HTTP 500 from fred", "HTTP 429 from fred"),                # status codes
         ("s1 valuation dropped", "s5 credit dropped"),
         ("timeout after 30s", "timeout after 1800s"),
+        ("KeyError: 'spy'", "KeyError: 'qqq'"),                      # quoted, distinct
+        ('bad date "3/1/2026" in column 0', 'bad date "7/1/2026" in column 0'),
         (_LONG + "rate limit", _LONG + "bad api key"),               # beyond any prefix cut
     ])
-    def test_different_defects_stay_different_outages(self, a, b):
+    def test_different_text_is_a_different_outage(self, a, b):
         assert failure_signature(a) != failure_signature(b)
 
-    def test_a_prefix_is_not_an_identity(self, sent):
-        """The end-to-end consequence of truncating: the second root cause was
-        throttled away for a day and the operator debugged the first."""
-        notify_recompute_outcome(self._LONG + "rate limit")
-        notify_recompute_outcome(self._LONG + "bad api key")
-        assert len(sent) == 2
+    def test_identical_text_is_the_same_outage(self):
+        assert failure_signature("HTTP 500 from fred") == failure_signature("HTTP 500 from fred")
+
+    def test_whitespace_and_case_do_not_split_one(self):
+        assert failure_signature("HTTP 500  from\n fred") == failure_signature("http 500 from fred")
 
     def test_a_second_distinct_failure_is_not_throttled_away(self, sent):
         """The end-to-end consequence: the operator hears about both."""
@@ -913,10 +909,10 @@ class TestTheSignatureSeparatesDefectFromData:
         notify_recompute_outcome("HTTP 429 from fred")
         assert len(sent) == 2
 
-    def test_the_same_failure_on_a_new_row_still_is(self, sent):
-        notify_recompute_outcome("invalid literal for int() with base 10: '1/1/'")
-        notify_recompute_outcome("invalid literal for int() with base 10: '2/1/'")
-        assert len(sent) == 1
+    def test_a_prefix_is_not_an_identity(self, sent):
+        notify_recompute_outcome(self._LONG + "rate limit")
+        notify_recompute_outcome(self._LONG + "bad api key")
+        assert len(sent) == 2
 
 
 class TestAMovingNumberDoesNotReAlert:
