@@ -241,6 +241,12 @@ def reset_state() -> None:
         _persist_locked()
 
 
+#: How much of a message is read for its identity. Deliberately far longer than
+#: the 160 characters that used to bound it: the part that distinguishes two
+#: failures is often at the END of a chain-of-fallbacks message, which is
+#: exactly what a prefix cut throws away.
+_SIGNATURE_CHARS = 2000
+
 #: Quoted literals in an exception message are the DATA the failure was reached
 #: on, not the failure itself. Collapsing them is what makes `int('1/1/')` and
 #: `int('2/1/')` — one defect, two rows — a single outage.
@@ -257,11 +263,19 @@ def failure_signature(error: str) -> str:
     went on debugging the wrong thing. In a message like that the number IS the
     meaning; inside quotes it is the row that happened to trip first.
 
+    NOTHING ELSE IS DISCARDED. This used to truncate to 160 characters, which
+    merged any two failures agreeing that far: "provider chain exhausted ...
+    FINAL CAUSE: rate limit" and the same chain ending "FINAL CAUSE: bad api
+    key" are one outage under that cut, so the operator hears the first and the
+    second is throttled away for a day. A prefix is not an identity. The bound
+    is now generous enough that the distinguishing part of a real message
+    survives, and it is the SIGNATURE's own bound rather than the message's.
+
     Callers whose own message carries a moving number should pass an explicit
     signature rather than rely on this — see `notify_recompute_outcome`."""
     # sanitize() redacts secret-shaped substrings and already collapses runs of
     # whitespace, so the signature cannot be split by a reflowed error string.
-    return _QUOTED_LITERAL.sub("'#'", sanitize(error, limit=300)).strip().lower()[:160]
+    return _QUOTED_LITERAL.sub("'#'", sanitize(error, limit=_SIGNATURE_CHARS)).strip().lower()
 
 
 def _compact_age(delta: timedelta) -> str:

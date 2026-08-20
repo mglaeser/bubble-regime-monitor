@@ -884,13 +884,25 @@ class TestTheSignatureSeparatesDefectFromData:
     def test_the_same_defect_on_different_data_is_one_outage(self, a, b):
         assert failure_signature(a) == failure_signature(b)
 
+    #: Same for 160 characters, different root cause at the end — the shape a
+    #: chain-of-fallbacks message actually has.
+    _LONG = "provider chain exhausted for SPY: " + "tiingo timeout; " * 12 + "FINAL CAUSE: "
+
     @pytest.mark.parametrize(("a", "b"), [
         ("HTTP 500 from fred", "HTTP 429 from fred"),                # server error vs rate limit
         ("s1 valuation dropped", "s5 credit dropped"),
         ("timeout after 30s", "timeout after 1800s"),
+        (_LONG + "rate limit", _LONG + "bad api key"),               # beyond any prefix cut
     ])
     def test_different_defects_stay_different_outages(self, a, b):
         assert failure_signature(a) != failure_signature(b)
+
+    def test_a_prefix_is_not_an_identity(self, sent):
+        """The end-to-end consequence of truncating: the second root cause was
+        throttled away for a day and the operator debugged the first."""
+        notify_recompute_outcome(self._LONG + "rate limit")
+        notify_recompute_outcome(self._LONG + "bad api key")
+        assert len(sent) == 2
 
     def test_a_second_distinct_failure_is_not_throttled_away(self, sent):
         """The end-to-end consequence: the operator hears about both."""
