@@ -1047,7 +1047,7 @@ class TestASignatureChangeCarriesTheWholeDeliveryState:
         fields = {f.name for f in dataclasses.fields(failure_alert._Outage)}
         assert fields == {"signature", "first_seen", "failures", "last_sent",
                           "announced", "sending", "bypasses_used",
-                          "announced_transport"}, (
+                          "announced_on"}, (
             "a new _Outage field must be given an explicit carry/reset decision "
             "in the signature-change branch")
 
@@ -1399,13 +1399,13 @@ class TestAnUnknownTransportIsNotAnSMS:
         assert "unknown transport" in (error or "")
 
     def test_a_corrupt_persisted_transport_does_not_route_to_sms(self, monkeypatch, sent):
-        """The end-to-end shape: a garbage `announced_transport` on disk must
-        not become an SMS."""
+        """The end-to-end shape: a garbage channel on disk must not become an
+        SMS."""
         import json
 
         notify_recompute_outcome(EBP_ERROR)
         state = json.loads(failure_alert._state_path().read_text())
-        state["announced_transport"] = "carrier-pigeon"
+        state["announced_on"] = ["carrier-pigeon"]
         failure_alert._state_path().write_text(json.dumps(state))
         failure_alert._current = None
         failure_alert._loaded = False
@@ -1419,3 +1419,80 @@ class TestAnUnknownTransportIsNotAnSMS:
         assert "sipgate" not in failure_alert._available_transports(get_settings())
         transport, problem = failure_alert._select_transport(prefer="sipgate")
         assert transport == "imessage" and problem is None
+
+
+class TestEveryChannelThatHeardTheAlarmHearsTheAllClear:
+    """An outage can span a transport change, and the all-clear is owed to
+    everyone who heard the alarm.
+
+    Announced over SMS, then iMessage switched on, then a second alert over
+    iMessage: a single remembered channel left SMS — still live, still watched —
+    holding "FAILING" forever. Panel finding on #64 (combo/SOTA-A)."""
+
+    @staticmethod
+    def _enable_sipgate(monkeypatch):
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+
+    def test_both_channels_are_remembered_and_both_are_cleared(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        self._enable_sipgate(monkeypatch)
+        get_settings.cache_clear()
+        assert notify_recompute_outcome(EBP_ERROR)["transport"] == "sipgate"
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")     # both live now
+        get_settings.cache_clear()
+        assert notify_recompute_outcome("Rscript not found")["transport"] == "imessage"
+        assert set(failure_alert._current.announced_on) == {"sipgate", "imessage"}
+
+        result = notify_recompute_outcome(None)
+        assert result["kind"] == "recovery"
+        assert "sipgate" in result["transport"] and "imessage" in result["transport"]
+
+    def test_a_channel_that_went_away_is_not_attempted(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        self._enable_sipgate(monkeypatch)
+        get_settings.cache_clear()
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome("Rscript not found")
+
+        monkeypatch.setenv("SMS_ENABLED", "false")         # SMS retired
+        get_settings.cache_clear()
+        result = notify_recompute_outcome(None)
+        assert result["transport"] == "imessage"
+
+    def test_the_outage_stays_open_until_every_channel_is_told(self, monkeypatch, sent):
+        """A channel that did not get the all-clear is a channel still holding
+        FAILING, so one failed delivery must not close the outage."""
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        self._enable_sipgate(monkeypatch)
+        get_settings.cache_clear()
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome("Rscript not found")
+
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        assert notify_recompute_outcome(None)["status"] == "failed"
+        assert failure_alert._current is not None, "the outage must stay open"
+
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda text: sent.append(text) or _Result())
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+        assert failure_alert._current is None
+
+    def test_a_single_channel_outage_is_unchanged(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        assert failure_alert._current.announced_on == ["imessage"]
+        assert notify_recompute_outcome(None)["transport"] == "imessage"

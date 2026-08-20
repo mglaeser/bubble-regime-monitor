@@ -60,7 +60,7 @@ import pathlib
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -121,11 +121,13 @@ class _Outage:
     #: Times a changed signature has skipped the quiet period in this outage.
     #: Refilled when an ordinary, window-elapsed alert goes out.
     bypasses_used: int = 0
-    #: Where the alarm actually went. The all-clear belongs on the same channel:
-    #: an operator who switched transports mid-outage would otherwise be left
-    #: holding "FAILING" on the one they were told on, forever, while the
-    #: recovery went somewhere they were not looking for it.
-    announced_transport: str | None = None
+    #: EVERY channel the alarm went out on, not merely the latest. An outage can
+    #: span a transport change — announced over SMS, then iMessage switched on,
+    #: then a second alert over iMessage — and a single slot remembered only the
+    #: last one, leaving the first channel holding "FAILING" while it was still
+    #: live and still being watched. The all-clear is owed to everyone who heard
+    #: the alarm.
+    announced_on: list[str] = field(default_factory=list)
 
     @property
     def operator_may_be_waiting(self) -> bool:
@@ -232,8 +234,7 @@ def _load_locked() -> None:
             announced=(raw.get("announced") is True) or (raw.get("sending") is True),
             sending=False,
             bypasses_used=max(0, int(raw.get("bypasses_used") or 0)),
-            announced_transport=(raw["announced_transport"]
-                                 if isinstance(raw.get("announced_transport"), str) else None),
+            announced_on=[t for t in (raw.get("announced_on") or []) if isinstance(t, str)],
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
                  announced=_current.announced)
@@ -561,8 +562,20 @@ def notify_recompute_outcome(error: str | None,
                 _persist_locked()
                 kind = "failure"
 
-            transport, problem = _select_transport(
-                outage.announced_transport if kind == "recovery" else None)
+            targets: list[str] | None = None
+            problem = None
+            if kind == "recovery":
+                # To EVERY channel that heard the alarm and is still live. Not a
+                # duplicated message — the same statement owed separately to
+                # each audience that was told the bad news.
+                targets = [t for t in outage.announced_on
+                           if t in _available_transports(settings)]
+                if not targets:
+                    fallback, problem = _select_transport()
+                    targets = [fallback]
+                transport = ", ".join(targets)
+            else:
+                transport, problem = _select_transport()
             if problem:
                 # Logged loudly: a failing recompute AND nowhere to say so is
                 # the state this whole module exists to make unreachable
@@ -589,7 +602,18 @@ def notify_recompute_outcome(error: str | None,
                 outage.sending = True
                 _persist_locked()
 
-            ok, status_code, send_error = _send(transport, text)
+            if targets is None:
+                ok, status_code, send_error = _send(transport, text)
+            else:
+                results = [_send(t, text) for t in targets]
+                # ALL of them, not any: a channel that did not get the all-clear
+                # is a channel still holding FAILING. A retry may deliver a
+                # second all-clear to a channel that already had one, which is
+                # the same true statement twice — strictly better than one
+                # audience left believing the service is down.
+                ok = all(r[0] for r in results)
+                status_code = results[0][1] if results else None
+                send_error = next((r[2] for r in results if not r[0]), None)
             if ok and kind == "recovery":
                 # The outage closes only once the all-clear is actually out.
                 # Clearing it first meant a failed recovery send was never
@@ -605,7 +629,8 @@ def notify_recompute_outcome(error: str | None,
                 outage.last_sent = now
                 outage.announced = True
                 outage.sending = False
-                outage.announced_transport = transport
+                if transport not in outage.announced_on:
+                    outage.announced_on = [*outage.announced_on, transport]
                 _persist_locked()
             elif kind == "failure":
                 # A transport that answered "not ok" is the KNOWN-not-delivered
