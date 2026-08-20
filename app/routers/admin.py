@@ -85,6 +85,7 @@ def run_recompute_guarded() -> None:
         _notify_if_stuck()
         return
     failure: str | None = None
+    outcome_known = False
     try:
         _last.update(started_at=datetime.now(UTC).isoformat(), finished_at=None,
                      snapshot_id=None, error=None)
@@ -97,11 +98,22 @@ def run_recompute_guarded() -> None:
             # purposes: the API keeps serving, but the number stops moving.
             failure = "recompute impossible: an entire block had no usable source"
             _last.update(error=failure)
+        outcome_known = True
     except Exception as exc:  # never let a recompute error escape the worker thread
         log.error("recompute_failed", error=str(exc))
         failure = str(exc)
         _last.update(finished_at=datetime.now(UTC).isoformat(), error=str(exc)[:400])
+        outcome_known = True
     finally:
+        if not outcome_known:
+            # A BaseException — SystemExit, KeyboardInterrupt — unwinds straight
+            # past `except Exception`, leaving `failure` at None. None is the
+            # SUCCESS signal: it would have closed an open outage and sent an
+            # all-clear for a run that died. "Nothing was raised that I know how
+            # to name" is not the same as "it worked", and only one of those two
+            # readings is safe to guess.
+            failure = "recompute aborted before it reported (shutdown or signal)"
+            _last.update(finished_at=datetime.now(UTC).isoformat(), error=failure)
         # BEFORE the lock is released, deliberately. This lock is the only
         # thing that totally orders recompute outcomes, so it has to cover the
         # reporting too. Releasing first let a manual POST /refresh start,

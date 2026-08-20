@@ -686,3 +686,65 @@ class TestTheStateFileIsNotWorldReadable:
         notify_recompute_outcome(EBP_ERROR)
         mode = failure_alert._state_path().stat().st_mode & 0o777
         assert mode == 0o600, oct(mode)
+
+
+class TestAnAbortIsNotASuccess:
+    """`except Exception` does not catch SystemExit or KeyboardInterrupt.
+
+    They unwind straight past it, leaving `failure` at None — and None is the
+    SUCCESS signal, so the run that died would have closed an open outage and
+    sent an all-clear. Panel finding on #64 (combo/SOTA-A)."""
+
+    @pytest.fixture()
+    def hook(self, monkeypatch, sent):
+        from app.routers import admin
+        from app.services import compute
+        from app.services import failure_alert as fa
+
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(fa, "notify_recompute_outcome",
+                            lambda error: seen.update(error=error) or {"status": "noop"})
+        return admin, compute, seen
+
+    @pytest.mark.parametrize("exc", [SystemExit, KeyboardInterrupt])
+    def test_a_base_exception_is_reported_as_a_failure(self, hook, monkeypatch, exc):
+        admin, compute, seen = hook
+
+        def _abort():
+            raise exc("shutting down")
+
+        monkeypatch.setattr(compute, "run_recompute", _abort)
+        with pytest.raises(exc):
+            admin.run_recompute_guarded()
+        assert seen["error"] is not None, "an abort must never read as success"
+        assert "aborted" in str(seen["error"])
+
+    @pytest.mark.parametrize("exc", [SystemExit, KeyboardInterrupt])
+    def test_the_lock_is_still_released_after_an_abort(self, hook, monkeypatch, exc):
+        admin, compute, seen = hook
+        monkeypatch.setattr(compute, "run_recompute",
+                            lambda: (_ for _ in ()).throw(exc("stop")))
+        with pytest.raises(exc):
+            admin.run_recompute_guarded()
+        assert not admin.recompute_lock.locked()
+
+    def test_an_abort_does_not_close_an_open_outage(self, monkeypatch, sent):
+        """The end-to-end shape: an announced outage must survive a shutdown
+        mid-recompute rather than being stood down by it."""
+        from app.routers import admin
+        from app.services import compute
+
+        notify_recompute_outcome(EBP_ERROR)              # outage announced
+        assert len(sent) == 1
+        monkeypatch.setattr(compute, "run_recompute",
+                            lambda: (_ for _ in ()).throw(SystemExit("stop")))
+        with pytest.raises(SystemExit):
+            admin.run_recompute_guarded()
+        assert failure_alert._current is not None        # still open
+        assert not any("OK" in m for m in sent)          # no all-clear
+
+    def test_a_real_success_still_reports_success(self, hook, monkeypatch):
+        admin, compute, seen = hook
+        monkeypatch.setattr(compute, "run_recompute", lambda: 42)
+        admin.run_recompute_guarded()
+        assert seen["error"] is None
