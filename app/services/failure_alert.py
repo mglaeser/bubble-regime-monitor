@@ -382,7 +382,13 @@ def notify_recompute_outcome(error: str | None) -> dict[str, Any]:
                 else:
                     outage.failures += 1
                     _persist_locked()
+                    # `last_sent` in the FUTURE silences every repeat until the
+                    # clock catches up — a backwards NTP correction or a state
+                    # file written under a skewed clock would mute the alerter
+                    # for as long as the skew lasts. A quiet period that has not
+                    # started yet has not elapsed either, so treat it as due.
                     if (outage.last_sent is not None
+                            and outage.last_sent <= now
                             and now - outage.last_sent < repeat_after):
                         return {"status": "throttled", "failures": outage.failures,
                                 "signature": signature}

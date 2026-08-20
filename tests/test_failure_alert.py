@@ -748,3 +748,30 @@ class TestAnAbortIsNotASuccess:
         monkeypatch.setattr(compute, "run_recompute", lambda: 42)
         admin.run_recompute_guarded()
         assert seen["error"] is None
+
+
+class TestAFutureTimestampCannotMuteTheAlerter:
+    """A `last_sent` in the future silences every repeat until the clock catches
+    up — a backwards NTP correction, or a state file written under a skewed
+    clock, would mute the alerter for the length of the skew. Panel finding on
+    #64 (combo/SOTA-A)."""
+
+    def test_a_future_last_sent_does_not_throttle(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        assert len(sent) == 1
+        failure_alert._current.last_sent = datetime.now(UTC) + timedelta(hours=48)
+        result = notify_recompute_outcome(EBP_ERROR)
+        assert result["status"] == "sent", "a quiet period that has not begun has not elapsed"
+
+    def test_a_normal_recent_send_still_throttles(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        failure_alert._current.last_sent = datetime.now(UTC) - timedelta(minutes=5)
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "throttled"
+
+    def test_a_future_timestamp_restored_from_disk_is_also_ignored(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        failure_alert._current.last_sent = datetime.now(UTC) + timedelta(days=3)
+        failure_alert._persist_locked()
+        failure_alert._current = None
+        failure_alert._loaded = False
+        assert notify_recompute_outcome(EBP_ERROR)["status"] == "sent"
