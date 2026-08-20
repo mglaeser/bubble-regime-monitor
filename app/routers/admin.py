@@ -29,7 +29,7 @@ recompute_lock = threading.Lock()
 _last: dict[str, Any] = {"started_at": None, "finished_at": None, "snapshot_id": None, "error": None}
 
 
-def _notify_if_stuck() -> None:
+def notify_if_stuck() -> None:
     """Report a recompute that has held the single-flight lock too long.
 
     The elapsed time is deliberately part of the message but not of the outage
@@ -93,7 +93,7 @@ def run_recompute_guarded() -> None:
         # and every subsequent slot lands here. Returning straight out was the
         # one path that produced no snapshot AND no alert — the original outage
         # in a different costume, and invisible for the same reason.
-        _notify_if_stuck()
+        notify_if_stuck()
         return
     failure: str | None = None
     outcome_known = False

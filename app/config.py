@@ -123,6 +123,13 @@ class Settings(BaseSettings):
     # is reported as a wedged run. Slots are 4h apart and a full gather runs
     # well under an hour, so a run still in flight at the next slot is stuck.
     failure_alert_stuck_after_h: int = 4
+    # How many times a CHANGED failure signature may skip the quiet period
+    # before the ordinary one applies again. A changed signature is news and
+    # sends at once — but an error whose text carries a moving unquoted number
+    # is "news" every single time, which bypasses the throttle entirely. A
+    # budget bounds that without delaying a genuinely distinct failure, which a
+    # time floor would.
+    failure_alert_max_signature_changes: int = 3
 
     # --- ALERT SYSTEM (docs/ALERT_SYSTEM.md) --------------------------------
     # Two INDEPENDENT switches. Evidence capture may run with alerting fully

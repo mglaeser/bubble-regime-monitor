@@ -60,7 +60,7 @@ import pathlib
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -118,6 +118,9 @@ class _Outage:
     last_sent: datetime | None = None
     announced: bool = False
     sending: bool = False
+    #: Times a changed signature has skipped the quiet period in this outage.
+    #: Refilled when an ordinary, window-elapsed alert goes out.
+    bypasses_used: int = 0
 
     @property
     def operator_may_be_waiting(self) -> bool:
@@ -145,13 +148,15 @@ def _persist_locked() -> None:
             path.unlink(missing_ok=True)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
+        # DERIVED FROM THE DATACLASS, not re-listed. Hand-listing the fields is
+        # how `bypasses_used` came to be written nowhere and silently refilled
+        # on every restart — the third time on this branch that a new field was
+        # dropped by a place that enumerates them. Writing is now total by
+        # construction; reading stays explicit, because that is where a value
+        # has to be distrusted.
         payload = json.dumps({
-            "signature": _current.signature,
-            "first_seen": _current.first_seen.isoformat(),
-            "failures": _current.failures,
-            "last_sent": _current.last_sent.isoformat() if _current.last_sent else None,
-            "announced": _current.announced,
-            "sending": _current.sending,
+            name: (value.isoformat() if isinstance(value, datetime) else value)
+            for name, value in asdict(_current).items()
         })
         # WRITE-THEN-RENAME, not write_text: that truncates first, so a process
         # killed mid-write leaves a partial file, which loads as "no outage" and
@@ -221,6 +226,7 @@ def _load_locked() -> None:
             # delivered. Conflating the two lost exactly that.
             announced=(raw.get("announced") is True) or (raw.get("sending") is True),
             sending=False,
+            bypasses_used=max(0, int(raw.get("bypasses_used") or 0)),
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
                  announced=_current.announced)
@@ -403,6 +409,11 @@ def notify_recompute_outcome(error: str | None,
 
         now = datetime.now(UTC)
         repeat_after = timedelta(hours=max(1, settings.failure_alert_repeat_h))
+        # How many times a CHANGED signature may skip the quiet period before
+        # the next ordinary alert. A budget rather than a time floor: a floor
+        # would delay a genuinely distinct failure, which is the one thing a
+        # changed signature is supposed to make immediate.
+        max_bypasses = max(0, settings.failure_alert_max_signature_changes)
 
         with _lock:
             # FIRST, and holding the lock: before any state is touched, not
@@ -464,11 +475,27 @@ def notify_recompute_outcome(error: str | None,
                     # not", which is visible, rather than "a field vanishes",
                     # which is silent. Only `last_sent` is reset: a new
                     # signature is news now, whatever the old quiet period said.
+                    # A CHANGED SIGNATURE BYPASSES THE QUIET PERIOD, so it must
+                    # not be able to bypass it without limit. An error whose text
+                    # carries a moving unquoted number — a row count, an id, an
+                    # elapsed figure — produces a fresh signature every time and
+                    # would alert on every occurrence, which is the spam the
+                    # throttle exists to prevent, reached by the door marked
+                    # "this is news". `last_sent` therefore carries; the floor
+                    # below decides.
                     outage = replace(outage, signature=signature,
-                                     failures=outage.failures + 1,
-                                     last_sent=None)
+                                     failures=outage.failures + 1)
                     _current = outage
                     _persist_locked()
+                    if outage.bypasses_used >= max_bypasses:
+                        # The budget is spent: this identity is moving faster
+                        # than it is telling us anything. Fall back to the
+                        # ordinary quiet period until it elapses.
+                        _persist_locked()
+                        return {"status": "throttled", "reason": "signature-change budget spent",
+                                "failures": outage.failures, "signature": signature}
+                    outage.bypasses_used += 1
+                    outage.last_sent = None      # this one skips the quiet period
                 else:
                     outage.failures += 1
                     _persist_locked()
@@ -482,6 +509,11 @@ def notify_recompute_outcome(error: str | None,
                             and now - outage.last_sent < repeat_after):
                         return {"status": "throttled", "failures": outage.failures,
                                 "signature": signature}
+                    # An ordinary alert — the quiet period genuinely elapsed —
+                    # refills the signature-change budget. The budget exists to
+                    # bound a burst, not to run out once and stay out for the
+                    # life of a long outage.
+                    outage.bypasses_used = 0
                 kind = "failure"
 
             transport, problem = _select_transport()

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 from datetime import date
 
@@ -39,6 +40,10 @@ from app.http_client import fetch
 from app.sources import SourceError
 
 EBP_URL = "https://www.federalreserve.gov/econres/notes/feds-notes/ebp_csv.csv"
+
+#: Values the Fed publishes for a month it has not computed. Absent data, not
+#: unreadable data — the distinction the tail guard turns on.
+_MISSING_VALUE = ("", "NA", ".")
 
 #: `YYYY-MM` or `YYYY-MM-DD`, the shape the file carried until 2026-08-06.
 _ISO_DATE_RE = re.compile(r"(?P<y>\d{4})-(?P<m>\d{1,2})(?:-(?P<d>\d{1,2}))?")
@@ -92,23 +97,41 @@ def _parse_ebp_csv(text: str) -> list[tuple[str, float]]:
         raise SourceError(f"Fed EBP CSV: missing date/ebp columns in {reader.fieldnames}")
     date_col, ebp_col = cols["date"], cols["ebp"]
     pairs: list[tuple[str, float]] = []
-    unreadable_dates = 0
-    last_readable = last_unreadable = -1
+    unreadable_dates = unreadable_values = 0
+    last_kept = last_dropped = -1
     for index, row in enumerate(reader):
         raw_date = (row.get(date_col) or "").strip()
         raw_ebp = (row.get(ebp_col) or "").strip()
-        if not raw_date or raw_ebp in ("", "NA", "."):
+        # A DOCUMENTED GAP IS NOT A DROP. The Fed publishes the sentinels below
+        # for a month it has not computed yet, routinely on the last row. Those
+        # rows are absent data, not data this parser failed to read, and
+        # counting them as drops would fire the tail guard on a healthy file.
+        if not raw_date or raw_ebp in _MISSING_VALUE:
             continue
         iso_date = normalise_date(raw_date)
         if iso_date is None:
             unreadable_dates += 1
-            last_unreadable = index
+            last_dropped = index
             continue
         try:
-            pairs.append((iso_date, float(raw_ebp)))
-            last_readable = index
+            value = float(raw_ebp)
         except ValueError:
+            # A value that is PRESENT and unreadable is a format change, not a
+            # gap: a provisional marker ("-0.31 (p)"), a Unicode minus, a
+            # thousands separator. Counted, so the tail guard can see it.
+            unreadable_values += 1
+            last_dropped = index
             continue
+        if not math.isfinite(value):
+            # float("NaN") and float("inf") do NOT raise. A NaN reaching the
+            # series is worse than a missing row: every comparison against it is
+            # False, so s5_credit's percentile counts nothing below it and the
+            # sub-score reads 1.0 — maximum credit fragility, from a typo.
+            unreadable_values += 1
+            last_dropped = index
+            continue
+        pairs.append((iso_date, value))
+        last_kept = index
     # A PARTIAL format change is the dangerous one. The Fed appends, so if the
     # unreadable rows are at the END of the file we are dropping the CURRENT
     # months and keeping a long legacy tail — which sails past the 24-row floor
@@ -116,17 +139,23 @@ def _parse_ebp_csv(text: str) -> list[tuple[str, float]]:
     # proxy. One stray bad row in the middle of fifty years is tolerable; an
     # unreadable row after the last readable one means the series has moved on
     # without us.
-    if last_unreadable > last_readable:
+    if last_dropped > last_kept:
         raise SourceError(
-            f"Fed EBP CSV: {unreadable_dates} unreadable date(s), the most recent rows "
-            f"among them — the current series is not being read (format change?)")
+            f"Fed EBP CSV: {unreadable_dates} unreadable date(s) and "
+            f"{unreadable_values} unreadable value(s), the most recent rows among "
+            f"them — the current series is not being read (format change?)")
     if len(pairs) < 24:
-        # Naming the unreadable-date count is the difference between "the Fed is
-        # down" and "the Fed changed the date format again"; the first needs
-        # patience and the second needs a commit.
-        detail = (f"; {unreadable_dates} rows carried an unreadable date format"
-                  if unreadable_dates else "")
-        raise SourceError(f"Fed EBP CSV: only {len(pairs)} usable monthly rows{detail}")
+        # Naming what could not be read is the difference between "the Fed is
+        # down" and "the Fed changed the format again"; the first needs patience
+        # and the second needs a commit.
+        detail = "; ".join(
+            part for part in (
+                f"{unreadable_dates} rows carried an unreadable date format" if unreadable_dates else "",
+                f"{unreadable_values} rows carried an unreadable value" if unreadable_values else "",
+            ) if part)
+        raise SourceError(
+            f"Fed EBP CSV: only {len(pairs)} usable monthly rows"
+            + (f"; {detail}" if detail else ""))
     pairs.sort(key=lambda p: p[0])  # normalised ISO dates sort chronologically
     return pairs
 

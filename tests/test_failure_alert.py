@@ -636,25 +636,25 @@ class TestTheWatchdogCannotInventAnOutage:
         """The lock is released the moment the run completes."""
         admin, sent = wedged
         admin.recompute_lock.release()
-        admin._notify_if_stuck()
+        admin.notify_if_stuck()
         assert sent == []
 
     def test_a_finished_stamp_beats_the_watchdog(self, wedged):
         admin, sent = wedged
         admin._last.update(finished_at=datetime.now(UTC).isoformat())
-        admin._notify_if_stuck()
+        admin.notify_if_stuck()
         assert sent == []
 
     def test_a_new_run_is_not_reported_as_the_old_one(self, wedged):
         """started_at moving means this report is about a run that is gone."""
         admin, sent = wedged
         admin._last.update(started_at=datetime.now(UTC).isoformat())
-        admin._notify_if_stuck()
+        admin.notify_if_stuck()
         assert sent == []
 
     def test_a_genuinely_wedged_run_is_still_reported(self, wedged):
         admin, sent = wedged
-        admin._notify_if_stuck()
+        admin.notify_if_stuck()
         assert len(sent) == 1
 
 
@@ -861,7 +861,7 @@ class TestThePreconditionIsHonouredUnderTheLock:
         get_settings.cache_clear()
         admin._last.update(started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
                            finished_at=datetime.now(UTC).isoformat())
-        admin._notify_if_stuck()
+        admin.notify_if_stuck()
         assert sent == []
         get_settings.cache_clear()
 
@@ -1015,6 +1015,27 @@ class TestASignatureChangeCarriesTheWholeDeliveryState:
         assert failure_alert._current.failures == 2
         assert failure_alert._current.last_sent is not None   # it just sent
 
+    def test_every_field_survives_a_round_trip(self, sent):
+        """Stronger than naming the fields: each one must actually be written
+        AND read back. `bypasses_used` existed, was carried by replace(), and
+        was still silently refilled on every restart because nothing wrote it."""
+        import dataclasses
+
+        notify_recompute_outcome(EBP_ERROR)
+        for n in range(3):
+            notify_recompute_outcome(f"other failure {n}")
+        before = failure_alert._current
+        failure_alert._current = None
+        failure_alert._loaded = False
+        notify_recompute_outcome(EBP_ERROR)          # forces a load
+        after = failure_alert._current
+
+        for field in dataclasses.fields(failure_alert._Outage):
+            if field.name in {"signature", "failures", "last_sent", "sending"}:
+                continue     # legitimately changed by the call that reloaded
+            assert getattr(after, field.name) == getattr(before, field.name), (
+                f"{field.name} did not survive persist -> load")
+
     def test_every_field_is_accounted_for(self):
         """A guard for the NEXT field. If someone adds one to _Outage, this says
         out loud that the signature-change branch must have a decision for it."""
@@ -1022,6 +1043,124 @@ class TestASignatureChangeCarriesTheWholeDeliveryState:
 
         fields = {f.name for f in dataclasses.fields(failure_alert._Outage)}
         assert fields == {"signature", "first_seen", "failures", "last_sent",
-                          "announced", "sending"}, (
+                          "announced", "sending", "bypasses_used"}, (
             "a new _Outage field must be given an explicit carry/reset decision "
             "in the signature-change branch")
+
+
+class TestTheWatchdogHasItsOwnClock:
+    """A wedged recompute is exactly when the watchdog must fire, and exactly
+    when the job it used to hang off stops running.
+
+    The recompute job is registered `max_instances=1`, so while a run is wedged
+    APScheduler SKIPS each subsequent firing — `_job` never runs, the
+    single-flight skip branch is never entered, and the report never happens.
+    `POST /refresh` returns `already_running` before spawning its thread, so it
+    cannot reach it either. Found by an adversarial review that drove a real
+    scheduler and observed zero stuck checks over five firings."""
+
+    def test_the_watchdog_is_registered_as_its_own_job(self):
+        """Not hung off the recompute job, whose firings stop when it matters."""
+        import inspect
+
+        from app import scheduler
+
+        src = inspect.getsource(scheduler.start)
+        assert 'id="stuck_watchdog"' in src
+        assert "_stuck_watchdog_job" in src
+
+    def test_it_does_not_share_the_recompute_job(self):
+        """If it were on the recompute trigger it would inherit the skipping."""
+        import inspect
+
+        from app import scheduler
+
+        src = inspect.getsource(scheduler.start)
+        watchdog = src[src.index("_stuck_watchdog_job"):]
+        assert "cron_hour_expression()" not in watchdog[:400], (
+            "the watchdog must not ride the recompute schedule")
+
+    def test_the_job_reports_a_wedged_run(self, monkeypatch, sent):
+        """The job itself, not the skip branch."""
+        from app import scheduler
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        admin.recompute_lock.acquire(blocking=False)
+        try:
+            admin._last.update(
+                started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
+                finished_at=None)
+            scheduler._stuck_watchdog_job()
+            assert len(sent) == 1
+            assert "FAILING" in sent[0]
+        finally:
+            if admin.recompute_lock.locked():
+                admin.recompute_lock.release()
+            admin._last.update(started_at=None, finished_at=None)
+            get_settings.cache_clear()
+
+    def test_the_job_says_nothing_when_nothing_is_wedged(self, monkeypatch, sent):
+        from app import scheduler
+        from app.routers import admin
+
+        admin._last.update(started_at=None, finished_at=None)
+        scheduler._stuck_watchdog_job()
+        assert sent == []
+
+    def test_the_job_never_raises(self, monkeypatch, sent):
+        """It runs on the scheduler thread; a raise there is not contained."""
+        from app import scheduler
+        from app.routers import admin
+
+        admin._last.update(started_at="not-a-timestamp", finished_at=None)
+        scheduler._stuck_watchdog_job()          # must not raise
+        admin._last.update(started_at=None, finished_at=None)
+
+
+class TestAMovingIdentityCannotBypassTheThrottleForever:
+    """A changed signature skips the quiet period, so it must not be able to
+    skip it without limit.
+
+    An error whose text carries a moving UNQUOTED number — a row count, an id,
+    an elapsed figure — produces a fresh signature every time and is therefore
+    "news" every time, which bypasses the throttle by the door marked news.
+    Found by an adversarial review of this branch.
+
+    The bound is a BUDGET, not a time floor: a floor would delay a genuinely
+    distinct failure, which is the one thing a changed signature exists to make
+    immediate."""
+
+    def test_a_moving_identity_is_bounded(self, sent):
+        for n in range(12):
+            notify_recompute_outcome(f"persist failed for snapshot {n}")
+        assert len(sent) == 4, "3 bypasses plus the first alert, then throttled"
+
+    def test_genuinely_distinct_failures_are_still_immediate(self, sent):
+        notify_recompute_outcome("HTTP 500 from fred")
+        notify_recompute_outcome("HTTP 429 from fred")
+        notify_recompute_outcome("Rscript not found")
+        assert len(sent) == 3, "within budget, each is news and goes at once"
+
+    def test_the_budget_refills_after_an_ordinary_alert(self, sent):
+        for n in range(6):
+            notify_recompute_outcome(f"persist failed for snapshot {n}")
+        spent = len(sent)
+        # the quiet period elapses and an ordinary alert goes out
+        failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
+        notify_recompute_outcome(failure_alert._current.signature.replace("#", "9"))
+        assert len(sent) > spent
+        assert failure_alert._current.bypasses_used == 0
+
+    def test_the_budget_carries_across_a_restart(self, sent):
+        for n in range(12):
+            notify_recompute_outcome(f"persist failed for snapshot {n}")
+        spent = len(sent)
+        failure_alert._current = None
+        failure_alert._loaded = False
+        for n in range(12, 20):
+            notify_recompute_outcome(f"persist failed for snapshot {n}")
+        assert len(sent) == spent, "a restart must not refill the budget"

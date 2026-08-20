@@ -151,3 +151,62 @@ class TestAPartialFormatChangeFailsOver:
     def test_the_live_shape_is_unaffected(self):
         pairs = _parse_ebp_csv(HEADER + _rows(_us_months(2025) + _us_months(2026)))
         assert pairs[-1][0] == "2026-12-01"
+
+
+class TestAnUnreadableValueIsNotAGap:
+    """The tail guard reacted only to unreadable DATES, so a trailing block
+    dropped for any other reason sailed past it and past the 24-row floor —
+    the same silent staleness the guard was added to prevent, one column over.
+
+    Found by an adversarial review of this branch, reproduced end to end."""
+
+    _GOOD = _rows(_us_months(2024) + _us_months(2025))          # 24 readable rows
+
+    @pytest.mark.parametrize(("label", "trailing"), [
+        ("provisional marker", "1/1/2026,1.03,-0.31 (p),0.12\n"),
+        ("unicode minus",      "1/1/2026,1.03,\u22120.31,0.12\n"),
+        ("thousands comma",    '1/1/2026,1.03,"1,031",0.12\n'),
+        ("NaN",                "1/1/2026,1.03,NaN,0.12\n"),
+        ("infinity",           "1/1/2026,1.03,inf,0.12\n"),
+    ])
+    def test_a_trailing_unreadable_value_fails_the_fetch(self, label, trailing):
+        with pytest.raises(SourceError) as exc:
+            _parse_ebp_csv(HEADER + self._GOOD + trailing)
+        assert "unreadable value" in str(exc.value)
+
+    def test_a_documented_gap_is_still_a_gap(self):
+        """NA / blank / '.' are what the Fed publishes for a month it has not
+        computed. Treating those as drops would fire the guard on a healthy
+        file — the Fed routinely ships one on the last row."""
+        pairs = _parse_ebp_csv(HEADER + self._GOOD
+                               + "1/1/2026,1.03,NA,0.12\n2/1/2026,1.03,,0.12\n3/1/2026,1.03,.,0.12\n")
+        assert len(pairs) == 24
+        assert pairs[-1][0] == "2025-12-01"
+
+    def test_one_unreadable_value_mid_series_is_tolerated(self):
+        body = _rows(_us_months(2024)) + "6/15/2024,1.03,-0.31 (p),0.12\n" + _rows(_us_months(2025))
+        pairs = _parse_ebp_csv(HEADER + body)
+        assert len(pairs) == 24
+
+
+class TestNaNNeverReachesTheScore:
+    """`float("NaN")` does not raise, so a NaN cell used to be ingested as a
+    real observation. Every comparison against NaN is False, so s5_credit's
+    percentile counts nothing at or below it and the sub-score reads 1.0 —
+    maximum credit fragility — from one bad cell. Verified end to end at +7.4
+    points on the headline."""
+
+    def test_a_non_finite_value_is_refused_not_ingested(self):
+        body = _rows(_us_months(2024)) + "6/15/2024,1.03,NaN,0.12\n" + _rows(_us_months(2025))
+        pairs = _parse_ebp_csv(HEADER + body)
+        assert all(v == v for _, v in pairs), "NaN must never enter the series"
+        assert all(abs(v) != float("inf") for _, v in pairs)
+
+    def test_the_scorer_would_have_been_wrong(self):
+        """Pins WHY the parser guards this, so the reason survives the guard."""
+        from app.indicators import s5_credit
+
+        history = [(-0.3 + (i % 7) * 0.03) for i in range(360)]
+        clean = s5_credit.sub_score_t2(history, lag_obs=24)
+        history[-25] = float("nan")
+        assert s5_credit.sub_score_t2(history, lag_obs=24) != clean
