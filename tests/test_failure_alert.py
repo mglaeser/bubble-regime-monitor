@@ -293,16 +293,19 @@ class TestPanelFindingsSecondRound:
 
         Told about failure A, the operator is owed an all-clear even if the
         service went on to fail with B and B's alert never left the host.
-        Deriving "were they told?" from the throttle clock — which resets on a
-        signature change — dropped that all-clear silently."""
+        Deriving "were they told?" from the throttle clock dropped that
+        all-clear silently."""
         notify_recompute_outcome(EBP_ERROR)          # A: delivered
         assert failure_alert._current.announced is True
 
         monkeypatch.setattr(failure_alert, "send_imessage",
                             lambda text: _Result(ok=False, status_code=503, error="down"))
-        notify_recompute_outcome("Rscript not found")   # B: new signature, undelivered
-        assert failure_alert._current.last_sent is None   # throttle clock reset
-        assert failure_alert._current.announced is True   # but they WERE told
+        result = notify_recompute_outcome("Rscript not found")   # B: new signature
+        # B is attempted at once rather than waiting out A's quiet period —
+        # asserted on the OUTCOME, not on `last_sent`. The clock used to be
+        # reset to express that; it now carries, and the decision is explicit.
+        assert result["status"] == "failed"               # attempted, transport refused
+        assert failure_alert._current.announced is True   # and they WERE told about A
 
         monkeypatch.setattr(failure_alert, "send_imessage",
                             lambda text: sent.append(text) or _Result())
@@ -1164,3 +1167,53 @@ class TestAMovingIdentityCannotBypassTheThrottleForever:
         for n in range(12, 20):
             notify_recompute_outcome(f"persist failed for snapshot {n}")
         assert len(sent) == spent, "a restart must not refill the budget"
+
+
+class TestABoundedBudgetNeverBecomesSilence:
+    """The budget delays a moving identity; it must never cancel it.
+
+    The first version returned "throttled" the moment the budget was spent and
+    never consulted the ordinary quiet period, while the budget refilled only on
+    the same-signature path — which a perpetually-moving error text never
+    reaches. An outage of exactly the kind the budget was added for therefore
+    went PERMANENTLY silent after its opening burst. Two panel verifiers caught
+    it; my own tests did not, because they only ever exercised the window."""
+
+    def test_a_moving_identity_still_reports_once_per_quiet_period(self, sent):
+        for n in range(12):
+            notify_recompute_outcome(f"persist failed for snapshot {n}")
+        burst = len(sent)
+        assert burst == 4                       # first alert plus three bypasses
+
+        # a day passes, the outage is still going, the identity still moving
+        failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
+        notify_recompute_outcome("persist failed for snapshot 99")
+        assert len(sent) == burst + 1, "a moving identity must never go silent"
+
+    def test_it_keeps_reporting_day_after_day(self, sent):
+        notify_recompute_outcome("persist failed for snapshot 0")
+        for day in range(1, 6):
+            failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
+            notify_recompute_outcome(f"persist failed for snapshot {day * 100}")
+        assert len(sent) == 6
+
+    def test_a_zero_budget_still_reports_once_per_quiet_period(self, monkeypatch, sent):
+        """FAILURE_ALERT_MAX_SIGNATURE_CHANGES=0 must mean "no bypasses", not
+        "no alerts after the first"."""
+        from app.config import get_settings
+
+        monkeypatch.setenv("FAILURE_ALERT_MAX_SIGNATURE_CHANGES", "0")
+        get_settings.cache_clear()
+        notify_recompute_outcome("persist failed for snapshot 0")
+        assert len(sent) == 1
+        notify_recompute_outcome("persist failed for snapshot 1")
+        assert len(sent) == 1                   # no bypass, correctly throttled
+        failure_alert._current.last_sent = datetime.now(UTC) - timedelta(hours=25)
+        notify_recompute_outcome("persist failed for snapshot 2")
+        assert len(sent) == 2, "the ordinary quiet period must still apply"
+        get_settings.cache_clear()
+
+    def test_the_same_signature_path_is_unchanged(self, sent):
+        for _ in range(20):
+            notify_recompute_outcome(EBP_ERROR)
+        assert len(sent) == 1

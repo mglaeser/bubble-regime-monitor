@@ -450,70 +450,62 @@ def notify_recompute_outcome(error: str | None,
                 # genuinely different failures. The caller knows which it has.
                 signature = signature or failure_signature(error)
                 outage = _current
+                changed = outage is not None and outage.signature != signature
                 if outage is None:
                     outage = _Outage(signature=signature, first_seen=now, failures=1)
                     _current = outage
-                    _persist_locked()
-                elif outage.signature != signature:
+                elif changed:
                     # A DIFFERENT failure is news even mid-outage: the operator
-                    # fixed one thing and hit the next, and waiting out the
-                    # repeat window would hide that. The TIMELINE CARRIES
+                    # fixed one thing and hit the next. The TIMELINE CARRIES
                     # FORWARD — the service has been failing continuously since
-                    # `first_seen`, and restarting the clock here would
-                    # under-report an outage whose first alert may never have
-                    # been delivered at all.
-                    #
-                    # CARRIED BY REPLACE, NOT BY RE-LISTING THE FIELDS. Written
-                    # as a fresh _Outage(...) this branch silently dropped
-                    # whichever field the author forgot: first `announced`, so a
-                    # told-then-changed outage lost its all-clear, and after
-                    # that was fixed, `sending`, so an outage whose delivery was
-                    # UNKNOWN lost it the same way one field later. Both were
-                    # found by the panel rather than by me. `replace` inverts
-                    # the default — everything survives unless it is named — so
-                    # the failure mode becomes "a field carries when it should
-                    # not", which is visible, rather than "a field vanishes",
-                    # which is silent. Only `last_sent` is reset: a new
-                    # signature is news now, whatever the old quiet period said.
-                    # A CHANGED SIGNATURE BYPASSES THE QUIET PERIOD, so it must
-                    # not be able to bypass it without limit. An error whose text
-                    # carries a moving unquoted number — a row count, an id, an
-                    # elapsed figure — produces a fresh signature every time and
-                    # would alert on every occurrence, which is the spam the
-                    # throttle exists to prevent, reached by the door marked
-                    # "this is news". `last_sent` therefore carries; the floor
-                    # below decides.
+                    # `first_seen` — and so does everything else, by `replace`
+                    # rather than by re-listing the fields. Written as a fresh
+                    # _Outage(...) this branch silently dropped whichever field
+                    # the author forgot: `announced` first, so a told-then-changed
+                    # outage lost its all-clear, then `sending` one field later,
+                    # so an outage whose delivery was UNKNOWN lost it the same
+                    # way. `replace` inverts the default, so the failure mode
+                    # becomes a field carrying when it should not — visible —
+                    # rather than a field vanishing.
                     outage = replace(outage, signature=signature,
                                      failures=outage.failures + 1)
                     _current = outage
-                    _persist_locked()
-                    if outage.bypasses_used >= max_bypasses:
-                        # The budget is spent: this identity is moving faster
-                        # than it is telling us anything. Fall back to the
-                        # ordinary quiet period until it elapses.
-                        _persist_locked()
-                        return {"status": "throttled", "reason": "signature-change budget spent",
-                                "failures": outage.failures, "signature": signature}
-                    outage.bypasses_used += 1
-                    outage.last_sent = None      # this one skips the quiet period
                 else:
                     outage.failures += 1
+
+                # ONE QUIET-PERIOD DECISION, shared by both paths. Written twice
+                # they diverged: the changed-signature path returned "throttled"
+                # the moment its budget was spent and never consulted the
+                # ordinary window at all, while the budget refilled only on the
+                # same-signature path — which a perpetually-moving error text
+                # never reaches. An outage of exactly the kind the budget was
+                # added for therefore went PERMANENTLY silent after its opening
+                # burst, which is the failure this whole module exists to
+                # prevent, produced by its own throttle.
+                #
+                # A `last_sent` in the FUTURE counts as elapsed: a backwards NTP
+                # correction, or a state file written under a skewed clock,
+                # would otherwise mute the alerter for the length of the skew.
+                quiet_elapsed = (outage.last_sent is None
+                                 or outage.last_sent > now
+                                 or now - outage.last_sent >= repeat_after)
+                # A changed signature may skip the quiet period, but only while
+                # the budget lasts. Once it is spent the ordinary window still
+                # applies — the alert is delayed, never cancelled.
+                may_bypass = changed and outage.bypasses_used < max_bypasses
+
+                if not (quiet_elapsed or may_bypass):
                     _persist_locked()
-                    # `last_sent` in the FUTURE silences every repeat until the
-                    # clock catches up — a backwards NTP correction or a state
-                    # file written under a skewed clock would mute the alerter
-                    # for as long as the skew lasts. A quiet period that has not
-                    # started yet has not elapsed either, so treat it as due.
-                    if (outage.last_sent is not None
-                            and outage.last_sent <= now
-                            and now - outage.last_sent < repeat_after):
-                        return {"status": "throttled", "failures": outage.failures,
-                                "signature": signature}
-                    # An ordinary alert — the quiet period genuinely elapsed —
-                    # refills the signature-change budget. The budget exists to
-                    # bound a burst, not to run out once and stay out for the
-                    # life of a long outage.
+                    return {"status": "throttled", "failures": outage.failures,
+                            "signature": signature}
+                if quiet_elapsed:
+                    # An ordinary alert refills the budget: it exists to bound a
+                    # burst, not to run out once and stay out for the life of a
+                    # long outage.
                     outage.bypasses_used = 0
+                else:
+                    outage.bypasses_used += 1
+                _persist_locked()
                 kind = "failure"
 
             transport, problem = _select_transport()
