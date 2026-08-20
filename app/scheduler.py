@@ -54,6 +54,20 @@ def _alert_dispatch_job() -> None:
     job()   # never raises
 
 
+def _stuck_watchdog_job() -> None:
+    # THE WATCHDOG NEEDS ITS OWN CLOCK. `run_recompute_guarded` reports a wedged
+    # run from its single-flight skip branch, and that branch is unreachable in
+    # production for the case that matters: the recompute job is registered
+    # `max_instances=1`, so while a run is wedged APScheduler SKIPS each
+    # subsequent firing outright — `_job` never runs, the skip branch is never
+    # entered, and the report never happens. `POST /refresh` cannot reach it
+    # either, because it returns `already_running` before spawning its thread.
+    # So the one failure the watchdog exists for was the one it could not see.
+    from app.routers.admin import notify_if_stuck
+
+    notify_if_stuck()   # never raises
+
+
 def _breadth_job() -> None:
     # Incremental breadth-cache refresh (Twelve Data, ~8/min, credit-governed).
     # Runs off the recompute path so the twice-daily recompute stays fast and
@@ -102,6 +116,15 @@ def start() -> BackgroundScheduler:
                            CronTrigger(minute="15,45", timezone="UTC"),
                            id="alert_recovery", replace_existing=True,
                            coalesce=True, misfire_grace_time=1800, max_instances=1)
+        # Wedged-recompute watchdog, on :05/:35 so it contends with nothing.
+        # Its own job precisely BECAUSE the recompute job is max_instances=1: a
+        # wedged run makes APScheduler skip that job's firings, so anything
+        # hanging off them cannot report it. This one keeps running while the
+        # recompute is stuck, which is the only time it has anything to say.
+        _scheduler.add_job(_stuck_watchdog_job,
+                           CronTrigger(minute="5,35", timezone="UTC"),
+                           id="stuck_watchdog", replace_existing=True,
+                           coalesce=True, misfire_grace_time=1800, max_instances=1)
         digest_schedule = "disabled"
         # Gated on the TRANSPORT, not on effective_daily_sms_enabled: an
         # operator who sets SMS_ENABLED=false and IMESSAGE_ENABLED=true means
@@ -143,6 +166,7 @@ def start() -> BackgroundScheduler:
         log.info("scheduler_started", recompute="every 4h (02/06/10/14/18/22 UTC)",
                  breadth_refresh="01:00/13:00 UTC", daily_digest=digest_schedule,
                  alert_recovery="every 30min (:15/:45)",
+                 stuck_watchdog="every 30min (:05/:35)",
                  alert_dispatch=f"every {max(20, settings.alerts_dispatch_poll_s)}s "
                                f"(mode={settings.alerts_mode})")
     return _scheduler

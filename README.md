@@ -203,7 +203,29 @@ SMS_DAILY_HOUR=8                   # UTC hour (default 08:00)
 
 The 160-character ASCII cap is an SMS constraint: one GSM-7 segment, ASCII-coerced so a stray Unicode character cannot halve the limit. It still applies over iMessage, where the proxy would accept 4000 Unicode code points — the shared cap keeps the digest identical across transports, and raising it is a product decision rather than part of the migration.
 
-Test either without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms` — the path is unchanged so existing operator scripts keep working, and the response names the `transport` that actually carried it. Example body: `bubblegauge 41/100 hold. IQR 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
+### System-failure alerts
+
+The digest tells you the score. This tells you when there is no new score to tell you about.
+
+```dotenv
+FAILURE_ALERTS_ENABLED=true    # default; sends over whichever transport above is on
+FAILURE_ALERT_REPEAT_H=24      # quiet period before the SAME failure repeats
+FAILURE_ALERT_STATE_PATH=/data/failure-alert-state.json   # outage memory across restarts
+FAILURE_ALERT_STUCK_AFTER_H=4  # a run holding the lock this long is reported wedged
+FAILURE_ALERT_MAX_SIGNATURE_CHANGES=3   # immediate alerts for a CHANGED cause, per quiet period
+```
+
+Every recompute — scheduled or manual — reports its outcome. A run that raises, or that completes without producing a snapshot, sends one compressed message over the transport the digest uses:
+
+```
+bubblegauge FAILING: recompute x72 since 06 Aug 14:00Z; no new score 12d; invalid literal for int() with base 10: '1/1/'
+```
+
+A **new** failure signature sends immediately, up to `FAILURE_ALERT_MAX_SIGNATURE_CHANGES` times per quiet period — a changed cause is news, but an error whose text carries a moving number would otherwise be "news" every time and bypass the throttle by that door. A **repeat** of the same one waits out `FAILURE_ALERT_REPEAT_H`, so an outage costs one message a day rather than one every four hours. The signature is the sanitised error text and nothing is normalised out of it: two failures are the same outage only when they read the same. Earlier versions collapsed digits, then quoted literals, to make one defect reached on two different rows a single outage — and each collapse also merged genuinely different failures, so `HTTP 500` and `HTTP 429` shared a quiet period and the second went unreported for a day. Bounding how often you are told is the budget's job; the signature does not decide what you are told about. When the recompute succeeds again you get a single all-clear — but only if you were told about the failure in the first place. **The outage is remembered across a restart**, in one small best-effort JSON file: deploying a fix *is* a restart, and that is the usual way an outage ends, so process-local memory would have dropped the all-clear in the common case rather than the exotic one. An unwritable or corrupt file degrades to in-memory state and never fails a send. A send that fails is retried at the next slot rather than being silently throttled away, and the error text is redacted before it leaves the host.
+
+**Why it defaults on.** It can only reach a transport and recipient you already configured, so it adds no destination; with both transports off it does nothing but log. This exists because between 2026-08-06 and 2026-08-18 every scheduled recompute failed and nothing said so: `/healthz` returned `ok`, `/readyz` listed all eighteen sources green (source health is only persisted *by* a successful snapshot, so it was replaying the last good run), the science audit counted zero errors because it has no snapshot-age flag, and the daily digest kept sending the same twelve-day-old score. A monitor you have to remember to switch on is a monitor that is off.
+
+Test either digest without waiting for the schedule: `curl -X POST -H "X-API-Key:<key>" localhost:8000/api/v1/admin/send-sms` — the path is unchanged so existing operator scripts keep working, and the response names the `transport` that actually carried it. Example body: `bubblegauge 41/100 hold. IQR 34-47. SPY IN, QQQ IN. Flags 0/4.` (since v3.6.0 the digest carries no disclaimer tag; the research-only framing lives on the status/spec pages)
 
 ## Falsification criteria
 
