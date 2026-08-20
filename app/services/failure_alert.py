@@ -602,7 +602,14 @@ def notify_recompute_outcome(error: str | None,
                 # would otherwise mute the alerter for the length of the skew.
                 quiet_elapsed = (outage.last_sent is None
                                  or outage.last_sent > now
-                                 or now - outage.last_sent >= repeat_after)
+                                 or now - outage.last_sent >= repeat_after
+                                 # Someone has been told the service RECOVERED.
+                                 # A quiet period assumes its audience already
+                                 # knows things are bad; an audience holding an
+                                 # all-clear does not, so the next failure is
+                                 # news to them however recently anyone else was
+                                 # told.
+                                 or bool(outage.cleared_on))
                 # A changed signature may skip the quiet period, but only while
                 # the budget lasts. Once it is spent the ordinary window still
                 # applies — the alert is delayed, never cancelled.
@@ -632,7 +639,24 @@ def notify_recompute_outcome(error: str | None,
 
             targets: list[str] | None = None
             problem = None
-            if kind == "recovery":
+            if kind == "failure" and outage.announced_on:
+                # THE ALARM ADDRESSES THE AUDIENCE, like the all-clear does.
+                # Sending only to the current channel left every other
+                # destination that had been told about this outage — and
+                # possibly told it had ENDED — believing the service was
+                # healthy while it was not. An audience is not a channel.
+                live = {_destination_id(t, settings): t
+                        for t in _available_transports(settings)}
+                current, problem = _select_transport()
+                audience = [live[d] for d in outage.announced_on if d in live]
+                if problem is None and current not in audience:
+                    audience.append(current)
+                if audience:
+                    targets, problem = audience, None
+                    transport = ", ".join(audience)
+                else:
+                    transport = current
+            elif kind == "recovery":
                 # To EVERY channel that heard the alarm and is still live. Not a
                 # duplicated message — the same statement owed separately to
                 # each audience that was told the bad news.
@@ -708,7 +732,13 @@ def notify_recompute_outcome(error: str | None,
                 # ALL of them, not any: a channel that did not get the all-clear
                 # is a channel still holding FAILING, so the outage stays open
                 # and is retried — but only to the channels that missed it.
-                ok = all(r[1][0] for r in results)
+                # For a RECOVERY: all of them. A channel that did not get the
+                # all-clear is still holding FAILING, so the outage stays open.
+                # For an ALARM: any of them. The operator has been reached; a
+                # channel that missed it is picked up by the next alert rather
+                # than by re-sending the same alarm on every slot.
+                ok = (all(r[1][0] for r in results) if kind == "recovery"
+                      else any(r[1][0] for r in results))
                 status_code = results[0][1][1] if results else None
                 send_error = next((r[1][2] for r in results if not r[1][0]), None)
             if kind == "recovery":
@@ -731,16 +761,21 @@ def notify_recompute_outcome(error: str | None,
                 outage.last_sent = now
                 outage.announced = True
                 outage.sending = False
-                destination = outage.pending_destination or _destination_id(transport, settings)
-                if destination not in outage.announced_on:
-                    outage.announced_on = [*outage.announced_on, destination]
+                if targets is not None:
+                    reached = [_destination_id(t, settings) for t in targets]
+                else:
+                    reached = [outage.pending_destination
+                               or _destination_id(transport, settings)]
+                for destination in reached:
+                    if destination not in outage.announced_on:
+                        outage.announced_on = [*outage.announced_on, destination]
                 # AND IT IS NO LONGER CLEARED. A channel that has just been told
                 # the service is failing again is holding FAILING again,
                 # whatever it heard about the previous recovery. Leaving it
                 # marked cleared excluded it from the final all-clear
                 # permanently: partial recovery clears A, a new alarm goes to A,
                 # and the closing all-clear then went only to B.
-                outage.cleared_on = [d for d in outage.cleared_on if d != destination]
+                outage.cleared_on = [d for d in outage.cleared_on if d not in reached]
                 outage.pending_destination = None
                 _persist_locked()
             else:

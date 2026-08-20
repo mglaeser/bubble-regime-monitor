@@ -1448,7 +1448,10 @@ class TestEveryChannelThatHeardTheAlarmHearsTheAllClear:
 
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")     # both live now
         get_settings.cache_clear()
-        assert notify_recompute_outcome("Rscript not found")["transport"] == "imessage"
+        # The second alarm addresses the AUDIENCE, so sipgate — which was told
+        # about this outage — hears it too, not just the newly-current channel.
+        second = notify_recompute_outcome("Rscript not found")["transport"]
+        assert "sipgate" in second and "imessage" in second
         assert {d.split("#")[0] for d in failure_alert._current.announced_on} == {
             "sipgate", "imessage"}
 
@@ -1828,3 +1831,66 @@ class TestClearedIsNotPermanent:
                             lambda text: sent.append(text) or _Result())
         notify_recompute_outcome(None)
         assert imessage_sends == [], "a channel that already heard must not be re-told"
+
+
+class TestAnAudienceIsNotAChannel:
+    """An alarm addresses everyone who has been told about this outage.
+
+    Sending only to the currently-selected channel left every other destination
+    that had heard about the outage — and possibly heard it had ENDED —
+    believing the service was healthy while it was not. And a quiet period
+    assumes its audience knows things are bad; an audience holding an all-clear
+    does not. Panel finding on #64."""
+
+    @staticmethod
+    def _two_channels(monkeypatch):
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+
+    def test_a_recurrence_reaches_a_channel_that_heard_the_all_clear(self, monkeypatch, sent):
+        """The sequence the panel named: partial recovery clears one channel,
+        the service fails again, and that channel must not be left believing
+        everything is fine."""
+        self._two_channels(monkeypatch)
+        notify_recompute_outcome("Rscript not found")       # both alarmed
+
+        sms_msgs, im_msgs = [], []
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda t: _Result(ok=False, status_code=503, error="down"))
+        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im_msgs.append(t) or _Result())
+        notify_recompute_outcome(None)                      # imessage told OK, sipgate not
+        assert any("OK" in m for m in im_msgs)
+
+        monkeypatch.setattr(failure_alert, "send_sms", lambda t: sms_msgs.append(t) or _Result())
+        notify_recompute_outcome("a different failure entirely")
+        assert any("FAILING" in m for m in im_msgs[1:]), (
+            "the channel holding an all-clear must hear the recurrence")
+
+    def test_the_quiet_period_does_not_mute_a_recurrence_after_an_all_clear(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        notify_recompute_outcome(None)                      # all-clear delivered
+        before = len(sent)
+        notify_recompute_outcome(EBP_ERROR)                 # same signature, at once
+        assert len(sent) == before + 1
+
+    def test_an_alarm_reaches_the_audience_if_any_channel_takes_it(self, monkeypatch, sent):
+        """One dead channel must not stop the alarm reaching the others."""
+        self._two_channels(monkeypatch)
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda t: _Result(ok=False, status_code=503, error="down"))
+        result = notify_recompute_outcome("Rscript not found")
+        assert result["status"] == "sent"
+
+    def test_the_first_alarm_still_goes_to_one_channel(self, sent):
+        """With no audience yet, there is nothing to broadcast to."""
+        result = notify_recompute_outcome(EBP_ERROR)
+        assert result["transport"] == "imessage"
