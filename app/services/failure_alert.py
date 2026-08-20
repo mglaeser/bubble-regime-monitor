@@ -715,12 +715,19 @@ def notify_recompute_outcome(error: str | None,
                     # keeping the timeline: a later failure starts fresh rather
                     # than adopting a fortnight-old first_seen and failure count.
                     if outage.recovered_at is None:
+                        # ONCE. Every later success re-entered this branch, so a
+                        # destination retired for good produced a WARNING and a
+                        # state-file write on every recompute — 78 of each over
+                        # a fortnight of perfectly healthy running, from the
+                        # subsystem whose warnings are supposed to mean
+                        # something. Nothing changes after the first pass, so
+                        # nothing is written or said after it either.
                         outage.recovered_at = now
-                    _persist_locked()
-                    log.warning("failure_alert_recovery_unreachable",
-                                announced_on=len(outage.announced_on),
-                                cleared_on=len(outage.cleared_on),
-                                failures=outage.failures)
+                        _persist_locked()
+                        log.warning("failure_alert_recovery_unreachable",
+                                    announced_on=len(outage.announced_on),
+                                    cleared_on=len(outage.cleared_on),
+                                    failures=outage.failures)
                     return {"status": "noop", "reason": "no announced destination reachable yet",
                             "kind": "recovery"}
                 transport = ", ".join(targets)

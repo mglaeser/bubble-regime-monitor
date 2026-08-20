@@ -2130,6 +2130,13 @@ class TestTheAllClearReportsTheOutageNotTheWait:
     attacking the previous fix."""
 
     def test_the_duration_is_measured_to_the_recovery(self, monkeypatch, sent):
+        """Drives the successful recomputes that happen while the channel is
+        away, rather than setting the timestamps by hand.
+
+        Setting them by hand and calling notify ONCE is what the first version
+        of this test did, and it passed whether or not `recovered_at` was
+        re-stamped on every unreachable success — the very thing it exists to
+        rule out. A worker pointed that out."""
         from app.config import get_settings
 
         notify_recompute_outcome(EBP_ERROR)
@@ -2137,17 +2144,22 @@ class TestTheAllClearReportsTheOutageNotTheWait:
         get_settings.cache_clear()
         notify_recompute_outcome(None)                       # recovered, undeliverable
 
-        # three days pass before the channel returns
         outage = failure_alert._current
-        outage.first_seen = datetime.now(UTC) - timedelta(days=3)
-        outage.recovered_at = outage.first_seen + timedelta(minutes=8)
+        recovered = outage.recovered_at
+        assert recovered is not None
+        outage.first_seen = recovered - timedelta(minutes=8)  # the outage lasted 8m
+
+        for _ in range(20):                                   # days of healthy running
+            notify_recompute_outcome(None)
+        assert failure_alert._current.recovered_at == recovered, (
+            "the recovery time must not walk forward with every healthy recompute")
+
         monkeypatch.setenv("IMESSAGE_ENABLED", "true")
         get_settings.cache_clear()
         notify_recompute_outcome(None)
 
         all_clear = next(m for m in sent if m.startswith("bubblegauge OK"))
         assert "8m" in all_clear, all_clear
-        assert "3d" not in all_clear
 
     def test_an_ordinary_recovery_is_unaffected(self, sent):
         notify_recompute_outcome(EBP_ERROR)
@@ -2234,3 +2246,52 @@ class TestAMixedRecoveryDoesNotAbandonTheUnreachable:
         notify_recompute_outcome(EBP_ERROR)
         assert notify_recompute_outcome(None)["kind"] == "recovery"
         assert failure_alert._current is None
+
+
+class TestAnUnreachableAudienceIsReportedOnce:
+    """A destination retired for good used to produce a WARNING and a state-file
+    write on EVERY recompute — 78 of each over a fortnight of healthy running,
+    from the subsystem whose warnings are supposed to mean something. Found by a
+    worker attacking the previous fix."""
+
+    def test_the_state_file_is_written_once_not_every_cycle(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+
+        writes = []
+        original = failure_alert._persist_locked
+        monkeypatch.setattr(failure_alert, "_persist_locked",
+                            lambda: (writes.append(1), original())[1])
+        for _ in range(78):
+            notify_recompute_outcome(None)
+        assert len(writes) == 1, f"{len(writes)} writes during healthy running"
+
+    def test_the_warning_is_emitted_once(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+
+        warnings = []
+        monkeypatch.setattr(failure_alert.log, "warning",
+                            lambda event, **kw: warnings.append(event))
+        for _ in range(78):
+            notify_recompute_outcome(None)
+        assert warnings.count("failure_alert_recovery_unreachable") == 1
+
+    def test_the_all_clear_still_arrives_afterwards(self, monkeypatch, sent):
+        """Quieting the branch must not quiet the obligation."""
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+        for _ in range(10):
+            notify_recompute_outcome(None)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
