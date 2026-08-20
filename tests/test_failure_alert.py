@@ -1664,3 +1664,95 @@ class TestAPartialRecoveryDoesNotReTellTheCleared:
         assert notify_recompute_outcome(None)["kind"] == "recovery"
         assert len(sms_sends) == 1
         assert failure_alert._current is None
+
+
+class TestTheOpeningStuckAlertCountsAtLeastOne:
+    """`occurrence=False` means "do not count this check as another attempt",
+    not "no attempt has failed".
+
+    The watchdog is precisely the reporter that arrives FIRST when a SCHEDULED
+    run wedges, because that run's own job never fires — so it creates the
+    outage, and starting at zero made the opening alert read "recompute x0".
+    Panel finding on #64, introduced by the fix for the previous one."""
+
+    @pytest.fixture()
+    def wedged(self, monkeypatch, sent):
+        from app.routers import admin
+
+        monkeypatch.setenv("FAILURE_ALERT_STUCK_AFTER_H", "4")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        admin.recompute_lock.acquire(blocking=False)
+        admin._last.update(started_at=(datetime.now(UTC) - timedelta(hours=9)).isoformat(),
+                           finished_at=None)
+        yield admin
+        if admin.recompute_lock.locked():
+            admin.recompute_lock.release()
+        admin._last.update(started_at=None, finished_at=None)
+        get_settings.cache_clear()
+
+    def test_the_first_stuck_alert_does_not_say_x0(self, wedged, sent):
+        wedged.notify_if_stuck()
+        assert len(sent) == 1
+        assert "x0" not in sent[0], sent[0]
+        assert "x1" in sent[0]
+
+    def test_and_still_does_not_inflate_afterwards(self, wedged, sent):
+        for _ in range(18):
+            wedged.notify_if_stuck()
+        assert failure_alert._current.failures == 1
+
+
+class TestCorruptDestinationStateIsUnknownNotUnreachable:
+    """A value of the wrong TYPE must read as "we do not know", which falls back
+    to the current channel — never as "we know, and none of them is reachable",
+    which drops the all-clear.
+
+    A bare string is iterable, so filtering items without checking the container
+    turned "imessage#abc" into eleven single-character destinations that match
+    nothing. Panel finding on #64."""
+
+    @pytest.mark.parametrize("corrupt", [
+        "imessage#abc123",          # a string iterates into characters
+        {"imessage#abc": 1},        # a dict iterates into keys
+        42,
+        None,
+    ])
+    def test_a_mistyped_destination_list_falls_back(self, sent, corrupt):
+        import json
+
+        notify_recompute_outcome(EBP_ERROR)
+        state = json.loads(failure_alert._state_path().read_text())
+        state["announced_on"] = corrupt
+        failure_alert._state_path().write_text(json.dumps(state))
+        failure_alert._current = None
+        failure_alert._loaded = False
+
+        result = notify_recompute_outcome(None)
+        assert result["kind"] == "recovery", "unknown must fall back, not drop"
+        assert any("OK" in m for m in sent)
+
+    def test_a_mistyped_cleared_list_does_not_suppress_delivery(self, sent):
+        import json
+
+        notify_recompute_outcome(EBP_ERROR)
+        state = json.loads(failure_alert._state_path().read_text())
+        state["cleared_on"] = "imessage#abc123"
+        failure_alert._state_path().write_text(json.dumps(state))
+        failure_alert._current = None
+        failure_alert._loaded = False
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+    def test_a_genuinely_unreachable_destination_still_closes_silently(self, sent):
+        """The real case must keep working: a well-formed list none of whose
+        destinations is live."""
+        import json
+
+        notify_recompute_outcome(EBP_ERROR)
+        state = json.loads(failure_alert._state_path().read_text())
+        state["announced_on"] = ["imessage#0000000000000000"]
+        failure_alert._state_path().write_text(json.dumps(state))
+        failure_alert._current = None
+        failure_alert._loaded = False
+        assert notify_recompute_outcome(None)["status"] == "noop"

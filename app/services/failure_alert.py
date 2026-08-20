@@ -215,6 +215,20 @@ def _aware(value: object) -> datetime:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def _destination_list(value: object) -> list[str]:
+    """A persisted destination list, or empty if it is not one.
+
+    THE TYPE IS CHECKED BEFORE THE ITEMS. A bare string is iterable, so
+    `[d for d in value if isinstance(d, str)]` turned "imessage#abc" into a list
+    of eleven single characters — eleven destinations that match nothing, which
+    reads as "we know where the alarm went and none of it is reachable" and
+    silently drops the all-clear. Empty means "we do not know", which falls back
+    to the current channel; garbage must mean that too, not the opposite."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
 def _restore_destinations(raw: dict[str, Any]) -> list[str]:
     """The destinations an outage was announced on, including the one an
     interrupted attempt was in flight to.
@@ -223,7 +237,7 @@ def _restore_destinations(raw: dict[str, Any]) -> list[str]:
     `_load_locked` reads as "the operator may have been told". They may have
     been told AT `pending_destination`, so it is promoted alongside — otherwise
     the outage knows it owes an all-clear and cannot say where to send it."""
-    known = [d for d in (raw.get("announced_on") or []) if isinstance(d, str)]
+    known = _destination_list(raw.get("announced_on"))
     pending = raw.get("pending_destination")
     if raw.get("sending") is True and isinstance(pending, str) and pending not in known:
         known.append(pending)
@@ -263,7 +277,7 @@ def _load_locked() -> None:
             bypasses_used=max(0, int(raw.get("bypasses_used") or 0)),
             announced_on=_restore_destinations(raw),
             pending_destination=None,
-            cleared_on=[d for d in (raw.get("cleared_on") or []) if isinstance(d, str)],
+            cleared_on=_destination_list(raw.get("cleared_on")),
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
                  announced=_current.announced)
@@ -546,8 +560,13 @@ def notify_recompute_outcome(error: str | None,
                 outage = _current
                 changed = outage is not None and outage.signature != signature
                 if outage is None:
-                    outage = _Outage(signature=signature, first_seen=now,
-                                     failures=1 if occurrence else 0)
+                    # ALWAYS 1, even from the watchdog. `occurrence=False` means
+                    # "do not count this check as another attempt", not "no
+                    # attempt has failed" — and the watchdog is precisely the
+                    # reporter that arrives FIRST when a scheduled run wedges,
+                    # because that run's own job never fires. Starting at 0 made
+                    # the opening alert read "recompute x0".
+                    outage = _Outage(signature=signature, first_seen=now, failures=1)
                     _current = outage
                 elif changed:
                     # A DIFFERENT failure is news even mid-outage: the operator
