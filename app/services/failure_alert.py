@@ -375,6 +375,23 @@ def _unconfigured(transport: str, settings: Any) -> str | None:
     return None
 
 
+def _available_transports(settings: Any) -> frozenset[str]:
+    """The transports the operator has BOTH switched on and configured.
+
+    Membership, not a per-name check, because a per-name check fails open: an
+    unrecognised name matched none of its branches and was reported sendable.
+    And `imessage_configured` answers "are the credentials present", not "is it
+    switched on" — so a preference could otherwise route over a transport the
+    operator had deliberately turned off."""
+    out = set()
+    if settings.imessage_enabled and settings.imessage_configured:
+        out.add("imessage")
+    if (settings.effective_daily_sms_enabled and settings.sipgate_token_id
+            and settings.sipgate_token and settings.sipgate_recipient):
+        out.add("sipgate")
+    return frozenset(out)
+
+
 def _select_transport(prefer: str | None = None) -> tuple[str, str | None]:
     """(transport, reason it cannot send). Mirrors the daily digest: whichever
     transport the operator turned on, exactly one, no silent downgrade.
@@ -386,7 +403,7 @@ def _select_transport(prefer: str | None = None) -> tuple[str, str | None]:
     channel is still configured — a preference cannot resurrect a transport the
     operator has taken away."""
     settings = get_settings()
-    if prefer and _unconfigured(prefer, settings) is None:
+    if prefer is not None and prefer in _available_transports(settings):
         return prefer, None
     transport = settings.daily_digest_transport
     return transport, _unconfigured(transport, settings)
@@ -400,8 +417,15 @@ def _send(transport: str, text: str) -> tuple[bool, int | None, str | None]:
         if transport == "imessage":
             result = send_imessage(text)
             return result.ok, result.status_code, result.error
-        sms = send_sms(text)
-        return sms.ok, sms.status_code, sms.error
+        if transport == "sipgate":
+            sms = send_sms(text)
+            return sms.ok, sms.status_code, sms.error
+        # NAMED, not defaulted. "anything that is not imessage is sipgate" meant
+        # a transport this module did not recognise — a corrupt state file, a
+        # future name — silently became an SMS to whoever sipgate is pointed at.
+        # A destination is not a fallback.
+        log.error("failure_alert_unknown_transport", transport=transport)
+        return False, None, f"unknown transport {transport!r}"
     except Exception as exc:
         detail = sanitize(exc, limit=200)
         log.error("failure_alert_send_raised", transport=transport, error=detail)

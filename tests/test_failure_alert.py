@@ -1263,12 +1263,34 @@ class TestTheAllClearFollowsTheAlarm:
     arrived somewhere they were not watching. Panel finding on #64."""
 
     def test_the_recovery_uses_the_announcing_transport(self, monkeypatch, sent):
+        """The alarm went out over SMS; iMessage is switched on afterwards, so
+        the DEFAULT flips to iMessage. The all-clear must still follow the
+        alarm — both channels are live, and only one of them heard the alarm."""
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        assert notify_recompute_outcome(EBP_ERROR)["transport"] == "sipgate"
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")      # default would now flip
+        get_settings.cache_clear()
+        result = notify_recompute_outcome(None)
+        assert result["kind"] == "recovery"
+        assert result["transport"] == "sipgate", "the all-clear follows the alarm"
+
+    def test_a_switched_off_channel_is_not_preferred(self, monkeypatch, sent):
+        """A preference must never route over a transport the operator has
+        DISABLED — `imessage_configured` answers "credentials present", not
+        "switched on", so preferring on configuration alone would send over a
+        channel that was deliberately turned off."""
         from app.config import get_settings
 
         assert notify_recompute_outcome(EBP_ERROR)["transport"] == "imessage"
-
-        # the operator moves to SMS while the outage is still open
-        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")     # off, credentials intact
         monkeypatch.setenv("SMS_ENABLED", "true")
         monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
         monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
@@ -1276,9 +1298,7 @@ class TestTheAllClearFollowsTheAlarm:
         get_settings.cache_clear()
 
         result = notify_recompute_outcome(None)
-        assert result["kind"] == "recovery"
-        assert result["transport"] == "imessage", (
-            "the all-clear must go where the alarm went")
+        assert result["transport"] == "sipgate"
 
     def test_it_falls_back_when_that_channel_is_gone(self, monkeypatch, sent):
         """A preference cannot resurrect a transport the operator removed."""
@@ -1365,3 +1385,37 @@ class TestTheWatchdogRaceUnderRealThreads:
             assert any("OK" in m for m in sent), "a FAILING must not be left standing"
             assert sent.index(next(m for m in sent if "OK" in m)) > \
                    sent.index(next(m for m in sent if "FAILING" in m))
+
+
+class TestAnUnknownTransportIsNotAnSMS:
+    """`_send` treated anything that was not "imessage" as sipgate, so a
+    transport this module did not recognise — a corrupt state file, a future
+    name — silently became an SMS to whoever sipgate is pointed at. A
+    destination is not a fallback. Panel finding on #64."""
+
+    def test_an_unknown_transport_sends_nothing(self, monkeypatch, sent):
+        ok, status, error = failure_alert._send("carrier-pigeon", "hello")
+        assert ok is False and sent == []
+        assert "unknown transport" in (error or "")
+
+    def test_a_corrupt_persisted_transport_does_not_route_to_sms(self, monkeypatch, sent):
+        """The end-to-end shape: a garbage `announced_transport` on disk must
+        not become an SMS."""
+        import json
+
+        notify_recompute_outcome(EBP_ERROR)
+        state = json.loads(failure_alert._state_path().read_text())
+        state["announced_transport"] = "carrier-pigeon"
+        failure_alert._state_path().write_text(json.dumps(state))
+        failure_alert._current = None
+        failure_alert._loaded = False
+
+        result = notify_recompute_outcome(None)
+        assert result["transport"] == "imessage", "an unrecognised preference is ignored"
+
+    def test_a_known_but_unavailable_preference_is_ignored(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        assert "sipgate" not in failure_alert._available_transports(get_settings())
+        transport, problem = failure_alert._select_transport(prefer="sipgate")
+        assert transport == "imessage" and problem is None
