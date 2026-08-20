@@ -1192,3 +1192,96 @@ class TestEveryVocabularyAlternativeIsAStem:
     def test_every_published_term_is_blocked_by_the_regex_it_publishes(self):
         missed = [t for t, _ in iv._DEFECT_VOCAB if not iv._DEFECT_WORDS.search(t)]
         assert not missed, missed
+
+
+class TestWireFailover:
+    """A 5xx on chat-completions costs a voice; the other wire may not have it.
+
+    Operator measurement over 13,815 logged gateway requests: 516 chat-protocol
+    requests, none ever past 91s, 150 clustered at ~90s -- while `responses` runs
+    to 380s. The cluster spans Anthropic (combo/SOAT-B) and NVIDIA
+    (combo/SOTA-C), unrelated upstreams, so it is the wire. A curl with no client
+    timeout ran the same model over chat-completions for 458s to a clean [DONE],
+    so the gateway has no wall of its own.
+
+    Losing a voice is not free here: an errored voice never approves, so two of
+    them take the quorum with them and the panel blocks on infrastructure alone.
+    Observed: two runs on PR #64 where combo/SOAT-B and combo/SOTA-C both
+    returned 504 and the panel decided on one voice.
+    """
+
+    OK_CHAT = (200, {"choices": [{"message": {"content":
+        '{"refuted": false, "confidence": "high", "reason": "docs only change", '
+        '"defects": [], "proof": "x-1"}'}}]})
+    OK_RESP = (200, {"output_text":
+        '{"refuted": false, "confidence": "high", "reason": "docs only change", '
+        '"defects": [], "proof": "x-1"}'})
+
+    @staticmethod
+    def _route(monkeypatch, chat, resp):
+        """Serve chat/completions and /responses independently, recording hits."""
+        calls: list[str] = []
+
+        def fake(url, payload=None, timeout=180):
+            if url.endswith("/chat/completions"):
+                calls.append("chat")
+                return chat
+            calls.append("responses")
+            return resp
+
+        monkeypatch.setattr(iv, "_http_json", fake)
+        return calls
+
+    def test_a_504_is_retried_on_the_other_wire(self, monkeypatch, capsys):
+        calls = self._route(monkeypatch, (504, "gateway timeout"), self.OK_RESP)
+        out = iv.attempt_once("combo/SOAT-B", "sys", "usr")
+        assert out["ok"] is True
+        assert out.get("wire") == "responses"
+        assert calls == ["chat", "responses"]
+        assert "retrying once on /responses" in capsys.readouterr().out
+
+    def test_a_network_error_is_retried_on_the_other_wire(self, monkeypatch):
+        # status 0 is _http_json's network-failure signal.
+        calls = self._route(monkeypatch, (0, "connection reset"), self.OK_RESP)
+        assert iv.attempt_once("combo/SOTA-C", "sys", "usr")["ok"] is True
+        assert calls == ["chat", "responses"]
+
+    def test_a_rate_limit_is_NOT_retried_on_the_other_wire(self, monkeypatch):
+        # 429 is upstream state both wires share; a second attempt burns budget
+        # and fails the same way.
+        calls = self._route(monkeypatch, (429, "rate limited"), self.OK_RESP)
+        out = iv.attempt_once("combo/SOTA-A", "sys", "usr")
+        assert out["ok"] is False
+        assert calls == ["chat"], "429 must not touch the second wire"
+
+    def test_an_exhausted_pool_is_NOT_retried_on_the_other_wire(self, monkeypatch):
+        calls = self._route(monkeypatch, (401, "no usable account credential"), self.OK_RESP)
+        assert iv.attempt_once("combo/SOTA-A", "sys", "usr")["ok"] is False
+        assert calls == ["chat"]
+
+    def test_a_healthy_chat_call_never_touches_the_other_wire(self, monkeypatch):
+        calls = self._route(monkeypatch, self.OK_CHAT, self.OK_RESP)
+        assert iv.attempt_once("combo/SOTA-A", "sys", "usr")["ok"] is True
+        assert calls == ["chat"]
+
+    def test_both_wires_failing_reports_the_ORIGINAL_failure(self, monkeypatch):
+        # The operator needs the chat-completions status, not the second one:
+        # the first is the symptom being diagnosed.
+        self._route(monkeypatch, (504, "gateway timeout"), (500, "also broken"))
+        out = iv.attempt_once("combo/SOAT-B", "sys", "usr")
+        assert out["ok"] is False
+        assert out["status"] == 504
+        assert "504" in out["reason"]
+
+    def test_the_documented_responses_only_rejection_still_works(self, monkeypatch):
+        # The pre-existing 400/404-naming-the-Responses-API path is untouched.
+        calls = self._route(monkeypatch, (404, "use the v1/responses endpoint"), self.OK_RESP)
+        assert iv.attempt_once("m", "sys", "usr")["ok"] is True
+        assert calls == ["chat", "responses"]
+
+    def test_wire_may_differ_predicate(self):
+        assert iv.wire_may_differ(0) and iv.wire_may_differ(500) and iv.wire_may_differ(504)
+        assert not iv.wire_may_differ(429)
+        assert not iv.wire_may_differ(401)
+        assert not iv.wire_may_differ(400)
+        assert not iv.wire_may_differ(200)

@@ -1298,6 +1298,37 @@ def should_fallback_responses(status: int, body: Any) -> bool:
             and re.search(r"v1/responses|responses endpoint|only supported in", body, re.I) is not None)
 
 
+def wire_may_differ(status: int) -> bool:
+    """A chat-completions failure the RESPONSES wire might not reproduce.
+
+    NOT a guess. Measured by the operator across 13,815 logged gateway requests:
+    of 516 chat-protocol requests NOT ONE has ever exceeded 91 seconds, with 150
+    clustered at ~90s, while `responses` runs to 380s freely. The ~90s cluster
+    spans unrelated upstreams -- Anthropic via combo/SOAT-B and NVIDIA via
+    combo/SOTA-C -- which do not share a server-side behaviour, so the common
+    factor is the wire. 78 of 82 combo/SOAT-B failures produced no first output
+    token at all, while its successes have a p50 first-token time of 69s and a
+    max of 84.9s: the successes are simply the requests whose thinking phase
+    finished before the ~90s axe fell.
+
+    Confirmed live: driving combo/SOAT-B over chat-completions with curl and NO
+    client timeout ran 458 seconds to a clean [DONE], 32,000 output tokens,
+    HTTP 200. The gateway imposes no wall of its own. The ceiling is the chat
+    wire's SSE translation not emitting a keepalive during the thinking phase,
+    and a client idle timeout collecting the silence.
+
+    So a 5xx or a network-level failure is worth ONE attempt on the other wire
+    before the voice is lost. Deliberately NOT 429 and NOT 401: a rate limit or
+    an exhausted account pool is upstream state both wires share, and retrying
+    the same condition on a second wire only burns the budget twice."""
+    return status == 0 or status >= 500
+
+
+def _responses_attempt(model: str, sys_prompt: str, user_prompt: str) -> tuple[int, Any]:
+    return _http_json(f"{BASE}/responses",
+                      {"model": model, "instructions": sys_prompt, "input": user_prompt})
+
+
 def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
     status, data = _http_json(f"{BASE}/chat/completions", {
         "model": model,
@@ -1312,12 +1343,21 @@ def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
     # a documented 400 (panel round-3 finding: a 400-only model would have
     # blocked the panel permanently); switch on either when the body says so.
     if should_fallback_responses(status, data):
-        s2, d2 = _http_json(f"{BASE}/responses",
-                            {"model": model, "instructions": sys_prompt, "input": user_prompt})
+        s2, d2 = _responses_attempt(model, sys_prompt, user_prompt)
         if s2 == 200:
             v = parse_verdict(_extract_responses_text(d2))
             return {"ok": True, "v": v, "decision": decide(v)}
         return {"ok": False, "status": s2, "reason": f"Responses API {s2}: {str(d2)[:300]}"}
+    # The wire itself may be the fault — see wire_may_differ. One attempt on the
+    # other wire, and the ORIGINAL failure is what gets reported if it also
+    # fails, because that is the one an operator needs to see.
+    if wire_may_differ(status):
+        print(f"  [wire] {model}: chat/completions {status or 'network error'} "
+              f"-> retrying once on /responses")
+        s2, d2 = _responses_attempt(model, sys_prompt, user_prompt)
+        if s2 == 200:
+            v = parse_verdict(_extract_responses_text(d2))
+            return {"ok": True, "v": v, "decision": decide(v), "wire": "responses"}
     return {"ok": False, "status": status, "reason": f"API {status}: {str(data)[:300]}"}
 
 
