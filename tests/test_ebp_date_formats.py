@@ -225,3 +225,32 @@ class TestNaNNeverReachesTheScore:
         clean = s5_credit.sub_score_t2(history, lag_obs=24)
         history[-25] = float("nan")
         assert s5_credit.sub_score_t2(history, lag_obs=24) != clean
+
+
+class TestARowWithoutADateIsNotAGap:
+    """Three kinds of skipped row, and only one of them is a gap.
+
+    A row carrying a real value but NO DATE is a reading the parser cannot place
+    in time — dropped data. It is also exactly the shape an Excel-style export
+    produces when it blanks a repeated date column, so a trailing block of them
+    silently truncates the series. Panel finding on #64 (combo/SOTA-A); the
+    value column had been fixed and the date column had not."""
+
+    _GOOD = _rows(_us_months(2024) + _us_months(2025))
+
+    def test_trailing_rows_with_no_date_fail_the_fetch(self):
+        with pytest.raises(SourceError) as exc:
+            _parse_ebp_csv(HEADER + self._GOOD + ",1.03,-0.31,0.12\n,1.03,-0.29,0.12\n")
+        assert "unreadable date" in str(exc.value)
+
+    def test_a_wholly_empty_trailing_row_is_just_padding(self):
+        pairs = _parse_ebp_csv(HEADER + self._GOOD + ",,,\n")
+        assert len(pairs) == 24
+
+    def test_a_dated_row_with_no_value_is_still_a_gap(self):
+        pairs = _parse_ebp_csv(HEADER + self._GOOD + "1/1/2026,1.03,NA,0.12\n")
+        assert len(pairs) == 24
+
+    def test_one_undated_row_mid_series_is_tolerated(self):
+        body = _rows(_us_months(2024)) + ",1.03,-0.31,0.12\n" + _rows(_us_months(2025))
+        assert len(_parse_ebp_csv(HEADER + body)) == 24

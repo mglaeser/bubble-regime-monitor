@@ -111,12 +111,24 @@ def _parse_ebp_csv(text: str) -> list[tuple[str, float]]:
     for index, row in enumerate(reader):
         raw_date = (row.get(date_col) or "").strip()
         raw_ebp = (row.get(ebp_col) or "").strip()
-        # A DOCUMENTED GAP IS NOT A DROP. The Fed publishes the sentinels below
-        # for a month it has not computed yet, routinely on the last row. Those
-        # rows are absent data, not data this parser failed to read, and
-        # counting them as drops would fire the tail guard on a healthy file.
-        if not raw_date or raw_ebp in _MISSING_VALUE:
+        # THREE KINDS OF SKIPPED ROW, and only one of them is a gap.
+        #
+        # An empty row is padding. A row with a value but NO DATE is a reading
+        # this parser cannot place in time — dropped data, and exactly the shape
+        # an Excel-style export produces when it blanks a repeated date column,
+        # so it must reach the tail guard. A row with a date but no value is the
+        # documented gap: the Fed publishes those sentinels for a month it has
+        # not computed, routinely on the last row, and counting them as drops
+        # would fire the guard on a healthy file.
+        has_value = raw_ebp not in _MISSING_VALUE
+        if not raw_date:
+            if not has_value:
+                continue                      # an empty row is not data
+            unreadable_dates += 1
+            last_dropped = index
             continue
+        if not has_value:
+            continue                          # a documented gap
         iso_date = normalise_date(raw_date)
         if iso_date is None:
             unreadable_dates += 1
