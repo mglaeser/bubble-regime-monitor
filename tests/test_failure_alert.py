@@ -1043,7 +1043,8 @@ class TestASignatureChangeCarriesTheWholeDeliveryState:
         fields = {f.name for f in dataclasses.fields(failure_alert._Outage)}
         assert fields == {"signature", "first_seen", "failures", "last_sent",
                           "announced", "sending", "bypasses_used",
-                          "announced_on", "pending_destinations", "cleared_on"}, (
+                          "announced_on", "pending_destinations", "cleared_on",
+                          "recovered_at"}, (
             "a new _Outage field must be given an explicit carry/reset decision "
             "in the signature-change branch")
 
@@ -1958,3 +1959,214 @@ class TestOnlyDeliveredDestinationsAreRecorded:
         failure_alert._loaded = False
         monkeypatch.setattr(failure_alert, "send_imessage", lambda t: sent.append(t) or _Result())
         assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+
+class TestATemporarilyUnreachableDestinationKeepsItsAllClear:
+    """A transport disabled for a restart or a key rotation is not gone forever.
+
+    The recovery path used to DISCARD the outage when no alarmed destination was
+    reachable, so a service that recovered during that minute lost its all-clear
+    permanently and the operator kept holding "FAILING" once the channel came
+    back. Panel finding on #64; reproduced before and after the fix."""
+
+    def test_the_all_clear_waits_for_the_channel_to_return(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        assert len(sent) == 1
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")     # a minute of maintenance
+        get_settings.cache_clear()
+        assert notify_recompute_outcome(None)["status"] == "noop"
+        assert failure_alert._current is not None, "the obligation must survive"
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+        assert sum(1 for m in sent if m.startswith("bubblegauge OK")) == 1
+        assert failure_alert._current is None
+
+    def test_repeated_successes_while_unreachable_send_nothing(self, monkeypatch, sent):
+        """Staying open must not mean retrying into the void every cycle."""
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+        for _ in range(5):
+            assert notify_recompute_outcome(None)["status"] == "noop"
+        assert len(sent) == 1
+
+    def test_it_survives_a_restart_while_unreachable(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)
+
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+
+class TestAnEndedOutageDoesNotLendItsTimeline:
+    """Keeping an undelivered all-clear alive must not keep the OUTAGE alive.
+
+    When the audience is permanently gone the obligation can never be
+    discharged, so the outage never closed — and a later failure adopted it,
+    inheriting first_seen and the old count and reporting a fresh incident as a
+    fortnight old. Found by a worker attacking the previous fix."""
+
+    def test_a_later_failure_starts_its_own_timeline(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        for _ in range(4):
+            notify_recompute_outcome(EBP_ERROR)          # throttled, but counted
+        assert failure_alert._current.failures == 5
+        first = failure_alert._current.first_seen
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")   # audience gone
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)                    # recovered, undeliverable
+        assert failure_alert._current.recovered_at is not None
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome("a completely different failure")
+        assert failure_alert._current.failures == 1, "a new outage counts from one"
+        assert failure_alert._current.first_seen > first
+        assert "x1" in sent[-1]
+
+    def test_the_all_clear_still_arrives_if_the_channel_returns_first(self, monkeypatch, sent):
+        """The obligation survives while the outage is over — that is the whole
+        point of the previous fix, and it must not regress."""
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+        assert sum(1 for m in sent if m.startswith("bubblegauge OK")) == 1
+
+    def test_a_stale_obligation_is_dropped_when_the_service_fails_again(self, monkeypatch, sent):
+        """The audience last heard FAILING and the service IS failing, so an
+        all-clear would now be false."""
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome("a completely different failure")
+
+        before = sum(1 for m in sent if m.startswith("bubblegauge OK"))
+        assert before == 0
+
+    def test_a_partially_cleared_outage_does_not_lend_its_timeline_either(self, monkeypatch, sent):
+        """The sharper case a worker reproduced: one channel receives the
+        all-clear, the other is retired, and a later failure then told the
+        CLEARED channel it had been failing since before the all-clear it had
+        already been sent."""
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        notify_recompute_outcome("boom A")                  # announced on sipgate
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome("boom B")                  # audience: both
+
+        im = []
+        monkeypatch.setattr(failure_alert, "send_imessage", lambda t: im.append(t) or _Result())
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda t: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome(None)                      # imessage cleared, sipgate not
+        assert any(m.startswith("bubblegauge OK") for m in im)
+
+        monkeypatch.setenv("SMS_ENABLED", "false")          # SMS retired for good
+        get_settings.cache_clear()
+        for _ in range(4):
+            notify_recompute_outcome(None)                  # a healthy stretch
+        notify_recompute_outcome("KeyError: 'spy'")         # a new, unrelated failure
+
+        last = im[-1]
+        assert "x1" in last, f"a fresh outage must count from one: {last}"
+
+    def test_the_recovered_flag_survives_a_restart(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome("a completely different failure")
+        assert failure_alert._current.failures == 1
+
+
+class TestTheAllClearReportsTheOutageNotTheWait:
+    """An all-clear that waited for an unreachable channel to return must not
+    report the wait as part of the outage.
+
+    "OK: recompute succeeded after 1 failures over 3d" for an outage that lasted
+    eight minutes — the other three days were healthy running. Found by a worker
+    attacking the previous fix."""
+
+    def test_the_duration_is_measured_to_the_recovery(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)                       # recovered, undeliverable
+
+        # three days pass before the channel returns
+        outage = failure_alert._current
+        outage.first_seen = datetime.now(UTC) - timedelta(days=3)
+        outage.recovered_at = outage.first_seen + timedelta(minutes=8)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)
+
+        all_clear = next(m for m in sent if m.startswith("bubblegauge OK"))
+        assert "8m" in all_clear, all_clear
+        assert "3d" not in all_clear
+
+    def test_an_ordinary_recovery_is_unaffected(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        failure_alert._current.first_seen = datetime.now(UTC) - timedelta(hours=5)
+        notify_recompute_outcome(None)
+        assert "5h" in next(m for m in sent if m.startswith("bubblegauge OK"))
+
+    def test_the_recovery_time_survives_a_restart(self, monkeypatch, sent):
+        from app.config import get_settings
+
+        notify_recompute_outcome(EBP_ERROR)
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)
+        recovered = failure_alert._current.recovered_at
+
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome(None)
+        assert recovered is not None

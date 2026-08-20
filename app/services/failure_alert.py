@@ -139,6 +139,14 @@ class _Outage:
     #: this the retry re-told the ones that had already heard, every cycle, for
     #: as long as the failing channel stayed down.
     cleared_on: list[str] = field(default_factory=list)
+    #: WHEN the service recovered, if the all-clear could not be delivered then —
+    #: the audience was unreachable. A timestamp rather than a flag because the
+    #: obligation outlives the outage and the duration must not: an all-clear
+    #: delivered three days later reported "over 3d" for an outage that lasted
+    #: minutes, counting the healthy stretch that followed it. The timeline does
+    #: not carry either — a later failure must not inherit `first_seen` and the
+    #: old count and report a fresh outage as a fortnight old.
+    recovered_at: datetime | None = None
 
     @property
     def operator_may_be_waiting(self) -> bool:
@@ -278,6 +286,8 @@ def _load_locked() -> None:
             announced_on=_restore_destinations(raw),
             pending_destinations=[],
             cleared_on=_destination_list(raw.get("cleared_on")),
+            recovered_at=(_aware(raw["recovered_at"])
+                          if raw.get("recovered_at") else None),
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
                  announced=_current.announced)
@@ -384,10 +394,16 @@ def build_failure_message(*, failures: int, first_seen: datetime, snapshot_age: 
     return f"{head}; {reason[:min(room, _MAX_REASON_CHARS)]}"[:limit]
 
 
-def build_recovery_message(*, failures: int, first_seen: datetime, limit: int) -> str:
+def build_recovery_message(*, failures: int, first_seen: datetime, limit: int,
+                           ended: datetime | None = None) -> str:
     """The all-clear. Sent only where a failure alert actually went out, so it
-    can never be the first thing an operator hears about an outage."""
-    spent = _compact_age(datetime.now(UTC) - first_seen)
+    can never be the first thing an operator hears about an outage.
+
+    `ended` is when the service actually recovered, which is not always when
+    this message goes out: an all-clear that waited for an unreachable channel
+    to return otherwise reported the wait as part of the outage — "over 3d" for
+    one that lasted minutes."""
+    spent = _compact_age((ended or datetime.now(UTC)) - first_seen)
     return f"bubblegauge OK: recompute succeeded after {failures} failures over {spent}"[:limit]
 
 
@@ -552,6 +568,15 @@ def notify_recompute_outcome(error: str | None,
                 # genuinely different failures. The caller knows which it has.
                 signature = signature or failure_signature(error)
                 outage = _current
+                if outage is not None and outage.recovered_at is not None:
+                    # That outage ENDED; its all-clear was merely undeliverable.
+                    # This is a new one, and telling the operator it began a
+                    # fortnight ago would be a worse lie than saying nothing.
+                    # The stale obligation goes with it: the audience last heard
+                    # FAILING, and the service is failing, so an all-clear would
+                    # now be false anyway.
+                    outage = None
+                    _current = None
                 changed = outage is not None and outage.signature != signature
                 if outage is None:
                     # ALWAYS 1, even from the watchdog. `occurrence=False` means
@@ -676,23 +701,26 @@ def notify_recompute_outcome(error: str | None,
                     fallback, problem = _select_transport()
                     targets = [fallback]
                 if not targets:
-                    # NOBODY LEFT TO TELL. Every destination that heard the alarm
-                    # has been reconfigured away, and the destinations configured
-                    # now never heard it — an all-clear would be a message about
-                    # an outage they do not know happened. The outage closes
-                    # silently rather than being announced to the wrong audience.
-                    _current = None
+                    # NOBODY REACHABLE RIGHT NOW — which is not the same as
+                    # nobody ever again. A transport is disabled for a restart,
+                    # a key rotation, a minute of maintenance; discarding the
+                    # outage here meant that if the service recovered during
+                    # that minute, the all-clear was gone for good and the
+                    # operator kept "FAILING" once the channel came back.
+                    #
+                    # The outage stays open, exactly as it does for any other
+                    # undelivered all-clear, and the next success delivers it.
+                    # The outage is OVER; only the undelivered all-clear
+                    # remains. Recording that keeps the obligation alive without
+                    # keeping the timeline: a later failure starts fresh rather
+                    # than adopting a fortnight-old first_seen and failure count.
+                    outage.recovered_at = now
                     _persist_locked()
-                    # WARNING, not info: an outage ended and nobody could be
-                    # told. The state is discarded deliberately — the audience
-                    # is unreachable and a future failure is a NEW outage whose
-                    # timeline must not inherit this one's — but the fact that
-                    # an all-clear went undelivered is the operator's business.
                     log.warning("failure_alert_recovery_unreachable",
                                 announced_on=len(outage.announced_on),
                                 cleared_on=len(outage.cleared_on),
                                 failures=outage.failures)
-                    return {"status": "noop", "reason": "no announced destination still configured",
+                    return {"status": "noop", "reason": "no announced destination reachable yet",
                             "kind": "recovery"}
                 transport = ", ".join(targets)
             else:
@@ -709,7 +737,8 @@ def notify_recompute_outcome(error: str | None,
             limit = settings.sms_max_len
             if kind == "recovery":
                 text = build_recovery_message(failures=outage.failures,
-                                              first_seen=outage.first_seen, limit=limit)
+                                              first_seen=outage.first_seen, limit=limit,
+                                              ended=outage.recovered_at)
             else:
                 text = build_failure_message(
                     failures=outage.failures, first_seen=outage.first_seen,
