@@ -1756,3 +1756,75 @@ class TestCorruptDestinationStateIsUnknownNotUnreachable:
         failure_alert._current = None
         failure_alert._loaded = False
         assert notify_recompute_outcome(None)["status"] == "noop"
+
+
+class TestClearedIsNotPermanent:
+    """A channel told the service is failing AGAIN is holding FAILING again.
+
+    Leaving it marked cleared excluded it from the final all-clear permanently:
+    partial recovery clears A, a new alarm goes to A, and the closing all-clear
+    then went only to B — A left holding FAILING forever, which is the exact
+    invariant this module claims. Panel finding on #64, in my own fix for the
+    retry flood."""
+
+    @staticmethod
+    def _two_channels(monkeypatch):
+        from app.config import get_settings
+
+        monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        monkeypatch.setenv("SIPGATE_TOKEN_ID", "token-id")
+        monkeypatch.setenv("SIPGATE_TOKEN", "token-secret")
+        monkeypatch.setenv("SIPGATE_RECIPIENT", "+491510000000")
+        get_settings.cache_clear()
+        notify_recompute_outcome(EBP_ERROR)                # announced on sipgate
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        get_settings.cache_clear()
+        notify_recompute_outcome("Rscript not found")      # announced on imessage
+
+    def test_a_rearmed_channel_gets_the_final_all_clear(self, monkeypatch, sent):
+        self._two_channels(monkeypatch)
+
+        # partial recovery: imessage hears it, sipgate does not
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome(None)
+        assert failure_alert._current is not None
+
+        # the service fails again and imessage is told, so it is no longer clear
+        notify_recompute_outcome("a different failure entirely")
+        assert not any(d.startswith("imessage#") for d in failure_alert._current.cleared_on)
+
+        imessage_all_clears = []
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: imessage_all_clears.append(text) or _Result())
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda text: sent.append(text) or _Result())
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+        assert any("OK" in m for m in imessage_all_clears), (
+            "the re-alarmed channel must hear the final all-clear")
+        assert failure_alert._current is None
+
+    def test_partial_recovery_progress_survives_a_restart(self, monkeypatch, sent):
+        """A failed recovery must persist which channels already heard, or the
+        next process re-tells one that did."""
+        import json
+
+        self._two_channels(monkeypatch)
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome(None)
+
+        on_disk = json.loads(failure_alert._state_path().read_text())
+        assert any(d.startswith("imessage#") for d in on_disk["cleared_on"]), (
+            "partial progress must reach the state file")
+
+        failure_alert._current = None
+        failure_alert._loaded = False
+        imessage_sends = []
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: imessage_sends.append(text) or _Result())
+        monkeypatch.setattr(failure_alert, "send_sms",
+                            lambda text: sent.append(text) or _Result())
+        notify_recompute_outcome(None)
+        assert imessage_sends == [], "a channel that already heard must not be re-told"

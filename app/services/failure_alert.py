@@ -711,13 +711,18 @@ def notify_recompute_outcome(error: str | None,
                 ok = all(r[1][0] for r in results)
                 status_code = results[0][1][1] if results else None
                 send_error = next((r[1][2] for r in results if not r[1][0]), None)
-            if ok and kind == "recovery":
-                # The outage closes only once the all-clear is actually out.
-                # Clearing it first meant a failed recovery send was never
-                # retried — every later success returned "noop" and the last
-                # thing the operator held was "FAILING" for a service that had
-                # been healthy for days.
-                _current = None
+            if kind == "recovery":
+                if ok:
+                    # The outage closes only once the all-clear is actually out.
+                    # Clearing it first meant a failed recovery send was never
+                    # retried — every later success returned "noop" and the last
+                    # thing the operator held was "FAILING" for a service that
+                    # had been healthy for days.
+                    _current = None
+                # PERSISTED EITHER WAY. A partial recovery records which
+                # channels have been told, and that progress only survives a
+                # restart if it is written on the failing path too — otherwise
+                # the next process re-tells a channel that already heard.
                 _persist_locked()
             elif ok:
                 # Only a DELIVERED alert starts the quiet period; a failed send
@@ -729,9 +734,16 @@ def notify_recompute_outcome(error: str | None,
                 destination = outage.pending_destination or _destination_id(transport, settings)
                 if destination not in outage.announced_on:
                     outage.announced_on = [*outage.announced_on, destination]
+                # AND IT IS NO LONGER CLEARED. A channel that has just been told
+                # the service is failing again is holding FAILING again,
+                # whatever it heard about the previous recovery. Leaving it
+                # marked cleared excluded it from the final all-clear
+                # permanently: partial recovery clears A, a new alarm goes to A,
+                # and the closing all-clear then went only to B.
+                outage.cleared_on = [d for d in outage.cleared_on if d != destination]
                 outage.pending_destination = None
                 _persist_locked()
-            elif kind == "failure":
+            else:
                 # A transport that answered "not ok" is the KNOWN-not-delivered
                 # case, which is not the crash gap: clear the marker so it does
                 # not later buy an all-clear for a message nobody received, and
