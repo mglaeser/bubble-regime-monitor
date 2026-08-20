@@ -944,3 +944,72 @@ class TestAMovingNumberDoesNotReAlert:
                 admin.recompute_lock.release()
             admin._last.update(started_at=None, finished_at=None)
             get_settings.cache_clear()
+
+
+class TestASignatureChangeCarriesTheWholeDeliveryState:
+    """Twice now, this branch dropped a field it should have carried.
+
+    First `announced`: an outage the operator HAD been told about lost its
+    all-clear when the error changed. Then, one field later, `sending`: an
+    outage whose delivery was UNKNOWN lost it the same way. Both were found by
+    the panel, not by me, which is why the construction is now `replace` — the
+    default is carry, and forgetting is no longer possible."""
+
+    def test_an_unknown_delivery_survives_a_signature_change(self, monkeypatch, sent):
+        """The exact regression: crash mid-send, RESTART, then a different
+        failure whose own send definitively fails.
+
+        A crash means the process dies, so the unknown is only ever discovered
+        on reload — which is where it is resolved. The later failed send must
+        clear its own attempt without erasing what the interrupted one may
+        already have delivered."""
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
+        with pytest.raises(KeyboardInterrupt):
+            notify_recompute_outcome(EBP_ERROR)
+        assert json.loads(failure_alert._state_path().read_text())["sending"] is True
+
+        failure_alert._current = None          # the process died
+        failure_alert._loaded = False
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: _Result(ok=False, status_code=503, error="down"))
+        notify_recompute_outcome("Rscript not found")      # different signature
+        assert failure_alert._current.operator_may_be_waiting is True, (
+            "the unknown delivery must survive both the reload and the change")
+
+    def test_the_all_clear_then_actually_fires(self, monkeypatch, sent):
+        """End to end, because the point is the operator, not the flag."""
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: (_ for _ in ()).throw(KeyboardInterrupt("killed")))
+        with pytest.raises(KeyboardInterrupt):
+            notify_recompute_outcome(EBP_ERROR)
+        failure_alert._current = None
+        failure_alert._loaded = False
+        monkeypatch.setattr(failure_alert, "send_imessage",
+                            lambda text: sent.append(text) or _Result())
+        notify_recompute_outcome("Rscript not found")
+        assert notify_recompute_outcome(None)["kind"] == "recovery"
+
+    def test_a_known_delivery_still_survives_one(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        notify_recompute_outcome("Rscript not found")
+        assert failure_alert._current.announced is True
+
+    def test_the_timeline_still_carries_and_the_throttle_still_resets(self, sent):
+        notify_recompute_outcome(EBP_ERROR)
+        started = failure_alert._current.first_seen
+        notify_recompute_outcome("Rscript not found")
+        assert failure_alert._current.first_seen == started
+        assert failure_alert._current.failures == 2
+        assert failure_alert._current.last_sent is not None   # it just sent
+
+    def test_every_field_is_accounted_for(self):
+        """A guard for the NEXT field. If someone adds one to _Outage, this says
+        out loud that the signature-change branch must have a decision for it."""
+        import dataclasses
+
+        fields = {f.name for f in dataclasses.fields(failure_alert._Outage)}
+        assert fields == {"signature", "first_seen", "failures", "last_sent",
+                          "announced", "sending"}, (
+            "a new _Outage field must be given an explicit carry/reset decision "
+            "in the signature-change branch")

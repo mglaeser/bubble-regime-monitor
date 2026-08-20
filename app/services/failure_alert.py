@@ -60,7 +60,7 @@ import pathlib
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -100,7 +100,10 @@ class _Outage:
     that died mid-send says NOBODY KNOWS. Collapsing the third into the second
     dropped the all-clear for an outage that had in fact been delivered — the
     crash gap. `sending` records the attempt BEFORE it is made, so a marker that
-    survives a restart is exactly the unknown case.
+    survives a restart is exactly the unknown case, and `_load_locked` promotes
+    it to `announced` there. That keeps `sending` TRANSIENT: inside a process
+    every attempt resolves, so a later failed send clears only its own flag and
+    cannot erase what an earlier interrupted one may already have delivered.
 
     Unknown is resolved as ANNOUNCED, because the two mistakes are not equal.
     Treating it as announced can produce an "OK, recompute succeeded after N
@@ -207,10 +210,17 @@ def _load_locked() -> None:
             # all-clear for an outage nobody was ever told about. Anything that
             # is not exactly true means "not announced", which is the direction
             # that stays silent rather than the one that lies.
-            announced=raw.get("announced") is True,
-            # A marker that survived a restart means the process died between
-            # handing the message to the transport and recording the result.
-            sending=raw.get("sending") is True,
+            # UNKNOWN RESOLVES HERE, at the only place it can be recognised.
+            # A `sending` marker on DISK means the previous process died between
+            # handing the message to the transport and recording the result, so
+            # the operator may have been told — which is what `announced` means.
+            # Promoting it at load keeps `sending` purely transient: within a
+            # process every attempt reaches its own resolution, so a later
+            # attempt that definitively fails can clear its own flag without
+            # erasing what an earlier, interrupted one may already have
+            # delivered. Conflating the two lost exactly that.
+            announced=(raw.get("announced") is True) or (raw.get("sending") is True),
+            sending=False,
         )
         log.info("failure_alert_state_restored", failures=_current.failures,
                  announced=_current.announced)
@@ -426,13 +436,23 @@ def notify_recompute_outcome(error: str | None,
                     # FORWARD — the service has been failing continuously since
                     # `first_seen`, and restarting the clock here would
                     # under-report an outage whose first alert may never have
-                    # been delivered at all. `announced` carries too: the
-                    # operator is owed an all-clear for anything they were told
-                    # about, whatever the error has since changed into.
-                    # `last_sent` does NOT — a new signature is news now.
-                    outage = _Outage(signature=signature, first_seen=outage.first_seen,
+                    # been delivered at all.
+                    #
+                    # CARRIED BY REPLACE, NOT BY RE-LISTING THE FIELDS. Written
+                    # as a fresh _Outage(...) this branch silently dropped
+                    # whichever field the author forgot: first `announced`, so a
+                    # told-then-changed outage lost its all-clear, and after
+                    # that was fixed, `sending`, so an outage whose delivery was
+                    # UNKNOWN lost it the same way one field later. Both were
+                    # found by the panel rather than by me. `replace` inverts
+                    # the default — everything survives unless it is named — so
+                    # the failure mode becomes "a field carries when it should
+                    # not", which is visible, rather than "a field vanishes",
+                    # which is silent. Only `last_sent` is reset: a new
+                    # signature is news now, whatever the old quiet period said.
+                    outage = replace(outage, signature=signature,
                                      failures=outage.failures + 1,
-                                     announced=outage.announced)
+                                     last_sent=None)
                     _current = outage
                     _persist_locked()
                 else:
