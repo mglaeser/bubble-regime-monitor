@@ -239,11 +239,22 @@ def evaluate_state(
     if outcome.truth is False:
         decision.condition_state = ConditionState.NORMAL
         decision.consecutive_true = 0
-        if memory.condition_state == ConditionState.PENDING:
+        # Settle against the state the outage INTERRUPTED, not the one it left
+        # behind. An UNKNOWN evaluation overwrites condition_state while the
+        # episode it interrupted stays open, so reading the stored value here
+        # matched neither arm: the episode stayed open forever, the mechanism
+        # reported NORMAL, and the one-open-episode index then blocked every
+        # later episode for that instance — one outage silently disarming the
+        # rule from then on. A null last-known state closes nothing, which is
+        # correct: there is no episode to settle.
+        prior = (memory.last_known_condition_state
+                 if memory.condition_state == ConditionState.UNKNOWN
+                 else memory.condition_state)
+        if prior == ConditionState.PENDING:
             decision.cancel_episode = EpisodeStatus.CANCELLED_UNCONFIRMED
             decision.reasons.append("candidate_reverted_before_confirmation")
             _clear_candidate(decision)
-        elif memory.condition_state == ConditionState.FIRING:
+        elif prior == ConditionState.FIRING:
             if rule.resolution.policy in ("auto_on_inverse", "auto_on_condition_false"):
                 decision.resolve_episode = True
                 decision.reasons.append("condition_false")

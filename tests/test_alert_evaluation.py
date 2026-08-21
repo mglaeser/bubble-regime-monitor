@@ -348,6 +348,73 @@ def test_a_candidate_is_never_latched_over_an_open_episode():
     assert decision.episode_id == "EP"
 
 
+
+
+def _unknown_settling_rule(count: int) -> RuleSpec:
+    """A boolean rule whose candidate needs `count` distinct observations."""
+    return _rule(
+        rule_id="test.persist",
+        source_fields=["rf4_active"],
+        condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+        confirmation={"count": count, "basis": "distinct_economic_observation"},
+        confirmation_sources=["rf4_active"],
+        candidate_ttl={"calendar": "US_TRADING", "intervals": 10, "grace_seconds": 0},
+    )
+
+
+def test_unknown_then_false_cancels_the_candidate_it_left_pending():
+    """An outage must not strand the pending episode it interrupted.
+
+    The definite-false arm reads the CURRENT stored state, but an outage has
+    already overwritten that with UNKNOWN — so neither the PENDING nor the
+    FIRING arm matched and the episode stayed open forever while the mechanism
+    reported NORMAL. The partial unique index on one open episode per instance
+    then blocks the NEXT episode, so a single outage silently disarms the rule
+    from then on.
+    """
+    rule = _unknown_settling_rule(2)
+    memory = InstanceMemory(
+        state_version=4,
+        condition_state=ConditionState.UNKNOWN,
+        last_known_condition_state=ConditionState.PENDING,
+        candidate_started_input="a",
+        confirmed_keys={"rf4_active": frozenset({"key-1"})},
+        candidate_expires_at=NOW + timedelta(days=5),
+        current_episode_id="EPISODE",
+    )
+    settled = make_input(identity="c", rf4=False, rf4_fireable=True)
+    decision = evaluate_state(
+        rule=rule, instance_fingerprint="fp", memory=memory,
+        outcome=evaluate_rule(rule, _ctx(settled)), ctx=_ctx(settled), now=NOW)
+
+    assert decision.condition_state == ConditionState.NORMAL
+    assert decision.cancel_episode == EpisodeStatus.CANCELLED_UNCONFIRMED
+    assert decision.candidate_started_input is None
+
+
+def test_unknown_then_false_resolves_the_episode_it_left_firing():
+    """The same defect, one state further on: a firing episode must resolve.
+
+    Worse here than for a candidate — the episode stays open AND the operator
+    is never told the condition cleared, so the dashboard shows a live firing
+    episode for a condition that ended during the outage.
+    """
+    rule = _unknown_settling_rule(1)
+    memory = InstanceMemory(
+        state_version=7,
+        condition_state=ConditionState.UNKNOWN,
+        last_known_condition_state=ConditionState.FIRING,
+        current_episode_id="EPISODE",
+    )
+    settled = make_input(identity="c", rf4=False, rf4_fireable=True)
+    decision = evaluate_state(
+        rule=rule, instance_fingerprint="fp", memory=memory,
+        outcome=evaluate_rule(rule, _ctx(settled)), ctx=_ctx(settled), now=NOW)
+
+    assert decision.condition_state == ConditionState.NORMAL
+    assert decision.resolve_episode is True
+    assert decision.cancel_episode is None
+
 def test_candidate_expires_only_through_its_ttl_during_an_outage():
     rule = _rule(
         rule_id="test.persist",
