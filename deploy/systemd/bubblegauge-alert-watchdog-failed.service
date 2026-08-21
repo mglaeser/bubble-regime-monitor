@@ -1,0 +1,38 @@
+# Escalation for bubblegauge-alert-watchdog.service.
+#
+# THE GAP THIS CLOSES. The watchdog runs `podman exec bubblegauge ...`. When the
+# container is stopped that exits 125, which is not in the watchdog's
+# SuccessExitStatus, so systemd marks the unit failed — and then nothing at all
+# happens. A failed user timer on an unattended box is indistinguishable from a
+# healthy one. That is why 344 hours of downtime produced no message.
+#
+# OnFailure= in the watchdog unit starts this one, which reports over a path
+# that shares nothing with the application: sh + curl, straight to the proxy.
+#
+# Install:
+#   install -D -m 755 deploy/notify-outage.sh ~/.local/bin/bubblegauge-notify-outage
+#   cp deploy/systemd/bubblegauge-alert-watchdog* ~/.config/systemd/user/
+#   install -d -m 700 ~/.config/bubblegauge
+#   # imessage.env must hold IMESSAGE_API_BASE_URL / _API_KEY / _RECIPIENT
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now bubblegauge-alert-watchdog.timer
+#
+# ExecStart deliberately names an INSTALLED path, not a checkout. Pointing a
+# unit at a working copy means the escalation dies with status=203/EXEC on any
+# host whose repo lives somewhere else — silently, which is the exact failure
+# this unit exists to remove.
+
+[Unit]
+Description=Report a bubblegauge watchdog failure over iMessage from the host
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/bubblegauge/imessage.env
+ExecStart=%h/.local/bin/bubblegauge-notify-outage "alert watchdog unit failed"
+# Never let the notifier's own failure loop back into another notification.
+# MUST exceed the script's worst-case curl budget, or systemd kills the last
+# delivery attempt: --max-time 20 per attempt, --retry 2, --retry-delay 3
+# => 3*20 + 2*3 = 66s. 120 leaves headroom for process start and DNS.
+# tests/test_host_outage_notifier.py derives both numbers and asserts the
+# relationship, so changing one without the other fails the suite.
+TimeoutStartSec=120

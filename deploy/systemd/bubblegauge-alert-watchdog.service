@@ -18,6 +18,10 @@
 [Unit]
 Description=bubblegauge alert watchdog (missed recompute slots)
 After=network-online.target
+# A failed unit notifies nobody by itself. Without this line a stopped
+# container makes `podman exec` exit 125, the unit is marked failed, and
+# the operator is told nothing — the 344h silence of 2026-08.
+OnFailure=bubblegauge-alert-watchdog-failed.service
 
 [Service]
 Type=oneshot
