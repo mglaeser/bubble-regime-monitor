@@ -121,6 +121,24 @@ class StateDecision:
         return self.activate_episode and not self.suppression_reasons
 
 
+def effective_prior_state(condition_state: str, last_known: str | None) -> str | None:
+    """The state an UNKNOWN evaluation is masking.
+
+    An UNKNOWN outcome overwrites `condition_state` while DELIBERATELY keeping
+    the episode and candidate it interrupted (property 1). So every lifecycle
+    decision has to ask what the outage INTERRUPTED, not what it left behind.
+    Reading the stored value directly is the B-05 defect, and it has the same
+    shape everywhere it appears: the FALSE arm stranded episodes, the TRUE arm
+    re-fired them, the candidate latch opened a second one over a live episode,
+    and the hysteresis context resolved them from inside their own hold band.
+
+    Returns None when nothing is known, which closes and re-fires nothing.
+    """
+    if condition_state == ConditionState.UNKNOWN:
+        return last_known
+    return condition_state
+
+
 def _confirmation_keys(rule: RuleSpec, outcome: ConditionOutcome) -> list[ConfirmationRecord]:
     """The observations this evaluation contributes, per declared source.
 
@@ -247,12 +265,18 @@ def evaluate_state(
         # later episode for that instance — one outage silently disarming the
         # rule from then on. A null last-known state closes nothing, which is
         # correct: there is no episode to settle.
-        prior = (memory.last_known_condition_state
-                 if memory.condition_state == ConditionState.UNKNOWN
-                 else memory.condition_state)
+        prior = effective_prior_state(memory.condition_state,
+                                      memory.last_known_condition_state)
         if prior == ConditionState.PENDING:
-            decision.cancel_episode = EpisodeStatus.CANCELLED_UNCONFIRMED
-            decision.reasons.append("candidate_reverted_before_confirmation")
+            # A candidate that died of TTL during the outage went STALE; it did
+            # not revert. The UNKNOWN and TRUE arms both say so, and the replay
+            # gate counts the two separately, so this arm must agree.
+            if _candidate_expired(memory, now):
+                decision.cancel_episode = EpisodeStatus.CANCELLED_STALE
+                decision.reasons.append("candidate_ttl_expired")
+            else:
+                decision.cancel_episode = EpisodeStatus.CANCELLED_UNCONFIRMED
+                decision.reasons.append("candidate_reverted_before_confirmation")
             _clear_candidate(decision)
         elif prior == ConditionState.FIRING:
             if rule.resolution.policy in ("auto_on_inverse", "auto_on_condition_false"):
@@ -265,7 +289,8 @@ def evaluate_state(
         return decision
 
     # ---- condition is TRUE ---------------------------------------------
-    if memory.condition_state == ConditionState.FIRING:
+    if effective_prior_state(memory.condition_state,
+                             memory.last_known_condition_state) == ConditionState.FIRING:
         # Already firing: stay firing, record the observation, do not re-fire.
         decision.condition_state = ConditionState.FIRING
         decision.consecutive_true = memory.consecutive_true + 1
@@ -295,8 +320,10 @@ def evaluate_state(
     # that already has one (the unique index rejects it, so an outage followed
     # by a recovery would wedge the rule) and would silently discard the
     # confirmation progress the outage was supposed to preserve.
-    candidate_in_flight = (memory.condition_state == ConditionState.PENDING
-                           or memory.candidate_started_input is not None)
+    candidate_in_flight = (
+        effective_prior_state(memory.condition_state,
+                              memory.last_known_condition_state) == ConditionState.PENDING
+        or memory.candidate_started_input is not None)
     if not candidate_in_flight:
         decision.open_episode = memory.current_episode_id is None
         decision.condition_state = ConditionState.PENDING
@@ -382,7 +409,13 @@ def flapping_projection(recent_states: list[str], *, window: int = 6,
     genuinely oscillating, and hiding that by rewriting the state would lose
     information. The planner reads this and adds `FLAPPING`.
     """
-    window_states = recent_states[-window:]
+    # UNKNOWN is a MASK over the previous state, not a state of its own, so
+    # FIRING->UNKNOWN->FIRING is one continuous firing and zero transitions.
+    # Counting it as two made two outages inside the window enough to declare a
+    # perfectly stable alert "flapping" — and flapping suppresses delivery, so
+    # the failure direction was a swallowed alert during exactly the degraded
+    # period the operator most needs to hear about.
+    window_states = [s for s in recent_states[-window:] if s != ConditionState.UNKNOWN]
     transitions = sum(
         1 for a, b in zip(window_states, window_states[1:], strict=False) if a != b
     )
