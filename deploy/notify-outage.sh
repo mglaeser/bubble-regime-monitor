@@ -42,6 +42,24 @@ fi
 
 BASE=$(printf '%s' "$IMESSAGE_API_BASE_URL" | sed 's:/*$::')
 
+# THE KEY NEVER GOES IN argv. /proc/<pid>/cmdline is world-readable on a default
+# Linux, so `-H "Authorization: Bearer $KEY"` hands the token to any local user
+# who runs ps during the request. curl reads it from a config file instead, mode
+# 0600, in a private temp file removed on every exit path. (The cross-vendor
+# review panel refused the first version of this script for exactly this.)
+case "$IMESSAGE_API_KEY" in
+    *\"*|*\\*|*"
+"*) echo "notify-outage: key contains a quote, backslash or newline; refusing" >&2
+    exit 1 ;;
+esac
+
+umask 077
+CFG=$(mktemp "${TMPDIR:-/tmp}/bg-notify.XXXXXX" 2>/dev/null) || CFG="${TMPDIR:-/tmp}/bg-notify.$$"
+: > "$CFG" || { echo "notify-outage: cannot create a private config file" >&2; exit 1; }
+chmod 600 "$CFG" 2>/dev/null || true
+trap 'rm -f "$CFG"' EXIT INT TERM HUP
+printf 'header = "Authorization: Bearer %s"\n' "$IMESSAGE_API_KEY" > "$CFG"
+
 # Answer the operator's first question before they have to ask it: is the thing
 # running at all? `podman ps` is cheap and cannot hang the way an exec can.
 if command -v podman >/dev/null 2>&1 && \
@@ -75,7 +93,7 @@ BODY=$(printf '{"recipient":"%s","text":"%s","service":"imessage"}' \
 code=$(printf '%s' "$BODY" | curl -sS -o /dev/null -w '%{http_code}' \
         --max-time 20 --retry 2 --retry-delay 3 \
         -X POST "$BASE/api/messages" \
-        -H "Authorization: Bearer $IMESSAGE_API_KEY" \
+        --config "$CFG" \
         -H "Content-Type: application/json" \
         -H "Idempotency-Key: $KEY" \
         --data-binary @- 2>/dev/null) || code="000"

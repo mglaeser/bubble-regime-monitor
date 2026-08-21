@@ -36,6 +36,13 @@ def _stubs(tmp_path: Path) -> Path:
         "#!/bin/sh\n"
         f'printf "%s\\n" "$@" > "{tmp_path}/curl-argv"\n'
         f'cat > "{tmp_path}/curl-stdin"\n'
+        'prev=""\n'
+        'for a in "$@"; do\n'
+        f'  if [ "$prev" = "--config" ] && [ -f "$a" ]; then cp "$a" "{tmp_path}/curl-config"; '
+        f'stat -c %a "$a" > "{tmp_path}/curl-config-mode" 2>/dev/null || true; '
+        f'printf "%s" "$a" > "{tmp_path}/curl-config-path"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
         "echo 204\n"
     )
     curl.chmod(curl.stat().st_mode | stat.S_IEXEC)
@@ -63,8 +70,9 @@ def test_it_posts_the_proxy_contract(tmp_path):
     argv = (tmp_path / "curl-argv").read_text()
     body = (tmp_path / "curl-stdin").read_text()
     assert "https://messages.example.com/api/messages" in argv
-    assert "Authorization: Bearer imp_notarealkey" in argv
     assert "Content-Type: application/json" in argv
+    # the bearer header travels in the curl config file, never in argv
+    assert "Authorization: Bearer imp_notarealkey" in (tmp_path / "curl-config").read_text()
     compact = body.replace(" ", "")
     assert '"service":"imessage"' in compact
     assert '"recipient":"+4915100000000"' in compact
@@ -115,3 +123,33 @@ def test_the_escalation_unit_exists_and_runs_the_notifier():
     failed = SCRIPT.parent / "systemd" / "bubblegauge-alert-watchdog-failed.service"
     assert failed.is_file(), f"{failed} is missing"
     assert "notify-outage.sh" in failed.read_text()
+
+
+def test_the_key_never_reaches_the_process_table(tmp_path):
+    """/proc/<pid>/cmdline is world-readable on a default Linux.
+
+    A bearer token passed as `-H "Authorization: Bearer ..."` is visible to any
+    local user running ps while the request is in flight. The cross-vendor review
+    panel refused the first version of this script for exactly this, and it was
+    right: this credential can send messages as the operator.
+    """
+    _run(tmp_path, GOOD, "x")
+    argv = (tmp_path / "curl-argv").read_text()
+    assert "imp_notarealkey" not in argv, "bearer key must never be a curl argument"
+    assert "--config" in argv, "the key must be delivered via a curl config file"
+
+
+def test_the_config_file_is_private_and_removed(tmp_path):
+    """A file only beats argv if it is unreadable and short-lived."""
+    _run(tmp_path, GOOD, "x")
+    mode = (tmp_path / "curl-config-mode").read_text().strip()
+    assert mode == "600", f"config file mode was {mode!r}, expected 600"
+    left = Path((tmp_path / "curl-config-path").read_text().strip())
+    assert not left.exists(), f"{left} survived the run"
+
+
+def test_it_refuses_a_key_that_would_break_the_config_quoting(tmp_path):
+    """An unescaped quote would silently truncate the header rather than error."""
+    res = _run(tmp_path, dict(GOOD, IMESSAGE_API_KEY='imp_a"b'), "x")
+    assert res.returncode != 0
+    assert "refusing" in (res.stdout + res.stderr).lower()
