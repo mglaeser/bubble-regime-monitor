@@ -51,7 +51,12 @@ from app.alerts.repository import (
     utc_ms,
 )
 from app.alerts.rulespec import RuleSpec
-from app.alerts.state_machine import InstanceMemory, StateDecision, evaluate_state
+from app.alerts.state_machine import (
+    InstanceMemory,
+    StateDecision,
+    effective_prior_state,
+    evaluate_state,
+)
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -209,8 +214,16 @@ def evaluate_ruleset(
             continue
 
         _row, memory = memories.get(fingerprint, (None, InstanceMemory()))
+        # The hysteresis context must also be the state the outage interrupted.
+        # Reading the stored value meant that after any outage a rule with an
+        # off_threshold compared against its ON level instead of its OFF level,
+        # so a value inside the hold band read as a definite FALSE — and the
+        # FALSE arm then resolved the very episode hysteresis exists to hold.
         outcome = evaluate_rule(
-            rule, ctx, currently_firing=memory.condition_state == ConditionState.FIRING
+            rule, ctx,
+            currently_firing=effective_prior_state(
+                memory.condition_state, memory.last_known_condition_state
+            ) == ConditionState.FIRING,
         )
         if outcome.status == EvaluationStatus.DISABLED:
             # A structurally dark rule (unresolved pin, absent input) is
