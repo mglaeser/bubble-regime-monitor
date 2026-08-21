@@ -229,6 +229,20 @@ class Settings(BaseSettings):
     db_url: str = "sqlite:////data/bubble.db"
     log_level: str = "INFO"
     gsadf_contested: bool = True
+    # S4 v4 CANDIDATE SWITCHES. Both default to the CURRENT production behaviour;
+    # neither moves a scored value until deliberately enabled. PINS_DECISION_MEMO
+    # puts the instrument change (PIN C) on CONDITIONAL HOLD pending "a documented
+    # drift gate", and every PIN becomes a v4 change (version bump +
+    # falsification-clock reset + regenerated golden). These exist to PRODUCE that
+    # drift evidence, in the shape PIN H already set for score-shifting work:
+    # build it, dual-report it, do not activate the headline.
+    #
+    # Shadow only. Runs GSADF a second time on the real (CPI-deflated) native
+    # Nasdaq-100 from FRED and reports the result alongside. Never scored.
+    gsadf_shadow_real_index: bool = False
+    # SCORE-SHIFTING when true. Lets a NON-REJECTION out of the contested cap;
+    # a rejection stays capped. See s4_gsadf.sub_score for the reasoning.
+    gsadf_contested_asymmetric: bool = False
     lppls_timeout_s: int = 1500  # generous headroom for the Atom N2800 (background recompute; API serves the last snapshot meanwhile)
     gsadf_timeout_s: int = 1800
 

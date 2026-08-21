@@ -538,8 +538,12 @@ def gather_inputs() -> RawInputs:
         except Exception:  # noqa: S110 -- optional 2yr-return enrichment; a short series legitimately has none (A-26)
             pass
 
-    # GSADF on Nasdaq-100 monthly log prices via the QQQ proxy (no free raw
-    # index source); R subprocess degrades to the contested/stale 0.25 floor.
+    # GSADF on Nasdaq-100 monthly log prices via the QQQ proxy. The comment here
+    # used to say "no free raw index source"; that is false -- FRED serves
+    # NASDAQ100 free on the key this service already holds, from 1986 against the
+    # proxy's 1999. Switching to it is a source substitution (PIN C, CONDITIONAL
+    # HOLD) and is staged as the shadow candidate, not swapped in here.
+    # R subprocess degrades to the contested/stale 0.25 floor.
     ndx = _track(raw, "price_NDX", lambda: _closes("NDX"))
     if ndx:
         import math

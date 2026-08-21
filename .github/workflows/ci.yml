@@ -55,7 +55,11 @@ jobs:
         # is A-13's job, but nothing may add to it in the meantime. Lower the
         # ceiling in the same commit that lowers the count.
         env:
-          MYPY_CEILING: "217"
+          # 217 -> 212: annotating the four frozen s4 policy constants as float
+          # cleared the whole no-any-return class in app/indicators/s4_gsadf.py.
+          # Lowered in the SAME commit that lowered the count, which is what the
+          # comment below has always asked for and what the ::notice:: advises.
+          MYPY_CEILING: "212"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:
