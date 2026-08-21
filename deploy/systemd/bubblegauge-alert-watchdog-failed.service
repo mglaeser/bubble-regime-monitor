@@ -1,0 +1,27 @@
+# Escalation for bubblegauge-alert-watchdog.service.
+#
+# THE GAP THIS CLOSES. The watchdog runs `podman exec bubblegauge ...`. When the
+# container is stopped that exits 125, which is not in the watchdog's
+# SuccessExitStatus, so systemd marks the unit failed — and then nothing at all
+# happens. A failed user timer on an unattended box is indistinguishable from a
+# healthy one. That is why 344 hours of downtime produced no message.
+#
+# OnFailure= in the watchdog unit starts this one, which reports over a path
+# that shares nothing with the application: sh + curl, straight to the proxy.
+#
+# Install:
+#   cp deploy/systemd/bubblegauge-alert-watchdog*.service ~/.config/systemd/user/
+#   cp deploy/systemd/bubblegauge-alert-watchdog.timer    ~/.config/systemd/user/
+#   # EnvironmentFile must contain IMESSAGE_API_BASE_URL / _API_KEY / _RECIPIENT
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now bubblegauge-alert-watchdog.timer
+
+[Unit]
+Description=Report a bubblegauge watchdog failure over iMessage from the host
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/bubblegauge/imessage.env
+ExecStart=%h/playground/bubble-regime-monitor/deploy/notify-outage.sh "alert watchdog unit failed"
+# Never let the notifier's own failure loop back into another notification.
+TimeoutStartSec=60
