@@ -310,6 +310,23 @@ def latest_pointers(session: Session, *, mode: str, live_profile: str) -> dict[s
 # ---------------------------------------------------------------------------
 
 
+#: The watchdog timer fires every 30 minutes (deploy/systemd/*.timer). Two
+#: missed runs plus a grace is a fault, not jitter.
+_WATCHDOG_MAX_SILENCE_S = 90 * 60
+#: The dispatcher polls on ALERTS_DISPATCH_POLL_S (20s default); a quiet hour
+#: is normal, half a day is not.
+_DISPATCHER_MAX_SILENCE_S = 12 * 60 * 60
+
+
+def _now_utc() -> datetime:
+    return datetime.now(UTC)
+
+
+def _parse_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 def health_projection(
     session: Session,
     *,
@@ -353,9 +370,52 @@ def health_projection(
         for row in session.execute(select(AlertComponentHeartbeat)).scalars().all()
     }
 
-    critical = ruleset is None
+    # ABSENCE OF A MONITOR IS A FAULT, NOT SILENCE.
+    #
+    # Each component records liveness when it runs, and the projection above
+    # lists the rows that EXIST. So a component that has NEVER run — because its
+    # systemd timer was never installed on the host, which is the recorded state
+    # of this deployment — contributed no row, and no row rendered as nothing at
+    # all. The watchdog is the component this matters most for: it is the thing
+    # that notices recomputes have stopped, so a watchdog nobody installed is an
+    # outage detector that cannot detect, reporting no problem.
+    expected = {
+        "watchdog": _WATCHDOG_MAX_SILENCE_S,
+        "dispatcher": _DISPATCHER_MAX_SILENCE_S,
+    }
+    components: dict[str, Any] = {}
+    conditions: list[str] = []
+    for name, max_silence in expected.items():
+        row = heartbeats.get(name)
+        if row is None:
+            components[name] = {
+                "present": False, "healthy": False,
+                "last_heartbeat_at": None, "status": None,
+                "reason": f"{name} has never reported — is its timer/job installed?",
+            }
+            conditions.append(f"{name}: never reported")
+            continue
+        last_seen = row.get("last_heartbeat_at")
+        age: float | None = None
+        if isinstance(last_seen, str) and last_seen:
+            age = (_now_utc() - _parse_iso(last_seen)).total_seconds()
+        stale = age is not None and age > max_silence
+        healthy = not stale and row["status"] != "critical"
+        components[name] = {
+            "present": True, "healthy": healthy,
+            "last_heartbeat_at": last_seen, "status": row["status"],
+            "reason": (f"{name} last reported {int(age or 0)}s ago, over the "
+                       f"{max_silence}s limit" if stale else
+                       f"{name} reported {row['status']}" if not healthy else ""),
+        }
+        if not healthy:
+            conditions.append(components[name]["reason"])
+
+    critical = ruleset is None or any(not c["healthy"] for c in components.values())
     return {
         "status": "critical" if critical else ("degraded" if fallback_reason else "ok"),
+        "components": components,
+        "conditions": conditions,
         "capture_enabled": bool(settings.alert_input_capture),
         "alerts_mode": mode,
         "live_profile": profile,
