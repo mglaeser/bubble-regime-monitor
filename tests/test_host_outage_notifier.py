@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
 import subprocess
 from pathlib import Path
+
+import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "notify-outage.sh"
 
@@ -187,3 +190,33 @@ def test_the_unit_timeout_covers_the_whole_curl_retry_budget():
         f"TimeoutStartSec={timeout}s is below the curl worst case of {worst_case}s "
         f"({retries + 1} attempts x {max_time}s + {retries} x {delay}s delay)"
     )
+
+
+def test_it_disables_ambient_curl_configuration(tmp_path):
+    """Without -q, curl reads ~/.curlrc before the explicit --config.
+
+    An entry there — a proxy, an extra --url, a --write-out — would send this
+    bearer token somewhere the operator never chose. -q must be first.
+    """
+    _run(tmp_path, GOOD, "x")
+    args = (tmp_path / "curl-argv").read_text().splitlines()
+    assert "-q" in args, "curl must be invoked with -q to ignore ~/.curlrc"
+    assert args[0] == "-q", f"-q must be the first argument, got {args[0]!r}"
+
+
+def test_it_runs_under_dash_not_just_bash(tmp_path):
+    """The shebang is #!/bin/sh, which is dash on Debian-family hosts.
+
+    A review verifier claimed the trap/case constructs abort under dash before
+    curl is reached. They do not, and this test is the standing evidence: it
+    executes the script with dash explicitly and asserts the request was made.
+    """
+    dash = shutil.which("dash")
+    if dash is None:
+        pytest.skip("dash not available on this host")
+    env = dict(os.environ)
+    env["PATH"] = f"{_stubs(tmp_path)}:{env['PATH']}"
+    env.update(GOOD)
+    res = subprocess.run([dash, str(SCRIPT), "x"], env=env, capture_output=True, text=True)
+    assert res.returncode == 0, f"dash run failed: {res.stderr}"
+    assert (tmp_path / "curl-argv").exists(), "curl was never reached under dash"

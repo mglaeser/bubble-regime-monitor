@@ -97,7 +97,11 @@ BODY=$(printf '{"recipient":"%s","text":"%s","service":"imessage"}' \
 # --max-time bounds the whole attempt: a notifier that can hang is a notifier
 # that does not notify. The key is passed via a header argument and never
 # echoed; `set -x` is deliberately not used anywhere in this script.
-code=$(printf '%s' "$BODY" | curl -sS -o /dev/null -w '%{http_code}' \
+# -q FIRST: without it curl reads ~/.curlrc before anything else, and an entry
+# there (a proxy, an extra --url, a --write-out) would send this bearer token
+# somewhere the operator never chose. A credential-bearing request must not
+# inherit ambient configuration.
+code=$(printf '%s' "$BODY" | curl -q -sS -o /dev/null -w '%{http_code}' \
         --max-time 20 --retry 2 --retry-delay 3 \
         -X POST "$BASE/api/messages" \
         --config "$CFG" \
