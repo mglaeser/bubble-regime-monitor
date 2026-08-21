@@ -79,7 +79,11 @@ printf 'header = "Authorization: Bearer %s"\n' "$IMESSAGE_API_KEY" > "$CFG"
 # whether the container runs is worth a few seconds, never the notification.
 CONTAINER="container state unknown"
 if command -v podman >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-    if PS=$(timeout 5 podman ps --filter "name=^bubblegauge$" --filter status=running \
+    # -k 2: plain `timeout` sends SIGTERM and then WAITS. A podman wedged in an
+    # uninterruptible state, or one that ignores SIGTERM, is unaffected by it and
+    # blocks until systemd kills the whole unit — so the bound would not bind.
+    # --kill-after follows with SIGKILL, which nothing can ignore.
+    if PS=$(timeout -k 2 5 podman ps --filter "name=^bubblegauge$" --filter status=running \
                     --format '{{.Names}}' 2>/dev/null); then
         case "$PS" in
             *bubblegauge*) CONTAINER="container running" ;;

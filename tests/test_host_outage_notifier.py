@@ -259,3 +259,25 @@ def test_the_escalation_unit_does_not_point_at_a_checkout():
         assert checkout_ish not in exec_line, (
             f"ExecStart names a checkout path ({checkout_ish!r}): {exec_line}")
     assert exec_line.startswith("ExecStart=%h/.local/bin/"), exec_line
+
+
+def test_a_podman_that_ignores_sigterm_still_cannot_block_the_alert(tmp_path):
+    """Plain `timeout` sends SIGTERM and then waits.
+
+    A process wedged in an uninterruptible state, or one that traps SIGTERM, is
+    unaffected — so the bound would not bind, and the probe would again hold the
+    message until systemd killed the unit. --kill-after follows with SIGKILL.
+    """
+    bin_dir = _stubs(tmp_path)
+    (bin_dir / "podman").write_text("#!/bin/sh\ntrap '' TERM\nsleep 60\n")
+    (bin_dir / "podman").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", **GOOD)
+
+    start = time.monotonic()
+    res = subprocess.run([str(SCRIPT), "x"], env=env, capture_output=True,
+                         text=True, timeout=30)
+    elapsed = time.monotonic() - start
+
+    assert res.returncode == 0, res.stderr
+    assert (tmp_path / "curl-argv").exists(), "the message was never sent"
+    assert elapsed < 15, f"took {elapsed:.1f}s; SIGTERM-ignoring probe was not killed"
