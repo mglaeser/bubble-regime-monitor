@@ -68,13 +68,24 @@ trap 'rm -f "$CFG"' EXIT INT TERM HUP
 printf 'header = "Authorization: Bearer %s"\n' "$IMESSAGE_API_KEY" > "$CFG"
 
 # Answer the operator's first question before they have to ask it: is the thing
-# running at all? `podman ps` is cheap and cannot hang the way an exec can.
-if command -v podman >/dev/null 2>&1 && \
-   podman ps --filter "name=^bubblegauge$" --filter status=running \
-             --format '{{.Names}}' 2>/dev/null | grep -q bubblegauge; then
-    CONTAINER="container running"
-else
-    CONTAINER="container NOT running"
+# running at all?
+#
+# THIS PROBE IS STRICTLY OPTIONAL AND MUST NEVER DELAY THE MESSAGE. `podman ps`
+# talks to the container runtime, and a wedged runtime is one of the exact
+# failures this script exists to report — an unbounded probe would hang until
+# systemd killed the unit, so the diagnostic would swallow the alert it was
+# meant to enrich. It is bounded, and when it cannot answer quickly it says so
+# instead of waiting. Without `timeout` the probe is skipped entirely: knowing
+# whether the container runs is worth a few seconds, never the notification.
+CONTAINER="container state unknown"
+if command -v podman >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    if PS=$(timeout 5 podman ps --filter "name=^bubblegauge$" --filter status=running \
+                    --format '{{.Names}}' 2>/dev/null); then
+        case "$PS" in
+            *bubblegauge*) CONTAINER="container running" ;;
+            *)             CONTAINER="container NOT running" ;;
+        esac
+    fi
 fi
 
 HOST=$(hostname 2>/dev/null || echo "?")

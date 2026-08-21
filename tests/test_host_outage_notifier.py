@@ -17,6 +17,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -220,3 +221,27 @@ def test_it_runs_under_dash_not_just_bash(tmp_path):
     res = subprocess.run([dash, str(SCRIPT), "x"], env=env, capture_output=True, text=True)
     assert res.returncode == 0, f"dash run failed: {res.stderr}"
     assert (tmp_path / "curl-argv").exists(), "curl was never reached under dash"
+
+
+def test_a_hung_container_runtime_cannot_swallow_the_alert(tmp_path):
+    """The probe must never outlive the message it decorates.
+
+    A wedged container runtime is one of the exact failures this script exists
+    to report. An unbounded `podman ps` would block until systemd killed the
+    unit, so the diagnostic would swallow the notification. Two independent
+    review verifiers refused an earlier version for this.
+    """
+    bin_dir = _stubs(tmp_path)
+    (bin_dir / "podman").write_text("#!/bin/sh\nsleep 60\n")
+    (bin_dir / "podman").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", **GOOD)
+
+    start = time.monotonic()
+    res = subprocess.run([str(SCRIPT), "x"], env=env, capture_output=True,
+                         text=True, timeout=30)
+    elapsed = time.monotonic() - start
+
+    assert res.returncode == 0, res.stderr
+    assert (tmp_path / "curl-argv").exists(), "the message was never sent"
+    assert elapsed < 15, f"took {elapsed:.1f}s; the probe must be bounded"
+    assert "unknown" in (tmp_path / "curl-stdin").read_text().lower()
