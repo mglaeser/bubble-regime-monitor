@@ -316,6 +316,9 @@ _WATCHDOG_MAX_SILENCE_S = 90 * 60
 #: The dispatcher polls on ALERTS_DISPATCH_POLL_S (20s default); a quiet hour
 #: is normal, half a day is not.
 _DISPATCHER_MAX_SILENCE_S = 12 * 60 * 60
+#: Tolerance for ordinary clock jitter before a future-dated heartbeat
+#: is called a fault rather than noise.
+_CLOCK_SKEW_TOLERANCE_S = 60
 
 
 def _now_utc() -> datetime:
@@ -399,12 +402,20 @@ def health_projection(
         age: float | None = None
         if isinstance(last_seen, str) and last_seen:
             age = (_now_utc() - _parse_iso(last_seen)).total_seconds()
+        # A heartbeat dated in the FUTURE gives a negative age, which sails
+        # under any "older than" test and pins the component healthy forever —
+        # silence masked by a clock, which is the failure this whole projection
+        # exists to expose. Treat it as a fault in its own right.
+        skewed = age is not None and age < -_CLOCK_SKEW_TOLERANCE_S
         stale = age is not None and age > max_silence
-        healthy = not stale and row["status"] != "critical"
+        healthy = not stale and not skewed and row["status"] != "critical"
         components[name] = {
             "present": True, "healthy": healthy,
             "last_heartbeat_at": last_seen, "status": row["status"],
-            "reason": (f"{name} last reported {int(age or 0)}s ago, over the "
+            "reason": (f"{name} heartbeat is dated {int(abs(age or 0))}s in the "
+                       f"FUTURE — clock skew or a bad write; treating as unhealthy"
+                       if skewed else
+                       f"{name} last reported {int(age or 0)}s ago, over the "
                        f"{max_silence}s limit" if stale else
                        f"{name} reported {row['status']}" if not healthy else ""),
         }

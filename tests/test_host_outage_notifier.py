@@ -245,3 +245,17 @@ def test_a_hung_container_runtime_cannot_swallow_the_alert(tmp_path):
     assert (tmp_path / "curl-argv").exists(), "the message was never sent"
     assert elapsed < 15, f"took {elapsed:.1f}s; the probe must be bounded"
     assert "unknown" in (tmp_path / "curl-stdin").read_text().lower()
+
+
+def test_the_escalation_unit_does_not_point_at_a_checkout():
+    """A unit aimed at a working copy dies 203/EXEC wherever the repo differs.
+
+    Silently — which is the exact failure this unit exists to remove, so the
+    notifier must be referenced at an installed path, not a checkout path.
+    """
+    unit = (SCRIPT.parent / "systemd" / "bubblegauge-alert-watchdog-failed.service").read_text()
+    exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+    for checkout_ish in ("playground", "bubble-regime-monitor", "/deploy/", "%h/repositories"):
+        assert checkout_ish not in exec_line, (
+            f"ExecStart names a checkout path ({checkout_ish!r}): {exec_line}")
+    assert exec_line.startswith("ExecStart=%h/.local/bin/"), exec_line
