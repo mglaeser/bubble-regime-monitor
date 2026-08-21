@@ -53,9 +53,16 @@ case "$IMESSAGE_API_KEY" in
     exit 1 ;;
 esac
 
+# No predictable-path fallback. A name like /tmp/bg-notify.$$ is guessable, and
+# /tmp is world-writable: an attacker who pre-creates that path as a symlink has
+# the key written wherever they point it. mktemp is the only creation here
+# because it is the only one that is atomic, O_EXCL and 0600. If it is missing,
+# refuse — sending nothing is recoverable, leaking the credential is not.
 umask 077
-CFG=$(mktemp "${TMPDIR:-/tmp}/bg-notify.XXXXXX" 2>/dev/null) || CFG="${TMPDIR:-/tmp}/bg-notify.$$"
-: > "$CFG" || { echo "notify-outage: cannot create a private config file" >&2; exit 1; }
+CFG=$(mktemp "${TMPDIR:-/tmp}/bg-notify.XXXXXX" 2>/dev/null) || {
+    echo "notify-outage: mktemp unavailable; refusing to write the key to a predictable path" >&2
+    exit 1
+}
 chmod 600 "$CFG" 2>/dev/null || true
 trap 'rm -f "$CFG"' EXIT INT TERM HUP
 printf 'header = "Authorization: Bearer %s"\n' "$IMESSAGE_API_KEY" > "$CFG"

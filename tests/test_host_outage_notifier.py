@@ -153,3 +153,37 @@ def test_it_refuses_a_key_that_would_break_the_config_quoting(tmp_path):
     res = _run(tmp_path, dict(GOOD, IMESSAGE_API_KEY='imp_a"b'), "x")
     assert res.returncode != 0
     assert "refusing" in (res.stdout + res.stderr).lower()
+
+
+def test_it_refuses_rather_than_using_a_predictable_temp_path(tmp_path):
+    """A guessable name in world-writable /tmp is a symlink attack on the key.
+
+    The panel refused an earlier version for falling back to /tmp/bg-notify.$$
+    when mktemp was missing: an attacker who pre-creates that path as a symlink
+    has the bearer token written wherever they point it. Sending nothing is
+    recoverable; leaking the credential is not.
+    """
+    bin_dir = _stubs(tmp_path)
+    (bin_dir / "mktemp").write_text("#!/bin/sh\nexit 1\n")
+    (bin_dir / "mktemp").chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", **GOOD)
+    res = subprocess.run([str(SCRIPT), "x"], env=env, capture_output=True, text=True)
+    assert res.returncode != 0, "must refuse when it cannot create a private file"
+    assert "predictable" in (res.stdout + res.stderr).lower()
+    assert not (tmp_path / "curl-argv").exists(), "must not have sent anything"
+
+
+def test_the_unit_timeout_covers_the_whole_curl_retry_budget():
+    """systemd killing the last retry is a message the operator never receives."""
+    script = SCRIPT.read_text()
+    max_time = int(re.search(r"--max-time (\d+)", script).group(1))
+    retries = int(re.search(r"--retry (\d+)", script).group(1))
+    delay = int(re.search(r"--retry-delay (\d+)", script).group(1))
+    worst_case = (retries + 1) * max_time + retries * delay
+
+    unit = (SCRIPT.parent / "systemd" / "bubblegauge-alert-watchdog-failed.service").read_text()
+    timeout = int(re.search(r"TimeoutStartSec=(\d+)", unit).group(1))
+    assert timeout > worst_case, (
+        f"TimeoutStartSec={timeout}s is below the curl worst case of {worst_case}s "
+        f"({retries + 1} attempts x {max_time}s + {retries} x {delay}s delay)"
+    )

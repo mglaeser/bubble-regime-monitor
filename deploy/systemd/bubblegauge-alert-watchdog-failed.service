@@ -24,4 +24,9 @@ Type=oneshot
 EnvironmentFile=%h/.config/bubblegauge/imessage.env
 ExecStart=%h/playground/bubble-regime-monitor/deploy/notify-outage.sh "alert watchdog unit failed"
 # Never let the notifier's own failure loop back into another notification.
-TimeoutStartSec=60
+# MUST exceed the script's worst-case curl budget, or systemd kills the last
+# delivery attempt: --max-time 20 per attempt, --retry 2, --retry-delay 3
+# => 3*20 + 2*3 = 66s. 120 leaves headroom for process start and DNS.
+# tests/test_host_outage_notifier.py derives both numbers and asserts the
+# relationship, so changing one without the other fails the suite.
+TimeoutStartSec=120
