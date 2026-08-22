@@ -961,10 +961,18 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         s4_note = raw.gsadf_note or f"GSADF_CONTESTED={str(contested).lower()}"
         # Name the statistic in the human-readable note too: "1.58 vs cv90 1.94"
         # means something different for an endpoint read than for a sup read.
-        if raw.bsadf_stat is not None and raw.gsadf_stat is not None:
+        #
+        # Each value is formatted only behind its OWN None check. Reaching this
+        # branch means _s4_ok, which constrains the SCORED pair only — the
+        # reported-only sup pair is not gated by it and can be absent, and a note
+        # builder must never raise (guardrail 5: an upstream gap must not surface
+        # as a 500). Formatting None with :.4f is a TypeError, not a blank.
+        if raw.bsadf_stat is not None and raw.bsadf_cv90 is not None:
             s4_note += (f"; scored BSADF@endpoint {raw.bsadf_stat:.4f} "
-                        f"(cv90 {raw.bsadf_cv90:.4f}); GSADF sup {raw.gsadf_stat:.4f} "
-                        f"(cv90 {raw.gsadf_cv90:.4f}) reported, not scored")
+                        f"(cv90 {raw.bsadf_cv90:.4f})")
+            if raw.gsadf_stat is not None and raw.gsadf_cv90 is not None:
+                s4_note += (f"; GSADF sup {raw.gsadf_stat:.4f} "
+                            f"(cv90 {raw.gsadf_cv90:.4f}) reported, not scored")
         s4_extra = None
     # DUAL REPORT (PIN C's "documented drift gate"). The shadow was previously
     # written to RawInputs and never read by anything -- computed at the cost of a
@@ -1283,7 +1291,14 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     red_flags = evaluate_red_flags(
         # Red flag #1 reads the SAME statistic the sub-score reads, so the flag and
         # the score cannot describe different regimes (was pinned to the sup).
-        gsadf_explosive_p05=s4_gsadf.explosive_p05(s4_stat, s4_cv95),
+        #
+        # It is also gated on _s4_ok. explosive_p05 compares stat > cv95 and does
+        # not inspect cv90, so a DEGENERATE CV pair (cv90 >= cv95, or non-finite)
+        # floored the sub-score to 0.25/quality 0.0 while the red flag still fired
+        # off the same unusable numbers. That hole predates this change — main had
+        # the identical structure on the sup — but "the flag and the score cannot
+        # disagree" is precisely what this change claims, so it is closed here.
+        gsadf_explosive_p05=_s4_ok and s4_gsadf.explosive_p05(s4_stat, s4_cv95),
         gsadf_contested=contested,
         semi_runup_pp=runup if runup is not None else 0.0,
         hy_oas_bps=raw.hy_oas_bps,

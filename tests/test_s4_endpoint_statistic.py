@@ -130,6 +130,48 @@ class TestFailClosed:
         assert compute_snapshot(raw, gsadf_contested=False).indicators["s4"].state == "FLOOR"
 
 
+class TestPartialMetadataNeverCrashes:
+    """Both cases below were raised by the cross-vendor review panel on PR #77
+    and reproduced before being fixed."""
+
+    def test_a_missing_sup_cv_does_not_crash_the_snapshot(self):
+        # _s4_ok constrains the SCORED pair only. The reported-only sup pair can
+        # be absent, and the note builder formatted it unconditionally with
+        # :.4f — TypeError on None, i.e. an HTTP 500 from a data gap (guardrail 5).
+        raw = _raw_diverging()
+        raw.gsadf_cv90 = None
+        snap = compute_snapshot(raw)
+        s4 = snap.indicators["s4"]
+        assert s4.state == "COMPUTED"                    # the scored pair is intact
+        assert "BSADF@endpoint" in s4.note               # scored read still named
+        assert "GSADF sup" not in s4.note                # absent half simply omitted
+
+    def test_a_missing_sup_statistic_does_not_crash_either(self):
+        raw = _raw_diverging()
+        raw.gsadf_stat = raw.gsadf_cv90 = raw.gsadf_cv95 = None
+        assert compute_snapshot(raw).indicators["s4"].state == "COMPUTED"
+
+    def test_a_degenerate_cv_pair_cannot_fire_the_red_flag(self):
+        # explosive_p05 compares stat > cv95 and never inspects cv90, so an
+        # inverted CV pair floored the sub-score while the flag still fired off
+        # the same unusable numbers. Pre-existing on main; closed here because
+        # this change claims flag and score cannot disagree.
+        raw = _raw_diverging()
+        raw.bsadf_stat = 3.0
+        raw.bsadf_cv90, raw.bsadf_cv95 = 2.0, 1.5        # inverted
+        snap = compute_snapshot(raw, gsadf_contested=False)
+        assert snap.indicators["s4"].state == "FLOOR"
+        assert snap.red_flags.gsadf_explosive_noncontested is False
+
+    def test_a_valid_rejection_still_fires_the_red_flag(self):
+        # The gate must not silence a genuine signal.
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5
+        snap = compute_snapshot(raw, gsadf_contested=False)
+        assert snap.indicators["s4"].state == "COMPUTED"
+        assert snap.red_flags.gsadf_explosive_noncontested is True
+
+
 class TestTheReportCarriesBoth:
     def test_both_statistics_are_reported(self):
         extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
