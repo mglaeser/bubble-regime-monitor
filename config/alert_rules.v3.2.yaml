@@ -1321,9 +1321,13 @@ rules:
   - rule_id: dynamics.d3_gate_fires
     identity_version: 1
     title: "Hyperscaler free-cash-flow gate fires"
-    enabled: true
+    enabled: false
     policy_status: APPROVED
-    runtime_readiness: READY
+    runtime_readiness: MISSING_INPUT
+    disabled_reason: "The gate boolean is now persisted and readable, but this rule
+      confirms on a NEW FILING and EDGAR provenance carries only a reading date.
+      A per-filing confirmation key cannot be built from it — every four-hour
+      recompute would present as a fresh filing — so the input is incomplete."
     enabled_in_stages: [3, 4, 5, 6, 7]
     bucket: dynamics
     priority: 2
