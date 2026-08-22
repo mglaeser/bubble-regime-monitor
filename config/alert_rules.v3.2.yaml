@@ -1241,28 +1241,34 @@ rules:
 
   - rule_id: structure.s5_percentile_jump
     identity_version: 1
-    title: "Credit percentile moves materially on a new release"
+    title: "Credit level moves materially on a new release"
     enabled: false
-    disabled_reason: "jump_pct is an unresolved [PIN]."
+    disabled_reason: "jump_pct is an unresolved [PIN], and it cannot be pinned as a
+      single number. s5 is a credit LEVEL whose unit follows the fallback tier that
+      produced it: the preferred tier is the Excess Bond Premium in pp, the two
+      fallbacks are spreads in bps. A threshold calibrated against one tier is
+      meaningless the moment the chain falls through to another, so any artifact
+      must name its tier and unit. It was previously declared in `percentile`, a
+      quantity nothing computes."
     policy_status: CALIBRATION_REQUIRED
     runtime_readiness: UNPINNED
     enabled_in_stages: [7]
     bucket: structure
     priority: 3
-    source_fields: [s5_percentile]
+    source_fields: [s5_credit_level]
     authoritative: false
     condition:
       kind: delta
-      source: s5_percentile
+      source: s5_credit_level
       mode: abs
       op: ge
       threshold: jump_pct
       window: previous_input
     thresholds:
-      - {name: jump_pct, value: null, unit: percentile, attribution: PIN}
+      - {name: jump_pct, value: null, unit: tier_dependent, attribution: PIN}
     attribution: PIN
     confirmation: {count: 1, basis: new_release_period}
-    confirmation_sources: [s5_percentile]
+    confirmation_sources: [s5_credit_level]
     hold_sources: []
     freshness_requirements: {}
     sync_policy: single_event

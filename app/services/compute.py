@@ -120,13 +120,25 @@ _NEAR_ATH_FRAC: float = _M.get_path("red_flags", "index_near_ath_frac")
 
 def _s5_extra_with_shadow(observations_dated: list[tuple[str, float]] | None,
                           cadence: Literal["monthly", "daily"], source_tier: str,
-                          production_sub: float | None) -> dict[str, Any]:
+                          production_sub: float | None,
+                          *, raw_value: float | None = None,
+                          raw_unit: str | None = None) -> dict[str, Any]:
     """S5 payload extra: the v3.7.7 provisional-lag contract keys PLUS the PIN-H
     shadow dual report (calendar-anchored candidate; operator authorization
     2026-07-23: inactive, included_in_score=false, zero influence on any scored
     value). A shadow failure must never break scoring (guardrail 5): it degrades
     to an error note inside the extra instead."""
     extra: dict[str, Any] = dict(S5_PROVISIONAL_LAG)
+    # TYPED, because `value` alone is unreadable: the preferred tier persists an
+    # Excess Bond Premium in percentage points and the two fallbacks persist a
+    # spread in basis points, so the unit is a property of the TIER, not of the
+    # indicator id. The percentile-like quantity is the SUB-SCORE; no separate
+    # percentile is ever computed, and saying so stops a consumer inventing one.
+    extra["s5_raw_value"] = raw_value
+    extra["s5_raw_unit"] = raw_unit
+    extra["s5_input_tier"] = source_tier
+    extra["s5_sub_score"] = production_sub
+    extra["s5_percentile_available"] = False
     try:
         if observations_dated:
             extra["s5_dual_report"] = s5_calendar.build_dual_report(
@@ -875,12 +887,14 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                    f"(~{ebp_t2:+.2f}pp) over {len(raw.ebp_history)} months (~{yrs:.0f}y). "
                    "A low/negative EBP is loose credit / elevated sentiment = high fragility.")
         # FIDELITY quality (v3.3.2): EBP IS the LSSZ credit-sentiment construct.
-        indicators["s5"] = IndicatorOutput("s5", round(ebp_t2, 4), sub, False,
+        ebp_t2_persisted = round(ebp_t2, 4)
+        indicators["s5"] = IndicatorOutput("s5", ebp_t2_persisted, sub, False,
                                            "fed_ebp", False, note=s5_note,
                                            as_of=raw.ebp_as_of, quality=1.0,
                                            extra=_s5_extra_with_shadow(
                                                raw.ebp_history_dated, "monthly",
-                                               "fed_ebp", sub))
+                                               "fed_ebp", sub,
+                                               raw_value=ebp_t2_persisted, raw_unit="pp"))
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
         # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
@@ -903,7 +917,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            as_of=raw.baa_spread_as_of, quality=0.5,
                                            extra=_s5_extra_with_shadow(
                                                raw.baa_spread_history_dated,
-                                               "monthly", "fred_BAA_DGS10", sub))
+                                               "monthly", "fred_BAA_DGS10", sub,
+                                               raw_value=spread_t2, raw_unit="bps"))
     elif raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
         # FALLBACK: HY-OAS t-2 over the (regime-limited) accrued 3yr history.
         oas_t2 = s5_credit.t_minus_2_value(raw.hy_oas_history_bps)
@@ -923,7 +938,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            as_of=raw.hy_oas_as_of, quality=0.3,
                                            extra=_s5_extra_with_shadow(
                                                raw.hy_oas_history_dated, "daily",
-                                               "fred_BAMLH0A0HYM2", sub))
+                                               "fred_BAMLH0A0HYM2", sub,
+                                               raw_value=oas_t2, raw_unit="bps"))
     else:
         indicators["s5"] = IndicatorOutput("s5", None, None, True, "fred_BAMLH0A0HYM2", False,
                                            note="HY OAS unavailable and no persisted history; dropped")

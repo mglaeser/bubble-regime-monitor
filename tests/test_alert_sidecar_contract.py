@@ -289,3 +289,105 @@ def test_the_vintage_check_ignores_labels_it_cannot_compare():
     assert _period_is_future("2026-Q3", "2026-10-01") is False     # closed
     assert _period_is_future(None, "2026-08-21") is False
     assert _period_is_future("2027-01", None) is False
+
+
+# ---------------------------------------------------------------------------
+# s5: a credit LEVEL whose unit depends on which fallback tier fired
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_with_s5(s5_payload: dict) -> Snapshot:
+    with session_scope() as session:
+        snap = Snapshot(
+            computed_at=datetime(2026, 8, 21, 6, 0, tzinfo=UTC), service_version="test",
+            median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+            point_score=51.0, action_band="trim", override_fired=False,
+            red_flag_count=0, red_flag_detail={},
+            block_s={"indicators": {"s5": s5_payload}},
+            block_d={"indicators": {}},
+            trend_states={}, fast_alarm={}, data_freshness={})
+        session.add(snap)
+        session.flush()
+        session.expunge(snap)
+        return snap
+
+
+def _s5_evidence(snap: Snapshot):
+    built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+    for item in built.indicators:
+        if item.observation_domain_id == obs.DOMAIN_S5_CREDIT_LEVEL:
+            return item
+    raise AssertionError("no s5 credit-level evidence in the sidecar")
+
+
+def test_the_s5_evidence_is_not_labelled_a_percentile(isolated_db):
+    """s5's `value` is a credit LEVEL, and it was published as a percentile.
+
+    The preferred tier persists the Gilchrist-Zakrajsek Excess Bond Premium in
+    percentage points; the two fallbacks persist a spread in basis points. All
+    three were emitted as `indicator.s5.credit_percentile` with unit
+    "percentile". The percentile-like quantity is the SUB-SCORE, a different
+    number entirely, so any rule comparing this field was comparing the wrong
+    thing in the wrong unit.
+    """
+    snap = _snapshot_with_s5({
+        "value": -0.42, "sub_score": 0.80, "as_of": "2026-06-01", "stale": False,
+        "s5_raw_value": -0.42, "s5_raw_unit": "pp", "s5_input_tier": "fed_ebp",
+        "s5_sub_score": 0.80, "s5_percentile_available": False,
+    })
+    evidence = _s5_evidence(snap)
+    assert evidence.unit == "pp", "the EBP tier is percentage points, not a percentile"
+    assert evidence.value == -0.42
+
+
+def test_a_fallback_tier_carries_its_own_unit(isolated_db):
+    """The unit is a property of the TIER, not of the indicator id.
+
+    A single hardcoded unit is wrong for two of the three tiers whatever it
+    says, so it has to travel with the reading.
+    """
+    snap = _snapshot_with_s5({
+        "value": 218.0, "sub_score": 0.55, "as_of": "2026-06-01", "stale": False,
+        "s5_raw_value": 218.0, "s5_raw_unit": "bps",
+        "s5_input_tier": "fred_BAA_DGS10",
+        "s5_sub_score": 0.55, "s5_percentile_available": False,
+    })
+    evidence = _s5_evidence(snap)
+    assert evidence.unit == "bps"
+    assert evidence.value == 218.0
+
+
+def test_the_sub_score_and_tier_travel_with_the_reading(isolated_db):
+    """A consumer must be able to tell WHICH construct produced this number."""
+    snap = _snapshot_with_s5({
+        "value": 269.0, "sub_score": 0.30, "as_of": "2026-06-01", "stale": False,
+        "s5_raw_value": 269.0, "s5_raw_unit": "bps",
+        "s5_input_tier": "fred_BAMLH0A0HYM2",
+        "s5_sub_score": 0.30, "s5_percentile_available": False,
+    })
+    evidence = _s5_evidence(snap)
+    assert evidence.metadata["s5_input_tier"] == "fred_BAMLH0A0HYM2"
+    assert evidence.metadata["sub_score"] == 0.30
+    assert evidence.metadata["s5_percentile_available"] is False
+
+
+def test_no_domain_still_claims_a_percentile_that_is_never_computed():
+    """`inverted percentile` describes the sub-score, not a persisted field.
+
+    Naming a domain after a quantity nothing computes invites exactly the
+    comparison this change removes.
+    """
+    from app.alerts import observation as o
+
+    assert not hasattr(o, "DOMAIN_S5_PERCENTILE"), "the untrue domain must be gone"
+    assert o.DOMAIN_S5_CREDIT_LEVEL == "indicator.s5.credit_level"
+
+
+def test_a_row_without_the_typed_tier_is_missing_not_a_number(isolated_db):
+    """Historical rows carry a bare `value` whose unit is unknowable."""
+    snap = _snapshot_with_s5({"value": 269.0, "sub_score": 0.30,
+                              "as_of": "2026-06-01", "stale": False})
+    evidence = _s5_evidence(snap)
+    assert evidence.value is None
+    assert evidence.data_state == DataState.MISSING
+    assert evidence.freshness_reason_code == "typed_s5_tier_absent"

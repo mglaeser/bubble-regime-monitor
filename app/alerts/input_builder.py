@@ -171,7 +171,8 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
         ("s2", obs.DOMAIN_TOP10, "percent"),
         ("s3", obs.DOMAIN_SEMIS, "pp"),
         ("s4", obs.DOMAIN_GSADF, "stat"),
-        ("s5", obs.DOMAIN_S5_PERCENTILE, "percentile"),
+        # s5 is NOT here: its unit depends on the fallback tier, so a single
+        # hardcoded unit is wrong for two of the three. Handled below.
     )
     for ind_id, domain, unit in _INDICATOR_DOMAINS:
         payload = indicators.get(ind_id)
@@ -191,6 +192,38 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
             # A reading dated after the moment we observed it is a bad vintage
             # or clock skew — recorded, never silently used.
             ineligibility.append(f"period_label_future:{ind_id}")
+
+    # s5 publishes a credit LEVEL with the unit of the tier that produced it.
+    #
+    # The preferred tier is the Gilchrist-Zakrajsek Excess Bond Premium in
+    # percentage points; the two fallbacks are spreads in basis points. All
+    # three were emitted as `indicator.s5.credit_percentile`, unit "percentile"
+    # — a quantity nothing computes, since the percentile-like number is the
+    # SUB-SCORE. Any rule comparing that field compared the wrong quantity in
+    # the wrong unit, and a threshold pinned against one tier would be
+    # meaningless the moment the chain fell through to another.
+    s5 = indicators.get("s5") or {}
+    s5_state, s5_reason = _evidence_data_state(s5) if s5 else (DataState.MISSING,
+                                                               "indicator_absent")
+    s5_tier = s5.get("s5_input_tier")
+    s5_unit = s5.get("s5_raw_unit")
+    if not s5 or not s5_tier or not s5_unit:
+        # A bare historical `value` cannot be interpreted: its unit is unknowable
+        # without the tier that produced it (mandate 5.4 — never inferred).
+        s5_value, s5_state, s5_reason = None, DataState.MISSING, "typed_s5_tier_absent"
+    else:
+        s5_value = _numeric(s5.get("s5_raw_value"))
+    s5_period = s5.get("as_of")
+    add(obs.DOMAIN_S5_CREDIT_LEVEL, s5_value, unit=s5_unit, source_id="s5",
+        period_start=s5_period, period_end=s5_period,
+        data_state=s5_state, reason=s5_reason,
+        provider_id=s5.get("data_source"),
+        metadata={"sub_score": s5.get("s5_sub_score", s5.get("sub_score")),
+                  "s5_input_tier": s5_tier,
+                  "s5_percentile_available": bool(s5.get("s5_percentile_available")),
+                  "quality": s5.get("quality")})
+    if _period_is_future(s5_period, computed_at):
+        ineligibility.append("period_label_future:s5")
 
     # d2 publishes the ROLLOVER MULTIPLIER, not the year-on-year percentage.
     #
