@@ -127,6 +127,7 @@ def load_memories(
                 candidate_ttl_policy=row.candidate_ttl_policy,
                 current_episode_id=row.current_episode_id,
                 confirmed_keys=confirmed,
+                last_fired_observation_key=row.last_fired_observation_key,
             ),
         )
     return out
@@ -275,6 +276,10 @@ def apply_decision(
     }
     if decision.activate_episode:
         values["last_fired_at"] = now
+        # Remembered even when the activation was suppressed as a repeat, so a
+        # third entry on the same period is still recognised rather than
+        # resetting the moment one is held.
+        values["last_fired_observation_key"] = decision.fired_observation_key
 
     if existing is None:
         session.add(AlertRuleState(

@@ -61,6 +61,8 @@ class InstanceMemory:
     #: economic observation keys already counted toward the OPEN candidate,
     #: keyed by confirmation source id.
     confirmed_keys: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: the economic observation that last caused an activation (see below).
+    last_fired_observation_key: str | None = None
 
 
 @dataclass
@@ -105,6 +107,10 @@ class StateDecision:
     candidate_ttl_policy: str | None = None
     candidate_ttl_basis: str | None = None
 
+    #: the economic observation this firing is attributed to; persisted so a
+    #: later re-entry on the same period can be recognised as a repeat.
+    fired_observation_key: str | None = None
+
     confirmations: list[ConfirmationRecord] = field(default_factory=list)
     suppression_reasons: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
@@ -137,6 +143,28 @@ def effective_prior_state(condition_state: str, last_known: str | None) -> str |
     if condition_state == ConditionState.UNKNOWN:
         return last_known
     return condition_state
+
+
+#: Confirmation bases that name an ECONOMIC PERIOD rather than a transition.
+#: For these, two readings of the same period are one observation — which the
+#: candidate latch already enforces when count > 1, and nothing enforced when
+#: count == 1. `authoritative_transition` and `adjacent_snapshots` are excluded
+#: deliberately: they count transitions and snapshots, not periods, so a second
+#: genuine transition must still fire.
+_PERIOD_BASES = frozenset({
+    "distinct_economic_observation",
+    "distinct_trading_date",
+    "new_filing",
+    "new_month_end_period",
+    "new_release_period",
+})
+
+
+def _fired_key(records: list[ConfirmationRecord]) -> str | None:
+    """One canonical key for the observations that triggered this firing."""
+    keys = sorted(r.economic_observation_key for r in records
+                  if r.confirmation_role == "CONFIRMATION")
+    return "|".join(keys) if keys else None
 
 
 def _confirmation_keys(rule: RuleSpec, outcome: ConditionOutcome) -> list[ConfirmationRecord]:
@@ -301,12 +329,30 @@ def evaluate_state(
     hold_records = _hold_records(rule, outcome)
 
     if not _needs_confirmation(rule):
+        # A single-observation rule fires on the transition itself, so the
+        # candidate latch never runs and the declared basis was never consulted
+        # — the artifact said "confirms on a new filing" while the machinery
+        # confirmed on any transition at all. For a basis that names a PERIOD,
+        # a second entry on the SAME period is not a second event: the
+        # underlying reading has not changed, so the flip-flop is a data
+        # artifact (an issuer fetch failing and recovering moves a cohort
+        # gate). The episode still opens, because the condition genuinely is
+        # firing and the audit trail should say so; the NOTIFICATION is what a
+        # repeat must not earn.
+        fired_key = _fired_key(records)
+        repeat = (rule.confirmation.basis in _PERIOD_BASES
+                  and fired_key is not None
+                  and fired_key == memory.last_fired_observation_key)
         decision.condition_state = ConditionState.FIRING
         decision.consecutive_true = memory.consecutive_true + 1
         decision.open_episode = memory.current_episode_id is None
         decision.activate_episode = True
+        decision.fired_observation_key = fired_key or memory.last_fired_observation_key
         decision.confirmations = records + hold_records
         decision.confirmation_progress = {r.source_id: 1 for r in records}
+        if repeat:
+            decision.suppression_reasons.append(SuppressionReason.COOLDOWN)
+            decision.reasons.append("same_economic_period_refire")
         _clear_candidate(decision)
         return decision
 

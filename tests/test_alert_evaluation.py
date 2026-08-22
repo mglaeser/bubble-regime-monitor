@@ -1072,3 +1072,69 @@ def test_an_outage_is_not_a_flap():
 
     real = [ConditionState.FIRING, ConditionState.NORMAL] * 3
     assert flapping_projection(real)["flapping"] is True, "a real oscillation must still flap"
+
+
+def test_a_period_basis_is_honoured_even_with_a_single_observation():
+    """`confirmation: {count: 1, basis: new_filing}` declared a control that
+    did nothing.
+
+    For count > 1 the candidate latch enforces the basis: two readings of one
+    period count once. For count == 1 there is no candidate, the TRUE branch
+    fires immediately, and the basis was never consulted — so the artifact said
+    "confirms on a new filing" while the machinery confirmed on any transition
+    at all. `dynamics.d3_gate_fires` is the live case: the gate is derived from
+    filed data and cannot legitimately change inside one filing period, so a
+    flip-flop there is an issuer fetch failing and recovering.
+
+    The episode still opens — the condition IS firing and the audit trail
+    should say so. The NOTIFICATION is what a repeat must not earn.
+    """
+    rule = _rule(
+        rule_id="test.filing", source_fields=["rf4_active"],
+        condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+        confirmation={"count": 1, "basis": "distinct_economic_observation"},
+        confirmation_sources=["rf4_active"],
+    )
+    same_period = make_input(identity="a", rf4=True, rf4_period="2026-08-14")
+    first = evaluate_state(rule=rule, instance_fingerprint="fp", memory=InstanceMemory(),
+                           outcome=evaluate_rule(rule, _ctx(same_period)),
+                           ctx=_ctx(same_period), now=NOW)
+    assert first.activate_episode is True
+    assert first.notification_eligible is True
+    assert first.fired_observation_key
+
+    # the condition drops out and returns, still inside the same period
+    memory = InstanceMemory(state_version=1, condition_state=ConditionState.NORMAL,
+                            last_known_condition_state=ConditionState.NORMAL,
+                            last_fired_observation_key=first.fired_observation_key)
+    again = make_input(identity="b", rf4=True, rf4_period="2026-08-14")
+    repeat = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                            outcome=evaluate_rule(rule, _ctx(again)),
+                            ctx=_ctx(again), now=NOW)
+    assert repeat.activate_episode is True, "the episode is real; record it"
+    assert repeat.notification_eligible is False, "but a repeat earns no message"
+    assert "same_economic_period_refire" in repeat.reasons
+
+    # a genuinely new period notifies again
+    later = make_input(identity="c", rf4=True, rf4_period="2026-09-14")
+    fresh = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                           outcome=evaluate_rule(rule, _ctx(later)),
+                           ctx=_ctx(later), now=NOW)
+    assert fresh.notification_eligible is True
+
+
+def test_a_transition_basis_still_fires_on_every_transition():
+    """`authoritative_transition` counts transitions, not periods.
+
+    Applying period suppression to it would swallow a second genuine band
+    move, so the two bases must stay distinguishable.
+    """
+    rule = _rule()          # band transition rule, basis authoritative_transition
+    before = make_input(identity="a", effective="trim")
+    after = make_input(identity="b", effective="de-risk")
+    memory = InstanceMemory(state_version=1, last_fired_observation_key="anything")
+    decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                              outcome=evaluate_rule(rule, _ctx(after, before)),
+                              ctx=_ctx(after, before), now=NOW)
+    assert decision.activate_episode is True
+    assert decision.notification_eligible is True
