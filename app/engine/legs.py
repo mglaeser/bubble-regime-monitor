@@ -45,6 +45,56 @@ def monthly_closes(daily: list[tuple[str, float]]) -> list[float]:
     return out
 
 
+def monthly_closes_dated(daily: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """(month, last close in that month), oldest first — same collapse as
+    `monthly_closes`, keeping the month label the caller needs to date it."""
+    out: list[tuple[str, float]] = []
+    current_month: str | None = None
+    for date, close in daily:
+        month = date[:7]
+        if month != current_month:
+            out.append((month, close))
+            current_month = month
+        else:
+            out[-1] = (month, close)
+    return out
+
+
+def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str
+                    ) -> tuple[str | None, str | None]:
+    """The AUTHORITATIVE Faber state: (state, month), completed months only.
+
+    `faber_state` deliberately stands the in-progress month's latest close in
+    for its month-end close — a useful live preview, and the wrong thing to
+    alert on. A rule that confirms on a new month-end period must see a state
+    that changes only when a month has actually ENDED, or an intramonth wobble
+    presents as a completed flip and the most severe alert in the system fires
+    on a month that is still running.
+
+    A month is completed when it is strictly earlier than the month we are
+    computing in; the in-progress month is dropped whatever its closes say.
+    Returns (None, None) when fewer than ten completed months exist.
+    """
+    completed = [(m, c) for m, c in monthly_closes_dated(daily) if m < as_of_month]
+    if len(completed) < 10:
+        return None, None
+    return faber_state([c for _, c in completed]), completed[-1][0]
+
+
+def faber_distance_pct(monthly: list[float]) -> float | None:
+    """Signed distance of the last close from the 10-month SMA, in percent.
+
+    Evidence for a prewarning rule, never a state: the crossing itself is
+    `faber_state`'s to decide.
+    """
+    if len(monthly) < 10:
+        return None
+    sma10 = sum(monthly[-10:]) / 10.0
+    if sma10 == 0:
+        return None
+    return (monthly[-1] - sma10) / sma10 * 100.0
+
+
 def faber_state(monthly: list[float]) -> str:
     """IN if last monthly close > 10-month SMA of monthly closes, else OUT.
 

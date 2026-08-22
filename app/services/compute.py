@@ -443,7 +443,7 @@ class SnapshotData:
     override_fired: bool
     red_flags: RedFlags
     indicators: dict[str, IndicatorOutput]
-    trend_states: dict[str, dict[str, str]]
+    trend_states: dict[str, dict[str, Any]]
     fast_alarm: dict[str, Any]
     freshness: dict[str, str]
     coverage: dict[str, Any]
@@ -1425,20 +1425,40 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             else "suppressed (block degraded)"
 
     # ---- legs ----
-    trend_states: dict[str, dict[str, str]] = {}
+    trend_states: dict[str, dict[str, Any]] = {}
+    # `faber_10mo` is a LIVE PREVIEW: faber_state stands the in-progress month's
+    # latest close in for its month-end close, which is the right reading
+    # between month ends and the wrong thing to alert on. The alert rules
+    # confirm on a NEW MONTH-END PERIOD, so the authoritative state — computed
+    # from COMPLETED months only — is persisted beside it, with the month it
+    # belongs to. `faber_10mo` keeps its meaning and its consumers unchanged.
+    as_of_month = (raw.spy_daily[-1][0][:7] if raw.spy_daily else None)
     for name, daily, closes in (("SPY", raw.spy_daily, raw.spy_daily_closes),
                                 ("QQQ", raw.qqq_daily, raw.qqq_daily_closes)):
-        states = {}
+        states: dict[str, Any] = {}
         if daily:
             try:
-                states["faber_10mo"] = legs.faber_state(legs.monthly_closes(daily))
+                monthly = legs.monthly_closes(daily)
+                states["faber_10mo"] = legs.faber_state(monthly)
+                states["faber_live_preview"] = states["faber_10mo"]
+                states["faber_distance_pct"] = legs.faber_distance_pct(monthly)
             except ValueError:
                 states["faber_10mo"] = "unknown"
+            month = as_of_month or daily[-1][0][:7]
+            me_state, me_period = legs.month_end_faber(daily, as_of_month=month)
+            states["faber_month_end_state"] = me_state
+            states["faber_month_end_period"] = me_period
         if closes:
             try:
                 states["sma200"] = legs.sma200_state(closes)
+                states["sma200_state"] = states["sma200"]
             except ValueError:
                 states["sma200"] = "unknown"
+            # The trading date the SMA actually read. Dated by the recompute,
+            # three four-hour runs would manufacture a "three trading date"
+            # confirmation in eight hours.
+            if daily:
+                states["sma200_as_of"] = daily[-1][0][:10]
         trend_states[name] = states or {"faber_10mo": "unknown", "sma200": "unknown"}
 
     try:

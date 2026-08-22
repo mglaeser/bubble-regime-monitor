@@ -301,13 +301,36 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
         ("SPY", obs.DOMAIN_LEG_SPY_FABER, obs.DOMAIN_LEG_SPY_SMA200),
         ("QQQ", obs.DOMAIN_LEG_QQQ_FABER, obs.DOMAIN_LEG_QQQ_SMA200),
     ):
-        for domain, leg in ((faber_domain, "faber_10mo"), (sma_domain, "sma200")):
-            state = _leg_state(trend, asset, leg)
+        # Legs are dated by their ECONOMIC period, never by the recompute.
+        #
+        # Faber publishes the state of the last COMPLETED month, because the
+        # rules confirm on a new month-end period and `faber_10mo` is a live
+        # preview that moves intramonth. SMA200 publishes the trading date it
+        # actually read, because `legs.sma200_flip` needs three distinct
+        # TRADING DATES and computed_at would let three four-hour recomputes
+        # manufacture that in eight hours.
+        #
+        # A row without the typed fields is MISSING. Promoting the preview
+        # would be inventing a month-end that never happened (mandate 5.4).
+        asset_state = trend.get(asset) or {}
+        for domain, leg in ((faber_domain, "faber"), (sma_domain, "sma200")):
+            if leg == "faber":
+                leg_state: str | None = asset_state.get("faber_month_end_state")
+                leg_period: str | None = asset_state.get("faber_month_end_period")
+                absent_reason = "typed_month_end_absent"
+            else:
+                leg_state = _leg_state(trend, asset, "sma200")
+                leg_period = asset_state.get("sma200_as_of")
+                absent_reason = "typed_trading_date_absent"
+            usable = leg_state not in (None, "unknown") and bool(leg_period)
             item = build_evidence(
-                domain, state, observed_at=observed_at, source_id=f"{asset}.{leg}",
-                period_start=computed_at, period_end=computed_at,
-                data_state=DataState.MISSING if state in (None, "unknown") else DataState.FRESH,
-                freshness_reason_code=None if state not in (None, "unknown") else "leg_state_unknown",
+                domain, leg_state if usable else None, observed_at=observed_at,
+                source_id=f"{asset}.{leg}",
+                period_start=leg_period if usable else None,
+                period_end=leg_period if usable else None,
+                data_state=DataState.FRESH if usable else DataState.MISSING,
+                freshness_reason_code=None if usable else (
+                    "leg_state_unknown" if leg_state == "unknown" else absent_reason),
                 code_revision=BUILDER_CODE_REVISION,
             )
             legs.append(EvidenceModel(**item.as_dict()))
