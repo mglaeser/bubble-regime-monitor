@@ -152,6 +152,18 @@ class TestBuildFeedGolden:
         lp = feed["metrics"]["lppls_confidence"]
         assert lp["available"] is True and lp["value"] == data.indicators["d4"].value
 
+    def test_the_configured_statistic_is_named_even_when_s4_produced_nothing(
+            self, snapshot, patched_sources):
+        """Which family is configured is a METHODOLOGY constant, so it is known on
+        a run where s4 produced nothing. Reading it from the run's extra published
+        statistic=null exactly when a consumer most needs to know what the null
+        value would have been."""
+        raw, data = snapshot
+        assert data.indicators["s4"].state == "FLOOR"       # golden supplies no stat
+        g = df.build_feed(raw, data)["metrics"]["gsadf"]
+        assert g["available"] is False and g["value"] is None
+        assert g["detail"]["statistic"] == "bsadf_endpoint"
+
     def test_the_gsadf_metric_is_the_scored_statistic(self, isolated_db, patched_sources):
         """value and state must describe the SAME statistic — the invariant the
         lppls_confidence assertion above holds. Until s4 scored the endpoint,

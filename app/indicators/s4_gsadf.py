@@ -19,9 +19,22 @@ WHAT/HOW/WHY/references/caveats: see app.references.REGISTRY["s4"]; summary:
     log levels from 1986 (T=487): GSADF 2.6189 > cv95 2.2604 REJECTS, and the
     sup is attained at a window ending 2000-02 — a 26-year-old episode — while
     the BSADF at the 2026-07 endpoint is 0.7562 against an endpoint cv90 of
-    1.1769. Scoring the sup would have flagged the present on the strength of
-    the dot-com peak. The mapping below is statistic-agnostic; compute.py
-    selects which statistic and which CV pair it receives.
+    1.1769.
+
+    READ THAT MEASUREMENT WITH ITS BOUND: gsadf.series_months_max = 360 caps
+    every runtime fit (both run_gsadf call sites), so T=487 is an OFFLINE
+    measurement on the untruncated series — the service never fits it. On the
+    360-month tail it does fit, the SAME series gives GSADF 1.3234 against cv95
+    2.2099: no rejection, sup dated 2021-08. So the dot-com rejection is not
+    something this deployment could have printed.
+
+    That is a sharper argument for the endpoint, not a weaker one. The sup's
+    VERDICT flips with the window length it is handed — reject at T=487, no
+    rejection at T=360, from identical data — while the endpoint returns 0.7562
+    under both. A statistic whose answer depends on how much history you happen
+    to feed it is the wrong summary for a live regime gauge; the endpoint is
+    invariant to that choice. The mapping below is statistic-agnostic;
+    compute.py selects which statistic and which CV pair it receives.
 
     Mapping: stat > cv95 AND non-contested -> 1.0; > cv90 -> 0.5;
     contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.

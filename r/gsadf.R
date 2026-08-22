@@ -3,6 +3,7 @@
 #   {"gsadf","cv90","cv95"}                     the sup over all endpoints (REPORTED)
 #   {"bsadf","bsadf_cv90","bsadf_cv95"}         the endpoint read (SCORED since v4.0)
 #   {"bsadf_n","bsadf_argmax","bsadf_n_finite"} sequence provenance
+#   {"bsadf_cv_route"}  which route produced the endpoint CVs, or "unavailable"
 # Any of the bsadf_* fields may be null; Python then floors s4 rather than guessing.
 # NEVER hard-code the blog value 1.49 — that is a SADF critical value, not GSADF.
 #
@@ -68,11 +69,46 @@ extract_cv <- function(obj, level) {
 # REJECTED long after the episode ends. Measured on native Nasdaq-100 from 1986
 # (exuber 1.1.0, T=487): GSADF 2.6189 > cv95 2.2604 -> rejects, and the sup is
 # attained at a window ending 2000-02, while the BSADF at the 2026-07 endpoint is
-# 0.7562 against an endpoint cv90 of 1.1769. A live regime gauge must read the
-# endpoint, not the sample maximum. Both are emitted; Python scores one of them
-# per frozen_methodology.json gsadf.statistic.
+# 0.7562 against an endpoint cv90 of 1.1769.
+#
+# BOUND ON THAT NUMBER: gsadf.series_months_max = 360 caps every runtime fit, so
+# T=487 is an offline measurement -- the service never fits it. On the 360-month
+# tail it does fit, the same series gives GSADF 1.3234 vs cv95 2.2099 (no
+# rejection, sup dated 2021-08) while the endpoint is 0.7562 under BOTH. The sup
+# changes its verdict with the window length it is handed; the endpoint does not.
+# That is why a live regime gauge reads the endpoint, not the sample maximum.
+# Both are emitted; Python scores one of them per frozen gsadf.statistic.
+extract_bsadf_cv <- function(r, cv, bs) {
+  # ONE route, stated plainly. The endpoint CV is the last row of cv$bsadf_cv,
+  # accepted only when that matrix is row-aligned with the BSADF sequence and
+  # carries the expected level names -- a mismatch means the CVs were simulated
+  # under a different (n, minw) than the fit, and comparing them would be a
+  # silent category error.
+  #
+  # There is deliberately NO second route. extract_cv() above defends the GSADF
+  # critical value with a tidy() fallback, so a fallback was attempted here too:
+  # tidy() exposes only the summary CVs (adf/sadf/gsadf), and augment_join(),
+  # which does expose per-index CVs, reads the SAME cv$bsadf_cv field -- measured,
+  # it returns "unavailable" in every case that defeats the direct route
+  # (renamed level columns, field removed, empty object). It agrees with the
+  # direct route when the direct route works, which is not what a fallback is
+  # for. A second path that fails whenever the first one does is dead code
+  # pretending to be redundancy, so it is not shipped.
+  #
+  # What IS shipped is the diagnosis: losing this pair floors s4 AND disables
+  # red flag #1, and "unavailable" says so, distinguishing a CV-extraction
+  # failure from a degenerate series. Both floor; they are not the same fault.
+  bcv <- cv$bsadf_cv
+  if (!is.null(bcv) && is.matrix(bcv) && nrow(bcv) == length(bs) &&
+      all(c("90%", "95%") %in% colnames(bcv))) {
+    return(list(cv90 = as.numeric(bcv[nrow(bcv), "90%"]),
+                cv95 = as.numeric(bcv[nrow(bcv), "95%"]), route = "bsadf_cv"))
+  }
+  list(cv90 = NA, cv95 = NA, route = "unavailable")
+}
+
 bsadf <- NA; bsadf_cv90 <- NA; bsadf_cv95 <- NA; bsadf_n <- NA
-bsadf_argmax <- NA; bsadf_n_finite <- NA
+bsadf_argmax <- NA; bsadf_n_finite <- NA; bsadf_cv_route <- NA
 bs <- if (!is.null(r$bsadf)) as.numeric(r$bsadf) else NULL
 if (!is.null(bs) && length(bs) > 0L) {
   bsadf_n        <- length(bs)
@@ -91,15 +127,17 @@ if (!is.null(bs) && length(bs) > 0L) {
   if (is.finite(bs[length(bs)])) {
     bsadf <- bs[length(bs)]
   }
-  bcv <- cv$bsadf_cv
   # The endpoint CV is the LAST row, and ONLY if the CV matrix is row-aligned with
   # the BSADF sequence. A mismatch means the CVs were simulated under a different
   # (n, minw) than the fit; comparing them would be a silent category error, so
   # leave them NA and let Python floor s4 at the contested 0.25 instead.
-  if (is.finite(bsadf) && !is.null(bcv) && is.matrix(bcv) && nrow(bcv) == length(bs) &&
-      all(c("90%", "95%") %in% colnames(bcv))) {
-    bsadf_cv90 <- as.numeric(bcv[nrow(bcv), "90%"])
-    bsadf_cv95 <- as.numeric(bcv[nrow(bcv), "95%"])
+  #
+  # Losing this pair is expensive -- it floors s4 AND disables red flag #1 -- so
+  # the route taken (or "unavailable") is reported. See extract_bsadf_cv above
+  # for why there is no second route.
+  if (is.finite(bsadf)) {
+    got <- extract_bsadf_cv(r, cv, bs)
+    bsadf_cv90 <- got$cv90; bsadf_cv95 <- got$cv95; bsadf_cv_route <- got$route
   }
 
   # The argmax IS a claim about the supremum over the WHOLE history, so it does
@@ -116,5 +154,6 @@ cat(toJSON(list(gsadf = extract_stat(r),
                 bsadf_cv95 = bsadf_cv95,
                 bsadf_n        = bsadf_n,
                 bsadf_argmax   = bsadf_argmax,
-                bsadf_n_finite = bsadf_n_finite),
+                bsadf_n_finite = bsadf_n_finite,
+                bsadf_cv_route = bsadf_cv_route),
            auto_unbox = TRUE, na = "null"))

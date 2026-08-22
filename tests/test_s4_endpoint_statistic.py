@@ -21,6 +21,7 @@ must fail here.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -58,6 +59,29 @@ def _raw_diverging():
     raw.bsadf_argmax, raw.bsadf_n, raw.bsadf_n_finite = 126, 443, 443
     raw.gsadf_as_of = "2026-07"
     return raw
+
+
+def _require_r():
+    """Skip where R/exuber is absent — which includes CI's unit job (CI installs
+    R only for the image build). Runs on a developer host and in the container."""
+    import shutil
+    import subprocess
+    if shutil.which("Rscript") is None or subprocess.run(
+            ["Rscript", "-e", "library(exuber)"], capture_output=True).returncode != 0:
+        pytest.skip("R/exuber not available (CI unit job installs R only for the image build)")
+
+
+def _clean_series():
+    """A well-behaved series: no degenerate windows, so the CV route is the
+    direct one and the endpoint is computable."""
+    import math
+    import random
+    rng = random.Random(7)
+    y, lvl = [], 100.0
+    for _ in range(150):
+        lvl *= 1.0 + rng.uniform(-0.03, 0.035)
+        y.append(lvl)
+    return [math.log(v) for v in y]
 
 
 class TestTheArtifactOwnsTheChoice:
@@ -191,6 +215,93 @@ class TestPartialMetadataNeverCrashes:
         assert snap.red_flags.gsadf_explosive_noncontested is True
 
 
+class TestTheEndpointCvRouteIsHonest:
+    """Losing the endpoint CV pair floors s4 AND disables red flag #1, so the
+    reason must be visible. Evaluates ONLY the helper definition out of the
+    shipped r/gsadf.R, so the test binds the real script, not a copy."""
+
+    R_PROBE = r"""
+library(exuber)
+for (e in parse("r/gsadf.R")) {
+  if (is.call(e) && identical(as.character(e[[1]]), "<-") &&
+      identical(as.character(e[[2]]), "extract_bsadf_cv")) eval(e, envir = globalenv())
+}
+set.seed(3); r <- radf(cumsum(rnorm(90)), lag = 0L)
+cv <- radf_mc_cv(n = 90, nrep = 30); bs <- as.numeric(r$bsadf)
+cv2 <- cv; colnames(cv2$bsadf_cv) <- c("q90", "q95", "q99")
+cv3 <- cv; cv3$bsadf_cv <- cv$bsadf_cv[-1, , drop = FALSE]
+cat(extract_bsadf_cv(r, cv, bs)$route, extract_bsadf_cv(r, cv2, bs)$route,
+    extract_bsadf_cv(r, cv3, bs)$route, extract_bsadf_cv(r, list(), bs)$route, sep = ",")
+"""
+
+    def test_the_route_is_named_and_failures_are_not_silent(self, tmp_path):
+        _require_r()
+        import subprocess
+        proc = subprocess.run(["Rscript", "-e", self.R_PROBE], capture_output=True,
+                              text=True, cwd=".", timeout=600)
+        assert proc.returncode == 0, proc.stderr[-800:]
+        routes = proc.stdout.strip().splitlines()[-1].split(",")
+        good, renamed, misaligned, empty = routes
+        assert good == "bsadf_cv"
+        # Every failure mode reports itself rather than returning a silent NA.
+        assert renamed == misaligned == empty == "unavailable"
+
+    def test_the_shipped_script_reports_the_route(self, tmp_path):
+        _require_r()
+        import json
+        import subprocess
+        payload = json.dumps({"series": _clean_series(),
+                              "params": {"lag": 0, "mc_nrep": 40, "mc_seed": 20260711}})
+        proc = subprocess.run(["Rscript", "r/gsadf.R"], input=payload, capture_output=True,
+                              text=True, cwd=".", timeout=900,
+                              env={**os.environ, "GSADF_CV_CACHE": str(tmp_path)})
+        assert proc.returncode == 0, proc.stderr[-800:]
+        assert json.loads(proc.stdout)["bsadf_cv_route"] == "bsadf_cv"
+
+
+class TestTheFloorNoteNamesTheScoredStatistic:
+    """FLOOR used to imply the sup was missing, so "GSADF not computable" was true
+    by construction. Since v4.0 _s4_ok gates the ENDPOINT, so FLOOR is reachable
+    with a perfectly good sup published in the same payload."""
+
+    def test_the_note_does_not_blame_a_statistic_that_was_computed(self):
+        raw = _raw_diverging()
+        raw.bsadf_stat = None                      # endpoint missing, sup fine
+        s4 = compute_snapshot(raw, gsadf_contested=False).indicators["s4"]
+        assert s4.state == "FLOOR"
+        assert "BSADF@endpoint" in s4.note
+        # The sup IS computable and is published right there; saying otherwise
+        # contradicts the payload.
+        assert "GSADF not computable" not in s4.note
+        assert s4.extra["s4_statistic"]["gsadf_sup"]["stat"] == SUP_1986
+
+    def test_the_note_follows_the_frozen_selection(self, frozen_statistic):
+        frozen_statistic("gsadf_sup")
+        raw = _raw_diverging()
+        raw.gsadf_stat = None                      # now the SUP is the missing one
+        s4 = compute_snapshot(raw, gsadf_contested=False).indicators["s4"]
+        assert s4.state == "FLOOR"
+        assert "GSADF sup" in s4.note and "BSADF@endpoint" not in s4.note
+
+
+class TestTheCvRouteIsReported:
+    def test_the_route_rides_on_the_report(self):
+        raw = _raw_diverging()
+        raw.bsadf_cv_route = "augment_join"
+        extra = compute_snapshot(raw).indicators["s4"].extra["s4_statistic"]
+        assert extra["cv_route"] == "augment_join"
+
+    def test_an_unavailable_route_is_visible_not_silent(self):
+        # A CV-extraction failure and a degenerate series both floor s4, but they
+        # are different faults and must be distinguishable in the payload.
+        raw = _raw_diverging()
+        raw.bsadf_cv90 = raw.bsadf_cv95 = None
+        raw.bsadf_cv_route = "unavailable"
+        s4 = compute_snapshot(raw).indicators["s4"]
+        assert s4.state == "FLOOR"
+        assert s4.extra["s4_statistic"]["cv_route"] == "unavailable"
+
+
 class TestTheReportCarriesBoth:
     def test_both_statistics_are_reported(self):
         extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
@@ -278,10 +389,12 @@ class TestRunnerContract:
         out = self._run_with(monkeypatch, {
             "gsadf": SUP_1986, "cv90": SUP_CV90, "cv95": SUP_CV95,
             "bsadf": END_1986, "bsadf_cv90": END_CV90, "bsadf_cv95": END_CV95,
-            "bsadf_n": 443, "bsadf_argmax": 126, "bsadf_n_finite": 443})
+            "bsadf_n": 443, "bsadf_argmax": 126, "bsadf_n_finite": 443,
+            "bsadf_cv_route": "bsadf_cv"})
         assert (out.bsadf, out.bsadf_cv90, out.bsadf_cv95) == (END_1986, END_CV90, END_CV95)
         assert (out.bsadf_n, out.bsadf_argmax) == (443, 126)
         assert out.bsadf_n_finite == 443
+        assert out.bsadf_cv_route == "bsadf_cv"
 
     def test_null_endpoint_fields_degrade_to_none(self, monkeypatch):
         # R emits null when exuber returns no usable sequence, or when the CV
@@ -307,13 +420,7 @@ class TestTheRScriptReturnsTheEndpointNotTheSup:
 
     NREP, SEED = 40, 20260711
 
-    @staticmethod
-    def _require_r():
-        import shutil
-        import subprocess
-        if shutil.which("Rscript") is None or subprocess.run(
-                ["Rscript", "-e", "library(exuber)"], capture_output=True).returncode != 0:
-            pytest.skip("R/exuber not available (CI unit job installs R only for the image build)")
+    _require_r = staticmethod(_require_r)
 
     @staticmethod
     def _explosive_then_calm():

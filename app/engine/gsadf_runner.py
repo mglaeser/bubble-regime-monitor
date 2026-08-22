@@ -47,6 +47,9 @@ class GsadfOutput:
     # this is below bsadf_n: the sup cannot be honestly date-stamped over a
     # sequence with holes, though the ENDPOINT may still be perfectly valid.
     bsadf_n_finite: int | None = None
+    # Which route produced the endpoint CVs: the direct cv$bsadf_cv field, the
+    # public augment_join() fallback, or "unavailable" when neither worked.
+    bsadf_cv_route: str | None = None
 
 
 def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfOutput | None:
@@ -87,7 +90,9 @@ def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfO
                            bsadf_cv95=_opt_f("bsadf_cv95"),
                            bsadf_n=_opt_i("bsadf_n"),
                            bsadf_argmax=_opt_i("bsadf_argmax"),
-                           bsadf_n_finite=_opt_i("bsadf_n_finite"))
+                           bsadf_n_finite=_opt_i("bsadf_n_finite"),
+                           bsadf_cv_route=(None if out.get("bsadf_cv_route") is None
+                                           else str(out["bsadf_cv_route"])))
     except subprocess.CalledProcessError as exc:
         log.warning("gsadf_run_failed", returncode=exc.returncode,
                     stdout=(exc.stdout or "")[-400:], stderr=(exc.stderr or "")[-400:])

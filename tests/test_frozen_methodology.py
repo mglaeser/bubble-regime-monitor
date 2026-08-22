@@ -47,7 +47,11 @@ from app import methodology as M
 #               PUBLISHED value (IndicatorOutput.value, the rf1 record and the
 #               dashboard feed all moved to the endpoint). Wording only; the
 #               score-effective tree is unchanged and the golden stays 52.43.
-EXPECTED_SHA256 = "a601d8e91baaee84b83131d54169edc78fc8e540e6b87b8da3d3e92b5f7c7cf3"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
+#   8d734ed1... v4.0 note bound: the rationale cited T=487, but
+#               gsadf.series_months_max = 360 caps every runtime fit, so that
+#               measurement is offline; on the fitted 360-month tail the sup
+#               does NOT reject. Disclosed. Wording only; tree unchanged.
+EXPECTED_SHA256 = "8d734ed117a4bd0a07e8e481f11941c66b984e4c262d7d8afa640699bf6365db"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
 
 
 def test_sha256_byte_guard():

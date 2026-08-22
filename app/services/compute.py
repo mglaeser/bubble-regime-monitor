@@ -285,6 +285,7 @@ class RawInputs:
     bsadf_argmax: int | None = None   # 1-based index of the sup within the sequence
     bsadf_n: int | None = None
     bsadf_n_finite: int | None = None  # < bsadf_n means the history has holes
+    bsadf_cv_route: str | None = None  # "bsadf_cv" | "augment_join" | "unavailable"
     # S4 v4 SHADOW (GSADF_SHADOW_REAL_INDEX). Reported, never scored.
     gsadf_shadow_stat: float | None = None
     gsadf_shadow_cv90: float | None = None
@@ -597,6 +598,7 @@ def gather_inputs() -> RawInputs:
             raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
             raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
             raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
+            raw.bsadf_cv_route = out.bsadf_cv_route
             raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
         else:
             # Reason only — the "GSADF not computable this run" prefix is added
@@ -948,7 +950,15 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # tells the coverage gate — and the reader — that NOTHING was measured
         # this run. A floored s4 must not report itself as a full-quality reading.
         s4_state, s4_quality = "FLOOR", 0.0
-        s4_note = "GSADF not computable this run; contested/stale floor applied"
+        # Name the SCORED statistic. FLOOR used to imply the sup was missing, so
+        # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
+        # the ENDPOINT triple, so this branch is reachable with a perfectly good
+        # sup sitting in the same payload under extra.s4_statistic.gsadf_sup.
+        _floor_lab = {"bsadf_endpoint": "BSADF@endpoint",
+                      "gsadf_sup": "GSADF sup"}.get(
+            _M.get_path("gsadf", "statistic"), str(_M.get_path("gsadf", "statistic")))
+        s4_note = (f"s4 scored statistic ({_floor_lab}) not computable this run; "
+                   "contested/stale floor applied")
         if raw.gsadf_note:
             s4_note += f" ({raw.gsadf_note})"
         # v3.7.8/G-06: the 0.25 that stays in the aggregation on a FLOOR is an
@@ -1010,6 +1020,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             # own finiteness — but the sup has no honest date-stamp, so
             # sup_argmax_index is null. Reported rather than silently dropped.
             "sequence_finite": raw.bsadf_n_finite,
+            # Which route produced the endpoint CVs. "unavailable" means the CVs
+            # could not be extracted at all — a different fault from degenerate
+            # data, and one that floors s4 and disables red flag #1.
+            "cv_route": raw.bsadf_cv_route,
         }
     if raw.gsadf_shadow_note:
         s4_extra = dict(s4_extra or {})

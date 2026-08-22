@@ -367,7 +367,11 @@ detail keys are new; none are removed:
   the pre-v4.0 rule). Read it before interpreting `value`.
 - `gsadf_sup` — the **unscored** GSADF sup and its own CVs, retained so the
   endpoint-vs-sup divergence stays auditable from the payload alone. The values
-  above are the 1986 real-Nasdaq-100 divergence (exuber 1.1.0, T=487), where the
+  above are the 1986 real-Nasdaq-100 divergence (exuber 1.1.0, T=487 — an
+  **offline** measurement; `gsadf.series_months_max = 360` caps every runtime fit,
+  and on the 360-month tail the service does fit, the same series gives GSADF
+  1.3234 vs cv95 2.2099, no rejection, while the endpoint is 0.7562 under both),
+  where the
   sup rejects at 5% on a window ending 2000-02 while the endpoint is calm — an
   illustration, not a live capture.
 

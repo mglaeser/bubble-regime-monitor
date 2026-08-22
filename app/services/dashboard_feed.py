@@ -26,6 +26,7 @@ import json
 from datetime import UTC, date, datetime
 from typing import Any
 
+from app import methodology as _M
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -350,12 +351,17 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
     # construction — the same invariant lppls_confidence still holds below.
     # The metric key stays "gsadf" (METRIC_KEYS is a frozen 35-key contract); the
     # unscored sup remains visible under detail so nothing is lost.
+    # The configured family is a methodology constant, so it is known even on a
+    # run where s4 produced nothing. Reading it from the run's extra published
+    # detail.statistic = null exactly when a consumer most needs to know which
+    # statistic the null value would have been.
+    _scored_key = _M.get_path("gsadf", "statistic")
     _s4_meta = (s4.extra or {}).get("s4_statistic") or {}
-    _scored_fam = _s4_meta.get(_s4_meta.get("scored")) or {}
+    _scored_fam = _s4_meta.get(_scored_key) or {}
     m["gsadf"] = _scalar(s4.value, "stat", s4.as_of, "exuber",
                          note=None if s4.value is not None else
                          "not computable this run; CONTESTED flag is permanent",
-                         detail={"statistic": _s4_meta.get("scored"),
+                         detail={"statistic": _scored_key,
                                  "cv90": _scored_fam.get("cv90"),
                                  "cv95": _scored_fam.get("cv95"),
                                  "contested": True, "state": s4.state,
