@@ -112,3 +112,31 @@ def test_the_multiplier_has_a_single_source_of_truth():
     import inspect
     src = inspect.getsource(d2_margin.sub_score)
     assert "multiplier(" in src, "sub_score must use the shared mapping"
+
+
+def test_a_future_dated_margin_release_still_marks_the_input_ineligible(isolated_db):
+    """Lifting d2 out of the generic loop silently dropped its vintage check.
+
+    The loop appends `period_label_future:<id>` when a reading is dated after
+    the moment it was observed — a bad vintage or clock skew. An explicit path
+    that omits it evaluates future-labelled evidence as ordinary fresh data, and
+    the eligibility gate stops firing for that one indicator only, which is the
+    hardest kind of gap to notice.
+    """
+    snap = _snapshot_with_d2({
+        "value": 12.0, "sub_score": 0.9, "as_of": "2027-01",
+        "yoy_pct": 12.0, "rollover_state": True, "multiplier": 1.0,
+        "rollover_assertable": True, "release_period": "2027-01",
+    })
+    built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+    assert "period_label_future:d2" in built.ineligibility_reasons
+
+
+def test_an_ordinary_past_release_is_not_flagged(isolated_db):
+    snap = _snapshot_with_d2({
+        "value": 12.0, "sub_score": 0.9, "as_of": "2026-06",
+        "yoy_pct": 12.0, "rollover_state": True, "multiplier": 1.0,
+        "rollover_assertable": True, "release_period": "2026-06",
+    })
+    built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+    assert not any(r.startswith("period_label_future") for r in built.ineligibility_reasons)

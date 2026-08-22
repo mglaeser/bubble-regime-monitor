@@ -186,14 +186,20 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
         d2_value, d2_state, d2_reason = None, DataState.MISSING, "rollover_not_assertable"
     else:
         d2_value = d2_multiplier
+    d2_period = d2.get("release_period") or d2.get("as_of")
     add(obs.DOMAIN_MARGIN, d2_value, unit="multiplier", source_id="d2",
-        period_start=d2.get("release_period") or d2.get("as_of"),
-        period_end=d2.get("release_period") or d2.get("as_of"),
+        period_start=d2_period, period_end=d2_period,
         data_state=d2_state, reason=d2_reason,
         provider_id=d2.get("data_source"),
         metadata={"yoy_pct": d2.get("yoy_pct"),
                   "rollover_state": d2.get("rollover_state"),
                   "sub_score": d2.get("sub_score")})
+    # The same vintage check the generic loop applies. Lifting d2 out of that
+    # loop silently dropped it — a reading dated after the moment we observed
+    # it is a bad vintage or clock skew, and it must mark the INPUT ineligible
+    # rather than being evaluated as ordinary fresh evidence.
+    if d2_period and computed_at and d2_period > computed_at[:10]:
+        ineligibility.append("period_label_future:d2")
 
     # d3 is a GATE (a decision), not a level.
     d3 = indicators.get("d3") or {}
