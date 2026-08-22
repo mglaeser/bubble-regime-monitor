@@ -128,7 +128,17 @@ def rollover_confirmed_calendar(months: list[str], values: list[float]) -> bool 
     return declines and peak_not_latest
 
 
+def multiplier(rollover: bool) -> float:
+    """The frozen rollover multiplier that scoring applies.
+
+    Exposed so the alert layer can PUBLISH which multiplier was used without
+    re-deriving the mapping. Alerting must never reproduce an authoritative
+    formula — a duplicate is a defect even while it agrees.
+    """
+    return float(ROLLOVER_MULT if rollover else NO_ROLLOVER_MULT)
+
+
 def sub_score(yoy: float, rollover: bool) -> float:
     base = max(0.0, min(1.0, (yoy - _M.get_path("indicators", "d2", "yoy_anchor"))
                         / _M.get_path("indicators", "d2", "yoy_span")))
-    return base * (ROLLOVER_MULT if rollover else NO_ROLLOVER_MULT)
+    return base * multiplier(rollover)

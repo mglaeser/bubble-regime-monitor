@@ -995,8 +995,20 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                 "no rollover; mult=0.6")
         if raw.margin_note:
             note = f"{raw.margin_note}; {note}"
-        indicators["d2"] = IndicatorOutput("d2", yoy, sub, False, "finra_xlsx", False,
-                                           note=note, as_of=raw.margin_as_of)
+        indicators["d2"] = IndicatorOutput(
+            "d2", yoy, sub, False, "finra_xlsx", False,
+            note=note, as_of=raw.margin_as_of,
+            # TYPED, because the alert layer cannot read the prose above and
+            # must not re-derive the mapping. `value` is the YoY PERCENTAGE;
+            # the rollover tripwire watches the MULTIPLIER, a different
+            # quantity entirely. rollover_state keeps all three states —
+            # scoring must pick a number and collapses None to "no rollover",
+            # but an unassertable rollover is UNKNOWN to alerting, never false.
+            extra={"yoy_pct": yoy,
+                   "rollover_state": rolled_state,
+                   "rollover_assertable": rolled_state is not None,
+                   "multiplier": d2_margin.multiplier(rolled),
+                   "release_period": raw.margin_as_of})
     elif raw.margin_cached is not None:
         # Guard (a): data older than 90 days (or missing) never feeds a YoY
         # across a broken window — serve the last good cached reading.
@@ -1009,7 +1021,13 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "d2", raw.margin_cached.get("value"), sub, False, "finra_xlsx (cached)", True,
             note=f"{reason}; serving cached reading from {raw.margin_cached['timestamp']}; "
                  "rollover: unknown",
-            as_of=raw.margin_as_of)
+            as_of=raw.margin_as_of,
+            # A cached reading says so in prose already; say it in a field too.
+            extra={"yoy_pct": raw.margin_cached.get("value"),
+                   "rollover_state": None,
+                   "rollover_assertable": False,
+                   "multiplier": None,
+                   "release_period": raw.margin_as_of})
     else:
         indicators["d2"] = IndicatorOutput("d2", None, None, True, "finra_xlsx", False,
                                            note="margin statistics unavailable, no cached reading; "
