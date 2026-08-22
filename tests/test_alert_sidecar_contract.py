@@ -391,3 +391,105 @@ def test_a_row_without_the_typed_tier_is_missing_not_a_number(isolated_db):
     assert evidence.value is None
     assert evidence.data_state == DataState.MISSING
     assert evidence.freshness_reason_code == "typed_s5_tier_absent"
+
+
+# ---------------------------------------------------------------------------
+# legs: dated by the ECONOMIC period, and Faber's authoritative state is
+# month-end (audit B-09 and B-10 — one defect family, one code block)
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_with_legs(trend: dict) -> Snapshot:
+    with session_scope() as session:
+        snap = Snapshot(
+            computed_at=datetime(2026, 8, 21, 6, 0, tzinfo=UTC), service_version="test",
+            median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+            point_score=51.0, action_band="trim", override_fired=False,
+            red_flag_count=0, red_flag_detail={},
+            block_s={"indicators": {}}, block_d={"indicators": {}},
+            trend_states=trend, fast_alarm={}, data_freshness={})
+        session.add(snap)
+        session.flush()
+        session.expunge(snap)
+        return snap
+
+
+def _leg(snap: Snapshot, domain: str):
+    built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+    for item in built.legs:
+        if item.observation_domain_id == domain:
+            return item
+    raise AssertionError(f"no leg evidence for {domain}")
+
+
+_FULL_SPY = {
+    "SPY": {
+        "faber_10mo": "OUT",                  # legacy live-preview field
+        "faber_live_preview": "OUT",
+        "faber_month_end_state": "IN",        # last COMPLETED month says IN
+        "faber_month_end_period": "2026-07",
+        "faber_distance_pct": 1.8,
+        "sma200_state": "IN",
+        "sma200_as_of": "2026-08-20",
+        "sma200": "IN",
+    },
+}
+
+
+def test_the_faber_leg_publishes_the_month_end_state_not_the_live_preview(isolated_db):
+    """`faber_state` stands the in-progress month's latest close in for a
+    month-end close — its own docstring says so. That is a live preview.
+
+    The P1 rule `legs.faber_spy_out_high_risk` confirms on a NEW MONTH-END
+    period. Publishing the preview under that contract means an intramonth
+    wobble reads as a completed month-end flip, and the most severe alert the
+    system can send fires on a month that has not ended.
+    """
+    evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_FABER)
+    assert evidence.value == "IN", "must be the completed month's state, not the preview"
+
+
+def test_the_faber_leg_is_dated_by_its_month_not_by_the_recompute(isolated_db):
+    """Stamping computed_at makes every four-hour run a new economic period."""
+    evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_FABER)
+    assert evidence.period_end == "2026-07"
+    assert not str(evidence.period_end).startswith("2026-08-21")
+
+
+def test_six_recomputes_in_one_month_are_one_faber_observation(isolated_db):
+    """The property `basis: new_month_end_period` actually depends on."""
+    keys = []
+    for hour in (0, 4, 8, 12, 16, 20):
+        with session_scope() as session:
+            snap = Snapshot(
+                computed_at=datetime(2026, 8, 21, hour, 0, tzinfo=UTC),
+                service_version="test",
+                median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+                point_score=51.0, action_band="trim", override_fired=False,
+                red_flag_count=0, red_flag_detail={},
+                block_s={"indicators": {}}, block_d={"indicators": {}},
+                trend_states=_FULL_SPY, fast_alarm={}, data_freshness={})
+            session.add(snap)
+            session.flush()
+            session.expunge(snap)
+        keys.append(_leg(snap, obs.DOMAIN_LEG_SPY_FABER).economic_observation_key)
+    assert len(set(keys)) == 1, "six recomputes in one month must be ONE observation"
+
+
+def test_the_sma200_leg_is_dated_by_its_trading_date(isolated_db):
+    """`legs.sma200_flip` needs three distinct TRADING DATES.
+
+    Dated by computed_at, three four-hour recomputes manufacture a
+    "three trading date" confirmation in eight hours.
+    """
+    evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_SMA200)
+    assert evidence.period_end == "2026-08-20"
+
+
+def test_a_snapshot_without_the_typed_leg_fields_is_missing_not_a_state(isolated_db):
+    """Historical rows carry only the live preview; it must not be promoted."""
+    legacy = {"SPY": {"faber_10mo": "OUT", "sma200": "IN"}}
+    faber = _leg(_snapshot_with_legs(legacy), obs.DOMAIN_LEG_SPY_FABER)
+    assert faber.value is None
+    assert faber.data_state == DataState.MISSING
+    assert faber.freshness_reason_code == "typed_month_end_absent"
