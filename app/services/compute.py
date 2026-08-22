@@ -1466,7 +1466,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             # deterministic, and errs toward "still running", which delays an
             # alert rather than firing one on an unfinished month.
             me_state, me_period = legs.month_end_faber(
-                daily, as_of_month=(as_of_date[:7] if as_of_date else daily[-1][0][:7]))
+                daily,
+                as_of_month=(as_of_date[:7] if as_of_date else daily[-1][0][:7]),
+                as_of_date=as_of_date)
             states["faber_month_end_state"] = me_state
             states["faber_month_end_period"] = me_period
         if closes:

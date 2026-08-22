@@ -606,28 +606,42 @@ def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
     assert sma.period_end is None, "but it must not claim a date it does not have"
 
 
-def test_a_stale_feed_does_not_promote_its_partial_month():
-    """The calendar alone cannot close a month; the DATA has to.
+def test_month_completion_needs_the_calendar_AND_a_publishing_feed():
+    """Two failures that trade off against each other, both avoided.
 
-    A feed whose newest bar is mid-July is still "past" once September
-    arrives. Promoting July then publishes a MID-JULY close as July's
-    month-end close — the exact substitution this function exists to refuse,
-    returning by way of the clock instead of the bar.
+    Waiting for a later bar means a month that ended on Friday is not
+    authoritative until Monday — a late P1. Trusting the calendar alone means a
+    feed that stopped mid-July gets July promoted once September arrives, with
+    a MID-JULY close standing in for July's month-end close — a wrong P1.
 
-    The cost is a bounded lag: a month ending on a Friday is not authoritative
-    until the next session's bar lands. That is deliberate. A late correct
-    state is recoverable; a P1 fired on a partial month is not, and no
-    staleness cutoff separates the two without inventing a threshold no
-    artifact defines.
+    The tolerance that separates them is DERIVED, not chosen: the largest gap
+    between consecutive bars in the recent window already encodes weekends and
+    holidays for whatever series this is. Nothing here is a number an operator
+    would calibrate.
     """
-    from app.engine.legs import month_end_faber
+    from datetime import date, timedelta
 
-    base = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
+    from app.engine.legs import feed_is_current, month_end_faber
 
-    stale = base + [("2026-07-15", 50.0)]          # feed stopped mid-July
-    _, period = month_end_faber(stale, as_of_month="2026-09")
-    assert period == "2025-12", "a partial month must not be promoted by the clock"
+    day, end, bars, px = date(2025, 8, 1), date(2026, 7, 31), [], 100.0
+    while day <= end:
+        if day.weekday() < 5:
+            px += 0.1
+            bars.append((day.isoformat(), px))
+        day += timedelta(days=1)
 
-    rolled = base + [("2026-07-31", 50.0), ("2026-08-03", 51.0)]
-    _, closed = month_end_faber(rolled, as_of_month="2026-09")
-    assert closed == "2026-07", "a later bar proves the month closed"
+    # the derived tolerance is the feed's own worst gap — a weekend
+    assert feed_is_current(bars, "2026-08-03") is True
+    assert feed_is_current(bars, "2026-09-02") is False
+
+    # publishing normally: July is authoritative the first session after it ends
+    _, prompt = month_end_faber(bars, as_of_month="2026-08", as_of_date="2026-08-03")
+    assert prompt == "2026-07", "a completed month must not wait for another bar"
+
+    # same feed, stopped: July must not be promoted from partial data
+    _, stale = month_end_faber(bars, as_of_month="2026-09", as_of_date="2026-09-02")
+    assert stale == "2026-06", "a stale feed's partial month is not a month-end"
+
+    # and the in-progress month is never promoted, whatever the feed is doing
+    _, running = month_end_faber(bars[:-8], as_of_month="2026-07", as_of_date="2026-07-20")
+    assert running == "2026-06"
