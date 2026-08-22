@@ -1106,7 +1106,7 @@ def test_a_period_basis_is_honoured_even_with_a_single_observation():
     # the condition drops out and returns, still inside the same period
     memory = InstanceMemory(state_version=1, condition_state=ConditionState.NORMAL,
                             last_known_condition_state=ConditionState.NORMAL,
-                            last_fired_observation_key=first.fired_observation_key)
+                            fired_observation_keys=(first.fired_observation_key,))
     again = make_input(identity="b", rf4=True, rf4_period="2026-08-14")
     repeat = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
                             outcome=evaluate_rule(rule, _ctx(again)),
@@ -1132,7 +1132,7 @@ def test_a_transition_basis_still_fires_on_every_transition():
     rule = _rule()          # band transition rule, basis authoritative_transition
     before = make_input(identity="a", effective="trim")
     after = make_input(identity="b", effective="de-risk")
-    memory = InstanceMemory(state_version=1, last_fired_observation_key="anything")
+    memory = InstanceMemory(state_version=1, fired_observation_keys=("anything",))
     decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
                               outcome=evaluate_rule(rule, _ctx(after, before)),
                               ctx=_ctx(after, before), now=NOW)
@@ -1185,7 +1185,7 @@ def test_a_suppressed_repeat_does_not_advance_the_cooldown_clock():
 
     memory = InstanceMemory(state_version=1, condition_state=ConditionState.NORMAL,
                             last_known_condition_state=ConditionState.NORMAL,
-                            last_fired_observation_key=first.fired_observation_key)
+                            fired_observation_keys=(first.fired_observation_key,))
     again = make_input(identity="b", rf4=True, rf4_period="2026-08-14")
     repeat = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
                             outcome=evaluate_rule(rule, _ctx(again)),
@@ -1198,7 +1198,7 @@ def test_the_fired_key_fits_the_column_it_is_stored_in():
     """An observation key is already 64 hex characters.
 
     A single `source=key` pair is 75, so the composite overflowed
-    `alert_rule_state.last_fired_observation_key` (VARCHAR(64)) before a second
+    `alert_rule_state.fired_observation_keys` before a second
     source was even considered, and the activation would have aborted on write
     for every rule. The digest is fixed-width by construction.
     """
@@ -1217,3 +1217,60 @@ def test_the_fired_key_fits_the_column_it_is_stored_in():
         key = _fired_key([rec(f"source_number_{i}", realistic) for i in range(n_sources)])
         assert key is not None
         assert len(key) <= SHA_LEN, f"{n_sources} sources overflowed: {len(key)} > {SHA_LEN}"
+
+
+def test_a_period_that_regresses_and_returns_does_not_fire_twice():
+    """The remembered set is membership, not adjacency.
+
+    The cohort period these keys derive from can REGRESS: an issuer skipped by
+    the EDGAR adapter lowers a max that later recovers. So the sequence
+    A, B, A is reachable, and comparing only against the previous key would let
+    the return to A alert a second time about one filing.
+    """
+    rule = _rule(
+        rule_id="test.filing", source_fields=["rf4_active"],
+        condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+        confirmation={"count": 1, "basis": "distinct_economic_observation"},
+        confirmation_sources=["rf4_active"],
+    )
+
+    def fire(memory: InstanceMemory, period: str):
+        current = make_input(identity=period, rf4=True, rf4_period=period)
+        return evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                              outcome=evaluate_rule(rule, _ctx(current)),
+                              ctx=_ctx(current), now=NOW)
+
+    memory = InstanceMemory()
+    a1 = fire(memory, "2026-08-14")
+    assert a1.notification_eligible is True
+
+    memory = InstanceMemory(state_version=1, fired_observation_keys=a1.fired_observation_keys)
+    b = fire(memory, "2026-09-14")
+    assert b.notification_eligible is True, "a genuinely new period alerts"
+
+    # the period regresses back to A
+    memory = InstanceMemory(state_version=2, fired_observation_keys=b.fired_observation_keys)
+    a2 = fire(memory, "2026-08-14")
+    assert a2.notification_eligible is False, "A already fired; the return is an artifact"
+    assert "same_economic_period_refire" in a2.reasons
+
+
+def test_the_remembered_set_is_bounded():
+    """Unbounded audit state in a hot row is its own defect."""
+    from app.alerts.state_machine import _FIRED_KEY_MEMORY
+
+    rule = _rule(
+        rule_id="test.filing", source_fields=["rf4_active"],
+        condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+        confirmation={"count": 1, "basis": "distinct_economic_observation"},
+        confirmation_sources=["rf4_active"],
+    )
+    memory = InstanceMemory()
+    for month in range(1, _FIRED_KEY_MEMORY + 6):
+        current = make_input(identity=f"m{month}", rf4=True, rf4_period=f"2026-{month % 12 + 1:02d}-0{month % 9 + 1}")
+        decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                                  outcome=evaluate_rule(rule, _ctx(current)),
+                                  ctx=_ctx(current), now=NOW)
+        memory = InstanceMemory(state_version=month,
+                                fired_observation_keys=decision.fired_observation_keys)
+    assert len(memory.fired_observation_keys) == _FIRED_KEY_MEMORY

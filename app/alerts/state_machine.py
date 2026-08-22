@@ -62,8 +62,8 @@ class InstanceMemory:
     #: economic observation keys already counted toward the OPEN candidate,
     #: keyed by confirmation source id.
     confirmed_keys: dict[str, frozenset[str]] = field(default_factory=dict)
-    #: the economic observation that last caused an activation (see below).
-    last_fired_observation_key: str | None = None
+    #: economic observations that have already caused an activation (see below).
+    fired_observation_keys: tuple[str, ...] = ()
 
 
 @dataclass
@@ -111,6 +111,8 @@ class StateDecision:
     #: the economic observation this firing is attributed to; persisted so a
     #: later re-entry on the same period can be recognised as a repeat.
     fired_observation_key: str | None = None
+    #: the bounded remembered set to persist, newest first.
+    fired_observation_keys: tuple[str, ...] = ()
     #: true when this activation is a re-entry on a period that already fired.
     #: The episode is still recorded; the notification and the wall-clock
     #: cooldown clock are what a repeat must not move.
@@ -156,6 +158,11 @@ def effective_prior_state(condition_state: str, last_known: str | None) -> str |
 #: count == 1. `authoritative_transition` and `adjacent_snapshots` are excluded
 #: deliberately: they count transitions and snapshots, not periods, so a second
 #: genuine transition must still fire.
+#: How many fired observations to remember. Bounded because unbounded audit
+#: state in a hot row is its own defect; the window only has to outlast the
+#: regressions a feed can produce, not the life of the rule.
+_FIRED_KEY_MEMORY = 16
+
 _PERIOD_BASES = frozenset({
     "distinct_economic_observation",
     "distinct_trading_date",
@@ -360,14 +367,22 @@ def evaluate_state(
         # firing and the audit trail should say so; the NOTIFICATION is what a
         # repeat must not earn.
         fired_key = _fired_key(records)
+        # Membership, not adjacency. The period this keys on can REGRESS — an
+        # issuer skipped by the EDGAR adapter lowers a cohort max that later
+        # recovers — so A, B, A is reachable and comparing only against the
+        # previous key would let the return to A fire again.
         repeat = (rule.confirmation.basis in _PERIOD_BASES
                   and fired_key is not None
-                  and fired_key == memory.last_fired_observation_key)
+                  and fired_key in memory.fired_observation_keys)
         decision.condition_state = ConditionState.FIRING
         decision.consecutive_true = memory.consecutive_true + 1
         decision.open_episode = memory.current_episode_id is None
         decision.activate_episode = True
-        decision.fired_observation_key = fired_key or memory.last_fired_observation_key
+        decision.fired_observation_key = fired_key
+        remembered = list(memory.fired_observation_keys)
+        if fired_key is not None and fired_key not in remembered:
+            remembered.insert(0, fired_key)
+        decision.fired_observation_keys = tuple(remembered[:_FIRED_KEY_MEMORY])
         decision.confirmations = records + hold_records
         decision.confirmation_progress = {r.source_id: 1 for r in records}
         decision.repeat_of_fired_key = repeat

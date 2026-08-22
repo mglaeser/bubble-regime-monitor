@@ -127,7 +127,7 @@ def load_memories(
                 candidate_ttl_policy=row.candidate_ttl_policy,
                 current_episode_id=row.current_episode_id,
                 confirmed_keys=confirmed,
-                last_fired_observation_key=row.last_fired_observation_key,
+                fired_observation_keys=tuple(row.fired_observation_keys or ()),
             ),
         )
     return out
@@ -281,9 +281,9 @@ def apply_decision(
         # what suppressing the repeat was for.
         if not decision.repeat_of_fired_key:
             values["last_fired_at"] = now
-        # The key is remembered either way, so a third entry on the same period
-        # is still recognised rather than resetting the moment one is held.
-        values["last_fired_observation_key"] = decision.fired_observation_key
+        # Remembered either way, so a third entry on the same period is still
+        # recognised rather than resetting the moment one is held.
+        values["fired_observation_keys"] = list(decision.fired_observation_keys)
 
     if existing is None:
         session.add(AlertRuleState(
