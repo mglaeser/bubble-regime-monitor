@@ -890,9 +890,18 @@ def populate_gsadf_shadow(raw: RawInputs) -> None:
 
 def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
-                     gsadf_contested: bool | None = None) -> SnapshotData:
+                     gsadf_contested: bool | None = None,
+                     as_of_date: str | None = None) -> SnapshotData:
     """PURE scoring pipeline: raw inputs -> snapshot data. Never raises on
-    missing sources; drops indicators and renormalizes instead."""
+    missing sources; drops indicators and renormalizes instead.
+
+    `as_of_date` (ISO) is the day the caller is evaluating on, used ONLY to
+    decide whether a price feed's last month has ended. It is optional and
+    defaults to the newest bar's own month, so the function stays pure and
+    reproducible for fixtures and replay; production passes the real date
+    because without it a completed month is not recognised until the first bar
+    of the NEXT month arrives, which delays a month-end P1 by a day or more.
+    """
     settings = get_settings()
     n = mc_samples or settings.mc_samples
     seed = mc_seed or settings.mc_seed
@@ -1443,13 +1452,21 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                 states["faber_distance_pct"] = legs.faber_distance_pct(monthly)
             except ValueError:
                 states["faber_10mo"] = "unknown"
-            # EACH asset is classified against ITS OWN latest bar. The feeds
-            # are independent and can be asynchronous, so borrowing one
-            # asset's clock could declare the other's month complete while it
-            # is still running — reintroducing the intramonth defect for the
-            # asset that happens to lag.
+            # The clock is the EVALUATION date when the caller supplies one,
+            # and the asset's own newest bar otherwise.
+            #
+            # Never another ASSET's bar: the feeds are independent and can be
+            # asynchronous, so borrowing one asset's clock could declare the
+            # other's month complete while it is still running.
+            #
+            # And never only the bar, in production: with no evaluation date a
+            # month that has genuinely ended is not recognised until the first
+            # bar of the NEXT month arrives, so a month-end P1 waits on the
+            # next session. Falling back to the bar keeps fixtures and replay
+            # deterministic, and errs toward "still running", which delays an
+            # alert rather than firing one on an unfinished month.
             me_state, me_period = legs.month_end_faber(
-                daily, as_of_month=daily[-1][0][:7])
+                daily, as_of_month=(as_of_date[:7] if as_of_date else daily[-1][0][:7]))
             states["faber_month_end_state"] = me_state
             states["faber_month_end_period"] = me_period
         if closes:
@@ -1659,7 +1676,9 @@ def run_recompute() -> int | None:
     block empty). Never raises upstream failures."""
     raw = gather_inputs()
     try:
-        data = compute_snapshot(raw)
+        # The real evaluation date: without it a completed month is invisible
+        # until the next month's first bar lands.
+        data = compute_snapshot(raw, as_of_date=datetime.now(UTC).date().isoformat())
     except RuntimeError as exc:
         log.error("recompute_impossible", error=str(exc))
         return None
