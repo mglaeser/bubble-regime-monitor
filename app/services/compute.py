@@ -1432,7 +1432,6 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # confirm on a NEW MONTH-END PERIOD, so the authoritative state — computed
     # from COMPLETED months only — is persisted beside it, with the month it
     # belongs to. `faber_10mo` keeps its meaning and its consumers unchanged.
-    as_of_month = (raw.spy_daily[-1][0][:7] if raw.spy_daily else None)
     for name, daily, closes in (("SPY", raw.spy_daily, raw.spy_daily_closes),
                                 ("QQQ", raw.qqq_daily, raw.qqq_daily_closes)):
         states: dict[str, Any] = {}
@@ -1444,8 +1443,13 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                 states["faber_distance_pct"] = legs.faber_distance_pct(monthly)
             except ValueError:
                 states["faber_10mo"] = "unknown"
-            month = as_of_month or daily[-1][0][:7]
-            me_state, me_period = legs.month_end_faber(daily, as_of_month=month)
+            # EACH asset is classified against ITS OWN latest bar. The feeds
+            # are independent and can be asynchronous, so borrowing one
+            # asset's clock could declare the other's month complete while it
+            # is still running — reintroducing the intramonth defect for the
+            # asset that happens to lag.
+            me_state, me_period = legs.month_end_faber(
+                daily, as_of_month=daily[-1][0][:7])
             states["faber_month_end_state"] = me_state
             states["faber_month_end_period"] = me_period
         if closes:
