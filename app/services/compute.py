@@ -264,6 +264,11 @@ class RawInputs:
     gsadf_cv90: float | None = None
     gsadf_cv95: float | None = None
     gsadf_note: str | None = None
+    # S4 v4 SHADOW (GSADF_SHADOW_REAL_INDEX). Reported, never scored.
+    gsadf_shadow_stat: float | None = None
+    gsadf_shadow_cv90: float | None = None
+    gsadf_shadow_cv95: float | None = None
+    gsadf_shadow_note: str | None = None
 
     hy_oas_bps: float | None = None
     hy_oas_history_bps: list[float] | None = None
@@ -573,6 +578,8 @@ def gather_inputs() -> RawInputs:
     else:
         raw.gsadf_note = "no Nasdaq-100/QQQ series this run"
 
+    populate_gsadf_shadow(raw)
+
     # HY OAS: FRED latest + own persisted history (FRED 3-yr truncation).
     # The date parse lives INSIDE the tracked callable, like `_ebp` below:
     # `date.fromisoformat` on a vendor string can raise, and out in the gather
@@ -750,6 +757,43 @@ def gather_inputs() -> RawInputs:
     return raw
 
 
+
+def populate_gsadf_shadow(raw: RawInputs) -> None:
+    """S4 v4 SHADOW: the same test on the input the cited papers use.
+
+    REPORTED, NEVER SCORED. PIN C (docs/PINS_DECISION_MEMO.md) holds the
+    instrument change pending "a documented drift gate"; this produces it.
+
+    A FUNCTION, not an inline block, because inline it was untestable: it lives
+    on the GATHER path while compute_snapshot is the pure scoring pipeline, so no
+    test could reach it. A mutation that disabled the guard
+    (`if False and get_settings()...`) survived the whole suite -- which is the
+    original "the shadow produces nothing" defect, undetected a second time.
+
+    Failure is silent by construction: a shadow that can break a recompute would
+    be a scoring dependency wearing a different name.
+    """
+    if not get_settings().gsadf_shadow_real_index:
+        return
+    try:
+        from app.sources import fred_real_index as _fri
+
+        shadow_as_of, shadow_series = _fri.real_monthly_log_index()
+        shadow_out = run_gsadf(
+            shadow_series[-_M.get_path("gsadf", "series_months_max"):],
+            timeout_s=get_settings().gsadf_timeout_s)
+        if shadow_out:
+            raw.gsadf_shadow_stat = shadow_out.gsadf
+            raw.gsadf_shadow_cv90 = shadow_out.cv90
+            raw.gsadf_shadow_cv95 = shadow_out.cv95
+            raw.gsadf_shadow_note = (
+                f"SHADOW (not scored): real CPI-deflated native NASDAQ100 from FRED, "
+                f"monthly month-end, T={len(shadow_series)}, as_of {shadow_as_of}")
+        else:
+            raw.gsadf_shadow_note = "SHADOW (not scored): R/exuber unavailable or the fit failed"
+    except Exception as exc:  # noqa: BLE001 -- a shadow must never break a recompute
+        raw.gsadf_shadow_note = f"SHADOW (not scored): unavailable — {str(exc)[:120]}"
+
 def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
                      gsadf_contested: bool | None = None) -> SnapshotData:
@@ -829,7 +873,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # ---- S4 GSADF ----
     # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
     # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
-    s4_sub = s4_gsadf.sub_score(raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95, contested)
+    s4_sub = s4_gsadf.sub_score(raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95, contested,
+                                asymmetric=settings.gsadf_contested_asymmetric)
     sub_s["s4"] = s4_sub
     mc_in.s4_sub = s4_sub
     # COMPUTED requires a finite statistic AND both CVs finite and ordered
@@ -850,13 +895,29 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # v3.7.8/G-06: the 0.25 that stays in the aggregation on a FLOOR is an
         # IMPUTATION of missing data to the contested floor, NOT a computed cap.
         # Label it explicitly so the deferred drop-vs-impute decision is visible.
-        s4_extra = {"imputation": "missing_to_contested_floor"}
+        s4_extra: dict[str, object] | None = {"imputation": "missing_to_contested_floor"}
     else:
         # Computed successfully. The contested CAP is epistemic policy, not a
         # data-quality problem — a capped-but-measured s4 is a full-quality read.
         s4_state, s4_quality = "COMPUTED", 1.0
         s4_note = raw.gsadf_note or f"GSADF_CONTESTED={str(contested).lower()}"
         s4_extra = None
+    # DUAL REPORT (PIN C's "documented drift gate"). The shadow was previously
+    # written to RawInputs and never read by anything -- computed at the cost of a
+    # FRED round-trip and a second R run, then discarded with the object. It now
+    # rides on IndicatorOutput.extra, the same channel s5 already uses for its
+    # dual report (extra["s5_dual_report"], read back in app/services/replay.py).
+    # included_in_score is false and there is no parameter by which it could
+    # become true: sub_score never sees it.
+    if raw.gsadf_shadow_note:
+        s4_extra = dict(s4_extra or {})
+        s4_extra["s4_shadow"] = {
+            "included_in_score": False,
+            "note": raw.gsadf_shadow_note,
+            "gsadf": raw.gsadf_shadow_stat,
+            "cv90": raw.gsadf_shadow_cv90,
+            "cv95": raw.gsadf_shadow_cv95,
+        }
     # as_of = the QQQ monthly series GSADF actually ran on (v3.7.1 — was the
     # unrelated semis-series date, a provenance mislabel).
     indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False,

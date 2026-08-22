@@ -78,10 +78,22 @@ def sub_score(gsadf_stat: float | None, cv90: float | None, cv95: float | None,
         # ASYMMETRIC CONTESTED (off by default; GSADF_CONTESTED_ASYMMETRIC).
         #
         # The contested flag exists because of Chen et al. (2026, arXiv
-        # 2604.25826): under hump-shaped GPT fundamentals the test "spuriously
-        # rejects the no-bubble null 93-100% of the time". That is SIZE
-        # DISTORTION -- it bounds FALSE POSITIVES. It says nothing against a
-        # NON-rejection.
+        # 2604.25826). Their finding, VERBATIM, sec 1: "In Monte Carlo
+        # simulations calibrated to postwar United States equity data and
+        # containing only technology-driven fundamentals with no speculative
+        # component, PSY rejects the null of no bubble in 93 percent of samples
+        # for detrended log prices and 100 percent for the price-dividend ratio
+        # at the 5 percent nominal level."
+        #
+        # Note what that is and is not. TWO specifications, not a range: 93% is
+        # detrended log prices, 100% is the price-dividend ratio. s4 runs
+        # NEITHER -- it runs raw log prices -- so the figures bound the concern,
+        # they do not measure this configuration. An earlier version of this
+        # comment rendered them as a quoted "93-100%", which is a paraphrase in
+        # quotation marks; the phrase is not in the paper.
+        #
+        # Either way it is SIZE DISTORTION -- it bounds FALSE POSITIVES, and says
+        # nothing against a NON-rejection.
         #
         # The inference runs the other way: if a test is biased toward
         # rejecting and still fails to reject, that is stronger evidence of no
