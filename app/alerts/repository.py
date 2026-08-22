@@ -275,10 +275,14 @@ def apply_decision(
         "updated_at": now,
     }
     if decision.activate_episode:
-        values["last_fired_at"] = now
-        # Remembered even when the activation was suppressed as a repeat, so a
-        # third entry on the same period is still recognised rather than
-        # resetting the moment one is held.
+        # A repeat on an already-fired period must NOT advance the cooldown
+        # clock: doing so pushes the window forward on an artifact and can
+        # delay the next legitimate period's alert, which is the opposite of
+        # what suppressing the repeat was for.
+        if not decision.repeat_of_fired_key:
+            values["last_fired_at"] = now
+        # The key is remembered either way, so a third entry on the same period
+        # is still recognised rather than resetting the moment one is held.
         values["last_fired_observation_key"] = decision.fired_observation_key
 
     if existing is None:

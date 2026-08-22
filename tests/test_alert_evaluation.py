@@ -1138,3 +1138,57 @@ def test_a_transition_basis_still_fires_on_every_transition():
                               ctx=_ctx(after, before), now=NOW)
     assert decision.activate_episode is True
     assert decision.notification_eligible is True
+
+
+def test_the_fired_key_is_bound_to_its_source():
+    """Joining observation keys alone is source-blind.
+
+    A two-source rule whose sources exchange keys between firings canonicalises
+    to the same string either way — sorted({X, Y}) — so a genuinely new period
+    would read as a repeat and a real notification would be suppressed.
+    """
+    from app.alerts.state_machine import ConfirmationRecord, _fired_key
+
+    def rec(source: str, key: str) -> ConfirmationRecord:
+        return ConfirmationRecord(
+            source_id=source, economic_observation_key=key,
+            source_revision_key="r", computation_fingerprint="c",
+            observed_at=None, confirmation_role="CONFIRMATION",
+            fresh_at_evaluation=True)
+
+    swapped_a = _fired_key([rec("alpha", "X"), rec("beta", "Y")])
+    swapped_b = _fired_key([rec("alpha", "Y"), rec("beta", "X")])
+    assert swapped_a != swapped_b, "a source swap is a different observation set"
+
+    # order of the records must NOT matter, only the pairing
+    assert _fired_key([rec("beta", "Y"), rec("alpha", "X")]) == swapped_a
+
+
+def test_a_suppressed_repeat_does_not_advance_the_cooldown_clock():
+    """Pushing `last_fired_at` forward on an artifact delays the real alert.
+
+    The repeat is suppressed precisely because it is not an event; letting it
+    move the wall-clock window would make the next legitimate period wait, which
+    inverts the purpose.
+    """
+    rule = _rule(
+        rule_id="test.filing", source_fields=["rf4_active"],
+        condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+        confirmation={"count": 1, "basis": "distinct_economic_observation"},
+        confirmation_sources=["rf4_active"],
+    )
+    first_input = make_input(identity="a", rf4=True, rf4_period="2026-08-14")
+    first = evaluate_state(rule=rule, instance_fingerprint="fp", memory=InstanceMemory(),
+                           outcome=evaluate_rule(rule, _ctx(first_input)),
+                           ctx=_ctx(first_input), now=NOW)
+    assert first.repeat_of_fired_key is False
+
+    memory = InstanceMemory(state_version=1, condition_state=ConditionState.NORMAL,
+                            last_known_condition_state=ConditionState.NORMAL,
+                            last_fired_observation_key=first.fired_observation_key)
+    again = make_input(identity="b", rf4=True, rf4_period="2026-08-14")
+    repeat = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                            outcome=evaluate_rule(rule, _ctx(again)),
+                            ctx=_ctx(again), now=NOW)
+    assert repeat.repeat_of_fired_key is True
+    assert repeat.fired_observation_key == first.fired_observation_key

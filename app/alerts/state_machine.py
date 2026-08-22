@@ -110,6 +110,10 @@ class StateDecision:
     #: the economic observation this firing is attributed to; persisted so a
     #: later re-entry on the same period can be recognised as a repeat.
     fired_observation_key: str | None = None
+    #: true when this activation is a re-entry on a period that already fired.
+    #: The episode is still recorded; the notification and the wall-clock
+    #: cooldown clock are what a repeat must not move.
+    repeat_of_fired_key: bool = False
 
     confirmations: list[ConfirmationRecord] = field(default_factory=list)
     suppression_reasons: list[str] = field(default_factory=list)
@@ -161,10 +165,17 @@ _PERIOD_BASES = frozenset({
 
 
 def _fired_key(records: list[ConfirmationRecord]) -> str | None:
-    """One canonical key for the observations that triggered this firing."""
-    keys = sorted(r.economic_observation_key for r in records
-                  if r.confirmation_role == "CONFIRMATION")
-    return "|".join(keys) if keys else None
+    """One canonical key for the observations that triggered this firing.
+
+    BOUND TO ITS SOURCE. Joining the observation keys alone is source-blind, so
+    a two-source rule whose sources exchange keys between firings canonicalises
+    to the same string — sorted({X, Y}) either way — and a genuinely new period
+    reads as a repeat, suppressing a real notification. Pairing each key with
+    the source it came from removes the collision.
+    """
+    pairs = sorted(f"{r.source_id}={r.economic_observation_key}" for r in records
+                   if r.confirmation_role == "CONFIRMATION")
+    return "|".join(pairs) if pairs else None
 
 
 def _confirmation_keys(rule: RuleSpec, outcome: ConditionOutcome) -> list[ConfirmationRecord]:
@@ -350,6 +361,7 @@ def evaluate_state(
         decision.fired_observation_key = fired_key or memory.last_fired_observation_key
         decision.confirmations = records + hold_records
         decision.confirmation_progress = {r.source_id: 1 for r in records}
+        decision.repeat_of_fired_key = repeat
         if repeat:
             decision.suppression_reasons.append(SuppressionReason.COOLDOWN)
             decision.reasons.append("same_economic_period_refire")
