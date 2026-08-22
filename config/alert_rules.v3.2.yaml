@@ -1327,6 +1327,17 @@ rules:
   - rule_id: dynamics.d3_gate_fires
     identity_version: 1
     title: "Hyperscaler free-cash-flow gate fires"
+    # CONFIRMATION KEY COARSENESS, recorded because it is real and bounded.
+    # `d3_gate` evidence is dated by the filed XBRL reporting-period end, taken
+    # as the MAX across the hyperscaler cohort — a per-PERIOD key, not a
+    # per-ISSUER accession identity. Two issuers filing the same period are one
+    # observation, and an issuer skipped by the adapter can make the max
+    # regress. Both under-count observations; neither can turn a recompute into
+    # a filing. With count:1 on a boolean_transition this changes nothing —
+    # the transition fires regardless of the key, pinned by
+    # test_a_same_period_re_transition_is_not_suppressed. It WOULD matter to any
+    # future rule on this source with count >= 2, which must not be added
+    # without a per-issuer key.
     enabled: true
     policy_status: APPROVED
     runtime_readiness: READY
