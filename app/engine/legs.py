@@ -27,6 +27,7 @@ Standing caveat: Cederburg, O'Doherty, Wang & Yan (2020, JFE 138(1): 95-117)
 
 from __future__ import annotations
 
+import datetime as _dt
 import math
 from dataclasses import dataclass
 
@@ -43,6 +44,117 @@ def monthly_closes(daily: list[tuple[str, float]]) -> list[float]:
         else:
             out[-1] = close
     return out
+
+
+def monthly_closes_dated(daily: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """(month, last close in that month), oldest first — same collapse as
+    `monthly_closes`, keeping the month label the caller needs to date it."""
+    out: list[tuple[str, float]] = []
+    current_month: str | None = None
+    for date, close in daily:
+        month = date[:7]
+        if month != current_month:
+            out.append((month, close))
+            current_month = month
+        else:
+            out[-1] = (month, close)
+    return out
+
+
+def feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None,
+                   *, lookback: int = 30) -> bool:
+    """Is the newest bar as recent as THIS FEED'S OWN cadence allows?
+
+    The tolerance is derived, not chosen: the largest gap between consecutive
+    bars in the recent window already encodes weekends and market holidays for
+    whatever this series is. A feed whose newest bar is no older than its own
+    worst observed gap is publishing normally; one that is older has stopped.
+
+    This is what lets a completed month be recognised the day it ends without
+    promoting a stale feed's partial month — the two failures that otherwise
+    trade off against each other. Nothing here is a threshold an operator
+    would have to calibrate; remove the feed and the question is unanswerable,
+    which is why it answers False rather than guessing.
+    """
+    if not as_of_date or len(daily) < 5:
+        return False
+    try:
+        days = [_dt.date.fromisoformat(d[:10]) for d, _ in daily[-lookback:]]
+        today = _dt.date.fromisoformat(as_of_date[:10])
+    except ValueError:
+        return False
+    gaps = [(b - a).days for a, b in zip(days, days[1:], strict=False)]
+    if not gaps:
+        return False
+    return (today - days[-1]).days <= max(gaps)
+
+
+def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
+                    as_of_date: str | None = None
+                    ) -> tuple[str | None, str | None]:
+    """The AUTHORITATIVE Faber state: (state, month), completed months only.
+
+    `faber_state` deliberately stands the in-progress month's latest close in
+    for its month-end close — a useful live preview, and the wrong thing to
+    alert on. A rule that confirms on a new month-end period must see a state
+    that changes only when a month has actually ENDED, or an intramonth wobble
+    presents as a completed flip and the most severe alert in the system fires
+    on a month that is still running.
+
+    A month is completed when it is strictly earlier than the month we are
+    computing in; the in-progress month is dropped whatever its closes say.
+    Returns (None, None) when fewer than ten completed months exist.
+    """
+    dated = monthly_closes_dated(daily)
+    if not dated:
+        return None, None
+
+    # A month is completed only when the DATA shows it closed — that is, when a
+    # LATER bar exists. The calendar is not enough on its own: a stale feed
+    # whose newest bar is mid-July is still "past" once September arrives, and
+    # promoting July then would publish a mid-July close as July's month-end
+    # close. That is the very substitution this function exists to refuse,
+    # returning by way of the clock instead of the bar.
+    #
+    # The cost is a bounded lag: a month that ends on a Friday is not
+    # authoritative until the next session's bar lands. That is deliberate. A
+    # late correct state is recoverable; a P1 fired on a partial month is not,
+    # and no staleness cutoff can separate the two without inventing a
+    # threshold no artifact defines.
+    #
+    # `as_of_month` can only ever WITHHOLD, never promote: a feed dated in the
+    # future relative to the evaluation is not evidence a month has closed.
+    # Every month before the newest one is closed: a later bar proves it.
+    closed = list(dated[:-1])
+
+    # The newest month is closed too when the calendar says it has ended AND
+    # the feed is still publishing normally — a current feed whose last bar is
+    # in a past month has given us that month's real month-end close. Without
+    # the freshness test this waits for the next session's bar (a late P1);
+    # without the calendar test a stale feed's partial month is promoted as if
+    # it were complete (a wrong P1). Both tests, or neither failure is avoided.
+    newest_month, _ = dated[-1]
+    if newest_month < as_of_month and feed_is_current(daily, as_of_date):
+        closed.append(dated[-1])
+
+    completed = [(m, c) for m, c in closed if m < as_of_month]
+    if len(completed) < 10:
+        return None, None
+    return faber_state([c for _, c in completed]), completed[-1][0]
+
+
+def faber_distance_pct(monthly: list[float]) -> float | None:
+    """Signed distance of the last close from the 10-month SMA, in percent.
+
+    Evidence for a prewarning rule, never a state: the crossing itself is
+    `faber_state`'s to decide.
+    """
+    if len(monthly) < 10:
+        return None
+    sma10 = sum(monthly[-10:]) / 10.0
+    if sma10 == 0:
+        return None
+    return (monthly[-1] - sma10) / sma10 * 100.0
 
 
 def faber_state(monthly: list[float]) -> str:

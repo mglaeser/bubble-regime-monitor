@@ -391,3 +391,185 @@ def test_a_row_without_the_typed_tier_is_missing_not_a_number(isolated_db):
     assert evidence.value is None
     assert evidence.data_state == DataState.MISSING
     assert evidence.freshness_reason_code == "typed_s5_tier_absent"
+
+
+# ---------------------------------------------------------------------------
+# legs: dated by the ECONOMIC period, and Faber's authoritative state is
+# month-end (audit B-09 and B-10 — one defect family, one code block)
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_with_legs(trend: dict) -> Snapshot:
+    with session_scope() as session:
+        snap = Snapshot(
+            computed_at=datetime(2026, 8, 21, 6, 0, tzinfo=UTC), service_version="test",
+            median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+            point_score=51.0, action_band="trim", override_fired=False,
+            red_flag_count=0, red_flag_detail={},
+            block_s={"indicators": {}}, block_d={"indicators": {}},
+            trend_states=trend, fast_alarm={}, data_freshness={})
+        session.add(snap)
+        session.flush()
+        session.expunge(snap)
+        return snap
+
+
+def _leg(snap: Snapshot, domain: str):
+    built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+    for item in built.legs:
+        if item.observation_domain_id == domain:
+            return item
+    raise AssertionError(f"no leg evidence for {domain}")
+
+
+_FULL_SPY = {
+    "SPY": {
+        "faber_10mo": "OUT",                  # legacy live-preview field
+        "faber_live_preview": "OUT",
+        "faber_month_end_state": "IN",        # last COMPLETED month says IN
+        "faber_month_end_period": "2026-07",
+        "faber_distance_pct": 1.8,
+        "sma200_state": "IN",
+        "sma200_as_of": "2026-08-20",
+        "sma200": "IN",
+    },
+}
+
+
+def test_the_faber_leg_publishes_the_month_end_state_not_the_live_preview(isolated_db):
+    """`faber_state` stands the in-progress month's latest close in for a
+    month-end close — its own docstring says so. That is a live preview.
+
+    The P1 rule `legs.faber_spy_out_high_risk` confirms on a NEW MONTH-END
+    period. Publishing the preview under that contract means an intramonth
+    wobble reads as a completed month-end flip, and the most severe alert the
+    system can send fires on a month that has not ended.
+    """
+    evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_FABER)
+    assert evidence.value == "IN", "must be the completed month's state, not the preview"
+
+
+def test_the_faber_leg_is_dated_by_its_month_not_by_the_recompute(isolated_db):
+    """Stamping computed_at makes every four-hour run a new economic period."""
+    evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_FABER)
+    assert evidence.period_end == "2026-07"
+    assert not str(evidence.period_end).startswith("2026-08-21")
+
+
+def test_six_recomputes_in_one_month_are_one_faber_observation(isolated_db):
+    """The property `basis: new_month_end_period` actually depends on."""
+    keys = []
+    for hour in (0, 4, 8, 12, 16, 20):
+        with session_scope() as session:
+            snap = Snapshot(
+                computed_at=datetime(2026, 8, 21, hour, 0, tzinfo=UTC),
+                service_version="test",
+                median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+                point_score=51.0, action_band="trim", override_fired=False,
+                red_flag_count=0, red_flag_detail={},
+                block_s={"indicators": {}}, block_d={"indicators": {}},
+                trend_states=_FULL_SPY, fast_alarm={}, data_freshness={})
+            session.add(snap)
+            session.flush()
+            session.expunge(snap)
+        keys.append(_leg(snap, obs.DOMAIN_LEG_SPY_FABER).economic_observation_key)
+    assert len(set(keys)) == 1, "six recomputes in one month must be ONE observation"
+
+
+def test_the_sma200_leg_is_dated_by_its_trading_date(isolated_db):
+    """`legs.sma200_flip` needs three distinct TRADING DATES.
+
+    Dated by computed_at, three four-hour recomputes manufacture a
+    "three trading date" confirmation in eight hours.
+    """
+    evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_SMA200)
+    assert evidence.period_end == "2026-08-20"
+
+
+def test_a_snapshot_without_the_typed_leg_fields_is_missing_not_a_state(isolated_db):
+    """Historical rows carry only the live preview; it must not be promoted."""
+    legacy = {"SPY": {"faber_10mo": "OUT", "sma200": "IN"}}
+    faber = _leg(_snapshot_with_legs(legacy), obs.DOMAIN_LEG_SPY_FABER)
+    assert faber.value is None
+    assert faber.data_state == DataState.MISSING
+    assert faber.freshness_reason_code == "typed_month_end_absent"
+
+
+def test_each_asset_is_classified_against_its_own_calendar(isolated_db):
+    """QQQ must not be classified by SPY's clock.
+
+    The feeds are independent and can be asynchronous. Borrowing one asset's
+    latest bar to decide whether the OTHER's month is complete declares a
+    still-running month finished for whichever asset lags — reintroducing the
+    intramonth defect for that asset only, which is the hardest shape to spot.
+    """
+    from app.engine.legs import month_end_faber
+
+    # twelve completed months, then a partial month for the lagging asset
+    completed = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
+    lagging = completed + [("2026-08-03", 50.0)]    # August only just started
+
+    # its own clock: the final month is in progress and is dropped
+    _, period = month_end_faber(lagging, as_of_month="2026-08")
+    assert period == "2025-12", "the in-progress month must be dropped"
+
+    # a LATER clock cannot promote it either — only a later BAR can, which is
+    # what stops a lagging feed being closed out by the leading asset's dates
+    _, borrowed = month_end_faber(lagging, as_of_month="2026-09")
+    assert borrowed == "2025-12", "another asset's calendar must not close this feed"
+
+
+def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
+    """A known state with no economic period is UNDATED, not absent.
+
+    Withholding it hides a state that was genuinely computed; publishing it
+    FRESH lets an undated reading satisfy a confirmation that counts distinct
+    dates. The house convention for an undated reading is UNKNOWN_AGE, and the
+    freshness requirement decides from there.
+    """
+    undated = {"SPY": {"faber_10mo": "OUT", "sma200": "IN", "sma200_state": "IN"}}
+    sma = _leg(_snapshot_with_legs(undated), obs.DOMAIN_LEG_SPY_SMA200)
+    assert sma.value == "IN", "the state was computed; do not hide it"
+    assert sma.data_state == DataState.UNKNOWN_AGE
+    assert sma.period_end is None, "but it must not claim a date it does not have"
+
+
+def test_month_completion_needs_the_calendar_AND_a_publishing_feed():
+    """Two failures that trade off against each other, both avoided.
+
+    Waiting for a later bar means a month that ended on Friday is not
+    authoritative until Monday — a late P1. Trusting the calendar alone means a
+    feed that stopped mid-July gets July promoted once September arrives, with
+    a MID-JULY close standing in for July's month-end close — a wrong P1.
+
+    The tolerance that separates them is DERIVED, not chosen: the largest gap
+    between consecutive bars in the recent window already encodes weekends and
+    holidays for whatever series this is. Nothing here is a number an operator
+    would calibrate.
+    """
+    from datetime import date, timedelta
+
+    from app.engine.legs import feed_is_current, month_end_faber
+
+    day, end, bars, px = date(2025, 8, 1), date(2026, 7, 31), [], 100.0
+    while day <= end:
+        if day.weekday() < 5:
+            px += 0.1
+            bars.append((day.isoformat(), px))
+        day += timedelta(days=1)
+
+    # the derived tolerance is the feed's own worst gap — a weekend
+    assert feed_is_current(bars, "2026-08-03") is True
+    assert feed_is_current(bars, "2026-09-02") is False
+
+    # publishing normally: July is authoritative the first session after it ends
+    _, prompt = month_end_faber(bars, as_of_month="2026-08", as_of_date="2026-08-03")
+    assert prompt == "2026-07", "a completed month must not wait for another bar"
+
+    # same feed, stopped: July must not be promoted from partial data
+    _, stale = month_end_faber(bars, as_of_month="2026-09", as_of_date="2026-09-02")
+    assert stale == "2026-06", "a stale feed's partial month is not a month-end"
+
+    # and the in-progress month is never promoted, whatever the feed is doing
+    _, running = month_end_faber(bars[:-8], as_of_month="2026-07", as_of_date="2026-07-20")
+    assert running == "2026-06"
