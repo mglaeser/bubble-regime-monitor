@@ -204,11 +204,20 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
     # d3 is a GATE (a decision), not a level.
     d3 = indicators.get("d3") or {}
     d3_state, d3_reason = _evidence_data_state(d3) if d3 else (DataState.MISSING, "indicator_absent")
-    gate = (d3.get("extra") or {}).get("gate_fired") if isinstance(d3.get("extra"), dict) else None
+    # `IndicatorOutput.payload()` FLATTENS `extra` into the top level, so the
+    # gate arrives as a top-level key. Reading `payload["extra"]["gate_fired"]`
+    # returned None on every snapshot that has ever existed, which rendered as
+    # "gate not persisted" while the rule stayed marked READY.
+    gate = d3.get("gate_fired")
+    d3_period = d3.get("filing_period") or d3.get("as_of")
     add(obs.DOMAIN_HYPERSCALER_GATE, gate if isinstance(gate, bool) else None,
-        source_id="d3", period_start=d3.get("as_of"), period_end=d3.get("as_of"),
-        data_state=d3_state if gate is not None else DataState.MISSING,
-        reason=d3_reason if gate is not None else "gate_state_not_persisted")
+        source_id="d3", period_start=d3_period, period_end=d3_period,
+        data_state=d3_state if isinstance(gate, bool) else DataState.MISSING,
+        reason=d3_reason if isinstance(gate, bool) else "gate_state_not_persisted",
+        metadata={"issuers_used": d3.get("issuers_used"),
+                  "issuers_full": d3.get("issuers_full")})
+    if d3_period and computed_at and str(d3_period) > computed_at[:10]:
+        ineligibility.append("period_label_future:d3")
 
     # --- legs --------------------------------------------------------------
     legs: list[EvidenceModel] = []

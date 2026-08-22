@@ -140,3 +140,83 @@ def test_an_ordinary_past_release_is_not_flagged(isolated_db):
     })
     built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
     assert not any(r.startswith("period_label_future") for r in built.ineligibility_reasons)
+
+
+# ---------------------------------------------------------------------------
+# d3: a GATE (a decision), not a level
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_with_d3(d3_payload: dict) -> Snapshot:
+    with session_scope() as session:
+        snap = Snapshot(
+            computed_at=datetime(2026, 8, 21, 6, 0, tzinfo=UTC), service_version="test",
+            median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+            point_score=51.0, action_band="trim", override_fired=False,
+            red_flag_count=0, red_flag_detail={},
+            block_s={"indicators": {}},
+            block_d={"indicators": {"d3": d3_payload}},
+            trend_states={}, fast_alarm={}, data_freshness={})
+        session.add(snap)
+        session.flush()
+        session.expunge(snap)
+        return snap
+
+
+def _gate_evidence(snap: Snapshot):
+    built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+    for item in built.indicators:
+        if item.observation_domain_id == obs.DOMAIN_HYPERSCALER_GATE:
+            return item
+    raise AssertionError("no hyperscaler-gate evidence in the sidecar")
+
+
+def test_the_d3_gate_reaches_the_sidecar_from_the_flattened_payload(isolated_db):
+    """`dynamics.d3_gate_fires` is READY and could never fire.
+
+    Two faults compounded. Scoring computed the gate boolean into a local and
+    never persisted it; and the builder looked for it under `payload["extra"]`
+    while `IndicatorOutput.payload()` FLATTENS extra into the top level. So the
+    lookup returned None on every snapshot that has ever existed, the evidence
+    was emitted MISSING with `gate_state_not_persisted`, and the rule sat marked
+    READY reporting a gate nobody could observe.
+    """
+    snap = _snapshot_with_d3({
+        "value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30", "stale": False,
+        "gate_fired": True, "filing_period": "2026-Q2",
+        "issuers_used": 5, "issuers_full": 5,
+    })
+    evidence = _gate_evidence(snap)
+    assert evidence.value is True
+    assert evidence.data_state == DataState.FRESH
+
+
+def test_a_gate_that_did_not_fire_is_a_definite_false_not_missing(isolated_db):
+    """False and unobservable must never render as the same evidence."""
+    snap = _snapshot_with_d3({
+        "value": 0.10, "sub_score": 0.30, "as_of": "2026-06-30", "stale": False,
+        "gate_fired": False, "filing_period": "2026-Q2",
+        "issuers_used": 5, "issuers_full": 5,
+    })
+    evidence = _gate_evidence(snap)
+    assert evidence.value is False
+    assert evidence.data_state == DataState.FRESH
+
+
+def test_a_snapshot_without_the_typed_gate_is_missing_not_false(isolated_db):
+    """Historical rows predate the field; absence must not become a decision."""
+    snap = _snapshot_with_d3({"value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30"})
+    evidence = _gate_evidence(snap)
+    assert evidence.value is None
+    assert evidence.data_state == DataState.MISSING
+
+
+def test_the_gate_carries_its_filing_period_not_the_recompute_time(isolated_db):
+    """A quarterly filing confirms once per filing, not once per 4-hour run."""
+    snap = _snapshot_with_d3({
+        "value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30", "stale": False,
+        "gate_fired": True, "filing_period": "2026-Q2",
+        "issuers_used": 5, "issuers_full": 5,
+    })
+    evidence = _gate_evidence(snap)
+    assert evidence.period_end == "2026-Q2"

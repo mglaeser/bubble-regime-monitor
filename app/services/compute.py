@@ -1048,13 +1048,28 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         d3_full = len(d3_hyperscaler_fcf.CIKS)
         d3_quality = len(raw.hyperscalers) / d3_full
         n_note = f"; {len(raw.hyperscalers)}/{d3_full} issuers"
-        indicators["d3"] = IndicatorOutput("d3", round(ratio, 4), sub, False, "sec_edgar", False,
-                                           note=f"{gate_note}{n_note}" + (f"; {note}" if note else ""),
-                                           as_of=raw.hyperscaler_as_of,
-                                           quality=max(0.0, min(1.0, d3_quality)))
+        indicators["d3"] = IndicatorOutput(
+            "d3", round(ratio, 4), sub, False, "sec_edgar", False,
+            note=f"{gate_note}{n_note}" + (f"; {note}" if note else ""),
+            as_of=raw.hyperscaler_as_of,
+            quality=max(0.0, min(1.0, d3_quality)),
+            # d3 is a GATE (a decision), and the decision itself was never
+            # persisted — it lived in a local and in prose. `value` is the FCF
+            # ratio, a different quantity, so a rule reading the level cannot
+            # learn whether the gate fired. Persist the decision, and the
+            # filing it belongs to: a quarterly filing confirms once per
+            # FILING, never once per four-hour recompute.
+            extra={"gate_fired": gate,
+                   "filing_period": raw.hyperscaler_as_of,
+                   "issuers_used": len(raw.hyperscalers),
+                   "issuers_full": d3_full})
     else:
-        indicators["d3"] = IndicatorOutput("d3", None, None, True, "sec_edgar", False,
-                                           note="EDGAR unavailable; dropped, Block D renormalized")
+        indicators["d3"] = IndicatorOutput(
+            "d3", None, None, True, "sec_edgar", False,
+            note="EDGAR unavailable; dropped, Block D renormalized",
+            # Dropped, so there is NO gate decision — not a false one.
+            extra={"gate_fired": None, "filing_period": None,
+                   "issuers_used": 0, "issuers_full": len(d3_hyperscaler_fcf.CIKS)})
 
     # ---- D4 LPPLS (v3.3.2 single-endpoint dense scan; FLOOR on failure) ----
     res = raw.lppls_result or {}
