@@ -284,6 +284,7 @@ class RawInputs:
     bsadf_cv95: float | None = None
     bsadf_argmax: int | None = None   # 1-based index of the sup within the sequence
     bsadf_n: int | None = None
+    bsadf_n_finite: int | None = None  # < bsadf_n means the history has holes
     # S4 v4 SHADOW (GSADF_SHADOW_REAL_INDEX). Reported, never scored.
     gsadf_shadow_stat: float | None = None
     gsadf_shadow_cv90: float | None = None
@@ -595,7 +596,7 @@ def gather_inputs() -> RawInputs:
             raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
             raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
             raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
-            raw.bsadf_n = out.bsadf_n
+            raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
             raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
         else:
             # Reason only — the "GSADF not computable this run" prefix is added
@@ -1004,6 +1005,11 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                           "cv95": raw.gsadf_cv95},
             "sup_argmax_index": raw.bsadf_argmax,
             "sequence_len": raw.bsadf_n,
+            # Below sequence_len means part of the BSADF history was not
+            # computable. The endpoint can still be valid — it is gated on its
+            # own finiteness — but the sup has no honest date-stamp, so
+            # sup_argmax_index is null. Reported rather than silently dropped.
+            "sequence_finite": raw.bsadf_n_finite,
         }
     if raw.gsadf_shadow_note:
         s4_extra = dict(s4_extra or {})

@@ -4,7 +4,8 @@ Contract (r/gsadf.R, JSON on stdin/stdout):
     stdin:  {"series": [monthly log prices...]}
     stdout: {"gsadf": <sup stat>, "cv90": <90% CV>, "cv95": <95% CV>,
              "bsadf": <endpoint stat>, "bsadf_cv90": .., "bsadf_cv95": ..,
-             "bsadf_n": <sequence length>, "bsadf_argmax": <1-based argmax>}
+             "bsadf_n": <sequence length>, "bsadf_argmax": <1-based argmax>,
+             "bsadf_n_finite": <how many of the sequence are finite>}
     The bsadf_* fields may be null when exuber returns no usable sequence or the
     simulated CV matrix is not row-aligned with it; they are typed Optional and a
     None flows to the contested/stale floor rather than to a comparison.
@@ -42,6 +43,10 @@ class GsadfOutput:
     bsadf_cv95: float | None = None
     bsadf_n: int | None = None
     bsadf_argmax: int | None = None
+    # How much of the BSADF history was computable. bsadf_argmax is None when
+    # this is below bsadf_n: the sup cannot be honestly date-stamped over a
+    # sequence with holes, though the ENDPOINT may still be perfectly valid.
+    bsadf_n_finite: int | None = None
 
 
 def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfOutput | None:
@@ -81,7 +86,8 @@ def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfO
                            bsadf=_opt_f("bsadf"), bsadf_cv90=_opt_f("bsadf_cv90"),
                            bsadf_cv95=_opt_f("bsadf_cv95"),
                            bsadf_n=_opt_i("bsadf_n"),
-                           bsadf_argmax=_opt_i("bsadf_argmax"))
+                           bsadf_argmax=_opt_i("bsadf_argmax"),
+                           bsadf_n_finite=_opt_i("bsadf_n_finite"))
     except subprocess.CalledProcessError as exc:
         log.warning("gsadf_run_failed", returncode=exc.returncode,
                     stdout=(exc.stdout or "")[-400:], stderr=(exc.stderr or "")[-400:])

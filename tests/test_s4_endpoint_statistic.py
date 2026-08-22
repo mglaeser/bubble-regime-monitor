@@ -55,7 +55,7 @@ def _raw_diverging():
     raw = make_golden_raw_inputs()
     raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = SUP_1986, SUP_CV90, SUP_CV95
     raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = END_1986, END_CV90, END_CV95
-    raw.bsadf_argmax, raw.bsadf_n = 126, 443
+    raw.bsadf_argmax, raw.bsadf_n, raw.bsadf_n_finite = 126, 443, 443
     raw.gsadf_as_of = "2026-07"
     return raw
 
@@ -198,6 +198,18 @@ class TestTheReportCarriesBoth:
         assert extra["s4_statistic"]["bsadf_endpoint"]["stat"] == END_1986
         assert extra["s4_statistic"]["gsadf_sup"]["stat"] == SUP_1986
         assert extra["s4_statistic"]["sup_argmax_index"] == 126
+        assert extra["s4_statistic"]["sequence_finite"] == 443
+
+    def test_a_holed_history_is_reported_not_silently_dropped(self):
+        # sequence_finite must be the FINITE count, not the length: the two are
+        # equal on a clean run, so a test using only clean data cannot tell them
+        # apart. Repo doctrine: no silent caps.
+        raw = _raw_diverging()
+        raw.bsadf_n, raw.bsadf_n_finite, raw.bsadf_argmax = 210, 179, None
+        extra = compute_snapshot(raw).indicators["s4"].extra["s4_statistic"]
+        assert (extra["sequence_len"], extra["sequence_finite"]) == (210, 179)
+        assert extra["sup_argmax_index"] is None          # no honest date-stamp
+        assert extra["bsadf_endpoint"]["stat"] == END_1986   # still scored
 
 
 class TestThePublishedRecordDescribesTheScoredStatistic:
@@ -266,9 +278,10 @@ class TestRunnerContract:
         out = self._run_with(monkeypatch, {
             "gsadf": SUP_1986, "cv90": SUP_CV90, "cv95": SUP_CV95,
             "bsadf": END_1986, "bsadf_cv90": END_CV90, "bsadf_cv95": END_CV95,
-            "bsadf_n": 443, "bsadf_argmax": 126})
+            "bsadf_n": 443, "bsadf_argmax": 126, "bsadf_n_finite": 443})
         assert (out.bsadf, out.bsadf_cv90, out.bsadf_cv95) == (END_1986, END_CV90, END_CV95)
         assert (out.bsadf_n, out.bsadf_argmax) == (443, 126)
+        assert out.bsadf_n_finite == 443
 
     def test_null_endpoint_fields_degrade_to_none(self, monkeypatch):
         # R emits null when exuber returns no usable sequence, or when the CV
@@ -417,9 +430,47 @@ class TestTheRScriptReturnsTheEndpointNotTheSup:
             'cat(toJSON(list(argmax = which.max(b), n = length(b), '
             'maxv = max(b), lastv = b[length(b)]), auto_unbox = TRUE))', tmp_path)
         assert out["bsadf_argmax"] == ref["argmax"]        # an off-by-one dies here
-        assert out["bsadf_n"] == ref["n"]
+        assert out["bsadf_n"] == ref["n"] == out["bsadf_n_finite"]
         assert out["bsadf"] == pytest.approx(ref["lastv"])
         assert out["gsadf"] == pytest.approx(ref["maxv"])
+
+    @staticmethod
+    def _flat_early_then_normal():
+        """A stale/flat quote run early in the sample — a real data shape. Some
+        historical sub-windows are degenerate while the ENDPOINT is fine."""
+        import math
+        import random
+        rng = random.Random(20260711)
+        y, lvl = [], 100.0
+        for t in range(240):
+            if t < 60:
+                lvl = 100.0                                   # perfectly constant
+            elif t < 160:
+                lvl += 0.2 + rng.uniform(-0.3, 0.3)
+            else:
+                lvl += rng.uniform(-0.4, 0.4)
+            y.append(lvl)
+        return [math.log(v) for v in y]
+
+    def test_a_hole_in_the_history_does_not_veto_a_valid_endpoint(self, tmp_path):
+        """The scored statistic is ONE endpoint, so only that endpoint's own
+        finiteness may gate it. A whole-history gate threw away a computable
+        current-regime read whenever any old sub-window was degenerate — while
+        exuber's gsadf, which skips NAs, still reported a loud rejection. That is
+        the distant past vetoing a measurable present, i.e. the failure scoring
+        the endpoint exists to avoid."""
+        self._require_r()
+        out = self._run(self._flat_early_then_normal(), tmp_path)
+        assert out["bsadf_n_finite"] < out["bsadf_n"]       # the history HAS holes
+        assert out["bsadf_n_finite"] > 0
+        assert out["bsadf"] is not None                     # ...and is still scored
+        assert out["bsadf_cv90"] is not None and out["bsadf_cv95"] is not None
+        assert out["bsadf"] < out["bsadf_cv90"]             # a calm endpoint
+        # The SUP, by contrast, is a whole-history claim and cannot be date-stamped
+        # over a sequence with holes.
+        assert out["bsadf_argmax"] is None
+        # exuber's own gsadf skips NAs and is loud here — the divergence is real.
+        assert out["gsadf"] > out["cv95"]
 
     def test_a_degenerate_series_nulls_the_statistic_and_never_crashes(self, tmp_path):
         """Zero variance: exuber's recursion is undefined. R must exit 0 with a
@@ -430,3 +481,7 @@ class TestTheRScriptReturnsTheEndpointNotTheSup:
         out = self._run([math.log(100.0)] * 240, tmp_path)
         assert out["gsadf"] is None
         assert out["bsadf"] is None
+        assert out["bsadf_n_finite"] == 0
+        # No statistic means no comparison was possible: emitting critical values
+        # beside a null statistic implies a test that did not happen.
+        assert out["bsadf_cv90"] is None and out["bsadf_cv95"] is None

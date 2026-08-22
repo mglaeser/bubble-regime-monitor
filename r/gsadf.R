@@ -67,22 +67,40 @@ extract_cv <- function(obj, level) {
 # 0.7562 against an endpoint cv90 of ~1.12. A live regime gauge must read the
 # endpoint, not the sample maximum. Both are emitted; Python scores one of them
 # per frozen_methodology.json gsadf.statistic.
-bsadf <- NA; bsadf_cv90 <- NA; bsadf_cv95 <- NA; bsadf_n <- NA; bsadf_argmax <- NA
+bsadf <- NA; bsadf_cv90 <- NA; bsadf_cv95 <- NA; bsadf_n <- NA
+bsadf_argmax <- NA; bsadf_n_finite <- NA
 bs <- if (!is.null(r$bsadf)) as.numeric(r$bsadf) else NULL
-if (!is.null(bs) && length(bs) > 0L && all(is.finite(bs))) {
-  bsadf        <- bs[length(bs)]
-  bsadf_n      <- length(bs)
-  bsadf_argmax <- which.max(bs)          # 1-based index into the BSADF sequence
+if (!is.null(bs) && length(bs) > 0L) {
+  bsadf_n        <- length(bs)
+  bsadf_n_finite <- sum(is.finite(bs))
+
+  # The SCORED statistic is a SINGLE endpoint, so it is gated on its OWN
+  # finiteness. Requiring the WHOLE sequence to be finite discarded a perfectly
+  # computable current-regime read whenever any historical sub-window was
+  # degenerate. Measured: a series with a stale/flat quote run early in the
+  # sample yields 179/210 finite BSADF values with a valid endpoint of -0.6482,
+  # while exuber's own gsadf (which skips NAs) reports 10.2127 against cv95
+  # 1.9282 -- a loud rejection. Under the whole-history gate s4 threw the -0.6482
+  # away and floored at the imputed 0.25. Letting the distant past veto a
+  # measurable present is precisely what scoring the endpoint exists to avoid.
+  if (is.finite(bs[length(bs)])) {
+    bsadf <- bs[length(bs)]
+  }
   bcv <- cv$bsadf_cv
   # The endpoint CV is the LAST row, and ONLY if the CV matrix is row-aligned with
   # the BSADF sequence. A mismatch means the CVs were simulated under a different
   # (n, minw) than the fit; comparing them would be a silent category error, so
   # leave them NA and let Python floor s4 at the contested 0.25 instead.
-  if (!is.null(bcv) && is.matrix(bcv) && nrow(bcv) == length(bs) &&
+  if (is.finite(bsadf) && !is.null(bcv) && is.matrix(bcv) && nrow(bcv) == length(bs) &&
       all(c("90%", "95%") %in% colnames(bcv))) {
     bsadf_cv90 <- as.numeric(bcv[nrow(bcv), "90%"])
     bsadf_cv95 <- as.numeric(bcv[nrow(bcv), "95%"])
   }
+
+  # The argmax IS a claim about the supremum over the WHOLE history, so it does
+  # need the whole history: with holes in the sequence there is no honest
+  # date-stamp, and which.max would silently report the max of the finite subset.
+  if (all(is.finite(bs))) bsadf_argmax <- which.max(bs)
 }
 
 cat(toJSON(list(gsadf = extract_stat(r),
@@ -91,6 +109,7 @@ cat(toJSON(list(gsadf = extract_stat(r),
                 bsadf      = bsadf,
                 bsadf_cv90 = bsadf_cv90,
                 bsadf_cv95 = bsadf_cv95,
-                bsadf_n      = bsadf_n,
-                bsadf_argmax = bsadf_argmax),
+                bsadf_n        = bsadf_n,
+                bsadf_argmax   = bsadf_argmax,
+                bsadf_n_finite = bsadf_n_finite),
            auto_unbox = TRUE, na = "null"))
