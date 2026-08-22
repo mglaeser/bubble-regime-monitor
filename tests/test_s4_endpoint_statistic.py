@@ -301,10 +301,19 @@ class TestTheRScriptReturnsTheEndpointNotTheSup:
         self._require_r()
         series = self._explosive_then_calm()
         out = self._run(series, tmp_path)
-
         n = len(series)
-        minw = math.floor(n * (0.01 + 1.8 / math.sqrt(n)))
+
+        # Ask exuber for its OWN minimum window rather than re-deriving it here.
+        # The rounding convention is not obvious and re-deriving it invites an
+        # off-by-one dispute that cannot be settled by reading the test: at
+        # n = 487, n*(0.01 + 1.8/sqrt(n)) = 44.5925, so floor gives 44 and round
+        # gives 45. exuber::psy_minw is the authority, and it returns 44.
+        minw = self._r_json('library(exuber); library(jsonlite); '
+                            f'cat(toJSON(list(minw = psy_minw({n})), auto_unbox = TRUE))',
+                            tmp_path)["minw"]
         assert out["bsadf_n"] == n - minw          # sequence spans endpoints only
+        # The documented rule (frozen minw_rule) must agree with what exuber does.
+        assert minw == math.floor(n * (0.01 + 1.8 / math.sqrt(n)))
 
         # The sup is interior by construction...
         assert out["bsadf_argmax"] < out["bsadf_n"]
