@@ -58,7 +58,39 @@ extract_cv <- function(obj, level) {
   as.numeric(obj$gsadf[key])
 }
 
+# --- BSADF AT THE LAST OBSERVATION (the current-regime read) ---
+# GSADF is sup over ALL endpoints r2, so it answers "was there ever an explosive
+# episode anywhere in this window?" -- a historical question whose answer stays
+# REJECTED long after the episode ends. Measured on native Nasdaq-100 from 1986
+# (exuber 1.1.0, T=487): GSADF 2.6189 > cv95 2.2604 -> rejects, and the sup is
+# attained at a window ending 2000-02, while the BSADF at the 2026-07 endpoint is
+# 0.7562 against an endpoint cv90 of ~1.12. A live regime gauge must read the
+# endpoint, not the sample maximum. Both are emitted; Python scores one of them
+# per frozen_methodology.json gsadf.statistic.
+bsadf <- NA; bsadf_cv90 <- NA; bsadf_cv95 <- NA; bsadf_n <- NA; bsadf_argmax <- NA
+bs <- if (!is.null(r$bsadf)) as.numeric(r$bsadf) else NULL
+if (!is.null(bs) && length(bs) > 0L && all(is.finite(bs))) {
+  bsadf        <- bs[length(bs)]
+  bsadf_n      <- length(bs)
+  bsadf_argmax <- which.max(bs)          # 1-based index into the BSADF sequence
+  bcv <- cv$bsadf_cv
+  # The endpoint CV is the LAST row, and ONLY if the CV matrix is row-aligned with
+  # the BSADF sequence. A mismatch means the CVs were simulated under a different
+  # (n, minw) than the fit; comparing them would be a silent category error, so
+  # leave them NA and let Python floor s4 at the contested 0.25 instead.
+  if (!is.null(bcv) && is.matrix(bcv) && nrow(bcv) == length(bs) &&
+      all(c("90%", "95%") %in% colnames(bcv))) {
+    bsadf_cv90 <- as.numeric(bcv[nrow(bcv), "90%"])
+    bsadf_cv95 <- as.numeric(bcv[nrow(bcv), "95%"])
+  }
+}
+
 cat(toJSON(list(gsadf = extract_stat(r),
                 cv90  = extract_cv(cv, 90),
-                cv95  = extract_cv(cv, 95)),
-           auto_unbox = TRUE))
+                cv95  = extract_cv(cv, 95),
+                bsadf      = bsadf,
+                bsadf_cv90 = bsadf_cv90,
+                bsadf_cv95 = bsadf_cv95,
+                bsadf_n      = bsadf_n,
+                bsadf_argmax = bsadf_argmax),
+           auto_unbox = TRUE, na = "null"))

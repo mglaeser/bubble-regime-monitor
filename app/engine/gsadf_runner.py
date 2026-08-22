@@ -2,7 +2,12 @@
 
 Contract (r/gsadf.R, JSON on stdin/stdout):
     stdin:  {"series": [monthly log prices...]}
-    stdout: {"gsadf": <stat>, "cv90": <90% CV>, "cv95": <95% CV>}
+    stdout: {"gsadf": <sup stat>, "cv90": <90% CV>, "cv95": <95% CV>,
+             "bsadf": <endpoint stat>, "bsadf_cv90": .., "bsadf_cv95": ..,
+             "bsadf_n": <sequence length>, "bsadf_argmax": <1-based argmax>}
+    The bsadf_* fields may be null when exuber returns no usable sequence or the
+    simulated CV matrix is not row-aligned with it; they are typed Optional and a
+    None flows to the contested/stale floor rather than to a comparison.
 
 If R/Rscript is unavailable or the script fails, return None so the S4
 sub-score falls back to the contested/stale floor 0.25 with a provenance
@@ -30,6 +35,13 @@ class GsadfOutput:
     gsadf: float
     cv90: float
     cv95: float
+    # Endpoint BSADF + the endpoint row of the simulated BSADF CVs. Optional so a
+    # partial R response degrades to the s4 floor instead of raising (guardrail 5).
+    bsadf: float | None = None
+    bsadf_cv90: float | None = None
+    bsadf_cv95: float | None = None
+    bsadf_n: int | None = None
+    bsadf_argmax: int | None = None
 
 
 def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfOutput | None:
@@ -56,8 +68,20 @@ def run(monthly_log_prices: list[float], timeout_s: int | None = None) -> GsadfO
             capture_output=True, text=True, timeout=timeout_s, check=True,
         )
         out = json.loads(proc.stdout.strip())
+        def _opt_f(key: str) -> float | None:
+            v = out.get(key)
+            return None if v is None else float(v)
+
+        def _opt_i(key: str) -> int | None:
+            v = out.get(key)
+            return None if v is None else int(v)
+
         return GsadfOutput(gsadf=float(out["gsadf"]), cv90=float(out["cv90"]),
-                           cv95=float(out["cv95"]))
+                           cv95=float(out["cv95"]),
+                           bsadf=_opt_f("bsadf"), bsadf_cv90=_opt_f("bsadf_cv90"),
+                           bsadf_cv95=_opt_f("bsadf_cv95"),
+                           bsadf_n=_opt_i("bsadf_n"),
+                           bsadf_argmax=_opt_i("bsadf_argmax"))
     except subprocess.CalledProcessError as exc:
         log.warning("gsadf_run_failed", returncode=exc.returncode,
                     stdout=(exc.stdout or "")[-400:], stderr=(exc.stderr or "")[-400:])
