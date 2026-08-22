@@ -28,6 +28,7 @@ Four properties this file exists to guarantee:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -175,7 +176,15 @@ def _fired_key(records: list[ConfirmationRecord]) -> str | None:
     """
     pairs = sorted(f"{r.source_id}={r.economic_observation_key}" for r in records
                    if r.confirmation_role == "CONFIRMATION")
-    return "|".join(pairs) if pairs else None
+    if not pairs:
+        return None
+    # HASHED, because the composite is unbounded: an economic observation key
+    # is already 64 hex characters, so a single `source=key` pair overflows the
+    # 64-character column before a second source is even considered, and the
+    # activation would abort on write. The digest is fixed-width, keeps the
+    # source pairing that stops a swap colliding, and is only ever compared for
+    # equality — it is never parsed back.
+    return hashlib.sha256("|".join(pairs).encode()).hexdigest()
 
 
 def _confirmation_keys(rule: RuleSpec, outcome: ConditionOutcome) -> list[ConfirmationRecord]:

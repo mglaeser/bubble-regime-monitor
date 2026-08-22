@@ -1192,3 +1192,28 @@ def test_a_suppressed_repeat_does_not_advance_the_cooldown_clock():
                             ctx=_ctx(again), now=NOW)
     assert repeat.repeat_of_fired_key is True
     assert repeat.fired_observation_key == first.fired_observation_key
+
+
+def test_the_fired_key_fits_the_column_it_is_stored_in():
+    """An observation key is already 64 hex characters.
+
+    A single `source=key` pair is 75, so the composite overflowed
+    `alert_rule_state.last_fired_observation_key` (VARCHAR(64)) before a second
+    source was even considered, and the activation would have aborted on write
+    for every rule. The digest is fixed-width by construction.
+    """
+    from app.alerts.models import SHA_LEN
+    from app.alerts.state_machine import ConfirmationRecord, _fired_key
+
+    def rec(source: str, key: str) -> ConfirmationRecord:
+        return ConfirmationRecord(
+            source_id=source, economic_observation_key=key,
+            source_revision_key="r", computation_fingerprint="c",
+            observed_at=None, confirmation_role="CONFIRMATION",
+            fresh_at_evaluation=True)
+
+    realistic = "f" * 64          # a real economic_observation_key is sha256 hex
+    for n_sources in (1, 2, 5):
+        key = _fired_key([rec(f"source_number_{i}", realistic) for i in range(n_sources)])
+        assert key is not None
+        assert len(key) <= SHA_LEN, f"{n_sources} sources overflowed: {len(key)} > {SHA_LEN}"
