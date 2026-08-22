@@ -12,6 +12,7 @@ These tests start from a persisted Snapshot and assert on the built sidecar.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from app.alerts import observation as obs
 from app.alerts.enums import DataState
@@ -877,3 +878,56 @@ def test_a_gapped_history_cannot_produce_a_ten_month_average():
                                     closed_months=_closed_months(gapped))
     assert state is None and period is None, (
         "a gapped window must be refused, not averaged")
+def test_a_same_period_re_transition_is_not_suppressed(isolated_db):
+    """The cohort-max key must not swallow a second gate transition.
+
+    `d3_gate` is dated by the cohort's max filed period, so two issuers filing
+    the same period are ONE observation. Review raised that this could suppress
+    a later gate alert. For this rule it cannot: count:1 on a boolean_transition
+    fires on the transition itself and never consults the key. Pinned here
+    because the reasoning is not obvious from the rule text, and because any
+    future rule on this source with count >= 2 WOULD be affected.
+    """
+    import yaml
+
+    from app.alerts.dto import AlertInput, EvidenceModel
+    from app.alerts.observation import build_evidence
+    from app.alerts.primitives import EvaluationContext, evaluate_rule
+    from app.alerts.rulespec import RuleSpec
+    from app.alerts.state_machine import InstanceMemory, evaluate_state
+
+    doc = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "config" / "alert_rules.v3.2.yaml").read_text())
+    rule = RuleSpec.model_validate(
+        next(r for r in doc["rules"] if r["rule_id"] == "dynamics.d3_gate_fires"))
+
+    def one(gate: bool, ident: str) -> AlertInput:
+        ev = build_evidence(obs.DOMAIN_HYPERSCALER_GATE, gate,
+                            observed_at="2026-08-21T06:00:00+00:00", source_id="d3",
+                            period_start="2026-06-30", period_end="2026-06-30",
+                            data_state=DataState.FRESH)
+        return AlertInput(
+            schema_version=1, input_identity=ident, origin="RECOMPUTE", snapshot_id=1,
+            computed_at="2026-08-21T06:00:00+00:00", built_at="2026-08-21T06:05:00+00:00",
+            service_version="test", methodology_version="v", methodology_sha256="s",
+            indicators=[EvidenceModel(**ev.as_dict())])
+
+    memory, previous, activations = InstanceMemory(), None, []
+    for gate, ident in ((True, "a"), (False, "b"), (True, "c")):
+        current = one(gate, ident)
+        ctx = EvaluationContext(current=current, previous=previous,
+                                history=(previous,) if previous else (),
+                                is_cold_start=previous is None)
+        decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                                  outcome=evaluate_rule(rule, ctx), ctx=ctx, now=BUILT_AT)
+        activations.append(decision.activate_episode)
+        previous = current
+        memory = InstanceMemory(
+            state_version=memory.state_version + 1,
+            condition_state=decision.condition_state,
+            last_known_condition_state=decision.condition_state,
+            current_episode_id=None if decision.resolve_episode
+            else ("EP" if decision.activate_episode else memory.current_episode_id))
+
+    # cold start is not a transition; the reversion is not; the RE-entry is.
+    assert activations == [False, False, True]
