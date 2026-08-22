@@ -1060,7 +1060,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             # filing it belongs to: a quarterly filing confirms once per
             # FILING, never once per four-hour recompute.
             extra={"gate_fired": gate,
-                   "filing_period": raw.hyperscaler_as_of,
+                   # EDGAR provenance gives a reading date, not a filing
+                   # identity. Say so rather than renaming `as_of`: the rule's
+                   # "once per new filing" confirmation cannot be built from a
+                   # reading date, and a fabricated key would make every
+                   # four-hour recompute look like a fresh filing.
+                   "filing_period_available": False,
                    "issuers_used": len(raw.hyperscalers),
                    "issuers_full": d3_full})
     else:
@@ -1068,7 +1073,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "d3", None, None, True, "sec_edgar", False,
             note="EDGAR unavailable; dropped, Block D renormalized",
             # Dropped, so there is NO gate decision — not a false one.
-            extra={"gate_fired": None, "filing_period": None,
+            extra={"gate_fired": None, "filing_period_available": False,
                    "issuers_used": 0, "issuers_full": len(d3_hyperscaler_fcf.CIKS)})
 
     # ---- D4 LPPLS (v3.3.2 single-endpoint dense scan; FLOOR on failure) ----

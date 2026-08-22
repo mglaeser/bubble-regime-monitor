@@ -62,6 +62,7 @@ def _indicator_payloads(snapshot: Snapshot) -> dict[str, dict[str, Any]]:
 
 
 _ISO_PREFIX = re.compile(r"^\d{4}-\d{2}(-\d{2})?$")
+_QUARTER_LABEL = re.compile(r"^(\d{4})-Q([1-4])$")
 
 
 def _period_is_future(period: Any, computed_at: str | None) -> bool:
@@ -79,6 +80,13 @@ def _period_is_future(period: Any, computed_at: str | None) -> bool:
     if not period or not computed_at:
         return False
     text = str(period)
+    quarter = _QUARTER_LABEL.match(text)
+    if quarter:
+        # A quarter is future when the quarter it NAMES has not ended. Compare
+        # the quarter's end month, so 2026-Q3 read on 2026-08-21 is future
+        # (the quarter is still open) while 2026-Q2 is not.
+        year, q = quarter.group(1), int(quarter.group(2))
+        return f"{year}-{3 * q:02d}" > computed_at[:7]
     if not _ISO_PREFIX.match(text):
         return False
     return text > computed_at[:10]
@@ -233,13 +241,19 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
     # returned None on every snapshot that has ever existed, which rendered as
     # "gate not persisted" while the rule stayed marked READY.
     gate = d3.get("gate_fired")
-    d3_period = d3.get("filing_period") or d3.get("as_of")
+    # NOT a filing period: EDGAR provenance carries only `as_of`, the reading
+    # date. Naming it a filing period would invent an identity the source does
+    # not provide, and the "once per new filing" confirmation this rule needs
+    # cannot be built from a reading date — every recompute would look like a
+    # new filing. The gate VALUE is now readable; its confirmation key is not.
+    d3_period = d3.get("as_of")
     add(obs.DOMAIN_HYPERSCALER_GATE, gate if isinstance(gate, bool) else None,
         source_id="d3", period_start=d3_period, period_end=d3_period,
         data_state=d3_state if isinstance(gate, bool) else DataState.MISSING,
         reason=d3_reason if isinstance(gate, bool) else "gate_state_not_persisted",
         metadata={"issuers_used": d3.get("issuers_used"),
-                  "issuers_full": d3.get("issuers_full")})
+                  "issuers_full": d3.get("issuers_full"),
+                  "filing_period_available": bool(d3.get("filing_period_available"))})
     # Checked against the ISO reading date, not the filing LABEL: `as_of` is a
     # real date, `filing_period` is "2026-Q2" and means something else.
     if _period_is_future(d3.get("as_of"), computed_at):
