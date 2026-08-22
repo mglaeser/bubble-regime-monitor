@@ -12,6 +12,7 @@ These tests start from a persisted Snapshot and assert on the built sidecar.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from app.alerts import observation as obs
 from app.alerts.enums import DataState
@@ -211,20 +212,56 @@ def test_a_snapshot_without_the_typed_gate_is_missing_not_false(isolated_db):
     assert evidence.data_state == DataState.MISSING
 
 
-def test_the_sidecar_records_that_no_filing_identity_exists(isolated_db):
-    """EDGAR provenance carries a reading date and nothing else.
+def test_one_filing_period_is_one_observation_across_many_recomputes(isolated_db):
+    """The property `basis: new_filing` actually depends on — and it holds.
 
-    The rule needs "once per new filing". A reading date cannot supply that —
-    every four-hour recompute would look like a fresh filing — so the absence
-    is recorded rather than papered over with a renamed `as_of`.
+    This rule was briefly disabled on the premise that EDGAR gives only a
+    reading date, so "once per new filing" could not be keyed and every
+    four-hour recompute would present as a fresh filing. That was wrong.
+    `as_of` is the END of the filed XBRL duration fact (edgar.py ttm -> f.end),
+    max across the cohort; the read moment is `Provenance.fetched_at`. The
+    premise was never tested, which is exactly how it got written into the
+    config artifact unchallenged, so it is pinned here by execution.
     """
+    keys = []
+    for hour in (0, 4, 8, 12):
+        with session_scope() as session:
+            snap = Snapshot(
+                computed_at=datetime(2026, 8, 21, hour, 0, tzinfo=UTC),
+                service_version="test",
+                median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+                point_score=51.0, action_band="trim", override_fired=False,
+                red_flag_count=0, red_flag_detail={},
+                block_s={"indicators": {}},
+                block_d={"indicators": {"d3": {
+                    "value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30",
+                    "stale": False, "gate_fired": True,
+                    "issuers_used": 5, "issuers_full": 5}}},
+                trend_states={}, fast_alarm={}, data_freshness={})
+            session.add(snap)
+            session.flush()
+            session.expunge(snap)
+        keys.append(_gate_evidence(snap).economic_observation_key)
+
+    assert len(set(keys)) == 1, "four recomputes of one filing must be ONE observation"
+
+    later = _snapshot_with_d3({
+        "value": 0.42, "sub_score": 0.30, "as_of": "2026-09-30", "stale": False,
+        "gate_fired": True, "issuers_used": 5, "issuers_full": 5,
+    })
+    assert _gate_evidence(later).economic_observation_key not in keys, (
+        "a new filing period must be a NEW observation")
+
+
+def test_the_sidecar_records_what_is_genuinely_absent(isolated_db):
+    """A cohort period end exists; a per-issuer accession identity does not."""
     snap = _snapshot_with_d3({
         "value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30", "stale": False,
-        "gate_fired": True, "filing_period_available": False,
-        "issuers_used": 5, "issuers_full": 5,
+        "gate_fired": True, "issuers_used": 5, "issuers_full": 5,
     })
     evidence = _gate_evidence(snap)
-    assert evidence.metadata["filing_period_available"] is False
+    assert evidence.metadata["issuer_accession_identity"] is False
+    assert evidence.period_end == "2026-06-30"
 
 
 def test_the_gate_carries_its_reading_date_not_the_recompute_time(isolated_db):
@@ -391,3 +428,56 @@ def test_a_row_without_the_typed_tier_is_missing_not_a_number(isolated_db):
     assert evidence.value is None
     assert evidence.data_state == DataState.MISSING
     assert evidence.freshness_reason_code == "typed_s5_tier_absent"
+def test_a_same_period_re_transition_is_not_suppressed(isolated_db):
+    """The cohort-max key must not swallow a second gate transition.
+
+    `d3_gate` is dated by the cohort's max filed period, so two issuers filing
+    the same period are ONE observation. Review raised that this could suppress
+    a later gate alert. For this rule it cannot: count:1 on a boolean_transition
+    fires on the transition itself and never consults the key. Pinned here
+    because the reasoning is not obvious from the rule text, and because any
+    future rule on this source with count >= 2 WOULD be affected.
+    """
+    import yaml
+
+    from app.alerts.dto import AlertInput, EvidenceModel
+    from app.alerts.observation import build_evidence
+    from app.alerts.primitives import EvaluationContext, evaluate_rule
+    from app.alerts.rulespec import RuleSpec
+    from app.alerts.state_machine import InstanceMemory, evaluate_state
+
+    doc = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "config" / "alert_rules.v3.2.yaml").read_text())
+    rule = RuleSpec.model_validate(
+        next(r for r in doc["rules"] if r["rule_id"] == "dynamics.d3_gate_fires"))
+
+    def one(gate: bool, ident: str) -> AlertInput:
+        ev = build_evidence(obs.DOMAIN_HYPERSCALER_GATE, gate,
+                            observed_at="2026-08-21T06:00:00+00:00", source_id="d3",
+                            period_start="2026-06-30", period_end="2026-06-30",
+                            data_state=DataState.FRESH)
+        return AlertInput(
+            schema_version=1, input_identity=ident, origin="RECOMPUTE", snapshot_id=1,
+            computed_at="2026-08-21T06:00:00+00:00", built_at="2026-08-21T06:05:00+00:00",
+            service_version="test", methodology_version="v", methodology_sha256="s",
+            indicators=[EvidenceModel(**ev.as_dict())])
+
+    memory, previous, activations = InstanceMemory(), None, []
+    for gate, ident in ((True, "a"), (False, "b"), (True, "c")):
+        current = one(gate, ident)
+        ctx = EvaluationContext(current=current, previous=previous,
+                                history=(previous,) if previous else (),
+                                is_cold_start=previous is None)
+        decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                                  outcome=evaluate_rule(rule, ctx), ctx=ctx, now=BUILT_AT)
+        activations.append(decision.activate_episode)
+        previous = current
+        memory = InstanceMemory(
+            state_version=memory.state_version + 1,
+            condition_state=decision.condition_state,
+            last_known_condition_state=decision.condition_state,
+            current_episode_id=None if decision.resolve_episode
+            else ("EP" if decision.activate_episode else memory.current_episode_id))
+
+    # cold start is not a transition; the reversion is not; the RE-entry is.
+    assert activations == [False, False, True]
