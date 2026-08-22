@@ -151,6 +151,25 @@ class TestPartialMetadataNeverCrashes:
         raw.gsadf_stat = raw.gsadf_cv90 = raw.gsadf_cv95 = None
         assert compute_snapshot(raw).indicators["s4"].state == "COMPUTED"
 
+    def test_the_note_labels_follow_the_selection_not_a_hardcoded_string(
+            self, frozen_statistic):
+        """Panel finding #3: the labels were hardcoded, so in gsadf_sup mode the
+        note called the SCORED statistic "reported, not scored" and the
+        reported-only one "scored", while s4.value carried the right number."""
+        frozen_statistic("gsadf_sup")
+        s4 = compute_snapshot(_raw_diverging()).indicators["s4"]
+        assert s4.value == SUP_1986
+        assert f"scored GSADF sup {SUP_1986:.4f}" in s4.note
+        assert f"BSADF@endpoint {END_1986:.4f} (cv90 {END_CV90:.4f}) reported, not scored" in s4.note
+        assert "scored BSADF@endpoint" not in s4.note
+
+    def test_the_note_labels_are_right_in_the_production_mode_too(self):
+        s4 = compute_snapshot(_raw_diverging()).indicators["s4"]
+        assert s4.value == END_1986
+        assert f"scored BSADF@endpoint {END_1986:.4f}" in s4.note
+        assert f"GSADF sup {SUP_1986:.4f} (cv90 {SUP_CV90:.4f}) reported, not scored" in s4.note
+        assert "scored GSADF sup" not in s4.note
+
     def test_a_degenerate_cv_pair_cannot_fire_the_red_flag(self):
         # explosive_p05 compares stat > cv95 and never inspects cv90, so an
         # inverted CV pair floored the sub-score while the flag still fired off

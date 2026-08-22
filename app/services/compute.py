@@ -967,12 +967,22 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # reported-only sup pair is not gated by it and can be absent, and a note
         # builder must never raise (guardrail 5: an upstream gap must not surface
         # as a 500). Formatting None with :.4f is a TypeError, not a blank.
-        if raw.bsadf_stat is not None and raw.bsadf_cv90 is not None:
-            s4_note += (f"; scored BSADF@endpoint {raw.bsadf_stat:.4f} "
-                        f"(cv90 {raw.bsadf_cv90:.4f})")
-            if raw.gsadf_stat is not None and raw.gsadf_cv90 is not None:
-                s4_note += (f"; GSADF sup {raw.gsadf_stat:.4f} "
-                            f"(cv90 {raw.gsadf_cv90:.4f}) reported, not scored")
+        # The "scored" / "reported, not scored" labels are DERIVED from the same
+        # selection the sub-score used. Hardcoding them inverted the provenance
+        # whenever gsadf.statistic was not "bsadf_endpoint": the note called the
+        # scored statistic reported-only and vice versa, while s4.value carried
+        # the right number.
+        _families = {
+            "bsadf_endpoint": ("BSADF@endpoint", raw.bsadf_stat, raw.bsadf_cv90),
+            "gsadf_sup": ("GSADF sup", raw.gsadf_stat, raw.gsadf_cv90),
+        }
+        _scored_family = _families.pop(_M.get_path("gsadf", "statistic"), None)
+        if _scored_family is not None and None not in _scored_family[1:]:
+            _lab, _st, _cv = _scored_family
+            s4_note += f"; scored {_lab} {_st:.4f} (cv90 {_cv:.4f})"
+        for _lab, _st, _cv in _families.values():
+            if _st is not None and _cv is not None:
+                s4_note += f"; {_lab} {_st:.4f} (cv90 {_cv:.4f}) reported, not scored"
         s4_extra = None
     # DUAL REPORT (PIN C's "documented drift gate"). The shadow was previously
     # written to RawInputs and never read by anything -- computed at the cost of a
