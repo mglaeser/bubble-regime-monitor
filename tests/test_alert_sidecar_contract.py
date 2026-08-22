@@ -211,20 +211,56 @@ def test_a_snapshot_without_the_typed_gate_is_missing_not_false(isolated_db):
     assert evidence.data_state == DataState.MISSING
 
 
-def test_the_sidecar_records_that_no_filing_identity_exists(isolated_db):
-    """EDGAR provenance carries a reading date and nothing else.
+def test_one_filing_period_is_one_observation_across_many_recomputes(isolated_db):
+    """The property `basis: new_filing` actually depends on — and it holds.
 
-    The rule needs "once per new filing". A reading date cannot supply that —
-    every four-hour recompute would look like a fresh filing — so the absence
-    is recorded rather than papered over with a renamed `as_of`.
+    This rule was briefly disabled on the premise that EDGAR gives only a
+    reading date, so "once per new filing" could not be keyed and every
+    four-hour recompute would present as a fresh filing. That was wrong.
+    `as_of` is the END of the filed XBRL duration fact (edgar.py ttm -> f.end),
+    max across the cohort; the read moment is `Provenance.fetched_at`. The
+    premise was never tested, which is exactly how it got written into the
+    config artifact unchallenged, so it is pinned here by execution.
     """
+    keys = []
+    for hour in (0, 4, 8, 12):
+        with session_scope() as session:
+            snap = Snapshot(
+                computed_at=datetime(2026, 8, 21, hour, 0, tzinfo=UTC),
+                service_version="test",
+                median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+                point_score=51.0, action_band="trim", override_fired=False,
+                red_flag_count=0, red_flag_detail={},
+                block_s={"indicators": {}},
+                block_d={"indicators": {"d3": {
+                    "value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30",
+                    "stale": False, "gate_fired": True,
+                    "issuers_used": 5, "issuers_full": 5}}},
+                trend_states={}, fast_alarm={}, data_freshness={})
+            session.add(snap)
+            session.flush()
+            session.expunge(snap)
+        keys.append(_gate_evidence(snap).economic_observation_key)
+
+    assert len(set(keys)) == 1, "four recomputes of one filing must be ONE observation"
+
+    later = _snapshot_with_d3({
+        "value": 0.42, "sub_score": 0.30, "as_of": "2026-09-30", "stale": False,
+        "gate_fired": True, "issuers_used": 5, "issuers_full": 5,
+    })
+    assert _gate_evidence(later).economic_observation_key not in keys, (
+        "a new filing period must be a NEW observation")
+
+
+def test_the_sidecar_records_what_is_genuinely_absent(isolated_db):
+    """A cohort period end exists; a per-issuer accession identity does not."""
     snap = _snapshot_with_d3({
         "value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30", "stale": False,
-        "gate_fired": True, "filing_period_available": False,
-        "issuers_used": 5, "issuers_full": 5,
+        "gate_fired": True, "issuers_used": 5, "issuers_full": 5,
     })
     evidence = _gate_evidence(snap)
-    assert evidence.metadata["filing_period_available"] is False
+    assert evidence.metadata["issuer_accession_identity"] is False
+    assert evidence.period_end == "2026-06-30"
 
 
 def test_the_gate_carries_its_reading_date_not_the_recompute_time(isolated_db):
