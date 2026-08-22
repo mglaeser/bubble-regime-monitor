@@ -54,7 +54,7 @@
 
 ### Metrics (34 + 1, see §7)
 
-`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: cv90, cv95, contested, state) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — no free raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1) · `cofer_gold_share_pct` (IMF **IFS**: gold ÷ total reserves — **NOT** COFER; quarterly, ~1-quarter lag) · `cofer_ust_share_pct` (IMF **COFER**: USD share of allocated FX reserves; quarterly, ~1-quarter lag)
+`cape` · `excess_cape_yield` · `sp500_top10_weight_pct` · `semis_runup_2yr_pp` · `hy_oas_bps` · `hy_oas_52w_change_bps` (≈252 business-day lookback in the persisted history) · `pct_above_200dma` · `margin_debt_yoy_pct` · `gsadf` (detail: statistic, cv90, cv95, contested, state, gsadf_sup — **since v4.0 the value is the endpoint BSADF, not the GSADF sup; see §8**) · `lppls_confidence` (detail: state, bands, n_windows_qualifying, n_windows_positive) · `vix_level` · `vix_term_state` (categorical: value null, `detail.state` ∈ contango/flat/backwardation) · `vix_term_ratio` · `vrp` (unit `annualized_variance_pts_pct2`) · `skew` · `qqq_close` · `spy_close` · `ndx_close` (**always** available:false — no free raw index; use `qqq_close`) · `gold_spot` · `silver_spot` · `gold_silver_ratio` (note states spot vs ETF basis) · `gold_ttm_pct` · `btc_spot` · `btc_ath` (detail: basis `monthly_closes+spot`, coverage_start — **not a curated all-time record**) · `btc_drawdown_pct` (≤ 0 by construction) · `usd_broad_index_level` · `usd_broad_index_ytd_pct` (vs last-December month-end) · `usdjpy` · `usdchf` · `ust10y_yield_pct` · `tbill3m_yield_pct` · `mmf_total_assets_usd` (USD_mn, quarterly Z.1) · `cofer_gold_share_pct` (IMF **IFS**: gold ÷ total reserves — **NOT** COFER; quarterly, ~1-quarter lag) · `cofer_ust_share_pct` (IMF **COFER**: USD share of allocated FX reserves; quarterly, ~1-quarter lag)
 
 ## 3 · Endpoint
 
@@ -341,6 +341,45 @@ inside `detail` as "not served this pull", not as zero.
 // series twin: available:false + 61 null points, same note pattern
 ```
 
+## 8 · v1.2 additive delta (methodology v4.0-s4-endpoint) — `gsadf` carries the SCORED statistic
+
+s4 now scores the **BSADF at the last observation** against the last row of the
+simulated BSADF critical-value matrix, instead of the GSADF sup over all
+endpoints. GSADF answers "was there ever an explosive episode anywhere in this
+window?" and stays rejected long after an episode ends; this feed reports a
+present-tense regime. Selection lives in the SHA-pinned `frozen_methodology.json`
+under `gsadf.statistic`; there is no environment variable.
+
+`metrics.gsadf.value` is `IndicatorOutput("s4").value`, so it is now the endpoint
+BSADF. `detail.cv90`/`detail.cv95` are the **endpoint** CV row — the same family
+as the value, so a consumer never compares a statistic to the wrong null. Two
+detail keys are new; none are removed:
+
+```jsonc
+"gsadf": { "value": 0.7562, "unit": "stat", "source": "exuber",
+           "detail": { "statistic": "bsadf_endpoint",
+                       "cv90": 1.1769, "cv95": 1.4315,
+                       "contested": true, "state": "COMPUTED",
+                       "gsadf_sup": { "stat": 2.6189, "cv90": 2.0034, "cv95": 2.2604 } } }
+```
+
+- `statistic` — names the scored family (`"bsadf_endpoint"`, or `"gsadf_sup"` for
+  the pre-v4.0 rule). Read it before interpreting `value`.
+- `gsadf_sup` — the **unscored** GSADF sup and its own CVs, retained so the
+  endpoint-vs-sup divergence stays auditable from the payload alone. The values
+  above are the 1986 real-Nasdaq-100 divergence (exuber 1.1.0, T=487), where the
+  sup rejects at 5% on a window ending 2000-02 while the endpoint is calm — an
+  illustration, not a live capture.
+
+The metric **key is unchanged** (`gsadf`) and `METRIC_KEYS` is still 35, so the
+frozen key inventory in §2 and the endpoint contract in §3 are unaffected.
+
+**The §5 / §5b captures predate this change** and show the pre-v4.0 sup under
+`gsadf`. They are dated records of what the host actually returned and are left
+as-is; read them against §5's own timestamp, not as the current shape.
+
 ---
 
-*Research/education tooling. Methodology of the bubble score is unchanged by this feed (changelog v3.4.0; v1.1 delta v3.7.0).*
+*Research/education tooling. The bubble score's methodology is unchanged by this
+feed; the v4.0 delta above records a methodology change that this feed reflects
+(changelog v3.4.0; v1.1 delta v3.7.0; v1.2 delta v4.0-s4-endpoint).*

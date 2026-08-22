@@ -172,7 +172,7 @@ Applied as `D = min(D_raw * V, 1.0)`. Neutral fallback when the ratio is missing
 
 | Red flag | Exact condition | Source |
 |---|---|---|
-| GSADF explosive non-contested | `gsadf_stat > cv95` AND `not contested` | `aggregate.py:evaluate_red_flags` |
+| GSADF explosive non-contested | `stat > cv95` AND `not contested` AND `_s4_ok` — `stat`/`cv95` are the **scored** family per `gsadf.statistic` (§4, since v4.0 the endpoint BSADF), and `_s4_ok` requires a finite statistic with a correctly ordered CV pair, so a degenerate reading can no longer fire a flag the sub-score floors. Flag key `gsadf_explosive_noncontested` is unchanged. | `aggregate.py:evaluate_red_flags`; gated in `compute.py:compute_snapshot` |
 | Semi run-up ≥ 150pp | `semi_runup_pp >= 150.0` | `aggregate.py` |
 | HY OAS widen > 100bps | `(hy_oas_bps - hy_oas_3yr_tight_bps) > 100.0` | `aggregate.py` |
 | Breadth < 50 near ATH | `breadth_pct < 50.0` AND `index_within_2pct_of_ath` | `aggregate.py` |
