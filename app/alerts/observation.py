@@ -63,7 +63,12 @@ DOMAIN_CAPE = "indicator.s1.cape"
 DOMAIN_TOP10 = "indicator.s2.top10_share"
 DOMAIN_SEMIS = "indicator.s3.semi_runup"
 DOMAIN_GSADF = "indicator.s4.gsadf"
-DOMAIN_S5_PERCENTILE = "indicator.s5.credit_percentile"
+#: s5 publishes a credit LEVEL, and its unit depends on which fallback
+#: tier fired (EBP in pp, the two spread tiers in bps). It was named
+#: `credit_percentile`, which is a quantity nothing computes: the
+#: percentile-like number is the SUB-SCORE. A domain named after a
+#: field that does not exist invites exactly the wrong comparison.
+DOMAIN_S5_CREDIT_LEVEL = "indicator.s5.credit_level"
 
 DOMAIN_HY_OAS = "credit.hy_oas.daily"
 DOMAIN_IG_OAS = "credit.ig_oas.daily"
@@ -93,7 +98,7 @@ OBSERVATION_DOMAINS: frozenset[str] = frozenset(
         DOMAIN_RF1, DOMAIN_RF2, DOMAIN_RF3, DOMAIN_RF4,
         DOMAIN_BREADTH, DOMAIN_MARGIN, DOMAIN_HYPERSCALER_GATE, DOMAIN_LPPLS,
         DOMAIN_LPPLS_BANDS, DOMAIN_CAPE, DOMAIN_TOP10, DOMAIN_SEMIS, DOMAIN_GSADF,
-        DOMAIN_S5_PERCENTILE,
+        DOMAIN_S5_CREDIT_LEVEL,
         DOMAIN_HY_OAS, DOMAIN_IG_OAS, DOMAIN_EBP,
         DOMAIN_LEG_SPY_FABER, DOMAIN_LEG_QQQ_FABER, DOMAIN_LEG_SPY_SMA200,
         DOMAIN_LEG_QQQ_SMA200,
