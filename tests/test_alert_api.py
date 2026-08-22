@@ -296,3 +296,49 @@ def test_browser_config_contains_no_admin_key():
             assert "change-me" in snippet or "<" in snippet, (
                 f"{path.name} appears to embed a real credential: {snippet[:40]}"
             )
+
+
+def test_health_says_out_loud_when_the_watchdog_has_never_run(client):
+    """An absent heartbeat is the loudest failure, and it used to be the quietest.
+
+    The watchdog records liveness on every run, and health lists the heartbeats
+    that EXIST. So a watchdog that has never run once — because its systemd
+    timer was never installed on the host, which is the recorded state of this
+    deployment — produced no row, and no row rendered as nothing at all.
+
+    Absence of a monitor must read as a fault, not as silence. This is the same
+    property the notifier enforces at the transport layer, one level up.
+    """
+    payload = client.get("/api/v1/alerts/health",
+                         headers={"X-API-Key": READ_KEY}).json()
+    watchdog = payload["components"]["watchdog"]
+    assert watchdog["present"] is False
+    assert watchdog["healthy"] is False
+    assert "never" in watchdog["reason"].lower()
+    assert "watchdog" in " ".join(payload["conditions"]).lower()
+
+
+def test_health_does_not_let_a_future_heartbeat_mask_silence(client, monkeypatch):
+    """Negative age sails under every "older than" test.
+
+    A heartbeat dated in the future — clock skew, or a bad write — would pin the
+    component healthy forever. Silence masked by a clock is precisely what this
+    projection exists to expose, so it is a fault in its own right.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+
+    with session_scope() as session:
+        session.merge(AlertComponentHeartbeat(
+            component="watchdog",
+            last_heartbeat_at=datetime.now(UTC) + timedelta(hours=6),
+            status="ok", detail_json={}))
+
+    payload = client.get("/api/v1/alerts/health",
+                         headers={"X-API-Key": READ_KEY}).json()
+    watchdog = payload["components"]["watchdog"]
+    assert watchdog["present"] is True
+    assert watchdog["healthy"] is False, "a future heartbeat must not read as healthy"
+    assert "future" in watchdog["reason"].lower()

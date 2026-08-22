@@ -358,9 +358,9 @@ _SPECS: tuple[SourceSpec, ...] = (
     _spec("semi_runup_pp", "number", obs.DOMAIN_SEMIS, authoritative=False,
           description="Semiconductor 2-yr net-of-market run-up, percentage points.",
           read=_evidence_reader("semi_runup_pp", obs.DOMAIN_SEMIS)),
-    _spec("s5_percentile", "number", obs.DOMAIN_S5_PERCENTILE, authoritative=False,
+    _spec("s5_credit_level", "number", obs.DOMAIN_S5_CREDIT_LEVEL, authoritative=False,
           description="Credit percentile behind the s5 sub-score.",
-          read=_evidence_reader("s5_percentile", obs.DOMAIN_S5_PERCENTILE)),
+          read=_evidence_reader("s5_credit_level", obs.DOMAIN_S5_CREDIT_LEVEL)),
     # --- credit sidecar (display only; rf3 is the authority) -------------
     _spec("hy_oas_bps", "number", obs.DOMAIN_HY_OAS, authoritative=False,
           description="HY OAS in bps. DISPLAY evidence — never a substitute for rf3.",

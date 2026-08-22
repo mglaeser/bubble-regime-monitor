@@ -3,9 +3,9 @@ name: ci
 # Audit rebuild (A-01/A-08/A-13/B-01/B-35): the previous pipeline was red on
 # every run and non-blocking ('mypy || true'), so production shipped on red.
 # This version fails closed on lint, tests, dependency CVEs and secret leaks.
-# Type-checking is EXPLICITLY advisory — not disguised as a gate — until the
-# tracked mypy errors are driven to zero (A-13). The count is RATCHETED: it may
-# fall, never rise. ("43 tracked errors" stood here and was wrong; the measured
+# Type-checking is BLOCKING as well — a RATCHET, not an advisory step: the
+# count may fall, never rise (A-13), and the step fails closed if mypy cannot
+# run at all. ("43 tracked errors" stood here and was wrong; the measured
 # figure was 217 in 49 files. A stale number in a governance comment is the
 # same defect class as a decorative gate — it reads as control and is not.)
 #

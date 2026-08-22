@@ -6,6 +6,7 @@ The properties here are the ones that decide whether a 3 a.m. SMS is real.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -15,7 +16,12 @@ from app.alerts.enums import ConditionState, EpisodeStatus, EvaluationStatus, Su
 from app.alerts.observation import build_evidence
 from app.alerts.primitives import EvaluationContext, evaluate_rule
 from app.alerts.rulespec import RuleSpec
-from app.alerts.state_machine import InstanceMemory, evaluate_state
+from app.alerts.state_machine import (
+    InstanceMemory,
+    effective_prior_state,
+    evaluate_state,
+    flapping_projection,
+)
 
 NOW = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
@@ -347,6 +353,73 @@ def test_a_candidate_is_never_latched_over_an_open_episode():
     assert decision.open_episode is False
     assert decision.episode_id == "EP"
 
+
+
+
+def _unknown_settling_rule(count: int) -> RuleSpec:
+    """A boolean rule whose candidate needs `count` distinct observations."""
+    return _rule(
+        rule_id="test.persist",
+        source_fields=["rf4_active"],
+        condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+        confirmation={"count": count, "basis": "distinct_economic_observation"},
+        confirmation_sources=["rf4_active"],
+        candidate_ttl={"calendar": "US_TRADING", "intervals": 10, "grace_seconds": 0},
+    )
+
+
+def test_unknown_then_false_cancels_the_candidate_it_left_pending():
+    """An outage must not strand the pending episode it interrupted.
+
+    The definite-false arm reads the CURRENT stored state, but an outage has
+    already overwritten that with UNKNOWN — so neither the PENDING nor the
+    FIRING arm matched and the episode stayed open forever while the mechanism
+    reported NORMAL. The partial unique index on one open episode per instance
+    then blocks the NEXT episode, so a single outage silently disarms the rule
+    from then on.
+    """
+    rule = _unknown_settling_rule(2)
+    memory = InstanceMemory(
+        state_version=4,
+        condition_state=ConditionState.UNKNOWN,
+        last_known_condition_state=ConditionState.PENDING,
+        candidate_started_input="a",
+        confirmed_keys={"rf4_active": frozenset({"key-1"})},
+        candidate_expires_at=NOW + timedelta(days=5),
+        current_episode_id="EPISODE",
+    )
+    settled = make_input(identity="c", rf4=False, rf4_fireable=True)
+    decision = evaluate_state(
+        rule=rule, instance_fingerprint="fp", memory=memory,
+        outcome=evaluate_rule(rule, _ctx(settled)), ctx=_ctx(settled), now=NOW)
+
+    assert decision.condition_state == ConditionState.NORMAL
+    assert decision.cancel_episode == EpisodeStatus.CANCELLED_UNCONFIRMED
+    assert decision.candidate_started_input is None
+
+
+def test_unknown_then_false_resolves_the_episode_it_left_firing():
+    """The same defect, one state further on: a firing episode must resolve.
+
+    Worse here than for a candidate — the episode stays open AND the operator
+    is never told the condition cleared, so the dashboard shows a live firing
+    episode for a condition that ended during the outage.
+    """
+    rule = _unknown_settling_rule(1)
+    memory = InstanceMemory(
+        state_version=7,
+        condition_state=ConditionState.UNKNOWN,
+        last_known_condition_state=ConditionState.FIRING,
+        current_episode_id="EPISODE",
+    )
+    settled = make_input(identity="c", rf4=False, rf4_fireable=True)
+    decision = evaluate_state(
+        rule=rule, instance_fingerprint="fp", memory=memory,
+        outcome=evaluate_rule(rule, _ctx(settled)), ctx=_ctx(settled), now=NOW)
+
+    assert decision.condition_state == ConditionState.NORMAL
+    assert decision.resolve_episode is True
+    assert decision.cancel_episode is None
 
 def test_candidate_expires_only_through_its_ttl_during_an_outage():
     rule = _rule(
@@ -857,3 +930,145 @@ def test_pure_modules_hold_no_clock_and_no_session():
                 assert "utcnow" not in target, f"{name} reads a clock"
             if isinstance(node, ast.ImportFrom):
                 assert node.module != "sqlalchemy.orm", f"{name} imports a Session"
+
+
+# ---------------------------------------------------------------------------
+# the clone sweep: every lifecycle decision must settle against the state the
+# outage INTERRUPTED, not the UNKNOWN it left behind (AGENTS.md: sweep for
+# clones of any pattern you fix)
+# ---------------------------------------------------------------------------
+
+
+def _hysteresis_rule() -> RuleSpec:
+    return _rule(
+        rule_id="test.hyst",
+        source_fields=["breadth_pct"],
+        condition={"kind": "threshold", "source": "breadth_pct", "op": "gt",
+                   "threshold": "on", "off_threshold": "off"},
+        thresholds=[{"name": "on", "value": 65.0, "unit": "percent", "attribution": "JUDG"},
+                    {"name": "off", "value": 55.0, "unit": "percent", "attribution": "JUDG"}],
+        confirmation={"count": 1, "basis": "authoritative_transition"},
+        confirmation_sources=["breadth_pct"],
+        resolution={"policy": "auto_on_condition_false"},
+    )
+
+
+def test_an_outage_does_not_resolve_an_episode_from_inside_its_hysteresis_band():
+    """The sharpest clone: the hysteresis CONTEXT was read from the stale field.
+
+    `evaluate_rule` is told whether the instance is currently firing. Read from
+    the stored state, that is False after any outage, so a rule with an
+    off_threshold compares against its ON level instead of its OFF level — and a
+    value the rule explicitly declared as still-firing becomes a definite FALSE.
+    Settling that FALSE against the effective prior then RESOLVES the very
+    episode hysteresis exists to hold open.
+    """
+    rule = _hysteresis_rule()
+    memory = InstanceMemory(state_version=5, condition_state=ConditionState.UNKNOWN,
+                            last_known_condition_state=ConditionState.FIRING,
+                            current_episode_id="EP")
+    inside_band = make_input(identity="c", breadth=60.0)      # >off(55), <on(65)
+    ctx = _ctx(inside_band)
+
+    firing = effective_prior_state(memory.condition_state,
+                                   memory.last_known_condition_state) == ConditionState.FIRING
+    outcome = evaluate_rule(rule, ctx, currently_firing=firing)
+    assert outcome.truth is True
+    assert "hysteresis_hold" in outcome.reasons
+
+    decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                              outcome=outcome, ctx=ctx, now=NOW)
+    assert decision.resolve_episode is False, "hysteresis must still hold the episode"
+
+
+def test_the_engine_derives_its_hysteresis_context_from_the_effective_prior():
+    """Guard that the swept clone stays swept."""
+    src = (Path(__file__).resolve().parents[1] / "app" / "alerts" / "engine.py").read_text()
+    assert "effective_prior_state(" in src
+    assert "currently_firing=memory.condition_state == ConditionState.FIRING" not in src
+
+
+def test_a_true_observation_after_an_outage_does_not_re_fire_an_open_episode():
+    """The already-firing short-circuit was the same stale read.
+
+    Missing it dropped through to the firing path and re-activated an episode
+    that was already open and already notified, which the planner reads as a
+    fresh firing: a second message about one continuous condition.
+    """
+    rule = _rule(rule_id="test.persist", source_fields=["rf4_active"],
+                 condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+                 confirmation={"count": 1, "basis": "distinct_economic_observation"},
+                 confirmation_sources=["rf4_active"])
+    memory = InstanceMemory(state_version=9, condition_state=ConditionState.UNKNOWN,
+                            last_known_condition_state=ConditionState.FIRING,
+                            current_episode_id="EP")
+    still_true = make_input(identity="c", rf4=True, rf4_fireable=True)
+    decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                              outcome=evaluate_rule(rule, _ctx(still_true)),
+                              ctx=_ctx(still_true), now=NOW)
+    assert decision.condition_state == ConditionState.FIRING
+    assert decision.activate_episode is False, "an open episode must not re-activate"
+    assert decision.notification_eligible is False
+
+
+def test_an_outage_does_not_latch_a_new_candidate_over_a_live_firing_episode():
+    """Worse than the original defect: it destroyed the evidence of the fix.
+
+    Latching a candidate over a FIRING episode makes the next persisted
+    last-known state PENDING, so the FIRING arm becomes unreachable forever and
+    the episode later closes as never-confirmed instead of resolving.
+    """
+    rule = _rule(rule_id="test.multi", source_fields=["rf4_active"],
+                 condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+                 confirmation={"count": 2, "basis": "distinct_economic_observation"},
+                 confirmation_sources=["rf4_active"],
+                 candidate_ttl={"calendar": "US_TRADING", "intervals": 10, "grace_seconds": 0})
+    memory = InstanceMemory(state_version=4, condition_state=ConditionState.UNKNOWN,
+                            last_known_condition_state=ConditionState.FIRING,
+                            current_episode_id="EP")
+    still_true = make_input(identity="c", rf4=True, rf4_fireable=True)
+    decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                              outcome=evaluate_rule(rule, _ctx(still_true)),
+                              ctx=_ctx(still_true), now=NOW)
+    assert decision.condition_state == ConditionState.FIRING
+    assert decision.open_episode is False
+    assert decision.candidate_from_state is None, "no candidate over a live episode"
+
+
+def test_a_candidate_that_died_of_ttl_during_an_outage_closes_stale_not_reverted():
+    """The replay gate counts the two separately, so the arms must agree."""
+    rule = _rule(rule_id="test.multi", source_fields=["rf4_active"],
+                 condition={"kind": "boolean_state", "source": "rf4_active", "equals": True},
+                 confirmation={"count": 2, "basis": "distinct_economic_observation"},
+                 confirmation_sources=["rf4_active"],
+                 candidate_ttl={"calendar": "US_TRADING", "intervals": 10, "grace_seconds": 0})
+    memory = InstanceMemory(state_version=4, condition_state=ConditionState.UNKNOWN,
+                            last_known_condition_state=ConditionState.PENDING,
+                            candidate_started_input="a",
+                            candidate_expires_at=NOW - timedelta(days=1),
+                            current_episode_id="EP")
+    settled = make_input(identity="c", rf4=False, rf4_fireable=True)
+    decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                              outcome=evaluate_rule(rule, _ctx(settled)),
+                              ctx=_ctx(settled), now=NOW)
+    assert decision.cancel_episode == EpisodeStatus.CANCELLED_STALE
+    assert "candidate_ttl_expired" in decision.reasons
+
+
+def test_an_outage_is_not_a_flap():
+    """UNKNOWN is a mask over the previous state, not an oscillation.
+
+    Counting it as two transitions let two outages inside the window declare a
+    perfectly stable alert 'flapping' — and flapping SUPPRESSES delivery, so the
+    failure direction was a swallowed alert during exactly the degraded period
+    the operator most needs to hear about.
+    """
+    steady = [ConditionState.FIRING] * 6
+    interrupted = [ConditionState.FIRING, ConditionState.UNKNOWN, ConditionState.FIRING,
+                   ConditionState.UNKNOWN, ConditionState.FIRING, ConditionState.FIRING]
+    assert flapping_projection(steady)["flapping"] is False
+    assert flapping_projection(interrupted)["transitions"] == 0
+    assert flapping_projection(interrupted)["flapping"] is False
+
+    real = [ConditionState.FIRING, ConditionState.NORMAL] * 3
+    assert flapping_projection(real)["flapping"] is True, "a real oscillation must still flap"

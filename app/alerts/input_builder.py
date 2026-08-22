@@ -11,6 +11,7 @@ cannot: nothing here imports one.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -58,6 +59,39 @@ def _indicator_payloads(snapshot: Snapshot) -> dict[str, dict[str, Any]]:
             if isinstance(payload, dict):
                 out[ind_id] = payload
     return out
+
+
+_ISO_PREFIX = re.compile(r"^\d{4}-\d{2}(-\d{2})?$")
+_QUARTER_LABEL = re.compile(r"^(\d{4})-Q([1-4])$")
+
+
+def _period_is_future(period: Any, computed_at: str | None) -> bool:
+    """Is this economic period labelled after the moment we observed it?
+
+    ONLY answers for labels that are lexically comparable to an ISO date, i.e.
+    `YYYY-MM` or `YYYY-MM-DD`. A quarterly label like `2026-Q2` is a perfectly
+    valid economic period — it is the confirmation key for "once per filing" —
+    but comparing it lexically to `2026-08-21` puts `Q` (0x51) above `0` (0x30),
+    so every valid past filing reads as future. That flagged the snapshot
+    ineligible and suppressed the alert, using the very check meant to protect
+    it. Anything not shaped like a date is not comparable, and an
+    incomparable label is not evidence of a bad vintage.
+    """
+    if not period or not computed_at:
+        return False
+    text = str(period)
+    quarter = _QUARTER_LABEL.match(text)
+    if quarter:
+        # A quarter is future while the quarter it NAMES has not ENDED, and that
+        # must be decided on the same day granularity as an ISO label. Comparing
+        # end MONTHS let a quarter read as closed throughout its own final month
+        # — 2026-Q3 on 2026-09-01 has 29 days still to run, and a month-level
+        # test called it past. Compare the quarter's last day instead.
+        year, q = quarter.group(1), int(quarter.group(2))
+        return f"{year}-{('03-31', '06-30', '09-30', '12-31')[q - 1]}" > computed_at[:10]
+    if not _ISO_PREFIX.match(text):
+        return False
+    return text > computed_at[:10]
 
 
 def _evidence_data_state(payload: dict[str, Any]) -> tuple[str, str | None]:
@@ -129,13 +163,16 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
 
     _INDICATOR_DOMAINS: tuple[tuple[str, str, str | None], ...] = (
         ("d1", obs.DOMAIN_BREADTH, "percent"),
-        ("d2", obs.DOMAIN_MARGIN, "multiplier"),
+        # d2 is NOT here: its generic `value` is the year-on-year percentage,
+        # while the rollover tripwire reads the MULTIPLIER. Publishing one
+        # under the other's name is handled explicitly below.
         ("d4", obs.DOMAIN_LPPLS, "confidence"),
         ("s1", obs.DOMAIN_CAPE, None),
         ("s2", obs.DOMAIN_TOP10, "percent"),
         ("s3", obs.DOMAIN_SEMIS, "pp"),
         ("s4", obs.DOMAIN_GSADF, "stat"),
-        ("s5", obs.DOMAIN_S5_PERCENTILE, "percentile"),
+        # s5 is NOT here: its unit depends on the fallback tier, so a single
+        # hardcoded unit is wrong for two of the three. Handled below.
     )
     for ind_id, domain, unit in _INDICATOR_DOMAINS:
         payload = indicators.get(ind_id)
@@ -156,14 +193,106 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
             # or clock skew — recorded, never silently used.
             ineligibility.append(f"period_label_future:{ind_id}")
 
+    # s5 publishes a credit LEVEL with the unit of the tier that produced it.
+    #
+    # The preferred tier is the Gilchrist-Zakrajsek Excess Bond Premium in
+    # percentage points; the two fallbacks are spreads in basis points. All
+    # three were emitted as `indicator.s5.credit_percentile`, unit "percentile"
+    # — a quantity nothing computes, since the percentile-like number is the
+    # SUB-SCORE. Any rule comparing that field compared the wrong quantity in
+    # the wrong unit, and a threshold pinned against one tier would be
+    # meaningless the moment the chain fell through to another.
+    s5 = indicators.get("s5") or {}
+    s5_state, s5_reason = _evidence_data_state(s5) if s5 else (DataState.MISSING,
+                                                               "indicator_absent")
+    s5_tier = s5.get("s5_input_tier")
+    s5_unit = s5.get("s5_raw_unit")
+    if not s5 or not s5_tier or not s5_unit:
+        # A bare historical `value` cannot be interpreted: its unit is unknowable
+        # without the tier that produced it (mandate 5.4 — never inferred).
+        s5_value, s5_state, s5_reason = None, DataState.MISSING, "typed_s5_tier_absent"
+    else:
+        s5_value = _numeric(s5.get("s5_raw_value"))
+    s5_period = s5.get("as_of")
+    add(obs.DOMAIN_S5_CREDIT_LEVEL, s5_value, unit=s5_unit, source_id="s5",
+        period_start=s5_period, period_end=s5_period,
+        data_state=s5_state, reason=s5_reason,
+        provider_id=s5.get("data_source"),
+        metadata={"sub_score": s5.get("s5_sub_score", s5.get("sub_score")),
+                  "s5_input_tier": s5_tier,
+                  "s5_percentile_available": bool(s5.get("s5_percentile_available")),
+                  "quality": s5.get("quality")})
+    if _period_is_future(s5_period, computed_at):
+        ineligibility.append("period_label_future:s5")
+
+    # d2 publishes the ROLLOVER MULTIPLIER, not the year-on-year percentage.
+    #
+    # `tripwire.margin_rollover` watches d2_multiplier cross 1.0 upward. The
+    # generic loop would publish the indicator's `value`, and for d2 that is the
+    # margin-debt YoY percentage — roughly 49, permanently far above 1.0 — so
+    # the rule could never observe the 0.6 -> 1.0 rollover it exists to report,
+    # while being marked READY.
+    #
+    # The tri-state matters as much as the quantity. `rollover_confirmed_calendar`
+    # returns None on a FINRA publication gap, meaning "cannot assert". Scoring
+    # must pick a number and collapses that to the no-rollover multiplier;
+    # alerting must NOT inherit the collapse, or the tripwire reads a missing
+    # publication as a definite "no rollover". Unknown is not normal.
+    d2 = indicators.get("d2") or {}
+    d2_state, d2_reason = _evidence_data_state(d2) if d2 else (DataState.MISSING,
+                                                               "indicator_absent")
+    d2_assertable = d2.get("rollover_assertable")
+    d2_multiplier = _numeric(d2.get("multiplier")) if d2_assertable is True else None
+    if not d2:
+        d2_value, d2_state, d2_reason = None, DataState.MISSING, "indicator_absent"
+    elif d2_assertable is None:
+        # A row persisted before the typed payload existed. Historical rows are
+        # NOT_EVALUABLE for this rule, never a fabricated number (mandate 5.4).
+        d2_value, d2_state, d2_reason = None, DataState.MISSING, "typed_rollover_absent"
+    elif d2_multiplier is None:
+        d2_value, d2_state, d2_reason = None, DataState.MISSING, "rollover_not_assertable"
+    else:
+        d2_value = d2_multiplier
+    d2_period = d2.get("release_period") or d2.get("as_of")
+    add(obs.DOMAIN_MARGIN, d2_value, unit="multiplier", source_id="d2",
+        period_start=d2_period, period_end=d2_period,
+        data_state=d2_state, reason=d2_reason,
+        provider_id=d2.get("data_source"),
+        metadata={"yoy_pct": d2.get("yoy_pct"),
+                  "rollover_state": d2.get("rollover_state"),
+                  "sub_score": d2.get("sub_score")})
+    # The same vintage check the generic loop applies. Lifting d2 out of that
+    # loop silently dropped it — a reading dated after the moment we observed
+    # it is a bad vintage or clock skew, and it must mark the INPUT ineligible
+    # rather than being evaluated as ordinary fresh evidence.
+    if _period_is_future(d2_period, computed_at):
+        ineligibility.append("period_label_future:d2")
+
     # d3 is a GATE (a decision), not a level.
     d3 = indicators.get("d3") or {}
     d3_state, d3_reason = _evidence_data_state(d3) if d3 else (DataState.MISSING, "indicator_absent")
-    gate = (d3.get("extra") or {}).get("gate_fired") if isinstance(d3.get("extra"), dict) else None
+    # `IndicatorOutput.payload()` FLATTENS `extra` into the top level, so the
+    # gate arrives as a top-level key. Reading `payload["extra"]["gate_fired"]`
+    # returned None on every snapshot that has ever existed, which rendered as
+    # "gate not persisted" while the rule stayed marked READY.
+    gate = d3.get("gate_fired")
+    # NOT a filing period: EDGAR provenance carries only `as_of`, the reading
+    # date. Naming it a filing period would invent an identity the source does
+    # not provide, and the "once per new filing" confirmation this rule needs
+    # cannot be built from a reading date — every recompute would look like a
+    # new filing. The gate VALUE is now readable; its confirmation key is not.
+    d3_period = d3.get("as_of")
     add(obs.DOMAIN_HYPERSCALER_GATE, gate if isinstance(gate, bool) else None,
-        source_id="d3", period_start=d3.get("as_of"), period_end=d3.get("as_of"),
-        data_state=d3_state if gate is not None else DataState.MISSING,
-        reason=d3_reason if gate is not None else "gate_state_not_persisted")
+        source_id="d3", period_start=d3_period, period_end=d3_period,
+        data_state=d3_state if isinstance(gate, bool) else DataState.MISSING,
+        reason=d3_reason if isinstance(gate, bool) else "gate_state_not_persisted",
+        metadata={"issuers_used": d3.get("issuers_used"),
+                  "issuers_full": d3.get("issuers_full"),
+                  "filing_period_available": bool(d3.get("filing_period_available"))})
+    # Checked against the ISO reading date, not the filing LABEL: `as_of` is a
+    # real date, `filing_period` is "2026-Q2" and means something else.
+    if _period_is_future(d3.get("as_of"), computed_at):
+        ineligibility.append("period_label_future:d3")
 
     # --- legs --------------------------------------------------------------
     legs: list[EvidenceModel] = []

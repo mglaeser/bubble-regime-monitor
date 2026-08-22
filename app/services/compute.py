@@ -120,13 +120,25 @@ _NEAR_ATH_FRAC: float = _M.get_path("red_flags", "index_near_ath_frac")
 
 def _s5_extra_with_shadow(observations_dated: list[tuple[str, float]] | None,
                           cadence: Literal["monthly", "daily"], source_tier: str,
-                          production_sub: float | None) -> dict[str, Any]:
+                          production_sub: float | None,
+                          *, raw_value: float | None = None,
+                          raw_unit: str | None = None) -> dict[str, Any]:
     """S5 payload extra: the v3.7.7 provisional-lag contract keys PLUS the PIN-H
     shadow dual report (calendar-anchored candidate; operator authorization
     2026-07-23: inactive, included_in_score=false, zero influence on any scored
     value). A shadow failure must never break scoring (guardrail 5): it degrades
     to an error note inside the extra instead."""
     extra: dict[str, Any] = dict(S5_PROVISIONAL_LAG)
+    # TYPED, because `value` alone is unreadable: the preferred tier persists an
+    # Excess Bond Premium in percentage points and the two fallbacks persist a
+    # spread in basis points, so the unit is a property of the TIER, not of the
+    # indicator id. The percentile-like quantity is the SUB-SCORE; no separate
+    # percentile is ever computed, and saying so stops a consumer inventing one.
+    extra["s5_raw_value"] = raw_value
+    extra["s5_raw_unit"] = raw_unit
+    extra["s5_input_tier"] = source_tier
+    extra["s5_sub_score"] = production_sub
+    extra["s5_percentile_available"] = False
     try:
         if observations_dated:
             extra["s5_dual_report"] = s5_calendar.build_dual_report(
@@ -941,12 +953,14 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                    f"(~{ebp_t2:+.2f}pp) over {len(raw.ebp_history)} months (~{yrs:.0f}y). "
                    "A low/negative EBP is loose credit / elevated sentiment = high fragility.")
         # FIDELITY quality (v3.3.2): EBP IS the LSSZ credit-sentiment construct.
-        indicators["s5"] = IndicatorOutput("s5", round(ebp_t2, 4), sub, False,
+        ebp_t2_persisted = round(ebp_t2, 4)
+        indicators["s5"] = IndicatorOutput("s5", ebp_t2_persisted, sub, False,
                                            "fed_ebp", False, note=s5_note,
                                            as_of=raw.ebp_as_of, quality=1.0,
                                            extra=_s5_extra_with_shadow(
                                                raw.ebp_history_dated, "monthly",
-                                               "fed_ebp", sub))
+                                               "fed_ebp", sub,
+                                               raw_value=ebp_t2_persisted, raw_unit="pp"))
     elif raw.baa_spread_history_bps and len(raw.baa_spread_history_bps) >= 24:
         # PREFERRED: long-history percentile on the BAA-DGS10 proxy (monthly),
         # LSSZ t-2yr lag (24 months). HY OAS is FRED-truncated to 3yr, so its
@@ -969,7 +983,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            as_of=raw.baa_spread_as_of, quality=0.5,
                                            extra=_s5_extra_with_shadow(
                                                raw.baa_spread_history_dated,
-                                               "monthly", "fred_BAA_DGS10", sub))
+                                               "monthly", "fred_BAA_DGS10", sub,
+                                               raw_value=spread_t2, raw_unit="bps"))
     elif raw.hy_oas_bps is not None and raw.hy_oas_history_bps:
         # FALLBACK: HY-OAS t-2 over the (regime-limited) accrued 3yr history.
         oas_t2 = s5_credit.t_minus_2_value(raw.hy_oas_history_bps)
@@ -989,7 +1004,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                                            as_of=raw.hy_oas_as_of, quality=0.3,
                                            extra=_s5_extra_with_shadow(
                                                raw.hy_oas_history_dated, "daily",
-                                               "fred_BAMLH0A0HYM2", sub))
+                                               "fred_BAMLH0A0HYM2", sub,
+                                               raw_value=oas_t2, raw_unit="bps"))
     else:
         indicators["s5"] = IndicatorOutput("s5", None, None, True, "fred_BAMLH0A0HYM2", False,
                                            note="HY OAS unavailable and no persisted history; dropped")
@@ -1061,8 +1077,20 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                 "no rollover; mult=0.6")
         if raw.margin_note:
             note = f"{raw.margin_note}; {note}"
-        indicators["d2"] = IndicatorOutput("d2", yoy, sub, False, "finra_xlsx", False,
-                                           note=note, as_of=raw.margin_as_of)
+        indicators["d2"] = IndicatorOutput(
+            "d2", yoy, sub, False, "finra_xlsx", False,
+            note=note, as_of=raw.margin_as_of,
+            # TYPED, because the alert layer cannot read the prose above and
+            # must not re-derive the mapping. `value` is the YoY PERCENTAGE;
+            # the rollover tripwire watches the MULTIPLIER, a different
+            # quantity entirely. rollover_state keeps all three states —
+            # scoring must pick a number and collapses None to "no rollover",
+            # but an unassertable rollover is UNKNOWN to alerting, never false.
+            extra={"yoy_pct": yoy,
+                   "rollover_state": rolled_state,
+                   "rollover_assertable": rolled_state is not None,
+                   "multiplier": d2_margin.multiplier(rolled),
+                   "release_period": raw.margin_as_of})
     elif raw.margin_cached is not None:
         # Guard (a): data older than 90 days (or missing) never feeds a YoY
         # across a broken window — serve the last good cached reading.
@@ -1075,7 +1103,13 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "d2", raw.margin_cached.get("value"), sub, False, "finra_xlsx (cached)", True,
             note=f"{reason}; serving cached reading from {raw.margin_cached['timestamp']}; "
                  "rollover: unknown",
-            as_of=raw.margin_as_of)
+            as_of=raw.margin_as_of,
+            # A cached reading says so in prose already; say it in a field too.
+            extra={"yoy_pct": raw.margin_cached.get("value"),
+                   "rollover_state": None,
+                   "rollover_assertable": False,
+                   "multiplier": None,
+                   "release_period": raw.margin_as_of})
     else:
         indicators["d2"] = IndicatorOutput("d2", None, None, True, "finra_xlsx", False,
                                            note="margin statistics unavailable, no cached reading; "
@@ -1096,13 +1130,33 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         d3_full = len(d3_hyperscaler_fcf.CIKS)
         d3_quality = len(raw.hyperscalers) / d3_full
         n_note = f"; {len(raw.hyperscalers)}/{d3_full} issuers"
-        indicators["d3"] = IndicatorOutput("d3", round(ratio, 4), sub, False, "sec_edgar", False,
-                                           note=f"{gate_note}{n_note}" + (f"; {note}" if note else ""),
-                                           as_of=raw.hyperscaler_as_of,
-                                           quality=max(0.0, min(1.0, d3_quality)))
+        indicators["d3"] = IndicatorOutput(
+            "d3", round(ratio, 4), sub, False, "sec_edgar", False,
+            note=f"{gate_note}{n_note}" + (f"; {note}" if note else ""),
+            as_of=raw.hyperscaler_as_of,
+            quality=max(0.0, min(1.0, d3_quality)),
+            # d3 is a GATE (a decision), and the decision itself was never
+            # persisted — it lived in a local and in prose. `value` is the FCF
+            # ratio, a different quantity, so a rule reading the level cannot
+            # learn whether the gate fired. Persist the decision, and the
+            # filing it belongs to: a quarterly filing confirms once per
+            # FILING, never once per four-hour recompute.
+            extra={"gate_fired": gate,
+                   # EDGAR provenance gives a reading date, not a filing
+                   # identity. Say so rather than renaming `as_of`: the rule's
+                   # "once per new filing" confirmation cannot be built from a
+                   # reading date, and a fabricated key would make every
+                   # four-hour recompute look like a fresh filing.
+                   "filing_period_available": False,
+                   "issuers_used": len(raw.hyperscalers),
+                   "issuers_full": d3_full})
     else:
-        indicators["d3"] = IndicatorOutput("d3", None, None, True, "sec_edgar", False,
-                                           note="EDGAR unavailable; dropped, Block D renormalized")
+        indicators["d3"] = IndicatorOutput(
+            "d3", None, None, True, "sec_edgar", False,
+            note="EDGAR unavailable; dropped, Block D renormalized",
+            # Dropped, so there is NO gate decision — not a false one.
+            extra={"gate_fired": None, "filing_period_available": False,
+                   "issuers_used": 0, "issuers_full": len(d3_hyperscaler_fcf.CIKS)})
 
     # ---- D4 LPPLS (v3.3.2 single-endpoint dense scan; FLOOR on failure) ----
     res = raw.lppls_result or {}
