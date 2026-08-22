@@ -11,6 +11,7 @@ cannot: nothing here imports one.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -58,6 +59,29 @@ def _indicator_payloads(snapshot: Snapshot) -> dict[str, dict[str, Any]]:
             if isinstance(payload, dict):
                 out[ind_id] = payload
     return out
+
+
+_ISO_PREFIX = re.compile(r"^\d{4}-\d{2}(-\d{2})?$")
+
+
+def _period_is_future(period: Any, computed_at: str | None) -> bool:
+    """Is this economic period labelled after the moment we observed it?
+
+    ONLY answers for labels that are lexically comparable to an ISO date, i.e.
+    `YYYY-MM` or `YYYY-MM-DD`. A quarterly label like `2026-Q2` is a perfectly
+    valid economic period — it is the confirmation key for "once per filing" —
+    but comparing it lexically to `2026-08-21` puts `Q` (0x51) above `0` (0x30),
+    so every valid past filing reads as future. That flagged the snapshot
+    ineligible and suppressed the alert, using the very check meant to protect
+    it. Anything not shaped like a date is not comparable, and an
+    incomparable label is not evidence of a bad vintage.
+    """
+    if not period or not computed_at:
+        return False
+    text = str(period)
+    if not _ISO_PREFIX.match(text):
+        return False
+    return text > computed_at[:10]
 
 
 def _evidence_data_state(payload: dict[str, Any]) -> tuple[str, str | None]:
@@ -198,7 +222,7 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
     # loop silently dropped it — a reading dated after the moment we observed
     # it is a bad vintage or clock skew, and it must mark the INPUT ineligible
     # rather than being evaluated as ordinary fresh evidence.
-    if d2_period and computed_at and d2_period > computed_at[:10]:
+    if _period_is_future(d2_period, computed_at):
         ineligibility.append("period_label_future:d2")
 
     # d3 is a GATE (a decision), not a level.
@@ -216,7 +240,9 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
         reason=d3_reason if isinstance(gate, bool) else "gate_state_not_persisted",
         metadata={"issuers_used": d3.get("issuers_used"),
                   "issuers_full": d3.get("issuers_full")})
-    if d3_period and computed_at and str(d3_period) > computed_at[:10]:
+    # Checked against the ISO reading date, not the filing LABEL: `as_of` is a
+    # real date, `filing_period` is "2026-Q2" and means something else.
+    if _period_is_future(d3.get("as_of"), computed_at):
         ineligibility.append("period_label_future:d3")
 
     # --- legs --------------------------------------------------------------

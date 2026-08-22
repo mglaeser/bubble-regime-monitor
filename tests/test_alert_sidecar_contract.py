@@ -220,3 +220,49 @@ def test_the_gate_carries_its_filing_period_not_the_recompute_time(isolated_db):
     })
     evidence = _gate_evidence(snap)
     assert evidence.period_end == "2026-Q2"
+
+
+def test_a_quarterly_filing_label_is_not_mistaken_for_a_future_period(isolated_db):
+    """`2026-Q2` sorts ABOVE `2026-08-21` because "Q" > "0".
+
+    A lexical vintage check therefore flagged every valid quarterly filing as
+    future-dated, marked the snapshot ineligible, and suppressed the alert —
+    using the check meant to protect it. The previous version of this file
+    asserted only `period_end` and stayed green while that was happening, which
+    is why this test asserts the eligibility list itself.
+    """
+    snap = _snapshot_with_d3({
+        "value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30", "stale": False,
+        "gate_fired": True, "filing_period": "2026-Q2",
+        "issuers_used": 5, "issuers_full": 5,
+    })
+    built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+    assert "period_label_future:d3" not in built.ineligibility_reasons
+    # (this minimal fixture is NOT_EVALUABLE for an unrelated and correct
+    # reason — it carries no typed action state — so assert on the reason
+    # rather than the verdict.)
+    assert not any("period_label_future" in r for r in built.ineligibility_reasons)
+
+
+def test_a_genuinely_future_d3_reading_date_is_still_caught(isolated_db):
+    """The check must still work on the field that IS a date."""
+    snap = _snapshot_with_d3({
+        "value": 0.42, "sub_score": 0.30, "as_of": "2027-06-30", "stale": False,
+        "gate_fired": True, "filing_period": "2027-Q2",
+        "issuers_used": 5, "issuers_full": 5,
+    })
+    built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+    assert "period_label_future:d3" in built.ineligibility_reasons
+
+
+def test_the_vintage_check_ignores_labels_it_cannot_compare():
+    """An incomparable label is not evidence of a bad vintage."""
+    from app.alerts.input_builder import _period_is_future
+
+    assert _period_is_future("2027-01", "2026-08-21") is True
+    assert _period_is_future("2026-06", "2026-08-21") is False
+    assert _period_is_future("2026-08", "2026-08-21") is False     # current month
+    assert _period_is_future("2026-Q2", "2026-08-21") is False     # not comparable
+    assert _period_is_future("2027-Q4", "2026-08-21") is False     # still not comparable
+    assert _period_is_future(None, "2026-08-21") is False
+    assert _period_is_future("2027-01", None) is False
