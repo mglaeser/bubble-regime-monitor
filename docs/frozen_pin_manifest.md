@@ -56,7 +56,7 @@ Engine baseline weights (Monte-Carlo + deterministic), asserted equal to the REG
 | s1 Valuation Extremity | `0.33` | S | `montecarlo.py:BASE_WEIGHTS_S`; `REGISTRY["s1"]` |
 | s2 Concentration | `0.27` | S | `BASE_WEIGHTS_S`; `REGISTRY["s2"]` |
 | s3 Semiconductor GSY Run-up | `0.20` | S | `BASE_WEIGHTS_S`; `REGISTRY["s3"]` |
-| s4 GSADF Explosiveness | `0.07` | S | `BASE_WEIGHTS_S`; `REGISTRY["s4"]` |
+| s4 PSY Explosiveness (endpoint BSADF) | `0.07` | S | `BASE_WEIGHTS_S`; `REGISTRY["s4"]` |
 | s5 Credit-Sentiment Fragility | `0.13` | S | `BASE_WEIGHTS_S`; `REGISTRY["s5"]` |
 | d1 Breadth | `0.35` | D | `BASE_WEIGHTS_D`; `REGISTRY["d1"]` |
 | d2 Margin-Debt Rollover | `0.13` | D | `BASE_WEIGHTS_D`; `REGISTRY["d2"]` |
@@ -94,7 +94,13 @@ Engine baseline weights (Monte-Carlo + deterministic), asserted equal to the REG
 | Mid tier | `100 <= runup < 150 pp` → `Beta(21, 19)` (mean 0.525) | `s3_semis_gsy.py`; `montecarlo.py` |
 | Low tier | `runup < 100` → `clip(0.30*runup/100, 0, 0.30)` | `s3_semis_gsy.py` |
 
-### s4 — GSADF Explosiveness (sub-score ladder)
+### s4 — PSY Explosiveness, endpoint BSADF (sub-score ladder)
+The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is.
+
+| Constant | Value | Source |
+|---|---|---|
+| Scored statistic | `gsadf.statistic = "bsadf_endpoint"` — BSADF at the last observation vs the last row of the simulated BSADF CV matrix. `"gsadf_sup"` selects the pre-v4.0 sup. Unknown value → fail-closed FLOOR. | `frozen_methodology.json`; `compute.py:scored_s4_statistic` |
+
 | Condition | Value | Source |
 |---|---|---|
 | Explosive & non-contested (`stat > cv95`) | `1.0` | `s4_gsadf.py` |
@@ -166,7 +172,7 @@ Applied as `D = min(D_raw * V, 1.0)`. Neutral fallback when the ratio is missing
 
 | Red flag | Exact condition | Source |
 |---|---|---|
-| GSADF explosive non-contested | `gsadf_stat > cv95` AND `not contested` | `aggregate.py:evaluate_red_flags` |
+| GSADF explosive non-contested | `stat > cv95` AND `not contested` AND `_s4_ok` — `stat`/`cv95` are the **scored** family per `gsadf.statistic` (§4, since v4.0 the endpoint BSADF), and `_s4_ok` requires a finite statistic with a correctly ordered CV pair, so a degenerate reading can no longer fire a flag the sub-score floors. Flag key `gsadf_explosive_noncontested` is unchanged. | `aggregate.py:evaluate_red_flags`; gated in `compute.py:compute_snapshot` |
 | Semi run-up ≥ 150pp | `semi_runup_pp >= 150.0` | `aggregate.py` |
 | HY OAS widen > 100bps | `(hy_oas_bps - hy_oas_3yr_tight_bps) > 100.0` | `aggregate.py` |
 | Breadth < 50 near ATH | `breadth_pct < 50.0` AND `index_within_2pct_of_ath` | `aggregate.py` |

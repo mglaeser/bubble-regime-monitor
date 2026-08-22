@@ -152,6 +152,48 @@ class TestBuildFeedGolden:
         lp = feed["metrics"]["lppls_confidence"]
         assert lp["available"] is True and lp["value"] == data.indicators["d4"].value
 
+    def test_the_configured_statistic_is_named_even_when_s4_produced_nothing(
+            self, snapshot, patched_sources):
+        """Which family is configured is a METHODOLOGY constant, so it is known on
+        a run where s4 produced nothing. Reading it from the run's extra published
+        statistic=null exactly when a consumer most needs to know what the null
+        value would have been."""
+        raw, data = snapshot
+        assert data.indicators["s4"].state == "FLOOR"       # golden supplies no stat
+        g = df.build_feed(raw, data)["metrics"]["gsadf"]
+        assert g["available"] is False and g["value"] is None
+        assert g["detail"]["statistic"] == "bsadf_endpoint"
+
+    def test_the_gsadf_metric_is_the_scored_statistic(self, isolated_db, patched_sources):
+        """value and state must describe the SAME statistic — the invariant the
+        lppls_confidence assertion above holds. Until s4 scored the endpoint,
+        raw.gsadf_stat and s4.value were the same number, so publishing the sup
+        beside s4.state was correct by construction. It is not any more."""
+        from app.services.compute import compute_snapshot
+        from tests.test_s4_endpoint_statistic import (
+            END_1986,
+            END_CV90,
+            END_CV95,
+            SUP_1986,
+            SUP_CV90,
+            SUP_CV95,
+            _raw_diverging,
+        )
+
+        raw = _raw_diverging()
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711)
+        g = df.build_feed(raw, data)["metrics"]["gsadf"]
+        assert g["value"] == data.indicators["s4"].value == END_1986
+        assert g["value"] != SUP_1986                       # not the unscored sup
+        assert g["detail"]["statistic"] == "bsadf_endpoint"
+        assert g["detail"]["state"] == data.indicators["s4"].state
+        # The CVs must belong to the SAME family as the value: comparing the
+        # published statistic against the sup's critical values is the wrong null.
+        assert (g["detail"]["cv90"], g["detail"]["cv95"]) == (END_CV90, END_CV95)
+        assert (g["detail"]["cv90"], g["detail"]["cv95"]) != (SUP_CV90, SUP_CV95)
+        sup = g["detail"]["gsadf_sup"]                      # sup still visible
+        assert (sup["stat"], sup["cv90"], sup["cv95"]) == (SUP_1986, SUP_CV90, SUP_CV95)
+
 
 class TestDegradation:
     def test_one_source_down_degrades_only_that_item(self, snapshot, patched_sources,
