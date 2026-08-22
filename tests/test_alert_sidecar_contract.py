@@ -280,5 +280,12 @@ def test_the_vintage_check_ignores_labels_it_cannot_compare():
     assert _period_is_future("2026-Q3", "2026-08-21") is True      # quarter still open
     assert _period_is_future("2027-Q4", "2026-08-21") is True      # plainly future
     assert _period_is_future("2026-H1", "2026-08-21") is False     # truly incomparable
+    # A quarter must stay "future" through its own final month. Comparing end
+    # MONTHS marked Q3 closed for the whole of September while 29 days of it
+    # remained; the day-level comparison is what makes these two disagree.
+    assert _period_is_future("2026-Q3", "2026-09-01") is True      # 29 days left
+    assert _period_is_future("2026-Q3", "2026-09-29") is True      # 1 day left
+    assert _period_is_future("2026-Q3", "2026-09-30") is False     # closed today
+    assert _period_is_future("2026-Q3", "2026-10-01") is False     # closed
     assert _period_is_future(None, "2026-08-21") is False
     assert _period_is_future("2027-01", None) is False

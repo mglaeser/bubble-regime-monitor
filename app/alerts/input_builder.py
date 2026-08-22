@@ -82,11 +82,13 @@ def _period_is_future(period: Any, computed_at: str | None) -> bool:
     text = str(period)
     quarter = _QUARTER_LABEL.match(text)
     if quarter:
-        # A quarter is future when the quarter it NAMES has not ended. Compare
-        # the quarter's end month, so 2026-Q3 read on 2026-08-21 is future
-        # (the quarter is still open) while 2026-Q2 is not.
+        # A quarter is future while the quarter it NAMES has not ENDED, and that
+        # must be decided on the same day granularity as an ISO label. Comparing
+        # end MONTHS let a quarter read as closed throughout its own final month
+        # — 2026-Q3 on 2026-09-01 has 29 days still to run, and a month-level
+        # test called it past. Compare the quarter's last day instead.
         year, q = quarter.group(1), int(quarter.group(2))
-        return f"{year}-{3 * q:02d}" > computed_at[:7]
+        return f"{year}-{('03-31', '06-30', '09-30', '12-31')[q - 1]}" > computed_at[:10]
     if not _ISO_PREFIX.match(text):
         return False
     return text > computed_at[:10]
