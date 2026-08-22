@@ -129,7 +129,9 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
 
     _INDICATOR_DOMAINS: tuple[tuple[str, str, str | None], ...] = (
         ("d1", obs.DOMAIN_BREADTH, "percent"),
-        ("d2", obs.DOMAIN_MARGIN, "multiplier"),
+        # d2 is NOT here: its generic `value` is the year-on-year percentage,
+        # while the rollover tripwire reads the MULTIPLIER. Publishing one
+        # under the other's name is handled explicitly below.
         ("d4", obs.DOMAIN_LPPLS, "confidence"),
         ("s1", obs.DOMAIN_CAPE, None),
         ("s2", obs.DOMAIN_TOP10, "percent"),
@@ -155,6 +157,43 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
             # A reading dated after the moment we observed it is a bad vintage
             # or clock skew — recorded, never silently used.
             ineligibility.append(f"period_label_future:{ind_id}")
+
+    # d2 publishes the ROLLOVER MULTIPLIER, not the year-on-year percentage.
+    #
+    # `tripwire.margin_rollover` watches d2_multiplier cross 1.0 upward. The
+    # generic loop would publish the indicator's `value`, and for d2 that is the
+    # margin-debt YoY percentage — roughly 49, permanently far above 1.0 — so
+    # the rule could never observe the 0.6 -> 1.0 rollover it exists to report,
+    # while being marked READY.
+    #
+    # The tri-state matters as much as the quantity. `rollover_confirmed_calendar`
+    # returns None on a FINRA publication gap, meaning "cannot assert". Scoring
+    # must pick a number and collapses that to the no-rollover multiplier;
+    # alerting must NOT inherit the collapse, or the tripwire reads a missing
+    # publication as a definite "no rollover". Unknown is not normal.
+    d2 = indicators.get("d2") or {}
+    d2_state, d2_reason = _evidence_data_state(d2) if d2 else (DataState.MISSING,
+                                                               "indicator_absent")
+    d2_assertable = d2.get("rollover_assertable")
+    d2_multiplier = _numeric(d2.get("multiplier")) if d2_assertable is True else None
+    if not d2:
+        d2_value, d2_state, d2_reason = None, DataState.MISSING, "indicator_absent"
+    elif d2_assertable is None:
+        # A row persisted before the typed payload existed. Historical rows are
+        # NOT_EVALUABLE for this rule, never a fabricated number (mandate 5.4).
+        d2_value, d2_state, d2_reason = None, DataState.MISSING, "typed_rollover_absent"
+    elif d2_multiplier is None:
+        d2_value, d2_state, d2_reason = None, DataState.MISSING, "rollover_not_assertable"
+    else:
+        d2_value = d2_multiplier
+    add(obs.DOMAIN_MARGIN, d2_value, unit="multiplier", source_id="d2",
+        period_start=d2.get("release_period") or d2.get("as_of"),
+        period_end=d2.get("release_period") or d2.get("as_of"),
+        data_state=d2_state, reason=d2_reason,
+        provider_id=d2.get("data_source"),
+        metadata={"yoy_pct": d2.get("yoy_pct"),
+                  "rollover_state": d2.get("rollover_state"),
+                  "sub_score": d2.get("sub_score")})
 
     # d3 is a GATE (a decision), not a level.
     d3 = indicators.get("d3") or {}
