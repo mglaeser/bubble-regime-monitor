@@ -240,9 +240,15 @@ class Settings(BaseSettings):
     # Shadow only. Runs GSADF a second time on the real (CPI-deflated) native
     # Nasdaq-100 from FRED and reports the result alongside. Never scored.
     gsadf_shadow_real_index: bool = False
-    # SCORE-SHIFTING when true. Lets a NON-REJECTION out of the contested cap;
-    # a rejection stays capped. See s4_gsadf.sub_score for the reasoning.
-    gsadf_contested_asymmetric: bool = False
+    # NOTE: there is deliberately NO runtime switch for the asymmetric contested
+    # rule. An earlier revision had one, and the panel refuted it: "runtime flag
+    # changes frozen S4 scoring without required v4 metadata/golden ceremony".
+    # Reproduced -- GSADF_CONTESTED_ASYMMETRIC=true moved s4 from 0.25 to 0.05
+    # while the frozen SHA, methodology_version and golden all stayed put. The
+    # freeze exists so a scored value cannot move without version bump +
+    # falsification-clock reset + regenerated golden; a config flag that moves
+    # one is a hole straight through it. Activation is a CODE change under that
+    # ceremony. sub_score keeps the `asymmetric` parameter, exercised by tests.
     lppls_timeout_s: int = 1500  # generous headroom for the Atom N2800 (background recompute; API serves the last snapshot meanwhile)
     gsadf_timeout_s: int = 1800
 

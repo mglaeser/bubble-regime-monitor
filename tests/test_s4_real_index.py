@@ -31,9 +31,13 @@ def _raw_with_live_gsadf():
 class TestDefaultsAreProductionBehaviour:
     """Neither switch may move a scored value until deliberately enabled."""
 
-    @pytest.mark.parametrize("field", ["gsadf_shadow_real_index", "gsadf_contested_asymmetric"])
-    def test_candidate_switches_default_off(self, field):
-        assert Settings.model_fields[field].default is False
+    def test_the_shadow_switch_defaults_off(self):
+        # The only runtime switch this branch adds, and it is NON-SCORING.
+        assert Settings.model_fields["gsadf_shadow_real_index"].default is False
+
+    def test_there_is_no_runtime_switch_for_the_scored_rule(self):
+        assert "gsadf_contested_asymmetric" not in Settings.model_fields, (
+            "the asymmetric rule is a code change under the v4 ceremony, never a flag")
 
     def test_contested_still_defaults_on(self):
         assert Settings.model_fields["gsadf_contested"].default is True
@@ -151,12 +155,19 @@ class TestBothSwitchesAreActuallyWired:
 
     @staticmethod
     def _snapshot(monkeypatch, *, asymmetric: bool):
-        from app.config import get_settings
+        """Drives compute_snapshot through the real call site. `asymmetric` is a
+        PARAMETER of sub_score, not a setting -- activation is a code change under
+        the v4 ceremony -- so the on-case is exercised by patching the call the
+        way that code change would make it."""
+        from app.indicators import s4_gsadf
         from app.services import compute
-        base = get_settings()
-        patched = base.model_copy(update={"gsadf_contested_asymmetric": asymmetric})
-        monkeypatch.setattr(compute, "get_settings", lambda: patched)
-        return compute.compute_snapshot(TestBothSwitchesAreActuallyWired._raw_with_live_gsadf())
+
+        if asymmetric:
+            real = s4_gsadf.sub_score
+            monkeypatch.setattr(
+                compute.s4_gsadf, "sub_score",
+                lambda *a, **k: real(*a, **{**k, "asymmetric": True}))
+        return compute.compute_snapshot(_raw_with_live_gsadf())
 
     def test_switch_off_scores_the_contested_floor(self, monkeypatch):
         snap = self._snapshot(monkeypatch, asymmetric=False)
@@ -175,11 +186,12 @@ class TestBothSwitchesAreActuallyWired:
         assert on < off, (on, off)
 
     def test_a_rejection_is_still_capped_end_to_end(self, monkeypatch):
-        from app.config import get_settings
+        from app.indicators import s4_gsadf
         from app.services import compute
-        patched = get_settings().model_copy(update={"gsadf_contested_asymmetric": True})
-        monkeypatch.setattr(compute, "get_settings", lambda: patched)
-        raw = self._raw_with_live_gsadf()
+        real = s4_gsadf.sub_score
+        monkeypatch.setattr(compute.s4_gsadf, "sub_score",
+                            lambda *a, **k: real(*a, **{**k, "asymmetric": True}))
+        raw = _raw_with_live_gsadf()
         raw.gsadf_stat = 2.5              # above cv95: a rejection
         snap = compute.compute_snapshot(raw)
         assert snap.indicators["s4"].sub_score == 0.25
@@ -307,15 +319,24 @@ class TestTheEnvBindingIsLive:
     Settings() from the environment -- model_fields reads the declaration and
     model_copy skips validators, so neither sees an alias change."""
 
-    def test_the_env_var_actually_sets_the_flag(self, monkeypatch):
+    def test_no_env_var_can_move_a_scored_value(self, monkeypatch):
+        """The panel refuted the runtime switch: "runtime flag changes frozen S4
+        scoring without required v4 metadata/golden ceremony". Reproduced --
+        GSADF_CONTESTED_ASYMMETRIC=true moved s4 0.25 -> 0.05 with the frozen
+        SHA, methodology_version and golden all unchanged. The switch is gone;
+        this pins that it stays gone."""
         from app.config import Settings
-        monkeypatch.setenv("GSADF_CONTESTED_ASYMMETRIC", "true")
-        assert Settings().gsadf_contested_asymmetric is True
+        from app.services import compute
+        from tests.conftest import make_golden_raw_inputs
 
-    def test_absent_env_leaves_it_off(self, monkeypatch):
-        from app.config import Settings
-        monkeypatch.delenv("GSADF_CONTESTED_ASYMMETRIC", raising=False)
-        assert Settings().gsadf_contested_asymmetric is False
+        monkeypatch.setenv("GSADF_CONTESTED_ASYMMETRIC", "true")
+        settings = Settings()
+        assert not hasattr(settings, "gsadf_contested_asymmetric"), (
+            "a setting that moves a frozen scored value defeats the freeze")
+        monkeypatch.setattr(compute, "get_settings", lambda: settings)
+        raw = make_golden_raw_inputs()
+        raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = LIVE_STAT, LIVE_CV90, LIVE_CV95
+        assert compute.compute_snapshot(raw).indicators["s4"].sub_score == 0.25
 
     def test_the_shadow_env_var_is_bound_too(self, monkeypatch):
         from app.config import Settings

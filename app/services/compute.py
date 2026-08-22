@@ -873,8 +873,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # ---- S4 GSADF ----
     # Mapping: explosive p<0.05 non-contested -> 1.0; p<0.10 -> 0.5;
     # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
-    s4_sub = s4_gsadf.sub_score(raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95, contested,
-                                asymmetric=settings.gsadf_contested_asymmetric)
+    # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
+    # defaults False, so this call is byte-equivalent to the pre-branch one.
+    s4_sub = s4_gsadf.sub_score(raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95, contested)
     sub_s["s4"] = s4_sub
     mc_in.s4_sub = s4_sub
     # COMPUTED requires a finite statistic AND both CVs finite and ordered
