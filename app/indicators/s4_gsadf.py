@@ -47,14 +47,14 @@ from __future__ import annotations
 
 from app import methodology as _M
 
-SUB_EXPLOSIVE_NONCONTESTED = _M.get_path("indicators", "s4", "sub_explosive_noncontested")
-SUB_CV90 = _M.get_path("indicators", "s4", "sub_cv90")
-SUB_CONTESTED_OR_STALE = _M.get_path("indicators", "s4", "sub_contested_or_stale")
-SUB_NULL = _M.get_path("indicators", "s4", "sub_null")
+SUB_EXPLOSIVE_NONCONTESTED: float = _M.get_path("indicators", "s4", "sub_explosive_noncontested")
+SUB_CV90: float = _M.get_path("indicators", "s4", "sub_cv90")
+SUB_CONTESTED_OR_STALE: float = _M.get_path("indicators", "s4", "sub_contested_or_stale")
+SUB_NULL: float = _M.get_path("indicators", "s4", "sub_null")
 
 
 def sub_score(gsadf_stat: float | None, cv90: float | None, cv95: float | None,
-              contested: bool, stale: bool = False) -> float:
+              contested: bool, stale: bool = False, asymmetric: bool = False) -> float:
     """Map the GSADF statistic against simulated finite-sample CVs.
 
     contested-or-stale caps the sub-score at 0.25 regardless of the statistic
@@ -70,7 +70,49 @@ def sub_score(gsadf_stat: float | None, cv90: float | None, cv95: float | None,
             or not (math.isfinite(gsadf_stat) and math.isfinite(cv90) and math.isfinite(cv95))
             or cv90 >= cv95):
         return SUB_CONTESTED_OR_STALE
-    if contested or stale:
+    if stale:
+        # Staleness is about DATA AGE, not about the test's size properties, so
+        # the asymmetry below does not apply to it.
+        return SUB_CONTESTED_OR_STALE
+    if contested:
+        # ASYMMETRIC CONTESTED (off by default; GSADF_CONTESTED_ASYMMETRIC).
+        #
+        # The contested flag exists because of Chen et al. (2026, arXiv
+        # 2604.25826). Their finding, VERBATIM, sec 1: "In Monte Carlo
+        # simulations calibrated to postwar United States equity data and
+        # containing only technology-driven fundamentals with no speculative
+        # component, PSY rejects the null of no bubble in 93 percent of samples
+        # for detrended log prices and 100 percent for the price-dividend ratio
+        # at the 5 percent nominal level."
+        #
+        # Note what that is and is not. TWO specifications, not a range: 93% is
+        # detrended log prices, 100% is the price-dividend ratio. s4 runs
+        # NEITHER -- it runs raw log prices -- so the figures bound the concern,
+        # they do not measure this configuration. An earlier version of this
+        # comment rendered them as a quoted "93-100%", which is a paraphrase in
+        # quotation marks; the phrase is not in the paper.
+        #
+        # Either way it is SIZE DISTORTION -- it bounds FALSE POSITIVES, and says
+        # nothing against a NON-rejection.
+        #
+        # The inference runs the other way: if a test is biased toward
+        # rejecting and still fails to reject, that is stronger evidence of no
+        # explosiveness, not weaker. Capping a non-rejection at 0.25 therefore
+        # discards the one reading the critique gives most reason to trust --
+        # and, at the live statistic, RAISES the sub-score above what the test
+        # returned (0.25 against SUB_NULL 0.05), so the "conservative cap" is
+        # currently a floor that pushes the headline UP.
+        #
+        # With this on: a rejection is still capped (the critique bites there);
+        # a non-rejection passes through at SUB_NULL. Off by default because
+        # switching it is score-shifting and belongs to the v4 ceremony --
+        # version bump, falsification-clock reset, regenerated golden.
+        #
+        # Residual, stated: a non-rejection can also mean LOW POWER rather than
+        # genuine absence, and Chen et al. establish size distortion, not power
+        # loss. SUB_NULL is "tested and not explosive", not "certainly calm".
+        if asymmetric and not (gsadf_stat > cv90):
+            return SUB_NULL
         return SUB_CONTESTED_OR_STALE
     if gsadf_stat > cv95:
         return SUB_EXPLOSIVE_NONCONTESTED

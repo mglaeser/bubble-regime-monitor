@@ -229,6 +229,26 @@ class Settings(BaseSettings):
     db_url: str = "sqlite:////data/bubble.db"
     log_level: str = "INFO"
     gsadf_contested: bool = True
+    # S4 v4 CANDIDATE SWITCHES. Both default to the CURRENT production behaviour;
+    # neither moves a scored value until deliberately enabled. PINS_DECISION_MEMO
+    # puts the instrument change (PIN C) on CONDITIONAL HOLD pending "a documented
+    # drift gate", and every PIN becomes a v4 change (version bump +
+    # falsification-clock reset + regenerated golden). These exist to PRODUCE that
+    # drift evidence, in the shape PIN H already set for score-shifting work:
+    # build it, dual-report it, do not activate the headline.
+    #
+    # Shadow only. Runs GSADF a second time on the real (CPI-deflated) native
+    # Nasdaq-100 from FRED and reports the result alongside. Never scored.
+    gsadf_shadow_real_index: bool = False
+    # NOTE: there is deliberately NO runtime switch for the asymmetric contested
+    # rule. An earlier revision had one, and the panel refuted it: "runtime flag
+    # changes frozen S4 scoring without required v4 metadata/golden ceremony".
+    # Reproduced -- GSADF_CONTESTED_ASYMMETRIC=true moved s4 from 0.25 to 0.05
+    # while the frozen SHA, methodology_version and golden all stayed put. The
+    # freeze exists so a scored value cannot move without version bump +
+    # falsification-clock reset + regenerated golden; a config flag that moves
+    # one is a hole straight through it. Activation is a CODE change under that
+    # ceremony. sub_score keeps the `asymmetric` parameter, exercised by tests.
     lppls_timeout_s: int = 1500  # generous headroom for the Atom N2800 (background recompute; API serves the last snapshot meanwhile)
     gsadf_timeout_s: int = 1800
 
