@@ -290,6 +290,14 @@ class AlertRuleState(Base):
     candidate_ttl_basis: Mapped[str | None] = mapped_column(String(255), nullable=True)
     flap_projection: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Economic observations that have caused an activation. A rule whose
+    #: confirmation basis is a period must not fire twice on ONE period, and
+    #: for count == 1 there is no candidate latch to enforce that, so the keys
+    #: are remembered here instead of trusting a wall-clock cooldown against a
+    #: cadence that is not fixed. A bounded list rather than the latest key:
+    #: the period can regress and return, so A, B, A is reachable.
+    fired_observation_keys: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (

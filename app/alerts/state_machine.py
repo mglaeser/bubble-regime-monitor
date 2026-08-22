@@ -28,6 +28,7 @@ Four properties this file exists to guarantee:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -61,6 +62,8 @@ class InstanceMemory:
     #: economic observation keys already counted toward the OPEN candidate,
     #: keyed by confirmation source id.
     confirmed_keys: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: economic observations that have already caused an activation (see below).
+    fired_observation_keys: tuple[str, ...] = ()
 
 
 @dataclass
@@ -105,6 +108,16 @@ class StateDecision:
     candidate_ttl_policy: str | None = None
     candidate_ttl_basis: str | None = None
 
+    #: the economic observation this firing is attributed to; persisted so a
+    #: later re-entry on the same period can be recognised as a repeat.
+    fired_observation_key: str | None = None
+    #: the bounded remembered set to persist, newest first.
+    fired_observation_keys: tuple[str, ...] = ()
+    #: true when this activation is a re-entry on a period that already fired.
+    #: The episode is still recorded; the notification and the wall-clock
+    #: cooldown clock are what a repeat must not move.
+    repeat_of_fired_key: bool = False
+
     confirmations: list[ConfirmationRecord] = field(default_factory=list)
     suppression_reasons: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
@@ -137,6 +150,48 @@ def effective_prior_state(condition_state: str, last_known: str | None) -> str |
     if condition_state == ConditionState.UNKNOWN:
         return last_known
     return condition_state
+
+
+#: Confirmation bases that name an ECONOMIC PERIOD rather than a transition.
+#: For these, two readings of the same period are one observation — which the
+#: candidate latch already enforces when count > 1, and nothing enforced when
+#: count == 1. `authoritative_transition` and `adjacent_snapshots` are excluded
+#: deliberately: they count transitions and snapshots, not periods, so a second
+#: genuine transition must still fire.
+#: How many fired observations to remember. Bounded because unbounded audit
+#: state in a hot row is its own defect; the window only has to outlast the
+#: regressions a feed can produce, not the life of the rule.
+_FIRED_KEY_MEMORY = 16
+
+_PERIOD_BASES = frozenset({
+    "distinct_economic_observation",
+    "distinct_trading_date",
+    "new_filing",
+    "new_month_end_period",
+    "new_release_period",
+})
+
+
+def _fired_key(records: list[ConfirmationRecord]) -> str | None:
+    """One canonical key for the observations that triggered this firing.
+
+    BOUND TO ITS SOURCE. Joining the observation keys alone is source-blind, so
+    a two-source rule whose sources exchange keys between firings canonicalises
+    to the same string — sorted({X, Y}) either way — and a genuinely new period
+    reads as a repeat, suppressing a real notification. Pairing each key with
+    the source it came from removes the collision.
+    """
+    pairs = sorted(f"{r.source_id}={r.economic_observation_key}" for r in records
+                   if r.confirmation_role == "CONFIRMATION")
+    if not pairs:
+        return None
+    # HASHED, because the composite is unbounded: an economic observation key
+    # is already 64 hex characters, so a single `source=key` pair overflows the
+    # 64-character column before a second source is even considered, and the
+    # activation would abort on write. The digest is fixed-width, keeps the
+    # source pairing that stops a swap colliding, and is only ever compared for
+    # equality — it is never parsed back.
+    return hashlib.sha256("|".join(pairs).encode()).hexdigest()
 
 
 def _confirmation_keys(rule: RuleSpec, outcome: ConditionOutcome) -> list[ConfirmationRecord]:
@@ -301,12 +356,39 @@ def evaluate_state(
     hold_records = _hold_records(rule, outcome)
 
     if not _needs_confirmation(rule):
+        # A single-observation rule fires on the transition itself, so the
+        # candidate latch never runs and the declared basis was never consulted
+        # — the artifact said "confirms on a new filing" while the machinery
+        # confirmed on any transition at all. For a basis that names a PERIOD,
+        # a second entry on the SAME period is not a second event: the
+        # underlying reading has not changed, so the flip-flop is a data
+        # artifact (an issuer fetch failing and recovering moves a cohort
+        # gate). The episode still opens, because the condition genuinely is
+        # firing and the audit trail should say so; the NOTIFICATION is what a
+        # repeat must not earn.
+        fired_key = _fired_key(records)
+        # Membership, not adjacency. The period this keys on can REGRESS — an
+        # issuer skipped by the EDGAR adapter lowers a cohort max that later
+        # recovers — so A, B, A is reachable and comparing only against the
+        # previous key would let the return to A fire again.
+        repeat = (rule.confirmation.basis in _PERIOD_BASES
+                  and fired_key is not None
+                  and fired_key in memory.fired_observation_keys)
         decision.condition_state = ConditionState.FIRING
         decision.consecutive_true = memory.consecutive_true + 1
         decision.open_episode = memory.current_episode_id is None
         decision.activate_episode = True
+        decision.fired_observation_key = fired_key
+        remembered = list(memory.fired_observation_keys)
+        if fired_key is not None and fired_key not in remembered:
+            remembered.insert(0, fired_key)
+        decision.fired_observation_keys = tuple(remembered[:_FIRED_KEY_MEMORY])
         decision.confirmations = records + hold_records
         decision.confirmation_progress = {r.source_id: 1 for r in records}
+        decision.repeat_of_fired_key = repeat
+        if repeat:
+            decision.suppression_reasons.append(SuppressionReason.COOLDOWN)
+            decision.reasons.append("same_economic_period_refire")
         _clear_candidate(decision)
         return decision
 

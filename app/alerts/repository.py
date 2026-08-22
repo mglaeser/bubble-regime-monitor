@@ -127,6 +127,7 @@ def load_memories(
                 candidate_ttl_policy=row.candidate_ttl_policy,
                 current_episode_id=row.current_episode_id,
                 confirmed_keys=confirmed,
+                fired_observation_keys=tuple(row.fired_observation_keys or ()),
             ),
         )
     return out
@@ -274,7 +275,15 @@ def apply_decision(
         "updated_at": now,
     }
     if decision.activate_episode:
-        values["last_fired_at"] = now
+        # A repeat on an already-fired period must NOT advance the cooldown
+        # clock: doing so pushes the window forward on an artifact and can
+        # delay the next legitimate period's alert, which is the opposite of
+        # what suppressing the repeat was for.
+        if not decision.repeat_of_fired_key:
+            values["last_fired_at"] = now
+        # Remembered either way, so a third entry on the same period is still
+        # recognised rather than resetting the moment one is held.
+        values["fired_observation_keys"] = list(decision.fired_observation_keys)
 
     if existing is None:
         session.add(AlertRuleState(
