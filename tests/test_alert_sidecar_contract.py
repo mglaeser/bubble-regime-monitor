@@ -581,14 +581,14 @@ def test_each_asset_is_classified_against_its_own_calendar(isolated_db):
     completed = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
     lagging = completed + [("2026-08-03", 50.0)]    # August only just started
 
-    # classified on its own clock, August is in progress and is dropped
-    state, period = month_end_faber(lagging, as_of_month="2026-08")
+    # its own clock: the final month is in progress and is dropped
+    _, period = month_end_faber(lagging, as_of_month="2026-08")
     assert period == "2025-12", "the in-progress month must be dropped"
 
-    # classified on a LATER clock, August would count as complete
-    borrowed, borrowed_period = month_end_faber(lagging, as_of_month="2026-09")
-    assert borrowed_period == "2026-08"
-    assert (state, period) != (borrowed, borrowed_period)
+    # a LATER clock cannot promote it either — only a later BAR can, which is
+    # what stops a lagging feed being closed out by the leading asset's dates
+    _, borrowed = month_end_faber(lagging, as_of_month="2026-09")
+    assert borrowed == "2025-12", "another asset's calendar must not close this feed"
 
 
 def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
@@ -606,19 +606,28 @@ def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
     assert sma.period_end is None, "but it must not claim a date it does not have"
 
 
-def test_a_month_end_that_has_ended_is_recognised_without_waiting_for_next_month():
-    """With no evaluation date, a completed month is invisible until the next
-    month's first bar arrives — delaying a month-end P1 by a session or more.
+def test_a_stale_feed_does_not_promote_its_partial_month():
+    """The calendar alone cannot close a month; the DATA has to.
+
+    A feed whose newest bar is mid-July is still "past" once September
+    arrives. Promoting July then publishes a MID-JULY close as July's
+    month-end close — the exact substitution this function exists to refuse,
+    returning by way of the clock instead of the bar.
+
+    The cost is a bounded lag: a month ending on a Friday is not authoritative
+    until the next session's bar lands. That is deliberate. A late correct
+    state is recoverable; a P1 fired on a partial month is not, and no
+    staleness cutoff separates the two without inventing a threshold no
+    artifact defines.
     """
     from app.engine.legs import month_end_faber
 
-    daily = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)] + [("2026-01-30", 130.0)]
+    base = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
 
-    # the feed's newest bar is in January and January is over, but the bar
-    # alone cannot say so
-    _, by_bar = month_end_faber(daily, as_of_month=daily[-1][0][:7])
-    assert by_bar == "2025-12", "the bar's own month is treated as still running"
+    stale = base + [("2026-07-15", 50.0)]          # feed stopped mid-July
+    _, period = month_end_faber(stale, as_of_month="2026-09")
+    assert period == "2025-12", "a partial month must not be promoted by the clock"
 
-    # the evaluation date knows February has begun
-    _, by_clock = month_end_faber(daily, as_of_month="2026-02")
-    assert by_clock == "2026-01", "the completed month is recognised at once"
+    rolled = base + [("2026-07-31", 50.0), ("2026-08-03", 51.0)]
+    _, closed = month_end_faber(rolled, as_of_month="2026-09")
+    assert closed == "2026-07", "a later bar proves the month closed"

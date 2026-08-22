@@ -75,7 +75,26 @@ def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str
     computing in; the in-progress month is dropped whatever its closes say.
     Returns (None, None) when fewer than ten completed months exist.
     """
-    completed = [(m, c) for m, c in monthly_closes_dated(daily) if m < as_of_month]
+    dated = monthly_closes_dated(daily)
+    if not dated:
+        return None, None
+
+    # A month is completed only when the DATA shows it closed — that is, when a
+    # LATER bar exists. The calendar is not enough on its own: a stale feed
+    # whose newest bar is mid-July is still "past" once September arrives, and
+    # promoting July then would publish a mid-July close as July's month-end
+    # close. That is the very substitution this function exists to refuse,
+    # returning by way of the clock instead of the bar.
+    #
+    # The cost is a bounded lag: a month that ends on a Friday is not
+    # authoritative until the next session's bar lands. That is deliberate. A
+    # late correct state is recoverable; a P1 fired on a partial month is not,
+    # and no staleness cutoff can separate the two without inventing a
+    # threshold no artifact defines.
+    #
+    # `as_of_month` can only ever WITHHOLD, never promote: a feed dated in the
+    # future relative to the evaluation is not evidence a month has closed.
+    completed = [(m, c) for m, c in dated[:-1] if m < as_of_month]
     if len(completed) < 10:
         return None, None
     return faber_state([c for _, c in completed]), completed[-1][0]
