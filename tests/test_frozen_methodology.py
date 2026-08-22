@@ -42,7 +42,12 @@ from app import methodology as M
 #               either statistic at current data. falsification_tracking_since
 #               stays <PIN>: no prospective process exists yet, and the existing
 #               note forbids backdating it.
-EXPECTED_SHA256 = "ae3984d85e45dd7a01cccac6868dee390bda474b764bb851962fd80309a1c539"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
+#   a601d8e9... v4.0 note correction: the note claimed the bump changes what s4
+#               measures 'not what it currently returns', which is false for the
+#               PUBLISHED value (IndicatorOutput.value, the rf1 record and the
+#               dashboard feed all moved to the endpoint). Wording only; the
+#               score-effective tree is unchanged and the golden stays 52.43.
+EXPECTED_SHA256 = "a601d8e91baaee84b83131d54169edc78fc8e540e6b87b8da3d3e92b5f7c7cf3"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
 
 
 def test_sha256_byte_guard():

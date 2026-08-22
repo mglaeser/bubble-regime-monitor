@@ -1,5 +1,9 @@
 # GSADF via exuber (JSS 103(10), doi:10.18637/jss.v103.i10); exuber >= 1.1.0.
-# Contract: JSON {"series": [...]} on stdin -> {"gsadf", "cv90", "cv95"} on stdout.
+# Contract: JSON {"series": [...], "params": {...}} on stdin -> on stdout
+#   {"gsadf","cv90","cv95"}                     the sup over all endpoints (REPORTED)
+#   {"bsadf","bsadf_cv90","bsadf_cv95"}         the endpoint read (SCORED since v4.0)
+#   {"bsadf_n","bsadf_argmax","bsadf_n_finite"} sequence provenance
+# Any of the bsadf_* fields may be null; Python then floors s4 rather than guessing.
 # NEVER hard-code the blog value 1.49 — that is a SADF critical value, not GSADF.
 #
 # v3.3.1: CACHED MONTE-CARLO critical values (radf_mc_cv) instead of the v3.3.0
@@ -64,7 +68,7 @@ extract_cv <- function(obj, level) {
 # REJECTED long after the episode ends. Measured on native Nasdaq-100 from 1986
 # (exuber 1.1.0, T=487): GSADF 2.6189 > cv95 2.2604 -> rejects, and the sup is
 # attained at a window ending 2000-02, while the BSADF at the 2026-07 endpoint is
-# 0.7562 against an endpoint cv90 of ~1.12. A live regime gauge must read the
+# 0.7562 against an endpoint cv90 of 1.1769. A live regime gauge must read the
 # endpoint, not the sample maximum. Both are emitted; Python scores one of them
 # per frozen_methodology.json gsadf.statistic.
 bsadf <- NA; bsadf_cv90 <- NA; bsadf_cv95 <- NA; bsadf_n <- NA
@@ -80,7 +84,8 @@ if (!is.null(bs) && length(bs) > 0L) {
   # degenerate. Measured: a series with a stale/flat quote run early in the
   # sample yields 179/210 finite BSADF values with a valid endpoint of -0.6482,
   # while exuber's own gsadf (which skips NAs) reports 10.2127 against cv95
-  # 1.9282 -- a loud rejection. Under the whole-history gate s4 threw the -0.6482
+  # 2.1357 at production nrep=2000 -- a loud rejection. Under the whole-history
+  # gate s4 threw the -0.6482
   # away and floored at the imputed 0.25. Letting the distant past veto a
   # measurable present is precisely what scoring the endpoint exists to avoid.
   if (is.finite(bs[length(bs)])) {

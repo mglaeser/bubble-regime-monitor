@@ -16,6 +16,12 @@ from app.indicators.s4_gsadf import sub_score
 from app.sources import SourceError
 from app.sources import fred_real_index as fri
 
+# NOTE: the two triples below come from DIFFERENT instruments and are not two
+# readings of one series. The sup is what the deployed service returns on its
+# QQQ proxy; the endpoint pair is measured on the CPI-deflated native index.
+# Both are real, both are non-rejections, and the tests below only need a
+# non-rejecting scored pair — but do not read them as a matched pair.
+#
 # The live GSADF sup and its critical values, from the deployed service. Since
 # v4.0-s4-endpoint this pair is REPORTED, not scored.
 LIVE_STAT, LIVE_CV90, LIVE_CV95 = 1.579, 1.9359, 2.2215
