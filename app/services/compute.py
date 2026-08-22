@@ -1449,11 +1449,19 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
         ind = data.indicators.get(indicator_id)
         return ind.stale if ind is not None else None
 
+    # The PUBLISHED rf1 record must describe the statistic that was actually
+    # scored. snapshot_contract derives distance_to_threshold = stat - cv95 from
+    # whatever is passed here, while red_flags.gsadf_explosive_noncontested came
+    # from the scored statistic — feeding the sup made the two disagree in sign:
+    # on a diverging input the record read active=false with distance=+0.3585,
+    # i.e. "did not fire" next to "0.36 ABOVE its own 95% threshold". Before this
+    # branch s4 scored the sup, so the two agreed by construction.
+    _rf1_stat, _, _rf1_cv95 = scored_s4_statistic(raw)
     red_flag_meta = build_red_flag_meta(
         red_flags=data.red_flags,
         observed_at=now.isoformat(),
-        gsadf_stat=raw.gsadf_stat,
-        gsadf_cv95=raw.gsadf_cv95,
+        gsadf_stat=_rf1_stat,
+        gsadf_cv95=_rf1_cv95,
         gsadf_contested=data.gsadf_contested,
         gsadf_available=data.gsadf_available,
         gsadf_as_of=raw.gsadf_as_of,

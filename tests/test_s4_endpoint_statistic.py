@@ -200,6 +200,54 @@ class TestTheReportCarriesBoth:
         assert extra["s4_statistic"]["sup_argmax_index"] == 126
 
 
+class TestThePublishedRecordDescribesTheScoredStatistic:
+    """snapshot_contract derives distance_to_threshold = stat - cv95 from what
+    persist_snapshot passes it, while `active` comes from the scored statistic.
+    Feeding the unscored sup made the published record self-contradictory."""
+
+    def test_rf1_distance_agrees_in_sign_with_the_flag(self, isolated_db, monkeypatch):
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import persist_snapshot
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        raw = _raw_diverging()
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,
+                                gsadf_contested=False)
+        snap_id = persist_snapshot(data, raw)
+        with session_scope() as session:
+            snap = session.execute(
+                select(Snapshot).where(Snapshot.id == snap_id)).scalars().one()
+            rf1 = snap.red_flag_meta["flags"]["rf1"]
+
+        assert rf1["active"] is False
+        # Signed: negative means below the firing threshold. Fed the sup this read
+        # +0.3585 — "did not fire" beside "0.36 above its own 95% threshold".
+        assert rf1["distance_to_threshold"] == pytest.approx(END_1986 - END_CV95)
+        assert (rf1["distance_to_threshold"] > 0) is rf1["active"]
+
+    def test_a_real_rejection_publishes_a_positive_distance(self, isolated_db, monkeypatch):
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import persist_snapshot
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,
+                                gsadf_contested=False)
+        with session_scope() as session:
+            snap = session.execute(select(Snapshot).where(
+                Snapshot.id == persist_snapshot(data, raw))).scalars().one()
+            rf1 = snap.red_flag_meta["flags"]["rf1"]
+        assert rf1["active"] is True
+        assert (rf1["distance_to_threshold"] > 0) is rf1["active"]
+
+
 class TestRunnerContract:
     @staticmethod
     def _run_with(monkeypatch, payload):

@@ -343,11 +343,23 @@ def build_feed(raw: Any, data: Any) -> dict[str, Any]:
                                        note="FINRA posts ~3 weeks after month-end",
                                        available=not d2.dropped and d2.value is not None)
     s4 = ind["s4"]
-    m["gsadf"] = _scalar(raw.gsadf_stat, "stat", s4.as_of, "exuber",
-                         note=None if raw.gsadf_stat is not None else
+    # Publish the SCORED statistic. s4.state and s4.value describe whichever
+    # statistic frozen gsadf.statistic selects; pairing the GSADF sup's number
+    # with that state reported a regime nothing had measured. Until s4 scored the
+    # endpoint the two were the same number, so the pairing was correct by
+    # construction — the same invariant lppls_confidence still holds below.
+    # The metric key stays "gsadf" (METRIC_KEYS is a frozen 35-key contract); the
+    # unscored sup remains visible under detail so nothing is lost.
+    _s4_meta = (s4.extra or {}).get("s4_statistic") or {}
+    _scored_fam = _s4_meta.get(_s4_meta.get("scored")) or {}
+    m["gsadf"] = _scalar(s4.value, "stat", s4.as_of, "exuber",
+                         note=None if s4.value is not None else
                          "not computable this run; CONTESTED flag is permanent",
-                         detail={"cv90": raw.gsadf_cv90, "cv95": raw.gsadf_cv95,
-                                 "contested": True, "state": s4.state})
+                         detail={"statistic": _s4_meta.get("scored"),
+                                 "cv90": _scored_fam.get("cv90"),
+                                 "cv95": _scored_fam.get("cv95"),
+                                 "contested": True, "state": s4.state,
+                                 "gsadf_sup": _s4_meta.get("gsadf_sup")})
     d4 = ind["d4"]
     lp = raw.lppls_result or {}
     m["lppls_confidence"] = _scalar(
