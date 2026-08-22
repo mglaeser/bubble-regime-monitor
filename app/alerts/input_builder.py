@@ -322,15 +322,28 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
                 leg_state = _leg_state(trend, asset, "sma200")
                 leg_period = asset_state.get("sma200_as_of")
                 absent_reason = "typed_trading_date_absent"
-            usable = leg_state not in (None, "unknown") and bool(leg_period)
+            known = leg_state not in (None, "unknown")
+            usable = known and bool(leg_period)
+            # A KNOWN state with no economic period is UNDATED, not absent. The
+            # house convention (v3.7.3/A-01, and `_evidence_data_state` above)
+            # is that an undated reading reads UNKNOWN_AGE — withholding it
+            # entirely would hide a state that was genuinely computed, while
+            # publishing it FRESH would let an undated reading satisfy a
+            # confirmation that counts distinct dates. Neither; say it is
+            # undated and let the freshness requirement decide.
+            if usable:
+                leg_data_state, leg_reason = DataState.FRESH, None
+            elif known:
+                leg_data_state, leg_reason = DataState.UNKNOWN_AGE, "reading_date_unknown"
+            else:
+                leg_data_state = DataState.MISSING
+                leg_reason = "leg_state_unknown" if leg_state == "unknown" else absent_reason
             item = build_evidence(
-                domain, leg_state if usable else None, observed_at=observed_at,
+                domain, leg_state if known else None, observed_at=observed_at,
                 source_id=f"{asset}.{leg}",
                 period_start=leg_period if usable else None,
                 period_end=leg_period if usable else None,
-                data_state=DataState.FRESH if usable else DataState.MISSING,
-                freshness_reason_code=None if usable else (
-                    "leg_state_unknown" if leg_state == "unknown" else absent_reason),
+                data_state=leg_data_state, freshness_reason_code=leg_reason,
                 code_revision=BUILDER_CODE_REVISION,
             )
             legs.append(EvidenceModel(**item.as_dict()))

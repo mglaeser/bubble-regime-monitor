@@ -517,3 +517,36 @@ def test_each_asset_is_classified_against_its_own_calendar(isolated_db):
     borrowed, borrowed_period = month_end_faber(lagging, as_of_month="2026-09")
     assert borrowed_period == "2026-08"
     assert (state, period) != (borrowed, borrowed_period)
+
+
+def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
+    """A known state with no economic period is UNDATED, not absent.
+
+    Withholding it hides a state that was genuinely computed; publishing it
+    FRESH lets an undated reading satisfy a confirmation that counts distinct
+    dates. The house convention for an undated reading is UNKNOWN_AGE, and the
+    freshness requirement decides from there.
+    """
+    undated = {"SPY": {"faber_10mo": "OUT", "sma200": "IN", "sma200_state": "IN"}}
+    sma = _leg(_snapshot_with_legs(undated), obs.DOMAIN_LEG_SPY_SMA200)
+    assert sma.value == "IN", "the state was computed; do not hide it"
+    assert sma.data_state == DataState.UNKNOWN_AGE
+    assert sma.period_end is None, "but it must not claim a date it does not have"
+
+
+def test_a_month_end_that_has_ended_is_recognised_without_waiting_for_next_month():
+    """With no evaluation date, a completed month is invisible until the next
+    month's first bar arrives — delaying a month-end P1 by a session or more.
+    """
+    from app.engine.legs import month_end_faber
+
+    daily = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)] + [("2026-01-30", 130.0)]
+
+    # the feed's newest bar is in January and January is over, but the bar
+    # alone cannot say so
+    _, by_bar = month_end_faber(daily, as_of_month=daily[-1][0][:7])
+    assert by_bar == "2025-12", "the bar's own month is treated as still running"
+
+    # the evaluation date knows February has begun
+    _, by_clock = month_end_faber(daily, as_of_month="2026-02")
+    assert by_clock == "2026-01", "the completed month is recognised at once"
