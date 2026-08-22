@@ -493,3 +493,27 @@ def test_a_snapshot_without_the_typed_leg_fields_is_missing_not_a_state(isolated
     assert faber.value is None
     assert faber.data_state == DataState.MISSING
     assert faber.freshness_reason_code == "typed_month_end_absent"
+
+
+def test_each_asset_is_classified_against_its_own_calendar(isolated_db):
+    """QQQ must not be classified by SPY's clock.
+
+    The feeds are independent and can be asynchronous. Borrowing one asset's
+    latest bar to decide whether the OTHER's month is complete declares a
+    still-running month finished for whichever asset lags — reintroducing the
+    intramonth defect for that asset only, which is the hardest shape to spot.
+    """
+    from app.engine.legs import month_end_faber
+
+    # twelve completed months, then a partial month for the lagging asset
+    completed = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
+    lagging = completed + [("2026-08-03", 50.0)]    # August only just started
+
+    # classified on its own clock, August is in progress and is dropped
+    state, period = month_end_faber(lagging, as_of_month="2026-08")
+    assert period == "2025-12", "the in-progress month must be dropped"
+
+    # classified on a LATER clock, August would count as complete
+    borrowed, borrowed_period = month_end_faber(lagging, as_of_month="2026-09")
+    assert borrowed_period == "2026-08"
+    assert (state, period) != (borrowed, borrowed_period)
