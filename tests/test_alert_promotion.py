@@ -9,6 +9,7 @@ branch was precise: CI was green while the stage-3 replay artifact said
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -401,6 +402,9 @@ def test_evidence_with_no_digest_at_all_does_not_bind():
 def test_grouping_is_reversible_and_full_fidelity():
     from app.alerts.promotion import group_digest, ungroup_digest
 
-    digest = "e04ac5b7b0d071fc94ec61fca951cf99174a9544c425d8addc85b6d5182d3a8a"
+    # Computed rather than pasted: a literal 64-hex string in a tracked file is
+    # indistinguishable from a leaked token to the secret scanner, which is the
+    # whole reason the artifact carries these grouped in the first place.
+    digest = hashlib.sha256(b"a ruleset").hexdigest()
     assert ungroup_digest(group_digest(digest)) == digest
     assert max(len(p) for p in group_digest(digest).split("-")) <= 8
