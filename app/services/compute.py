@@ -805,7 +805,14 @@ def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, flo
     s4 at the contested 0.25 with quality 0.0 and a visible note. It does not
     fall back to a statistic nobody chose, and it does not raise (guardrail 5:
     never surface an upstream/config fault as a 500)."""
-    which = _M.get_path("gsadf", "statistic")
+    # An ABSENT key is the same fault as an unrecognised value: the artifact is
+    # not the one this code was written against. get_path raises KeyError, which
+    # would surface as an HTTP 500 on a config fault (guardrail 5 forbids that).
+    try:
+        which = _M.get_path("gsadf", "statistic")
+    except Exception:
+        log.error("s4_missing_frozen_statistic")
+        return None, None, None
     if which == "bsadf_endpoint":
         return raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95
     if which == "gsadf_sup":
@@ -840,7 +847,11 @@ def scored_s4_contested_rule() -> bool | None:
     FAIL-CLOSED: an unrecognised value returns None, and the caller then treats
     s4 as not computable (FLOOR, quality 0.0) rather than silently applying a
     rule nobody chose."""
-    rule = _M.get_path("gsadf", "contested_rule")
+    try:
+        rule = _M.get_path("gsadf", "contested_rule")
+    except Exception:
+        log.error("s4_missing_frozen_contested_rule")
+        return None
     if rule == "asymmetric":
         return True
     if rule == "symmetric":
@@ -1008,9 +1019,9 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
         # the ENDPOINT triple, so this branch is reachable with a perfectly good
         # sup sitting in the same payload under extra.s4_statistic.gsadf_sup.
+        _which_stat = _M.frozen_methodology().get("gsadf", {}).get("statistic")
         _floor_lab = {"bsadf_endpoint": "BSADF@endpoint",
-                      "gsadf_sup": "GSADF sup"}.get(
-            _M.get_path("gsadf", "statistic"), str(_M.get_path("gsadf", "statistic")))
+                      "gsadf_sup": "GSADF sup"}.get(_which_stat, str(_which_stat))
         s4_note = (f"s4 scored statistic ({_floor_lab}) not computable this run; "
                    "contested/stale floor applied")
         if raw.gsadf_note:
@@ -1041,7 +1052,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "bsadf_endpoint": ("BSADF@endpoint", raw.bsadf_stat, raw.bsadf_cv90),
             "gsadf_sup": ("GSADF sup", raw.gsadf_stat, raw.gsadf_cv90),
         }
-        _scored_family = _families.pop(_M.get_path("gsadf", "statistic"), None)
+        # Non-raising read: unreachable with an absent key today (the selector
+        # floors first), but the guardrail is that a config fault never 500s.
+        _scored_family = _families.pop(
+            _M.frozen_methodology().get("gsadf", {}).get("statistic"), None)
         if _scored_family is not None and None not in _scored_family[1:]:
             _lab, _st, _cv = _scored_family
             s4_note += f"; scored {_lab} {_st:.4f} (cv90 {_cv:.4f})"
@@ -1062,7 +1076,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     if raw.gsadf_stat is not None or raw.bsadf_stat is not None:
         s4_extra = dict(s4_extra or {})
         s4_extra["s4_statistic"] = {
-            "scored": _M.get_path("gsadf", "statistic"),
+            "scored": _M.frozen_methodology().get("gsadf", {}).get("statistic"),
             "bsadf_endpoint": {"stat": raw.bsadf_stat, "cv90": raw.bsadf_cv90,
                                "cv95": raw.bsadf_cv95},
             "gsadf_sup": {"stat": raw.gsadf_stat, "cv90": raw.gsadf_cv90,
@@ -1078,7 +1092,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             # could not be extracted at all — a different fault from degenerate
             # data, and one that floors s4 and disables red flag #1.
             "cv_route": raw.bsadf_cv_route,
-            "contested_rule": _M.get_path("gsadf", "contested_rule"),
+            "contested_rule": (_M.frozen_methodology().get("gsadf", {})
+                               .get("contested_rule")),
         }
     if raw.gsadf_shadow_note:
         s4_extra = dict(s4_extra or {})
