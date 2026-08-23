@@ -149,6 +149,41 @@ class TestTheDivergenceIsScored:
         assert snap.red_flags.gsadf_explosive_noncontested is True
 
 
+class TestAnAbsentKeyFailsClosedNotFiveHundred:
+    """Guardrail 5: never surface an upstream/config fault as a 500. An ABSENT
+    key is the same fault as an unrecognised value — the artifact is not the one
+    this code was written against — but get_path raises, so both selectors had to
+    catch it. Verified: before the fix, compute_snapshot propagated KeyError."""
+
+    @pytest.fixture
+    def frozen_without(self, monkeypatch, tmp_path):
+        def _apply(key):
+            data = json.loads(M.FROZEN_PATH.read_bytes())
+            data["gsadf"].pop(key)
+            f = tmp_path / "frozen.json"
+            f.write_text(json.dumps(data))
+            monkeypatch.setattr(M, "FROZEN_PATH", f)
+            for fn in _CACHED:
+                fn.cache_clear()
+        yield _apply
+        for fn in _CACHED:
+            fn.cache_clear()
+
+    @pytest.mark.parametrize("key", ["statistic", "contested_rule"])
+    def test_an_absent_key_floors_instead_of_raising(self, frozen_without, key):
+        frozen_without(key)
+        snap = compute_snapshot(_raw_diverging(), gsadf_contested=False)
+        s4 = snap.indicators["s4"]
+        assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25)
+
+    @pytest.mark.parametrize("key", ["statistic", "contested_rule"])
+    def test_the_report_survives_an_absent_key(self, frozen_without, key):
+        # extra.s4_statistic reads the same keys; it must not raise either.
+        frozen_without(key)
+        extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
+        assert "s4_statistic" in extra
+
+
 class TestTheContestedRuleIsAFrozenConstant:
     """v4.1. The critique (Chen et al. 2026) is SIZE distortion: it bounds false
     positives and says nothing against a non-rejection, so a non-rejection is

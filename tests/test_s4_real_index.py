@@ -26,11 +26,21 @@ from app.sources import fred_real_index as fri
 # v4.0-s4-endpoint this pair is REPORTED, not scored.
 LIVE_STAT, LIVE_CV90, LIVE_CV95 = 1.579, 1.9359, 2.2215
 
-# The SCORED pair: BSADF at the last observation against the endpoint row of the
-# simulated BSADF CVs. Measured with exuber 1.1.0 (lag=0, nrep=2000, seed
-# 20260711) on CPI-deflated native Nasdaq-100 monthly log levels, T=331,
-# as_of 2026-07. Like the sup above, it is a non-rejection.
-LIVE_BSADF, LIVE_BSADF_CV90, LIVE_BSADF_CV95 = 0.7562, 1.1393, 1.378
+# The SCORED pair, on the SCORED INSTRUMENT. compute.py fetches the QQQ proxy and
+# takes logs -- there is no deflation on the scored path -- so the endpoint must
+# come from the NOMINAL series. Measured with exuber 1.1.0 (lag=0, nrep=2000,
+# seed 20260711) on nominal native Nasdaq-100 monthly log levels, T=331.
+#
+# It is a non-rejection, but only just: 1.1315 against cv90 1.1393 is 0.7% of the
+# critical value. An earlier version of this file used the CPI-DEFLATED endpoint
+# (0.7562, a 34% margin) here and labelled it "the SCORED pair". That is the
+# SHADOW instrument, and the mislabel propagated into the frozen artifact's
+# record of the live reading before it was caught.
+LIVE_BSADF, LIVE_BSADF_CV90, LIVE_BSADF_CV95 = 1.1315, 1.1393, 1.378
+
+# The deflated series is the SHADOW: reported, never scored (PIN C, and
+# GSADF_SHADOW_REAL_INDEX defaults off). Kept for the contrast.
+SHADOW_BSADF = 0.7562
 
 
 def _raw_with_live_gsadf():
