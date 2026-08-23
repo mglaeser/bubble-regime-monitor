@@ -700,9 +700,14 @@ def test_a_gap_month_does_not_prove_the_month_before_it_closed():
     outage = base + [("2026-07-15", 50.0), ("2026-09-02", 51.0)]
     _, period = month_end_faber(outage, as_of_month="2026-09", feed_current=True)
     assert period == "2025-11", (
-        "neither July nor December is proven closed by a bar two months later")
+        "neither July nor December is proven closed by a bar two months later; "
+        "the months that remain are consecutive, so the window is still valid")
 
-    clean = base + [("2026-07-31", 50.0), ("2026-08-03", 51.0)]
+    # contiguous through July, so the ten-month window is a real one and this
+    # asserts the CLOSURE rule rather than tripping the window rule
+    contiguous = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(8, 13)]
+    contiguous += [(f"2026-{m:02d}-28", 105.0 + m) for m in range(1, 7)]
+    clean = contiguous + [("2026-07-31", 50.0), ("2026-08-03", 51.0)]
     _, rolled = month_end_faber(clean, as_of_month="2026-08", feed_current=True)
     assert rolled == "2026-07", "an adjacent bar does prove closure"
 
@@ -749,8 +754,10 @@ def test_a_stale_feed_that_finished_its_month_still_closes_it():
             day -= timedelta(days=1)
         return day.isoformat()
 
-    # every bar IS its month's last trading day, so the calendar closes them
-    months = [(month_end(2025, m), 100.0 + m) for m in range(1, 13)]
+    # every bar IS its month's last trading day, so the calendar closes them,
+    # and the months are CONTIGUOUS so the ten-month window is a real one
+    months = [(month_end(2025, m), 100.0 + m) for m in range(7, 13)]
+    months += [(month_end(2026, m), 106.0 + m) for m in range(1, 7)]
     finished = months + [(month_end(2026, 7), 60.0)]
     closed = _closed_months(finished)
     assert "2026-07" in closed, "31 July is July's last trading day"
@@ -798,3 +805,39 @@ def test_the_current_month_is_not_promoted_on_its_own_final_session():
     # evaluated once March has begun: promoted
     _, rolled = month_end_faber(bars, as_of_month="2026-03", closed_months=closed)
     assert rolled == "2026-02"
+
+
+def test_a_gapped_history_cannot_produce_a_ten_month_average():
+    """Ten entries are not ten months.
+
+    `faber_state` receives closes with their labels stripped, so it cannot tell
+    that a series missing four months has averaged ten readings spread over
+    fourteen. That is a different statistic wearing the same name — and it
+    would be published as an authoritative month-end state and can fire a P1.
+    """
+    from datetime import date, timedelta
+
+    from app.alerts.calendars import is_trading_day
+    from app.engine.legs import month_end_faber
+    from app.services.compute import _closed_months
+
+    def month_end(year: int, month: int) -> str:
+        nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        day = nxt - timedelta(days=1)
+        while not is_trading_day(day):
+            day -= timedelta(days=1)
+        return day.isoformat()
+
+    contiguous = [(month_end(2025, m), 100.0 + m) for m in range(1, 13)]
+    contiguous += [(month_end(2026, m), 112.0 + m) for m in range(1, 3)]
+    state, period = month_end_faber(contiguous, as_of_month="2026-03",
+                                    closed_months=_closed_months(contiguous))
+    assert state is not None and period == "2026-02"
+
+    # drop three months out of the middle of the window
+    gapped = [b for b in contiguous
+              if b[0][:7] not in {"2025-08", "2025-09", "2025-10"}]
+    state, period = month_end_faber(gapped, as_of_month="2026-03",
+                                    closed_months=_closed_months(gapped))
+    assert state is None and period is None, (
+        "a gapped window must be refused, not averaged")

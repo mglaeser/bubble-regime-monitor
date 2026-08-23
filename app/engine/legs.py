@@ -158,7 +158,22 @@ def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
 
     if len(completed) < 10:
         return None, None
-    return faber_state([c for _, c in completed]), completed[-1][0]
+
+    # The Faber rule is a TEN-MONTH SMA. Ten entries are not ten months if the
+    # feed lost some: a series missing four months would average ten readings
+    # spread over fourteen, and `faber_state` cannot tell — it receives a list
+    # of closes with the labels already stripped. That is a different statistic
+    # wearing the same name, and it would be published as an authoritative
+    # month-end state and can fire a P1.
+    #
+    # Refuse instead of averaging what is there. A gap in the price history is
+    # exactly the condition under which "we do not know" is the honest answer.
+    window = completed[-10:]
+    for (month, _close), (following, _next) in zip(window, window[1:], strict=False):
+        if not _is_next_month(month, following):
+            return None, None
+
+    return faber_state([c for _, c in window]), window[-1][0]
 
 
 def faber_distance_pct(monthly: list[float]) -> float | None:
