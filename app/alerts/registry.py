@@ -105,6 +105,20 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
+#: Confirmation bases naming an economic PERIOD. The candidate latch enforces
+#: these, and mandate 8.1 scopes the latch to count > 1 — so at count 1 they are
+#: declared and never consulted. `authoritative_transition` and
+#: `adjacent_snapshots` are not here: they count transitions and snapshots, and
+#: a single transition is exactly what they mean.
+_PERIOD_BASES = frozenset({
+    "distinct_economic_observation",
+    "distinct_trading_date",
+    "new_filing",
+    "new_month_end_period",
+    "new_release_period",
+})
+
+
 def _check_sources(rule: RuleSpec, problems: list[str]) -> None:
     for name in rule.source_fields:
         if name in FORBIDDEN_SOURCE_NAMES:
@@ -297,6 +311,24 @@ def validate_ruleset(
             warnings.append(
                 f"{rule.rule_id}: ready and approved but disabled — check that this is "
                 "a rollout decision, not an oversight"
+            )
+        # A confirmation basis that names an economic PERIOD is enforced by the
+        # candidate latch, and mandate 8.1 scopes that latch to "a rule with
+        # confirmation greater than one". At count 1 there is no candidate: the
+        # rule fires on the transition and the basis is never consulted. The
+        # declaration is therefore inert — it reads as a control and is not —
+        # and what actually limits repeat notifications is `cooldown_seconds`.
+        #
+        # Warned, not rejected: 21 of the shipped rules are written this way and
+        # all carry a real cooldown, so this is a documentation defect in the
+        # artifact rather than a broken rule. Rejecting would force a third of
+        # the inventory to be rewritten to satisfy a naming problem.
+        if rule.confirmation.count == 1 and rule.confirmation.basis in _PERIOD_BASES:
+            warnings.append(
+                f"{rule.rule_id}: confirmation basis '{rule.confirmation.basis}' names an "
+                f"economic period but count is 1, so no candidate latch enforces it — "
+                f"repeat notifications are limited by cooldown_seconds="
+                f"{rule.cooldown_seconds} alone"
             )
 
     if problems:

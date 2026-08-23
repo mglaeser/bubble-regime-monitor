@@ -801,3 +801,28 @@ def test_busy_timeout_is_configured(isolated_db):
     assert timeout > 0
     assert str(wal).lower() == "wal"
     assert fks == 1
+
+
+def test_an_inert_confirmation_basis_is_reported_not_silently_accepted(ruleset):
+    """A basis naming an economic period is enforced by the candidate latch,
+    and mandate 8.1 scopes that latch to `count > 1`.
+
+    At count 1 there is no candidate: the rule fires on the transition and the
+    basis is never consulted, so the declaration reads as a control and is not.
+    What actually limits repeat notifications there is `cooldown_seconds`.
+
+    Warned rather than rejected — a third of the shipped rules are written this
+    way and all carry a real cooldown, so it is a documentation defect in the
+    artifact, not a broken rule. But it must not pass in silence: the point is
+    that a reader should not believe an enforcement that is not happening.
+    """
+    inert = [w for w in ruleset.warnings if "no candidate latch enforces it" in w]
+    assert inert, "an inert period basis must be reported"
+
+    # every warning names the cooldown that is doing the actual limiting
+    for warning in inert:
+        assert "cooldown_seconds=" in warning
+
+    # transition bases are NOT flagged: one transition is exactly what they mean
+    assert not [w for w in inert if "authoritative_transition" in w]
+    assert not [w for w in inert if "adjacent_snapshots" in w]

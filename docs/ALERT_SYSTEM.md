@@ -171,6 +171,35 @@ computed from the rules including Good Friday and Juneteenth),
 `MONTHLY_RELEASE`, `QUARTERLY_FILING`. A candidate needing "two more breadth
 observations" does not expire over a long weekend.
 
+### The basis is inert when confirmation is 1
+
+Mandate §8.1 scopes the candidate latch to "a rule with confirmation greater
+than one". That is exactly where a period-naming basis —
+`new_filing`, `new_release_period`, `new_month_end_period`,
+`distinct_economic_observation`, `distinct_trading_date` — is enforced: two
+readings of one period are counted once, so the rule confirms only on a
+genuinely new period.
+
+**At `count: 1` there is no candidate.** The rule fires on the transition
+itself and the basis is never consulted. Twenty-one of the shipped rules are
+written this way, including every Faber leg and both s3 tiers.
+
+So for those rules the declaration describes intent, not enforcement, and what
+actually limits a repeat notification is `cooldown_seconds` — 2 days on the
+Faber legs, 30 on the release-driven rules. If a source flip-flops inside one
+period, the condition re-fires and the cooldown is the only thing standing
+between that and a second message.
+
+The loader emits a warning naming each such rule and the cooldown carrying the
+weight, because the failure mode this documents is a reader trusting an
+enforcement that is not happening. It is a warning rather than a rejection: the
+rules are not broken, and all of them carry a real cooldown.
+
+If a rule ever needs true one-period-one-notification semantics, the honest
+routes are to give it `count: 2` on that basis, or to add per-period
+suppression to the state machine — which is persistence the mandate does not
+currently ask for, and should not be added without deciding that it should.
+
 ---
 
 ## 6. Priorities, budgets and quiet hours
