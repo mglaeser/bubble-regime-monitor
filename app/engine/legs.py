@@ -71,7 +71,8 @@ def _is_next_month(month: str, following: str) -> bool:
 
 
 def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
-                    feed_current: bool = False
+                    feed_current: bool = False,
+                    closed_months: frozenset[str] | None = None
                     ) -> tuple[str | None, str | None]:
     """The AUTHORITATIVE Faber state: (state, month), completed months only.
 
@@ -116,11 +117,20 @@ def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
     #
     # A bar in the next calendar month proves the previous one ran to its end;
     # a bar two months later proves nothing about the month in between.
-    closed = [
-        (month, close)
-        for i, (month, close) in enumerate(dated[:-1])
-        if _is_next_month(month, dated[i + 1][0])
-    ]
+    if closed_months is not None:
+        # The caller knows the market calendar: a month is closed when its last
+        # bar IS that month's last trading day. Exact, and it subsumes the
+        # weaker test below.
+        closed = [(m, c) for m, c in dated[:-1] if m in closed_months]
+    else:
+        # Calendar-free fallback: a bar in the month immediately after. Weaker,
+        # because a month holding a single early bar followed by a bar next
+        # month passes it while its close is nowhere near the month end.
+        closed = [
+            (month, close)
+            for i, (month, close) in enumerate(dated[:-1])
+            if _is_next_month(month, dated[i + 1][0])
+        ]
 
     # The newest month is closed too when the calendar says it has ended AND
     # the feed is still publishing normally — a current feed whose last bar is

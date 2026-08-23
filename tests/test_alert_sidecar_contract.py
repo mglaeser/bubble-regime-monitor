@@ -705,3 +705,21 @@ def test_a_gap_month_does_not_prove_the_month_before_it_closed():
     clean = base + [("2026-07-31", 50.0), ("2026-08-03", 51.0)]
     _, rolled = month_end_faber(clean, as_of_month="2026-08", feed_current=True)
     assert rolled == "2026-07", "an adjacent bar does prove closure"
+
+
+def test_a_month_with_one_early_bar_is_not_closed():
+    """Adjacency is not enough; the month must have run to its end.
+
+    A feed publishing 2026-07-02 and then nothing until 2026-08-14 satisfies
+    "a bar exists in the following month" while July's close is two days into
+    the month. The exact test is the market calendar: a month is closed when
+    its last bar IS that month's last trading day.
+    """
+    from app.services.compute import _closed_months
+
+    one_early = [("2026-06-30", 1.0), ("2026-07-02", 2.0), ("2026-08-14", 3.0)]
+    assert "2026-07" not in _closed_months(one_early)
+    assert "2026-06" in _closed_months(one_early), "June ran to its end"
+
+    ran_out = [("2026-07-31", 1.0), ("2026-08-31", 2.0)]
+    assert {"2026-07", "2026-08"} <= _closed_months(ran_out)

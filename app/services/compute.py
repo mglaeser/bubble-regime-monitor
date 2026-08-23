@@ -889,6 +889,40 @@ def populate_gsadf_shadow(raw: RawInputs) -> None:
     except Exception as exc:  # noqa: BLE001 -- a shadow must never break a recompute
         raw.gsadf_shadow_note = f"SHADOW (not scored): unavailable — {str(exc)[:120]}"
 
+def _closed_months(daily: list[tuple[str, float]]) -> frozenset[str]:
+    """Months whose LAST BAR is that month's last trading day.
+
+    The exact test for "this month ran to its end". Adjacency — a bar in the
+    following month — is weaker and lets a month holding a single early bar
+    through: a feed publishing 2026-07-02 and then nothing until 2026-08-15
+    would have July "closed" on a July-2 close.
+
+    Uses the market calendar the repository already computes, so nothing here
+    is a tolerance an operator would tune.
+    """
+    last_bar: dict[str, date] = {}
+    for stamp, _close in daily:
+        try:
+            day = date.fromisoformat(stamp[:10])
+        except ValueError:
+            continue
+        month = stamp[:7]
+        if month not in last_bar or day > last_bar[month]:
+            last_bar[month] = day
+
+    closed: set[str] = set()
+    for month, seen in last_bar.items():
+        year_text, month_text = month.split("-")[:2]
+        year, mon = int(year_text), int(month_text)
+        nxt = date(year + 1, 1, 1) if mon == 12 else date(year, mon + 1, 1)
+        final = nxt - timedelta(days=1)
+        while not is_trading_day(final):
+            final -= timedelta(days=1)
+        if seen >= final:
+            closed.add(month)
+    return frozenset(closed)
+
+
 def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> bool:
     """Has this price feed printed a bar for the latest session it should have?
 
@@ -1502,20 +1536,24 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             me_state, me_period = legs.month_end_faber(
                 daily,
                 as_of_month=(as_of_date[:7] if as_of_date else daily[-1][0][:7]),
-                feed_current=_feed_is_current(daily, as_of_date))
+                feed_current=_feed_is_current(daily, as_of_date),
+                closed_months=_closed_months(daily))
             states["faber_month_end_state"] = me_state
             states["faber_month_end_period"] = me_period
         if closes:
             try:
                 states["sma200"] = legs.sma200_state(closes)
                 states["sma200_state"] = states["sma200"]
+                # Dated by the SAME series the SMA read, and only when the SMA
+                # actually produced a state. `closes` is derived from `daily`,
+                # and the length check keeps that true rather than assumed: a
+                # date taken from a different series would be a trading date
+                # the SMA never saw, and `legs.sma200_flip` counts distinct
+                # trading dates.
+                if daily and len(daily) == len(closes):
+                    states["sma200_as_of"] = daily[-1][0][:10]
             except ValueError:
                 states["sma200"] = "unknown"
-            # The trading date the SMA actually read. Dated by the recompute,
-            # three four-hour runs would manufacture a "three trading date"
-            # confirmation in eight hours.
-            if daily:
-                states["sma200_as_of"] = daily[-1][0][:10]
         trend_states[name] = states or {"faber_10mo": "unknown", "sma200": "unknown"}
 
     try:
