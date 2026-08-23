@@ -163,6 +163,17 @@ def load_active_for_mode(session: Session, *, mode: str,
             f"promoted is {promoted.ruleset.rules_sha256[:12]}. Promote it "
             "deliberately or correct the file."
         )
+    # The rules decide WHETHER to alert; the phrase set decides what the alert
+    # SAYS, and it is the half that reaches the phone. Binding only the rules
+    # would admit a ruleset whose rules were promoted while its text was not,
+    # which is the more dangerous of the two to get wrong unnoticed.
+    if promoted.ruleset.phrase_set_sha256 != artifacts.ruleset.phrase_set_sha256:
+        raise AlertingUnavailable(
+            "live mode refuses an unpromoted phrase set: loaded "
+            f"{artifacts.ruleset.phrase_set_sha256[:12]} from {artifacts.source}, "
+            f"promoted is {promoted.ruleset.phrase_set_sha256[:12]}. The rules "
+            "match, so this is a text change that was never promoted."
+        )
     return artifacts
 
 

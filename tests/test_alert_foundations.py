@@ -880,3 +880,39 @@ def test_load_active_offers_no_mode_argument_it_would_ignore():
 
     assert "mode" not in inspect.signature(load_active).parameters
     assert "mode" in inspect.signature(load_active_for_mode).parameters
+
+
+def test_live_admission_binds_the_phrase_set_and_not_only_the_rules(isolated_db):
+    """The rules decide WHETHER to alert; the phrase set decides what it SAYS.
+
+    Binding only `rules_sha256` admits a ruleset whose rules were promoted
+    while its text was not — and the text is the half that reaches the phone.
+    """
+    from dataclasses import replace
+
+    import pytest
+
+    from app.alerts import artifacts as artifacts_module
+    from app.alerts.artifacts import load_active, load_active_for_mode, register
+    from app.alerts.errors import AlertingUnavailable
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded, promote=True)
+        session.flush()
+
+        # Same rules, different text: the one case the old check waved through.
+        drifted = replace(loaded.ruleset, phrase_set_sha256="d" * 64)
+        original = artifacts_module.load_active
+        artifacts_module.load_active = (
+            lambda s, **kw: replace(loaded, ruleset=drifted))
+        try:
+            with pytest.raises(AlertingUnavailable) as caught:
+                load_active_for_mode(session, mode="live")
+        finally:
+            artifacts_module.load_active = original
+
+    message = str(caught.value)
+    assert "phrase set" in message
+    assert "text change that was never promoted" in message

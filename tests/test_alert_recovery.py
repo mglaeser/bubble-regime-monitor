@@ -316,16 +316,17 @@ def test_an_abandoned_evaluation_is_actually_retried(isolated_db, monkeypatch):
     called: list[str] = []
     monkeypatch.setattr(
         "app.services.alert_integration.evaluate_input",
-        lambda identity, **kw: called.append(identity))
+        lambda identity, **kw: called.append((identity, kw.get("mode"))))
 
     monkeypatch.setattr(alert_recovery, "recover_evaluations",
                         lambda session, **kw: _report(abandoned=["EVAL1"]))
     monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
     monkeypatch.setattr(alert_recovery, "_retryable_inputs",
-                        lambda session, abandoned, *, limit: ["INPUT1"])
+                        lambda session, abandoned, *, limit: [("INPUT1", "shadow")])
 
     result = alert_recovery.run_once()
-    assert called == ["INPUT1"], "the abandoned work must be re-run"
+    assert called == [("INPUT1", "shadow")], (
+        "the abandoned work must be re-run, and in the mode it ran in")
     assert result["retried"] == 1
 
 
@@ -345,14 +346,16 @@ def test_the_retry_budget_is_bounded(isolated_db):
     from app.jobs.alert_recovery import _retryable_inputs
 
     rows = {
-        "FRESH": SimpleNamespace(input_identity="A", attempt_count=1),
-        "SPENT": SimpleNamespace(input_identity="B", attempt_count=9),
+        "FRESH": SimpleNamespace(input_identity="A", attempt_count=1,
+                                 mode="shadow"),
+        "SPENT": SimpleNamespace(input_identity="B", attempt_count=9,
+                                 mode="shadow"),
         "GONE": None,
     }
     session = SimpleNamespace(get=lambda _model, key: rows.get(key))
 
     out = _retryable_inputs(session, ["FRESH", "SPENT", "GONE"], limit=2)
-    assert out == ["A"], "only work still inside its budget is re-run"
+    assert out == [("A", "shadow")], "only work still inside its budget is re-run"
 
 
 def test_the_watchdog_evaluates_what_it_captured(isolated_db, monkeypatch):
@@ -371,3 +374,21 @@ def test_the_watchdog_evaluates_what_it_captured(isolated_db, monkeypatch):
     assert "evaluate_input" in source, "the watchdog must evaluate its own input"
     # and it must not let that evaluation take the capture down with it
     assert "alert_watchdog_evaluation_failed" in source
+
+
+def test_a_retry_does_not_change_the_mode_the_work_ran_in(isolated_db):
+    """An interrupted shadow evaluation must not come back live.
+
+    The retry resumes work that already HAD a mode. Re-running it under
+    whatever the process happens to be configured for now is how an evaluation
+    that was explicitly not allowed to send ends up sending.
+    """
+    from types import SimpleNamespace
+
+    from app.jobs.alert_recovery import _retryable_inputs
+
+    rows = {"E": SimpleNamespace(input_identity="I", attempt_count=1,
+                                 mode="shadow")}
+    session = SimpleNamespace(get=lambda _model, key: rows.get(key))
+
+    assert _retryable_inputs(session, ["E"], limit=5) == [("I", "shadow")]

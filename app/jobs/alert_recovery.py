@@ -42,17 +42,23 @@ def heartbeat(component: str, status: str, detail: dict[str, Any] | None = None)
             row.detail_json = detail or {}
 
 
-def _retryable_inputs(session: Any, abandoned: list[str], *, limit: int) -> list[str]:
-    """Input identities for abandoned evaluations still inside their budget.
+def _retryable_inputs(session: Any, abandoned: list[str], *,
+                      limit: int) -> list[tuple[str, str]]:
+    """(input identity, mode) for abandoned evaluations still in budget.
 
     The attempt count lives on the evaluation row, so a retry that abandons
     again is counted and eventually stops. Without the bound one permanently
     failing input would keep the recovery job busy forever, which is a worse
     failure than the one it is fixing.
+
+    The MODE is carried out with the identity rather than left to the ambient
+    setting. A retry is a resumption of work that already had a mode, and
+    re-running it under whatever the process happens to be configured for now
+    can turn an interrupted shadow evaluation into a live one that sends.
     """
     from app.alerts.models import AlertEvaluation
 
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     for evaluation_id in abandoned:
         row = session.get(AlertEvaluation, evaluation_id)
         if row is None or row.input_identity is None:
@@ -61,7 +67,7 @@ def _retryable_inputs(session: Any, abandoned: list[str], *, limit: int) -> list
             log.warning("alert_evaluation_retry_budget_spent",
                         evaluation_id=evaluation_id, attempts=row.attempt_count)
             continue
-        out.append(row.input_identity)
+        out.append((row.input_identity, str(row.mode)))
     return out
 
 
@@ -86,9 +92,9 @@ def run_once() -> dict[str, Any]:
     retried: list[str] = []
     if settings.alerts_mode != "disabled":
         from app.services.alert_integration import evaluate_input
-        for identity in retryable:
+        for identity, original_mode in retryable:
             try:
-                evaluate_input(identity)
+                evaluate_input(identity, mode=original_mode)
                 retried.append(identity)
             except Exception as exc:      # noqa: BLE001
                 # One stuck input must not stop the sweep or the job.
