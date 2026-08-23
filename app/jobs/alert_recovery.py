@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from app.alerts.errors import sanitize
 from app.alerts.models import AlertComponentHeartbeat
 from app.alerts.recovery import reconcile_sidecars, recover_evaluations
 from app.config import get_settings
@@ -41,6 +42,29 @@ def heartbeat(component: str, status: str, detail: dict[str, Any] | None = None)
             row.detail_json = detail or {}
 
 
+def _retryable_inputs(session: Any, abandoned: list[str], *, limit: int) -> list[str]:
+    """Input identities for abandoned evaluations still inside their budget.
+
+    The attempt count lives on the evaluation row, so a retry that abandons
+    again is counted and eventually stops. Without the bound one permanently
+    failing input would keep the recovery job busy forever, which is a worse
+    failure than the one it is fixing.
+    """
+    from app.alerts.models import AlertEvaluation
+
+    out: list[str] = []
+    for evaluation_id in abandoned:
+        row = session.get(AlertEvaluation, evaluation_id)
+        if row is None or row.input_identity is None:
+            continue
+        if (row.attempt_count or 0) > limit:
+            log.warning("alert_evaluation_retry_budget_spent",
+                        evaluation_id=evaluation_id, attempts=row.attempt_count)
+            continue
+        out.append(row.input_identity)
+    return out
+
+
 def run_once() -> dict[str, Any]:
     settings = get_settings()
     if not settings.alert_input_capture and settings.alerts_mode == "disabled":
@@ -49,6 +73,27 @@ def run_once() -> dict[str, Any]:
     with session_scope() as session:
         report = recover_evaluations(session)
         gaps = reconcile_sidecars(session)
+        # Which inputs the abandoned evaluations were for, read INSIDE the
+        # sweep's session so the retry below works from what was just written.
+        retryable = _retryable_inputs(session, report.abandoned,
+                                      limit=settings.alerts_eval_retry_max)
+
+    # RETRY, outside that transaction. `recover_evaluations` records
+    # "safe to retry" and nothing ever retried, so an outage that interrupted
+    # an evaluation silently cost that snapshot its alerts — the work was
+    # marked recoverable and then abandoned in the ordinary sense of the word
+    # (audit B-13).
+    retried: list[str] = []
+    if settings.alerts_mode != "disabled":
+        from app.services.alert_integration import evaluate_input
+        for identity in retryable:
+            try:
+                evaluate_input(identity)
+                retried.append(identity)
+            except Exception as exc:      # noqa: BLE001
+                # One stuck input must not stop the sweep or the job.
+                log.error("alert_evaluation_retry_failed", input_identity=identity,
+                          error_class=type(exc).__name__, error=sanitize(exc))
 
     status = "critical" if report.needs_operator else ("degraded" if gaps else "ok")
     detail = {
@@ -56,6 +101,7 @@ def run_once() -> dict[str, Any]:
         "inconsistent": len(report.inconsistent),
         "in_progress": len(report.in_progress),
         "sidecar_gaps": len(gaps),
+        "retried": len(retried),
     }
     heartbeat(COMPONENT, status, detail)
     return {"status": status, **detail}

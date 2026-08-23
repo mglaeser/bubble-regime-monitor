@@ -101,11 +101,23 @@ def validate_from_disk(
     return LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set, source="candidate")
 
 
-def load_active(session: Session, *, service_version: str | None = None) -> LoadedArtifacts:
+def load_active(session: Session, *, service_version: str | None = None,
+                mode: str | None = None) -> LoadedArtifacts:
     """The artifacts evaluation should actually use, with the LKG fallback.
 
     Order: the candidate on disk, then the last-known-good file, then whatever
     is already PROMOTED in the registry. A fallback is reported, never silent.
+
+    IN LIVE MODE the result must additionally BE the promoted artifact.
+    Promotion is the operator's deliberate act, and without this check a valid
+    but unpromoted candidate placed on disk is evaluated and dispatched exactly
+    like an approved one — the promotion step becomes advisory, which is the
+    same "reads as control and is not" shape the rest of this system keeps
+    removing. Health reported `live_matches_promoted` and nothing enforced it
+    (audit B-04).
+
+    Shadow and dryrun may run an unpromoted candidate: that is what they are
+    for. Only live is bound.
     """
     rules_path, lkg_path, phrase_path = _candidate_paths()
     try:
@@ -130,6 +142,32 @@ def load_active(session: Session, *, service_version: str | None = None) -> Load
         )
     return LoadedArtifacts(ruleset=promoted.ruleset, phrase_set=promoted.phrase_set,
                            source="registry", fallback_reason=candidate_error)
+
+
+def load_active_for_mode(session: Session, *, mode: str,
+                         service_version: str | None = None) -> LoadedArtifacts:
+    """`load_active`, plus the live-mode admission check.
+
+    Kept as its own entry point so the check cannot be skipped by forgetting a
+    keyword: a caller that wants mode-aware loading has to say which mode.
+    """
+    artifacts = load_active(session, service_version=service_version)
+    if str(mode).lower() != "live":
+        return artifacts
+
+    promoted = load_promoted(session, service_version=service_version)
+    if promoted is None:
+        raise AlertingUnavailable(
+            "live mode requires a PROMOTED ruleset and the registry has none"
+        )
+    if promoted.ruleset.rules_sha256 != artifacts.ruleset.rules_sha256:
+        raise AlertingUnavailable(
+            "live mode refuses an unpromoted ruleset: loaded "
+            f"{artifacts.ruleset.rules_sha256[:12]} from {artifacts.source}, "
+            f"promoted is {promoted.ruleset.rules_sha256[:12]}. Promote it "
+            "deliberately or correct the file."
+        )
+    return artifacts
 
 
 def load_promoted(session: Session, *,

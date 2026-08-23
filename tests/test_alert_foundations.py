@@ -826,3 +826,40 @@ def test_an_inert_confirmation_basis_is_reported_not_silently_accepted(ruleset):
     # transition bases are NOT flagged: one transition is exactly what they mean
     assert not [w for w in inert if "authoritative_transition" in w]
     assert not [w for w in inert if "adjacent_snapshots" in w]
+
+
+def test_live_mode_refuses_a_ruleset_that_was_never_promoted(isolated_db):
+    """Promotion is the operator's deliberate act, or it is decoration.
+
+    Without this check a valid but UNPROMOTED candidate placed on disk is
+    evaluated and dispatched exactly like an approved one — health reported
+    `live_matches_promoted` and nothing enforced it (audit B-04). Shadow and
+    dryrun may run an unpromoted candidate; that is what they are for.
+    """
+    import pytest
+
+    from app.alerts.artifacts import load_active_for_mode
+    from app.alerts.errors import AlertingUnavailable
+    from app.db import session_scope
+
+    with session_scope() as session:
+        # nothing has been promoted yet
+        assert load_active_for_mode(session, mode="shadow") is not None
+        assert load_active_for_mode(session, mode="dryrun") is not None
+
+        with pytest.raises(AlertingUnavailable) as caught:
+            load_active_for_mode(session, mode="live")
+        assert "PROMOTED" in str(caught.value)
+
+
+def test_live_mode_accepts_the_ruleset_once_it_is_promoted(isolated_db):
+    from app.alerts.artifacts import load_active, load_active_for_mode, register
+    from app.db import session_scope
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts, promote=True, promoted_by="test")
+
+    with session_scope() as session:
+        admitted = load_active_for_mode(session, mode="live")
+        assert admitted.ruleset.rules_sha256 == artifacts.ruleset.rules_sha256

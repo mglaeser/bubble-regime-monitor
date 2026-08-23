@@ -297,3 +297,77 @@ def test_recovery_job_skips_when_everything_is_off(isolated_db, monkeypatch):
     get_settings.cache_clear()
     assert run_once()["status"] == "skipped"
     get_settings.cache_clear()
+
+
+def test_an_abandoned_evaluation_is_actually_retried(isolated_db, monkeypatch):
+    """"Safe to retry" and nothing retried is just "abandoned".
+
+    `recover_evaluations` marks a lease-expired evaluation ABANDONED and logs
+    that it is safe to retry. Nothing did, so an outage that interrupted an
+    evaluation silently cost that snapshot its alerts — the work was declared
+    recoverable and then left (audit B-13).
+    """
+    from app.jobs import alert_recovery
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        "app.services.alert_integration.evaluate_input",
+        lambda identity, **kw: called.append(identity))
+
+    monkeypatch.setattr(alert_recovery, "recover_evaluations",
+                        lambda session, **kw: _report(abandoned=["EVAL1"]))
+    monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
+    monkeypatch.setattr(alert_recovery, "_retryable_inputs",
+                        lambda session, abandoned, *, limit: ["INPUT1"])
+
+    result = alert_recovery.run_once()
+    assert called == ["INPUT1"], "the abandoned work must be re-run"
+    assert result["retried"] == 1
+
+
+def _report(**kw):
+    from app.alerts.recovery import RecoveryReport
+
+    report = RecoveryReport()
+    for key, value in kw.items():
+        setattr(report, key, value)
+    return report
+
+
+def test_the_retry_budget_is_bounded(isolated_db):
+    """A retry that can loop turns one stuck input into a busy job forever."""
+    from types import SimpleNamespace
+
+    from app.jobs.alert_recovery import _retryable_inputs
+
+    rows = {
+        "FRESH": SimpleNamespace(input_identity="A", attempt_count=1),
+        "SPENT": SimpleNamespace(input_identity="B", attempt_count=9),
+        "GONE": None,
+    }
+    session = SimpleNamespace(get=lambda _model, key: rows.get(key))
+
+    out = _retryable_inputs(session, ["FRESH", "SPENT", "GONE"], limit=2)
+    assert out == ["A"], "only work still inside its budget is re-run"
+
+
+def test_the_watchdog_evaluates_what_it_captured(isolated_db, monkeypatch):
+    """Capturing alone leaves the outage recorded and unreported.
+
+    The standalone watchdog is the one component that runs OUTSIDE the
+    recompute it watches. Capturing an input and stopping means
+    `ops.recompute_outage` can never open an episode and nothing is ever
+    planned — it detects the failure and tells no one (audit B-02).
+    """
+    import inspect
+
+    from app.alerts import watchdog
+
+    source = inspect.getsource(watchdog.run_once)
+    assert "evaluate_input" in source, "the watchdog must evaluate its own input"
+    # and it must not let that evaluation take the capture down with it
+    assert "alert_watchdog_evaluation_failed" in source
