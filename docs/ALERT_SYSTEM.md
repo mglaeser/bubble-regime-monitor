@@ -587,6 +587,45 @@ and the registry, unlike the committed artifact, does hold `rules_sha256`.
 
 ---
 
+## 11c. The weekly digest
+
+The product this replaces sent one message every day at 10:00 whether or not
+anything had happened. The replacement is event alerts **plus** a weekly
+digest — and the digest half matters more than it looks, because the Stage 4
+cutover switches the daily message off.
+
+It runs Monday 08:30 Europe/Berlin and digests the window that has **closed**,
+never the one in progress. One delivery per window, identified by the window
+key itself, so a retried job, a restarted scheduler and a manual run all
+converge on the same single message rather than three.
+
+**A quiet week still sends.** This is the part that is easy to get wrong. If
+the digest only went out when something had happened, then after cutover an
+operator receiving nothing could not distinguish
+
+  * a genuinely quiet week, from
+  * a scheduler that died on Tuesday.
+
+The daily message used to make that distinction for free, by accident. The
+digest has to make it on purpose, so a week with no events sends
+`Wochenrueckblick: keine Ereignisse.` — the proof-of-life the old cadence
+provided without anyone designing it.
+
+Two consequences worth knowing:
+
+* A memberless digest is the one legitimate memberless market delivery. Both
+  the dispatcher and the `alert_delivery_requires_member` trigger (migration
+  0010) exempt `DIGEST` for exactly this reason; every other kind with no live
+  members is still aborted at the database rather than sent as an empty
+  message.
+* The digest reports a **count**, not a sample. One SMS is 160 septets and a
+  week of events does not fit; a message quietly containing the first three of
+  twelve would be lying about the other nine. The episodes are on record as
+  delivery members for anyone who needs to know which ones.
+
+Per mandate 9.2 the digest is reported in user load but does **not** consume
+the non-P1 budget: it is a scheduled summary, not an interruption.
+
 ## 12. Replay (the Stage 1 gate)
 
 Stage 1's gate is *deterministic replay; no PII; no scoring regression*.

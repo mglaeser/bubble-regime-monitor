@@ -31,6 +31,7 @@ from sqlalchemy import select
 
 from app.alerts.budgets import check_budget
 from app.alerts.canonical import new_ulid
+from app.alerts.digest import render_digest_body
 from app.alerts.enums import DeliveryKind, Priority, RenderSource
 from app.alerts.errors import RenderRejected, sanitize
 from app.alerts.models import (
@@ -357,7 +358,12 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
 
         # -- 2: revalidate ------------------------------------------------
         members = revalidate_members(session, delivery, now=now)
-        if not members and delivery.delivery_kind != DeliveryKind.TEST:
+        # A DIGEST with no members is the one legitimate memberless market
+        # delivery: a quiet week still sends, because after cutover this is the
+        # only scheduled message the operator gets and silence is also what a
+        # dead scheduler produces.
+        if not members and delivery.delivery_kind not in (DeliveryKind.TEST,
+                                                          DeliveryKind.DIGEST):
             cancel(session, delivery, now=now, reason="ALL_MEMBERS_RESOLVED")
             report.cancelled += 1
             return
@@ -376,30 +382,49 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         if existing is not None:
             body = existing.final_message
         else:
-            context = _build_context(session, delivery, members, phrase_set)
-            if not context.members:
-                mark_render_failed(session, delivery, now=now,
-                                   reason="no renderable member context")
-                report.render_failed += 1
-                return
-            headline = _headline_for(members[0].rule_id, phrase_set)
-            try:
-                result = render_with_cascade(
-                    context=context, phrase_set=phrase_set, headline_code=headline,
-                    phrase_codes=[], next_check_code="NEXT_RECOMPUTE", caveat_codes=[],
-                    render_source=RenderSource.TEMPLATE_FULL,
-                )
-            except RenderRejected as exc:
-                mark_render_failed(session, delivery, now=now, reason=exc.redacted())
-                report.render_failed += 1
-                return
+            # A digest has no single subject to render facts from, so it is
+            # assembled from its own reviewed fragments and its item count.
+            if delivery.delivery_kind == DeliveryKind.DIGEST:
+                context = RenderContext(members=[])
+                try:
+                    result = render_digest_body(phrase_set,
+                                                item_count=len(members))
+                except RenderRejected as exc:
+                    mark_render_failed(session, delivery, now=now,
+                                       reason=exc.redacted())
+                    report.render_failed += 1
+                    return
+            else:
+                context = _build_context(session, delivery, members, phrase_set)
+                if not context.members:
+                    mark_render_failed(session, delivery, now=now,
+                                       reason="no renderable member context")
+                    report.render_failed += 1
+                    return
+                headline = _headline_for(members[0].rule_id, phrase_set)
+                try:
+                    result = render_with_cascade(
+                        context=context, phrase_set=phrase_set,
+                        headline_code=headline, phrase_codes=[],
+                        next_check_code="NEXT_RECOMPUTE", caveat_codes=[],
+                        render_source=RenderSource.TEMPLATE_FULL,
+                    )
+                except RenderRejected as exc:
+                    mark_render_failed(session, delivery, now=now,
+                                       reason=exc.redacted())
+                    report.render_failed += 1
+                    return
             session.add(AlertRender(
                 render_id=new_ulid(utc_ms(now)),
                 delivery_id=delivery_id,
                 render_source=result.render_source,
                 fallback_reason=result.fallback_reason,
-                planning_phrase_set_version=members[0].origin_phrase_set_version,
-                planning_phrase_set_sha256=members[0].origin_phrase_set_sha256,
+                planning_phrase_set_version=(
+                    members[0].origin_phrase_set_version if members
+                    else phrase_set.version),
+                planning_phrase_set_sha256=(
+                    members[0].origin_phrase_set_sha256 if members
+                    else phrase_set.sha256),
                 render_context_hash=context.context_hash(),
                 fact_catalog_hash=context.fact_catalog_hash(),
                 selected_fact_ids=result.selected_fact_ids,
