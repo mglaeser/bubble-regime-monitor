@@ -367,3 +367,30 @@ def test_a_different_secret_yields_a_different_key(monkeypatch):
     ImessageSender(_client(handler)).send("b", recipient_ref="default",
                                           idempotency_key="same")
     assert keys[0] != keys[1]
+
+
+def test_rotating_the_transport_credential_keeps_retry_identity(monkeypatch):
+    """A rotation must not turn an in-flight retry into a new message.
+
+    Keying the hash with the API key — the obvious choice — means every
+    credential rotation re-identifies every message in the outbox, so a retry
+    that crossed one would deliver the alert twice. That is the duplicate this
+    key exists to prevent, arriving through the back door.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setenv("ALERTS_IDEMPOTENCY_SECRET", "stable_across_rotations")  # pragma: allowlist secret
+    _clear()
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
+
+    ImessageSender(_client(handler)).send("b", recipient_ref="default",
+                                          idempotency_key="v1|MARKET|live|d|r|1")
+    monkeypatch.setenv("IMESSAGE_API_KEY", "imp_rotatedkey")  # pragma: allowlist secret
+    _clear()
+    ImessageSender(_client(handler)).send("b", recipient_ref="default",
+                                          idempotency_key="v1|MARKET|live|d|r|1")
+
+    assert keys[0] == keys[1], "a credential rotation re-identified the message"
