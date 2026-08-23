@@ -12,6 +12,7 @@ These tests start from a persisted Snapshot and assert on the built sidecar.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from app.alerts import observation as obs
 from app.alerts.enums import DataState
@@ -211,20 +212,56 @@ def test_a_snapshot_without_the_typed_gate_is_missing_not_false(isolated_db):
     assert evidence.data_state == DataState.MISSING
 
 
-def test_the_sidecar_records_that_no_filing_identity_exists(isolated_db):
-    """EDGAR provenance carries a reading date and nothing else.
+def test_one_filing_period_is_one_observation_across_many_recomputes(isolated_db):
+    """The property `basis: new_filing` actually depends on — and it holds.
 
-    The rule needs "once per new filing". A reading date cannot supply that —
-    every four-hour recompute would look like a fresh filing — so the absence
-    is recorded rather than papered over with a renamed `as_of`.
+    This rule was briefly disabled on the premise that EDGAR gives only a
+    reading date, so "once per new filing" could not be keyed and every
+    four-hour recompute would present as a fresh filing. That was wrong.
+    `as_of` is the END of the filed XBRL duration fact (edgar.py ttm -> f.end),
+    max across the cohort; the read moment is `Provenance.fetched_at`. The
+    premise was never tested, which is exactly how it got written into the
+    config artifact unchallenged, so it is pinned here by execution.
     """
+    keys = []
+    for hour in (0, 4, 8, 12):
+        with session_scope() as session:
+            snap = Snapshot(
+                computed_at=datetime(2026, 8, 21, hour, 0, tzinfo=UTC),
+                service_version="test",
+                median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+                point_score=51.0, action_band="trim", override_fired=False,
+                red_flag_count=0, red_flag_detail={},
+                block_s={"indicators": {}},
+                block_d={"indicators": {"d3": {
+                    "value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30",
+                    "stale": False, "gate_fired": True,
+                    "issuers_used": 5, "issuers_full": 5}}},
+                trend_states={}, fast_alarm={}, data_freshness={})
+            session.add(snap)
+            session.flush()
+            session.expunge(snap)
+        keys.append(_gate_evidence(snap).economic_observation_key)
+
+    assert len(set(keys)) == 1, "four recomputes of one filing must be ONE observation"
+
+    later = _snapshot_with_d3({
+        "value": 0.42, "sub_score": 0.30, "as_of": "2026-09-30", "stale": False,
+        "gate_fired": True, "issuers_used": 5, "issuers_full": 5,
+    })
+    assert _gate_evidence(later).economic_observation_key not in keys, (
+        "a new filing period must be a NEW observation")
+
+
+def test_the_sidecar_records_what_is_genuinely_absent(isolated_db):
+    """A cohort period end exists; a per-issuer accession identity does not."""
     snap = _snapshot_with_d3({
         "value": 0.42, "sub_score": 0.30, "as_of": "2026-06-30", "stale": False,
-        "gate_fired": True, "filing_period_available": False,
-        "issuers_used": 5, "issuers_full": 5,
+        "gate_fired": True, "issuers_used": 5, "issuers_full": 5,
     })
     evidence = _gate_evidence(snap)
-    assert evidence.metadata["filing_period_available"] is False
+    assert evidence.metadata["issuer_accession_identity"] is False
+    assert evidence.period_end == "2026-06-30"
 
 
 def test_the_gate_carries_its_reading_date_not_the_recompute_time(isolated_db):
@@ -466,3 +503,431 @@ def test_an_unobservable_rf4_does_not_inflate_the_fireable_universe():
 
     assert universe(False) < universe(True), (
         "an unobservable rf4 must not be counted in the fireable universe")
+# legs: dated by the ECONOMIC period, and Faber's authoritative state is
+# month-end (audit B-09 and B-10 — one defect family, one code block)
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_with_legs(trend: dict) -> Snapshot:
+    with session_scope() as session:
+        snap = Snapshot(
+            computed_at=datetime(2026, 8, 21, 6, 0, tzinfo=UTC), service_version="test",
+            median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+            point_score=51.0, action_band="trim", override_fired=False,
+            red_flag_count=0, red_flag_detail={},
+            block_s={"indicators": {}}, block_d={"indicators": {}},
+            trend_states=trend, fast_alarm={}, data_freshness={})
+        session.add(snap)
+        session.flush()
+        session.expunge(snap)
+        return snap
+
+
+def _leg(snap: Snapshot, domain: str):
+    built = build_alert_input(snap, built_at=BUILT_AT, service_version="test")
+    for item in built.legs:
+        if item.observation_domain_id == domain:
+            return item
+    raise AssertionError(f"no leg evidence for {domain}")
+
+
+_FULL_SPY = {
+    "SPY": {
+        "faber_10mo": "OUT",                  # legacy live-preview field
+        "faber_live_preview": "OUT",
+        "faber_month_end_state": "IN",        # last COMPLETED month says IN
+        "faber_month_end_period": "2026-07",
+        "faber_distance_pct": 1.8,
+        "sma200_state": "IN",
+        "sma200_as_of": "2026-08-20",
+        "sma200": "IN",
+    },
+}
+
+
+def test_the_faber_leg_publishes_the_month_end_state_not_the_live_preview(isolated_db):
+    """`faber_state` stands the in-progress month's latest close in for a
+    month-end close — its own docstring says so. That is a live preview.
+
+    The P1 rule `legs.faber_spy_out_high_risk` confirms on a NEW MONTH-END
+    period. Publishing the preview under that contract means an intramonth
+    wobble reads as a completed month-end flip, and the most severe alert the
+    system can send fires on a month that has not ended.
+    """
+    evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_FABER)
+    assert evidence.value == "IN", "must be the completed month's state, not the preview"
+
+
+def test_the_faber_leg_is_dated_by_its_month_not_by_the_recompute(isolated_db):
+    """Stamping computed_at makes every four-hour run a new economic period."""
+    evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_FABER)
+    assert evidence.period_end == "2026-07"
+    assert not str(evidence.period_end).startswith("2026-08-21")
+
+
+def test_six_recomputes_in_one_month_are_one_faber_observation(isolated_db):
+    """The property `basis: new_month_end_period` actually depends on."""
+    keys = []
+    for hour in (0, 4, 8, 12, 16, 20):
+        with session_scope() as session:
+            snap = Snapshot(
+                computed_at=datetime(2026, 8, 21, hour, 0, tzinfo=UTC),
+                service_version="test",
+                median=52.0, iqr_lo=50.0, iqr_hi=55.0, band5=48.0, band95=58.0,
+                point_score=51.0, action_band="trim", override_fired=False,
+                red_flag_count=0, red_flag_detail={},
+                block_s={"indicators": {}}, block_d={"indicators": {}},
+                trend_states=_FULL_SPY, fast_alarm={}, data_freshness={})
+            session.add(snap)
+            session.flush()
+            session.expunge(snap)
+        keys.append(_leg(snap, obs.DOMAIN_LEG_SPY_FABER).economic_observation_key)
+    assert len(set(keys)) == 1, "six recomputes in one month must be ONE observation"
+
+
+def test_the_sma200_leg_is_dated_by_its_trading_date(isolated_db):
+    """`legs.sma200_flip` needs three distinct TRADING DATES.
+
+    Dated by computed_at, three four-hour recomputes manufacture a
+    "three trading date" confirmation in eight hours.
+    """
+    evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_SMA200)
+    assert evidence.period_end == "2026-08-20"
+
+
+def test_a_snapshot_without_the_typed_leg_fields_is_missing_not_a_state(isolated_db):
+    """Historical rows carry only the live preview; it must not be promoted."""
+    legacy = {"SPY": {"faber_10mo": "OUT", "sma200": "IN"}}
+    faber = _leg(_snapshot_with_legs(legacy), obs.DOMAIN_LEG_SPY_FABER)
+    assert faber.value is None
+    assert faber.data_state == DataState.MISSING
+    assert faber.freshness_reason_code == "typed_month_end_absent"
+
+
+def test_each_asset_is_classified_against_its_own_calendar(isolated_db):
+    """QQQ must not be classified by SPY's clock.
+
+    The feeds are independent and can be asynchronous. Borrowing one asset's
+    latest bar to decide whether the OTHER's month is complete declares a
+    still-running month finished for whichever asset lags — reintroducing the
+    intramonth defect for that asset only, which is the hardest shape to spot.
+    """
+    from app.engine.legs import month_end_faber
+
+    # a contiguous monthly series, then a partial month for the lagging asset
+    completed = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
+    completed += [(f"2026-{m:02d}-28", 112.0 + m) for m in range(1, 8)]
+    lagging = completed + [("2026-08-03", 50.0)]    # August only just started
+
+    # its own clock: August is in progress and is dropped, July is closed
+    # because an August bar exists immediately after it
+    _, period = month_end_faber(lagging, as_of_month="2026-08", feed_current=True)
+    assert period == "2026-07", "the in-progress month must be dropped"
+
+    # a LATER clock cannot promote August: no September bar proves it closed,
+    # which is what stops a lagging feed being closed out by another asset's
+    # dates
+    # freshness is DERIVED, not asserted: on 2026-09-02 a feed whose newest bar
+    # is 2026-08-03 is a month behind, so it cannot close August either
+    from app.services.compute import _feed_is_current
+
+    assert _feed_is_current(lagging, "2026-09-02") is False
+    _, borrowed = month_end_faber(
+        lagging, as_of_month="2026-09",
+        feed_current=_feed_is_current(lagging, "2026-09-02"))
+    assert borrowed == "2026-07", "another asset's calendar must not close this feed"
+
+
+def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
+    """A known state with no economic period is UNDATED, not absent.
+
+    Withholding it hides a state that was genuinely computed; publishing it
+    FRESH lets an undated reading satisfy a confirmation that counts distinct
+    dates. The house convention for an undated reading is UNKNOWN_AGE, and the
+    freshness requirement decides from there.
+    """
+    undated = {"SPY": {"faber_10mo": "OUT", "sma200": "IN", "sma200_state": "IN"}}
+    sma = _leg(_snapshot_with_legs(undated), obs.DOMAIN_LEG_SPY_SMA200)
+    assert sma.value == "IN", "the state was computed; do not hide it"
+    assert sma.data_state == DataState.UNKNOWN_AGE
+    assert sma.period_end is None, "but it must not claim a date it does not have"
+
+
+def test_month_completion_needs_the_calendar_AND_a_publishing_feed():
+    """Two failures that trade off against each other, both avoided.
+
+    Waiting for a later bar means a month that ended on Friday is not
+    authoritative until Monday — a late P1. Trusting the calendar alone means a
+    feed that stopped mid-July gets July promoted once September arrives, with
+    a MID-JULY close standing in for July's month-end close — a wrong P1.
+
+    Freshness is decided against the MARKET CALENDAR, never the series' own gap
+    history: every statistic over those gaps is contaminated by the outages it
+    exists to detect, which is how a 40-day hole last month can make a feed
+    that stopped 30 days ago look healthy.
+    """
+    from datetime import date, timedelta
+
+    from app.engine.legs import month_end_faber
+    from app.services.compute import _feed_is_current
+
+    day, end_day, bars, px = date(2025, 8, 1), date(2026, 7, 31), [], 100.0
+    while day <= end_day:
+        if day.weekday() < 5:
+            px += 0.1
+            bars.append((day.isoformat(), px))
+        day += timedelta(days=1)
+
+    # 2026-07-31 is a Friday; on the following Monday the feed is current
+    assert _feed_is_current(bars, "2026-08-03") is True
+    # five weeks later it plainly is not, however long its past gaps were
+    assert _feed_is_current(bars, "2026-09-02") is False
+
+    _, prompt = month_end_faber(bars, as_of_month="2026-08",
+                                feed_current=_feed_is_current(bars, "2026-08-03"))
+    assert prompt == "2026-07", "a completed month must not wait for another bar"
+
+    _, stale = month_end_faber(bars, as_of_month="2026-09",
+                               feed_current=_feed_is_current(bars, "2026-09-02"))
+    assert stale == "2026-06", "a stale feed's partial month is not a month-end"
+
+    _, running = month_end_faber(bars[:-8], as_of_month="2026-07", feed_current=True)
+    assert running == "2026-06", "the in-progress month is never promoted"
+
+
+def test_a_prior_outage_cannot_make_a_stopped_feed_look_current():
+    """The defect in deriving freshness from the series' own cadence.
+
+    A long hole earlier in the window raises any gap statistic enough that a
+    feed which has since stopped passes as healthy — the outage hides the
+    outage. The market calendar has no such feedback loop.
+    """
+    from datetime import date, timedelta
+
+    from app.services.compute import _feed_is_current
+
+    day, end_day, bars, px = date(2025, 8, 1), date(2026, 5, 1), [], 100.0
+    while day <= end_day:
+        if day.weekday() < 5:
+            px += 0.1
+            bars.append((day.isoformat(), px))
+        day += timedelta(days=1)
+    # a 40-day outage inside the history, then it resumes, then it stops again
+    bars = [b for b in bars if not ("2026-02-01" <= b[0] <= "2026-03-12")]
+
+    assert _feed_is_current(bars, "2026-06-15") is False, (
+        "a stopped feed must not be excused by an earlier outage")
+
+
+
+
+def test_a_gap_month_does_not_prove_the_month_before_it_closed():
+    """"Some later bar exists" is not proof; the NEXT month's bar is.
+
+    A feed that stops mid-July and resumes in September leaves July as the
+    second-to-last month with a September bar behind it. Treating that as
+    closure promotes a MID-JULY close as July's month-end — the same partial
+    substitution this function exists to refuse, arriving through the gap
+    instead of through the clock.
+    """
+    from app.engine.legs import month_end_faber
+
+    base = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
+
+    outage = base + [("2026-07-15", 50.0), ("2026-09-02", 51.0)]
+    _, period = month_end_faber(outage, as_of_month="2026-09", feed_current=True)
+    assert period == "2025-11", (
+        "neither July nor December is proven closed by a bar two months later; "
+        "the months that remain are consecutive, so the window is still valid")
+
+    # contiguous through July, so the ten-month window is a real one and this
+    # asserts the CLOSURE rule rather than tripping the window rule
+    contiguous = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(8, 13)]
+    contiguous += [(f"2026-{m:02d}-28", 105.0 + m) for m in range(1, 7)]
+    clean = contiguous + [("2026-07-31", 50.0), ("2026-08-03", 51.0)]
+    _, rolled = month_end_faber(clean, as_of_month="2026-08", feed_current=True)
+    assert rolled == "2026-07", "an adjacent bar does prove closure"
+
+
+def test_a_month_with_one_early_bar_is_not_closed():
+    """Adjacency is not enough; the month must have run to its end.
+
+    A feed publishing 2026-07-02 and then nothing until 2026-08-14 satisfies
+    "a bar exists in the following month" while July's close is two days into
+    the month. The exact test is the market calendar: a month is closed when
+    its last bar IS that month's last trading day.
+    """
+    from app.services.compute import _closed_months
+
+    one_early = [("2026-06-30", 1.0), ("2026-07-02", 2.0), ("2026-08-14", 3.0)]
+    assert "2026-07" not in _closed_months(one_early)
+    assert "2026-06" in _closed_months(one_early), "June ran to its end"
+
+    ran_out = [("2026-07-31", 1.0), ("2026-08-31", 2.0)]
+    assert {"2026-07", "2026-08"} <= _closed_months(ran_out)
+
+
+def test_a_stale_feed_that_finished_its_month_still_closes_it():
+    """Closure is a property of the DATA, not of the feed's current health.
+
+    A feed whose final bar is 31 July has genuinely closed July — the month ran
+    to its end and every bar exists — whether or not it is still publishing in
+    September. A feed that stopped on 2 July has not, however current it looks.
+
+    Judging the newest month by freshness while judging every other month by
+    the calendar produced exactly the two errors it was meant to prevent: a
+    partial month promoted, or a complete one withheld.
+    """
+    from datetime import date, timedelta
+
+    from app.alerts.calendars import is_trading_day
+    from app.engine.legs import month_end_faber
+    from app.services.compute import _closed_months
+
+    def month_end(year: int, month: int) -> str:
+        nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        day = nxt - timedelta(days=1)
+        while not is_trading_day(day):
+            day -= timedelta(days=1)
+        return day.isoformat()
+
+    # every bar IS its month's last trading day, so the calendar closes them,
+    # and the months are CONTIGUOUS so the ten-month window is a real one
+    months = [(month_end(2025, m), 100.0 + m) for m in range(7, 13)]
+    months += [(month_end(2026, m), 106.0 + m) for m in range(1, 7)]
+    finished = months + [(month_end(2026, 7), 60.0)]
+    closed = _closed_months(finished)
+    assert "2026-07" in closed, "31 July is July's last trading day"
+
+    _, period = month_end_faber(finished, as_of_month="2026-09",
+                                closed_months=closed)
+    assert period == "2026-07", "a finished month closes even from a dead feed"
+
+    stopped = months + [("2026-07-02", 60.0)]      # abandoned on the 2nd
+    _, partial = month_end_faber(stopped, as_of_month="2026-09",
+                                 closed_months=_closed_months(stopped))
+    assert partial != "2026-07", "a month abandoned on the 2nd is not closed"
+
+
+def test_the_current_month_is_not_promoted_on_its_own_final_session():
+    """The bar dated today may still be an intraday price.
+
+    A daily feed publishes a bar for the current session that is only final
+    once that session closes. Promoting a month while still inside it — even
+    on its last trading day, even with the calendar agreeing the month ends
+    today — puts an unfinished price into an authoritative month-end state.
+    """
+    from datetime import date, timedelta
+
+    from app.alerts.calendars import is_trading_day
+    from app.engine.legs import month_end_faber
+    from app.services.compute import _closed_months
+
+    def month_end(year: int, month: int) -> str:
+        nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        day = nxt - timedelta(days=1)
+        while not is_trading_day(day):
+            day -= timedelta(days=1)
+        return day.isoformat()
+
+    bars = [(month_end(2025, m), 100.0 + m) for m in range(1, 13)]
+    bars += [(month_end(2026, 1), 113.0), (month_end(2026, 2), 114.0)]
+    closed = _closed_months(bars)
+    assert "2026-02" in closed, "the calendar agrees February ended"
+
+    # evaluated ON February's last trading day: not yet promoted
+    _, same_month = month_end_faber(bars, as_of_month="2026-02", closed_months=closed)
+    assert same_month == "2026-01", "the month being lived in is never authoritative"
+
+    # evaluated once March has begun: promoted
+    _, rolled = month_end_faber(bars, as_of_month="2026-03", closed_months=closed)
+    assert rolled == "2026-02"
+
+
+def test_a_gapped_history_cannot_produce_a_ten_month_average():
+    """Ten entries are not ten months.
+
+    `faber_state` receives closes with their labels stripped, so it cannot tell
+    that a series missing four months has averaged ten readings spread over
+    fourteen. That is a different statistic wearing the same name — and it
+    would be published as an authoritative month-end state and can fire a P1.
+    """
+    from datetime import date, timedelta
+
+    from app.alerts.calendars import is_trading_day
+    from app.engine.legs import month_end_faber
+    from app.services.compute import _closed_months
+
+    def month_end(year: int, month: int) -> str:
+        nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        day = nxt - timedelta(days=1)
+        while not is_trading_day(day):
+            day -= timedelta(days=1)
+        return day.isoformat()
+
+    contiguous = [(month_end(2025, m), 100.0 + m) for m in range(1, 13)]
+    contiguous += [(month_end(2026, m), 112.0 + m) for m in range(1, 3)]
+    state, period = month_end_faber(contiguous, as_of_month="2026-03",
+                                    closed_months=_closed_months(contiguous))
+    assert state is not None and period == "2026-02"
+
+    # drop three months out of the middle of the window
+    gapped = [b for b in contiguous
+              if b[0][:7] not in {"2025-08", "2025-09", "2025-10"}]
+    state, period = month_end_faber(gapped, as_of_month="2026-03",
+                                    closed_months=_closed_months(gapped))
+    assert state is None and period is None, (
+        "a gapped window must be refused, not averaged")
+def test_a_same_period_re_transition_is_not_suppressed(isolated_db):
+    """The cohort-max key must not swallow a second gate transition.
+
+    `d3_gate` is dated by the cohort's max filed period, so two issuers filing
+    the same period are ONE observation. Review raised that this could suppress
+    a later gate alert. For this rule it cannot: count:1 on a boolean_transition
+    fires on the transition itself and never consults the key. Pinned here
+    because the reasoning is not obvious from the rule text, and because any
+    future rule on this source with count >= 2 WOULD be affected.
+    """
+    import yaml
+
+    from app.alerts.dto import AlertInput, EvidenceModel
+    from app.alerts.observation import build_evidence
+    from app.alerts.primitives import EvaluationContext, evaluate_rule
+    from app.alerts.rulespec import RuleSpec
+    from app.alerts.state_machine import InstanceMemory, evaluate_state
+
+    doc = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "config" / "alert_rules.v3.2.yaml").read_text())
+    rule = RuleSpec.model_validate(
+        next(r for r in doc["rules"] if r["rule_id"] == "dynamics.d3_gate_fires"))
+
+    def one(gate: bool, ident: str) -> AlertInput:
+        ev = build_evidence(obs.DOMAIN_HYPERSCALER_GATE, gate,
+                            observed_at="2026-08-21T06:00:00+00:00", source_id="d3",
+                            period_start="2026-06-30", period_end="2026-06-30",
+                            data_state=DataState.FRESH)
+        return AlertInput(
+            schema_version=1, input_identity=ident, origin="RECOMPUTE", snapshot_id=1,
+            computed_at="2026-08-21T06:00:00+00:00", built_at="2026-08-21T06:05:00+00:00",
+            service_version="test", methodology_version="v", methodology_sha256="s",
+            indicators=[EvidenceModel(**ev.as_dict())])
+
+    memory, previous, activations = InstanceMemory(), None, []
+    for gate, ident in ((True, "a"), (False, "b"), (True, "c")):
+        current = one(gate, ident)
+        ctx = EvaluationContext(current=current, previous=previous,
+                                history=(previous,) if previous else (),
+                                is_cold_start=previous is None)
+        decision = evaluate_state(rule=rule, instance_fingerprint="fp", memory=memory,
+                                  outcome=evaluate_rule(rule, ctx), ctx=ctx, now=BUILT_AT)
+        activations.append(decision.activate_episode)
+        previous = current
+        memory = InstanceMemory(
+            state_version=memory.state_version + 1,
+            condition_state=decision.condition_state,
+            last_known_condition_state=decision.condition_state,
+            current_episode_id=None if decision.resolve_episode
+            else ("EP" if decision.activate_episode else memory.current_episode_id))
+
+    # cold start is not a transition; the reversion is not; the RE-entry is.
+    assert activations == [False, False, True]

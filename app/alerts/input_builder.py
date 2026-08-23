@@ -276,11 +276,20 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
     # returned None on every snapshot that has ever existed, which rendered as
     # "gate not persisted" while the rule stayed marked READY.
     gate = d3.get("gate_fired")
-    # NOT a filing period: EDGAR provenance carries only `as_of`, the reading
-    # date. Naming it a filing period would invent an identity the source does
-    # not provide, and the "once per new filing" confirmation this rule needs
-    # cannot be built from a reading date — every recompute would look like a
-    # new filing. The gate VALUE is now readable; its confirmation key is not.
+    # `as_of` IS the filing period, and it is the confirmation key this rule
+    # needs. For the EDGAR adapter it is the END of the filed XBRL duration fact
+    # (app/sources/edgar.py ttm() -> f.end, surfaced at edgar.py:171), taken as
+    # the max across the hyperscaler cohort. The moment we READ it is a
+    # different field, `Provenance.fetched_at`. So it is stable across
+    # recomputes and advances only when an issuer files a later period —
+    # verified: four sidecars built at 00:00/04:00/08:00/12:00 from one filing
+    # period share an economic_observation_key, and a later period yields a
+    # different one. `basis: new_filing` therefore counts filings, not runs.
+    #
+    # The one real coarseness: it is a max over issuers, so a cohort-level
+    # period rather than a per-issuer accession identity, and an issuer skipped
+    # by the adapter's `except: continue` can make it regress. That
+    # under-counts; it never turns a recompute into a filing.
     d3_period = d3.get("as_of")
     add(obs.DOMAIN_HYPERSCALER_GATE, gate if isinstance(gate, bool) else None,
         source_id="d3", period_start=d3_period, period_end=d3_period,
@@ -288,7 +297,7 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
         reason=d3_reason if isinstance(gate, bool) else "gate_state_not_persisted",
         metadata={"issuers_used": d3.get("issuers_used"),
                   "issuers_full": d3.get("issuers_full"),
-                  "filing_period_available": bool(d3.get("filing_period_available"))})
+                  "issuer_accession_identity": False})
     # Checked against the ISO reading date, not the filing LABEL: `as_of` is a
     # real date, `filing_period` is "2026-Q2" and means something else.
     if _period_is_future(d3.get("as_of"), computed_at):
@@ -301,13 +310,49 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
         ("SPY", obs.DOMAIN_LEG_SPY_FABER, obs.DOMAIN_LEG_SPY_SMA200),
         ("QQQ", obs.DOMAIN_LEG_QQQ_FABER, obs.DOMAIN_LEG_QQQ_SMA200),
     ):
-        for domain, leg in ((faber_domain, "faber_10mo"), (sma_domain, "sma200")):
-            state = _leg_state(trend, asset, leg)
+        # Legs are dated by their ECONOMIC period, never by the recompute.
+        #
+        # Faber publishes the state of the last COMPLETED month, because the
+        # rules confirm on a new month-end period and `faber_10mo` is a live
+        # preview that moves intramonth. SMA200 publishes the trading date it
+        # actually read, because `legs.sma200_flip` needs three distinct
+        # TRADING DATES and computed_at would let three four-hour recomputes
+        # manufacture that in eight hours.
+        #
+        # A row without the typed fields is MISSING. Promoting the preview
+        # would be inventing a month-end that never happened (mandate 5.4).
+        asset_state = trend.get(asset) or {}
+        for domain, leg in ((faber_domain, "faber"), (sma_domain, "sma200")):
+            if leg == "faber":
+                leg_state: str | None = asset_state.get("faber_month_end_state")
+                leg_period: str | None = asset_state.get("faber_month_end_period")
+                absent_reason = "typed_month_end_absent"
+            else:
+                leg_state = _leg_state(trend, asset, "sma200")
+                leg_period = asset_state.get("sma200_as_of")
+                absent_reason = "typed_trading_date_absent"
+            known = leg_state not in (None, "unknown")
+            usable = known and bool(leg_period)
+            # A KNOWN state with no economic period is UNDATED, not absent. The
+            # house convention (v3.7.3/A-01, and `_evidence_data_state` above)
+            # is that an undated reading reads UNKNOWN_AGE — withholding it
+            # entirely would hide a state that was genuinely computed, while
+            # publishing it FRESH would let an undated reading satisfy a
+            # confirmation that counts distinct dates. Neither; say it is
+            # undated and let the freshness requirement decide.
+            if usable:
+                leg_data_state, leg_reason = DataState.FRESH, None
+            elif known:
+                leg_data_state, leg_reason = DataState.UNKNOWN_AGE, "reading_date_unknown"
+            else:
+                leg_data_state = DataState.MISSING
+                leg_reason = "leg_state_unknown" if leg_state == "unknown" else absent_reason
             item = build_evidence(
-                domain, state, observed_at=observed_at, source_id=f"{asset}.{leg}",
-                period_start=computed_at, period_end=computed_at,
-                data_state=DataState.MISSING if state in (None, "unknown") else DataState.FRESH,
-                freshness_reason_code=None if state not in (None, "unknown") else "leg_state_unknown",
+                domain, leg_state if known else None, observed_at=observed_at,
+                source_id=f"{asset}.{leg}",
+                period_start=leg_period if usable else None,
+                period_end=leg_period if usable else None,
+                data_state=leg_data_state, freshness_reason_code=leg_reason,
                 code_revision=BUILDER_CODE_REVISION,
             )
             legs.append(EvidenceModel(**item.as_dict()))

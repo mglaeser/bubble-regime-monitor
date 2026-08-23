@@ -1327,13 +1327,48 @@ rules:
   - rule_id: dynamics.d3_gate_fires
     identity_version: 1
     title: "Hyperscaler free-cash-flow gate fires"
+    # WHAT `basis: new_filing` DOES AND DOES NOT DO HERE.
+    # The basis is enforced by the candidate latch, and mandate 8.1 scopes that
+    # latch to confirmation count > 1. At count 1 the rule fires on the
+    # transition and the basis is never consulted, so it states intent rather
+    # than enforcement — the loader warns about exactly this, and section 5 of
+    # docs/ALERT_SYSTEM.md explains it. What limits a repeat notification is
+    # cooldown_seconds below: 30 days against a roughly 90-day filing cadence.
+    #
+    # The evidence key is nonetheless correct and worth having: `as_of` is the
+    # filed reporting-period end (edgar.py ttm -> f.end), max across the
+    # cohort, so four recomputes of one filing share one
+    # economic_observation_key and a new period yields a new one. It is a
+    # per-PERIOD key, not a per-ISSUER accession identity: two issuers filing
+    # the same period are one observation, and an issuer skipped by the adapter
+    # can make the max regress. Both UNDER-count; neither turns a recompute
+    # into a filing.
+    # CONFIRMATION KEY COARSENESS, recorded because it is real and bounded.
+    # `d3_gate` evidence is dated by the filed XBRL reporting-period end, taken
+    # as the MAX across the hyperscaler cohort — a per-PERIOD key, not a
+    # per-ISSUER accession identity. Two issuers filing the same period are one
+    # observation, and an issuer skipped by the adapter can make the max
+    # regress. Both under-count observations; neither can turn a recompute into
+    # a filing. With count:1 on a boolean_transition this changes nothing —
+    # the transition fires regardless of the key, pinned by
+    # test_a_same_period_re_transition_is_not_suppressed. It WOULD matter to any
+    # future rule on this source with count >= 2, which must not be added
+    # without a per-issuer key.
     enabled: false
     policy_status: APPROVED
-    runtime_readiness: MISSING_INPUT
-    disabled_reason: "The gate boolean is now persisted and readable, but this rule
-      confirms on a NEW FILING and EDGAR provenance carries only a reading date.
-      A per-filing confirmation key cannot be built from it — every four-hour
-      recompute would present as a fresh filing — so the input is incomplete."
+    runtime_readiness: READY
+    disabled_reason: "Ready and correct, and held back for ONE reason: at
+      confirmation count 1 no candidate latch enforces `basis: new_filing`
+      (mandate 8.1 scopes the latch to count > 1), so a gate that flips false
+      -> true -> false -> true inside a single filing period emits a second
+      time once cooldown_seconds lapses — 30 days against a roughly 90-day
+      filing cadence. The gate is derived from filed data and cannot
+      legitimately change inside one period, so such a flip is an issuer fetch
+      failing and recovering, and a second alert about one filing is wrong.
+      This is NOT the earlier claim that the evidence key is unusable: `as_of`
+      IS the filed reporting-period end and four recomputes of one filing share
+      one economic_observation_key, verified by test. Enable when either the
+      basis is enforced at count 1 or the confirmation is raised to 2."
     enabled_in_stages: [3, 4, 5, 6, 7]
     bucket: dynamics
     priority: 2

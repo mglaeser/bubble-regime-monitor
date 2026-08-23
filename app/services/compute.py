@@ -44,6 +44,7 @@ from typing import Any, Literal
 from sqlalchemy import select
 
 from app import methodology as _M
+from app.alerts.calendars import is_trading_day
 from app.config import get_settings
 from app.db import session_scope
 from app.engine import judgment, legs
@@ -444,7 +445,7 @@ class SnapshotData:
     override_fired: bool
     red_flags: RedFlags
     indicators: dict[str, IndicatorOutput]
-    trend_states: dict[str, dict[str, str]]
+    trend_states: dict[str, dict[str, Any]]
     fast_alarm: dict[str, Any]
     freshness: dict[str, str]
     coverage: dict[str, Any]
@@ -991,11 +992,87 @@ def populate_gsadf_shadow(raw: RawInputs) -> None:
     except Exception as exc:  # noqa: BLE001 -- a shadow must never break a recompute
         raw.gsadf_shadow_note = f"SHADOW (not scored): unavailable — {str(exc)[:120]}"
 
+def _closed_months(daily: list[tuple[str, float]]) -> frozenset[str]:
+    """Months whose LAST BAR is that month's last trading day.
+
+    The exact test for "this month ran to its end". Adjacency — a bar in the
+    following month — is weaker and lets a month holding a single early bar
+    through: a feed publishing 2026-07-02 and then nothing until 2026-08-15
+    would have July "closed" on a July-2 close.
+
+    Uses the market calendar the repository already computes, so nothing here
+    is a tolerance an operator would tune.
+    """
+    last_bar: dict[str, date] = {}
+    for stamp, _close in daily:
+        try:
+            day = date.fromisoformat(stamp[:10])
+        except ValueError:
+            continue
+        month = stamp[:7]
+        if month not in last_bar or day > last_bar[month]:
+            last_bar[month] = day
+
+    closed: set[str] = set()
+    for month, seen in last_bar.items():
+        year_text, month_text = month.split("-")[:2]
+        year, mon = int(year_text), int(month_text)
+        nxt = date(year + 1, 1, 1) if mon == 12 else date(year, mon + 1, 1)
+        final = nxt - timedelta(days=1)
+        while not is_trading_day(final):
+            final -= timedelta(days=1)
+        if seen >= final:
+            closed.add(month)
+    return frozenset(closed)
+
+
+def _feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None) -> bool:
+    """Has this price feed printed a bar for the latest session it should have?
+
+    Decided against the MARKET CALENDAR, never against the series' own gap
+    history. Any statistic over those gaps is contaminated by the outages it
+    exists to detect — a single long hole earlier in the window raises the
+    tolerance enough for a feed that has since stopped to look healthy.
+
+    One session of slack, because today's bar may not have printed yet. That is
+    not a tuned threshold: a daily feed publishes once per session, so the
+    previous session is the newest bar that must exist.
+    """
+    if not daily or not as_of_date:
+        return False
+    try:
+        last_bar = date.fromisoformat(daily[-1][0][:10])
+        today = date.fromisoformat(as_of_date[:10])
+    except ValueError:
+        return False
+
+    def _session_on_or_before(day: date) -> date:
+        # Terminates: `is_trading_day` excludes weekends and a fixed holiday
+        # set, so a trading day is never more than a few days back. No literal
+        # bound, because a number here would read as a tunable and is not one.
+        while not is_trading_day(day):
+            day -= timedelta(days=1)
+        return day
+
+    latest = _session_on_or_before(today)
+    previous = _session_on_or_before(latest - timedelta(days=1))
+    return last_bar >= previous
+
+
 def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
                      mc_seed: int | None = None,
-                     gsadf_contested: bool | None = None) -> SnapshotData:
+                     gsadf_contested: bool | None = None,
+                     as_of_date: str | None = None) -> SnapshotData:
     """PURE scoring pipeline: raw inputs -> snapshot data. Never raises on
-    missing sources; drops indicators and renormalizes instead."""
+    missing sources; drops indicators and renormalizes instead.
+
+    `as_of_date` (ISO) is the day the caller is evaluating on, used ONLY to
+    decide whether a price feed's last month has ended. It is optional and
+    defaults to the newest bar's own month, so the function stays pure and
+    reproducible for fixtures and replay; production passes the real date
+    because without it a completed month is not recognised until the first bar
+    of the NEXT month arrives, which delays a month-end P1 by a day or more.
+    """
     settings = get_settings()
     n = mc_samples or settings.mc_samples
     seed = mc_seed or settings.mc_seed
@@ -1416,12 +1493,11 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             # filing it belongs to: a quarterly filing confirms once per
             # FILING, never once per four-hour recompute.
             extra={"gate_fired": gate,
-                   # EDGAR provenance gives a reading date, not a filing
-                   # identity. Say so rather than renaming `as_of`: the rule's
-                   # "once per new filing" confirmation cannot be built from a
-                   # reading date, and a fabricated key would make every
-                   # four-hour recompute look like a fresh filing.
-                   "filing_period_available": False,
+                   # `as_of` is the filed reporting-period END (edgar.py ttm),
+                   # max across the cohort — a real per-filing key. What is NOT
+                   # available is a per-ISSUER accession identity, so record
+                   # that precisely instead of denying the period exists.
+                   "issuer_accession_identity": False,
                    "issuers_used": len(raw.hyperscalers),
                    "issuers_full": d3_full})
     else:
@@ -1429,7 +1505,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "d3", None, None, True, "sec_edgar", False,
             note="EDGAR unavailable; dropped, Block D renormalized",
             # Dropped, so there is NO gate decision — not a false one.
-            extra={"gate_fired": None, "filing_period_available": False,
+            extra={"gate_fired": None, "issuer_accession_identity": False,
                    "issuers_used": 0, "issuers_full": len(d3_hyperscaler_fcf.CIKS)})
 
     # ---- D4 LPPLS (v3.3.2 single-endpoint dense scan; FLOOR on failure) ----
@@ -1559,18 +1635,56 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             else "suppressed (block degraded)"
 
     # ---- legs ----
-    trend_states: dict[str, dict[str, str]] = {}
+    trend_states: dict[str, dict[str, Any]] = {}
+    # `faber_10mo` is a LIVE PREVIEW: faber_state stands the in-progress month's
+    # latest close in for its month-end close, which is the right reading
+    # between month ends and the wrong thing to alert on. The alert rules
+    # confirm on a NEW MONTH-END PERIOD, so the authoritative state — computed
+    # from COMPLETED months only — is persisted beside it, with the month it
+    # belongs to. `faber_10mo` keeps its meaning and its consumers unchanged.
     for name, daily, closes in (("SPY", raw.spy_daily, raw.spy_daily_closes),
                                 ("QQQ", raw.qqq_daily, raw.qqq_daily_closes)):
-        states = {}
+        states: dict[str, Any] = {}
         if daily:
             try:
-                states["faber_10mo"] = legs.faber_state(legs.monthly_closes(daily))
+                monthly = legs.monthly_closes(daily)
+                states["faber_10mo"] = legs.faber_state(monthly)
+                states["faber_live_preview"] = states["faber_10mo"]
+                states["faber_distance_pct"] = legs.faber_distance_pct(monthly)
             except ValueError:
                 states["faber_10mo"] = "unknown"
+            # The clock is the EVALUATION date when the caller supplies one,
+            # and the asset's own newest bar otherwise.
+            #
+            # Never another ASSET's bar: the feeds are independent and can be
+            # asynchronous, so borrowing one asset's clock could declare the
+            # other's month complete while it is still running.
+            #
+            # And never only the bar, in production: with no evaluation date a
+            # month that has genuinely ended is not recognised until the first
+            # bar of the NEXT month arrives, so a month-end P1 waits on the
+            # next session. Falling back to the bar keeps fixtures and replay
+            # deterministic, and errs toward "still running", which delays an
+            # alert rather than firing one on an unfinished month.
+            me_state, me_period = legs.month_end_faber(
+                daily,
+                as_of_month=(as_of_date[:7] if as_of_date else daily[-1][0][:7]),
+                feed_current=_feed_is_current(daily, as_of_date),
+                closed_months=_closed_months(daily))
+            states["faber_month_end_state"] = me_state
+            states["faber_month_end_period"] = me_period
         if closes:
             try:
                 states["sma200"] = legs.sma200_state(closes)
+                states["sma200_state"] = states["sma200"]
+                # Dated by the SAME series the SMA read, and only when the SMA
+                # actually produced a state. `closes` is derived from `daily`,
+                # and the length check keeps that true rather than assumed: a
+                # date taken from a different series would be a trading date
+                # the SMA never saw, and `legs.sma200_flip` counts distinct
+                # trading dates.
+                if daily and len(daily) == len(closes):
+                    states["sma200_as_of"] = daily[-1][0][:10]
             except ValueError:
                 states["sma200"] = "unknown"
         trend_states[name] = states or {"faber_10mo": "unknown", "sma200": "unknown"}
@@ -1778,7 +1892,9 @@ def run_recompute() -> int | None:
     block empty). Never raises upstream failures."""
     raw = gather_inputs()
     try:
-        data = compute_snapshot(raw)
+        # The real evaluation date: without it a completed month is invisible
+        # until the next month's first bar lands.
+        data = compute_snapshot(raw, as_of_date=datetime.now(UTC).date().isoformat())
     except RuntimeError as exc:
         log.error("recompute_impossible", error=str(exc))
         return None
