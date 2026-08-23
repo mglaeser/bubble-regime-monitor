@@ -153,7 +153,12 @@ class TestAnAbsentKeyFailsClosedNotFiveHundred:
     """Guardrail 5: never surface an upstream/config fault as a 500. An ABSENT
     key is the same fault as an unrecognised value — the artifact is not the one
     this code was written against — but get_path raises, so both selectors had to
-    catch it. Verified: before the fix, compute_snapshot propagated KeyError."""
+    catch it. Verified: before the fix, compute_snapshot propagated KeyError.
+
+    NOT covered here: removing the whole `gsadf` SECTION. The loader rejects that
+    with "missing required sections" before any key lookup, which is its own
+    fail-closed contract and breaks every consumer, not just s4 — pre-existing
+    and deliberately not worked around."""
 
     @pytest.fixture
     def frozen_without(self, monkeypatch, tmp_path):
@@ -168,6 +173,54 @@ class TestAnAbsentKeyFailsClosedNotFiveHundred:
         yield _apply
         for fn in _CACHED:
             fn.cache_clear()
+
+    def test_the_healthy_artifact_still_reads(self):
+        """The guard that nearly broke everything: the loader returns a
+        MappingProxyType, so `isinstance(block, dict)` rejects the HEALTHY
+        artifact and floors s4 forever. Pin the happy path, not just the
+        malformed ones."""
+        from app.services.compute import frozen_gsadf
+
+        assert frozen_gsadf("statistic") == "bsadf_endpoint"
+        assert frozen_gsadf("contested_rule") == "asymmetric"
+        s4 = compute_snapshot(_raw_diverging()).indicators["s4"]
+        assert (s4.state, s4.sub_score) == ("COMPUTED", 0.05)
+
+    @pytest.mark.parametrize("shape,mutate", [
+        ("gsadf is a string", lambda d: d.__setitem__("gsadf", "nope")),
+        ("gsadf is a list", lambda d: d.__setitem__("gsadf", [])),
+        ("gsadf is null", lambda d: d.__setitem__("gsadf", None)),
+        ("statistic is a list", lambda d: d["gsadf"].__setitem__("statistic", ["x"])),
+    ])
+    def test_a_malformed_gsadf_section_floors(self, monkeypatch, tmp_path, shape, mutate):
+        """The loader validates that gsadf EXISTS, not that it is a mapping, so a
+        scalar or a list survives it and reaches the constant reads."""
+        data = json.loads(M.FROZEN_PATH.read_bytes())
+        mutate(data)
+        f = tmp_path / "frozen.json"
+        f.write_text(json.dumps(data))
+        monkeypatch.setattr(M, "FROZEN_PATH", f)
+        for fn in _CACHED:
+            fn.cache_clear()
+        try:
+            s4 = compute_snapshot(_raw_diverging(), gsadf_contested=False).indicators["s4"]
+            assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25), shape
+        finally:
+            for fn in _CACHED:
+                fn.cache_clear()
+
+    def test_an_unreadable_artifact_floors_rather_than_propagating(self, monkeypatch):
+        """The loader itself can raise (invalid JSON, a <PIN> in a scored path, a
+        missing required section). The helper must absorb that too — reached
+        through compute_snapshot it would be a 500."""
+        from app.services import compute as C
+
+        def boom():
+            raise ValueError("frozen_methodology: missing required sections ['gsadf']")
+
+        monkeypatch.setattr(C._M, "frozen_methodology", boom)
+        assert C.frozen_gsadf("statistic") is None
+        assert C.frozen_gsadf("contested_rule") is None
 
     @pytest.mark.parametrize("key", ["statistic", "contested_rule"])
     def test_an_absent_key_floors_instead_of_raising(self, frozen_without, key):

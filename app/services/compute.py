@@ -36,6 +36,7 @@ from __future__ import annotations
 import calendar
 import math
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
@@ -787,6 +788,40 @@ def gather_inputs() -> RawInputs:
 
 
 
+def frozen_gsadf(key: str) -> str | None:
+    """Read one gsadf constant from the frozen artifact WITHOUT ever raising.
+
+    Guardrail 5: a config fault must never surface as an HTTP 500. Three ways
+    this read can fail, all measured, none hypothetical:
+      * the key is absent            -> get_path raises KeyError
+      * the whole gsadf section is absent -> the loader raises ValueError
+        ("missing required sections"), before any key lookup
+      * gsadf is present but is NOT a mapping (a scalar or a list survives the
+        loader, which validates presence, not type) -> .get raises AttributeError
+
+    All three mean the same thing: the artifact is not the one this code was
+    written against. Callers treat None as "cannot identify the rule" and floor,
+    which is the same path as an unrecognised value."""
+    try:
+        block = _M.frozen_methodology().get("gsadf")
+    except Exception:
+        log.error("s4_frozen_gsadf_unreadable", key=key)
+        return None
+    # Mapping, not dict: the loader hands back MappingProxyType, so an isinstance
+    # check against dict rejects the HEALTHY artifact and would floor s4 forever.
+    if not isinstance(block, Mapping):
+        log.error("s4_frozen_gsadf_not_a_mapping", key=key, kind=type(block).__name__)
+        return None
+    value = block.get(key)
+    # These constants are string enums. Anything else -- a list, a number, a
+    # nested object -- is a malformed artifact, not a value to coerce, so it
+    # takes the same fail-closed path as an unrecognised name.
+    if value is not None and not isinstance(value, str):
+        log.error("s4_frozen_gsadf_not_a_string", key=key, kind=type(value).__name__)
+        return None
+    return value
+
+
 def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, float | None]:
     """The (stat, cv90, cv95) triple s4 scores, per frozen gsadf.statistic.
 
@@ -808,11 +843,7 @@ def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, flo
     # An ABSENT key is the same fault as an unrecognised value: the artifact is
     # not the one this code was written against. get_path raises KeyError, which
     # would surface as an HTTP 500 on a config fault (guardrail 5 forbids that).
-    try:
-        which = _M.get_path("gsadf", "statistic")
-    except Exception:
-        log.error("s4_missing_frozen_statistic")
-        return None, None, None
+    which = frozen_gsadf("statistic")
     if which == "bsadf_endpoint":
         return raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95
     if which == "gsadf_sup":
@@ -847,11 +878,7 @@ def scored_s4_contested_rule() -> bool | None:
     FAIL-CLOSED: an unrecognised value returns None, and the caller then treats
     s4 as not computable (FLOOR, quality 0.0) rather than silently applying a
     rule nobody chose."""
-    try:
-        rule = _M.get_path("gsadf", "contested_rule")
-    except Exception:
-        log.error("s4_missing_frozen_contested_rule")
-        return None
+    rule = frozen_gsadf("contested_rule")
     if rule == "asymmetric":
         return True
     if rule == "symmetric":
@@ -1019,9 +1046,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
         # the ENDPOINT triple, so this branch is reachable with a perfectly good
         # sup sitting in the same payload under extra.s4_statistic.gsadf_sup.
-        _which_stat = _M.frozen_methodology().get("gsadf", {}).get("statistic")
-        _floor_lab = {"bsadf_endpoint": "BSADF@endpoint",
-                      "gsadf_sup": "GSADF sup"}.get(_which_stat, str(_which_stat))
+        _which_stat = frozen_gsadf("statistic")
+        # None means the artifact could not identify the rule at all; say that
+        # rather than printing "None" at the reader.
+        _floor_lab = ({"bsadf_endpoint": "BSADF@endpoint",
+                       "gsadf_sup": "GSADF sup"}.get(_which_stat, _which_stat)
+                      if _which_stat is not None else "unidentified — artifact unreadable")
         s4_note = (f"s4 scored statistic ({_floor_lab}) not computable this run; "
                    "contested/stale floor applied")
         if raw.gsadf_note:
@@ -1054,8 +1084,8 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         }
         # Non-raising read: unreachable with an absent key today (the selector
         # floors first), but the guardrail is that a config fault never 500s.
-        _scored_family = _families.pop(
-            _M.frozen_methodology().get("gsadf", {}).get("statistic"), None)
+        _stat_key = frozen_gsadf("statistic")
+        _scored_family = _families.pop(_stat_key, None) if _stat_key is not None else None
         if _scored_family is not None and None not in _scored_family[1:]:
             _lab, _st, _cv = _scored_family
             s4_note += f"; scored {_lab} {_st:.4f} (cv90 {_cv:.4f})"
@@ -1076,7 +1106,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     if raw.gsadf_stat is not None or raw.bsadf_stat is not None:
         s4_extra = dict(s4_extra or {})
         s4_extra["s4_statistic"] = {
-            "scored": _M.frozen_methodology().get("gsadf", {}).get("statistic"),
+            "scored": frozen_gsadf("statistic"),
             "bsadf_endpoint": {"stat": raw.bsadf_stat, "cv90": raw.bsadf_cv90,
                                "cv95": raw.bsadf_cv95},
             "gsadf_sup": {"stat": raw.gsadf_stat, "cv90": raw.gsadf_cv90,
@@ -1092,8 +1122,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             # could not be extracted at all — a different fault from degenerate
             # data, and one that floors s4 and disables red flag #1.
             "cv_route": raw.bsadf_cv_route,
-            "contested_rule": (_M.frozen_methodology().get("gsadf", {})
-                               .get("contested_rule")),
+            "contested_rule": frozen_gsadf("contested_rule"),
         }
     if raw.gsadf_shadow_note:
         s4_extra = dict(s4_extra or {})
