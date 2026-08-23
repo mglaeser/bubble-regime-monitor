@@ -763,3 +763,38 @@ def test_a_stale_feed_that_finished_its_month_still_closes_it():
     _, partial = month_end_faber(stopped, as_of_month="2026-09",
                                  closed_months=_closed_months(stopped))
     assert partial != "2026-07", "a month abandoned on the 2nd is not closed"
+
+
+def test_the_current_month_is_not_promoted_on_its_own_final_session():
+    """The bar dated today may still be an intraday price.
+
+    A daily feed publishes a bar for the current session that is only final
+    once that session closes. Promoting a month while still inside it — even
+    on its last trading day, even with the calendar agreeing the month ends
+    today — puts an unfinished price into an authoritative month-end state.
+    """
+    from datetime import date, timedelta
+
+    from app.alerts.calendars import is_trading_day
+    from app.engine.legs import month_end_faber
+    from app.services.compute import _closed_months
+
+    def month_end(year: int, month: int) -> str:
+        nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        day = nxt - timedelta(days=1)
+        while not is_trading_day(day):
+            day -= timedelta(days=1)
+        return day.isoformat()
+
+    bars = [(month_end(2025, m), 100.0 + m) for m in range(1, 13)]
+    bars += [(month_end(2026, 1), 113.0), (month_end(2026, 2), 114.0)]
+    closed = _closed_months(bars)
+    assert "2026-02" in closed, "the calendar agrees February ended"
+
+    # evaluated ON February's last trading day: not yet promoted
+    _, same_month = month_end_faber(bars, as_of_month="2026-02", closed_months=closed)
+    assert same_month == "2026-01", "the month being lived in is never authoritative"
+
+    # evaluated once March has begun: promoted
+    _, rolled = month_end_faber(bars, as_of_month="2026-03", closed_months=closed)
+    assert rolled == "2026-02"

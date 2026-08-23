@@ -128,8 +128,19 @@ def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
         # contradict the exact test applied to every other month — promoting a
         # partial month the calendar rejects, or withholding a complete one it
         # accepts.
+        # STRICTLY earlier than the month being evaluated in. On the final
+        # trading day itself the bar for that date exists but may still be an
+        # intraday price rather than the close — the feed publishes a daily bar
+        # that is only final once the session is over. Promoting then puts an
+        # unfinished price into an authoritative month-end state on exactly one
+        # day a month, which is the intramonth defect this branch exists to
+        # remove, surviving in its last hiding place.
+        #
+        # The cost is at most a day or two of lag once the month rolls over.
+        # A late correct state is recoverable; a P1 fired on a mid-session
+        # price is not.
         completed = [(m, c) for m, c in dated
-                     if m in closed_months and m <= as_of_month]
+                     if m in closed_months and m < as_of_month]
     else:
         # Calendar-free fallback: a bar in the month immediately after proves
         # closure for all but the newest month, and the newest is taken only on
