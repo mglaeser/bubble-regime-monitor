@@ -27,6 +27,13 @@ MAX_STORED_MESSAGE = 500
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     # E.164-ish phone numbers (the SMS recipient).
     (re.compile(r"\+\d[\d\s\-()]{6,}\d"), "[phone]"),
+    # Email addresses. An iMessage handle is an Apple ID as often as a phone
+    # number, so a proxy error body naming the recipient it could not reach
+    # ("unknown recipient someone@icloud.com") would otherwise persist a
+    # contactable address into a field called `error_message_redacted`. The
+    # phone pattern above covers only the other half of the same identifier.
+    (re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),
+     "[email]"),
     # Bearer / Basic auth headers.
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}"), r"\1 [redacted]"),
     # api_key= / apikey= / apiKey= / token= / secret= …, header or query form.

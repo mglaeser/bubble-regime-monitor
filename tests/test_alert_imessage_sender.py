@@ -394,3 +394,24 @@ def test_rotating_the_transport_credential_keeps_retry_identity(monkeypatch):
                                           idempotency_key="v1|MARKET|live|d|r|1")
 
     assert keys[0] == keys[1], "a credential rotation re-identified the message"
+
+
+def test_a_proxy_error_naming_the_recipient_does_not_persist_it(monkeypatch):
+    """An iMessage handle is an Apple ID as often as a phone number.
+
+    The proxy's error body is persisted as the delivery's redacted detail, and
+    the redaction list only covered the phone-number half of that identifier —
+    so "unknown recipient someone@icloud.com" would have stored a contactable
+    address in a field called `error_message_redacted`.
+    """
+    _configured(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422, text='{"error":"unknown recipient someone@icloud.com"}')
+
+    result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    detail = result.error_message_redacted or ""
+    assert "someone@icloud.com" not in detail
+    assert "[email]" in detail
+    assert result.outcome == SenderOutcome.DEFINITE_PERMANENT_REJECTION
