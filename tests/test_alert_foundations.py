@@ -863,3 +863,20 @@ def test_live_mode_accepts_the_ruleset_once_it_is_promoted(isolated_db):
     with session_scope() as session:
         admitted = load_active_for_mode(session, mode="live")
         assert admitted.ruleset.rules_sha256 == artifacts.ruleset.rules_sha256
+
+
+def test_load_active_offers_no_mode_argument_it_would_ignore():
+    """A parameter that looks like a control and is not is worse than none.
+
+    An earlier version accepted `mode` and ignored it, so a caller writing
+    `load_active(session, mode="live")` read as guarded and received an
+    unpromoted candidate. The live check lives in `load_active_for_mode`, and
+    the only way to be sure it is not skipped is for the mode-blind loader to
+    refuse the argument outright.
+    """
+    import inspect
+
+    from app.alerts.artifacts import load_active, load_active_for_mode
+
+    assert "mode" not in inspect.signature(load_active).parameters
+    assert "mode" in inspect.signature(load_active_for_mode).parameters

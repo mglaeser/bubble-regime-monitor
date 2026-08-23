@@ -101,23 +101,19 @@ def validate_from_disk(
     return LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set, source="candidate")
 
 
-def load_active(session: Session, *, service_version: str | None = None,
-                mode: str | None = None) -> LoadedArtifacts:
+def load_active(session: Session, *, service_version: str | None = None) -> LoadedArtifacts:
     """The artifacts evaluation should actually use, with the LKG fallback.
 
     Order: the candidate on disk, then the last-known-good file, then whatever
     is already PROMOTED in the registry. A fallback is reported, never silent.
 
-    IN LIVE MODE the result must additionally BE the promoted artifact.
-    Promotion is the operator's deliberate act, and without this check a valid
-    but unpromoted candidate placed on disk is evaluated and dispatched exactly
-    like an approved one — the promotion step becomes advisory, which is the
-    same "reads as control and is not" shape the rest of this system keeps
-    removing. Health reported `live_matches_promoted` and nothing enforced it
-    (audit B-04).
-
-    Shadow and dryrun may run an unpromoted candidate: that is what they are
-    for. Only live is bound.
+    THIS FUNCTION IS MODE-BLIND ON PURPOSE, and takes no `mode` argument.
+    Live mode must additionally receive the PROMOTED artifact (audit B-04), and
+    that check lives in `load_active_for_mode`. An earlier version of this took
+    a `mode` keyword and ignored it, which is worse than not offering one: a
+    caller passing mode="live" would read as guarded and receive an unpromoted
+    candidate. A parameter that looks like a control and is not is the exact
+    shape this system keeps removing.
     """
     rules_path, lkg_path, phrase_path = _candidate_paths()
     try:
