@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from app.alerts.promotion import promotion_blockers
 
 ARTIFACT = Path("docs/alert-stage1-gate.json")
@@ -110,3 +112,74 @@ def test_stage_three_is_currently_blocked_by_the_non_p1_breach():
         "stage 3 now clears the gate. If the non-P1 breach was resolved, this "
         "test should be updated to assert that — deliberately, not silently.")
     assert any("cap" in b for b in blockers)
+
+
+# --- the second refutation -------------------------------------------------
+
+def test_evidence_without_a_provenance_section_does_not_bind_to_anything():
+    """The fail-open one level down.
+
+    Skipping the version binding when the artifact carries no `artifacts`
+    object would let an artifact that says nothing about which ruleset it
+    describes clear the gate whose whole purpose is to establish that.
+    """
+    artifact = {"runs": {"stage_3": {"evaluated_at_stage": 3, "passed": True,
+                                     "failures": []}}}
+    blockers = promotion_blockers(target_stage=3, artifact=artifact,
+                                  rule_version="v3.2.0")
+    assert any("no provenance section" in b for b in blockers)
+
+    # a non-object provenance section is the same hole wearing a different hat
+    artifact["artifacts"] = "omitted"
+    assert any("no provenance section" in b for b in
+               promotion_blockers(target_stage=3, artifact=artifact,
+                                  rule_version="v3.2.0"))
+
+
+def test_unreadable_evidence_is_a_blocker_not_an_absence_of_objections():
+    from app.alerts.promotion import load_evidence
+
+    assert load_evidence("/nonexistent/nowhere.json") is None
+    assert load_evidence(__file__) is None          # readable, not JSON
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_live_dispatch_refuses_to_send_at_an_unjustified_stage(monkeypatch):
+    """The runtime half. A gate only CI performs protects the repo, not the
+    operator — whose container was started from an image and never saw a PR.
+    """
+    from app.alerts import promotion
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    monkeypatch.setattr(
+        promotion, "live_admission_blockers",
+        lambda session, **kw: ["stage 3: non-P1 volume breached the 24h cap"])
+    import app.alerts.dispatcher as dispatcher_module
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: ["stage 3: caps breached"])
+
+    class _Explodes:
+        def send(self, *a, **k):
+            raise AssertionError("a refused dispatcher must not reach the wire")
+
+    report = dispatch_once(session_scope, phrase_set=None, mode="live",
+                           live_profile="default", sender=_Explodes())
+    assert report.sent == 0 and report.claimed == 0
+    assert any("withheld" in n for n in report.notes)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_shadow_mode_is_not_gated_on_delivery_evidence(monkeypatch):
+    """Shadow sends nothing, so there is nothing for the evidence to justify."""
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    called: list[int] = []
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: called.append(1) or ["blocked"])
+
+    dispatch_once(session_scope, phrase_set=None, mode="shadow",
+                  live_profile="default")
+    assert called == [], "shadow mode consulted a delivery gate"

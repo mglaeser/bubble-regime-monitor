@@ -55,6 +55,7 @@ from app.alerts.outbox import (
     revalidate_members,
 )
 from app.alerts.phrase_registry import ValidatedPhraseSet
+from app.alerts.promotion import live_admission_blockers
 from app.alerts.render_context import RenderContext, build_member_context
 from app.alerts.renderer import render_with_cascade
 from app.alerts.repository import load_input, utc_ms
@@ -197,6 +198,23 @@ def dispatch_once(
     sender = sender or default_sender(live=live)
     owner = _owner()
     report = DispatchReport()
+
+    # A live dispatcher must not deliver at a stage its own committed evidence
+    # does not support. The CI gate protects the repository; this protects the
+    # operator, whose container was started from an image and never consulted
+    # a pull request. Fail-closed: nothing is claimed, nothing is sent, and the
+    # reason is on the report rather than in a traceback.
+    if live:
+        with session_factory() as session:
+            blockers = live_admission_blockers(session)
+        if blockers:
+            report.notes.extend(blockers)
+            report.notes.append(
+                "live delivery withheld: the ruleset's active stage is not "
+                "backed by its gate evidence")
+            log.error("alert_live_admission_refused", blockers=blockers)
+            _heartbeat(report)
+            return report
 
     with session_factory() as session:
         report.recovered = recover_leases(session, now=now)

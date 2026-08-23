@@ -19,6 +19,8 @@ that recomputes its own evidence can be made to agree with itself.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 #: Stages at or below this need no replay evidence: no delivery rule is live,
@@ -50,19 +52,33 @@ def promotion_blockers(*, target_stage: int, artifact: dict[str, Any],
     # the exact digests by design (they are gated by a separate CI step), so
     # this binds on the declared versions — weaker than a hash, and the reason
     # the digest step is not optional.
-    declared = artifact.get("artifacts")
-    if isinstance(declared, dict):
-        if rule_version is not None and declared.get("rule_version") != rule_version:
+    #
+    # A MISSING provenance section does not excuse the check. Skipping the
+    # binding when the artifact carries no `artifacts` object would mean an
+    # artifact that says nothing about which ruleset it describes clears the
+    # very gate that exists to establish it — the same fail-open shape this
+    # module was written to remove, hidden one level down.
+    if rule_version is not None or phrase_set_version is not None:
+        declared = artifact.get("artifacts")
+        if not isinstance(declared, dict):
             blockers.append(
-                f"stage {target_stage}: the evidence was produced for rule version "
-                f"{declared.get('rule_version')!r}, but {rule_version!r} is committed "
-                "— it does not describe these rules")
-        if phrase_set_version is not None \
-                and declared.get("phrase_set_version") != phrase_set_version:
-            blockers.append(
-                f"stage {target_stage}: the evidence was produced for phrase set "
-                f"{declared.get('phrase_set_version')!r}, but {phrase_set_version!r} "
-                "is committed")
+                f"stage {target_stage}: the evidence carries no provenance "
+                "section, so there is nothing to show it describes this "
+                "ruleset rather than some other one")
+        else:
+            if rule_version is not None \
+                    and declared.get("rule_version") != rule_version:
+                blockers.append(
+                    f"stage {target_stage}: the evidence was produced for rule "
+                    f"version {declared.get('rule_version')!r}, but "
+                    f"{rule_version!r} is committed — it does not describe "
+                    "these rules")
+            if phrase_set_version is not None \
+                    and declared.get("phrase_set_version") != phrase_set_version:
+                blockers.append(
+                    f"stage {target_stage}: the evidence was produced for phrase "
+                    f"set {declared.get('phrase_set_version')!r}, but "
+                    f"{phrase_set_version!r} is committed")
 
     key = f"stage_{target_stage}"
     run = runs.get(key)
@@ -95,3 +111,64 @@ def promotion_blockers(*, target_stage: int, artifact: dict[str, Any],
             f"{len(failures)} failure(s) — the artifact contradicts itself")
 
     return blockers
+
+
+#: Where the committed evidence lives. It ships in the image (`COPY . .`), so
+#: a running container can consult the same file CI does.
+EVIDENCE_PATH = "docs/alert-stage1-gate.json"
+
+
+def _repo_root() -> Path:
+    """This file is app/alerts/promotion.py, so the root is three parents up."""
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def load_evidence(path: str | Path | None = None) -> dict[str, Any] | None:
+    """The committed gate artifact, or None if it cannot be read as one.
+
+    None means "no usable evidence", which every caller must treat as a
+    blocker. It deliberately does not raise: an unreadable artifact is a
+    condition to report through the same channel as a failing one, not a
+    traceback out of the dispatch loop.
+    """
+    candidate = Path(path) if path is not None else _repo_root() / EVIDENCE_PATH
+    try:
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def live_admission_blockers(session: Any, *, path: str | Path | None = None,
+                            ) -> list[str]:
+    """Whether the ACTIVE ruleset may deliver at the stage it claims.
+
+    This is the runtime half of the gate, and the reason the module is not just
+    a test helper: a check that only CI performs protects the repository, not
+    the operator. A container started from an image whose evidence does not
+    support its own `active_stage` must not send.
+
+    Fail-closed throughout — including on an unreadable artifact, and including
+    when the active ruleset cannot be loaded at all.
+    """
+    from app.alerts.artifacts import load_active
+
+    try:
+        ruleset = load_active(session).ruleset
+    except Exception as exc:                       # noqa: BLE001 - reported, not raised
+        return [f"the active ruleset could not be loaded, so its stage cannot "
+                f"be justified: {type(exc).__name__}"]
+
+    stage = ruleset.document.meta.active_stage
+    if stage < EVIDENCE_REQUIRED_FROM_STAGE:
+        return []
+
+    evidence = load_evidence(path)
+    if evidence is None:
+        return [f"stage {stage}: the gate evidence at {EVIDENCE_PATH} is missing "
+                "or unreadable, so nothing justifies delivering at this stage"]
+
+    return promotion_blockers(
+        target_stage=stage, artifact=evidence,
+        rule_version=ruleset.document.meta.rule_version,
+    )
