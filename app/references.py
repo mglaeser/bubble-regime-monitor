@@ -258,7 +258,7 @@ REGISTRY: dict[str, Methodology] = {
             "signal to the dot-com peak rather than to the present. THREE conditions bound "
             "that statement: the SHIPPED instrument is the QQQ proxy from 1999 (T~331), "
             "where the sup is 1.4936 and rejects nothing; and while GSADF_CONTESTED is set "
-            "the sub-score is capped at 0.25 for either statistic, so the divergence bites "
+            "the sub-score was capped at 0.25 for either statistic until v4.1, so the divergence bit "
             "on the published value and on red flag #1, and on the sub-score only if the "
             "contested cap were lifted; and — the binding one — gsadf.series_months_max = 360 "
             "caps every runtime fit, so T=487 is an OFFLINE measurement the service never "
@@ -986,6 +986,26 @@ CHANGELOG: list[dict[str, str]] = [
         "PENDING_HOST, never silently omitted. All candidate thresholds exercised are the "
         "operator's previously enumerated candidates; nothing is recommended or pinned.",
     },
+    {
+        "version": "v3.9.0",
+        "score": "SCORE-SHIFTING at v4.1 — live headline 53.30 -> 51.82 (delta -1.48); action band "
+        "UNCHANGED at 'trim'. The golden fixture stays 52.43 ONLY because it supplies no GSADF "
+        "input and floors under either rule — that is a property of the fixture, not evidence of "
+        "score-neutrality. THE FALL IS A POLICY CORRECTION, NOT MARKET IMPROVEMENT: the contested "
+        "cap sat ABOVE what the test returned, so it was a floor pushing the headline UP.",
+        "notes": "v4.0 (methodology unchanged): s4 scores the BSADF at the LAST observation against "
+        "the endpoint row of the simulated BSADF CVs, not the GSADF sup over all endpoints. The sup "
+        "answers a historical question and its verdict flips with the window length it is handed "
+        "(same series: rejects at T=487, does not at T=360, the length actually fitted under "
+        "gsadf.series_months_max=360), while the endpoint is invariant to that choice. v4.1: "
+        "gsadf.contested_rule='asymmetric' releases a contested NON-rejection to 0.05 while a "
+        "contested REJECTION stays capped at 0.25, because Chen et al. (2026) establish SIZE "
+        "distortion, which bounds false positives and says nothing against a non-rejection. "
+        "CAVEATS OF RECORD: on the SCORED (nominal) instrument the live endpoint is 1.1315 against "
+        "cv90 1.1393 — a non-rejection by 0.7 percent of the critical value, so one data revision "
+        "moves 1.48 points; and Chen et al. measure the SUPREMUM, so endpoint-level size distortion "
+        "is ASSUMED, not shown. Both are recorded in the frozen artifact.",
+    },
 ]
 
 LEG_REFERENCES: dict[str, list[str]] = {
@@ -1149,7 +1169,8 @@ KNOWN_ISSUES: list[dict[str, str]] = [
     {"id": "gsadf-contested", "severity": "warn", "category": "contested-method",
      "title": "GSADF is permanently CONTESTED",
      "detail": "Chen-Chen-Huang (2026) show GSADF-type tests spuriously reject the no-bubble "
-     "null 93-100% of the time under hump-shaped GPT fundamentals; S4 is capped at 0.25 and "
+     "null 93-100% of the time under hump-shaped GPT fundamentals; since v4.1 a contested "
+     "REJECTION is capped at 0.25 while a contested NON-rejection is released to 0.05, and S4 "
      "carries a low weight.", "ref": "indicator s4"},
     {"id": "index-proxy", "severity": "info", "category": "data-substitution",
      "title": "Stock indices served via ETF proxies",

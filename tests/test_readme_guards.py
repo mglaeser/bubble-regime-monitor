@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 README = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
 
 
@@ -61,3 +63,31 @@ def test_readme_documents_every_api_router():
     assert sections, "no /api/v1 routes found — app factory changed?"
     missing = sorted(s for s in sections if s not in README)
     assert not missing, f"README is missing API sections: {missing}"
+
+
+def test_readme_golden_table_matches_the_fixture():
+    """The golden table's Sub-score column must equal the fixture's sub-scores.
+
+    Only the string "52.43" was guarded, so the table could drift from the
+    arithmetic printed a few lines below it — and did: a methodology change
+    edited the S4 row to the LIVE value, which the golden fixture (no GSADF
+    input at all) cannot produce under any rule."""
+    import re
+    from pathlib import Path
+
+    from tests.conftest import GOLDEN_SUB_D, GOLDEN_SUB_S
+
+    expected = {**GOLDEN_SUB_S, **GOLDEN_SUB_D}
+    text = Path("README.md").read_text(encoding="utf-8")
+    body = text[text.index("## Golden fixture"):]
+    body = body[:body.index("\n## ", 1)] if "\n## " in body[1:] else body
+
+    found = {}
+    for line in body.splitlines():
+        m = re.match(r"\|\s*([SD]\d)\s*\|[^|]*\|[^|]*\|\s*\*\*([0-9.]+)\*\*\s*\|", line)
+        if m:
+            found[m.group(1).lower()] = float(m.group(2))
+
+    assert found, "no golden-table rows parsed — the table shape changed"
+    assert found == pytest.approx(expected), (
+        f"README golden table disagrees with the fixture: {found} != {expected}")

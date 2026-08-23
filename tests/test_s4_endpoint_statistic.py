@@ -180,6 +180,50 @@ class TestTheContestedRuleIsAFrozenConstant:
         s4 = compute_snapshot(_raw_diverging()).indicators["s4"]
         assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25)
 
+    def test_an_unknown_rule_floors_the_SCORE_not_just_the_label(self, frozen_gsadf):
+        """FLOOR must floor the number. The sub-score is computed and published
+        BEFORE the _s4_ok gate, and before v4.1 `not _s4_ok` was equivalent to
+        sub_score's own data-missing guard, so FLOOR implied 0.25 by
+        construction. Adding the rule check broke that: an unrecognised rule
+        reaches the gate with a fully scorable triple.
+
+        The non-contested REJECTION is the case that exposes it — measured, it
+        published 1.0 under a FLOOR label, with a headline bit-identical to the
+        recognised-rule run. Both conditions are required: contested=True or a
+        non-rejection both mask it."""
+        frozen_gsadf(contested_rule="lenient")
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5                       # a REJECTION
+        snap = compute_snapshot(raw, gsadf_contested=False)   # and NON-contested
+        s4 = snap.indicators["s4"]
+        assert (s4.state, s4.quality) == ("FLOOR", 0.0)
+        assert s4.sub_score == 0.25, "FLOOR published a scored value, i.e. failed OPEN"
+        # and the headline must differ from the recognised-rule run
+        frozen_gsadf(contested_rule="asymmetric")
+        assert compute_snapshot(raw, gsadf_contested=False).point_score != snap.point_score
+
+    def test_a_floor_feeds_the_floored_value_to_the_monte_carlo(self, frozen_gsadf):
+        """The MC band must be drawn around the value that was actually scored.
+        Re-flooring the point score but not mc_in.s4_sub would publish a band
+        centred somewhere the headline never was."""
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5
+        frozen_gsadf(contested_rule="lenient")
+        floored = compute_snapshot(raw, mc_samples=20_000, mc_seed=20260711,
+                                   gsadf_contested=False)
+        # A run that legitimately floors s4 to the same 0.25 must give the SAME band.
+        frozen_gsadf(contested_rule="asymmetric")
+        raw2 = _raw_diverging()
+        raw2.bsadf_stat = raw2.bsadf_cv90 = raw2.bsadf_cv95 = None   # data-missing FLOOR
+        reference = compute_snapshot(raw2, mc_samples=20_000, mc_seed=20260711,
+                                     gsadf_contested=False)
+        assert floored.indicators["s4"].sub_score == reference.indicators["s4"].sub_score == 0.25
+        assert floored.point_score == pytest.approx(reference.point_score, abs=1e-9)
+        # point_score is deterministic; the MC outputs are what mc_in.s4_sub feeds.
+        assert floored.median == pytest.approx(reference.median, abs=1e-9)
+        assert floored.iqr == pytest.approx(reference.iqr, abs=1e-9)
+        assert floored.band_5_95 == pytest.approx(reference.band_5_95, abs=1e-9)
+
     def test_the_rule_is_reported(self):
         extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
         assert extra["s4_statistic"]["contested_rule"] == "asymmetric"

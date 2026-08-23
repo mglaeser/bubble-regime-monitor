@@ -56,7 +56,12 @@ from app import methodology as M
 #               headline 53.30 -> 51.82 (s4 0.25 -> 0.05); action band unchanged
 #               at 'trim'. The golden stays 52.43 only because its fixture
 #               supplies no GSADF input and floors under either rule.
-EXPECTED_SHA256 = "4a7fd45cad1d61b6ee3983d35bbcb7da6f722fc2917653b075cbcf0079e3d275"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
+#   70dcbcc7... v4.1 record correction: the note quoted the CPI-deflated
+#               SHADOW endpoint (0.7562, 34% margin) as the live reading. The
+#               SCORED instrument is nominal: 1.1315 vs cv90 1.1393, a 0.7%
+#               margin. Also records that endpoint-level size distortion is
+#               ASSUMED, not shown — Chen et al. measure the sup.
+EXPECTED_SHA256 = "70dcbcc794e14e28428b83385ded2d3b740477f99c65e88d5ade5e6f48d38643"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
 
 
 def test_sha256_byte_guard():

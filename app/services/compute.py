@@ -992,6 +992,18 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # tells the coverage gate — and the reader — that NOTHING was measured
         # this run. A floored s4 must not report itself as a full-quality reading.
         s4_state, s4_quality = "FLOOR", 0.0
+        # FLOOR must actually floor the SCORE, not just the label. s4_sub was
+        # computed and published above; before v4.1 `not _s4_ok` was
+        # character-equivalent to sub_score's own data-missing guard, so FLOOR
+        # implied 0.25 by construction and nothing had to re-assert it. Adding
+        # `s4_asym is not None` broke that equivalence: an unrecognised rule
+        # reaches here with a finite, ordered, fully scorable triple, and the
+        # branch was publishing whatever sub_score returned for it -- measured,
+        # 1.0 on a non-contested rejection, headline bit-identical to the run
+        # under a recognised rule. That is failing OPEN while reporting FLOOR.
+        s4_sub = s4_gsadf.SUB_CONTESTED_OR_STALE
+        sub_s["s4"] = s4_sub
+        mc_in.s4_sub = s4_sub
         # Name the SCORED statistic. FLOOR used to imply the sup was missing, so
         # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
         # the ENDPOINT triple, so this branch is reachable with a perfectly good
