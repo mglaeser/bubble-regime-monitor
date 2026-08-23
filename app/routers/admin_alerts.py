@@ -204,7 +204,10 @@ def admin_promote(response: Response, _: None = Depends(require_admin_key)) -> A
     from app.alerts.artifacts import _failed_gate_for_stage
 
     target_stage = artifacts.ruleset.document.meta.active_stage
-    blocked = _failed_gate_for_stage(target_stage)
+    blocked = _failed_gate_for_stage(
+        target_stage,
+        rule_version=artifacts.ruleset.rule_version,
+        phrase_set_version=artifacts.phrase_set.version)
     if blocked:
         return problem(
             409, "Stage gate failed",

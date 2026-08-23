@@ -277,28 +277,51 @@ def register(session: Session, artifacts: LoadedArtifacts, *, now: datetime | No
     return row.rules_sha256
 
 
-def _failed_gate_for_stage(stage: int) -> list[str]:
+#: Resolved from the package, not the working directory. A cwd-relative path
+#: makes the answer depend on where the process happened to start — and with
+#: the gate failing closed, "not found" now BLOCKS, so a service started from
+#: anywhere but the repo root would refuse every promotion for the wrong
+#: reason.
+_GATE_ARTIFACT = Path(__file__).resolve().parents[2] / "docs" / "alert-stage1-gate.json"
+
+
+def _failed_gate_for_stage(stage: int, *, rule_version: str | None = None,
+                           phrase_set_version: str | None = None) -> list[str]:
     """Reasons the recorded gate run forbids promoting to this stage.
 
-    FAIL CLOSED. A missing artifact, an unreadable one, or a stage with no
-    recorded run all BLOCK — they are not clearances. Promotion is the moment
-    a stage's acceptance evidence is supposed to be checked, and "we could not
-    read the evidence" is the one answer that must never be treated as "the
-    evidence was fine". An earlier version of this returned no reasons in
-    those cases, which made the gate permissive exactly when it was blindest.
+    FAIL CLOSED. A missing artifact, an unreadable one, and a stage with no
+    recorded run all BLOCK. Promotion is the moment a stage's acceptance
+    evidence is checked, so "we could not read the evidence" must never resolve
+    to "the evidence was fine".
 
-    Reads the committed artifact rather than re-running the replay: it is
-    produced by `scripts/export_alert_stage1_gate` and CI asserts it is
-    current, so a stale one cannot slip past here.
+    BOUND TO THE ARTIFACTS IT CERTIFIES. A passing run proves something about
+    the ruleset it ran against, not about whatever is on disk today; without
+    this check a stale pass would clear a ruleset it never saw. The binding is
+    on `rule_version` and `phrase_set_version` because that is the identity
+    this artifact carries — digests are omitted from it by design (see
+    `_DIGEST_FIELDS` in scripts/export_alert_stage1_gate.py), and overriding
+    that decision here would be the wrong place to reopen it.
     """
-    artifact = Path("docs/alert-stage1-gate.json")
-    if not artifact.is_file():
-        return [f"no gate artifact at {artifact} — nothing certifies stage {stage}"]
+    if not _GATE_ARTIFACT.is_file():
+        return [f"no gate artifact at {_GATE_ARTIFACT.name} — "
+                f"nothing certifies stage {stage}"]
     try:
-        payload = json.loads(artifact.read_text(encoding="utf-8"))
+        payload = json.loads(_GATE_ARTIFACT.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return [f"gate artifact unreadable ({type(exc).__name__}) — "
                 f"stage {stage} is uncertified, not cleared"]
+
+    certified = payload.get("artifacts") or {}
+    if rule_version is not None and certified.get("rule_version") != rule_version:
+        return [f"gate artifact certifies rule_version "
+                f"{certified.get('rule_version')!r}, not {rule_version!r} — "
+                "the evidence describes a different ruleset"]
+    if (phrase_set_version is not None
+            and certified.get("phrase_set_version") != phrase_set_version):
+        return [f"gate artifact certifies phrase_set_version "
+                f"{certified.get('phrase_set_version')!r}, "
+                f"not {phrase_set_version!r}"]
+
     runs = payload.get("runs")
     if not isinstance(runs, dict):
         return ["gate artifact has no runs section — stage is uncertified"]

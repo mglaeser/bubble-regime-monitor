@@ -618,13 +618,44 @@ def test_a_stage_whose_gate_failed_cannot_be_promoted():
 
 def test_the_promotion_gate_fails_closed_on_unreadable_evidence(tmp_path, monkeypatch):
     """Missing or corrupt evidence blocks; it does not clear."""
+    from app.alerts import artifacts as art
+
+    monkeypatch.setattr(art, "_GATE_ARTIFACT", tmp_path / "absent.json")
+    assert art._failed_gate_for_stage(1), "a missing artifact must block"
+
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(art, "_GATE_ARTIFACT", corrupt)
+    blocked = art._failed_gate_for_stage(1)
+    assert blocked and "unreadable" in " ".join(blocked)
+
+
+def test_the_gate_artifact_is_found_regardless_of_working_directory(monkeypatch,
+                                                                    tmp_path):
+    """A cwd-relative lookup makes the answer depend on where the process
+    started — and with the gate failing closed, "not found" now BLOCKS, so a
+    service started anywhere but the repo root would refuse every promotion
+    for a reason that has nothing to do with the evidence.
+    """
+    from app.alerts.artifacts import _GATE_ARTIFACT, _failed_gate_for_stage
+
+    assert _GATE_ARTIFACT.is_absolute()
+    monkeypatch.chdir(tmp_path)
+    assert _failed_gate_for_stage(1) == [], "stage 1 passes from any directory"
+
+
+def test_the_evidence_must_certify_the_ruleset_being_promoted():
+    """A passing run proves something about the ruleset it RAN AGAINST.
+
+    Without this binding a stale pass would clear a ruleset it never saw —
+    the gate would be checking that some evidence exists, not that this
+    ruleset earned it.
+    """
     from app.alerts.artifacts import _failed_gate_for_stage
 
-    monkeypatch.chdir(tmp_path)                     # no artifact at all
-    assert _failed_gate_for_stage(1), "a missing artifact must block"
+    assert _failed_gate_for_stage(1, rule_version="v3.2.0",
+                                  phrase_set_version="v3.2") == []
 
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    (docs / "alert-stage1-gate.json").write_text("{not json", encoding="utf-8")
-    blocked = _failed_gate_for_stage(1)
-    assert blocked and "unreadable" in " ".join(blocked)
+    mismatched = _failed_gate_for_stage(1, rule_version="v9.9.9")
+    assert mismatched, "evidence for another ruleset must not clear this one"
+    assert "different ruleset" in " ".join(mismatched)
