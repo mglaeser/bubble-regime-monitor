@@ -22,8 +22,10 @@ cutover; this is the alert dispatcher's sender.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -204,5 +206,175 @@ def _resolve_recipient(recipient_ref: str, settings: object) -> str:
 
 
 def default_sender(*, live: bool) -> Sender:
-    """`NullSender` unless the caller explicitly asks for live transport."""
-    return SipgateSender() if live else NullSender()
+    """`NullSender` unless the caller explicitly asks for live transport.
+
+    The live transport follows the SAME precedence the daily digest uses:
+    iMessage when it is configured, sipgate otherwise. Alerts must not go out
+    over a channel the operator has stopped reading — this deployment runs
+    `SMS_ENABLED=false` with the proxy configured, so a sipgate-only alert path
+    would have delivered every alert to a disconnected number.
+
+    Exactly ONE transport, never a fallback between them. A proxy that is down
+    must not quietly become an SMS: the silence is the signal, and a silent
+    downgrade hides the outage precisely when the operator needs to see it.
+    That rule is stated in app/config.py for the digest and holds here for the
+    same reason.
+    """
+    if not live:
+        return NullSender()
+    settings = get_settings()
+    if getattr(settings, "imessage_configured", False):
+        return ImessageSender()
+    return SipgateSender()
+
+
+class ImessageSender:
+    """The alert transport for this deployment. Never raises — it classifies.
+
+    Production delivers over iMessage: `SMS_ENABLED=false`, the proxy
+    configured, and `daily_digest_transport == "imessage"`. The mandate names
+    sipgate because it predates that cutover, so a sipgate-only alert path
+    would have sent every alert down a channel the operator no longer uses.
+
+    REUSES the legacy module's hardening rather than restating it — the
+    destination check, the plain-HTTP proxy defence, the recipient rules, text
+    normalisation and the 202-exactly contract were all earned there and are
+    not worth re-deriving. What it does NOT reuse is that module's result type:
+    `ImessageResult` says ok/not-ok, and a durable outbox needs to know whether
+    a failure is safe to retry. That distinction is the whole point of
+    `SendResult`, and the audit calls the old contract out by name.
+    """
+
+    def __init__(self, client: httpx.Client | None = None) -> None:
+        self._client = client
+
+    def send(self, message: str, *, recipient_ref: str) -> SendResult:
+        from app.notify.imessage import (
+            SEND_PATH,
+            _accepted_operation_id,
+            _base_url,
+            _read_timeout_s,
+            check_destination,
+            is_valid_recipient,
+            normalise_text,
+        )
+
+        settings = get_settings()
+        base = _base_url()
+        if not (base and settings.imessage_api_key):
+            return SendResult(
+                outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+                error_code="NOT_CONFIGURED",
+                error_message_redacted="imessage proxy is not configured",
+            )
+        destination_problem = check_destination(base)
+        if destination_problem:
+            return SendResult(
+                outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+                error_code="BAD_DESTINATION",
+                error_message_redacted=sanitize(destination_problem),
+            )
+
+        recipient = _resolve_imessage_recipient(recipient_ref, settings)
+        if not recipient or not is_valid_recipient(recipient):
+            return SendResult(
+                outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+                error_code="NO_RECIPIENT",
+                error_message_redacted=f"recipient_ref {recipient_ref!r} does not resolve",
+            )
+
+        text = normalise_text(message)
+        if not text:
+            return SendResult(
+                outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+                error_code="EMPTY_BODY",
+                error_message_redacted="message body empty after normalisation",
+            )
+
+        body = {"recipient": recipient, "text": text, "service": "imessage"}
+        headers = {
+            "Authorization": f"Bearer {settings.imessage_api_key}",
+            "Content-Type": "application/json",
+            "Idempotency-Key": uuid.uuid4().hex,
+        }
+        # See app/notify/imessage.py: over plain HTTP an ambient proxy would
+        # route the bearer header and the body to a third host, which is the
+        # exposure permitting loopback http was meant to preclude.
+        plain_http = urlsplit(base).scheme == "http"
+        timeout = httpx.Timeout(_read_timeout_s(settings.imessage_timeout_s),
+                                connect=10.0)
+
+        request_started = False
+        try:
+            client = self._client or httpx.Client(timeout=timeout,
+                                                  trust_env=not plain_http)
+            close = self._client is None
+            try:
+                request_started = True
+                response = client.post(base + SEND_PATH, json=body, headers=headers)
+            finally:
+                if close:
+                    client.close()
+        except Exception as exc:
+            result = _classify_exception(exc, request_started=request_started)
+            log.warning("alert_imessage_failed", outcome=result.outcome,
+                        error_code=result.error_code)
+            return result
+
+        result = _classify_imessage_response(response, _accepted_operation_id)
+        log.info("alert_imessage_result", outcome=result.outcome,
+                 status=result.http_status, septets=len(text))
+        return result
+
+
+def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> SendResult:
+    """The proxy's contract is ONE success status, and a body to match.
+
+    202 with an accepted SendOperation is the only confirmed success. Any other
+    2xx means something that is not the proxy's send route answered — a wrong
+    base URL, a captive portal, a load balancer health page — and reporting
+    that as delivered is how an alert silently goes nowhere. It is a permanent
+    rejection, not a retry: the same request to the same wrong place will keep
+    succeeding at nothing.
+    """
+    status = response.status_code
+    if status == 202:
+        operation_id = accepted_id(response)
+        if operation_id is None:
+            # Tightening the status without checking the body is half a
+            # control: a gateway answering 202 to everything passes trivially.
+            return SendResult(
+                outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+                http_status=status, error_code="NOT_A_SEND_OPERATION",
+                error_message_redacted="202 carried no accepted SendOperation",
+                request_started=True,
+            )
+        return SendResult(outcome=SenderOutcome.CONFIRMED_SUCCESS, http_status=status,
+                          provider_correlation_id=operation_id, request_started=True)
+
+    if 200 <= status < 300:
+        return SendResult(
+            outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION, http_status=status,
+            error_code="UNEXPECTED_SUCCESS_STATUS",
+            error_message_redacted=(f"{status} where the contract specifies 202; "
+                                    "this reply did not come from the send route"),
+            request_started=True,
+        )
+
+    detail = sanitize(response.text[:500])
+    if status in _PERMANENT:
+        return SendResult(outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+                          http_status=status, error_code=f"HTTP_{status}",
+                          error_message_redacted=detail, request_started=True)
+    return SendResult(outcome=SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED,
+                      http_status=status, error_code=f"HTTP_{status}",
+                      error_message_redacted=detail, request_started=True)
+
+
+def _resolve_imessage_recipient(recipient_ref: str, settings: Any) -> str:
+    """The configured handle. `recipient_ref` is an opaque profile label.
+
+    Never the address itself: mandate 13 forbids recipient PII in persisted or
+    returned data, and the delivery row carries this ref.
+    """
+    return str(getattr(settings, "imessage_recipient", "") or "")
