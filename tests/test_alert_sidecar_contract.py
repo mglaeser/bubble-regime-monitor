@@ -577,18 +577,28 @@ def test_each_asset_is_classified_against_its_own_calendar(isolated_db):
     """
     from app.engine.legs import month_end_faber
 
-    # twelve completed months, then a partial month for the lagging asset
+    # a contiguous monthly series, then a partial month for the lagging asset
     completed = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
+    completed += [(f"2026-{m:02d}-28", 112.0 + m) for m in range(1, 8)]
     lagging = completed + [("2026-08-03", 50.0)]    # August only just started
 
-    # its own clock: the final month is in progress and is dropped
-    _, period = month_end_faber(lagging, as_of_month="2026-08")
-    assert period == "2025-12", "the in-progress month must be dropped"
+    # its own clock: August is in progress and is dropped, July is closed
+    # because an August bar exists immediately after it
+    _, period = month_end_faber(lagging, as_of_month="2026-08", feed_current=True)
+    assert period == "2026-07", "the in-progress month must be dropped"
 
-    # a LATER clock cannot promote it either — only a later BAR can, which is
-    # what stops a lagging feed being closed out by the leading asset's dates
-    _, borrowed = month_end_faber(lagging, as_of_month="2026-09")
-    assert borrowed == "2025-12", "another asset's calendar must not close this feed"
+    # a LATER clock cannot promote August: no September bar proves it closed,
+    # which is what stops a lagging feed being closed out by another asset's
+    # dates
+    # freshness is DERIVED, not asserted: on 2026-09-02 a feed whose newest bar
+    # is 2026-08-03 is a month behind, so it cannot close August either
+    from app.services.compute import _feed_is_current
+
+    assert _feed_is_current(lagging, "2026-09-02") is False
+    _, borrowed = month_end_faber(
+        lagging, as_of_month="2026-09",
+        feed_current=_feed_is_current(lagging, "2026-09-02"))
+    assert borrowed == "2026-07", "another asset's calendar must not close this feed"
 
 
 def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
@@ -672,3 +682,26 @@ def test_a_prior_outage_cannot_make_a_stopped_feed_look_current():
         "a stopped feed must not be excused by an earlier outage")
 
 
+
+
+def test_a_gap_month_does_not_prove_the_month_before_it_closed():
+    """"Some later bar exists" is not proof; the NEXT month's bar is.
+
+    A feed that stops mid-July and resumes in September leaves July as the
+    second-to-last month with a September bar behind it. Treating that as
+    closure promotes a MID-JULY close as July's month-end — the same partial
+    substitution this function exists to refuse, arriving through the gap
+    instead of through the clock.
+    """
+    from app.engine.legs import month_end_faber
+
+    base = [(f"2025-{m:02d}-28", 100.0 + m) for m in range(1, 13)]
+
+    outage = base + [("2026-07-15", 50.0), ("2026-09-02", 51.0)]
+    _, period = month_end_faber(outage, as_of_month="2026-09", feed_current=True)
+    assert period == "2025-11", (
+        "neither July nor December is proven closed by a bar two months later")
+
+    clean = base + [("2026-07-31", 50.0), ("2026-08-03", 51.0)]
+    _, rolled = month_end_faber(clean, as_of_month="2026-08", feed_current=True)
+    assert rolled == "2026-07", "an adjacent bar does prove closure"

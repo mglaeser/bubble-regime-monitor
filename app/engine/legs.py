@@ -60,6 +60,16 @@ def monthly_closes_dated(daily: list[tuple[str, float]]) -> list[tuple[str, floa
     return out
 
 
+def _is_next_month(month: str, following: str) -> bool:
+    """Is `following` the calendar month immediately after `month`?"""
+    try:
+        year, mon = (int(part) for part in month.split("-")[:2])
+        nyear, nmon = (int(part) for part in following.split("-")[:2])
+    except ValueError:
+        return False
+    return (nyear, nmon) == ((year + 1, 1) if mon == 12 else (year, mon + 1))
+
+
 def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
                     feed_current: bool = False
                     ) -> tuple[str | None, str | None]:
@@ -95,8 +105,22 @@ def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
     #
     # `as_of_month` can only ever WITHHOLD, never promote: a feed dated in the
     # future relative to the evaluation is not evidence a month has closed.
-    # Every month before the newest one is closed: a later bar proves it.
-    closed = list(dated[:-1])
+    # A month is closed when the month IMMEDIATELY AFTER it also has a bar.
+    #
+    # "Some later bar exists" is not enough. A feed that stops mid-July and
+    # resumes in September leaves July as the second-to-last month with a
+    # September bar behind it — and July's last close is then a MID-JULY close,
+    # promoted as if it were July's month-end. That is the same partial-month
+    # substitution this function exists to refuse, arriving through the gap
+    # instead of through the clock.
+    #
+    # A bar in the next calendar month proves the previous one ran to its end;
+    # a bar two months later proves nothing about the month in between.
+    closed = [
+        (month, close)
+        for i, (month, close) in enumerate(dated[:-1])
+        if _is_next_month(month, dated[i + 1][0])
+    ]
 
     # The newest month is closed too when the calendar says it has ended AND
     # the feed is still publishing normally — a current feed whose last bar is
