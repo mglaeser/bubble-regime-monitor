@@ -184,6 +184,8 @@ def build_red_flag_meta(
     breadth_pct: float | None,
     breadth_as_of: str | None,
     breadth_stale: bool | None,
+    near_ath_available: bool = False,
+    near_ath_state: bool | None = None,
 ) -> dict[str, Any]:
     """Build the typed red-flag contract for one snapshot.
 
@@ -265,18 +267,29 @@ def build_red_flag_meta(
         data_state=_data_state(available=rf3_available, stale=hy_oas_stale),
     )
 
-    # rf4 — breadth < 50% while the index sits within 2% of its ATH. The
-    # near-ATH leg is a condition, not a separate datum: `active` already
-    # carries it, and the distance below is the breadth leg alone.
+    # rf4 — breadth < 50% while the index sits within 2% of its ATH.
+    #
+    # TWO LEGS, and fireability needs BOTH. `index_within_2pct_of_ath` is a
+    # plain bool that DEFAULTS TO FALSE, so when the SPY series is missing the
+    # conjunction evaluates false and rf4 reports a confident "not firing"
+    # built on no evidence. Calling the near-ATH leg "a condition, not a
+    # separate datum" — as this comment used to — is what hid that: the leg has
+    # its own availability, and a flag whose second leg was never observed is
+    # UNKNOWN, not inactive.
+    #
+    # The consequence is not local. `fireable` feeds
+    # `override_fireable_universe_count`, so overstating it understates how
+    # close the non-compensatory override is to firing.
+    rf4_available = breadth_pct is not None and near_ath_available
     facts["rf4"] = RedFlagFact(
         flag_id="rf4",
         source_key=FLAG_IDS["rf4"],
         active=values[FLAG_IDS["rf4"]],
-        fireable=breadth_pct is not None,
+        fireable=rf4_available,
         state=_flag_state(
             active=values[FLAG_IDS["rf4"]],
-            fireable=breadth_pct is not None,
-            available=breadth_pct is not None,
+            fireable=rf4_available,
+            available=rf4_available,
         ),
         distance_to_threshold=(
             _round_or_none(breadth_pct - _BREADTH_LT_PCT) if breadth_pct is not None else None
@@ -286,7 +299,7 @@ def build_red_flag_meta(
         period_end=breadth_as_of,
         published_at=None,
         observed_at=observed_at,
-        data_state=_data_state(available=breadth_pct is not None, stale=breadth_stale),
+        data_state=_data_state(available=rf4_available, stale=breadth_stale),
     )
 
     return {

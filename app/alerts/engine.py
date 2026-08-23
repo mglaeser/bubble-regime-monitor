@@ -300,9 +300,28 @@ def run_evaluation(
                                  error_message="another worker holds a live lease")
     if missing_origins:
         # An open episode whose originating ruleset is not loadable cannot be
-        # continued. Refuse loudly rather than orphaning it.
+        # continued — its rules are what decide whether it resolves, expires or
+        # keeps firing. Evaluating anyway commits the CURRENT ruleset's plans
+        # and reports a healthy COMMITTED batch, while the orphaned episode
+        # stays open forever and the partial unique index it holds blocks every
+        # future episode for that instance. A green evaluation that silently
+        # abandoned an open episode is worse than no evaluation.
+        #
+        # So this fails the batch. Nothing is applied, the mechanism is visibly
+        # unavailable rather than quietly stale, and the operator gets an error
+        # naming the hashes to restore. Audit finding B-12; logging alone was
+        # the defect, not the reporting of it.
         log.error("alert_origin_ruleset_unavailable", evaluation_id=evaluation_id,
                   missing=missing_origins)
+        _finish(session_factory, evaluation_id, EvaluationRunStatus.FAILED, now, started,
+                error=None, error_code="ORIGIN_RULESET_UNAVAILABLE",
+                error_message=f"origin rulesets not loadable: {sorted(missing_origins)}")
+        return EvaluationOutcome(
+            evaluation_id=evaluation_id,
+            status=EvaluationRunStatus.FAILED,
+            input_identity=alert_input.input_identity,
+            error_code="ORIGIN_RULESET_UNAVAILABLE",
+            error_message=f"origin rulesets not loadable: {sorted(missing_origins)}")
 
     # ---- P1: pure evaluation, no write transaction -----------------------
     deadline = Deadline(budget_ms)
@@ -432,13 +451,16 @@ def _input_moment(alert_input: AlertInput, fallback: datetime) -> datetime:
 
 
 def _finish(session_factory: Any, evaluation_id: str, status: str, now: datetime,
-            started: float, *, error: Exception) -> None:
+            started: float, *, error: Exception | None,
+            error_code: str | None = None,
+            error_message: str | None = None) -> None:
     """Record a terminal non-committed status in its OWN transaction.
 
     Separate on purpose: the failure that got us here already rolled back the
     apply, so recording it must not ride on that transaction.
     """
-    code = getattr(error, "code", type(error).__name__)
+    code = error_code or (getattr(error, "code", type(error).__name__)
+                          if error is not None else "UNKNOWN")
     with session_factory() as session:
         row = session.get(AlertEvaluation, evaluation_id)
         if row is not None:
@@ -448,6 +470,7 @@ def _finish(session_factory: Any, evaluation_id: str, status: str, now: datetime
             row.duration_ms = int((time.monotonic() - started) * 1000)
             row.lease_until = None
             row.error_code = str(code)[:64]
-            row.error_message_redacted = sanitize(error)
+            row.error_message_redacted = (error_message if error is None
+                                          else sanitize(error))
     log.warning("alert_evaluation_not_committed", evaluation_id=evaluation_id,
                 status=status, error_code=str(code))
