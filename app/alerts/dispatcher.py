@@ -380,7 +380,15 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
 
         # -- 4: render (reuse on retry) ------------------------------------
         existing = _existing_render(session, delivery_id)
-        if existing is not None:
+        # Reuse exists so a retry does not change the text of a message that
+        # may already have arrived. That reasoning only holds once something
+        # has been transmitted. A DIGEST that has never been sent must be
+        # re-rendered, because its count is computed from suppression state
+        # that can move between passes: an episode silenced after the first
+        # render would otherwise be disclosed by a stale number.
+        if existing is not None and not (
+                delivery.delivery_kind == DeliveryKind.DIGEST
+                and delivery.attempts == 0):
             body = existing.final_message
         else:
             # A digest has no single subject to render facts from, so it is

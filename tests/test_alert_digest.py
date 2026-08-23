@@ -8,7 +8,7 @@ daily digest and puts nothing in its place.
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -172,19 +172,54 @@ def test_an_item_from_another_window_is_not_swept_in():
     assert plan.quiet is True, "last week's item belongs to last week's digest"
 
 
-def test_the_job_digests_the_window_that_closed():
+def test_the_job_digests_the_window_that_closed(monkeypatch):
     """Running Monday for the week that ended Sunday is the point.
 
     Digesting the CURRENT window would summarise a few hours and then never
     mention the rest of the week.
     """
-    import inspect
-
+    from app.alerts.calendars import digest_window_key
     from app.jobs import alert_digest
 
-    source = inspect.getsource(alert_digest.run_once)
-    assert "timedelta(days=1)" in source
-    assert "window that just CLOSED" in source or "just CLOSED" in source
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    result = alert_digest.run_once(now=NOW)
+    assert result["window_key"] == digest_window_key(NOW - timedelta(days=1))
+    assert result["window_key"] != digest_window_key(NOW), (
+        "the job digested the window it is standing in")
+
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, result["delivery_id"])
+        assert delivery.delivery_kind == DeliveryKind.DIGEST
+
+
+def test_a_missed_monday_does_not_lose_the_week(monkeypatch):
+    """The scheduler's misfire grace is finite; a week is not recoverable.
+
+    A host down across Monday morning drops the trigger, and for the one
+    message that always goes out, "the week vanished with no trace" is the
+    failure this feature exists to remove.
+    """
+    from app.alerts.calendars import digest_window_key
+    from app.jobs import alert_digest
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    # three Mondays missed; the job runs once, late
+    result = alert_digest.run_once(now=NOW)
+    assert result["windows_planned"] >= 2, (
+        "only the current window was planned, so the missed ones are gone")
+
+    missed = digest_window_key(NOW - timedelta(days=8))
+    assert missed in result["recovered_windows"]
+
+    # and running again changes nothing: the window key is the identity
+    again = alert_digest.run_once(now=NOW)
+    assert again["windows_planned"] == 0
 
 
 # --- the message itself ----------------------------------------------------
@@ -367,3 +402,49 @@ def test_a_silenced_episode_is_not_disclosed_by_the_count():
     body = sender.sent[0][1]
     assert "2 Ereignisse" in body, (
         f"the silenced episode was disclosed, or the resolved one dropped: {body!r}")
+
+
+def test_a_silence_after_the_first_render_is_not_disclosed_by_a_stale_body():
+    """Render reuse exists so a retry does not change a message that may have
+    arrived. That reasoning only holds once something has been transmitted.
+
+    A digest that was rendered and then held — budget, quiet hours, a crash —
+    has sent nothing, so its cached count is just a stale number. Reusing it
+    after an episode is silenced discloses exactly what the silence was for.
+    """
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.models import AlertRender
+    from app.alerts.sender import NullSender
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        for rule in ("regime.band_to_derisk", "regime.band_hold_to_trim"):
+            _pending_item(session, rules_sha=rules_sha, rule_id=rule)
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha, window_key=WINDOW,
+                           now=NOW)
+        delivery_id = plan.delivery_id
+
+        # a render exists from an earlier pass that never reached the wire
+        session.add(AlertRender(
+            render_id=new_ulid(utc_ms(NOW)), delivery_id=delivery_id,
+            render_source="TEMPLATE_FULL", fallback_reason=None,
+            planning_phrase_set_version="v3.2", planning_phrase_set_sha256="p" * 64,
+            render_context_hash="c" * 64, fact_catalog_hash="f" * 64,
+            selected_fact_ids=[], selected_phrase_codes=[], validation_results={},
+            final_message="Wochenrueckblick: 2 Ereignisse. Naechster Rueckblick Montag.",
+            gsm7_septets=60, created_at=NOW))
+        session.flush()
+        assert session.get(AlertDelivery, delivery_id).attempts == 0
+
+        # then one of them is silenced
+        episode = session.execute(select(AlertEpisode)).scalars().first()
+        episode.suppression_reasons = ["SILENCED"]
+
+    sender = NullSender()
+    dispatch_once(session_scope, phrase_set=_phrase_set(), mode="shadow",
+                  live_profile="default", sender=sender, now=NOW)
+
+    body = sender.sent[0][1]
+    assert "1 Ereignisse" in body, (
+        f"the stale render disclosed the silenced episode: {body!r}")

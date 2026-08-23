@@ -36,21 +36,42 @@ def run_once(*, now: datetime | None = None,
     # The window that just CLOSED, not the one we are in. Running on Monday for
     # the week that ended on Sunday is the whole point; digesting the current
     # window would summarise a few hours and then never mention the rest.
-    target = window_key or digest_window_key(now - timedelta(days=1))
+    # CATCH UP, do not just do today. The scheduler's misfire grace is finite,
+    # so a host down across Monday morning drops the trigger entirely — and the
+    # week it would have summarised is gone with no trace, which for the one
+    # message that always goes out is the failure mode this whole feature
+    # exists to remove.
+    #
+    # Planning is idempotent through the window key, so re-offering windows
+    # that already have a delivery costs one query each and changes nothing.
+    if window_key is not None:
+        targets = [window_key]
+    else:
+        targets = [digest_window_key(now - timedelta(days=days))
+                   for days in (1, 8, 15, 22)]
+        targets = list(dict.fromkeys(targets))
 
+    plans = []
     with session_scope() as session:
         artifacts = load_active(session)
         register(session, artifacts)
-        plan = plan_digest(
-            session, mode=settings.alerts_mode,
-            live_profile=settings.alerts_live_profile,
-            planning_rules_sha256=artifacts.ruleset.rules_sha256,
-            phrase_set_version=artifacts.phrase_set.version,
-            phrase_set_sha256=artifacts.phrase_set.sha256,
-            window_key=target,
-            recipient_ref=settings.alerts_live_profile, now=now)
+        for target in targets:
+            plans.append(plan_digest(
+                session, mode=settings.alerts_mode,
+                live_profile=settings.alerts_live_profile,
+                planning_rules_sha256=artifacts.ruleset.rules_sha256,
+                phrase_set_version=artifacts.phrase_set.version,
+                phrase_set_sha256=artifacts.phrase_set.sha256,
+                window_key=target,
+                recipient_ref=settings.alerts_live_profile, now=now))
 
-    detail = plan.as_dict()
+    planned = [p for p in plans if p.skipped_reason is None]
+    detail = {**plans[0].as_dict(), "windows_offered": len(targets),
+              "windows_planned": len(planned),
+              "recovered_windows": [p.window_key for p in planned[1:]]}
+    if len(planned) > 1:
+        log.warning("alert_digest_recovered_missed_windows",
+                    windows=[p.window_key for p in planned[1:]])
     heartbeat(COMPONENT, "ok", detail)
     return {"status": "ok", **detail}
 
