@@ -1354,9 +1354,21 @@ rules:
     # test_a_same_period_re_transition_is_not_suppressed. It WOULD matter to any
     # future rule on this source with count >= 2, which must not be added
     # without a per-issuer key.
-    enabled: true
+    enabled: false
     policy_status: APPROVED
     runtime_readiness: READY
+    disabled_reason: "Ready and correct, and held back for ONE reason: at
+      confirmation count 1 no candidate latch enforces `basis: new_filing`
+      (mandate 8.1 scopes the latch to count > 1), so a gate that flips false
+      -> true -> false -> true inside a single filing period emits a second
+      time once cooldown_seconds lapses — 30 days against a roughly 90-day
+      filing cadence. The gate is derived from filed data and cannot
+      legitimately change inside one period, so such a flip is an issuer fetch
+      failing and recovering, and a second alert about one filing is wrong.
+      This is NOT the earlier claim that the evidence key is unusable: `as_of`
+      IS the filed reporting-period end and four recomputes of one filing share
+      one economic_observation_key, verified by test. Enable when either the
+      basis is enforced at count 1 or the confirmation is raised to 2."
     enabled_in_stages: [3, 4, 5, 6, 7]
     bucket: dynamics
     priority: 2
