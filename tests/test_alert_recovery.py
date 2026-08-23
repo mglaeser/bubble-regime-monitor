@@ -490,3 +490,35 @@ def test_clean_retries_still_report_ok(isolated_db, monkeypatch):
     result = _run_with_retries(monkeypatch, outcomes={"A": None, "B": None})
     assert result["status"] == "ok"
     assert result["retries_failed"] == 0
+
+
+def test_a_watchdog_that_cannot_evaluate_does_not_report_healthy():
+    """The worst component to hide this on.
+
+    The watchdog exists to notice that recomputes have stopped. An evaluation
+    that throws means it noticed and could not tell anyone — and a green
+    heartbeat then states the opposite of what happened.
+    """
+    from app.alerts.watchdog import heartbeat_status
+
+    # the case that was reported "ok": captured an outage, could not alert on it
+    assert heartbeat_status(False, "FAILED") == "critical"
+    assert heartbeat_status(True, "FAILED") == "critical"
+
+    # a firing verdict is critical whether or not evaluation succeeded
+    assert heartbeat_status(True, "COMMITTED") == "critical"
+
+    # and the quiet path still reports ok, or the signal stops being read
+    assert heartbeat_status(False, "COMMITTED") == "ok"
+    assert heartbeat_status(False, None) == "ok"
+
+
+def test_the_watchdog_wires_its_status_helper_into_the_heartbeat():
+    """Guards the extraction: the helper must be what actually decides."""
+    import inspect
+
+    from app.alerts import watchdog
+
+    source = inspect.getsource(watchdog.run_once)
+    assert "heartbeat_status(" in source
+    assert '"critical" if verdict.firing else "ok"' not in source

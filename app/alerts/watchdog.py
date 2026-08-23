@@ -84,6 +84,28 @@ def evaluate_outage(*, last_snapshot_at: datetime | None, now: datetime) -> Watc
                            f"{len(missed)} consecutive slots missed past the grace window")
 
 
+def heartbeat_status(firing: bool, evaluation_status: str | None) -> str:
+    """What this pass should report about itself.
+
+    Its own function because the interesting case is the one that is easy to
+    get wrong and hard to reach from a test: the watchdog captured an outage,
+    failed to evaluate it, and swallowed the exception so the timer survives.
+    Catching is right; reporting "ok" afterwards is not.
+
+    On THIS component that is the worst place to hide it. The watchdog exists
+    to notice that recomputes have stopped, so a failed evaluation means it
+    noticed and could not tell anyone — and a green heartbeat states the
+    opposite of what happened.
+
+    Critical rather than degraded even when the verdict is not firing: the path
+    from observation to alert is broken either way, and this is the component
+    with nobody behind it to catch that.
+    """
+    if firing or evaluation_status == "FAILED":
+        return "critical"
+    return "ok"
+
+
 def run_once(*, now: datetime | None = None) -> dict[str, object]:
     """Check for an outage and, when firing, capture a watchdog input.
 
@@ -161,9 +183,11 @@ def run_once(*, now: datetime | None = None) -> dict[str, object]:
                           input_identity=captured, error=sanitize(exc))
                 evaluated = "FAILED"
 
-    heartbeat(COMPONENT, "critical" if verdict.firing else "ok", verdict.as_dict())
+    # The evaluation's outcome has to reach the heartbeat — see
+    # `heartbeat_status`.
     result = {**verdict.as_dict(), "input_identity": captured,
               "evaluation_status": evaluated}
+    heartbeat(COMPONENT, heartbeat_status(verdict.firing, evaluated), result)
     log.info("alert_watchdog", **result)
     return result
 
