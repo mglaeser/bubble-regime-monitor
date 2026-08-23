@@ -211,21 +211,6 @@ def test_a_retry_of_one_message_carries_ONE_idempotency_key(monkeypatch):
     assert keys[2] != keys[0], "two distinct messages collapsed onto one key"
 
 
-def test_the_dedupe_key_is_not_handed_to_the_proxy_verbatim(monkeypatch):
-    """It carries rule ids. Those are ours, not the proxy's business."""
-    _configured(monkeypatch)
-    keys: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        keys.append(request.headers.get("Idempotency-Key"))
-        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
-
-    ImessageSender(_client(handler)).send(
-        "body", recipient_ref="default",
-        idempotency_key="v1|MARKET|live|default|regime.band_to_derisk|1")
-    assert "regime.band_to_derisk" not in keys[0]
-    assert len(keys[0]) == 64
-
 
 def test_an_unresolvable_recipient_does_not_echo_the_caller_s_string(monkeypatch):
     """The ref is meant to be opaque, but that is a convention, not a promise.
@@ -323,77 +308,6 @@ def test_the_switch_alone_does_not_select_imessage(monkeypatch):
     assert not isinstance(default_sender(live=True), _Im)
 
 
-def test_the_idempotency_key_does_not_leak_which_rule_fired(monkeypatch):
-    """A bare sha256 of the dedupe key is reversible by guessing.
-
-    The key is low-entropy by construction: a mode, a profile, a rule id and a
-    small integer, all from sets an observer can enumerate. A plain digest
-    would let anyone who sees the header recover which rule fired and how many
-    times. Keying it with the API secret keeps it stable for our retries and
-    opaque to everyone else.
-    """
-    import hashlib
-
-    _configured(monkeypatch)
-    keys: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        keys.append(request.headers.get("Idempotency-Key"))
-        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
-
-    dedupe = "v1|MARKET|live|default|regime.band_to_derisk|1"
-    ImessageSender(_client(handler)).send("b", recipient_ref="default",
-                                          idempotency_key=dedupe)
-
-    guessed = hashlib.sha256(dedupe.encode()).hexdigest()
-    assert keys[0] != guessed, (
-        "the key is a plain digest of a guessable string, so an observer who "
-        "enumerates the candidates recovers the rule")
-
-
-def test_a_different_secret_yields_a_different_key(monkeypatch):
-    """Confirms the secret is actually keying the hash rather than decorating it."""
-    _configured(monkeypatch)
-    keys: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        keys.append(request.headers.get("Idempotency-Key"))
-        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
-
-    ImessageSender(_client(handler)).send("b", recipient_ref="default",
-                                          idempotency_key="same")
-    monkeypatch.setenv("IMESSAGE_API_KEY", "imp_adifferentkey")  # pragma: allowlist secret
-    _clear()
-    ImessageSender(_client(handler)).send("b", recipient_ref="default",
-                                          idempotency_key="same")
-    assert keys[0] != keys[1]
-
-
-def test_rotating_the_transport_credential_keeps_retry_identity(monkeypatch):
-    """A rotation must not turn an in-flight retry into a new message.
-
-    Keying the hash with the API key — the obvious choice — means every
-    credential rotation re-identifies every message in the outbox, so a retry
-    that crossed one would deliver the alert twice. That is the duplicate this
-    key exists to prevent, arriving through the back door.
-    """
-    _configured(monkeypatch)
-    monkeypatch.setenv("ALERTS_IDEMPOTENCY_SECRET", "stable_across_rotations")  # pragma: allowlist secret
-    _clear()
-    keys: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        keys.append(request.headers.get("Idempotency-Key"))
-        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
-
-    ImessageSender(_client(handler)).send("b", recipient_ref="default",
-                                          idempotency_key="v1|MARKET|live|d|r|1")
-    monkeypatch.setenv("IMESSAGE_API_KEY", "imp_rotatedkey")  # pragma: allowlist secret
-    _clear()
-    ImessageSender(_client(handler)).send("b", recipient_ref="default",
-                                          idempotency_key="v1|MARKET|live|d|r|1")
-
-    assert keys[0] == keys[1], "a credential rotation re-identified the message"
 
 
 def test_a_proxy_error_naming_the_recipient_does_not_persist_it(monkeypatch):
@@ -415,3 +329,47 @@ def test_a_proxy_error_naming_the_recipient_does_not_persist_it(monkeypatch):
     assert "someone@icloud.com" not in detail
     assert "[email]" in detail
     assert result.outcome == SenderOutcome.DEFINITE_PERMANENT_REJECTION
+
+def test_the_key_the_proxy_sees_names_nothing(monkeypatch):
+    """The identity is the delivery id, so there is nothing to conceal.
+
+    Hashing the outbox dedupe key — which spells out mode, profile and rule id
+    — needed an HMAC, the HMAC needed a secret, and the secret had to survive
+    credential rotation or a retry crossing one would deliver twice. A ULID
+    discloses none of it and needs no secret to protect.
+    """
+    _configured(monkeypatch)
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
+
+    sender = ImessageSender(_client(handler))
+    sender.send("b", recipient_ref="default", idempotency_key="01M0DELIVERY0000000000000A")
+    sender.send("b", recipient_ref="default", idempotency_key="01M0DELIVERY0000000000000A")
+    sender.send("b", recipient_ref="default", idempotency_key="01M0DELIVERY0000000000000B")
+
+    assert keys[0] == keys[1], "a retry asked the proxy to treat it as new"
+    assert keys[2] != keys[0], "two distinct deliveries collapsed onto one key"
+    for key in keys:
+        assert "regime." not in key and "live" not in key
+
+
+def test_rotating_the_credential_cannot_change_retry_identity(monkeypatch):
+    """No secret is involved, so a rotation has nothing to invalidate."""
+    _configured(monkeypatch)
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
+
+    ImessageSender(_client(handler)).send("b", recipient_ref="default",
+                                          idempotency_key="01M0DELIVERY0000000000000A")
+    monkeypatch.setenv("IMESSAGE_API_KEY", "imp_rotatedkey")  # pragma: allowlist secret
+    _clear()
+    ImessageSender(_client(handler)).send("b", recipient_ref="default",
+                                          idempotency_key="01M0DELIVERY0000000000000A")
+
+    assert keys[0] == keys[1]

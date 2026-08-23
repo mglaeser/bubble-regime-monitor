@@ -95,13 +95,6 @@ class Settings(BaseSettings):
     imessage_api_base_url: str = ""  # origin only, e.g. https://messages.example.com
     imessage_api_key: str = ""       # scoped `messages:send` key, `imp_` prefix
 
-    # Keys the outbound Idempotency-Key hash. Deliberately NOT the transport
-    # credential: rotating the credential would change the identity of every
-    # in-flight message, so a retry that crossed a rotation would look new to
-    # the proxy and deliver the alert twice — the exact failure the
-    # idempotency key exists to prevent. Set it once and leave it alone; it
-    # authenticates nothing and grants no access.
-    alerts_idempotency_secret: str = ""
     imessage_recipient: str = ""     # allowlisted handle: +E.164 or an Apple-ID email
     imessage_timeout_s: int = 30     # read cap; the proxy's own deadline is longer
 

@@ -22,8 +22,6 @@ cutover; this is the alert dispatcher's sender.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -361,21 +359,17 @@ class ImessageSender:
         # With no key supplied, fall back to per-call randomness: an unkeyed
         # send is not made worse by being unkeyed, and silently reusing some
         # other request's key would be.
-        # HMAC rather than a bare sha256. The dedupe key is low-entropy by
-        # construction — a mode, a profile, a rule id and a small integer, all
-        # drawn from sets an observer can enumerate — so a plain digest is
-        # reversible by guessing, and the header would tell anyone who sees it
-        # which rule fired and how many times.
+        # Passed through unchanged. The caller supplies the delivery id — a
+        # ULID, already opaque and already stable across the retries of one
+        # message — so there is nothing here to hash and no secret to keep.
         #
-        # The HMAC secret is NOT the API key, even though it is the obvious
-        # thing to reach for. Rotating a transport credential is routine, and
-        # it would change the identity of every in-flight message: a retry that
-        # crossed a rotation would look new to the proxy and deliver the alert
-        # twice — reintroducing, through the back door, the duplicate this key
-        # exists to prevent. `alerts_idempotency_secret` outlives credentials
-        # because it authenticates nothing.
-        stable = (_idempotency_digest(idempotency_key, settings)
-                  if idempotency_key else uuid.uuid4().hex)
+        # The earlier version hashed the outbox DEDUPE KEY, which spells out
+        # mode, profile and rule id and therefore could not go on the wire.
+        # Protecting it needed an HMAC, the HMAC needed a secret, and the
+        # secret had to outlive credential rotation or a retry crossing one
+        # would deliver the alert twice. All of that was work to conceal a
+        # value we were free not to send.
+        stable = idempotency_key or uuid.uuid4().hex
         headers = {
             "Authorization": f"Bearer {settings.imessage_api_key}",
             "Content-Type": "application/json",
@@ -409,25 +403,6 @@ class ImessageSender:
         log.info("alert_imessage_result", outcome=result.outcome,
                  status=result.http_status, septets=len(text))
         return result
-
-
-def _idempotency_digest(dedupe_key: str, settings: Any) -> str:
-    """A stable, opaque per-message identity for the proxy.
-
-    Falls back to the API key when no dedicated secret is configured, because
-    a deployment that has not set one is still better served by an opaque key
-    that survives most retries than by a plain digest naming the rule. The
-    fallback is logged: it is a configuration gap with a real consequence
-    (a rotation invalidates in-flight retry identity), not a supported mode.
-    """
-    secret = getattr(settings, "alerts_idempotency_secret", "") or ""
-    if not secret:
-        secret = settings.imessage_api_key
-        log.warning("alert_idempotency_secret_unset",
-                    detail="ALERTS_IDEMPOTENCY_SECRET is not set; retry identity "
-                           "will change if the transport credential is rotated")
-    return hmac.new(secret.encode(), dedupe_key.encode(),
-                    hashlib.sha256).hexdigest()
 
 
 def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> SendResult:
