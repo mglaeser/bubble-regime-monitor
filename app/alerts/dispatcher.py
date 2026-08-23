@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.alerts.budgets import check_budget
 from app.alerts.canonical import new_ulid
@@ -36,6 +36,7 @@ from app.alerts.enums import DeliveryKind, Priority, RenderSource
 from app.alerts.errors import RenderRejected, sanitize
 from app.alerts.models import (
     AlertDelivery,
+    AlertDeliveryMember,
     AlertEpisode,
     AlertRender,
 )
@@ -386,9 +387,18 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             # assembled from its own reviewed fragments and its item count.
             if delivery.delivery_kind == DeliveryKind.DIGEST:
                 context = RenderContext(members=[])
+                # NOT len(members): revalidation drops members whose episodes
+                # resolved or were silenced since planning, and a weekly
+                # retrospective counts what HAPPENED, not what is still open on
+                # Monday morning. Using the live count would quietly under-report
+                # exactly the weeks that had the most movement.
+                planned = session.execute(
+                    select(func.count()).select_from(AlertDeliveryMember)
+                    .where(AlertDeliveryMember.delivery_id == delivery_id)
+                ).scalar_one()
                 try:
                     result = render_digest_body(phrase_set,
-                                                item_count=len(members))
+                                                item_count=int(planned))
                 except RenderRejected as exc:
                     mark_render_failed(session, delivery, now=now,
                                        reason=exc.redacted())

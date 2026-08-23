@@ -105,10 +105,19 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         plan.skipped_reason = "already planned for this window"
         return plan
 
+    # The namespace is NOT optional here. `AlertDigestItem` carries no mode or
+    # profile of its own — those live on the episode — so a query keyed only on
+    # the window would let a shadow digest consume live items, mark them
+    # PLANNED, and report a count drawn from another namespace's week. The
+    # delivery is namespaced; its contents have to be too.
     items = session.execute(
-        select(AlertDigestItem).where(
+        select(AlertDigestItem)
+        .join(AlertEpisode, AlertEpisode.episode_id == AlertDigestItem.episode_id)
+        .where(
             AlertDigestItem.digest_window_key == window,
             AlertDigestItem.status == DigestItemStatus.PENDING,
+            AlertEpisode.mode == mode,
+            AlertEpisode.live_profile == live_profile,
         ).order_by(AlertDigestItem.pending_at)
     ).scalars().all()
 

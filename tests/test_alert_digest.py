@@ -11,6 +11,7 @@ import hashlib
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import select
 
 from app.alerts.artifacts import load_active, register
 from app.alerts.digest import digest_dedupe_key, plan_digest
@@ -256,3 +257,75 @@ def test_a_memberless_digest_is_not_cancelled_as_all_resolved():
     with session_scope() as session:
         delivery = session.get(AlertDelivery, delivery_id)
         assert delivery.transport_status == TransportStatus.SENT
+
+
+# --- what the panel caught -------------------------------------------------
+
+def test_a_digest_never_consumes_another_namespace_s_items():
+    """`AlertDigestItem` has no mode or profile of its own.
+
+    Those live on the episode, so a query keyed only on the window would let a
+    shadow digest swallow live items, mark them PLANNED — removing them from
+    the live digest that should have carried them — and report a count drawn
+    from someone else's week.
+    """
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+
+        # the live namespace has nothing of its own this week
+        plan = plan_digest(session, mode="live", live_profile="default",
+                           planning_rules_sha256=rules_sha, window_key=WINDOW,
+                           now=NOW)
+        assert plan.quiet is True, "a live digest consumed a shadow item"
+        assert plan.item_ids == []
+
+        # and the shadow item is still there for the shadow digest to take
+        shadow = plan_digest(session, mode="shadow", live_profile="default",
+                             planning_rules_sha256=rules_sha, window_key=WINDOW,
+                             now=NOW)
+        assert len(shadow.item_ids) == 1
+        assert shadow.quiet is False
+
+
+def test_the_count_is_what_happened_not_what_is_still_open():
+    """A retrospective counts the week, not Monday morning.
+
+    Revalidation drops members whose episodes resolved or were silenced since
+    planning. Counting the survivors would under-report exactly the weeks with
+    the most movement — a week where everything fired and then resolved would
+    read as quiet.
+    """
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import TransportStatus
+    from app.alerts.sender import NullSender
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        for rule in ("regime.band_to_derisk", "regime.band_hold_to_trim",
+                     "tripwire.rf4_first"):
+            _pending_item(session, rules_sha=rules_sha, rule_id=rule)
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha, window_key=WINDOW,
+                           now=NOW)
+        delivery_id = plan.delivery_id
+        assert len(plan.item_ids) == 3
+
+        # every episode resolves before the digest is dispatched
+        from app.alerts.enums import EpisodeStatus
+        for episode in session.execute(select(AlertEpisode)).scalars().all():
+            episode.is_open = False
+            episode.episode_status = EpisodeStatus.RESOLVED
+            episode.resolved_at = NOW
+
+    sender = NullSender()
+    dispatch_once(session_scope, phrase_set=_phrase_set(), mode="shadow",
+                  live_profile="default", sender=sender, now=NOW)
+
+    assert sender.sent, "the digest was not dispatched"
+    body = sender.sent[0][1]
+    assert "3 Ereignisse" in body, f"the week under-reported itself: {body!r}"
+    assert "keine Ereignisse" not in body
+    with session_scope() as session:
+        assert session.get(AlertDelivery, delivery_id).transport_status \
+            == TransportStatus.SENT
