@@ -453,3 +453,34 @@ def load_input_for_snapshot(session: Session, snapshot_id: int | None) -> AlertI
     if row is None:
         return None
     return AlertInput.model_validate(json.loads(row.payload))
+
+
+def resolve_predecessor(session: Session, alert_input: AlertInput) -> AlertInput | None:
+    """The input this one moved FROM. One definition, used by both sides.
+
+    A transition rule DECIDES against this, and the renderer DESCRIBES it. If
+    the evaluator and the dispatcher resolved it differently the alert would
+    fire on one predecessor and describe another — or, when only one of them
+    finds it, fire and then be dropped at render for an unauthorized fact.
+    Neither failure leaves a trace, so the two must share this function rather
+    than agree by coincidence.
+
+    Lineage first: `prev_snapshot_id` is what the scoring layer recorded, so it
+    survives a skipped recompute, a retry or an out-of-order arrival. Falling
+    back to the nearest earlier sidecar keeps replay over backfilled history
+    working, where rows predate the lineage column entirely.
+    """
+    lineage = load_input_for_snapshot(session, alert_input.prev_snapshot_id)
+    if lineage is not None:
+        return lineage
+    stamp = alert_input.computed_at or alert_input.built_at
+    if not stamp:
+        return None
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    earlier = load_recent_inputs(session, before=moment, limit=1)
+    return earlier[-1] if earlier else None

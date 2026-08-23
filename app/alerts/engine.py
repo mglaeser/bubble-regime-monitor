@@ -47,12 +47,12 @@ from app.alerts.registry import ValidatedRuleset, instance_fingerprint
 from app.alerts.repository import (
     apply_decision,
     load_active_silences,
-    load_input_for_snapshot,
     load_memories,
     load_notification_memories,
     load_recent_inputs,
     open_episodes,
     origin_rulesets_with_open_episodes,
+    resolve_predecessor,
     utc_ms,
 )
 from app.alerts.rulespec import RuleSpec
@@ -357,10 +357,14 @@ def run_evaluation(
         # layer recorded, so it survives a skipped recompute, a retry or an
         # out-of-order arrival. `history` stays chronological, because bases
         # like `adjacent_snapshots` count snapshots and mean exactly that.
+        # ONE definition of "the input before this one", shared with the
+        # dispatcher. A transition rule decides against it and the message
+        # describes it; resolving it differently in the two places makes an
+        # alert fire on one predecessor and describe another, or fire and then
+        # be dropped at render. Neither leaves a trace.
         with session_factory() as session:
-            previous = load_input_for_snapshot(session, alert_input.prev_snapshot_id)
-        if previous is None:
-            previous = history[-1] if history else None
+            previous = resolve_predecessor(session, alert_input)
+
         ctx = EvaluationContext(
             current=alert_input,
             previous=previous,

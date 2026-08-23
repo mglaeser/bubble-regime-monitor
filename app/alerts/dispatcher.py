@@ -57,7 +57,7 @@ from app.alerts.outbox import (
 from app.alerts.phrase_registry import ValidatedPhraseSet
 from app.alerts.render_context import RenderContext, build_member_context
 from app.alerts.renderer import render_with_cascade
-from app.alerts.repository import load_input, load_input_for_snapshot, utc_ms
+from app.alerts.repository import load_input, resolve_predecessor, utc_ms
 from app.alerts.sender import Sender, default_sender
 from app.logging_conf import get_logger
 
@@ -109,15 +109,10 @@ def _build_context(session, delivery: AlertDelivery, members,
         trigger = load_input(session, episode.trigger_input_identity) if episode else None
         if trigger is None:
             continue
-        # The trigger's PREDECESSOR, for transition facts: a phrase that says
-        # "vorher X" cannot be filled from the trigger alone.
-        #
-        # Taken from snapshot LINEAGE, not from chronology. `prev_snapshot_id`
-        # is what the scoring layer recorded as this snapshot's predecessor, so
-        # it stays correct when a recompute is skipped, retried or lands out of
-        # order — none of which "the most recent sidecar before this timestamp"
-        # survives, and each of which would put the wrong band in the message.
-        previous = load_input_for_snapshot(session, trigger.prev_snapshot_id)
+        # The same resolver the evaluator used, so the message describes the
+        # predecessor the decision was made against.
+        previous = resolve_predecessor(session, trigger)
+
         status = "STILL_FIRING"
         if episode is not None and not episode.is_open:
             status = "RESOLVED_BEFORE_SEND"
