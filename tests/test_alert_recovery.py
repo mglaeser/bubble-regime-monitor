@@ -551,3 +551,30 @@ def test_a_committed_evaluation_still_counts_as_retried(isolated_db, monkeypatch
     assert result["retried"] == 1
     assert result["retries_failed"] == 0
     assert result["status"] == "ok"
+
+
+def test_a_committed_retry_is_recognised_however_the_status_is_typed(
+        isolated_db, monkeypatch):
+    """Guards the comparison against the enum's base class changing.
+
+    `EvaluationRunStatus` is a StrEnum, so `str(member)` is the bare value.
+    That is a property of the base class rather than of this comparison — as a
+    plain Enum it would stringify to "EvaluationRunStatus.COMMITTED", every
+    successful retry would be counted as a failure, and the component would sit
+    at critical forever while nothing was actually wrong.
+    """
+    from types import SimpleNamespace
+
+    from app.alerts.enums import EvaluationRunStatus
+
+    for typed in (EvaluationRunStatus.COMMITTED, "COMMITTED"):
+        result = _run_with_retries(
+            monkeypatch, outcomes={"A": SimpleNamespace(status=typed)})
+        assert result["retried"] == 1, typed
+        assert result["retries_failed"] == 0, typed
+        assert result["status"] == "ok", typed
+
+    for typed in (EvaluationRunStatus.FAILED, "FAILED"):
+        result = _run_with_retries(
+            monkeypatch, outcomes={"A": SimpleNamespace(status=typed)})
+        assert result["retries_failed"] == 1, typed

@@ -133,8 +133,18 @@ def run_once() -> dict[str, Any]:
                 # snapshot without its alerts exactly as an exception would —
                 # counting it as retried is how abandoned work goes quiet
                 # behind a healthy heartbeat.
+                # Compare bare VALUES on both sides. `EvaluationRunStatus` is
+                # a StrEnum today, so `str(member)` is "COMMITTED" and this
+                # would work either way — but that is a property of the base
+                # class, not of this comparison. If the enum ever became a
+                # plain Enum, `str(member)` would become
+                # "EvaluationRunStatus.COMMITTED", every successful retry would
+                # be classified as a failure, and the component would report
+                # critical forever. `.value` makes the comparison say what it
+                # means instead of depending on that.
                 status = getattr(outcome, "status", None)
-                if status is not None and str(status) != EvaluationRunStatus.COMMITTED:
+                committed = EvaluationRunStatus.COMMITTED.value
+                if status is not None and str(status) != committed:
                     failed.append(identity)
                     log.error("alert_evaluation_retry_not_committed",
                               input_identity=identity, status=str(status))
