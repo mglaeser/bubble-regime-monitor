@@ -185,11 +185,51 @@ def live_admission_blockers(session: Any, *, path: str | Path | None = None,
         return [f"stage {stage}: the gate evidence at {EVIDENCE_PATH} is missing "
                 "or unreadable, so nothing justifies delivering at this stage"]
 
-    return promotion_blockers(
+    blockers = promotion_blockers(
         target_stage=stage, artifact=evidence,
         rule_version=ruleset.document.meta.rule_version,
         phrase_set_version=getattr(ruleset, "phrase_set_version", None),
     )
+    blockers.extend(_digest_blockers(session, ruleset))
+    return blockers
+
+
+def _digest_blockers(session: Any, ruleset: Any) -> list[str]:
+    """Bind the running ruleset to promoted BYTES, not to declared versions.
+
+    The artifact cannot carry content digests — an entropy detector cannot tell
+    a 64-hex digest from a token, and the secret baseline is a byte-identical
+    ratchet — so the evidence check above binds on versions, and a version
+    string is something a human types. That is a real weakness, and the fix is
+    not to smuggle digests into the artifact but to bind the bytes where they
+    already exist exactly: the registry.
+
+    The registry stores what was promoted. Requiring the running ruleset to BE
+    the promoted one closes the gap the version binding leaves open — an edit
+    that forgot to bump its version no longer reaches a phone, because its
+    bytes were never promoted.
+    """
+    from app.alerts.artifacts import load_promoted
+
+    try:
+        promoted = load_promoted(session)
+    except Exception as exc:                       # noqa: BLE001 - reported, not raised
+        return [f"the promoted ruleset could not be rebuilt, so the running "
+                f"one cannot be shown to match it: {type(exc).__name__}"]
+    if promoted is None:
+        return ["nothing has been promoted, so no bytes authorise delivery"]
+
+    out: list[str] = []
+    if promoted.ruleset.rules_sha256 != ruleset.rules_sha256:
+        out.append(
+            f"the running rules ({ruleset.rules_sha256[:12]}) are not the "
+            f"promoted ones ({promoted.ruleset.rules_sha256[:12]}), whatever "
+            "version they declare")
+    if promoted.ruleset.phrase_set_sha256 != ruleset.phrase_set_sha256:
+        out.append(
+            f"the running phrase set ({ruleset.phrase_set_sha256[:12]}) is not "
+            f"the promoted one ({promoted.ruleset.phrase_set_sha256[:12]})")
+    return out
 
 
 def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
@@ -230,8 +270,10 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
         return [f"stage {stage}: the gate evidence at {EVIDENCE_PATH} is missing "
                 "or unreadable, so nothing justifies sending this delivery"]
 
-    return promotion_blockers(
+    blockers = promotion_blockers(
         target_stage=stage, artifact=evidence,
         rule_version=ruleset.document.meta.rule_version,
         phrase_set_version=getattr(ruleset, "phrase_set_version", None),
     )
+    blockers.extend(_digest_blockers(session, ruleset))
+    return blockers

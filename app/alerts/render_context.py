@@ -145,7 +145,6 @@ def build_member_context(
     priority: int,
     trigger: AlertInput,
     current: AlertInput | None,
-    previous: AlertInput | None = None,
     authorized_phrase_codes: frozenset[str],
     required_caveat_codes: tuple[str, ...],
     condition_status: str,
@@ -153,6 +152,10 @@ def build_member_context(
     origin_phrase_set_sha256: str,
     origin_rules_sha256: str,
     escalation_of: str | None = None,
+    # Keyword-only, so its position carries no meaning — but sitting between
+    # two required parameters it read like a syntax error to more than one
+    # reviewer, and it costs nothing to put the optional ones together.
+    previous: AlertInput | None = None,
 ) -> MemberContext:
     """Build one member's isolated fact set.
 

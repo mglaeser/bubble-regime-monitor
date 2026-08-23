@@ -258,3 +258,43 @@ def test_a_delivery_naming_rules_nobody_has_is_blocked():
         blockers = delivery_admission_blockers(session, "f" * 64)
     assert blockers
     assert any("not in the registry" in b for b in blockers)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_ruleset_that_was_never_promoted_does_not_deliver_however_it_is_versioned():
+    """Byte binding where the bytes actually exist: the registry.
+
+    The artifact cannot carry content digests, so its check binds on declared
+    versions — and a version string is something a human types. The registry
+    stores what was promoted, so requiring the running ruleset to BE the
+    promoted one closes what the version binding leaves open: an edit that
+    forgot to bump its version never reaches a phone.
+    """
+    from dataclasses import replace
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.promotion import _digest_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded, promote=True)
+        session.flush()
+
+        # same declared versions, different bytes
+        edited = replace(loaded.ruleset, rules_sha256="e" * 64)
+        blockers = _digest_blockers(session, edited)
+
+    assert blockers
+    assert any("whatever version they declare" in b for b in blockers)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_nothing_promoted_means_nothing_authorised():
+    from app.alerts.artifacts import load_active
+    from app.alerts.promotion import _digest_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        blockers = _digest_blockers(session, load_active(session).ruleset)
+    assert blockers == ["nothing has been promoted, so no bytes authorise delivery"]
