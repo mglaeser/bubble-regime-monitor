@@ -390,6 +390,13 @@ class AlertEpisode(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolution_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    #: The input this episode's transition was decided AGAINST, resolved once
+    #: at plan time. The renderer reads it rather than resolving again: the
+    #: lineage half is immutable but the fallback is a query over "what exists
+    #: before this timestamp", which a backfill can change between evaluation
+    #: and dispatch. Nullable — a cold start has no predecessor.
+    predecessor_input_identity: Mapped[str | None] = mapped_column(
+        String(SHA_LEN), nullable=True)
     trigger_input_identity: Mapped[str] = mapped_column(
         ForeignKey("alert_input_snapshot.input_identity"), nullable=False)
     candidate_expires_at: Mapped[datetime | None] = mapped_column(

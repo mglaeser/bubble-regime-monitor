@@ -16,6 +16,7 @@ against, and those bytes live in the database.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -274,6 +275,25 @@ def register(session: Session, artifacts: LoadedArtifacts, *, now: datetime | No
         log.info("alert_ruleset_promoted", rules_sha256=row.rules_sha256,
                  rule_version=row.rule_version)
     return row.rules_sha256
+
+
+def _failed_gate_for_stage(stage: int) -> list[str]:
+    """Failures recorded for this stage in the committed gate artifact.
+
+    Reads the evidence rather than re-running it: the artifact is produced by
+    `scripts/export_alert_stage1_gate` and CI checks it is current, so a stale
+    one cannot slip through here. A stage with no recorded run is not blocked —
+    absence of evidence blocks nothing, it simply is not a pass either.
+    """
+    artifact = Path("docs/alert-stage1-gate.json")
+    if not artifact.is_file():
+        return []
+    try:
+        payload = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    run = (payload.get("runs") or {}).get(f"stage_{stage}") or {}
+    return [str(f) for f in (run.get("failures") or [])]
 
 
 def archived_rulesets(session: Session, hashes: list[str], *,

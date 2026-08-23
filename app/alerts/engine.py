@@ -420,6 +420,8 @@ def run_evaluation(
                     session, decision, mode=mode, live_profile=live_profile,
                     rules_sha256=rules_sha, rule=rule, alert_input=alert_input,
                     evaluation_id=evaluation_id, now=now, existing=existing,
+                    predecessor_identity=(previous.input_identity
+                                          if previous is not None else None),
                 )
                 if affected:
                     episode_ids_by_hash.setdefault(rules_sha, {})[

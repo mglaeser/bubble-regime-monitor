@@ -57,7 +57,7 @@ from app.alerts.outbox import (
 from app.alerts.phrase_registry import ValidatedPhraseSet
 from app.alerts.render_context import RenderContext, build_member_context
 from app.alerts.renderer import render_with_cascade
-from app.alerts.repository import load_input, resolve_predecessor, utc_ms
+from app.alerts.repository import load_input, utc_ms
 from app.alerts.sender import Sender, default_sender
 from app.logging_conf import get_logger
 
@@ -109,9 +109,14 @@ def _build_context(session, delivery: AlertDelivery, members,
         trigger = load_input(session, episode.trigger_input_identity) if episode else None
         if trigger is None:
             continue
-        # The same resolver the evaluator used, so the message describes the
-        # predecessor the decision was made against.
-        previous = resolve_predecessor(session, trigger)
+        # READ, never re-resolved. The evaluator recorded which input it
+        # decided against; resolving again here would re-run a query whose
+        # answer can change — a backfill inserting a sidecar between the
+        # trigger and its original predecessor would make this message name a
+        # band the decision never saw, with nothing in the record to show it.
+        previous = (load_input(session, episode.predecessor_input_identity)
+                    if episode is not None and episode.predecessor_input_identity
+                    else None)
 
         status = "STILL_FIRING"
         if episode is not None and not episode.is_open:

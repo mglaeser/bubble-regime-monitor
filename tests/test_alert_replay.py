@@ -588,3 +588,26 @@ def test_the_replay_script_forwards_to_the_cli():
                                       "2026-01-01T00:00:00+00:00"])
     assert args.state_db == "/tmp/x.db"
     assert args.from_moment == "2026-01-01T00:00:00+00:00"
+
+
+def test_a_stage_whose_gate_failed_cannot_be_promoted():
+    """The breach is a CONTROL, not a note.
+
+    `docs/alert-stage1-gate.json` records stage 3 as failing on the non-P1
+    budget. Leaving that as documentation would make the artifact a report
+    nobody acts on — the exact shape of control this repository keeps
+    removing. Promotion now reads its own recorded evidence and refuses.
+    """
+    from app.alerts.artifacts import _failed_gate_for_stage
+
+    # stage 1 is the committed stage and passes, so nothing blocks it
+    assert _failed_gate_for_stage(1) == []
+
+    # stage 3 currently fails on the caps, so it is blocked
+    blocked = _failed_gate_for_stage(3)
+    assert blocked, "the recorded stage-3 failure must be visible to promotion"
+    assert all("cap" in reason for reason in blocked), blocked
+
+    # a stage with no recorded run is not blocked: absence of evidence blocks
+    # nothing, it is simply not a pass either
+    assert _failed_gate_for_stage(7) == []

@@ -218,42 +218,57 @@ def test_the_predecessor_comes_from_lineage_not_from_the_clock(isolated_db):
         "the interloper would have claimed the move came from 'trim'")
 
 
-def test_the_evaluator_and_the_renderer_resolve_the_same_predecessor(isolated_db):
-    """They must not agree by coincidence.
+def test_the_renderer_reads_the_predecessor_rather_than_resolving_it(
+        isolated_db, tmp_path, monkeypatch):
+    """Resolved ONCE, at plan time, and recorded on the episode.
 
-    A transition rule DECIDES against the predecessor and the message
-    DESCRIBES it. Two independent lookups can diverge in two ways, and neither
-    leaves a trace: the alert fires on one predecessor and describes another,
-    or only one side finds it and the delivery is dropped at render for an
-    unauthorized fact. So both call the same function.
+    Lineage is immutable, but the fallback is a query over "what exists before
+    this timestamp" — and a reconstruction or backfill can insert a sidecar
+    between the trigger and its original predecessor at any time. Evaluation
+    happens once; dispatch happens later, sometimes much later behind quiet
+    hours. Two independent lookups can therefore disagree, and the message
+    would name a band the decision never saw with nothing in the record to
+    show it.
     """
     import inspect
 
-    from app.alerts import dispatcher, engine
-    from app.alerts.repository import resolve_predecessor
+    import yaml
 
-    assert "resolve_predecessor(" in inspect.getsource(engine.run_evaluation)
-    assert "resolve_predecessor(" in inspect.getsource(dispatcher._build_context)
+    from app.alerts import dispatcher
+    from app.alerts.models import AlertEpisode
+    from app.services.alert_integration import capture_alert_input, evaluate_input
 
-    # and it prefers lineage while still answering for backfilled history
-    from app.services.alert_integration import capture_alert_input
+    source_yaml = yaml.safe_load(
+        pathlib.Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8"))
+    source_yaml["meta"]["active_stage"] = 3
+    staged = tmp_path / "alert_rules.stage3.yaml"
+    staged.write_text(yaml.safe_dump(source_yaml, sort_keys=False, allow_unicode=True),
+                      encoding="utf-8")
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(staged))
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    source = inspect.getsource(dispatcher._build_context)
+    assert "resolve_predecessor" not in source, (
+        "the dispatcher must not re-resolve the predecessor")
+    assert "predecessor_input_identity" in source
 
     base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
     with session_scope() as session:
-        first = _snapshot(session, computed_at=base, effective="hold", prev_id=None).id
-    capture_alert_input(first)
+        first = _snapshot(session, computed_at=base, effective="trim", prev_id=None).id
+    i1 = capture_alert_input(first)
     with session_scope() as session:
         second = _snapshot(session, computed_at=base + timedelta(hours=4),
                            effective="de-risk", prev_id=first).id
-    capture_alert_input(second)
+    i2 = capture_alert_input(second)
+    evaluate_input(i1)
+    evaluate_input(i2)
 
-    from app.alerts.repository import load_input_for_snapshot
     with session_scope() as session:
-        trigger = load_input_for_snapshot(session, second)
-        assert resolve_predecessor(session, trigger).snapshot_id == first
-
-        # a row with no lineage still resolves, so replay over backfilled
-        # history keeps working rather than reading every input as cold start
-        orphan = load_input_for_snapshot(session, first)
-        assert orphan.prev_snapshot_id is None
-        assert resolve_predecessor(session, orphan) is None   # nothing earlier exists
+        episodes = [e for e in session.query(AlertEpisode).all()
+                    if e.rule_id == "regime.band_to_derisk"]
+        assert episodes, "the transition must have opened an episode"
+        assert episodes[0].predecessor_input_identity == i1, (
+            "the episode must record the input the decision was made against")

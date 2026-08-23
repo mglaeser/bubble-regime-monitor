@@ -180,6 +180,7 @@ def apply_decision(
     evaluation_id: str,
     now: datetime,
     existing: AlertRuleState | None,
+    predecessor_identity: str | None = None,
 ) -> str | None:
     """Persist one instance's decision. Returns the affected episode id.
 
@@ -207,6 +208,7 @@ def apply_decision(
             opened_at=now,
             activated_at=now if decision.activate_episode else None,
             trigger_input_identity=alert_input.input_identity,
+            predecessor_input_identity=predecessor_identity,
             candidate_expires_at=decision.candidate_expires_at,
             created_evaluation_id=evaluation_id,
             last_evaluation_id=evaluation_id,
