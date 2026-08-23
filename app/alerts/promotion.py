@@ -208,13 +208,18 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
     """
     from app.alerts.artifacts import load_by_hash
 
+    unavailable = (f"the ruleset that planned this delivery "
+                   f"({planning_rules_sha256[:12]}) could not be rebuilt, so "
+                   f"what it was permitted to do cannot be established")
     try:
-        ruleset = load_by_hash(session, planning_rules_sha256).ruleset
+        loaded = load_by_hash(session, planning_rules_sha256)
     except Exception as exc:                       # noqa: BLE001 - reported, not raised
-        return [f"the ruleset that planned this delivery "
-                f"({planning_rules_sha256[:12]}) could not be rebuilt, so what "
-                f"it was permitted to do cannot be established: "
-                f"{type(exc).__name__}"]
+        return [f"{unavailable}: {type(exc).__name__}"]
+    if loaded is None:
+        # Not in the registry at all. The delivery names rules nothing can
+        # produce, so nothing establishes the stage that authorised it.
+        return [f"{unavailable}: it is not in the registry"]
+    ruleset = loaded.ruleset
 
     stage = ruleset.document.meta.active_stage
     if stage < EVIDENCE_REQUIRED_FROM_STAGE:

@@ -246,3 +246,15 @@ def test_a_queued_delivery_is_judged_by_the_rules_that_planned_it(monkeypatch):
     assert seen == ["abc"], "the planning ruleset was not the one checked"
     assert report.sent == 0 and report.claimed == 0
     assert any("planned under a stage" in n for n in report.notes)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_delivery_naming_rules_nobody_has_is_blocked():
+    """Absent rules cannot certify a stage, so they do not clear one."""
+    from app.alerts.promotion import delivery_admission_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        blockers = delivery_admission_blockers(session, "f" * 64)
+    assert blockers
+    assert any("not in the registry" in b for b in blockers)
