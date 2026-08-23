@@ -22,6 +22,7 @@ cutover; this is the alert dispatcher's sender.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -71,7 +72,8 @@ class SendResult:
 
 
 class Sender(Protocol):
-    def send(self, message: str, *, recipient_ref: str) -> SendResult: ...
+    def send(self, message: str, *, recipient_ref: str,
+             idempotency_key: str | None = None) -> SendResult: ...
 
 
 class NullSender:
@@ -84,7 +86,8 @@ class NullSender:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
 
-    def send(self, message: str, *, recipient_ref: str) -> SendResult:
+    def send(self, message: str, *, recipient_ref: str,
+             idempotency_key: str | None = None) -> SendResult:
         self.sent.append((recipient_ref, message))
         log.info("alert_null_send", chars=len(message), recipient_ref=recipient_ref)
         return SendResult(outcome=SenderOutcome.CONFIRMED_SUCCESS, http_status=204)
@@ -150,7 +153,8 @@ class SipgateSender:
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client
 
-    def send(self, message: str, *, recipient_ref: str) -> SendResult:
+    def send(self, message: str, *, recipient_ref: str,
+             idempotency_key: str | None = None) -> SendResult:
         settings = get_settings()
         if not (settings.sipgate_token_id and settings.sipgate_token):
             return SendResult(
@@ -163,7 +167,14 @@ class SipgateSender:
             return SendResult(
                 outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
                 error_code="NO_RECIPIENT",
-                error_message_redacted=f"recipient_ref {recipient_ref!r} does not resolve",
+                # Two reasons not to echo the ref. It is MEANT to be an opaque
+                # label, but that is a convention callers keep rather than a
+                # guarantee this function can make, and the string lands in a
+                # persisted delivery row via a field named "redacted".
+                # More plainly: the resolver ignores the ref entirely and
+                # returns the configured handle, so naming the ref points the
+                # reader at the one thing that was NOT the problem.
+                error_message_redacted="no recipient handle is configured",
             )
 
         body = {"smsId": settings.sipgate_sms_id, "recipient": recipient,
@@ -248,7 +259,8 @@ class ImessageSender:
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client
 
-    def send(self, message: str, *, recipient_ref: str) -> SendResult:
+    def send(self, message: str, *, recipient_ref: str,
+             idempotency_key: str | None = None) -> SendResult:
         from app.notify.imessage import (
             SEND_PATH,
             _accepted_operation_id,
@@ -280,7 +292,14 @@ class ImessageSender:
             return SendResult(
                 outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
                 error_code="NO_RECIPIENT",
-                error_message_redacted=f"recipient_ref {recipient_ref!r} does not resolve",
+                # Two reasons not to echo the ref. It is MEANT to be an opaque
+                # label, but that is a convention callers keep rather than a
+                # guarantee this function can make, and the string lands in a
+                # persisted delivery row via a field named "redacted".
+                # More plainly: the resolver ignores the ref entirely and
+                # returns the configured handle, so naming the ref points the
+                # reader at the one thing that was NOT the problem.
+                error_message_redacted="no recipient handle is configured",
             )
 
         text = normalise_text(message)
@@ -292,10 +311,27 @@ class ImessageSender:
             )
 
         body = {"recipient": recipient, "text": text, "service": "imessage"}
+        # The idempotency key must be STABLE across retries of the same
+        # message, which is the entire reason a proxy offers one. A fresh
+        # uuid4 per call — the obvious thing to write — makes every retry a
+        # new message to the proxy, so its deduplication can never fire and a
+        # transient failure followed by a retry delivers the alert twice.
+        #
+        # The outbox already owns exactly this identity: `dedupe_key` is stable
+        # for one logical message and CHANGES when a reminder generation or an
+        # operator's manual retry means a second send is intended. It is hashed
+        # rather than sent verbatim because it carries rule ids, which are ours
+        # and not the proxy's business.
+        #
+        # With no key supplied, fall back to per-call randomness: an unkeyed
+        # send is not made worse by being unkeyed, and silently reusing some
+        # other request's key would be.
+        stable = (hashlib.sha256(idempotency_key.encode()).hexdigest()
+                  if idempotency_key else uuid.uuid4().hex)
         headers = {
             "Authorization": f"Bearer {settings.imessage_api_key}",
             "Content-Type": "application/json",
-            "Idempotency-Key": uuid.uuid4().hex,
+            "Idempotency-Key": stable,
         }
         # See app/notify/imessage.py: over plain HTTP an ambient proxy would
         # route the bearer header and the body to a third host, which is the
@@ -366,6 +402,19 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
         return SendResult(outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
                           http_status=status, error_code=f"HTTP_{status}",
                           error_message_redacted=detail, request_started=True)
+
+    # A 5xx is NOT a definite non-acceptance, and that difference decides
+    # whether the outbox may retry without a human. The proxy hands the message
+    # to iMessage and then answers; a 502 or 504 raised by anything in front of
+    # it is entirely consistent with the message having been accepted and
+    # already delivered. Auto-retrying that sends the alert twice, which is the
+    # exact failure the four-outcome contract exists to prevent. Only a status
+    # where the proxy itself answered and declined is safe to repeat.
+    if status >= 500:
+        return SendResult(outcome=SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION,
+                          http_status=status, error_code=f"HTTP_{status}",
+                          error_message_redacted=detail, request_started=True)
+
     return SendResult(outcome=SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED,
                       http_status=status, error_code=f"HTTP_{status}",
                       error_message_redacted=detail, request_started=True)

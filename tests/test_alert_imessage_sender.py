@@ -140,3 +140,100 @@ def test_the_live_transport_follows_the_configured_channel(monkeypatch):
     from app.config import get_settings
     get_settings.cache_clear()
     assert isinstance(default_sender(live=True), SipgateSender)
+
+
+# --- what the panel caught -------------------------------------------------
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_a_5xx_is_ambiguous_and_never_auto_retried(monkeypatch, status):
+    """The difference between "not accepted" and "we don't know" is a duplicate.
+
+    The proxy hands the message to iMessage and then answers. A 502 or 504
+    raised by anything in front of it is entirely consistent with the alert
+    having been accepted and already delivered. Classifying that as a DEFINITE
+    transient non-acceptance lets the outbox retry unattended, and the operator
+    gets the same alert twice — which is the failure the four-outcome contract
+    exists to prevent.
+    """
+    _configured(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="upstream unavailable")
+
+    result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    assert result.outcome == SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION
+    assert result.may_retry_automatically is False
+    assert result.is_ambiguous is True
+
+
+def test_a_429_is_still_a_definite_non_acceptance(monkeypatch):
+    """The proxy answered, and it said no. That one IS safe to repeat."""
+    _configured(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="slow down")
+
+    result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    assert result.outcome == SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED
+    assert result.may_retry_automatically is True
+
+
+def test_a_retry_of_one_message_carries_ONE_idempotency_key(monkeypatch):
+    """A fresh uuid per call defeats the deduplication it exists to request.
+
+    Same logical message -> same key, so the proxy can suppress the second
+    copy. A different message -> a different key, so it does not suppress a
+    real one.
+    """
+    _configured(monkeypatch)
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(502, text="gateway")
+
+    sender = ImessageSender(_client(handler))
+    sender.send("body", recipient_ref="default", idempotency_key="v1|MARKET|live|d|r|1")
+    sender.send("body", recipient_ref="default", idempotency_key="v1|MARKET|live|d|r|1")
+    sender.send("body", recipient_ref="default", idempotency_key="v1|MARKET|live|d|r|2")
+
+    assert keys[0] == keys[1], "a retry asked the proxy to treat it as new"
+    assert keys[2] != keys[0], "two distinct messages collapsed onto one key"
+
+
+def test_the_dedupe_key_is_not_handed_to_the_proxy_verbatim(monkeypatch):
+    """It carries rule ids. Those are ours, not the proxy's business."""
+    _configured(monkeypatch)
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
+
+    ImessageSender(_client(handler)).send(
+        "body", recipient_ref="default",
+        idempotency_key="v1|MARKET|live|default|regime.band_to_derisk|1")
+    assert "regime.band_to_derisk" not in keys[0]
+    assert len(keys[0]) == 64
+
+
+def test_an_unresolvable_recipient_does_not_echo_the_caller_s_string(monkeypatch):
+    """The ref is meant to be opaque, but that is a convention, not a promise.
+
+    It also is not what failed: the resolver ignores the ref entirely and
+    returns the configured handle, so naming the ref points the reader at the
+    one thing that was not the problem.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setenv("IMESSAGE_RECIPIENT", "")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request should be made without a recipient")
+
+    result = ImessageSender(_client(handler)).send(
+        "x", recipient_ref="+4915100000000")
+    assert result.outcome == SenderOutcome.DEFINITE_PERMANENT_REJECTION
+    assert result.error_code == "NO_RECIPIENT"
+    assert "+4915100000000" not in (result.error_message_redacted or "")

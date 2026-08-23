@@ -276,9 +276,13 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             body = result.body
         mark_sending(session, delivery, now=now)
         recipient_ref = delivery.recipient_ref
+        # Read inside the transaction: the send happens outside it, and the
+        # object is detached by then.
+        idempotency_key = delivery.dedupe_key
 
     # -- 5: send. OUTSIDE any transaction: no external I/O holds a write lock.
-    outcome = sender.send(body or "", recipient_ref=recipient_ref)
+    outcome = sender.send(body or "", recipient_ref=recipient_ref,
+                          idempotency_key=idempotency_key)
 
     # -- 6: classify ---------------------------------------------------------
     with session_factory() as session:
