@@ -723,3 +723,44 @@ def test_a_month_with_one_early_bar_is_not_closed():
 
     ran_out = [("2026-07-31", 1.0), ("2026-08-31", 2.0)]
     assert {"2026-07", "2026-08"} <= _closed_months(ran_out)
+
+
+def test_a_stale_feed_that_finished_its_month_still_closes_it():
+    """Closure is a property of the DATA, not of the feed's current health.
+
+    A feed whose final bar is 31 July has genuinely closed July — the month ran
+    to its end and every bar exists — whether or not it is still publishing in
+    September. A feed that stopped on 2 July has not, however current it looks.
+
+    Judging the newest month by freshness while judging every other month by
+    the calendar produced exactly the two errors it was meant to prevent: a
+    partial month promoted, or a complete one withheld.
+    """
+    from app.engine.legs import month_end_faber
+    from app.services.compute import _closed_months
+
+    from datetime import date, timedelta
+
+    from app.alerts.calendars import is_trading_day
+
+    def month_end(year: int, month: int) -> str:
+        nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        day = nxt - timedelta(days=1)
+        while not is_trading_day(day):
+            day -= timedelta(days=1)
+        return day.isoformat()
+
+    # every bar IS its month's last trading day, so the calendar closes them
+    months = [(month_end(2025, m), 100.0 + m) for m in range(1, 13)]
+    finished = months + [(month_end(2026, 7), 60.0)]
+    closed = _closed_months(finished)
+    assert "2026-07" in closed, "31 July is July's last trading day"
+
+    _, period = month_end_faber(finished, as_of_month="2026-09",
+                                closed_months=closed)
+    assert period == "2026-07", "a finished month closes even from a dead feed"
+
+    stopped = months + [("2026-07-02", 60.0)]      # abandoned on the 2nd
+    _, partial = month_end_faber(stopped, as_of_month="2026-09",
+                                 closed_months=_closed_months(stopped))
+    assert partial != "2026-07", "a month abandoned on the 2nd is not closed"

@@ -118,36 +118,33 @@ def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
     # A bar in the next calendar month proves the previous one ran to its end;
     # a bar two months later proves nothing about the month in between.
     if closed_months is not None:
-        # The caller knows the market calendar: a month is closed when its last
-        # bar IS that month's last trading day. Exact, and it subsumes the
-        # weaker test below.
-        closed = [(m, c) for m, c in dated[:-1] if m in closed_months]
+        # ONE rule for every month, newest included. A month is closed when its
+        # last bar is that month's last trading day, and that answer does not
+        # depend on whether the feed is still publishing today: a feed whose
+        # final bar IS 31 July has genuinely closed July, stale or not, while
+        # one that stopped on 2 July has not, however current it looks.
+        #
+        # Judging the newest month by a freshness heuristic instead would
+        # contradict the exact test applied to every other month — promoting a
+        # partial month the calendar rejects, or withholding a complete one it
+        # accepts.
+        completed = [(m, c) for m, c in dated
+                     if m in closed_months and m <= as_of_month]
     else:
-        # Calendar-free fallback: a bar in the month immediately after. Weaker,
-        # because a month holding a single early bar followed by a bar next
-        # month passes it while its close is nowhere near the month end.
-        closed = [
+        # Calendar-free fallback: a bar in the month immediately after proves
+        # closure for all but the newest month, and the newest is taken only on
+        # the caller's word that the feed is publishing normally. Weaker on
+        # both counts, and only for callers without a calendar.
+        adjacent = [
             (month, close)
             for i, (month, close) in enumerate(dated[:-1])
             if _is_next_month(month, dated[i + 1][0])
         ]
+        newest_month, newest_close = dated[-1]
+        if newest_month < as_of_month and feed_current:
+            adjacent.append((newest_month, newest_close))
+        completed = [(m, c) for m, c in adjacent if m < as_of_month]
 
-    # The newest month is closed too when the calendar says it has ended AND
-    # the feed is still publishing normally — a current feed whose last bar is
-    # in a past month has given us that month's real month-end close. Without
-    # the freshness test this waits for the next session's bar (a late P1);
-    # without the calendar test a stale feed's partial month is promoted as if
-    # it were complete (a wrong P1). Both tests, or neither failure is avoided.
-    # `feed_current` is decided by the caller against the market calendar, not
-    # inferred from this series. Every statistic over the series' own gaps is
-    # contaminated by the outages it must detect: one 40-day hole last month
-    # raises the tolerance enough for a feed that stopped 30 days ago to look
-    # healthy. The calendar is not self-referential.
-    newest_month, _ = dated[-1]
-    if newest_month < as_of_month and feed_current:
-        closed.append(dated[-1])
-
-    completed = [(m, c) for m, c in closed if m < as_of_month]
     if len(completed) < 10:
         return None, None
     return faber_state([c for _, c in completed]), completed[-1][0]
