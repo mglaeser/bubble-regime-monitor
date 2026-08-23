@@ -8,9 +8,10 @@ critical values.
 
 The divergence is not hypothetical. Measured with exuber 1.1.0 (lag=0,
 nrep=2000, seed 20260711) on CPI-deflated native Nasdaq-100 monthly log levels
-from 1986 (T=487): the GSADF sup is 2.6189 against cv95 2.2604 — a rejection —
+from 1986 (T=487, NOMINAL — the scored family): the GSADF sup is 2.5837 against
+cv95 2.2604 — a rejection —
 and it is attained at a window ending 2000-02, while the BSADF at the 2026-07
-endpoint is 0.7562 against endpoint cv90 1.1769. Under the v3 rule a longer
+endpoint is 1.1315 against endpoint cv90 1.1769. Under the v3 rule a longer
 history would have reported the dot-com peak as a present-day bubble signal.
 
 These tests drive compute_snapshot, so behaviour is what is pinned: swapping the
@@ -29,9 +30,13 @@ from app import methodology as M
 from app.services.compute import compute_snapshot, scored_s4_statistic
 from tests.conftest import make_golden_raw_inputs
 
-# Measured, exuber 1.1.0, real native Nasdaq-100 from 1986 (T=487).
-SUP_1986, SUP_CV90, SUP_CV95 = 2.6189, 2.0034, 2.2604          # rejects at 5%
-END_1986, END_CV90, END_CV95 = 0.7562, 1.1769, 1.4315          # does not reject
+# Measured, exuber 1.1.0, NOMINAL native Nasdaq-100 from 1986 (T=487) -- the
+# SCORED family. compute.py fetches the QQQ proxy and takes logs; there is no
+# deflation on the scored path, so a test that drives compute_snapshot must use
+# nominal numbers. (The CPI-deflated series is the shadow: it gives sup 2.6189
+# and endpoint 0.7562, tells the same story, and is never scored.)
+SUP_1986, SUP_CV90, SUP_CV95 = 2.5837, 2.0034, 2.2604          # rejects at 5%
+END_1986, END_CV90, END_CV95 = 1.1315, 1.1769, 1.4315          # does not reject
 _CACHED = (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology)
 
 
@@ -149,13 +154,297 @@ class TestTheDivergenceIsScored:
         assert snap.red_flags.gsadf_explosive_noncontested is True
 
 
+class TestAMalformedArtifactIsNamed:
+    """A corrupt SPECIFICATION must not read as a quiet data gap.
+
+    Coverage is a WEIGHT measure and cannot express this: s4 is 0.07 of Block S,
+    so losing it moves the block from 0.909 to 0.839 against a 1/3 threshold —
+    never degrading. Measured before this gate, absent gsadf.statistic on an
+    explosive endpoint with gsadf_contested=False: red flag #1 True -> False,
+    the non-compensatory override True -> False, band de-risk 70.00 -> trim
+    57.38, coverage.degraded false throughout. A corrupt specification silently
+    disarming the override is what this prevents."""
+
+    @pytest.fixture
+    def frozen_broken(self, monkeypatch, tmp_path):
+        def _apply(mutate):
+            data = json.loads(M.FROZEN_PATH.read_bytes())
+            mutate(data)
+            f = tmp_path / "frozen.json"
+            f.write_text(json.dumps(data))
+            monkeypatch.setattr(M, "FROZEN_PATH", f)
+            for fn in _CACHED:
+                fn.cache_clear()
+        yield _apply
+        for fn in _CACHED:
+            fn.cache_clear()
+
+    @staticmethod
+    def _explosive():
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5          # rf1 would fire on a good artifact
+        return raw
+
+    def test_a_healthy_artifact_is_not_degraded(self):
+        snap = compute_snapshot(self._explosive(), gsadf_contested=False)
+        assert snap.coverage["degraded"] is False
+        assert "integrity" not in snap.coverage
+        assert snap.red_flags.gsadf_explosive_noncontested is True
+
+    @pytest.mark.parametrize("label,mutate,expected", [
+        ("statistic absent", lambda d: d["gsadf"].pop("statistic"), ["gsadf.statistic"]),
+        ("rule absent", lambda d: d["gsadf"].pop("contested_rule"), ["gsadf.contested_rule"]),
+        ("statistic unknown", lambda d: d["gsadf"].__setitem__("statistic", "sadf"),
+         ["gsadf.statistic"]),
+        ("rule unknown", lambda d: d["gsadf"].__setitem__("contested_rule", "lenient"),
+         ["gsadf.contested_rule"]),
+        ("gsadf not a mapping", lambda d: d.__setitem__("gsadf", "nope"),
+         ["gsadf.statistic", "gsadf.contested_rule"]),
+    ])
+    def test_a_malformed_constant_degrades_and_is_named(self, frozen_broken, label,
+                                                        mutate, expected):
+        frozen_broken(mutate)
+        snap = compute_snapshot(self._explosive(), gsadf_contested=False)
+        assert snap.coverage["degraded"] is True, label
+        assert snap.coverage["integrity"]["constants"] == expected, label
+        assert snap.coverage["integrity"]["frozen_artifact"] == "scored_constant_unidentified"
+        # and it refuses an action band it cannot stand behind
+        assert "suppressed" in snap.action_band or "degraded" in snap.action_band, label
+
+    @staticmethod
+    def _three_flags_without_rf1():
+        """rf2 + rf3 + rf4 fire; rf1 does NOT. The override is then entirely
+        independent of the frozen artifact — semis run-up, HY OAS widening and
+        breadth near the ATH say nothing about which GSADF statistic is scored."""
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_1986                                     # rf1 off
+        raw.smh_2yr_return_pct, raw.spy_2yr_return_pct = 200.0, 32.0  # rf2
+        raw.hy_oas_bps, raw.hy_oas_history_bps = 400.0, [250.0] * 800  # rf3
+        raw.breadth_pct, raw.index_within_2pct_of_ath = 30.0, True    # rf4
+        return raw
+
+    def test_it_does_not_mask_an_override_it_did_not_break(self, frozen_broken):
+        """The integrity verdict must not RE-LABEL a fired override as merely
+        suppressed. Masking a forced de-risk hides the strongest bearish signal
+        — fail-dangerous, and precisely what refusing to compute would do.
+
+        The three other tripwires are measured from data the artifact cannot
+        touch, so degrading the snapshot must leave their verdict intact and
+        only annotate it."""
+        good = compute_snapshot(self._three_flags_without_rf1(), gsadf_contested=False)
+        assert good.red_flags.count == 3 and good.red_flags.override_fired is True
+        assert good.action_band == "de-risk"
+
+        frozen_broken(lambda d: d["gsadf"].pop("statistic"))
+        bad = compute_snapshot(self._three_flags_without_rf1(), gsadf_contested=False)
+        assert bad.coverage["integrity"]["constants"] == ["gsadf.statistic"]
+        assert bad.red_flags.count == 3, "the artifact cannot reach rf2/rf3/rf4"
+        assert bad.red_flags.override_fired is True
+        assert bad.action_band == "de-risk (data degraded)"
+        assert "suppressed" not in bad.action_band
+
+    @pytest.mark.parametrize("failing_reads", [1, 2])
+    def test_a_scoring_time_read_failure_is_latched(self, monkeypatch, failing_reads):
+        """The constants must be read ONCE and the result carried forward.
+
+        They used to be read three times per request — when s4 was scored, by the
+        integrity gate, and by persist_snapshot for the rf1 record. A read that
+        failed only during SCORING was invisible to the gate, which re-read a
+        healthy artifact. Measured before the latch, exactly the vetoed shape:
+        s4 FLOOR, rf1 False, coverage.degraded False, band 'trim'."""
+        from app.services import compute as C
+
+        real = C.frozen_gsadf
+        state = {"n": 0}
+
+        def flaky(key):
+            state["n"] += 1
+            return None if state["n"] <= failing_reads else real(key)
+
+        monkeypatch.setattr(C, "frozen_gsadf", flaky)
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5
+        snap = C.compute_snapshot(raw, gsadf_contested=False)
+        # Whatever else it does, it must not look ordinary.
+        assert snap.coverage["degraded"] is True
+        assert "integrity" in snap.coverage
+        assert "suppressed" in snap.action_band
+        # CONSISTENCY is the point of latching, not merely "something degraded":
+        # if the verdict says the constants were unidentifiable, then the score
+        # must be the floored one. A second, luckier read that scored s4 normally
+        # while the verdict said otherwise is the bug this pins.
+        assert snap.indicators["s4"].state == "FLOOR"
+        assert snap.indicators["s4"].sub_score == 0.25
+        assert snap.s4_scored_stat is None and snap.s4_scored_cv95 is None
+
+    def test_only_the_rule_read_failing_is_still_latched(self, monkeypatch):
+        """Discriminating case for the RULE specifically. If only the second read
+        fails, a re-reading caller gets a healthy rule while the latched verdict
+        says it was unidentifiable — so s4 would score COMPUTED beside an
+        integrity verdict saying the rule could not be identified. The two must
+        agree, and they can only agree if both come from the same read."""
+        from app.services import compute as C
+
+        real = C.frozen_gsadf
+        state = {"n": 0}
+
+        def flaky(key):
+            state["n"] += 1
+            return None if state["n"] == 2 else real(key)   # rule read only
+
+        monkeypatch.setattr(C, "frozen_gsadf", flaky)
+        raw = _raw_diverging()
+        snap = C.compute_snapshot(raw, gsadf_contested=False)
+        assert snap.coverage["integrity"]["constants"] == ["gsadf.contested_rule"]
+        assert snap.indicators["s4"].state == "FLOOR", (
+            "scored COMPUTED while the integrity verdict said the rule was "
+            "unidentifiable — the two came from different reads")
+        assert snap.indicators["s4"].sub_score == 0.25
+
+    def test_the_published_rf1_record_cannot_outrun_the_score(self, monkeypatch,
+                                                              isolated_db):
+        """persist_snapshot used to re-read the artifact for the rf1 record — a
+        third independent read. Under a transient failure it could publish a
+        distance derived from a healthy statistic beside a flag that came from a
+        floored score."""
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services import compute as C
+
+        real = C.frozen_gsadf
+        state = {"n": 0}
+
+        def flaky(key):
+            state["n"] += 1
+            return None if state["n"] <= 2 else real(key)
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        monkeypatch.setattr(C, "frozen_gsadf", flaky)
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5
+        data = C.compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,
+                                  gsadf_contested=False)
+        assert data.indicators["s4"].state == "FLOOR"
+        snap_id = C.persist_snapshot(data, raw)
+        with session_scope() as session:
+            row = session.execute(
+                select(Snapshot).where(Snapshot.id == snap_id)).scalars().one()
+            rf1 = row.red_flag_meta["flags"]["rf1"]
+        # s4 was not scored, so rf1's input is UNAVAILABLE — never a live margin.
+        assert rf1["active"] is False
+        assert rf1["distance_to_threshold"] is None
+
+    def test_it_cannot_silently_disarm_the_override(self, frozen_broken):
+        """The safety property, stated as a test: whatever else happens, a
+        malformed artifact must not produce a snapshot that looks ordinary."""
+        good = compute_snapshot(self._explosive(), gsadf_contested=False)
+        frozen_broken(lambda d: d["gsadf"].pop("statistic"))
+        bad = compute_snapshot(self._explosive(), gsadf_contested=False)
+        assert good.red_flags.gsadf_explosive_noncontested is True
+        assert bad.red_flags.gsadf_explosive_noncontested is False   # unknown, not not-fired
+        # ...and THAT is why the snapshot must not present itself as clean.
+        assert good.coverage["degraded"] is False
+        assert bad.coverage["degraded"] is True
+        assert bad.action_band != good.action_band
+
+
+class TestAnAbsentKeyFailsClosedNotFiveHundred:
+    """Guardrail 5: never surface an upstream/config fault as a 500. An ABSENT
+    key is the same fault as an unrecognised value — the artifact is not the one
+    this code was written against — but get_path raises, so both selectors had to
+    catch it. Verified: before the fix, compute_snapshot propagated KeyError.
+
+    NOT covered here: removing the whole `gsadf` SECTION. The loader rejects that
+    with "missing required sections" before any key lookup, which is its own
+    fail-closed contract and breaks every consumer, not just s4 — pre-existing
+    and deliberately not worked around."""
+
+    @pytest.fixture
+    def frozen_without(self, monkeypatch, tmp_path):
+        def _apply(key):
+            data = json.loads(M.FROZEN_PATH.read_bytes())
+            data["gsadf"].pop(key)
+            f = tmp_path / "frozen.json"
+            f.write_text(json.dumps(data))
+            monkeypatch.setattr(M, "FROZEN_PATH", f)
+            for fn in _CACHED:
+                fn.cache_clear()
+        yield _apply
+        for fn in _CACHED:
+            fn.cache_clear()
+
+    def test_the_healthy_artifact_still_reads(self):
+        """The guard that nearly broke everything: the loader returns a
+        MappingProxyType, so `isinstance(block, dict)` rejects the HEALTHY
+        artifact and floors s4 forever. Pin the happy path, not just the
+        malformed ones."""
+        from app.services.compute import frozen_gsadf
+
+        assert frozen_gsadf("statistic") == "bsadf_endpoint"
+        assert frozen_gsadf("contested_rule") == "asymmetric"
+        s4 = compute_snapshot(_raw_diverging()).indicators["s4"]
+        assert (s4.state, s4.sub_score) == ("COMPUTED", 0.05)
+
+    @pytest.mark.parametrize("shape,mutate", [
+        ("gsadf is a string", lambda d: d.__setitem__("gsadf", "nope")),
+        ("gsadf is a list", lambda d: d.__setitem__("gsadf", [])),
+        ("gsadf is null", lambda d: d.__setitem__("gsadf", None)),
+        ("statistic is a list", lambda d: d["gsadf"].__setitem__("statistic", ["x"])),
+    ])
+    def test_a_malformed_gsadf_section_floors(self, monkeypatch, tmp_path, shape, mutate):
+        """The loader validates that gsadf EXISTS, not that it is a mapping, so a
+        scalar or a list survives it and reaches the constant reads."""
+        data = json.loads(M.FROZEN_PATH.read_bytes())
+        mutate(data)
+        f = tmp_path / "frozen.json"
+        f.write_text(json.dumps(data))
+        monkeypatch.setattr(M, "FROZEN_PATH", f)
+        for fn in _CACHED:
+            fn.cache_clear()
+        try:
+            s4 = compute_snapshot(_raw_diverging(), gsadf_contested=False).indicators["s4"]
+            assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25), shape
+        finally:
+            for fn in _CACHED:
+                fn.cache_clear()
+
+    def test_an_unreadable_artifact_floors_rather_than_propagating(self, monkeypatch):
+        """The loader itself can raise (invalid JSON, a <PIN> in a scored path, a
+        missing required section). The helper must absorb that too — reached
+        through compute_snapshot it would be a 500."""
+        from app.services import compute as C
+
+        def boom():
+            raise ValueError("frozen_methodology: missing required sections ['gsadf']")
+
+        monkeypatch.setattr(C._M, "frozen_methodology", boom)
+        assert C.frozen_gsadf("statistic") is None
+        assert C.frozen_gsadf("contested_rule") is None
+
+    @pytest.mark.parametrize("key", ["statistic", "contested_rule"])
+    def test_an_absent_key_floors_instead_of_raising(self, frozen_without, key):
+        frozen_without(key)
+        snap = compute_snapshot(_raw_diverging(), gsadf_contested=False)
+        s4 = snap.indicators["s4"]
+        assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25)
+
+    @pytest.mark.parametrize("key", ["statistic", "contested_rule"])
+    def test_the_report_survives_an_absent_key(self, frozen_without, key):
+        # extra.s4_statistic reads the same keys; it must not raise either.
+        frozen_without(key)
+        extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
+        assert "s4_statistic" in extra
+
+
 class TestTheContestedRuleIsAFrozenConstant:
     """v4.1. The critique (Chen et al. 2026) is SIZE distortion: it bounds false
     positives and says nothing against a non-rejection, so a non-rejection is
     released while a rejection stays capped."""
 
     def test_a_non_rejection_is_released(self):
-        # endpoint 0.7562 < cv90 1.1769 -> not explosive -> SUB_NULL, not the cap.
+        # endpoint 1.1315 < cv90 1.1769 -> not explosive -> SUB_NULL, not the cap.
         assert compute_snapshot(_raw_diverging()).indicators["s4"].sub_score == 0.05
 
     def test_a_rejection_is_still_capped(self):
@@ -453,6 +742,33 @@ class TestThePublishedRecordDescribesTheScoredStatistic:
         # +0.3585 — "did not fire" beside "0.36 above its own 95% threshold".
         assert rf1["distance_to_threshold"] == pytest.approx(END_1986 - END_CV95)
         assert (rf1["distance_to_threshold"] > 0) is rf1["active"]
+
+    def test_an_unmeasured_s4_publishes_no_margin(self, isolated_db, monkeypatch):
+        """A FLOOR reached through a DEGENERATE CV pair still carries a finite
+        statistic. Publishing it made the record read "inactive, +0.50 above its
+        own 95% threshold" for a reading that was never scored — an inactive flag
+        quoting a measured-looking margin is worse than no margin at all."""
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import persist_snapshot
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        raw = _raw_diverging()
+        raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = 2.0, 1.9, 1.5   # cv90 > cv95
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,
+                                gsadf_contested=False)
+        assert data.indicators["s4"].state == "FLOOR"
+        assert data.gsadf_available is False
+        assert data.s4_scored_stat is None and data.s4_scored_cv95 is None
+        with session_scope() as session:
+            rf1 = session.execute(select(Snapshot).where(
+                Snapshot.id == persist_snapshot(data, raw))).scalars().one() \
+                .red_flag_meta["flags"]["rf1"]
+        assert rf1["active"] is False
+        assert rf1["distance_to_threshold"] is None, (
+            "published a margin for a statistic that was never scored")
 
     def test_a_real_rejection_publishes_a_positive_distance(self, isolated_db, monkeypatch):
         from sqlalchemy import select

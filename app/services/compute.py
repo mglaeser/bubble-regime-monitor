@@ -36,6 +36,7 @@ from __future__ import annotations
 import calendar
 import math
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
@@ -453,6 +454,12 @@ class SnapshotData:
     # Typed alert contract (Stage 0) — derived from the values above, never a
     # second opinion on them. See app/engine/snapshot_contract.py.
     band_state: TypedBandState | None = None
+    # The (stat, cv95) pair s4 was ACTUALLY scored on this run, latched from the
+    # single frozen read. persist_snapshot publishes the rf1 record from these
+    # rather than re-reading the artifact, so the record cannot describe a
+    # different statistic than the one that produced the flag.
+    s4_scored_stat: float | None = None
+    s4_scored_cv95: float | None = None
     red_flag_meta: dict[str, Any] = field(default_factory=dict)
     # Already-computed red-flag INPUTS carried forward so the typed contract is
     # built from the exact values scoring used, never recomputed from raw.
@@ -788,6 +795,88 @@ def gather_inputs() -> RawInputs:
 
 
 
+def frozen_gsadf(key: str) -> str | None:
+    """Read one gsadf constant from the frozen artifact WITHOUT ever raising.
+
+    Guardrail 5: a config fault must never surface as an HTTP 500. Three ways
+    this read can fail, all measured, none hypothetical:
+      * the key is absent            -> get_path raises KeyError
+      * the whole gsadf section is absent -> the loader raises ValueError
+        ("missing required sections"), before any key lookup
+      * gsadf is present but is NOT a mapping (a scalar or a list survives the
+        loader, which validates presence, not type) -> .get raises AttributeError
+
+    All three mean the same thing: the artifact is not the one this code was
+    written against. Callers treat None as "cannot identify the rule" and floor,
+    which is the same path as an unrecognised value."""
+    try:
+        block = _M.frozen_methodology().get("gsadf")
+    except Exception:
+        log.error("s4_frozen_gsadf_unreadable", key=key)
+        return None
+    # Mapping, not dict: the loader hands back MappingProxyType, so an isinstance
+    # check against dict rejects the HEALTHY artifact and would floor s4 forever.
+    if not isinstance(block, Mapping):
+        log.error("s4_frozen_gsadf_not_a_mapping", key=key, kind=type(block).__name__)
+        return None
+    value = block.get(key)
+    # These constants are string enums. Anything else -- a list, a number, a
+    # nested object -- is a malformed artifact, not a value to coerce, so it
+    # takes the same fail-closed path as an unrecognised name.
+    if value is not None and not isinstance(value, str):
+        log.error("s4_frozen_gsadf_not_a_string", key=key, kind=type(value).__name__)
+        return None
+    return value
+
+
+# The frozen gsadf constants s4's SCORING depends on, and the values each may
+# take. Declared once here; scored_s4_statistic and scored_s4_contested_rule
+# below map the same names to behaviour.
+S4_SCORED_FROZEN_ENUMS: dict[str, tuple[str, ...]] = {
+    "statistic": ("bsadf_endpoint", "gsadf_sup"),
+    "contested_rule": ("asymmetric", "symmetric"),
+}
+
+
+def s4_frozen_selection() -> tuple[str | None, str | None, list[str]]:
+    """ONE read of both scored constants, plus which of them were unidentifiable.
+
+    LATCHED ON PURPOSE. The constants were previously read three times per
+    request — once when s4 was scored, once by the integrity gate, once by
+    persist_snapshot for the published rf1 record. A read that failed only
+    during SCORING was then invisible to the gate, which re-read a healthy
+    artifact: measured, that reproduced the vetoed property exactly (s4 FLOOR,
+    rf1 False, coverage.degraded False, band "trim"). Reading once and passing
+    the values down removes the window rather than narrowing it."""
+    stat = frozen_gsadf("statistic")
+    rule = frozen_gsadf("contested_rule")
+    unidentified = [k for k, v in (("statistic", stat), ("contested_rule", rule))
+                    if v not in S4_SCORED_FROZEN_ENUMS[k]]
+    return stat, rule, unidentified
+
+
+def unidentified_s4_frozen_constants() -> list[str]:
+    """Frozen gsadf constants that could not be IDENTIFIED this run.
+
+    INTEGRITY, not data, and the distinction is the whole point. Guardrail 5
+    covers upstream DATA failure; frozen_methodology.json is not upstream data,
+    it is the specification, and it is SHA-256-pinned in CI. Every OTHER
+    score-effective constant is read at import (app/indicators/s4_gsadf.py), so
+    an absent one aborts startup. gsadf.statistic and gsadf.contested_rule are
+    new in v4.0/v4.1 and are read per-request, so without this check the
+    identical fault passes as an ordinary s4 data floor.
+
+    Measured, absent gsadf.statistic on an explosive endpoint with
+    gsadf_contested=False: red flag #1 True -> False, the non-compensatory
+    override True -> False, and the band de-risk 70.00 -> trim 57.38, with
+    coverage.degraded reporting false throughout. A corrupt specification
+    silently disarming the override is the failure this exists to prevent.
+
+    Returns [] on a healthy artifact, so the healthy path is bit-unchanged."""
+    return [k for k, allowed in S4_SCORED_FROZEN_ENUMS.items()
+            if frozen_gsadf(k) not in allowed]
+
+
 def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, float | None]:
     """The (stat, cv90, cv95) triple s4 scores, per frozen gsadf.statistic.
 
@@ -806,7 +895,17 @@ def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, flo
     s4 at the contested 0.25 with quality 0.0 and a visible note. It does not
     fall back to a statistic nobody chose, and it does not raise (guardrail 5:
     never surface an upstream/config fault as a 500)."""
-    which = _M.get_path("gsadf", "statistic")
+    # An ABSENT key is the same fault as an unrecognised value: the artifact is
+    # not the one this code was written against. get_path raises KeyError, which
+    # would surface as an HTTP 500 on a config fault (guardrail 5 forbids that).
+    return s4_triple_for(raw, frozen_gsadf("statistic"))
+
+
+def s4_triple_for(raw: RawInputs, which: str | None
+                  ) -> tuple[float | None, float | None, float | None]:
+    """Interpret an ALREADY-READ gsadf.statistic. Split out so compute_snapshot
+    can read the constant ONCE and use that same value for scoring, for the
+    integrity verdict and for the published rf1 record — see s4_frozen_selection."""
     if which == "bsadf_endpoint":
         return raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95
     if which == "gsadf_sup":
@@ -841,7 +940,11 @@ def scored_s4_contested_rule() -> bool | None:
     FAIL-CLOSED: an unrecognised value returns None, and the caller then treats
     s4 as not computable (FLOOR, quality 0.0) rather than silently applying a
     rule nobody chose."""
-    rule = _M.get_path("gsadf", "contested_rule")
+    return s4_rule_is_asymmetric(frozen_gsadf("contested_rule"))
+
+
+def s4_rule_is_asymmetric(rule: str | None) -> bool | None:
+    """Interpret an ALREADY-READ gsadf.contested_rule. See s4_frozen_selection."""
     if rule == "asymmetric":
         return True
     if rule == "symmetric":
@@ -1046,12 +1149,16 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
     # defaults False, so this call is byte-equivalent to the pre-branch one.
-    s4_stat, s4_cv90, s4_cv95 = scored_s4_statistic(raw)
+    # ONE latched read. Everything downstream that needs these constants — the
+    # sub-score, the integrity verdict, and the published rf1 record — uses these
+    # exact values, so a read that fails only here cannot be invisible later.
+    _s4_stat_key, _s4_rule_key, _s4_unidentified = s4_frozen_selection()
+    s4_stat, s4_cv90, s4_cv95 = s4_triple_for(raw, _s4_stat_key)
     # v4.1: the contested rule is a frozen constant, same discipline as the
     # statistic. bool(None) is False, i.e. the cap — and an unknown rule also
     # fails _s4_ok below, so the run reports FLOOR/quality 0.0 rather than
     # scoring under a rule that could not be identified.
-    s4_asym = scored_s4_contested_rule()
+    s4_asym = s4_rule_is_asymmetric(_s4_rule_key)
     s4_sub = s4_gsadf.sub_score(s4_stat, s4_cv90, s4_cv95, contested,
                                 asymmetric=bool(s4_asym))
     sub_s["s4"] = s4_sub
@@ -1085,9 +1192,12 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
         # the ENDPOINT triple, so this branch is reachable with a perfectly good
         # sup sitting in the same payload under extra.s4_statistic.gsadf_sup.
-        _floor_lab = {"bsadf_endpoint": "BSADF@endpoint",
-                      "gsadf_sup": "GSADF sup"}.get(
-            _M.get_path("gsadf", "statistic"), str(_M.get_path("gsadf", "statistic")))
+        _which_stat = _s4_stat_key
+        # None means the artifact could not identify the rule at all; say that
+        # rather than printing "None" at the reader.
+        _floor_lab = ({"bsadf_endpoint": "BSADF@endpoint",
+                       "gsadf_sup": "GSADF sup"}.get(_which_stat, _which_stat)
+                      if _which_stat is not None else "unidentified — artifact unreadable")
         s4_note = (f"s4 scored statistic ({_floor_lab}) not computable this run; "
                    "contested/stale floor applied")
         if raw.gsadf_note:
@@ -1118,7 +1228,10 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "bsadf_endpoint": ("BSADF@endpoint", raw.bsadf_stat, raw.bsadf_cv90),
             "gsadf_sup": ("GSADF sup", raw.gsadf_stat, raw.gsadf_cv90),
         }
-        _scored_family = _families.pop(_M.get_path("gsadf", "statistic"), None)
+        # Non-raising read: unreachable with an absent key today (the selector
+        # floors first), but the guardrail is that a config fault never 500s.
+        _stat_key = _s4_stat_key
+        _scored_family = _families.pop(_stat_key, None) if _stat_key is not None else None
         if _scored_family is not None and None not in _scored_family[1:]:
             _lab, _st, _cv = _scored_family
             s4_note += f"; scored {_lab} {_st:.4f} (cv90 {_cv:.4f})"
@@ -1139,7 +1252,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     if raw.gsadf_stat is not None or raw.bsadf_stat is not None:
         s4_extra = dict(s4_extra or {})
         s4_extra["s4_statistic"] = {
-            "scored": _M.get_path("gsadf", "statistic"),
+            "scored": _s4_stat_key,
             "bsadf_endpoint": {"stat": raw.bsadf_stat, "cv90": raw.bsadf_cv90,
                                "cv95": raw.bsadf_cv95},
             "gsadf_sup": {"stat": raw.gsadf_stat, "cv90": raw.gsadf_cv90,
@@ -1155,7 +1268,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             # could not be extracted at all — a different fault from degenerate
             # data, and one that floors s4 and disables red flag #1.
             "cv_route": raw.bsadf_cv_route,
-            "contested_rule": _M.get_path("gsadf", "contested_rule"),
+            "contested_rule": _s4_rule_key,
         }
     if raw.gsadf_shadow_note:
         s4_extra = dict(s4_extra or {})
@@ -1496,6 +1609,27 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # masking that forced de-risk as "suppressed" would hide the strongest
     # bearish signal (fail-dangerous). override_fired is persisted regardless.
     coverage = _coverage_gate(indicators)
+    # ARTIFACT INTEGRITY — a fault the coverage gate structurally CANNOT express.
+    # Coverage is a WEIGHT measure: s4 is 0.07 of Block S, so losing it moves the
+    # block from 0.909 to 0.839 against a 1/3 threshold, i.e. never degrading.
+    # But an unidentifiable frozen constant is not lost weight, it is a lost
+    # RULE — red flag #1 becomes UNKNOWN rather than not-fired, and rf1 feeds the
+    # non-compensatory override. The snapshot therefore stays SERVED (guardrail 5:
+    # a fault is never a 500) but is named degraded and refuses an action band it
+    # cannot stand behind.
+    _unidentified = _s4_unidentified
+    if _unidentified:
+        log.error("frozen_artifact_scored_constant_unidentified", constants=_unidentified)
+        coverage = dict(coverage)
+        coverage["degraded"] = True
+        # Named, because "degraded" alone reads as thin data — the one thing this
+        # is not. Block fractions are left untouched: this is not a coverage
+        # measurement, it is a separate integrity verdict riding the same gate.
+        coverage["integrity"] = {
+            "frozen_artifact": "scored_constant_unidentified",
+            "constants": [f"gsadf.{k}" for k in _unidentified],
+            "effect": "s4 floored; red flag #1 is UNKNOWN, not not-fired",
+        }
     if coverage["degraded"]:
         band = "de-risk (data degraded)" if red_flags.override_fired \
             else "suppressed (block degraded)"
@@ -1600,6 +1734,13 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         ),
         gsadf_contested=contested,
         gsadf_available=_s4_ok,
+        # ONLY when something was actually measured. A FLOOR reached through a
+        # degenerate CV pair still has a finite statistic, and publishing it here
+        # made the rf1 record read "inactive, +0.50 above its own 95% threshold"
+        # for a reading that was never scored. Gated on _s4_ok so the record says
+        # UNAVAILABLE instead of quoting a margin nothing stands behind.
+        s4_scored_stat=s4_stat if _s4_ok else None,
+        s4_scored_cv95=s4_cv95 if _s4_ok else None,
         hy_oas_tight_bps=hy_oas_tight_bps,
         semi_runup_pp=runup,
     )
@@ -1645,7 +1786,9 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
     # on a diverging input the record read active=false with distance=+0.3585,
     # i.e. "did not fire" next to "0.36 ABOVE its own 95% threshold". Before this
     # branch s4 scored the sup, so the two agreed by construction.
-    _rf1_stat, _, _rf1_cv95 = scored_s4_statistic(raw)
+    # Latched from compute_snapshot; see SnapshotData.s4_scored_stat. Re-reading
+    # the artifact here was a third independent read of the same constant.
+    _rf1_stat, _rf1_cv95 = data.s4_scored_stat, data.s4_scored_cv95
     red_flag_meta = build_red_flag_meta(
         red_flags=data.red_flags,
         observed_at=now.isoformat(),

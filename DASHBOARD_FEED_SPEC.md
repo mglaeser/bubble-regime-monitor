@@ -356,21 +356,21 @@ as the value, so a consumer never compares a statistic to the wrong null. Two
 detail keys are new; none are removed:
 
 ```jsonc
-"gsadf": { "value": 0.7562, "unit": "stat", "source": "exuber",
+"gsadf": { "value": 1.1315, "unit": "stat", "source": "exuber",
            "detail": { "statistic": "bsadf_endpoint",
                        "cv90": 1.1769, "cv95": 1.4315,
                        "contested": true, "state": "COMPUTED",
-                       "gsadf_sup": { "stat": 2.6189, "cv90": 2.0034, "cv95": 2.2604 } } }
+                       "gsadf_sup": { "stat": 2.5837, "cv90": 2.0034, "cv95": 2.2604 } } }
 ```
 
 - `statistic` — names the scored family (`"bsadf_endpoint"`, or `"gsadf_sup"` for
   the pre-v4.0 rule). Read it before interpreting `value`.
 - `gsadf_sup` — the **unscored** GSADF sup and its own CVs, retained so the
   endpoint-vs-sup divergence stays auditable from the payload alone. The values
-  above are the 1986 real-Nasdaq-100 divergence (exuber 1.1.0, T=487 — an
+  above are the 1986 NOMINAL Nasdaq-100 divergence, the scored family (exuber 1.1.0, T=487 — an
   **offline** measurement; `gsadf.series_months_max = 360` caps every runtime fit,
   and on the 360-month tail the service does fit, the same series gives GSADF
-  1.3234 vs cv95 2.2099, no rejection, while the endpoint is 0.7562 under both),
+  1.4936 vs cv95 2.2099, no rejection, while the endpoint is 1.1315 under both),
   where the
   sup rejects at 5% on a window ending 2000-02 while the endpoint is calm — an
   illustration, not a live capture.

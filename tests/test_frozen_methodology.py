@@ -61,7 +61,11 @@ from app import methodology as M
 #               SCORED instrument is nominal: 1.1315 vs cv90 1.1393, a 0.7%
 #               margin. Also records that endpoint-level size distortion is
 #               ASSUMED, not shown — Chen et al. measure the sup.
-EXPECTED_SHA256 = "70dcbcc794e14e28428b83385ded2d3b740477f99c65e88d5ade5e6f48d38643"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
+#   bfb3d9a5... instrument correction: the v4.0 RATIONALE still quoted the
+#               CPI-deflated shadow (2.6189 / 0.7562). Restated on the NOMINAL
+#               scored family (2.5837 / 1.1315) — same story, and the numbers
+#               now belong to the series the service actually fits.
+EXPECTED_SHA256 = "bfb3d9a536e70042ada48ab4c2ffa29ac052540171b55f158e4f2b15d7fe5483"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
 
 
 def test_sha256_byte_guard():
