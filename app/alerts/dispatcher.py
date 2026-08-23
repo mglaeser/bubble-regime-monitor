@@ -387,14 +387,23 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             # assembled from its own reviewed fragments and its item count.
             if delivery.delivery_kind == DeliveryKind.DIGEST:
                 context = RenderContext(members=[])
-                # NOT len(members): revalidation drops members whose episodes
-                # resolved or were silenced since planning, and a weekly
-                # retrospective counts what HAPPENED, not what is still open on
-                # Monday morning. Using the live count would quietly under-report
-                # exactly the weeks that had the most movement.
+                # NOT len(members), and not every planned member either.
+                #
+                # Revalidation drops members for two different reasons, and the
+                # digest treats them differently because they mean opposite
+                # things. RESOLVED_BEFORE_SEND means it happened and then
+                # cleared — a weekly retrospective counts that, or a week where
+                # everything fired and resolved would read as quiet. SILENCED
+                # means the operator asked not to be told, and a count is still
+                # telling: "3 Ereignisse" when two were silenced discloses
+                # exactly what the silence was for.
+                #
+                # So: everything planned, less what was deliberately suppressed.
                 planned = session.execute(
                     select(func.count()).select_from(AlertDeliveryMember)
-                    .where(AlertDeliveryMember.delivery_id == delivery_id)
+                    .where(AlertDeliveryMember.delivery_id == delivery_id,
+                           func.coalesce(AlertDeliveryMember.drop_reason, "")
+                           != "SILENCED_BEFORE_SEND")
                 ).scalar_one()
                 try:
                     result = render_digest_body(phrase_set,

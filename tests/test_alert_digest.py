@@ -329,3 +329,41 @@ def test_the_count_is_what_happened_not_what_is_still_open():
     with session_scope() as session:
         assert session.get(AlertDelivery, delivery_id).transport_status \
             == TransportStatus.SENT
+
+
+def test_a_silenced_episode_is_not_disclosed_by_the_count():
+    """A count is still telling.
+
+    The two drop reasons mean opposite things. RESOLVED_BEFORE_SEND is "it
+    happened and then cleared" — a retrospective counts that. SILENCED is the
+    operator asking not to be told, and reporting "3 Ereignisse" when two were
+    silenced discloses precisely what the silence was for.
+    """
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import EpisodeStatus
+    from app.alerts.sender import NullSender
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        for rule in ("regime.band_to_derisk", "regime.band_hold_to_trim",
+                     "tripwire.rf4_first"):
+            _pending_item(session, rules_sha=rules_sha, rule_id=rule)
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha, window_key=WINDOW,
+                           now=NOW)
+        assert len(plan.item_ids) == 3
+
+        episodes = session.execute(select(AlertEpisode)).scalars().all()
+        # one silenced, one resolved, one still open
+        episodes[0].suppression_reasons = ["SILENCED"]
+        episodes[1].is_open = False
+        episodes[1].episode_status = EpisodeStatus.RESOLVED
+        episodes[1].resolved_at = NOW
+
+    sender = NullSender()
+    dispatch_once(session_scope, phrase_set=_phrase_set(), mode="shadow",
+                  live_profile="default", sender=sender, now=NOW)
+
+    body = sender.sent[0][1]
+    assert "2 Ereignisse" in body, (
+        f"the silenced episode was disclosed, or the resolved one dropped: {body!r}")
