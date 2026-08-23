@@ -8,9 +8,10 @@ critical values.
 
 The divergence is not hypothetical. Measured with exuber 1.1.0 (lag=0,
 nrep=2000, seed 20260711) on CPI-deflated native Nasdaq-100 monthly log levels
-from 1986 (T=487): the GSADF sup is 2.6189 against cv95 2.2604 — a rejection —
+from 1986 (T=487, NOMINAL — the scored family): the GSADF sup is 2.5837 against
+cv95 2.2604 — a rejection —
 and it is attained at a window ending 2000-02, while the BSADF at the 2026-07
-endpoint is 0.7562 against endpoint cv90 1.1769. Under the v3 rule a longer
+endpoint is 1.1315 against endpoint cv90 1.1769. Under the v3 rule a longer
 history would have reported the dot-com peak as a present-day bubble signal.
 
 These tests drive compute_snapshot, so behaviour is what is pinned: swapping the
@@ -29,9 +30,13 @@ from app import methodology as M
 from app.services.compute import compute_snapshot, scored_s4_statistic
 from tests.conftest import make_golden_raw_inputs
 
-# Measured, exuber 1.1.0, real native Nasdaq-100 from 1986 (T=487).
-SUP_1986, SUP_CV90, SUP_CV95 = 2.6189, 2.0034, 2.2604          # rejects at 5%
-END_1986, END_CV90, END_CV95 = 0.7562, 1.1769, 1.4315          # does not reject
+# Measured, exuber 1.1.0, NOMINAL native Nasdaq-100 from 1986 (T=487) -- the
+# SCORED family. compute.py fetches the QQQ proxy and takes logs; there is no
+# deflation on the scored path, so a test that drives compute_snapshot must use
+# nominal numbers. (The CPI-deflated series is the shadow: it gives sup 2.6189
+# and endpoint 0.7562, tells the same story, and is never scored.)
+SUP_1986, SUP_CV90, SUP_CV95 = 2.5837, 2.0034, 2.2604          # rejects at 5%
+END_1986, END_CV90, END_CV95 = 1.1315, 1.1769, 1.4315          # does not reject
 _CACHED = (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology)
 
 
@@ -243,7 +248,7 @@ class TestTheContestedRuleIsAFrozenConstant:
     released while a rejection stays capped."""
 
     def test_a_non_rejection_is_released(self):
-        # endpoint 0.7562 < cv90 1.1769 -> not explosive -> SUB_NULL, not the cap.
+        # endpoint 1.1315 < cv90 1.1769 -> not explosive -> SUB_NULL, not the cap.
         assert compute_snapshot(_raw_diverging()).indicators["s4"].sub_score == 0.05
 
     def test_a_rejection_is_still_capped(self):

@@ -66,15 +66,17 @@ extract_cv <- function(obj, level) {
 # --- BSADF AT THE LAST OBSERVATION (the current-regime read) ---
 # GSADF is sup over ALL endpoints r2, so it answers "was there ever an explosive
 # episode anywhere in this window?" -- a historical question whose answer stays
-# REJECTED long after the episode ends. Measured on native Nasdaq-100 from 1986
-# (exuber 1.1.0, T=487): GSADF 2.6189 > cv95 2.2604 -> rejects, and the sup is
+# REJECTED long after the episode ends. Measured on NOMINAL native Nasdaq-100
+# from 1986 -- the SCORED family, since there is no deflation on the scored path
+# (exuber 1.1.0, T=487): GSADF 2.5837 > cv95 2.2604 -> rejects, and the sup is
 # attained at a window ending 2000-02, while the BSADF at the 2026-07 endpoint is
-# 0.7562 against an endpoint cv90 of 1.1769.
+# 1.1315 against an endpoint cv90 of 1.1769. (The CPI-deflated shadow gives
+# 2.6189 and 0.7562 -- same story, and never scored.)
 #
 # BOUND ON THAT NUMBER: gsadf.series_months_max = 360 caps every runtime fit, so
 # T=487 is an offline measurement -- the service never fits it. On the 360-month
-# tail it does fit, the same series gives GSADF 1.3234 vs cv95 2.2099 (no
-# rejection, sup dated 2021-08) while the endpoint is 0.7562 under BOTH. The sup
+# tail it does fit, the same series gives GSADF 1.4936 vs cv95 2.2099 (no
+# rejection, sup dated 2021-08) while the endpoint is 1.1315 under BOTH. The sup
 # changes its verdict with the window length it is handed; the endpoint does not.
 # That is why a live regime gauge reads the endpoint, not the sample maximum.
 # Both are emitted; Python scores one of them per frozen gsadf.statistic.
