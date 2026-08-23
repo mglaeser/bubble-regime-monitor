@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from app.alerts.enums import EvaluationRunStatus
 from app.alerts.errors import sanitize
 from app.alerts.models import AlertComponentHeartbeat
 from app.alerts.recovery import reconcile_sidecars, recover_evaluations
@@ -125,7 +126,19 @@ def run_once() -> dict[str, Any]:
                 log.warning("alert_evaluation_retry_mode_reduced",
                             input_identity=identity, was=original_mode, now=mode)
             try:
-                evaluate_input(identity, mode=mode)
+                outcome = evaluate_input(identity, mode=mode)
+                # An evaluation that RETURNS a failure raises nothing, so
+                # "it did not throw" is not the same as "it worked". A run
+                # that ends FAILED, TIMED_OUT, CONFLICT or ABANDONED left the
+                # snapshot without its alerts exactly as an exception would —
+                # counting it as retried is how abandoned work goes quiet
+                # behind a healthy heartbeat.
+                status = getattr(outcome, "status", None)
+                if status is not None and str(status) != EvaluationRunStatus.COMMITTED:
+                    failed.append(identity)
+                    log.error("alert_evaluation_retry_not_committed",
+                              input_identity=identity, status=str(status))
+                    continue
                 retried.append(identity)
             except Exception as exc:      # noqa: BLE001
                 # One stuck input must not stop the sweep or the job — but it

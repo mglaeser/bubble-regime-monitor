@@ -522,3 +522,32 @@ def test_the_watchdog_wires_its_status_helper_into_the_heartbeat():
     source = inspect.getsource(watchdog.run_once)
     assert "heartbeat_status(" in source
     assert '"critical" if verdict.firing else "ok"' not in source
+
+
+def test_an_evaluation_that_returns_a_failure_is_not_counted_as_retried(
+        isolated_db, monkeypatch):
+    """"It did not throw" is not the same as "it worked".
+
+    A run that ends FAILED, TIMED_OUT, CONFLICT or ABANDONED raises nothing and
+    leaves the snapshot without its alerts exactly as an exception would.
+    Counting it as retried is how abandoned work goes quiet behind a healthy
+    heartbeat.
+    """
+    from types import SimpleNamespace
+
+    for bad in ("FAILED", "TIMED_OUT", "CONFLICT", "ABANDONED"):
+        result = _run_with_retries(
+            monkeypatch, outcomes={"A": SimpleNamespace(status=bad)})
+        assert result["retries_failed"] == 1, bad
+        assert result["retried"] == 0, bad
+        assert result["status"] == "critical", bad
+
+
+def test_a_committed_evaluation_still_counts_as_retried(isolated_db, monkeypatch):
+    from types import SimpleNamespace
+
+    result = _run_with_retries(
+        monkeypatch, outcomes={"A": SimpleNamespace(status="COMMITTED")})
+    assert result["retried"] == 1
+    assert result["retries_failed"] == 0
+    assert result["status"] == "ok"
