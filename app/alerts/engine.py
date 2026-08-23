@@ -47,6 +47,7 @@ from app.alerts.registry import ValidatedRuleset, instance_fingerprint
 from app.alerts.repository import (
     apply_decision,
     load_active_silences,
+    load_input_for_snapshot,
     load_memories,
     load_notification_memories,
     load_recent_inputs,
@@ -344,7 +345,22 @@ def run_evaluation(
                 open_by_hash.setdefault(episode.origin_rules_sha256, set()).add(
                     episode.instance_fingerprint)
 
-        previous = history[-1] if history else None
+        # THE SAME PREDECESSOR THE RENDERER WILL DESCRIBE.
+        #
+        # A transition rule decides against `previous`, and the message says
+        # what the state moved FROM. If the decision used the chronologically
+        # nearest sidecar while the render used snapshot lineage, the two can
+        # disagree — the alert fires on one basis and describes another, and
+        # nothing in the record would show the mismatch.
+        #
+        # Lineage is the correct one: `prev_snapshot_id` is what the scoring
+        # layer recorded, so it survives a skipped recompute, a retry or an
+        # out-of-order arrival. `history` stays chronological, because bases
+        # like `adjacent_snapshots` count snapshots and mean exactly that.
+        with session_factory() as session:
+            previous = load_input_for_snapshot(session, alert_input.prev_snapshot_id)
+        if previous is None:
+            previous = history[-1] if history else None
         ctx = EvaluationContext(
             current=alert_input,
             previous=previous,
@@ -378,7 +394,12 @@ def run_evaluation(
                                          rules_sha256=rules_sha)
                 for rules_sha in [current.rules_sha256, *archived]
             }
-            episode_ids: dict[str, str] = {}
+            # Keyed by (ruleset, fingerprint). One instance can hold an open
+            # episode under an ARCHIVED ruleset and a new one under the current
+            # ruleset at the same time — that is what continuation means — so a
+            # map keyed by fingerprint alone collides and a delivery can be
+            # attached to the wrong episode.
+            episode_ids_by_hash: dict[str, dict[str, str]] = {}
             # Keyed by RULESET, then rule_id. Two rulesets in one batch can
             # define the same rule_id with different specs — that is the whole
             # reason an archived ruleset is loaded — so a flat map lets whichever
@@ -397,7 +418,8 @@ def run_evaluation(
                     evaluation_id=evaluation_id, now=now, existing=existing,
                 )
                 if affected:
-                    episode_ids[decision.instance_fingerprint] = affected
+                    episode_ids_by_hash.setdefault(rules_sha, {})[
+                        decision.instance_fingerprint] = affected
                 rules_by_hash.setdefault(rules_sha, {})[decision.rule_id] = rule
 
             # ---- planning, INSIDE the same transaction --------------------
@@ -439,10 +461,10 @@ def run_evaluation(
                     now=now,
                     rules=rules_by_hash.get(rules_sha, {}),
                     decisions=decisions,
-                    episode_ids=episode_ids,
+                    episode_ids=episode_ids_by_hash.get(rules_sha, {}),
                     memories=load_notification_memories(
                         session, mode=mode, live_profile=live_profile,
-                        fingerprints=set(episode_ids)),
+                        fingerprints=set(episode_ids_by_hash.get(rules_sha, {}))),
                     **silences,
                     origin_rules_sha256=rules_sha,
                     phrase_set_version=artifacts.phrase_set_version,
