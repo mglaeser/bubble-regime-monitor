@@ -129,17 +129,27 @@ def test_an_unconfigured_proxy_is_a_permanent_rejection_not_a_crash(monkeypatch)
 def test_the_live_transport_follows_the_configured_channel(monkeypatch):
     """Alerts must not go out over a channel the operator stopped reading."""
     from app.alerts.sender import ImessageSender as IS
-    from app.alerts.sender import NullSender, SipgateSender
+    from app.alerts.sender import (
+        NullSender,
+        SipgateSender,
+        UnconfiguredSender,
+    )
 
     _configured(monkeypatch)
     assert isinstance(default_sender(live=True), IS)
     assert isinstance(default_sender(live=False), NullSender), (
         "nothing reaches a transport unless the caller asks for live")
 
+    # This assertion used to read `SipgateSender`, which encoded the defect the
+    # panel caught: losing the iMessage base URL is a MISCONFIGURATION, and
+    # answering it by transmitting over the channel the operator switched off
+    # is not a fallback anyone chose. With SMS_ENABLED unset there is now no
+    # transport at all, and that is reported rather than substituted.
     monkeypatch.setenv("IMESSAGE_API_BASE_URL", "")
     from app.config import get_settings
     get_settings.cache_clear()
-    assert isinstance(default_sender(live=True), SipgateSender)
+    assert not isinstance(default_sender(live=True), SipgateSender)
+    assert isinstance(default_sender(live=True), UnconfiguredSender)
 
 
 # --- what the panel caught -------------------------------------------------
@@ -237,3 +247,77 @@ def test_an_unresolvable_recipient_does_not_echo_the_caller_s_string(monkeypatch
     assert result.outcome == SenderOutcome.DEFINITE_PERMANENT_REJECTION
     assert result.error_code == "NO_RECIPIENT"
     assert "+4915100000000" not in (result.error_message_redacted or "")
+
+
+def _clear():
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+
+def test_a_half_configured_imessage_never_falls_back_to_disabled_sms(monkeypatch):
+    """The failure the operator would never see coming.
+
+    Production runs SMS_ENABLED=false with sipgate credentials still in the
+    environment from before the cutover. Selecting sipgate because the iMessage
+    config is incomplete would transmit over a channel that was deliberately
+    switched off, using leftover credentials — in exactly the situation where
+    nobody is watching: a deployment that is half configured.
+    """
+    from app.alerts.sender import SipgateSender, UnconfiguredSender
+
+    monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+    monkeypatch.setenv("IMESSAGE_API_BASE_URL", _BASE)
+    monkeypatch.setenv("IMESSAGE_API_KEY", "")          # the half-configuration
+    monkeypatch.setenv("SMS_ENABLED", "false")
+    monkeypatch.setenv("SIPGATE_TOKEN_ID", "left")
+    monkeypatch.setenv("SIPGATE_TOKEN", "over")         # pragma: allowlist secret
+    monkeypatch.setenv("SIPGATE_RECIPIENT", "+4915100000000")
+    _clear()
+
+    sender = default_sender(live=True)
+    assert not isinstance(sender, SipgateSender)
+    assert isinstance(sender, UnconfiguredSender)
+
+
+def test_no_transport_is_a_visible_rejection_not_a_silent_success(monkeypatch):
+    """A NullSender here would drain the outbox into nothing.
+
+    It reports CONFIRMED_SUCCESS, so every alert would be recorded delivered
+    while none was sent — the dashboard would show delivery working.
+    """
+    from app.alerts.sender import UnconfiguredSender
+
+    result = UnconfiguredSender().send("x", recipient_ref="default")
+    assert result.outcome == SenderOutcome.DEFINITE_PERMANENT_REJECTION
+    assert result.is_success is False
+    assert result.may_retry_automatically is False
+    assert result.error_code == "NO_TRANSPORT_CONFIGURED"
+
+
+def test_sipgate_is_still_selected_when_sms_is_deliberately_on(monkeypatch):
+    """The check is the SWITCH, not a blanket ban on the older transport."""
+    from app.alerts.sender import SipgateSender
+
+    monkeypatch.setenv("IMESSAGE_ENABLED", "false")
+    monkeypatch.setenv("IMESSAGE_API_KEY", "")
+    monkeypatch.setenv("SMS_ENABLED", "true")
+    monkeypatch.setenv("SIPGATE_TOKEN_ID", "id")
+    monkeypatch.setenv("SIPGATE_TOKEN", "tok")          # pragma: allowlist secret
+    monkeypatch.setenv("SIPGATE_RECIPIENT", "+4915100000000")
+    _clear()
+
+    assert isinstance(default_sender(live=True), SipgateSender)
+
+
+def test_the_switch_alone_does_not_select_imessage(monkeypatch):
+    """Enabled but unconfigured must not be treated as available."""
+    from app.alerts.sender import ImessageSender as _Im
+
+    monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+    monkeypatch.setenv("IMESSAGE_API_BASE_URL", "")
+    monkeypatch.setenv("IMESSAGE_API_KEY", "")
+    monkeypatch.setenv("IMESSAGE_RECIPIENT", "")
+    monkeypatch.setenv("SMS_ENABLED", "false")
+    _clear()
+
+    assert not isinstance(default_sender(live=True), _Im)

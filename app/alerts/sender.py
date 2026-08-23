@@ -220,7 +220,7 @@ def default_sender(*, live: bool) -> Sender:
     """`NullSender` unless the caller explicitly asks for live transport.
 
     The live transport follows the SAME precedence the daily digest uses:
-    iMessage when it is configured, sipgate otherwise. Alerts must not go out
+    iMessage when it is enabled and configured, sipgate when SMS is. Alerts must not go out
     over a channel the operator has stopped reading — this deployment runs
     `SMS_ENABLED=false` with the proxy configured, so a sipgate-only alert path
     would have delivered every alert to a disconnected number.
@@ -234,9 +234,43 @@ def default_sender(*, live: bool) -> Sender:
     if not live:
         return NullSender()
     settings = get_settings()
-    if getattr(settings, "imessage_configured", False):
+    if getattr(settings, "imessage_enabled", False) \
+            and getattr(settings, "imessage_configured", False):
         return ImessageSender()
-    return SipgateSender()
+    # `sms_configured` folds in SMS_ENABLED, which is the point. Selecting
+    # sipgate merely because iMessage config is incomplete would transmit over
+    # a channel the operator switched OFF, using credentials that are still
+    # lying around from before the cutover — and it would do it in exactly the
+    # situation where attention is least likely: a half-configured deployment.
+    if getattr(settings, "sms_configured", False):
+        return SipgateSender()
+    # Neither transport is both enabled and configured. This must not be a
+    # NullSender: that reports CONFIRMED_SUCCESS, so every alert would be
+    # recorded as delivered and the outbox would drain into nothing.
+    return UnconfiguredSender()
+
+
+class UnconfiguredSender:
+    """Live delivery was asked for and no transport is available.
+
+    It exists because the two obvious alternatives are both worse. Raising
+    would take down the dispatch loop for a configuration problem, and a
+    `NullSender` would report every alert as CONFIRMED_SUCCESS — draining the
+    outbox into nothing while the dashboard shows delivery working.
+
+    A permanent rejection is the honest answer: it will not be auto-retried,
+    it is visible on the delivery row, and it names what is wrong.
+    """
+
+    def send(self, message: str, *, recipient_ref: str,
+             idempotency_key: str | None = None) -> SendResult:
+        log.error("alert_no_live_transport")
+        return SendResult(
+            outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+            error_code="NO_TRANSPORT_CONFIGURED",
+            error_message_redacted=("live delivery requested but neither "
+                                    "iMessage nor SMS is enabled and configured"),
+        )
 
 
 class ImessageSender:
