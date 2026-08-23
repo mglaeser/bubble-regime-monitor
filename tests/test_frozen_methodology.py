@@ -8,7 +8,8 @@ Three guarantees:
   3. MUTATION — changing a value in the artifact flows through the loader (the file
      is the source), and the hash changes.
 
-Golden headline stays 52.43; the artifact is byte-faithful to the v3.7.8 literals.
+Golden headline stays 52.43. The artifact is byte-faithful to the v3.7.8 literals
+except gsadf.statistic (v4.0-s4-endpoint), which selects the scored statistic.
 """
 
 from __future__ import annotations
@@ -32,7 +33,25 @@ from app import methodology as M
 #   0bfb716f... PIN-A: _meta.methodology_frozen_at = "2026-07-15"
 #   86c52c71... governance cleanup: _meta.unresolved_v4_constants adds
 #               S5_EMPIRICAL_CDF_TIE_METHOD = <PIN> (operator H-clarification)
-EXPECTED_SHA256 = "86c52c71a88f5e2cca3ad26e4d82b2afbc87099b6f68fa0ed4373ad020bba96e"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
+# NOT metadata-only from here on:
+#   ae3984d8... v4.0-s4-endpoint: adds gsadf.statistic = "bsadf_endpoint" (a
+#               score-EFFECTIVE constant — it selects which statistic s4 scores),
+#               bumps _meta.methodology_version and methodology_frozen_at. The
+#               score-effective tree hash therefore CHANGES; the golden headline
+#               does not (52.43), because GSADF_CONTESTED caps s4 at 0.25 for
+#               either statistic at current data. falsification_tracking_since
+#               stays <PIN>: no prospective process exists yet, and the existing
+#               note forbids backdating it.
+#   a601d8e9... v4.0 note correction: the note claimed the bump changes what s4
+#               measures 'not what it currently returns', which is false for the
+#               PUBLISHED value (IndicatorOutput.value, the rf1 record and the
+#               dashboard feed all moved to the endpoint). Wording only; the
+#               score-effective tree is unchanged and the golden stays 52.43.
+#   8d734ed1... v4.0 note bound: the rationale cited T=487, but
+#               gsadf.series_months_max = 360 caps every runtime fit, so that
+#               measurement is offline; on the fitted 360-month tail the sup
+#               does NOT reject. Disclosed. Wording only; tree unchanged.
+EXPECTED_SHA256 = "8d734ed117a4bd0a07e8e481f11941c66b984e4c262d7d8afa640699bf6365db"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
 
 
 def test_sha256_byte_guard():
@@ -60,15 +79,18 @@ def test_loader_rejects_unresolved_pin_in_scored_tree(tmp_path, monkeypatch):
 
 def test_pin_allowed_only_in_meta():
     # PIN-A operator decision (2026-07-19 review): methodology_frozen_at is the
-    # date of the last score-effective methodology change (v3.3.2, 2026-07-15).
+    # date of the last score-effective methodology change. Moved 2026-07-15 ->
+    # 2026-08-22 by v4.0-s4-endpoint, which changes WHICH statistic s4 scores
+    # (gsadf.statistic) — score-effective by definition, even though the headline
+    # is unmoved at current data because the contested cap dominates.
     # falsification_tracking_since intentionally REMAINS <PIN> — it may only be
     # set once a real prospective observation process exists, and must never be
     # backdated or equated with the freeze date. A remaining _meta <PIN> must
     # NOT block loading (it is not score-effective).
     meta = M.get_path("_meta")
-    assert meta["methodology_frozen_at"] == "2026-07-15"
+    assert meta["methodology_frozen_at"] == "2026-08-22"
     assert meta["falsification_tracking_since"] == "<PIN>"
-    assert meta["methodology_version"] == "v3-final"
+    assert meta["methodology_version"] == "v4.0-s4-endpoint"
     M.frozen_methodology()   # loads without raising despite the remaining _meta PIN
 
 

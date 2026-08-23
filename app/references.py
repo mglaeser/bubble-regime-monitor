@@ -207,14 +207,17 @@ REGISTRY: dict[str, Methodology] = {
     ),
     "s4": Methodology(
         id="s4",
-        name="GSADF Explosiveness",
+        name="PSY Explosiveness (endpoint BSADF)",
         weight=0.07,
         grounding="contested",
         block="S",
         what=(
-            "A recursive right-tailed unit-root test (the Phillips-Shi-Yu Generalized Supremum ADF, "
-            "'GSADF') for explosive (faster-than-exponential) dynamics in Nasdaq-100 and SMH monthly "
-            "log prices."
+            "A recursive right-tailed unit-root test (Phillips-Shi-Yu) for explosive "
+            "(faster-than-exponential) dynamics in Nasdaq-100 and SMH monthly log prices. Since "
+            "v4.0-s4-endpoint the SCORED statistic is the backward SADF at the LAST observation — a "
+            "present-tense read of the current regime — rather than the GSADF supremum over every "
+            "endpoint in the sample, which answers the historical question 'was there ever an "
+            "explosive episode in this window?' and stays rejected long after one has ended."
         ),
         how=(
             "Compute in R via exuber (JSS 103(10)): radf(y, lag = 0) with minimum window "
@@ -222,8 +225,16 @@ REGISTRY: dict[str, Methodology] = {
             "from radf_mc_cv(n = length(y), nrep = 2000) after set.seed(20260711), cached as RDS "
             "under GSADF_CV_CACHE (default /data/cv_cache), keyed by n. NEVER hard-code the blog value "
             "1.49 — that is a SADF critical value, not GSADF; the simulated GSADF 95% CV is "
-            "~1.9-2.1 depending on T. Called from Python via Rscript r/gsadf.R with JSON "
-            "stdin/stdout. Sub-score mapping: gsadf_stat > cv95 AND non-contested -> 1.0; "
+            "~1.9-2.3 depending on T (measured with exuber 1.1.0, nrep=2000, seed 20260711: "
+            "T=331 -> cv90 1.9312 / cv95 2.2007; T=487 -> cv90 2.0034 / cv95 2.2604). "
+            "Called from Python via Rscript r/gsadf.R with JSON "
+            "stdin/stdout. Which statistic is scored is the frozen constant gsadf.statistic "
+            "(\"bsadf_endpoint\"); it is a methodology value in the SHA-pinned artifact, not a "
+            "setting, so it cannot be moved by configuration. The endpoint statistic is compared "
+            "against the LAST row of the simulated BSADF critical-value matrix (~1.38-1.43 at the "
+            "95% level for T~330-490, materially below the GSADF CVs above, because a single "
+            "endpoint is not a supremum over hundreds of them). The GSADF sup is still computed and "
+            "REPORTED alongside it. Sub-score mapping: stat > cv95 AND non-contested -> 1.0; "
             "> cv90 -> 0.5; contested-or-stale-or-data-missing -> 0.25; "
             "tested-and-not-explosive -> 0.05."
         ),
@@ -231,6 +242,22 @@ REGISTRY: dict[str, Methodology] = {
             "The GSADF test recursively runs right-tailed ADF regressions over expanding and rolling "
             "windows and takes the supremum, allowing detection and date-stamping of mildly explosive "
             "episodes even when they later collapse (Phillips, Shi & Yu 2015; Homm & Breitung 2012). "
+            "That date-stamping property is exactly why the supremum is the wrong summary for a live "
+            "gauge: measured with exuber 1.1.0 on CPI-deflated native Nasdaq-100 monthly log levels "
+            "from 1986 (T=487), the GSADF is 2.6189 against a 95% CV of 2.2604 — a rejection — but "
+            "the window attaining it ends 2000-02, while the BSADF at the 2026-07 endpoint is 0.7562 "
+            "against an endpoint 90% CV of 1.1769. On that history the supremum would date the "
+            "signal to the dot-com peak rather than to the present. THREE conditions bound "
+            "that statement: the SHIPPED instrument is the QQQ proxy from 1999 (T~331), "
+            "where the sup is 1.4936 and rejects nothing; and while GSADF_CONTESTED is set "
+            "the sub-score is capped at 0.25 for either statistic, so the divergence bites "
+            "on the published value and on red flag #1, and on the sub-score only if the "
+            "contested cap were lifted; and — the binding one — gsadf.series_months_max = 360 "
+            "caps every runtime fit, so T=487 is an OFFLINE measurement the service never "
+            "performs. On the 360-month tail it does fit, the same series gives GSADF 1.3234 "
+            "against cv95 2.2099: no rejection, sup dated 2021-08. The endpoint returns 0.7562 "
+            "under both truncations — the sup changes its verdict with the window length it is "
+            "handed, the endpoint does not, which is the sharper argument for scoring it. "
             "It is theoretically attractive for bubble detection, but its statistical validity here "
             "is disputed: Chen, Chen & Huang (2026) show that under hump-shaped GPT fundamentals the "
             "test spuriously rejects the no-bubble null 93-100% of the time and find no genuine "

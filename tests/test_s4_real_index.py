@@ -16,14 +16,29 @@ from app.indicators.s4_gsadf import sub_score
 from app.sources import SourceError
 from app.sources import fred_real_index as fri
 
-# The live statistic and its critical values, from the deployed service.
+# NOTE: the two triples below come from DIFFERENT instruments and are not two
+# readings of one series. The sup is what the deployed service returns on its
+# QQQ proxy; the endpoint pair is measured on the CPI-deflated native index.
+# Both are real, both are non-rejections, and the tests below only need a
+# non-rejecting scored pair — but do not read them as a matched pair.
+#
+# The live GSADF sup and its critical values, from the deployed service. Since
+# v4.0-s4-endpoint this pair is REPORTED, not scored.
 LIVE_STAT, LIVE_CV90, LIVE_CV95 = 1.579, 1.9359, 2.2215
+
+# The SCORED pair: BSADF at the last observation against the endpoint row of the
+# simulated BSADF CVs. Measured with exuber 1.1.0 (lag=0, nrep=2000, seed
+# 20260711) on CPI-deflated native Nasdaq-100 monthly log levels, T=331,
+# as_of 2026-07. Like the sup above, it is a non-rejection.
+LIVE_BSADF, LIVE_BSADF_CV90, LIVE_BSADF_CV95 = 0.7562, 1.1393, 1.378
 
 
 def _raw_with_live_gsadf():
     from tests.conftest import make_golden_raw_inputs
     raw = make_golden_raw_inputs()
     raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = LIVE_STAT, LIVE_CV90, LIVE_CV95
+    raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = (
+        LIVE_BSADF, LIVE_BSADF_CV90, LIVE_BSADF_CV95)
     raw.gsadf_as_of = "2026-08"
     return raw
 
@@ -140,8 +155,8 @@ class TestBothSwitchesAreActuallyWired:
     the whole suite stayed at 1305 passed. These tests drive compute_snapshot
     instead, so behaviour is what is pinned.
 
-    No R and no network are needed: R only supplies gsadf_stat/cv90/cv95, which
-    a test can hand over directly."""
+    No R and no network are needed: R only supplies the statistic/CV triples,
+    which a test can hand over directly."""
 
     LIVE = (LIVE_STAT, LIVE_CV90, LIVE_CV95)
 
@@ -192,7 +207,7 @@ class TestBothSwitchesAreActuallyWired:
         monkeypatch.setattr(compute.s4_gsadf, "sub_score",
                             lambda *a, **k: real(*a, **{**k, "asymmetric": True}))
         raw = _raw_with_live_gsadf()
-        raw.gsadf_stat = 2.5              # above cv95: a rejection
+        raw.bsadf_stat = 2.5              # above the endpoint cv95: a rejection
         snap = compute.compute_snapshot(raw)
         assert snap.indicators["s4"].sub_score == 0.25
 

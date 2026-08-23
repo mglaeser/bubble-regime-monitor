@@ -276,10 +276,23 @@ class RawInputs:
     gsadf_cv90: float | None = None
     gsadf_cv95: float | None = None
     gsadf_note: str | None = None
+    # Endpoint BSADF + endpoint-row CVs. This is the SCORED pair under
+    # frozen gsadf.statistic == "bsadf_endpoint"; the gsadf_* sup above is then
+    # reported-only. Both are always carried so the note can show the drift.
+    bsadf_stat: float | None = None
+    bsadf_cv90: float | None = None
+    bsadf_cv95: float | None = None
+    bsadf_argmax: int | None = None   # 1-based index of the sup within the sequence
+    bsadf_n: int | None = None
+    bsadf_n_finite: int | None = None  # < bsadf_n means the history has holes
+    bsadf_cv_route: str | None = None  # "bsadf_cv" | "augment_join" | "unavailable"
     # S4 v4 SHADOW (GSADF_SHADOW_REAL_INDEX). Reported, never scored.
     gsadf_shadow_stat: float | None = None
     gsadf_shadow_cv90: float | None = None
     gsadf_shadow_cv95: float | None = None
+    gsadf_shadow_bsadf: float | None = None
+    gsadf_shadow_bsadf_cv90: float | None = None
+    gsadf_shadow_bsadf_cv95: float | None = None
     gsadf_shadow_note: str | None = None
 
     hy_oas_bps: float | None = None
@@ -582,6 +595,10 @@ def gather_inputs() -> RawInputs:
                         timeout_s=get_settings().gsadf_timeout_s)
         if out:
             raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = out.gsadf, out.cv90, out.cv95
+            raw.bsadf_stat, raw.bsadf_cv90 = out.bsadf, out.bsadf_cv90
+            raw.bsadf_cv95, raw.bsadf_argmax = out.bsadf_cv95, out.bsadf_argmax
+            raw.bsadf_n, raw.bsadf_n_finite = out.bsadf_n, out.bsadf_n_finite
+            raw.bsadf_cv_route = out.bsadf_cv_route
             raw.gsadf_note = f"{gsadf_src_note} (cached MC CVs)"
         else:
             # Reason only — the "GSADF not computable this run" prefix is added
@@ -770,6 +787,33 @@ def gather_inputs() -> RawInputs:
 
 
 
+def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, float | None]:
+    """The (stat, cv90, cv95) triple s4 scores, per frozen gsadf.statistic.
+
+    Which statistic s4 scores is a METHODOLOGY constant, not configuration: it
+    lives in the SHA-pinned frozen artifact, so changing it fails the byte guard
+    in CI until it is re-pinned through the v4 process. There is deliberately no
+    env var — a scored value must not move by configuration (see app/config.py
+    and the removal of the GSADF_CONTESTED_ASYMMETRIC runtime binding).
+
+    "bsadf_endpoint" (v4.0) scores the BSADF at the LAST observation against the
+    endpoint row of the simulated BSADF CVs — the current-regime read.
+    "gsadf_sup" (v3) scores the sup over ALL endpoints, which answers a
+    historical question and stays rejected while a spent episode is in sample.
+
+    FAIL-CLOSED: an unrecognised value returns the all-None triple, which floors
+    s4 at the contested 0.25 with quality 0.0 and a visible note. It does not
+    fall back to a statistic nobody chose, and it does not raise (guardrail 5:
+    never surface an upstream/config fault as a 500)."""
+    which = _M.get_path("gsadf", "statistic")
+    if which == "bsadf_endpoint":
+        return raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95
+    if which == "gsadf_sup":
+        return raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95
+    log.error("s4_unknown_frozen_statistic", statistic=which)
+    return None, None, None
+
+
 def populate_gsadf_shadow(raw: RawInputs) -> None:
     """S4 v4 SHADOW: the same test on the input the cited papers use.
 
@@ -798,6 +842,9 @@ def populate_gsadf_shadow(raw: RawInputs) -> None:
             raw.gsadf_shadow_stat = shadow_out.gsadf
             raw.gsadf_shadow_cv90 = shadow_out.cv90
             raw.gsadf_shadow_cv95 = shadow_out.cv95
+            raw.gsadf_shadow_bsadf = shadow_out.bsadf
+            raw.gsadf_shadow_bsadf_cv90 = shadow_out.bsadf_cv90
+            raw.gsadf_shadow_bsadf_cv95 = shadow_out.bsadf_cv95
             raw.gsadf_shadow_note = (
                 f"SHADOW (not scored): real CPI-deflated native NASDAQ100 from FRED, "
                 f"monthly month-end, T={len(shadow_series)}, as_of {shadow_as_of}")
@@ -887,22 +934,31 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # contested-or-stale-or-DATA-MISSING -> 0.25; tested-and-not-explosive -> 0.05.
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
     # defaults False, so this call is byte-equivalent to the pre-branch one.
-    s4_sub = s4_gsadf.sub_score(raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95, contested)
+    s4_stat, s4_cv90, s4_cv95 = scored_s4_statistic(raw)
+    s4_sub = s4_gsadf.sub_score(s4_stat, s4_cv90, s4_cv95, contested)
     sub_s["s4"] = s4_sub
     mc_in.s4_sub = s4_sub
     # COMPUTED requires a finite statistic AND both CVs finite and ordered
     # (v3.7.4/G-04) — a missing cv90 or a NaN previously still reported COMPUTED
     # with quality 1.0 while sub_score silently floored at 0.25.
     _s4_ok = all(v is not None and math.isfinite(v)
-                 for v in (raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95)) \
-        and (raw.gsadf_cv90 or 0.0) < (raw.gsadf_cv95 or 0.0)
+                 for v in (s4_stat, s4_cv90, s4_cv95)) \
+        and (s4_cv90 or 0.0) < (s4_cv95 or 0.0)
     if not _s4_ok:
         # v3.3.2 FLOOR semantics: the 0.25 stays in the aggregation (that is the
         # documented contested/stale policy constant, unchanged), but quality=0.0
         # tells the coverage gate — and the reader — that NOTHING was measured
         # this run. A floored s4 must not report itself as a full-quality reading.
         s4_state, s4_quality = "FLOOR", 0.0
-        s4_note = "GSADF not computable this run; contested/stale floor applied"
+        # Name the SCORED statistic. FLOOR used to imply the sup was missing, so
+        # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
+        # the ENDPOINT triple, so this branch is reachable with a perfectly good
+        # sup sitting in the same payload under extra.s4_statistic.gsadf_sup.
+        _floor_lab = {"bsadf_endpoint": "BSADF@endpoint",
+                      "gsadf_sup": "GSADF sup"}.get(
+            _M.get_path("gsadf", "statistic"), str(_M.get_path("gsadf", "statistic")))
+        s4_note = (f"s4 scored statistic ({_floor_lab}) not computable this run; "
+                   "contested/stale floor applied")
         if raw.gsadf_note:
             s4_note += f" ({raw.gsadf_note})"
         # v3.7.8/G-06: the 0.25 that stays in the aggregation on a FLOOR is an
@@ -914,6 +970,30 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # data-quality problem — a capped-but-measured s4 is a full-quality read.
         s4_state, s4_quality = "COMPUTED", 1.0
         s4_note = raw.gsadf_note or f"GSADF_CONTESTED={str(contested).lower()}"
+        # Name the statistic in the human-readable note too: "1.58 vs cv90 1.94"
+        # means something different for an endpoint read than for a sup read.
+        #
+        # Each value is formatted only behind its OWN None check. Reaching this
+        # branch means _s4_ok, which constrains the SCORED pair only — the
+        # reported-only sup pair is not gated by it and can be absent, and a note
+        # builder must never raise (guardrail 5: an upstream gap must not surface
+        # as a 500). Formatting None with :.4f is a TypeError, not a blank.
+        # The "scored" / "reported, not scored" labels are DERIVED from the same
+        # selection the sub-score used. Hardcoding them inverted the provenance
+        # whenever gsadf.statistic was not "bsadf_endpoint": the note called the
+        # scored statistic reported-only and vice versa, while s4.value carried
+        # the right number.
+        _families = {
+            "bsadf_endpoint": ("BSADF@endpoint", raw.bsadf_stat, raw.bsadf_cv90),
+            "gsadf_sup": ("GSADF sup", raw.gsadf_stat, raw.gsadf_cv90),
+        }
+        _scored_family = _families.pop(_M.get_path("gsadf", "statistic"), None)
+        if _scored_family is not None and None not in _scored_family[1:]:
+            _lab, _st, _cv = _scored_family
+            s4_note += f"; scored {_lab} {_st:.4f} (cv90 {_cv:.4f})"
+        for _lab, _st, _cv in _families.values():
+            if _st is not None and _cv is not None:
+                s4_note += f"; {_lab} {_st:.4f} (cv90 {_cv:.4f}) reported, not scored"
         s4_extra = None
     # DUAL REPORT (PIN C's "documented drift gate"). The shadow was previously
     # written to RawInputs and never read by anything -- computed at the cost of a
@@ -922,6 +1002,29 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # dual report (extra["s5_dual_report"], read back in app/services/replay.py).
     # included_in_score is false and there is no parameter by which it could
     # become true: sub_score never sees it.
+    # WHICH STATISTIC, and what the other one said. The unscored statistic is
+    # reported so the endpoint-vs-sup divergence is auditable from the payload
+    # alone — that divergence is the entire reason for the v4.0 switch.
+    if raw.gsadf_stat is not None or raw.bsadf_stat is not None:
+        s4_extra = dict(s4_extra or {})
+        s4_extra["s4_statistic"] = {
+            "scored": _M.get_path("gsadf", "statistic"),
+            "bsadf_endpoint": {"stat": raw.bsadf_stat, "cv90": raw.bsadf_cv90,
+                               "cv95": raw.bsadf_cv95},
+            "gsadf_sup": {"stat": raw.gsadf_stat, "cv90": raw.gsadf_cv90,
+                          "cv95": raw.gsadf_cv95},
+            "sup_argmax_index": raw.bsadf_argmax,
+            "sequence_len": raw.bsadf_n,
+            # Below sequence_len means part of the BSADF history was not
+            # computable. The endpoint can still be valid — it is gated on its
+            # own finiteness — but the sup has no honest date-stamp, so
+            # sup_argmax_index is null. Reported rather than silently dropped.
+            "sequence_finite": raw.bsadf_n_finite,
+            # Which route produced the endpoint CVs. "unavailable" means the CVs
+            # could not be extracted at all — a different fault from degenerate
+            # data, and one that floors s4 and disables red flag #1.
+            "cv_route": raw.bsadf_cv_route,
+        }
     if raw.gsadf_shadow_note:
         s4_extra = dict(s4_extra or {})
         s4_extra["s4_shadow"] = {
@@ -930,10 +1033,13 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             "gsadf": raw.gsadf_shadow_stat,
             "cv90": raw.gsadf_shadow_cv90,
             "cv95": raw.gsadf_shadow_cv95,
+            "bsadf": raw.gsadf_shadow_bsadf,
+            "bsadf_cv90": raw.gsadf_shadow_bsadf_cv90,
+            "bsadf_cv95": raw.gsadf_shadow_bsadf_cv95,
         }
     # as_of = the QQQ monthly series GSADF actually ran on (v3.7.1 — was the
     # unrelated semis-series date, a provenance mislabel).
-    indicators["s4"] = IndicatorOutput("s4", raw.gsadf_stat, s4_sub, False, "exuber", False,
+    indicators["s4"] = IndicatorOutput("s4", s4_stat, s4_sub, False, "exuber", False,
                                        note=s4_note, as_of=raw.gsadf_as_of,
                                        quality=s4_quality, state=s4_state, extra=s4_extra)
 
@@ -1213,7 +1319,16 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # report the SAME value the flag was evaluated against (no recomputation).
     hy_oas_tight_bps = min(raw.hy_oas_history_bps[-756:]) if raw.hy_oas_history_bps else None
     red_flags = evaluate_red_flags(
-        gsadf_explosive_p05=s4_gsadf.explosive_p05(raw.gsadf_stat, raw.gsadf_cv95),
+        # Red flag #1 reads the SAME statistic the sub-score reads, so the flag and
+        # the score cannot describe different regimes (was pinned to the sup).
+        #
+        # It is also gated on _s4_ok. explosive_p05 compares stat > cv95 and does
+        # not inspect cv90, so a DEGENERATE CV pair (cv90 >= cv95, or non-finite)
+        # floored the sub-score to 0.25/quality 0.0 while the red flag still fired
+        # off the same unusable numbers. That hole predates this change — main had
+        # the identical structure on the sup — but "the flag and the score cannot
+        # disagree" is precisely what this change claims, so it is closed here.
+        gsadf_explosive_p05=_s4_ok and s4_gsadf.explosive_p05(s4_stat, s4_cv95),
         gsadf_contested=contested,
         semi_runup_pp=runup if runup is not None else 0.0,
         hy_oas_bps=raw.hy_oas_bps,
@@ -1354,11 +1469,19 @@ def persist_snapshot(data: SnapshotData, raw: RawInputs) -> int:
         ind = data.indicators.get(indicator_id)
         return ind.stale if ind is not None else None
 
+    # The PUBLISHED rf1 record must describe the statistic that was actually
+    # scored. snapshot_contract derives distance_to_threshold = stat - cv95 from
+    # whatever is passed here, while red_flags.gsadf_explosive_noncontested came
+    # from the scored statistic — feeding the sup made the two disagree in sign:
+    # on a diverging input the record read active=false with distance=+0.3585,
+    # i.e. "did not fire" next to "0.36 ABOVE its own 95% threshold". Before this
+    # branch s4 scored the sup, so the two agreed by construction.
+    _rf1_stat, _, _rf1_cv95 = scored_s4_statistic(raw)
     red_flag_meta = build_red_flag_meta(
         red_flags=data.red_flags,
         observed_at=now.isoformat(),
-        gsadf_stat=raw.gsadf_stat,
-        gsadf_cv95=raw.gsadf_cv95,
+        gsadf_stat=_rf1_stat,
+        gsadf_cv95=_rf1_cv95,
         gsadf_contested=data.gsadf_contested,
         gsadf_available=data.gsadf_available,
         gsadf_as_of=raw.gsadf_as_of,
