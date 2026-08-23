@@ -75,7 +75,7 @@ class TestS4StateQuality:
         from app.services.compute import compute_snapshot
         from tests.conftest import make_golden_raw_inputs
 
-        raw = make_golden_raw_inputs()  # gsadf_stat unset -> not computable
+        raw = make_golden_raw_inputs()  # scored statistic unset -> not computable
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711)
         s4 = data.indicators["s4"]
         assert s4.state == "FLOOR"
@@ -87,12 +87,20 @@ class TestS4StateQuality:
         from tests.conftest import make_golden_raw_inputs
 
         raw = make_golden_raw_inputs()
+        # Both triples, as R returns them. Since v4.0-s4-endpoint the SCORED pair
+        # is the endpoint BSADF; the sup is carried for the report only, so a raw
+        # with only the sup set is (correctly) not computable.
         raw.gsadf_stat, raw.gsadf_cv90, raw.gsadf_cv95 = 1.2, 1.5, 1.9
+        raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = 1.2, 1.5, 1.9
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711)
         s4 = data.indicators["s4"]
         assert s4.state == "COMPUTED"
         assert s4.quality == 1.0
-        assert s4.sub_score == 0.25  # contested cap (policy), full quality
+        # v4.1: the statistic (1.2) is below cv90 (1.5) -- a NON-rejection -- and
+        # gsadf.contested_rule = "asymmetric" lets exactly that case through at
+        # SUB_NULL. A REJECTION would still be capped at 0.25. Full quality either
+        # way: the cap is epistemic policy, not a data-quality problem.
+        assert s4.sub_score == 0.05
 
 
 class TestS5FidelityQuality:

@@ -73,7 +73,7 @@ The headline is the **median** of a seeded 100 000-draw Monte Carlo distribution
 | S1 | Valuation extremity | CAPE 41.6, ECY 0.40 pp | **0.92** | 0.33 |
 | S2 | Concentration | top-10 = 36.4% | **0.80** | 0.27 |
 | S3 | Semis GSY run-up | +108 pp | **0.525** | 0.20 |
-| S4 | GSADF (contested) | contested | **0.25** | 0.07 |
+| S4 | PSY Explosiveness — endpoint BSADF (contested) | no GSADF input (data-missing) | **0.25** | 0.07 |
 | S5 | Credit tightness | OAS 267 bps | **0.80** | 0.13 |
 | D1 | Breadth | pct = 56 | **0.618** | 0.35 |
 | D2 | Margin rollover | +53.7% YoY, no rollover | **0.49** | 0.13 |
@@ -240,6 +240,7 @@ Outcomes are stored in the DB and exposed via `/api/v1/meta/methodology`.
 - **v1 (score 33):** linear-additive aggregation (fully compensatory); stale concentration 40.8%; HY-OAS sign inverted; LPPLS neutral placeholder.
 - **v2 (score 28):** data fixes (concentration, HY-OAS sign, LPPLS); still fully compensatory.
 - **v3 (score ≈ 40, IQR 34–47 at release):** two-block geometric aggregation + non-compensatory override + Monte Carlo median. **The v2→v3 rise is the aggregation fix (partial compensability now punishes imbalance), NOT market deterioration.**
+- **v3.9.0 (methodology v4.0-s4-endpoint → v4.1-s4-asymmetric-contested; score 53.30 → 51.82 live; golden unchanged at 52.43):** s4 scores the **endpoint BSADF**, not the GSADF sup (v4.0, methodology unchanged), and a **contested non-rejection is released** from the 0.25 cap to 0.05 while a contested rejection stays capped (v4.1, score-shifting). **The fall is a policy correction, not market improvement** — the cap sat *above* what the test returned, so it was a floor pushing the headline up. The golden stays 52.43 only because its fixture supplies no GSADF input. Two caveats of record: on the scored (nominal) instrument the live margin is **0.7%** of the critical value, and Chen et al. measure the *supremum*, so endpoint-level size distortion is **assumed, not shown**.
 - **v3.0.1 (methodology unchanged):** first-live-run bugfixes — hardened Stooq pipeline, FINRA parser date-sort (+ staleness guards), GSADF data-missing floors at the contested 0.25, machine-detectable judgment-call failures, LPPLS ≥500-close guard, timezone-aware `computed_at`.
 - **v3.1 (methodology unchanged; price-layer restructure):** Stooq behind a JS proof-of-work gate → disabled; new provider chain **Tiingo → Twelve Data → Alpha Vantage → yfinance → cache** with ETF index proxies (QQQ/SPY), provider health scoring, and the coverage gate. Two free API keys now required.
 - **v3.2.0 (methodology unchanged; July-2026 outage remediation):** root cause was broken in-container DNS — pinned nameservers; LPPLS repaired to the real `lppls==0.6.24` API; S3 provenance fixed; breadth re-architected onto SSGA constituents with a credit-governed background sweep.
