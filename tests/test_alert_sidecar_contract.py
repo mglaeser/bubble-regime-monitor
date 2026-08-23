@@ -614,34 +614,61 @@ def test_month_completion_needs_the_calendar_AND_a_publishing_feed():
     feed that stopped mid-July gets July promoted once September arrives, with
     a MID-JULY close standing in for July's month-end close — a wrong P1.
 
-    The tolerance that separates them is DERIVED, not chosen: the largest gap
-    between consecutive bars in the recent window already encodes weekends and
-    holidays for whatever series this is. Nothing here is a number an operator
-    would calibrate.
+    Freshness is decided against the MARKET CALENDAR, never the series' own gap
+    history: every statistic over those gaps is contaminated by the outages it
+    exists to detect, which is how a 40-day hole last month can make a feed
+    that stopped 30 days ago look healthy.
     """
     from datetime import date, timedelta
 
-    from app.engine.legs import feed_is_current, month_end_faber
+    from app.engine.legs import month_end_faber
+    from app.services.compute import _feed_is_current
 
-    day, end, bars, px = date(2025, 8, 1), date(2026, 7, 31), [], 100.0
-    while day <= end:
+    day, end_day, bars, px = date(2025, 8, 1), date(2026, 7, 31), [], 100.0
+    while day <= end_day:
         if day.weekday() < 5:
             px += 0.1
             bars.append((day.isoformat(), px))
         day += timedelta(days=1)
 
-    # the derived tolerance is the feed's own worst gap — a weekend
-    assert feed_is_current(bars, "2026-08-03") is True
-    assert feed_is_current(bars, "2026-09-02") is False
+    # 2026-07-31 is a Friday; on the following Monday the feed is current
+    assert _feed_is_current(bars, "2026-08-03") is True
+    # five weeks later it plainly is not, however long its past gaps were
+    assert _feed_is_current(bars, "2026-09-02") is False
 
-    # publishing normally: July is authoritative the first session after it ends
-    _, prompt = month_end_faber(bars, as_of_month="2026-08", as_of_date="2026-08-03")
+    _, prompt = month_end_faber(bars, as_of_month="2026-08",
+                                feed_current=_feed_is_current(bars, "2026-08-03"))
     assert prompt == "2026-07", "a completed month must not wait for another bar"
 
-    # same feed, stopped: July must not be promoted from partial data
-    _, stale = month_end_faber(bars, as_of_month="2026-09", as_of_date="2026-09-02")
+    _, stale = month_end_faber(bars, as_of_month="2026-09",
+                               feed_current=_feed_is_current(bars, "2026-09-02"))
     assert stale == "2026-06", "a stale feed's partial month is not a month-end"
 
-    # and the in-progress month is never promoted, whatever the feed is doing
-    _, running = month_end_faber(bars[:-8], as_of_month="2026-07", as_of_date="2026-07-20")
-    assert running == "2026-06"
+    _, running = month_end_faber(bars[:-8], as_of_month="2026-07", feed_current=True)
+    assert running == "2026-06", "the in-progress month is never promoted"
+
+
+def test_a_prior_outage_cannot_make_a_stopped_feed_look_current():
+    """The defect in deriving freshness from the series' own cadence.
+
+    A long hole earlier in the window raises any gap statistic enough that a
+    feed which has since stopped passes as healthy — the outage hides the
+    outage. The market calendar has no such feedback loop.
+    """
+    from datetime import date, timedelta
+
+    from app.services.compute import _feed_is_current
+
+    day, end_day, bars, px = date(2025, 8, 1), date(2026, 5, 1), [], 100.0
+    while day <= end_day:
+        if day.weekday() < 5:
+            px += 0.1
+            bars.append((day.isoformat(), px))
+        day += timedelta(days=1)
+    # a 40-day outage inside the history, then it resumes, then it stops again
+    bars = [b for b in bars if not ("2026-02-01" <= b[0] <= "2026-03-12")]
+
+    assert _feed_is_current(bars, "2026-06-15") is False, (
+        "a stopped feed must not be excused by an earlier outage")
+
+

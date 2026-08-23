@@ -27,7 +27,6 @@ Standing caveat: Cederburg, O'Doherty, Wang & Yan (2020, JFE 138(1): 95-117)
 
 from __future__ import annotations
 
-import datetime as _dt
 import math
 from dataclasses import dataclass
 
@@ -61,36 +60,8 @@ def monthly_closes_dated(daily: list[tuple[str, float]]) -> list[tuple[str, floa
     return out
 
 
-def feed_is_current(daily: list[tuple[str, float]], as_of_date: str | None,
-                   *, lookback: int = 30) -> bool:
-    """Is the newest bar as recent as THIS FEED'S OWN cadence allows?
-
-    The tolerance is derived, not chosen: the largest gap between consecutive
-    bars in the recent window already encodes weekends and market holidays for
-    whatever this series is. A feed whose newest bar is no older than its own
-    worst observed gap is publishing normally; one that is older has stopped.
-
-    This is what lets a completed month be recognised the day it ends without
-    promoting a stale feed's partial month — the two failures that otherwise
-    trade off against each other. Nothing here is a threshold an operator
-    would have to calibrate; remove the feed and the question is unanswerable,
-    which is why it answers False rather than guessing.
-    """
-    if not as_of_date or len(daily) < 5:
-        return False
-    try:
-        days = [_dt.date.fromisoformat(d[:10]) for d, _ in daily[-lookback:]]
-        today = _dt.date.fromisoformat(as_of_date[:10])
-    except ValueError:
-        return False
-    gaps = [(b - a).days for a, b in zip(days, days[1:], strict=False)]
-    if not gaps:
-        return False
-    return (today - days[-1]).days <= max(gaps)
-
-
 def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
-                    as_of_date: str | None = None
+                    feed_current: bool = False
                     ) -> tuple[str | None, str | None]:
     """The AUTHORITATIVE Faber state: (state, month), completed months only.
 
@@ -133,8 +104,13 @@ def month_end_faber(daily: list[tuple[str, float]], *, as_of_month: str,
     # the freshness test this waits for the next session's bar (a late P1);
     # without the calendar test a stale feed's partial month is promoted as if
     # it were complete (a wrong P1). Both tests, or neither failure is avoided.
+    # `feed_current` is decided by the caller against the market calendar, not
+    # inferred from this series. Every statistic over the series' own gaps is
+    # contaminated by the outages it must detect: one 40-day hole last month
+    # raises the tolerance enough for a feed that stopped 30 days ago to look
+    # healthy. The calendar is not self-referential.
     newest_month, _ = dated[-1]
-    if newest_month < as_of_month and feed_is_current(daily, as_of_date):
+    if newest_month < as_of_month and feed_current:
         closed.append(dated[-1])
 
     completed = [(m, c) for m, c in closed if m < as_of_month]
