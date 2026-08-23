@@ -23,6 +23,7 @@ cutover; this is the alert dispatcher's sender.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -360,7 +361,15 @@ class ImessageSender:
         # With no key supplied, fall back to per-call randomness: an unkeyed
         # send is not made worse by being unkeyed, and silently reusing some
         # other request's key would be.
-        stable = (hashlib.sha256(idempotency_key.encode()).hexdigest()
+        # HMAC rather than a bare sha256. The dedupe key is low-entropy by
+        # construction — a mode, a profile, a rule id and a small integer, all
+        # drawn from sets an observer can enumerate — so a plain digest is
+        # reversible by guessing, and the header would tell anyone who sees it
+        # which rule fired and how many times. Keying the hash with the API
+        # secret keeps the value stable for OUR retries while making it opaque
+        # to everyone else.
+        stable = (hmac.new(settings.imessage_api_key.encode(),
+                           idempotency_key.encode(), hashlib.sha256).hexdigest()
                   if idempotency_key else uuid.uuid4().hex)
         headers = {
             "Authorization": f"Bearer {settings.imessage_api_key}",

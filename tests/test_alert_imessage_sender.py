@@ -321,3 +321,49 @@ def test_the_switch_alone_does_not_select_imessage(monkeypatch):
     _clear()
 
     assert not isinstance(default_sender(live=True), _Im)
+
+
+def test_the_idempotency_key_does_not_leak_which_rule_fired(monkeypatch):
+    """A bare sha256 of the dedupe key is reversible by guessing.
+
+    The key is low-entropy by construction: a mode, a profile, a rule id and a
+    small integer, all from sets an observer can enumerate. A plain digest
+    would let anyone who sees the header recover which rule fired and how many
+    times. Keying it with the API secret keeps it stable for our retries and
+    opaque to everyone else.
+    """
+    import hashlib
+
+    _configured(monkeypatch)
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
+
+    dedupe = "v1|MARKET|live|default|regime.band_to_derisk|1"
+    ImessageSender(_client(handler)).send("b", recipient_ref="default",
+                                          idempotency_key=dedupe)
+
+    guessed = hashlib.sha256(dedupe.encode()).hexdigest()
+    assert keys[0] != guessed, (
+        "the key is a plain digest of a guessable string, so an observer who "
+        "enumerates the candidates recovers the rule")
+
+
+def test_a_different_secret_yields_a_different_key(monkeypatch):
+    """Confirms the secret is actually keying the hash rather than decorating it."""
+    _configured(monkeypatch)
+    keys: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keys.append(request.headers.get("Idempotency-Key"))
+        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
+
+    ImessageSender(_client(handler)).send("b", recipient_ref="default",
+                                          idempotency_key="same")
+    monkeypatch.setenv("IMESSAGE_API_KEY", "imp_adifferentkey")  # pragma: allowlist secret
+    _clear()
+    ImessageSender(_client(handler)).send("b", recipient_ref="default",
+                                          idempotency_key="same")
+    assert keys[0] != keys[1]
