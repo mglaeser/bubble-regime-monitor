@@ -379,7 +379,11 @@ def run_evaluation(
                 for rules_sha in [current.rules_sha256, *archived]
             }
             episode_ids: dict[str, str] = {}
-            rules_by_id: dict[str, Any] = {}
+            # Keyed by RULESET, then rule_id. Two rulesets in one batch can
+            # define the same rule_id with different specs — that is the whole
+            # reason an archived ruleset is loaded — so a flat map lets whichever
+            # was applied last decide how the other's members are planned.
+            rules_by_hash: dict[str, dict[str, Any]] = {}
             for rules_sha, rule, decision in planned:
                 existing, memory = memories_by_hash.get(rules_sha, {}).get(
                     decision.instance_fingerprint, (None, InstanceMemory()))
@@ -394,7 +398,7 @@ def run_evaluation(
                 )
                 if affected:
                     episode_ids[decision.instance_fingerprint] = affected
-                rules_by_id[decision.rule_id] = rule
+                rules_by_hash.setdefault(rules_sha, {})[decision.rule_id] = rule
 
             # ---- planning, INSIDE the same transaction --------------------
             #
@@ -417,11 +421,6 @@ def run_evaluation(
             # 14.8 keeps `origin_rules_sha256` per member precisely so a queued
             # delivery can be rendered from the artifact that produced it.
             silences = _silence_kwargs(load_active_silences(session, now=now))
-            memories = load_notification_memories(
-                session, mode=mode, live_profile=live_profile,
-                fingerprints=set(episode_ids))
-            usage = budget_usage(session, mode=mode, live_profile=live_profile,
-                                 now=now)
             limits = default_limits(get_settings())
             recipient = _recipient_ref(get_settings())
 
@@ -431,17 +430,25 @@ def run_evaluation(
 
             for rules_sha, decisions in by_ruleset.items():
                 artifacts = archived.get(rules_sha, current)
+                # RE-READ between passes. Each `persist_plan` adds deliveries
+                # that count against the budget and bumps notification
+                # generations, so a snapshot taken once before the loop lets the
+                # second ruleset plan against headroom the first already spent —
+                # the caps would be respected per pass and breached in total.
                 plan_result = plan(PlanInputs(
                     now=now,
-                    rules=rules_by_id,
+                    rules=rules_by_hash.get(rules_sha, {}),
                     decisions=decisions,
                     episode_ids=episode_ids,
-                    memories=memories,
+                    memories=load_notification_memories(
+                        session, mode=mode, live_profile=live_profile,
+                        fingerprints=set(episode_ids)),
                     **silences,
                     origin_rules_sha256=rules_sha,
                     phrase_set_version=artifacts.phrase_set_version,
                     phrase_set_sha256=artifacts.phrase_set_sha256,
-                    budget_usage=usage,
+                    budget_usage=budget_usage(session, mode=mode,
+                                              live_profile=live_profile, now=now),
                     budget_limits=limits,
                 ))
                 persist_plan(
@@ -449,6 +456,7 @@ def run_evaluation(
                     planning_rules_sha256=rules_sha,
                     recipient_ref=recipient, now=now,
                 )
+                session.flush()   # so the next pass SEES what this one wrote
             evaluation = session.get(AlertEvaluation, evaluation_id)
             if evaluation is not None:
                 evaluation.status = EvaluationRunStatus.COMMITTED

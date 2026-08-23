@@ -178,3 +178,41 @@ def test_a_band_transition_reaches_a_sent_delivery(tmp_path, monkeypatch):
             f"body must fit one GSM-7 message, got {render.gsm7_septets} septets")
         assert "vorher" in render.final_message, (
             f"the transition phrase needs the predecessor: {render.final_message!r}")
+
+
+def test_the_predecessor_comes_from_lineage_not_from_the_clock(isolated_db):
+    """`prev_snapshot_id` is what scoring recorded as the predecessor.
+
+    Picking "the most recent sidecar before this timestamp" instead looks
+    identical in steady state and diverges exactly when it matters: a skipped
+    recompute, a retry, or an out-of-order arrival puts a DIFFERENT snapshot
+    immediately before the trigger, and the message then says the state moved
+    from a band it never moved from.
+    """
+    from app.alerts.repository import load_input_for_snapshot
+    from app.services.alert_integration import capture_alert_input
+
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    with session_scope() as session:
+        first = _snapshot(session, computed_at=base, effective="hold", prev_id=None).id
+    capture_alert_input(first)
+
+    # an unrelated snapshot lands BETWEEN them in time but is not the lineage
+    with session_scope() as session:
+        interloper = _snapshot(session, computed_at=base + timedelta(hours=1),
+                               effective="trim", prev_id=None).id
+    capture_alert_input(interloper)
+
+    with session_scope() as session:
+        third = _snapshot(session, computed_at=base + timedelta(hours=2),
+                          effective="de-risk", prev_id=first).id
+    capture_alert_input(third)
+
+    with session_scope() as session:
+        trigger = load_input_for_snapshot(session, third)
+        previous = load_input_for_snapshot(session, trigger.prev_snapshot_id)
+
+    assert previous is not None
+    assert previous.snapshot_id == first, "lineage, not the nearest timestamp"
+    assert previous.effective_action_state == "hold", (
+        "the interloper would have claimed the move came from 'trim'")

@@ -435,3 +435,21 @@ def load_active_silences(session: Session, *, now: datetime) -> dict[str, Any]:
     for row in rows:
         out.setdefault(row.matcher_kind, set()).add(row.matcher_value)
     return out
+
+
+def load_input_for_snapshot(session: Session, snapshot_id: int | None) -> AlertInput | None:
+    """The sidecar captured for a specific snapshot.
+
+    Lineage, not chronology. `prev_snapshot_id` is what the scoring layer
+    recorded as this snapshot's predecessor, so it stays correct when a
+    recompute is skipped, retried, or arrives out of order — none of which the
+    "most recent sidecar before this timestamp" answer survives.
+    """
+    if snapshot_id is None:
+        return None
+    row = session.execute(
+        select(AlertInputSnapshot).where(AlertInputSnapshot.snapshot_id == snapshot_id)
+    ).scalars().first()
+    if row is None:
+        return None
+    return AlertInput.model_validate(json.loads(row.payload))

@@ -57,7 +57,7 @@ from app.alerts.outbox import (
 from app.alerts.phrase_registry import ValidatedPhraseSet
 from app.alerts.render_context import RenderContext, build_member_context
 from app.alerts.renderer import render_with_cascade
-from app.alerts.repository import load_input, load_recent_inputs, utc_ms
+from app.alerts.repository import load_input, load_input_for_snapshot, utc_ms
 from app.alerts.sender import Sender, default_sender
 from app.logging_conf import get_logger
 
@@ -100,11 +100,6 @@ def _existing_render(session, delivery_id: str) -> AlertRender | None:
     ).scalars().first()
 
 
-def _as_utc(stamp: str) -> datetime:
-    parsed = datetime.fromisoformat(stamp)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
 def _build_context(session, delivery: AlertDelivery, members,
                    phrase_set: ValidatedPhraseSet) -> RenderContext:
     """One isolated context per member, built from persisted sidecars only."""
@@ -114,16 +109,15 @@ def _build_context(session, delivery: AlertDelivery, members,
         trigger = load_input(session, episode.trigger_input_identity) if episode else None
         if trigger is None:
             continue
-        # The input immediately before the trigger, for transition facts. A
-        # phrase that says "vorher X" cannot be filled from the trigger alone.
-        previous = None
-        moment = trigger.computed_at or trigger.built_at
-        if moment:
-            try:
-                earlier = load_recent_inputs(session, before=_as_utc(moment), limit=1)
-                previous = earlier[-1] if earlier else None
-            except ValueError:
-                previous = None
+        # The trigger's PREDECESSOR, for transition facts: a phrase that says
+        # "vorher X" cannot be filled from the trigger alone.
+        #
+        # Taken from snapshot LINEAGE, not from chronology. `prev_snapshot_id`
+        # is what the scoring layer recorded as this snapshot's predecessor, so
+        # it stays correct when a recompute is skipped, retried or lands out of
+        # order — none of which "the most recent sidecar before this timestamp"
+        # survives, and each of which would put the wrong band in the message.
+        previous = load_input_for_snapshot(session, trigger.prev_snapshot_id)
         status = "STILL_FIRING"
         if episode is not None and not episode.is_open:
             status = "RESOLVED_BEFORE_SEND"
