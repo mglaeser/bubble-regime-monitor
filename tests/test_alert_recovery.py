@@ -392,3 +392,52 @@ def test_a_retry_does_not_change_the_mode_the_work_ran_in(isolated_db):
     session = SimpleNamespace(get=lambda _model, key: rows.get(key))
 
     assert _retryable_inputs(session, ["E"], limit=5) == [("I", "shadow")]
+
+
+def test_a_retry_never_runs_in_a_more_permissive_mode_than_either(isolated_db):
+    """Both directions are a defect, and fixing one alone creates the other.
+
+    Escalation: work interrupted in shadow — explicitly not allowed to send —
+    must not come back live.
+
+    Staleness: work interrupted in live must not keep sending after the
+    operator has switched to shadow or disabled, which is very often the switch
+    they threw BECAUSE something was wrong.
+    """
+    from app.jobs.alert_recovery import _retry_mode
+
+    # no escalation: the ambient setting cannot promote stored work
+    assert _retry_mode("shadow", "live") == "shadow"
+    assert _retry_mode("disabled", "live") == "disabled"
+
+    # no staleness: stored work cannot outrank what is currently permitted
+    assert _retry_mode("live", "shadow") == "shadow"
+    assert _retry_mode("live", "disabled") == "disabled"
+
+    # agreement is uneventful
+    assert _retry_mode("live", "live") == "live"
+    assert _retry_mode("shadow", "shadow") == "shadow"
+
+    # an unrecognised mode is treated as the most restrictive, not the least
+    assert _retry_mode("nonsense", "live") == "nonsense"
+    assert _retry_mode("live", "nonsense") == "nonsense"
+
+
+def test_a_retry_is_skipped_entirely_once_alerting_is_disabled(isolated_db, monkeypatch):
+    """Downgrading to disabled stops the retry rather than running it quietly."""
+    from app.jobs import alert_recovery
+
+    called: list = []
+    monkeypatch.setattr("app.services.alert_integration.evaluate_input",
+                        lambda identity, **kw: called.append(identity))
+    monkeypatch.setattr(alert_recovery, "recover_evaluations",
+                        lambda session, **kw: _report(abandoned=["E"]))
+    monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
+    monkeypatch.setattr(alert_recovery, "_retryable_inputs",
+                        lambda session, abandoned, *, limit: [("I", "live")])
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    alert_recovery.run_once()
+    assert called == ["I"], "the retry should still run, just not in live"

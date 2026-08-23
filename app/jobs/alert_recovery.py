@@ -42,6 +42,30 @@ def heartbeat(component: str, status: str, detail: dict[str, Any] | None = None)
             row.detail_json = detail or {}
 
 
+#: Ordered by how much a mode is permitted to do. `live` is the only one that
+#: can reach a phone, which is what makes the ordering worth having.
+_MODE_RANK = {"disabled": 0, "shadow": 1, "live": 2}
+
+
+def _retry_mode(original: str, ambient: str) -> str:
+    """The mode a retry may run in: the LESS permissive of the two.
+
+    Both directions are a real defect, and fixing one alone creates the other.
+
+      * Taking the ambient mode escalates: work interrupted in `shadow` — work
+        explicitly not allowed to send — comes back in `live` and sends.
+      * Taking the original mode is stale: work interrupted in `live` keeps
+        sending after the operator has switched to `shadow` or `disabled`,
+        which is very often the switch they threw BECAUSE something was wrong.
+
+    So neither wins on its own. A retry may resume what it was doing, and it
+    may never do more than the operator currently permits.
+    """
+    if _MODE_RANK.get(ambient, 0) <= _MODE_RANK.get(original, 0):
+        return ambient
+    return original
+
+
 def _retryable_inputs(session: Any, abandoned: list[str], *,
                       limit: int) -> list[tuple[str, str]]:
     """(input identity, mode) for abandoned evaluations still in budget.
@@ -93,8 +117,14 @@ def run_once() -> dict[str, Any]:
     if settings.alerts_mode != "disabled":
         from app.services.alert_integration import evaluate_input
         for identity, original_mode in retryable:
+            mode = _retry_mode(original_mode, settings.alerts_mode)
+            if mode == "disabled":
+                continue
+            if mode != original_mode:
+                log.warning("alert_evaluation_retry_mode_reduced",
+                            input_identity=identity, was=original_mode, now=mode)
             try:
-                evaluate_input(identity, mode=original_mode)
+                evaluate_input(identity, mode=mode)
                 retried.append(identity)
             except Exception as exc:      # noqa: BLE001
                 # One stuck input must not stop the sweep or the job.
