@@ -44,7 +44,9 @@ def _raw_with_live_gsadf():
 
 
 class TestDefaultsAreProductionBehaviour:
-    """Neither switch may move a scored value until deliberately enabled."""
+    """The asymmetric rule is now SHIPPED (v4.1, gsadf.contested_rule), but it is
+    still not reachable by configuration — it moved by ceremony, which is the
+    property these tests defend."""
 
     def test_the_shadow_switch_defaults_off(self):
         # The only runtime switch this branch adds, and it is NON-SCORING.
@@ -57,8 +59,14 @@ class TestDefaultsAreProductionBehaviour:
     def test_contested_still_defaults_on(self):
         assert Settings.model_fields["gsadf_contested"].default is True
 
-    def test_sub_score_unchanged_with_defaults(self):
-        # The production call site passes neither stale nor asymmetric.
+    def test_the_rule_is_a_frozen_constant_not_a_setting(self):
+        from app import methodology as _M
+        assert _M.get_path("gsadf", "contested_rule") == "asymmetric"
+        assert not [f for f in Settings.model_fields if "contested_rule" in f.lower()]
+
+    def test_the_mapping_itself_is_unchanged(self):
+        # sub_score's own default is still the cap; v4.1 changed what the CALL
+        # SITE passes, not the function's behaviour.
         assert sub_score(LIVE_STAT, LIVE_CV90, LIVE_CV95, contested=True) == 0.25
 
 
@@ -184,21 +192,52 @@ class TestBothSwitchesAreActuallyWired:
                 lambda *a, **k: real(*a, **{**k, "asymmetric": True}))
         return compute.compute_snapshot(_raw_with_live_gsadf())
 
-    def test_switch_off_scores_the_contested_floor(self, monkeypatch):
+    def test_the_shipped_rule_scores_what_the_test_returned(self, monkeypatch):
+        # v4.1: no patching. This is the production path.
         snap = self._snapshot(monkeypatch, asymmetric=False)
-        assert snap.indicators["s4"].sub_score == 0.25
-
-    def test_switch_on_scores_what_the_test_returned(self, monkeypatch):
-        # The whole point: a NON-rejection stops being capped.
-        snap = self._snapshot(monkeypatch, asymmetric=True)
         assert snap.indicators["s4"].sub_score == 0.05
 
-    def test_the_switch_moves_the_headline(self, monkeypatch):
-        off = self._snapshot(monkeypatch, asymmetric=False).point_score
-        on = self._snapshot(monkeypatch, asymmetric=True).point_score
-        # Direction is what matters and is asserted exactly: the contested floor
-        # sits ABOVE what the test returned, so releasing it lowers the headline.
+    def test_reverting_the_frozen_rule_restores_the_cap(self, monkeypatch, tmp_path):
+        # The constant is what moves it — flipping it back must restore 0.25, so a
+        # silent revert of the artifact cannot pass unnoticed.
+        import json
+
+        from app import methodology as _M
+        data = json.loads(_M.FROZEN_PATH.read_bytes())
+        data["gsadf"]["contested_rule"] = "symmetric"
+        f = tmp_path / "frozen.json"
+        f.write_text(json.dumps(data))
+        monkeypatch.setattr(_M, "FROZEN_PATH", f)
+        for fn in (_M.frozen_bytes, _M.frozen_sha256, _M.frozen_methodology):
+            fn.cache_clear()
+        try:
+            snap = self._snapshot(monkeypatch, asymmetric=False)
+            assert snap.indicators["s4"].sub_score == 0.25
+        finally:
+            for fn in (_M.frozen_bytes, _M.frozen_sha256, _M.frozen_methodology):
+                fn.cache_clear()
+
+    def test_the_rule_lowers_the_headline_at_the_live_reading(self, monkeypatch, tmp_path):
+        import json
+
+        from app import methodology as _M
+        on = self._snapshot(monkeypatch, asymmetric=False).point_score
+        data = json.loads(_M.FROZEN_PATH.read_bytes())
+        data["gsadf"]["contested_rule"] = "symmetric"
+        f = tmp_path / "frozen.json"
+        f.write_text(json.dumps(data))
+        monkeypatch.setattr(_M, "FROZEN_PATH", f)
+        for fn in (_M.frozen_bytes, _M.frozen_sha256, _M.frozen_methodology):
+            fn.cache_clear()
+        try:
+            off = self._snapshot(monkeypatch, asymmetric=False).point_score
+        finally:
+            for fn in (_M.frozen_bytes, _M.frozen_sha256, _M.frozen_methodology):
+                fn.cache_clear()
+        # The contested floor sat ABOVE what the test returned, so releasing a
+        # non-rejection LOWERS the headline. Measured: 53.30 -> 51.82.
         assert on < off, (on, off)
+        assert round(on - off, 2) == -1.48, (on, off)
 
     def test_a_rejection_is_still_capped_end_to_end(self, monkeypatch):
         from app.indicators import s4_gsadf

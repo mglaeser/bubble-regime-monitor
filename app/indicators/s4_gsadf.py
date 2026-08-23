@@ -106,7 +106,8 @@ def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
         # the asymmetry below does not apply to it.
         return SUB_CONTESTED_OR_STALE
     if contested:
-        # ASYMMETRIC CONTESTED (off by default; GSADF_CONTESTED_ASYMMETRIC).
+        # ASYMMETRIC CONTESTED — SHIPPED since v4.1 (gsadf.contested_rule =
+        # "asymmetric"). The caller passes it; there is no runtime switch.
         #
         # The contested flag exists because of Chen et al. (2026, arXiv
         # 2604.25826). Their finding, VERBATIM, sec 1: "In Monte Carlo
@@ -135,9 +136,11 @@ def sub_score(stat: float | None, cv90: float | None, cv95: float | None,
         # currently a floor that pushes the headline UP.
         #
         # With this on: a rejection is still capped (the critique bites there);
-        # a non-rejection passes through at SUB_NULL. Off by default because
-        # switching it is score-shifting and belongs to the v4 ceremony --
-        # version bump, falsification-clock reset, regenerated golden.
+        # a non-rejection passes through at SUB_NULL. Enabling it was
+        # score-shifting and went through the ceremony (v4.1, 2026-08-23):
+        # version bump, artifact re-pin, measured delta recorded -- live
+        # headline 53.30 -> 51.82 at the reading of the day, action band
+        # unchanged. Setting contested_rule = "symmetric" restores the cap.
         #
         # Residual, stated: a non-rejection can also mean LOW POWER rather than
         # genuine absence, and Chen et al. establish size distortion, not power

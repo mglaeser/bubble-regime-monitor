@@ -814,6 +814,41 @@ def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, flo
     return None, None, None
 
 
+def scored_s4_contested_rule() -> bool | None:
+    """True when a NON-rejection is released from the contested cap.
+
+    Like gsadf.statistic this is a METHODOLOGY constant in the SHA-pinned
+    artifact, not configuration — a scored value must not move by environment.
+
+    WHY ASYMMETRIC. The contested flag exists because of Chen, Chen & Huang
+    (2026): under hump-shaped GPT fundamentals PSY over-rejects. That is SIZE
+    distortion — it bounds FALSE POSITIVES and says nothing against a
+    non-rejection. The inference runs the other way: a test biased toward
+    rejecting that still fails to reject is STRONGER evidence of no
+    explosiveness, not weaker. Capping that reading at 0.25 discards the one
+    result the critique gives most reason to trust, and at the live statistic it
+    RAISES the sub-score above what the test returned (0.25 against SUB_NULL
+    0.05) — so the "conservative cap" was a floor pushing the headline UP.
+
+    Under "asymmetric" a rejection is still capped, because that is exactly where
+    the critique bites. Only the non-rejection passes through.
+
+    RESIDUAL, STATED: a non-rejection can also mean LOW POWER rather than genuine
+    absence, and Chen et al. establish size distortion, not power loss. SUB_NULL
+    is "tested and not explosive", never "certainly calm".
+
+    FAIL-CLOSED: an unrecognised value returns None, and the caller then treats
+    s4 as not computable (FLOOR, quality 0.0) rather than silently applying a
+    rule nobody chose."""
+    rule = _M.get_path("gsadf", "contested_rule")
+    if rule == "asymmetric":
+        return True
+    if rule == "symmetric":
+        return False
+    log.error("s4_unknown_frozen_contested_rule", rule=rule)
+    return None
+
+
 def populate_gsadf_shadow(raw: RawInputs) -> None:
     """S4 v4 SHADOW: the same test on the input the cited papers use.
 
@@ -935,14 +970,21 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # asymmetric= is deliberately NOT bound to a setting: see app/config.py. It
     # defaults False, so this call is byte-equivalent to the pre-branch one.
     s4_stat, s4_cv90, s4_cv95 = scored_s4_statistic(raw)
-    s4_sub = s4_gsadf.sub_score(s4_stat, s4_cv90, s4_cv95, contested)
+    # v4.1: the contested rule is a frozen constant, same discipline as the
+    # statistic. bool(None) is False, i.e. the cap — and an unknown rule also
+    # fails _s4_ok below, so the run reports FLOOR/quality 0.0 rather than
+    # scoring under a rule that could not be identified.
+    s4_asym = scored_s4_contested_rule()
+    s4_sub = s4_gsadf.sub_score(s4_stat, s4_cv90, s4_cv95, contested,
+                                asymmetric=bool(s4_asym))
     sub_s["s4"] = s4_sub
     mc_in.s4_sub = s4_sub
     # COMPUTED requires a finite statistic AND both CVs finite and ordered
     # (v3.7.4/G-04) — a missing cv90 or a NaN previously still reported COMPUTED
     # with quality 1.0 while sub_score silently floored at 0.25.
-    _s4_ok = all(v is not None and math.isfinite(v)
-                 for v in (s4_stat, s4_cv90, s4_cv95)) \
+    _s4_ok = s4_asym is not None \
+        and all(v is not None and math.isfinite(v)
+                for v in (s4_stat, s4_cv90, s4_cv95)) \
         and (s4_cv90 or 0.0) < (s4_cv95 or 0.0)
     if not _s4_ok:
         # v3.3.2 FLOOR semantics: the 0.25 stays in the aggregation (that is the
@@ -950,6 +992,18 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         # tells the coverage gate — and the reader — that NOTHING was measured
         # this run. A floored s4 must not report itself as a full-quality reading.
         s4_state, s4_quality = "FLOOR", 0.0
+        # FLOOR must actually floor the SCORE, not just the label. s4_sub was
+        # computed and published above; before v4.1 `not _s4_ok` was
+        # character-equivalent to sub_score's own data-missing guard, so FLOOR
+        # implied 0.25 by construction and nothing had to re-assert it. Adding
+        # `s4_asym is not None` broke that equivalence: an unrecognised rule
+        # reaches here with a finite, ordered, fully scorable triple, and the
+        # branch was publishing whatever sub_score returned for it -- measured,
+        # 1.0 on a non-contested rejection, headline bit-identical to the run
+        # under a recognised rule. That is failing OPEN while reporting FLOOR.
+        s4_sub = s4_gsadf.SUB_CONTESTED_OR_STALE
+        sub_s["s4"] = s4_sub
+        mc_in.s4_sub = s4_sub
         # Name the SCORED statistic. FLOOR used to imply the sup was missing, so
         # "GSADF not computable" was true by construction; since v4.0 _s4_ok gates
         # the ENDPOINT triple, so this branch is reachable with a perfectly good
@@ -1024,6 +1078,7 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
             # could not be extracted at all — a different fault from degenerate
             # data, and one that floors s4 and disables red flag #1.
             "cv_route": raw.bsadf_cv_route,
+            "contested_rule": _M.get_path("gsadf", "contested_rule"),
         }
     if raw.gsadf_shadow_note:
         s4_extra = dict(s4_extra or {})

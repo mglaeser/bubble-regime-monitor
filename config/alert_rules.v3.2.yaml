@@ -29,8 +29,8 @@
 meta:
   rule_version: "v3.2.0"
   alert_input_schema_version: 1
-  methodology_version: "v4.0-s4-endpoint"
-  methodology_manifest_sha256: "8d734ed117a4bd0a07e8e481f11941c66b984e4c262d7d8afa640699bf6365db"  # pragma: allowlist secret  (public content hash of frozen_methodology.json)
+  methodology_version: "v4.1-s4-asymmetric-contested"
+  methodology_manifest_sha256: "70dcbcc794e14e28428b83385ded2d3b740477f99c65e88d5ade5e6f48d38643"  # pragma: allowlist secret  (public content hash of frozen_methodology.json)
   min_service_version: "3.8.0"
   max_service_version: "3.99.99"
   phrase_set: "v3.2"

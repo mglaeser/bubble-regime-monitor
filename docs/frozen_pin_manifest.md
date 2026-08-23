@@ -100,12 +100,14 @@ The ladder below is statistic-agnostic; `gsadf.statistic` selects what `stat` is
 | Constant | Value | Source |
 |---|---|---|
 | Scored statistic | `gsadf.statistic = "bsadf_endpoint"` — BSADF at the last observation vs the last row of the simulated BSADF CV matrix. `"gsadf_sup"` selects the pre-v4.0 sup. Unknown value → fail-closed FLOOR. | `frozen_methodology.json`; `compute.py:scored_s4_statistic` |
+| Contested rule | `gsadf.contested_rule = "asymmetric"` (v4.1) — a contested REJECTION stays capped at 0.25; a contested NON-REJECTION is released to `SUB_NULL`. `"symmetric"` restores the pre-v4.1 unconditional cap. Unknown value → fail-closed FLOOR. | `frozen_methodology.json`; `compute.py:scored_s4_contested_rule` |
 
 | Condition | Value | Source |
 |---|---|---|
 | Explosive & non-contested (`stat > cv95`) | `1.0` | `s4_gsadf.py` |
 | `stat > cv90` | `0.5` | `s4_gsadf.py` |
-| Contested / stale / data-missing / degenerate CV | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
+| Contested REJECTION / stale / data-missing / degenerate CV / unknown rule | `SUB_CONTESTED_OR_STALE = 0.25` | `s4_gsadf.py` |
+| Contested NON-rejection (`stat <= cv90`) under `contested_rule = "asymmetric"` | `SUB_NULL = 0.05` | `s4_gsadf.py` |
 | Tested-and-not-explosive | `0.05` | `s4_gsadf.py` |
 | COMPUTED gate | finite `stat`, finite `cv90 < cv95`, else FLOOR (0.25, quality 0.0) | `s4_gsadf.py`/`compute.py` (G-04) |
 
