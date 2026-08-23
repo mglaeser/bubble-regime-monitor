@@ -508,7 +508,27 @@ Stage 4. What must not happen is the caps being relaxed to make a gate pass:
 the budget exists precisely to catch a ruleset that talks too much, and it has
 just done its job on the first history it was ever able to measure.
 
-Until this is decided, Stage 3 promotion is blocked by the gate.
+Until this is decided, Stage 3 must not be promoted. That is currently a
+statement, not a mechanism, and closing the gap is scheduled with audit
+finding **B-04** (live execution fail-closed on the promoted ruleset) because
+the two need the same missing piece.
+
+A promotion check has to bind the evidence to the *bytes* it certifies, and
+this artifact deliberately carries no digest: an entropy detector cannot tell a
+64-hex digest from a token, and `.secrets.baseline` is a byte-identical ratchet
+that may not grow to carry one (see `_DIGEST_FIELDS` in
+`scripts/export_alert_stage1_gate.py`). Binding on `rule_version` instead was
+tried and rejected in review, correctly — a version label is mutable, so an
+edited ruleset that failed to bump it would still be cleared by evidence
+describing different bytes.
+
+What does hold today: `tests/test_alert_replay.py` pins the two failures
+literally, so CI breaks if a new one appears **or** if the breach is fixed
+without updating the list, and the artifact-currency test regenerates the
+evidence on every run, so a ruleset edit that changed behaviour cannot reach
+`main` with stale numbers attached. The uncovered path is an edit made
+directly on the deployment host, which is exactly what B-04 exists to close —
+and the registry, unlike the committed artifact, does hold `rules_sha256`.
 
 ---
 

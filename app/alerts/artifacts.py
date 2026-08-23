@@ -16,7 +16,6 @@ against, and those bytes live in the database.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -275,64 +274,6 @@ def register(session: Session, artifacts: LoadedArtifacts, *, now: datetime | No
         log.info("alert_ruleset_promoted", rules_sha256=row.rules_sha256,
                  rule_version=row.rule_version)
     return row.rules_sha256
-
-
-#: Resolved from the package, not the working directory. A cwd-relative path
-#: makes the answer depend on where the process happened to start — and with
-#: the gate failing closed, "not found" now BLOCKS, so a service started from
-#: anywhere but the repo root would refuse every promotion for the wrong
-#: reason.
-_GATE_ARTIFACT = Path(__file__).resolve().parents[2] / "docs" / "alert-stage1-gate.json"
-
-
-def _failed_gate_for_stage(stage: int, *, rule_version: str | None = None,
-                           phrase_set_version: str | None = None) -> list[str]:
-    """Reasons the recorded gate run forbids promoting to this stage.
-
-    FAIL CLOSED. A missing artifact, an unreadable one, and a stage with no
-    recorded run all BLOCK. Promotion is the moment a stage's acceptance
-    evidence is checked, so "we could not read the evidence" must never resolve
-    to "the evidence was fine".
-
-    BOUND TO THE ARTIFACTS IT CERTIFIES. A passing run proves something about
-    the ruleset it ran against, not about whatever is on disk today; without
-    this check a stale pass would clear a ruleset it never saw. The binding is
-    on `rule_version` and `phrase_set_version` because that is the identity
-    this artifact carries — digests are omitted from it by design (see
-    `_DIGEST_FIELDS` in scripts/export_alert_stage1_gate.py), and overriding
-    that decision here would be the wrong place to reopen it.
-    """
-    if not _GATE_ARTIFACT.is_file():
-        return [f"no gate artifact at {_GATE_ARTIFACT.name} — "
-                f"nothing certifies stage {stage}"]
-    try:
-        payload = json.loads(_GATE_ARTIFACT.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        return [f"gate artifact unreadable ({type(exc).__name__}) — "
-                f"stage {stage} is uncertified, not cleared"]
-
-    certified = payload.get("artifacts") or {}
-    if rule_version is not None and certified.get("rule_version") != rule_version:
-        return [f"gate artifact certifies rule_version "
-                f"{certified.get('rule_version')!r}, not {rule_version!r} — "
-                "the evidence describes a different ruleset"]
-    if (phrase_set_version is not None
-            and certified.get("phrase_set_version") != phrase_set_version):
-        return [f"gate artifact certifies phrase_set_version "
-                f"{certified.get('phrase_set_version')!r}, "
-                f"not {phrase_set_version!r}"]
-
-    runs = payload.get("runs")
-    if not isinstance(runs, dict):
-        return ["gate artifact has no runs section — stage is uncertified"]
-    run = runs.get(f"stage_{stage}")
-    if not isinstance(run, dict):
-        return [f"no recorded gate run for stage {stage} — "
-                "absence of evidence is not a pass"]
-    if run.get("passed") is not True:
-        failures = [str(f) for f in (run.get("failures") or [])]
-        return failures or [f"stage {stage} gate run did not pass"]
-    return []
 
 
 def archived_rulesets(session: Session, hashes: list[str], *,

@@ -191,30 +191,6 @@ def admin_promote(response: Response, _: None = Depends(require_admin_key)) -> A
     except AlertError as exc:
         return problem(422, "Ruleset invalid", exc.redacted())
 
-    # The recorded gate run for the target stage is a PRECONDITION, not a
-    # report. `docs/alert-stage1-gate.json` is the acceptance replay for that
-    # stage, and promoting past a failure it names would make the artifact
-    # something nobody acts on. Today that means the non-P1 budget breach
-    # blocks Stage 3 until it is resolved or the caps are changed deliberately
-    # — both operator decisions, neither a reason to promote around the gate.
-    #
-    # Checked here, at the operator boundary, rather than inside `register`:
-    # replay and tests register re-staged rulesets to GATHER this evidence, and
-    # a check there would stop the gate measuring the stage it gates.
-    from app.alerts.artifacts import _failed_gate_for_stage
-
-    target_stage = artifacts.ruleset.document.meta.active_stage
-    blocked = _failed_gate_for_stage(
-        target_stage,
-        rule_version=artifacts.ruleset.rule_version,
-        phrase_set_version=artifacts.phrase_set.version)
-    if blocked:
-        return problem(
-            409, "Stage gate failed",
-            f"stage {target_stage} cannot be promoted: its recorded gate run "
-            f"failed ({'; '.join(blocked)}). Resolve the failure or change the "
-            "target deliberately.")
-
     with session_scope() as session:
         rules_sha = register(session, artifacts, promote=True, promoted_by="admin-api")
     return {
