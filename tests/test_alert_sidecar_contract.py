@@ -391,3 +391,78 @@ def test_a_row_without_the_typed_tier_is_missing_not_a_number(isolated_db):
     assert evidence.value is None
     assert evidence.data_state == DataState.MISSING
     assert evidence.freshness_reason_code == "typed_s5_tier_absent"
+
+
+# ---------------------------------------------------------------------------
+# rf4: a two-legged flag whose second leg has its own availability (B-11)
+# ---------------------------------------------------------------------------
+
+
+def _rf4_meta(*, breadth, near_ath_available, near_ath_state):
+    from app.engine.aggregate import RedFlags
+    from app.engine.snapshot_contract import build_red_flag_meta
+
+    flags = RedFlags()
+    flags.breadth_lt_50_near_ath = bool(
+        breadth is not None and breadth < 50.0 and bool(near_ath_state))
+    return build_red_flag_meta(
+        red_flags=flags, observed_at="2026-08-21T06:00:00+00:00",
+        gsadf_stat=None, gsadf_cv95=None, gsadf_contested=False,
+        gsadf_available=False, gsadf_as_of=None, gsadf_stale=None,
+        semi_runup_pp=None, semis_as_of=None, semis_stale=None,
+        hy_oas_bps=None, hy_oas_tight_bps=None, hy_oas_as_of=None, hy_oas_stale=None,
+        breadth_pct=breadth, breadth_as_of="2026-08-20", breadth_stale=False,
+        near_ath_available=near_ath_available, near_ath_state=near_ath_state,
+    )["flags"]["rf4"]
+
+
+def test_rf4_is_unknown_when_its_near_ath_leg_was_never_observed():
+    """`index_within_2pct_of_ath` is a bool that DEFAULTS TO FALSE.
+
+    With the SPY series missing, the conjunction evaluates false and rf4 used
+    to report a confident "not firing" built on no evidence — because
+    fireability only ever asked about breadth. A flag whose second leg was
+    never observed is UNKNOWN, not inactive.
+    """
+    fact = _rf4_meta(breadth=44.0, near_ath_available=False, near_ath_state=None)
+    assert fact["fireable"] is False, "a flag missing a leg is not fireable"
+    assert fact["active"] is False
+    assert fact["state"] != "INACTIVE", "absence must not read as a definite negative"
+
+
+def test_rf4_is_fireable_when_both_legs_were_observed():
+    fact = _rf4_meta(breadth=44.0, near_ath_available=True, near_ath_state=False)
+    assert fact["fireable"] is True
+    assert fact["active"] is False
+    assert fact["state"] == "INACTIVE", "observed and not firing IS a definite negative"
+
+
+def test_rf4_fires_when_both_legs_are_present_and_true():
+    fact = _rf4_meta(breadth=44.0, near_ath_available=True, near_ath_state=True)
+    assert fact["fireable"] is True
+    assert fact["active"] is True
+
+
+def test_an_unobservable_rf4_does_not_inflate_the_fireable_universe():
+    """`fireable` feeds `override_fireable_universe_count`.
+
+    Overstating it understates how close the non-compensatory override is to
+    firing — the error propagates out of the flag and into the override.
+    """
+    from app.engine.aggregate import RedFlags
+    from app.engine.snapshot_contract import build_red_flag_meta
+
+    def universe(available: bool) -> int:
+        return build_red_flag_meta(
+            red_flags=RedFlags(), observed_at="2026-08-21T06:00:00+00:00",
+            gsadf_stat=None, gsadf_cv95=None, gsadf_contested=False,
+            gsadf_available=False, gsadf_as_of=None, gsadf_stale=None,
+            semi_runup_pp=None, semis_as_of=None, semis_stale=None,
+            hy_oas_bps=None, hy_oas_tight_bps=None, hy_oas_as_of=None, hy_oas_stale=None,
+            breadth_pct=44.0, breadth_as_of="2026-08-20", breadth_stale=False,
+            near_ath_available=available,
+            near_ath_state=False if available else None,
+        )["override_fireable_universe_count"]
+
+    assert universe(False) < universe(True), (
+        "an unobservable rf4 must not be counted in the fireable universe")
