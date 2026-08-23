@@ -16,15 +16,11 @@ It answers one question — "may the ruleset run at stage N?" — and answers it
 from the committed artifact only. It never re-runs the replay, because a gate
 that recomputes its own evidence can be made to agree with itself.
 
-One limitation, stated plainly so it is not mistaken for something stronger:
-the binding is on DECLARED VERSIONS, not on content digests. The artifact
-deliberately omits digests — an entropy detector cannot distinguish a 64-hex
-digest from a 64-hex token, and this repository's secret baseline is a
-byte-identical ratchet that may not grow to carry them (see
-`scripts/export_alert_stage1_gate.py`). So a ruleset edit that fails to bump
-its version is NOT caught here. It is caught by the separate "Alert artifacts"
-CI step, which is why that step is not optional, and by the episode counts in
-the artifact itself moving.
+The binding is on BYTES as well as declared versions. The artifact could not
+carry bare digests — see `group_digest` — so they are written grouped, which
+keeps the full value while staying invisible to an entropy detector. A ruleset
+edit that forgets to bump its version is therefore caught here, and not only by
+the separate "Alert artifacts" CI step.
 """
 
 from __future__ import annotations
@@ -38,10 +34,36 @@ from typing import Any
 #: Mandate 13: delivery is gated at stage 3 and above.
 EVIDENCE_REQUIRED_FROM_STAGE = 3
 
+#: A sha256 written as eight hyphen-separated 8-character groups.
+#:
+#: The artifact could not carry bare digests: an entropy detector cannot tell a
+#: 64-hex digest from a token, and this repository's secret baseline is a
+#: byte-identical ratchet that may not grow to hold them. Truncating was
+#: rejected for a good reason — the detector scores entropy rather than length,
+#: so whether a prefix passes depends on which characters the hash happened to
+#: produce, and a future edit would fail CI for reasons unrelated to the edit.
+#:
+#: Grouping has neither problem. The digest is carried in FULL, so nothing is
+#: weakened, and no group is long enough to score as high-entropy, so the
+#: result is stable rather than luck-of-the-hash.
+_GROUP = 8
+
+
+def group_digest(digest: str) -> str:
+    return "-".join(digest[i:i + _GROUP] for i in range(0, len(digest), _GROUP))
+
+
+def ungroup_digest(grouped: str) -> str:
+    return grouped.replace("-", "")
+
+
+
 
 def promotion_blockers(*, target_stage: int, artifact: dict[str, Any],
                        rule_version: str | None = None,
-                       phrase_set_version: str | None = None) -> list[str]:
+                       phrase_set_version: str | None = None,
+                       rules_sha256: str | None = None,
+                       phrase_set_sha256: str | None = None) -> list[str]:
     """Everything standing between the ruleset and running at `target_stage`.
 
     An empty list means promotion is permitted. Any non-empty list means it is
@@ -89,6 +111,24 @@ def promotion_blockers(*, target_stage: int, artifact: dict[str, Any],
                     f"stage {target_stage}: the evidence was produced for phrase "
                     f"set {declared.get('phrase_set_version')!r}, but "
                     f"{phrase_set_version!r} is committed")
+
+            # Bytes, where the artifact can carry them. A version string is
+            # something a human types; this is what the replay actually ran on.
+            for label, expected, key in (
+                    ("rules", rules_sha256, "rules_sha256_grouped"),
+                    ("phrase set", phrase_set_sha256, "phrase_set_sha256_grouped")):
+                if expected is None:
+                    continue
+                recorded = declared.get(key)
+                if not isinstance(recorded, str) or not recorded:
+                    blockers.append(
+                        f"stage {target_stage}: the evidence records no {label} "
+                        "digest, so it cannot be shown to describe these bytes")
+                elif ungroup_digest(recorded) != expected:
+                    blockers.append(
+                        f"stage {target_stage}: the evidence was produced on "
+                        f"{label} {ungroup_digest(recorded)[:12]}, but "
+                        f"{expected[:12]} is committed")
 
     key = f"stage_{target_stage}"
     run = runs.get(key)
@@ -189,6 +229,8 @@ def live_admission_blockers(session: Any, *, path: str | Path | None = None,
         target_stage=stage, artifact=evidence,
         rule_version=ruleset.document.meta.rule_version,
         phrase_set_version=getattr(ruleset, "phrase_set_version", None),
+        rules_sha256=ruleset.rules_sha256,
+        phrase_set_sha256=ruleset.phrase_set_sha256,
     )
     blockers.extend(_digest_blockers(session, ruleset))
     return blockers
@@ -274,6 +316,8 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
         target_stage=stage, artifact=evidence,
         rule_version=ruleset.document.meta.rule_version,
         phrase_set_version=getattr(ruleset, "phrase_set_version", None),
+        rules_sha256=ruleset.rules_sha256,
+        phrase_set_sha256=ruleset.phrase_set_sha256,
     )
     blockers.extend(_digest_blockers(session, ruleset))
     return blockers

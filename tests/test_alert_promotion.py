@@ -298,3 +298,109 @@ def test_nothing_promoted_means_nothing_authorised():
     with session_scope() as session:
         blockers = _digest_blockers(session, load_active(session).ruleset)
     assert blockers == ["nothing has been promoted, so no bytes authorise delivery"]
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_authorisation_withdrawn_after_the_claim_stops_the_send(monkeypatch):
+    """Check-then-act: the pass-level check ran before this delivery's work.
+
+    A promotion, a demotion or a swapped ruleset in between leaves an
+    authorisation that was true when it was read and false when it is acted on.
+    """
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    calls: list[int] = []
+
+    def _gate(session, rules_sha, **kw):
+        calls.append(1)
+        # authorised at the pass-level check, withdrawn by the time we send
+        return [] if len(calls) == 1 else ["stage 3: promotion was withdrawn"]
+
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: [])
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers", _gate)
+
+    class _Explodes:
+        def send(self, *a, **k):
+            raise AssertionError("sent after authorisation was withdrawn")
+
+    report = dispatch_once(session_scope, phrase_set=None, mode="live",
+                           live_profile="default", sender=_Explodes())
+    assert report.sent == 0
+    # the gate is consulted more than once: before the pass and before the wire
+    assert len(calls) != 1 or report.claimed == 0
+
+
+def test_a_released_delivery_is_queued_again_not_held():
+    """It is still exactly as sendable as it was; something else said not yet."""
+    from datetime import UTC, datetime
+
+    from app.alerts.enums import PlanningState, TransportStatus
+    from app.alerts.outbox import release
+
+    class _D:
+        transport_status = TransportStatus.LEASED
+        planning_state = PlanningState.READY
+        lease_owner = "worker-1"
+        lease_until = "later"
+        updated_at = None
+
+    delivery = _D()
+    release(delivery.__class__ and None or None, delivery,  # session unused
+            now=datetime(2026, 8, 24, tzinfo=UTC))
+    assert delivery.transport_status == TransportStatus.PENDING
+    assert delivery.lease_owner is None and delivery.lease_until is None
+    assert delivery.planning_state == PlanningState.READY, (
+        "release must not invent a hold state")
+
+
+def test_evidence_produced_on_other_bytes_does_not_certify_these():
+    """The gap version binding left open, now closed.
+
+    A version string is something a human types, so an edit that forgot to bump
+    it produced evidence that still claimed to describe the new ruleset.
+    """
+    from app.alerts.promotion import group_digest
+
+    artifact = {
+        "artifacts": {
+            "rule_version": "v3.2.0", "phrase_set_version": "v3.2",
+            "rules_sha256_grouped": group_digest("a" * 64),
+            "phrase_set_sha256_grouped": group_digest("b" * 64),
+        },
+        "runs": {"stage_3": {"evaluated_at_stage": 3, "passed": True,
+                             "failures": []}},
+    }
+    # same declared versions, different bytes
+    blockers = promotion_blockers(target_stage=3, artifact=artifact,
+                                  rule_version="v3.2.0", phrase_set_version="v3.2",
+                                  rules_sha256="c" * 64,
+                                  phrase_set_sha256="b" * 64)
+    assert any("was produced on rules" in b for b in blockers)
+
+    # and matching bytes clear it
+    assert promotion_blockers(target_stage=3, artifact=artifact,
+                              rule_version="v3.2.0", phrase_set_version="v3.2",
+                              rules_sha256="a" * 64,
+                              phrase_set_sha256="b" * 64) == []
+
+
+def test_evidence_with_no_digest_at_all_does_not_bind():
+    artifact = {
+        "artifacts": {"rule_version": "v3.2.0"},
+        "runs": {"stage_3": {"evaluated_at_stage": 3, "passed": True,
+                             "failures": []}},
+    }
+    blockers = promotion_blockers(target_stage=3, artifact=artifact,
+                                  rule_version="v3.2.0", rules_sha256="a" * 64)
+    assert any("records no rules digest" in b for b in blockers)
+
+
+def test_grouping_is_reversible_and_full_fidelity():
+    from app.alerts.promotion import group_digest, ungroup_digest
+
+    digest = "e04ac5b7b0d071fc94ec61fca951cf99174a9544c425d8addc85b6d5182d3a8a"
+    assert ungroup_digest(group_digest(digest)) == digest
+    assert max(len(p) for p in group_digest(digest).split("-")) <= 8

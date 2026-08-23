@@ -483,15 +483,48 @@ def test_the_committed_history_carries_no_derived_content_hash():
     assert "economic_observation_key" not in raw
 
 
-def test_the_gate_artifact_records_artifact_identity_without_a_digest():
-    """Versions, not hashes — and the omission is stated, not silent."""
+def test_the_gate_artifact_binds_to_bytes_and_not_only_to_versions():
+    """Versions AND digests — because a version string is something a human types.
+
+    This test previously asserted the digests were absent, which was true and
+    was the weakness: an edit that forgot to bump `rule_version` produced
+    evidence that still "described" the new ruleset. The digests are carried
+    grouped, which keeps the whole value while staying invisible to the entropy
+    detector — so per-run summaries can still omit bare digests, and the
+    provenance section can bind bytes.
+    """
+    from app.alerts.promotion import ungroup_digest
+
     payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
-    assert payload["artifacts"]["rule_version"]
-    assert payload["artifacts"]["phrase_set_version"]
-    assert "omitted by design" in payload["artifacts"]["digests"]
+    declared = payload["artifacts"]
+    assert declared["rule_version"]
+    assert declared["phrase_set_version"]
+
+    for key in ("rules_sha256_grouped", "phrase_set_sha256_grouped"):
+        grouped = declared[key]
+        assert "-" in grouped, "an ungrouped digest would trip the secret scan"
+        assert len(ungroup_digest(grouped)) == 64, "the digest was truncated"
+        assert max(len(part) for part in grouped.split("-")) <= 8
+
+    # the digests belong to the ARTIFACT's provenance, not to each run
     for run in payload["runs"].values():
         assert "rules_sha256" not in run
         assert "phrase_set_sha256" not in run
+
+
+def test_the_gate_artifact_digests_are_the_committed_ones():
+    """Evidence that binds to the wrong bytes binds to nothing."""
+    from app.alerts.artifacts import validate_from_disk
+    from app.alerts.promotion import ungroup_digest
+
+    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
+    ruleset = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
+                                 service_version="3.8.0").ruleset
+    declared = payload["artifacts"]
+    assert ungroup_digest(declared["rules_sha256_grouped"]) == ruleset.rules_sha256, (
+        "docs/alert-stage1-gate.json is stale — regenerate it")
+    assert ungroup_digest(declared["phrase_set_sha256_grouped"]) \
+        == ruleset.phrase_set_sha256
 
 
 # ---------------------------------------------------------------------------

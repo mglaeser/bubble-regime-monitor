@@ -52,6 +52,7 @@ from app.alerts.outbox import (
     mark_transient,
     mark_unknown,
     recover_leases,
+    release,
     revalidate_members,
 )
 from app.alerts.phrase_registry import ValidatedPhraseSet
@@ -328,6 +329,27 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 created_at=now,
             ))
             body = result.body
+        # Re-check admission HERE, inside the transaction that marks the
+        # delivery as sending. The pass-level check ran before any of this
+        # delivery's work: a promotion, a demotion or a swapped ruleset between
+        # then and now would leave an authorisation that was true when it was
+        # read and false when it is acted on. Checking again immediately before
+        # the wire narrows that to the transaction itself.
+        #
+        # No hold and no failure state: the delivery stays PENDING and the next
+        # pass picks it up. An authorisation that has just been withdrawn is a
+        # condition to wait out, not a property of this message.
+        if mode == "live":
+            late = delivery_admission_blockers(
+                session, delivery.planning_rules_sha256)
+            if late:
+                report.notes.extend(late)
+                report.held += 1
+                log.error("alert_admission_withdrawn_before_send",
+                          delivery_id=delivery_id, blockers=late)
+                release(session, delivery, now=now)
+                return
+
         mark_sending(session, delivery, now=now)
         recipient_ref = delivery.recipient_ref
         # Read inside the transaction: the send happens outside it, and the
