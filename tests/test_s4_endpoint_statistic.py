@@ -743,6 +743,33 @@ class TestThePublishedRecordDescribesTheScoredStatistic:
         assert rf1["distance_to_threshold"] == pytest.approx(END_1986 - END_CV95)
         assert (rf1["distance_to_threshold"] > 0) is rf1["active"]
 
+    def test_an_unmeasured_s4_publishes_no_margin(self, isolated_db, monkeypatch):
+        """A FLOOR reached through a DEGENERATE CV pair still carries a finite
+        statistic. Publishing it made the record read "inactive, +0.50 above its
+        own 95% threshold" for a reading that was never scored — an inactive flag
+        quoting a measured-looking margin is worse than no margin at all."""
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services.compute import persist_snapshot
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        raw = _raw_diverging()
+        raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = 2.0, 1.9, 1.5   # cv90 > cv95
+        data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,
+                                gsadf_contested=False)
+        assert data.indicators["s4"].state == "FLOOR"
+        assert data.gsadf_available is False
+        assert data.s4_scored_stat is None and data.s4_scored_cv95 is None
+        with session_scope() as session:
+            rf1 = session.execute(select(Snapshot).where(
+                Snapshot.id == persist_snapshot(data, raw))).scalars().one() \
+                .red_flag_meta["flags"]["rf1"]
+        assert rf1["active"] is False
+        assert rf1["distance_to_threshold"] is None, (
+            "published a margin for a statistic that was never scored")
+
     def test_a_real_rejection_publishes_a_positive_distance(self, isolated_db, monkeypatch):
         from sqlalchemy import select
 

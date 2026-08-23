@@ -1620,8 +1620,13 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
         ),
         gsadf_contested=contested,
         gsadf_available=_s4_ok,
-        s4_scored_stat=s4_stat,
-        s4_scored_cv95=s4_cv95,
+        # ONLY when something was actually measured. A FLOOR reached through a
+        # degenerate CV pair still has a finite statistic, and publishing it here
+        # made the rf1 record read "inactive, +0.50 above its own 95% threshold"
+        # for a reading that was never scored. Gated on _s4_ok so the record says
+        # UNAVAILABLE instead of quoting a margin nothing stands behind.
+        s4_scored_stat=s4_stat if _s4_ok else None,
+        s4_scored_cv95=s4_cv95 if _s4_ok else None,
         hy_oas_tight_bps=hy_oas_tight_bps,
         semi_runup_pp=runup,
     )
