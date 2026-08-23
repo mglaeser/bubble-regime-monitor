@@ -736,12 +736,11 @@ def test_a_stale_feed_that_finished_its_month_still_closes_it():
     the calendar produced exactly the two errors it was meant to prevent: a
     partial month promoted, or a complete one withheld.
     """
-    from app.engine.legs import month_end_faber
-    from app.services.compute import _closed_months
-
     from datetime import date, timedelta
 
     from app.alerts.calendars import is_trading_day
+    from app.engine.legs import month_end_faber
+    from app.services.compute import _closed_months
 
     def month_end(year: int, month: int) -> str:
         nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
