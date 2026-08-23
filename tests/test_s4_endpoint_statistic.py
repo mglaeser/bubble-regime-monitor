@@ -211,6 +211,38 @@ class TestAMalformedArtifactIsNamed:
         # and it refuses an action band it cannot stand behind
         assert "suppressed" in snap.action_band or "degraded" in snap.action_band, label
 
+    @staticmethod
+    def _three_flags_without_rf1():
+        """rf2 + rf3 + rf4 fire; rf1 does NOT. The override is then entirely
+        independent of the frozen artifact — semis run-up, HY OAS widening and
+        breadth near the ATH say nothing about which GSADF statistic is scored."""
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_1986                                     # rf1 off
+        raw.smh_2yr_return_pct, raw.spy_2yr_return_pct = 200.0, 32.0  # rf2
+        raw.hy_oas_bps, raw.hy_oas_history_bps = 400.0, [250.0] * 800  # rf3
+        raw.breadth_pct, raw.index_within_2pct_of_ath = 30.0, True    # rf4
+        return raw
+
+    def test_it_does_not_mask_an_override_it_did_not_break(self, frozen_broken):
+        """The integrity verdict must not RE-LABEL a fired override as merely
+        suppressed. Masking a forced de-risk hides the strongest bearish signal
+        — fail-dangerous, and precisely what refusing to compute would do.
+
+        The three other tripwires are measured from data the artifact cannot
+        touch, so degrading the snapshot must leave their verdict intact and
+        only annotate it."""
+        good = compute_snapshot(self._three_flags_without_rf1(), gsadf_contested=False)
+        assert good.red_flags.count == 3 and good.red_flags.override_fired is True
+        assert good.action_band == "de-risk"
+
+        frozen_broken(lambda d: d["gsadf"].pop("statistic"))
+        bad = compute_snapshot(self._three_flags_without_rf1(), gsadf_contested=False)
+        assert bad.coverage["integrity"]["constants"] == ["gsadf.statistic"]
+        assert bad.red_flags.count == 3, "the artifact cannot reach rf2/rf3/rf4"
+        assert bad.red_flags.override_fired is True
+        assert bad.action_band == "de-risk (data degraded)"
+        assert "suppressed" not in bad.action_band
+
     def test_it_cannot_silently_disarm_the_override(self, frozen_broken):
         """The safety property, stated as a test: whatever else happens, a
         malformed artifact must not produce a snapshot that looks ordinary."""
