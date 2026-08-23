@@ -156,6 +156,10 @@ def _meta(**overrides):
         hy_oas_bps=267.0, hy_oas_tight_bps=250.0, hy_oas_as_of="2026-08-14",
         hy_oas_stale=False,
         breadth_pct=56.0, breadth_as_of="2026-08-14", breadth_stale=False,
+        # rf4 has TWO legs and both must have been observed for it to be
+        # fireable (B-11). The default here is the seeing case; the tests that
+        # care about a blind near-ATH leg say so explicitly.
+        near_ath_available=True, near_ath_state=False,
     )
     base.update(overrides)
     return build_red_flag_meta(**base)
@@ -185,6 +189,20 @@ def test_uncontested_gsadf_is_fireable():
     meta = _meta(gsadf_contested=False)
     assert meta["flags"]["rf1"]["fireable"] is True
     assert meta["override_fireable_universe_count"] == 4
+
+
+def test_a_blind_near_ath_leg_makes_rf4_unknown_not_inactive():
+    """rf4 = breadth < 50 AND index within 2% of its ATH.
+
+    `index_within_2pct_of_ath` defaults to False, so with the SPY series
+    missing the conjunction reads false and rf4 would report a confident
+    "not firing" built on no evidence. Both legs, or the flag is unknown.
+    """
+    meta = _meta(gsadf_contested=False, near_ath_available=False, near_ath_state=None)
+    rf4 = meta["flags"]["rf4"]
+    assert rf4["fireable"] is False
+    assert rf4["state"] == "UNKNOWN"
+    assert meta["override_fireable_universe_count"] == 3
 
 
 def test_missing_input_is_unknown_and_shrinks_the_fireable_universe():

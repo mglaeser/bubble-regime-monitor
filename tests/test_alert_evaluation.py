@@ -1072,3 +1072,32 @@ def test_an_outage_is_not_a_flap():
 
     real = [ConditionState.FIRING, ConditionState.NORMAL] * 3
     assert flapping_projection(real)["flapping"] is True, "a real oscillation must still flap"
+
+
+def test_an_unloadable_origin_ruleset_fails_the_batch(isolated_db, monkeypatch):
+    """An open episode whose originating ruleset is gone cannot be continued.
+
+    Its rules are what decide whether it resolves, expires or keeps firing.
+    Evaluating anyway commits the CURRENT ruleset's plans and reports a healthy
+    COMMITTED batch, while the orphaned episode stays open forever and the
+    partial unique index it holds blocks every future episode for that
+    instance. A green evaluation that silently abandoned an open episode is
+    worse than no evaluation. Audit finding B-12; logging alone was the defect.
+    """
+    from app.alerts import engine as engine_mod
+
+    seen: dict[str, object] = {}
+
+    def _capture(session_factory, evaluation_id, status, now, started, **kw):
+        seen["status"] = status
+        seen["error_code"] = kw.get("error_code")
+
+    monkeypatch.setattr(engine_mod, "_finish", _capture)
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "alerts" / "engine.py").read_text()
+    # the guard must not merely log: it must terminate the batch
+    guard = src[src.index("if missing_origins:"):]
+    guard = guard[:guard.index("# ---- P1")]
+    assert "EvaluationRunStatus.FAILED" in guard, "an unloadable origin must fail the batch"
+    assert "return EvaluationOutcome" in guard, "and must not fall through to evaluation"
+    assert "ORIGIN_RULESET_UNAVAILABLE" in guard, "with a code an operator can act on"
