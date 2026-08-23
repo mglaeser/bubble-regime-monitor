@@ -822,6 +822,37 @@ def frozen_gsadf(key: str) -> str | None:
     return value
 
 
+# The frozen gsadf constants s4's SCORING depends on, and the values each may
+# take. Declared once here; scored_s4_statistic and scored_s4_contested_rule
+# below map the same names to behaviour.
+S4_SCORED_FROZEN_ENUMS: dict[str, tuple[str, ...]] = {
+    "statistic": ("bsadf_endpoint", "gsadf_sup"),
+    "contested_rule": ("asymmetric", "symmetric"),
+}
+
+
+def unidentified_s4_frozen_constants() -> list[str]:
+    """Frozen gsadf constants that could not be IDENTIFIED this run.
+
+    INTEGRITY, not data, and the distinction is the whole point. Guardrail 5
+    covers upstream DATA failure; frozen_methodology.json is not upstream data,
+    it is the specification, and it is SHA-256-pinned in CI. Every OTHER
+    score-effective constant is read at import (app/indicators/s4_gsadf.py), so
+    an absent one aborts startup. gsadf.statistic and gsadf.contested_rule are
+    new in v4.0/v4.1 and are read per-request, so without this check the
+    identical fault passes as an ordinary s4 data floor.
+
+    Measured, absent gsadf.statistic on an explosive endpoint with
+    gsadf_contested=False: red flag #1 True -> False, the non-compensatory
+    override True -> False, and the band de-risk 70.00 -> trim 57.38, with
+    coverage.degraded reporting false throughout. A corrupt specification
+    silently disarming the override is the failure this exists to prevent.
+
+    Returns [] on a healthy artifact, so the healthy path is bit-unchanged."""
+    return [k for k, allowed in S4_SCORED_FROZEN_ENUMS.items()
+            if frozen_gsadf(k) not in allowed]
+
+
 def scored_s4_statistic(raw: RawInputs) -> tuple[float | None, float | None, float | None]:
     """The (stat, cv90, cv95) triple s4 scores, per frozen gsadf.statistic.
 
@@ -1464,6 +1495,27 @@ def compute_snapshot(raw: RawInputs, *, mc_samples: int | None = None,
     # masking that forced de-risk as "suppressed" would hide the strongest
     # bearish signal (fail-dangerous). override_fired is persisted regardless.
     coverage = _coverage_gate(indicators)
+    # ARTIFACT INTEGRITY — a fault the coverage gate structurally CANNOT express.
+    # Coverage is a WEIGHT measure: s4 is 0.07 of Block S, so losing it moves the
+    # block from 0.909 to 0.839 against a 1/3 threshold, i.e. never degrading.
+    # But an unidentifiable frozen constant is not lost weight, it is a lost
+    # RULE — red flag #1 becomes UNKNOWN rather than not-fired, and rf1 feeds the
+    # non-compensatory override. The snapshot therefore stays SERVED (guardrail 5:
+    # a fault is never a 500) but is named degraded and refuses an action band it
+    # cannot stand behind.
+    _unidentified = unidentified_s4_frozen_constants()
+    if _unidentified:
+        log.error("frozen_artifact_scored_constant_unidentified", constants=_unidentified)
+        coverage = dict(coverage)
+        coverage["degraded"] = True
+        # Named, because "degraded" alone reads as thin data — the one thing this
+        # is not. Block fractions are left untouched: this is not a coverage
+        # measurement, it is a separate integrity verdict riding the same gate.
+        coverage["integrity"] = {
+            "frozen_artifact": "scored_constant_unidentified",
+            "constants": [f"gsadf.{k}" for k in _unidentified],
+            "effect": "s4 floored; red flag #1 is UNKNOWN, not not-fired",
+        }
     if coverage["degraded"]:
         band = "de-risk (data degraded)" if red_flags.override_fired \
             else "suppressed (block degraded)"

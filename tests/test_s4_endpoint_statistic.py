@@ -154,6 +154,77 @@ class TestTheDivergenceIsScored:
         assert snap.red_flags.gsadf_explosive_noncontested is True
 
 
+class TestAMalformedArtifactIsNamed:
+    """A corrupt SPECIFICATION must not read as a quiet data gap.
+
+    Coverage is a WEIGHT measure and cannot express this: s4 is 0.07 of Block S,
+    so losing it moves the block from 0.909 to 0.839 against a 1/3 threshold —
+    never degrading. Measured before this gate, absent gsadf.statistic on an
+    explosive endpoint with gsadf_contested=False: red flag #1 True -> False,
+    the non-compensatory override True -> False, band de-risk 70.00 -> trim
+    57.38, coverage.degraded false throughout. A corrupt specification silently
+    disarming the override is what this prevents."""
+
+    @pytest.fixture
+    def frozen_broken(self, monkeypatch, tmp_path):
+        def _apply(mutate):
+            data = json.loads(M.FROZEN_PATH.read_bytes())
+            mutate(data)
+            f = tmp_path / "frozen.json"
+            f.write_text(json.dumps(data))
+            monkeypatch.setattr(M, "FROZEN_PATH", f)
+            for fn in _CACHED:
+                fn.cache_clear()
+        yield _apply
+        for fn in _CACHED:
+            fn.cache_clear()
+
+    @staticmethod
+    def _explosive():
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5          # rf1 would fire on a good artifact
+        return raw
+
+    def test_a_healthy_artifact_is_not_degraded(self):
+        snap = compute_snapshot(self._explosive(), gsadf_contested=False)
+        assert snap.coverage["degraded"] is False
+        assert "integrity" not in snap.coverage
+        assert snap.red_flags.gsadf_explosive_noncontested is True
+
+    @pytest.mark.parametrize("label,mutate,expected", [
+        ("statistic absent", lambda d: d["gsadf"].pop("statistic"), ["gsadf.statistic"]),
+        ("rule absent", lambda d: d["gsadf"].pop("contested_rule"), ["gsadf.contested_rule"]),
+        ("statistic unknown", lambda d: d["gsadf"].__setitem__("statistic", "sadf"),
+         ["gsadf.statistic"]),
+        ("rule unknown", lambda d: d["gsadf"].__setitem__("contested_rule", "lenient"),
+         ["gsadf.contested_rule"]),
+        ("gsadf not a mapping", lambda d: d.__setitem__("gsadf", "nope"),
+         ["gsadf.statistic", "gsadf.contested_rule"]),
+    ])
+    def test_a_malformed_constant_degrades_and_is_named(self, frozen_broken, label,
+                                                        mutate, expected):
+        frozen_broken(mutate)
+        snap = compute_snapshot(self._explosive(), gsadf_contested=False)
+        assert snap.coverage["degraded"] is True, label
+        assert snap.coverage["integrity"]["constants"] == expected, label
+        assert snap.coverage["integrity"]["frozen_artifact"] == "scored_constant_unidentified"
+        # and it refuses an action band it cannot stand behind
+        assert "suppressed" in snap.action_band or "degraded" in snap.action_band, label
+
+    def test_it_cannot_silently_disarm_the_override(self, frozen_broken):
+        """The safety property, stated as a test: whatever else happens, a
+        malformed artifact must not produce a snapshot that looks ordinary."""
+        good = compute_snapshot(self._explosive(), gsadf_contested=False)
+        frozen_broken(lambda d: d["gsadf"].pop("statistic"))
+        bad = compute_snapshot(self._explosive(), gsadf_contested=False)
+        assert good.red_flags.gsadf_explosive_noncontested is True
+        assert bad.red_flags.gsadf_explosive_noncontested is False   # unknown, not not-fired
+        # ...and THAT is why the snapshot must not present itself as clean.
+        assert good.coverage["degraded"] is False
+        assert bad.coverage["degraded"] is True
+        assert bad.action_band != good.action_band
+
+
 class TestAnAbsentKeyFailsClosedNotFiveHundred:
     """Guardrail 5: never surface an upstream/config fault as a 500. An ABSENT
     key is the same fault as an unrecognised value — the artifact is not the one
