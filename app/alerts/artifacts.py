@@ -278,22 +278,38 @@ def register(session: Session, artifacts: LoadedArtifacts, *, now: datetime | No
 
 
 def _failed_gate_for_stage(stage: int) -> list[str]:
-    """Failures recorded for this stage in the committed gate artifact.
+    """Reasons the recorded gate run forbids promoting to this stage.
 
-    Reads the evidence rather than re-running it: the artifact is produced by
-    `scripts/export_alert_stage1_gate` and CI checks it is current, so a stale
-    one cannot slip through here. A stage with no recorded run is not blocked —
-    absence of evidence blocks nothing, it simply is not a pass either.
+    FAIL CLOSED. A missing artifact, an unreadable one, or a stage with no
+    recorded run all BLOCK — they are not clearances. Promotion is the moment
+    a stage's acceptance evidence is supposed to be checked, and "we could not
+    read the evidence" is the one answer that must never be treated as "the
+    evidence was fine". An earlier version of this returned no reasons in
+    those cases, which made the gate permissive exactly when it was blindest.
+
+    Reads the committed artifact rather than re-running the replay: it is
+    produced by `scripts/export_alert_stage1_gate` and CI asserts it is
+    current, so a stale one cannot slip past here.
     """
     artifact = Path("docs/alert-stage1-gate.json")
     if not artifact.is_file():
-        return []
+        return [f"no gate artifact at {artifact} — nothing certifies stage {stage}"]
     try:
         payload = json.loads(artifact.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    run = (payload.get("runs") or {}).get(f"stage_{stage}") or {}
-    return [str(f) for f in (run.get("failures") or [])]
+    except (OSError, ValueError) as exc:
+        return [f"gate artifact unreadable ({type(exc).__name__}) — "
+                f"stage {stage} is uncertified, not cleared"]
+    runs = payload.get("runs")
+    if not isinstance(runs, dict):
+        return ["gate artifact has no runs section — stage is uncertified"]
+    run = runs.get(f"stage_{stage}")
+    if not isinstance(run, dict):
+        return [f"no recorded gate run for stage {stage} — "
+                "absence of evidence is not a pass"]
+    if run.get("passed") is not True:
+        failures = [str(f) for f in (run.get("failures") or [])]
+        return failures or [f"stage {stage} gate run did not pass"]
+    return []
 
 
 def archived_rulesets(session: Session, hashes: list[str], *,

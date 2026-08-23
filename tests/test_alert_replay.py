@@ -608,6 +608,23 @@ def test_a_stage_whose_gate_failed_cannot_be_promoted():
     assert blocked, "the recorded stage-3 failure must be visible to promotion"
     assert all("cap" in reason for reason in blocked), blocked
 
-    # a stage with no recorded run is not blocked: absence of evidence blocks
-    # nothing, it is simply not a pass either
-    assert _failed_gate_for_stage(7) == []
+    # a stage with NO recorded run is blocked too. "We could not read the
+    # evidence" must never be treated as "the evidence was fine" — that is the
+    # one answer a gate cannot afford to be permissive about.
+    unrecorded = _failed_gate_for_stage(7)
+    assert unrecorded, "absence of evidence is not a pass"
+    assert "absence of evidence" in " ".join(unrecorded)
+
+
+def test_the_promotion_gate_fails_closed_on_unreadable_evidence(tmp_path, monkeypatch):
+    """Missing or corrupt evidence blocks; it does not clear."""
+    from app.alerts.artifacts import _failed_gate_for_stage
+
+    monkeypatch.chdir(tmp_path)                     # no artifact at all
+    assert _failed_gate_for_stage(1), "a missing artifact must block"
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "alert-stage1-gate.json").write_text("{not json", encoding="utf-8")
+    blocked = _failed_gate_for_stage(1)
+    assert blocked and "unreadable" in " ".join(blocked)
