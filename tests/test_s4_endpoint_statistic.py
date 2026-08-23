@@ -243,6 +243,99 @@ class TestAMalformedArtifactIsNamed:
         assert bad.action_band == "de-risk (data degraded)"
         assert "suppressed" not in bad.action_band
 
+    @pytest.mark.parametrize("failing_reads", [1, 2])
+    def test_a_scoring_time_read_failure_is_latched(self, monkeypatch, failing_reads):
+        """The constants must be read ONCE and the result carried forward.
+
+        They used to be read three times per request — when s4 was scored, by the
+        integrity gate, and by persist_snapshot for the rf1 record. A read that
+        failed only during SCORING was invisible to the gate, which re-read a
+        healthy artifact. Measured before the latch, exactly the vetoed shape:
+        s4 FLOOR, rf1 False, coverage.degraded False, band 'trim'."""
+        from app.services import compute as C
+
+        real = C.frozen_gsadf
+        state = {"n": 0}
+
+        def flaky(key):
+            state["n"] += 1
+            return None if state["n"] <= failing_reads else real(key)
+
+        monkeypatch.setattr(C, "frozen_gsadf", flaky)
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5
+        snap = C.compute_snapshot(raw, gsadf_contested=False)
+        # Whatever else it does, it must not look ordinary.
+        assert snap.coverage["degraded"] is True
+        assert "integrity" in snap.coverage
+        assert "suppressed" in snap.action_band
+        # CONSISTENCY is the point of latching, not merely "something degraded":
+        # if the verdict says the constants were unidentifiable, then the score
+        # must be the floored one. A second, luckier read that scored s4 normally
+        # while the verdict said otherwise is the bug this pins.
+        assert snap.indicators["s4"].state == "FLOOR"
+        assert snap.indicators["s4"].sub_score == 0.25
+        assert snap.s4_scored_stat is None and snap.s4_scored_cv95 is None
+
+    def test_only_the_rule_read_failing_is_still_latched(self, monkeypatch):
+        """Discriminating case for the RULE specifically. If only the second read
+        fails, a re-reading caller gets a healthy rule while the latched verdict
+        says it was unidentifiable — so s4 would score COMPUTED beside an
+        integrity verdict saying the rule could not be identified. The two must
+        agree, and they can only agree if both come from the same read."""
+        from app.services import compute as C
+
+        real = C.frozen_gsadf
+        state = {"n": 0}
+
+        def flaky(key):
+            state["n"] += 1
+            return None if state["n"] == 2 else real(key)   # rule read only
+
+        monkeypatch.setattr(C, "frozen_gsadf", flaky)
+        raw = _raw_diverging()
+        snap = C.compute_snapshot(raw, gsadf_contested=False)
+        assert snap.coverage["integrity"]["constants"] == ["gsadf.contested_rule"]
+        assert snap.indicators["s4"].state == "FLOOR", (
+            "scored COMPUTED while the integrity verdict said the rule was "
+            "unidentifiable — the two came from different reads")
+        assert snap.indicators["s4"].sub_score == 0.25
+
+    def test_the_published_rf1_record_cannot_outrun_the_score(self, monkeypatch,
+                                                              isolated_db):
+        """persist_snapshot used to re-read the artifact for the rf1 record — a
+        third independent read. Under a transient failure it could publish a
+        distance derived from a healthy statistic beside a flag that came from a
+        floored score."""
+        from sqlalchemy import select
+
+        from app.db import session_scope
+        from app.models import Snapshot
+        from app.services import compute as C
+
+        real = C.frozen_gsadf
+        state = {"n": 0}
+
+        def flaky(key):
+            state["n"] += 1
+            return None if state["n"] <= 2 else real(key)
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        monkeypatch.setattr(C, "frozen_gsadf", flaky)
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5
+        data = C.compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,
+                                  gsadf_contested=False)
+        assert data.indicators["s4"].state == "FLOOR"
+        snap_id = C.persist_snapshot(data, raw)
+        with session_scope() as session:
+            row = session.execute(
+                select(Snapshot).where(Snapshot.id == snap_id)).scalars().one()
+            rf1 = row.red_flag_meta["flags"]["rf1"]
+        # s4 was not scored, so rf1's input is UNAVAILABLE — never a live margin.
+        assert rf1["active"] is False
+        assert rf1["distance_to_threshold"] is None
+
     def test_it_cannot_silently_disarm_the_override(self, frozen_broken):
         """The safety property, stated as a test: whatever else happens, a
         malformed artifact must not produce a snapshot that looks ordinary."""
