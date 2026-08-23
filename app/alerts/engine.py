@@ -408,27 +408,47 @@ def run_evaluation(
             # conflict or a deadline overrun must leave no episode without its
             # delivery intent and no intent without its episode. Two
             # transactions cannot promise that.
-            plan_result = plan(PlanInputs(
-                now=now,
-                rules=rules_by_id,
-                decisions=[d for _h, _r, d in planned],
-                episode_ids=episode_ids,
-                memories=load_notification_memories(
-                    session, mode=mode, live_profile=live_profile,
-                    fingerprints=set(episode_ids)),
-                **_silence_kwargs(load_active_silences(session, now=now)),
-                origin_rules_sha256=current.rules_sha256,
-                phrase_set_version=current.phrase_set_version,
-                phrase_set_sha256=current.phrase_set_sha256,
-                budget_usage=budget_usage(session, mode=mode,
-                                          live_profile=live_profile, now=now),
-                budget_limits=default_limits(get_settings()),
-            ))
-            persist_plan(
-                session, plan_result, mode=mode, live_profile=live_profile,
-                planning_rules_sha256=current.rules_sha256,
-                recipient_ref=_recipient_ref(get_settings()), now=now,
-            )
+            # PLANNED PER RULESET, because origin provenance is per member.
+            #
+            # A batch can mix rulesets: the current one for new candidates, plus
+            # any archived ruleset that still owns an open episode. Stamping
+            # every member with the CURRENT hash would tell a later reader that
+            # a continuation was planned under rules it never saw — and mandate
+            # 14.8 keeps `origin_rules_sha256` per member precisely so a queued
+            # delivery can be rendered from the artifact that produced it.
+            silences = _silence_kwargs(load_active_silences(session, now=now))
+            memories = load_notification_memories(
+                session, mode=mode, live_profile=live_profile,
+                fingerprints=set(episode_ids))
+            usage = budget_usage(session, mode=mode, live_profile=live_profile,
+                                 now=now)
+            limits = default_limits(get_settings())
+            recipient = _recipient_ref(get_settings())
+
+            by_ruleset: dict[str, list[StateDecision]] = {}
+            for rules_sha, _rule, decision in planned:
+                by_ruleset.setdefault(rules_sha, []).append(decision)
+
+            for rules_sha, decisions in by_ruleset.items():
+                artifacts = archived.get(rules_sha, current)
+                plan_result = plan(PlanInputs(
+                    now=now,
+                    rules=rules_by_id,
+                    decisions=decisions,
+                    episode_ids=episode_ids,
+                    memories=memories,
+                    **silences,
+                    origin_rules_sha256=rules_sha,
+                    phrase_set_version=artifacts.phrase_set_version,
+                    phrase_set_sha256=artifacts.phrase_set_sha256,
+                    budget_usage=usage,
+                    budget_limits=limits,
+                ))
+                persist_plan(
+                    session, plan_result, mode=mode, live_profile=live_profile,
+                    planning_rules_sha256=rules_sha,
+                    recipient_ref=recipient, now=now,
+                )
             evaluation = session.get(AlertEvaluation, evaluation_id)
             if evaluation is not None:
                 evaluation.status = EvaluationRunStatus.COMMITTED

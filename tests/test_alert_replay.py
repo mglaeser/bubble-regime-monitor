@@ -424,14 +424,26 @@ def test_the_gate_artifact_exercises_more_than_the_committed_stage():
     # The verdict must follow its own evidence, in either direction.
     assert stage3["passed"] is (stage3["failures"] == [])
 
-    # It currently FAILS, and that is the artifact working rather than breaking.
+    # Stage 3 currently FAILS, and the exact failures are pinned so that CI
+    # cannot quietly absorb a NEW one.
+    #
     # Wiring the planner into the atomic apply (B-01) turned every non-P1
     # volume figure from "0 by construction" into a real count, and on this
-    # history the ruleset breaches its own caps. That is a Stage 2 input, not a
-    # test to loosen: the budget exists to catch exactly this.
-    if not stage3["passed"]:
-        assert any("cap" in f for f in stage3["failures"]), (
-            f"unexpected stage-3 failures: {stage3['failures']}")
+    # history the ruleset breaches its own caps. That is a Stage 2 input and an
+    # open decision for the operator — tune the rules or raise the caps
+    # deliberately — not something to relax here. Loosening this assertion to
+    # "some failure containing the word cap" would be the same defect class the
+    # rest of this branch exists to remove: a control that still looks armed.
+    #
+    # When the breach is resolved this list becomes empty and the test fails
+    # until it is updated, which is the point.
+    assert stage3["failures"] == [
+        "non-P1 volume breached the 24h cap: 5 > 3",
+        "non-P1 volume breached the 168h cap: 8 > 6",
+    ], (
+        "stage-3 failures changed. If the breach was FIXED, empty this list. "
+        f"If a NEW failure appeared, it needs its own decision: {stage3['failures']}"
+    )
 
 
 def test_the_gate_artifact_carries_no_pii():

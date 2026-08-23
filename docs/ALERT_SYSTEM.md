@@ -484,6 +484,34 @@ it, only status, timing, hashes and an already-redacted error string.
 
 ---
 
+## 11b. Open Stage 2 blocker: the ruleset exceeds its own non-P1 budget
+
+Wiring the planner into the atomic apply (audit B-01) turned every non-P1
+volume figure in the replay from "0 by construction" into a real count. On the
+captured history the stage-3 replay plans 13 deliveries and breaches the budget
+the mandate sets for itself:
+
+```
+non-P1 24h  : 5   cap 3
+non-P1 168h : 8   cap 6
+non-P1 mean : 8.0 per 168h, quiet-regime target 2
+```
+
+`docs/alert-stage1-gate.json` therefore records **stage 3 as FAILING**, and
+`tests/test_alert_replay.py` pins those two failures exactly so a new one
+cannot be absorbed silently.
+
+This is an operator decision, not an engineering one. The options are to tune
+the rules that generate the volume, to raise the caps deliberately with a
+recorded reason, or to accept the breach for Stage 3 and re-measure before
+Stage 4. What must not happen is the caps being relaxed to make a gate pass:
+the budget exists precisely to catch a ruleset that talks too much, and it has
+just done its job on the first history it was ever able to measure.
+
+Until this is decided, Stage 3 promotion is blocked by the gate.
+
+---
+
 ## 12. Replay (the Stage 1 gate)
 
 Stage 1's gate is *deterministic replay; no PII; no scoring regression*.

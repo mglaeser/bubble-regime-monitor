@@ -19,7 +19,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.alerts.enums import TransportStatus
-from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEpisode
+from app.alerts.models import (
+    AlertDelivery,
+    AlertDeliveryMember,
+    AlertEpisode,
+    AlertRender,
+)
 from app.db import session_scope
 from app.models import Snapshot
 
@@ -152,18 +157,24 @@ def test_a_band_transition_reaches_a_sent_delivery(tmp_path, monkeypatch):
     assert report.claimed, (
         f"the dispatcher found nothing to claim: {report.as_dict()}")
 
-    # 4. and it stops at RENDER, which is the NEXT gap and not this one.
+    # 4. and it reaches SENT through the NullSender
     #
-    # `_build_context` yields no renderable member, so the delivery lands in
-    # RENDER_FAILED rather than SENT. That is audit B-14 — rendering is not yet
-    # the per-member, origin-artifact JIT flow the mandate specifies — and it is
-    # scheduled as its own portion.
-    #
-    # Asserting the boundary rather than asserting SENT keeps this test honest
-    # about what is and is not wired. When B-14 lands, the two lines below
-    # become `assert report.sent` and the delivery reaches SENT.
+    # This is the assertion the whole chain exists for. It required the render
+    # context to carry the PREDECESSOR input: `BAND_TO_DERISK` reads
+    # "Stufe {F_BAND_EFFECTIVE} erreicht (vorher {F_BAND_PREVIOUS})", and no
+    # single input can say what a state moved FROM. Without it the fact is
+    # unauthorized, the render is rejected, and every band P1 died in
+    # RENDER_FAILED (audit B-14).
+    assert report.sent == report.claimed, (
+        f"the delivery did not reach SENT: {report.as_dict()}")
+
     with session_scope() as session:
-        statuses = {d.transport_status for d in session.query(AlertDelivery).all()}
-    assert report.render_failed == report.claimed, (
-        f"expected the claim to stop at rendering (B-14); got {report.as_dict()}")
-    assert statuses == {TransportStatus.RENDER_FAILED}, statuses
+        deliveries = session.query(AlertDelivery).all()
+        assert {d.transport_status for d in deliveries} == {TransportStatus.SENT}
+        render = session.query(AlertRender).first()
+        assert render is not None, "a sent delivery must persist its render"
+        assert render.final_message, "the body must be persisted with the render"
+        assert render.gsm7_septets and render.gsm7_septets <= 160, (
+            f"body must fit one GSM-7 message, got {render.gsm7_septets} septets")
+        assert "vorher" in render.final_message, (
+            f"the transition phrase needs the predecessor: {render.final_message!r}")
