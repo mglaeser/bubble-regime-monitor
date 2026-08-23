@@ -36,6 +36,22 @@ _CACHED = (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology)
 
 
 @pytest.fixture
+def frozen_gsadf(monkeypatch, tmp_path):
+    """Rewrite any key in the frozen gsadf block, off-disk."""
+    def _apply(**kw):
+        data = json.loads(M.FROZEN_PATH.read_bytes())
+        data["gsadf"].update(kw)
+        f = tmp_path / "frozen.json"
+        f.write_text(json.dumps(data))
+        monkeypatch.setattr(M, "FROZEN_PATH", f)
+        for fn in _CACHED:
+            fn.cache_clear()
+    yield _apply
+    for fn in _CACHED:
+        fn.cache_clear()
+
+
+@pytest.fixture
 def frozen_statistic(monkeypatch, tmp_path):
     """Rewrite gsadf.statistic in an off-disk copy of the frozen artifact."""
     def _apply(value):
@@ -131,6 +147,49 @@ class TestTheDivergenceIsScored:
         snap = compute_snapshot(raw, gsadf_contested=False)
         assert snap.indicators["s4"].sub_score == 1.0
         assert snap.red_flags.gsadf_explosive_noncontested is True
+
+
+class TestTheContestedRuleIsAFrozenConstant:
+    """v4.1. The critique (Chen et al. 2026) is SIZE distortion: it bounds false
+    positives and says nothing against a non-rejection, so a non-rejection is
+    released while a rejection stays capped."""
+
+    def test_a_non_rejection_is_released(self):
+        # endpoint 0.7562 < cv90 1.1769 -> not explosive -> SUB_NULL, not the cap.
+        assert compute_snapshot(_raw_diverging()).indicators["s4"].sub_score == 0.05
+
+    def test_a_rejection_is_still_capped(self):
+        # Where the critique DOES bite, the cap holds even under "asymmetric".
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV95 + 0.5
+        assert compute_snapshot(raw).indicators["s4"].sub_score == 0.25
+
+    def test_the_boundary_is_cv90(self):
+        raw = _raw_diverging()
+        raw.bsadf_stat = END_CV90 - 1e-9
+        assert compute_snapshot(raw).indicators["s4"].sub_score == 0.05
+        raw.bsadf_stat = END_CV90 + 1e-9
+        assert compute_snapshot(raw).indicators["s4"].sub_score == 0.25
+
+    def test_symmetric_restores_the_cap(self, frozen_gsadf):
+        frozen_gsadf(contested_rule="symmetric")
+        assert compute_snapshot(_raw_diverging()).indicators["s4"].sub_score == 0.25
+
+    def test_an_unknown_rule_floors_rather_than_guessing(self, frozen_gsadf):
+        frozen_gsadf(contested_rule="lenient")      # plausible, but not a rule we ship
+        s4 = compute_snapshot(_raw_diverging()).indicators["s4"]
+        assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25)
+
+    def test_the_rule_is_reported(self):
+        extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
+        assert extra["s4_statistic"]["contested_rule"] == "asymmetric"
+
+    def test_staleness_still_caps_regardless(self):
+        # Staleness is DATA AGE, not a size property, so the asymmetry must not
+        # apply to it.
+        from app.indicators.s4_gsadf import sub_score
+        assert sub_score(END_1986, END_CV90, END_CV95, contested=True,
+                         stale=True, asymmetric=True) == 0.25
 
 
 class TestFailClosed:

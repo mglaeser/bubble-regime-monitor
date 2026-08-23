@@ -96,7 +96,11 @@ class TestS4StateQuality:
         s4 = data.indicators["s4"]
         assert s4.state == "COMPUTED"
         assert s4.quality == 1.0
-        assert s4.sub_score == 0.25  # contested cap (policy), full quality
+        # v4.1: the statistic (1.2) is below cv90 (1.5) -- a NON-rejection -- and
+        # gsadf.contested_rule = "asymmetric" lets exactly that case through at
+        # SUB_NULL. A REJECTION would still be capped at 0.25. Full quality either
+        # way: the cap is epistemic policy, not a data-quality problem.
+        assert s4.sub_score == 0.05
 
 
 class TestS5FidelityQuality:

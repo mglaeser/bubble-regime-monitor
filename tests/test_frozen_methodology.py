@@ -51,7 +51,12 @@ from app import methodology as M
 #               gsadf.series_months_max = 360 caps every runtime fit, so that
 #               measurement is offline; on the fitted 360-month tail the sup
 #               does NOT reject. Disclosed. Wording only; tree unchanged.
-EXPECTED_SHA256 = "8d734ed117a4bd0a07e8e481f11941c66b984e4c262d7d8afa640699bf6365db"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
+#   4a7fd45c... v4.1-s4-asymmetric-contested: adds gsadf.contested_rule =
+#               "asymmetric". SCORE-SHIFTING — the first in this line. Live
+#               headline 53.30 -> 51.82 (s4 0.25 -> 0.05); action band unchanged
+#               at 'trim'. The golden stays 52.43 only because its fixture
+#               supplies no GSADF input and floors under either rule.
+EXPECTED_SHA256 = "4a7fd45cad1d61b6ee3983d35bbcb7da6f722fc2917653b075cbcf0079e3d275"  # pragma: allowlist secret -- public artifact integrity pin, not a credential
 
 
 def test_sha256_byte_guard():
@@ -88,9 +93,9 @@ def test_pin_allowed_only_in_meta():
     # backdated or equated with the freeze date. A remaining _meta <PIN> must
     # NOT block loading (it is not score-effective).
     meta = M.get_path("_meta")
-    assert meta["methodology_frozen_at"] == "2026-08-22"
+    assert meta["methodology_frozen_at"] == "2026-08-23"
     assert meta["falsification_tracking_since"] == "<PIN>"
-    assert meta["methodology_version"] == "v4.0-s4-endpoint"
+    assert meta["methodology_version"] == "v4.1-s4-asymmetric-contested"
     M.frozen_methodology()   # loads without raising despite the remaining _meta PIN
 
 

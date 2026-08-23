@@ -236,7 +236,15 @@ REGISTRY: dict[str, Methodology] = {
             "endpoint is not a supremum over hundreds of them). The GSADF sup is still computed and "
             "REPORTED alongside it. Sub-score mapping: stat > cv95 AND non-contested -> 1.0; "
             "> cv90 -> 0.5; contested-or-stale-or-data-missing -> 0.25; "
-            "tested-and-not-explosive -> 0.05."
+            "tested-and-not-explosive -> 0.05. Since v4.1 gsadf.contested_rule = 'asymmetric': "
+            "a CONTESTED REJECTION is still capped at 0.25, because that is where the "
+            "over-rejection critique bites, but a CONTESTED NON-REJECTION is released to 0.05. "
+            "Chen et al. establish SIZE distortion, which bounds false positives and says "
+            "nothing against a non-rejection; a test biased toward rejecting that still fails "
+            "to reject is stronger evidence of no explosiveness. The 0.25 cap sat ABOVE what "
+            "the test returned, so it was a floor pushing the headline UP. Residual: a "
+            "non-rejection can also mean LOW POWER; SUB_NULL is 'tested and not explosive', "
+            "never 'certainly calm'."
         ),
         why=(
             "The GSADF test recursively runs right-tailed ADF regressions over expanding and rolling "

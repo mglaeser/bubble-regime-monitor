@@ -73,7 +73,7 @@ The headline is the **median** of a seeded 100 000-draw Monte Carlo distribution
 | S1 | Valuation extremity | CAPE 41.6, ECY 0.40 pp | **0.92** | 0.33 |
 | S2 | Concentration | top-10 = 36.4% | **0.80** | 0.27 |
 | S3 | Semis GSY run-up | +108 pp | **0.525** | 0.20 |
-| S4 | PSY Explosiveness — endpoint BSADF (contested) | contested | **0.25** | 0.07 |
+| S4 | PSY Explosiveness — endpoint BSADF (contested) | contested, not explosive | **0.05** | 0.07 |
 | S5 | Credit tightness | OAS 267 bps | **0.80** | 0.13 |
 | D1 | Breadth | pct = 56 | **0.618** | 0.35 |
 | D2 | Margin rollover | +53.7% YoY, no rollover | **0.49** | 0.13 |
