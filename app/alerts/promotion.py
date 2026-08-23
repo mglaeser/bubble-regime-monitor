@@ -15,6 +15,16 @@ So this module is fail-closed in all three directions:
 It answers one question — "may the ruleset run at stage N?" — and answers it
 from the committed artifact only. It never re-runs the replay, because a gate
 that recomputes its own evidence can be made to agree with itself.
+
+One limitation, stated plainly so it is not mistaken for something stronger:
+the binding is on DECLARED VERSIONS, not on content digests. The artifact
+deliberately omits digests — an entropy detector cannot distinguish a 64-hex
+digest from a 64-hex token, and this repository's secret baseline is a
+byte-identical ratchet that may not grow to carry them (see
+`scripts/export_alert_stage1_gate.py`). So a ruleset edit that fails to bump
+its version is NOT caught here. It is caught by the separate "Alert artifacts"
+CI step, which is why that step is not optional, and by the episode counts in
+the artifact itself moving.
 """
 
 from __future__ import annotations
@@ -95,7 +105,14 @@ def promotion_blockers(*, target_stage: int, artifact: dict[str, Any],
             f"stage {run.get('evaluated_at_stage')!r}")
 
     failures = run.get("failures")
-    failures = list(failures) if isinstance(failures, list) else []
+    if not isinstance(failures, list):
+        # Coercing this to [] would let a run whose failure list is a string,
+        # an object, or absent report as having nothing wrong with it. A
+        # verdict we cannot read is not a verdict that passed.
+        blockers.append(
+            f"stage {target_stage}: the run's failure list is not a list "
+            f"({type(failures).__name__}), so its verdict cannot be read")
+        return blockers
     if failures:
         blockers.extend(f"stage {target_stage}: {failure}" for failure in failures)
 
@@ -171,4 +188,45 @@ def live_admission_blockers(session: Any, *, path: str | Path | None = None,
     return promotion_blockers(
         target_stage=stage, artifact=evidence,
         rule_version=ruleset.document.meta.rule_version,
+        phrase_set_version=getattr(ruleset, "phrase_set_version", None),
+    )
+
+
+def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
+                                path: str | Path | None = None) -> list[str]:
+    """Whether a QUEUED delivery may be sent, judged by the rules that planned it.
+
+    `live_admission_blockers` asks about the ruleset that is active now. That
+    is not the same question. A delivery sits in the outbox carrying the hash
+    of the ruleset that planned it, and a promotion between planning and
+    dispatch means the active ruleset is no longer the one whose stage
+    authorised this message. Checking only the active one lets a delivery
+    planned under an unbacked stage go out because something else is fine now.
+
+    Fail-closed: a planning ruleset that cannot be rebuilt from the registry
+    is a blocker, since nothing then establishes what it was allowed to do.
+    """
+    from app.alerts.artifacts import load_by_hash
+
+    try:
+        ruleset = load_by_hash(session, planning_rules_sha256).ruleset
+    except Exception as exc:                       # noqa: BLE001 - reported, not raised
+        return [f"the ruleset that planned this delivery "
+                f"({planning_rules_sha256[:12]}) could not be rebuilt, so what "
+                f"it was permitted to do cannot be established: "
+                f"{type(exc).__name__}"]
+
+    stage = ruleset.document.meta.active_stage
+    if stage < EVIDENCE_REQUIRED_FROM_STAGE:
+        return []
+
+    evidence = load_evidence(path)
+    if evidence is None:
+        return [f"stage {stage}: the gate evidence at {EVIDENCE_PATH} is missing "
+                "or unreadable, so nothing justifies sending this delivery"]
+
+    return promotion_blockers(
+        target_stage=stage, artifact=evidence,
+        rule_version=ruleset.document.meta.rule_version,
+        phrase_set_version=getattr(ruleset, "phrase_set_version", None),
     )

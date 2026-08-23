@@ -55,7 +55,10 @@ from app.alerts.outbox import (
     revalidate_members,
 )
 from app.alerts.phrase_registry import ValidatedPhraseSet
-from app.alerts.promotion import live_admission_blockers
+from app.alerts.promotion import (
+    delivery_admission_blockers,
+    live_admission_blockers,
+)
 from app.alerts.render_context import RenderContext, build_member_context
 from app.alerts.renderer import render_with_cascade
 from app.alerts.repository import load_input, utc_ms
@@ -220,8 +223,31 @@ def dispatch_once(
         report.recovered = recover_leases(session, now=now)
 
     with session_factory() as session:
-        candidates = [d.delivery_id for d in claimable(
-            session, mode=mode, live_profile=live_profile, now=now, limit=limit)]
+        pending = list(claimable(session, mode=mode, live_profile=live_profile,
+                                 now=now, limit=limit))
+        candidates = [d.delivery_id for d in pending]
+
+        # A queued delivery carries the hash of the ruleset that PLANNED it,
+        # and a promotion between planning and dispatch means that is no longer
+        # the ruleset checked above. Judging a message by rules that did not
+        # authorise it is the mismatch: something else being fine now does not
+        # make this one sendable. One unbacked delivery refuses the whole pass
+        # rather than being parked individually — an unauthorised stage is an
+        # operator's problem with the deployment, not a property of one message.
+        if live:
+            planning_blockers: list[str] = []
+            for rules_sha in sorted({d.planning_rules_sha256 for d in pending}):
+                planning_blockers.extend(
+                    delivery_admission_blockers(session, rules_sha))
+            if planning_blockers:
+                report.notes.extend(planning_blockers)
+                report.notes.append(
+                    "live delivery withheld: a queued delivery was planned "
+                    "under a stage its gate evidence does not support")
+                log.error("alert_queued_admission_refused",
+                          blockers=planning_blockers)
+                _heartbeat(report)
+                return report
 
     for delivery_id in candidates:
         with session_factory() as session:

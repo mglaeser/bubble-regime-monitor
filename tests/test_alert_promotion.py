@@ -183,3 +183,66 @@ def test_shadow_mode_is_not_gated_on_delivery_evidence(monkeypatch):
     dispatch_once(session_scope, phrase_set=None, mode="shadow",
                   live_profile="default")
     assert called == [], "shadow mode consulted a delivery gate"
+
+
+def test_a_malformed_failure_list_is_unreadable_not_empty():
+    """Coercion is the fail-open. A verdict we cannot read did not pass."""
+    for broken in ("cap breached", {"a": 1}, 3, None):
+        artifact = {"runs": {"stage_3": {"evaluated_at_stage": 3,
+                                         "passed": True, "failures": broken}}}
+        blockers = promotion_blockers(target_stage=3, artifact=artifact)
+        assert any("cannot be read" in b for b in blockers), broken
+
+
+def test_the_runtime_gate_binds_the_phrase_set_as_well_as_the_rules():
+    """The rules decide whether to alert; the phrase set decides what it says."""
+    artifact = {
+        "artifacts": {"rule_version": "v3.2.0", "phrase_set_version": "v3.2"},
+        "runs": {"stage_3": {"evaluated_at_stage": 3, "passed": True,
+                             "failures": []}},
+    }
+    assert promotion_blockers(target_stage=3, artifact=artifact,
+                              rule_version="v3.2.0",
+                              phrase_set_version="v3.2") == []
+    drifted = promotion_blockers(target_stage=3, artifact=artifact,
+                                 rule_version="v3.2.0",
+                                 phrase_set_version="v9.9")
+    assert any("phrase set" in b for b in drifted)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_queued_delivery_is_judged_by_the_rules_that_planned_it(monkeypatch):
+    """A promotion between planning and dispatch changes which rules apply.
+
+    Checking only the ACTIVE ruleset lets a delivery planned under an unbacked
+    stage go out because something else is fine now.
+    """
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    seen: list[str] = []
+
+    def _planning_gate(session, rules_sha, **kw):
+        seen.append(rules_sha)
+        return ["stage 3: the evidence does not describe these rules"]
+
+    # the ACTIVE ruleset is fine; only the one that planned the delivery is not
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: [])
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
+                        _planning_gate)
+    monkeypatch.setattr(dispatcher_module, "claimable",
+                        lambda session, **kw: [
+                            type("D", (), {"delivery_id": "d1",
+                                           "planning_rules_sha256": "abc"})()])
+
+    class _Explodes:
+        def send(self, *a, **k):
+            raise AssertionError("a refused pass must not reach the wire")
+
+    report = dispatch_once(session_scope, phrase_set=None, mode="live",
+                           live_profile="default", sender=_Explodes())
+    assert seen == ["abc"], "the planning ruleset was not the one checked"
+    assert report.sent == 0 and report.claimed == 0
+    assert any("planned under a stage" in n for n in report.notes)
