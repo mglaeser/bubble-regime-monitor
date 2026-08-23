@@ -297,3 +297,332 @@ def test_recovery_job_skips_when_everything_is_off(isolated_db, monkeypatch):
     get_settings.cache_clear()
     assert run_once()["status"] == "skipped"
     get_settings.cache_clear()
+
+
+def test_an_abandoned_evaluation_is_actually_retried(isolated_db, monkeypatch):
+    """"Safe to retry" and nothing retried is just "abandoned".
+
+    `recover_evaluations` marks a lease-expired evaluation ABANDONED and logs
+    that it is safe to retry. Nothing did, so an outage that interrupted an
+    evaluation silently cost that snapshot its alerts — the work was declared
+    recoverable and then left (audit B-13).
+    """
+    from app.jobs import alert_recovery
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        "app.services.alert_integration.evaluate_input",
+        lambda identity, **kw: called.append((identity, kw.get("mode"))))
+
+    monkeypatch.setattr(alert_recovery, "recover_evaluations",
+                        lambda session, **kw: _report(abandoned=["EVAL1"]))
+    monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
+    monkeypatch.setattr(alert_recovery, "_retryable_inputs",
+                        lambda session, abandoned, *, limit, exhausted=None:
+                        [("INPUT1", "shadow")])
+
+    result = alert_recovery.run_once()
+    assert called == [("INPUT1", "shadow")], (
+        "the abandoned work must be re-run, and in the mode it ran in")
+    assert result["retried"] == 1
+
+
+def _report(**kw):
+    from app.alerts.recovery import RecoveryReport
+
+    report = RecoveryReport()
+    for key, value in kw.items():
+        setattr(report, key, value)
+    return report
+
+
+def test_the_retry_budget_is_bounded(isolated_db):
+    """A retry that can loop turns one stuck input into a busy job forever."""
+    from types import SimpleNamespace
+
+    from app.jobs.alert_recovery import _retryable_inputs
+
+    rows = {
+        "FRESH": SimpleNamespace(input_identity="A", attempt_count=1,
+                                 mode="shadow"),
+        "SPENT": SimpleNamespace(input_identity="B", attempt_count=9,
+                                 mode="shadow"),
+        "GONE": None,
+    }
+    session = SimpleNamespace(get=lambda _model, key: rows.get(key))
+
+    out = _retryable_inputs(session, ["FRESH", "SPENT", "GONE"], limit=2)
+    assert out == [("A", "shadow")], "only work still inside its budget is re-run"
+
+
+def test_the_watchdog_evaluates_what_it_captured(isolated_db, monkeypatch):
+    """Capturing alone leaves the outage recorded and unreported.
+
+    The standalone watchdog is the one component that runs OUTSIDE the
+    recompute it watches. Capturing an input and stopping means
+    `ops.recompute_outage` can never open an episode and nothing is ever
+    planned — it detects the failure and tells no one (audit B-02).
+    """
+    import inspect
+
+    from app.alerts import watchdog
+
+    source = inspect.getsource(watchdog.run_once)
+    assert "evaluate_input" in source, "the watchdog must evaluate its own input"
+    # and it must not let that evaluation take the capture down with it
+    assert "alert_watchdog_evaluation_failed" in source
+
+
+def test_a_retry_does_not_change_the_mode_the_work_ran_in(isolated_db):
+    """An interrupted shadow evaluation must not come back live.
+
+    The retry resumes work that already HAD a mode. Re-running it under
+    whatever the process happens to be configured for now is how an evaluation
+    that was explicitly not allowed to send ends up sending.
+    """
+    from types import SimpleNamespace
+
+    from app.jobs.alert_recovery import _retryable_inputs
+
+    rows = {"E": SimpleNamespace(input_identity="I", attempt_count=1,
+                                 mode="shadow")}
+    session = SimpleNamespace(get=lambda _model, key: rows.get(key))
+
+    assert _retryable_inputs(session, ["E"], limit=5) == [("I", "shadow")]
+
+
+def test_a_retry_never_runs_in_a_more_permissive_mode_than_either(isolated_db):
+    """Both directions are a defect, and fixing one alone creates the other.
+
+    Escalation: work interrupted in shadow — explicitly not allowed to send —
+    must not come back live.
+
+    Staleness: work interrupted in live must not keep sending after the
+    operator has switched to shadow or disabled, which is very often the switch
+    they threw BECAUSE something was wrong.
+    """
+    from app.jobs.alert_recovery import _retry_mode
+
+    # no escalation: the ambient setting cannot promote stored work
+    assert _retry_mode("shadow", "live") == "shadow"
+    assert _retry_mode("disabled", "live") == "disabled"
+
+    # no staleness: stored work cannot outrank what is currently permitted
+    assert _retry_mode("live", "shadow") == "shadow"
+    assert _retry_mode("live", "disabled") == "disabled"
+
+    # agreement is uneventful
+    assert _retry_mode("live", "live") == "live"
+    assert _retry_mode("shadow", "shadow") == "shadow"
+
+    # An unrecognised mode resolves to "disabled", not to itself. Returning the
+    # unknown string ranked it as most restrictive and then let the caller
+    # execute it, because it did not equal "disabled" — restrictive by the
+    # ranking, permissive by the outcome. This assertion used to encode that.
+    assert _retry_mode("nonsense", "live") == "disabled"
+    assert _retry_mode("live", "nonsense") == "disabled"
+
+
+def test_a_retry_is_skipped_entirely_once_alerting_is_disabled(isolated_db, monkeypatch):
+    """Downgrading to disabled stops the retry rather than running it quietly."""
+    from app.jobs import alert_recovery
+
+    called: list = []
+    monkeypatch.setattr("app.services.alert_integration.evaluate_input",
+                        lambda identity, **kw: called.append(identity))
+    monkeypatch.setattr(alert_recovery, "recover_evaluations",
+                        lambda session, **kw: _report(abandoned=["E"]))
+    monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
+    monkeypatch.setattr(alert_recovery, "_retryable_inputs",
+                        lambda session, abandoned, *, limit, exhausted=None:
+                        [("I", "live")])
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    alert_recovery.run_once()
+    assert called == ["I"], "the retry should still run, just not in live"
+
+
+def _run_with_retries(monkeypatch, *, outcomes: dict, mode: str = "shadow"):
+    """Drive run_once with a controlled set of retry results."""
+    from app.jobs import alert_recovery
+
+    def _evaluate(identity, **kw):
+        if isinstance(outcomes[identity], Exception):
+            raise outcomes[identity]
+        return outcomes[identity]
+
+    monkeypatch.setattr("app.services.alert_integration.evaluate_input", _evaluate)
+    monkeypatch.setattr(alert_recovery, "recover_evaluations",
+                        lambda session, **kw: _report(abandoned=list(outcomes)))
+    monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
+    monkeypatch.setattr(alert_recovery, "_retryable_inputs",
+                        lambda session, abandoned, *, limit, exhausted=None:
+                        [(i, mode) for i in outcomes])
+    monkeypatch.setenv("ALERTS_MODE", mode)
+    from app.config import get_settings
+    get_settings.cache_clear()
+    return alert_recovery.run_once()
+
+
+def test_a_failing_retry_does_not_report_a_healthy_component(isolated_db, monkeypatch):
+    """The heartbeat has to watch the work, not itself.
+
+    Swallowing every retry exception and then reporting "ok" makes the total
+    loss of alert evaluation look identical to a quiet week from the outside —
+    which is exactly what component monitoring exists to distinguish.
+    """
+    result = _run_with_retries(monkeypatch, outcomes={"A": RuntimeError("boom")})
+    assert result["status"] == "critical", "every retry failed and it reported ok"
+    assert result["retries_failed"] == 1
+    assert result["retried"] == 0
+
+
+def test_a_partial_retry_failure_is_degraded_not_healthy(isolated_db, monkeypatch):
+    result = _run_with_retries(
+        monkeypatch, outcomes={"A": None, "B": RuntimeError("boom")})
+    assert result["status"] == "degraded"
+    assert result["retried"] == 1 and result["retries_failed"] == 1
+
+
+def test_clean_retries_still_report_ok(isolated_db, monkeypatch):
+    """The check must not cry wolf, or it stops being read."""
+    result = _run_with_retries(monkeypatch, outcomes={"A": None, "B": None})
+    assert result["status"] == "ok"
+    assert result["retries_failed"] == 0
+
+
+def test_a_watchdog_that_cannot_evaluate_does_not_report_healthy():
+    """The worst component to hide this on.
+
+    The watchdog exists to notice that recomputes have stopped. An evaluation
+    that throws means it noticed and could not tell anyone — and a green
+    heartbeat then states the opposite of what happened.
+    """
+    from app.alerts.watchdog import heartbeat_status
+
+    # the case that was reported "ok": captured an outage, could not alert on it
+    assert heartbeat_status(False, "FAILED") == "critical"
+    assert heartbeat_status(True, "FAILED") == "critical"
+
+    # a firing verdict is critical whether or not evaluation succeeded
+    assert heartbeat_status(True, "COMMITTED") == "critical"
+
+    # and the quiet path still reports ok, or the signal stops being read
+    assert heartbeat_status(False, "COMMITTED") == "ok"
+    assert heartbeat_status(False, None) == "ok"
+
+
+def test_the_watchdog_wires_its_status_helper_into_the_heartbeat():
+    """Guards the extraction: the helper must be what actually decides."""
+    import inspect
+
+    from app.alerts import watchdog
+
+    source = inspect.getsource(watchdog.run_once)
+    assert "heartbeat_status(" in source
+    assert '"critical" if verdict.firing else "ok"' not in source
+
+
+def test_an_evaluation_that_returns_a_failure_is_not_counted_as_retried(
+        isolated_db, monkeypatch):
+    """"It did not throw" is not the same as "it worked".
+
+    A run that ends FAILED, TIMED_OUT, CONFLICT or ABANDONED raises nothing and
+    leaves the snapshot without its alerts exactly as an exception would.
+    Counting it as retried is how abandoned work goes quiet behind a healthy
+    heartbeat.
+    """
+    from types import SimpleNamespace
+
+    for bad in ("FAILED", "TIMED_OUT", "CONFLICT", "ABANDONED"):
+        result = _run_with_retries(
+            monkeypatch, outcomes={"A": SimpleNamespace(status=bad)})
+        assert result["retries_failed"] == 1, bad
+        assert result["retried"] == 0, bad
+        assert result["status"] == "critical", bad
+
+
+def test_a_committed_evaluation_still_counts_as_retried(isolated_db, monkeypatch):
+    from types import SimpleNamespace
+
+    result = _run_with_retries(
+        monkeypatch, outcomes={"A": SimpleNamespace(status="COMMITTED")})
+    assert result["retried"] == 1
+    assert result["retries_failed"] == 0
+    assert result["status"] == "ok"
+
+
+def test_a_committed_retry_is_recognised_however_the_status_is_typed(
+        isolated_db, monkeypatch):
+    """Guards the comparison against the enum's base class changing.
+
+    `EvaluationRunStatus` is a StrEnum, so `str(member)` is the bare value.
+    That is a property of the base class rather than of this comparison — as a
+    plain Enum it would stringify to "EvaluationRunStatus.COMMITTED", every
+    successful retry would be counted as a failure, and the component would sit
+    at critical forever while nothing was actually wrong.
+    """
+    from types import SimpleNamespace
+
+    from app.alerts.enums import EvaluationRunStatus
+
+    for typed in (EvaluationRunStatus.COMMITTED, "COMMITTED"):
+        result = _run_with_retries(
+            monkeypatch, outcomes={"A": SimpleNamespace(status=typed)})
+        assert result["retried"] == 1, typed
+        assert result["retries_failed"] == 0, typed
+        assert result["status"] == "ok", typed
+
+    for typed in (EvaluationRunStatus.FAILED, "FAILED"):
+        result = _run_with_retries(
+            monkeypatch, outcomes={"A": SimpleNamespace(status=typed)})
+        assert result["retries_failed"] == 1, typed
+
+
+def test_a_corrupt_stored_mode_is_never_executed(isolated_db, monkeypatch):
+    """The ranking said "most restrictive"; the outcome ran it anyway."""
+    from app.jobs import alert_recovery
+
+    called: list = []
+    monkeypatch.setattr("app.services.alert_integration.evaluate_input",
+                        lambda identity, **kw: called.append(kw.get("mode")))
+    monkeypatch.setattr(alert_recovery, "recover_evaluations",
+                        lambda session, **kw: _report(abandoned=["E"]))
+    monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
+    monkeypatch.setattr(alert_recovery, "_retryable_inputs",
+                        lambda session, abandoned, *, limit, exhausted=None:
+                        [("I", "nonsense")])
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    alert_recovery.run_once()
+    assert called == [], f"a corrupt stored mode was executed as {called!r}"
+
+
+def test_work_written_off_by_the_retry_budget_reaches_the_status(
+        isolated_db, monkeypatch):
+    """Bounding retries is right; reporting ok while writing work off is not.
+
+    Past its budget nothing will run that evaluation again, so those snapshots
+    never get their alerts — permanently. A green heartbeat over that is the
+    same silence this component exists to break.
+    """
+    from types import SimpleNamespace
+
+    from app.jobs.alert_recovery import _retryable_inputs
+
+    rows = {"SPENT": SimpleNamespace(input_identity="B", attempt_count=9,
+                                     mode="shadow")}
+    session = SimpleNamespace(get=lambda _model, key: rows.get(key))
+    exhausted: list[str] = []
+
+    out = _retryable_inputs(session, ["SPENT"], limit=2, exhausted=exhausted)
+    assert out == []
+    assert exhausted == ["SPENT"], "the write-off was invisible to the caller"

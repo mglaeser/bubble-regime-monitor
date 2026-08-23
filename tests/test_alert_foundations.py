@@ -826,3 +826,93 @@ def test_an_inert_confirmation_basis_is_reported_not_silently_accepted(ruleset):
     # transition bases are NOT flagged: one transition is exactly what they mean
     assert not [w for w in inert if "authoritative_transition" in w]
     assert not [w for w in inert if "adjacent_snapshots" in w]
+
+
+def test_live_mode_refuses_a_ruleset_that_was_never_promoted(isolated_db):
+    """Promotion is the operator's deliberate act, or it is decoration.
+
+    Without this check a valid but UNPROMOTED candidate placed on disk is
+    evaluated and dispatched exactly like an approved one — health reported
+    `live_matches_promoted` and nothing enforced it (audit B-04). Shadow and
+    dryrun may run an unpromoted candidate; that is what they are for.
+    """
+    import pytest
+
+    from app.alerts.artifacts import load_active_for_mode
+    from app.alerts.errors import AlertingUnavailable
+    from app.db import session_scope
+
+    with session_scope() as session:
+        # nothing has been promoted yet
+        assert load_active_for_mode(session, mode="shadow") is not None
+        assert load_active_for_mode(session, mode="dryrun") is not None
+
+        with pytest.raises(AlertingUnavailable) as caught:
+            load_active_for_mode(session, mode="live")
+        assert "PROMOTED" in str(caught.value)
+
+
+def test_live_mode_accepts_the_ruleset_once_it_is_promoted(isolated_db):
+    from app.alerts.artifacts import load_active, load_active_for_mode, register
+    from app.db import session_scope
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts, promote=True, promoted_by="test")
+
+    with session_scope() as session:
+        admitted = load_active_for_mode(session, mode="live")
+        assert admitted.ruleset.rules_sha256 == artifacts.ruleset.rules_sha256
+
+
+def test_load_active_offers_no_mode_argument_it_would_ignore():
+    """A parameter that looks like a control and is not is worse than none.
+
+    An earlier version accepted `mode` and ignored it, so a caller writing
+    `load_active(session, mode="live")` read as guarded and received an
+    unpromoted candidate. The live check lives in `load_active_for_mode`, and
+    the only way to be sure it is not skipped is for the mode-blind loader to
+    refuse the argument outright.
+    """
+    import inspect
+
+    from app.alerts.artifacts import load_active, load_active_for_mode
+
+    assert "mode" not in inspect.signature(load_active).parameters
+    assert "mode" in inspect.signature(load_active_for_mode).parameters
+
+
+def test_live_admission_binds_the_phrase_set_and_not_only_the_rules(isolated_db):
+    """The rules decide WHETHER to alert; the phrase set decides what it SAYS.
+
+    Binding only `rules_sha256` admits a ruleset whose rules were promoted
+    while its text was not — and the text is the half that reaches the phone.
+    """
+    from dataclasses import replace
+
+    import pytest
+
+    from app.alerts import artifacts as artifacts_module
+    from app.alerts.artifacts import load_active, load_active_for_mode, register
+    from app.alerts.errors import AlertingUnavailable
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded, promote=True)
+        session.flush()
+
+        # Same rules, different text: the one case the old check waved through.
+        drifted = replace(loaded.ruleset, phrase_set_sha256="d" * 64)
+        original = artifacts_module.load_active
+        artifacts_module.load_active = (
+            lambda s, **kw: replace(loaded, ruleset=drifted))
+        try:
+            with pytest.raises(AlertingUnavailable) as caught:
+                load_active_for_mode(session, mode="live")
+        finally:
+            artifacts_module.load_active = original
+
+    message = str(caught.value)
+    assert "phrase set" in message
+    assert "text change that was never promoted" in message
