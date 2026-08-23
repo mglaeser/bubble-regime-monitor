@@ -322,7 +322,8 @@ def test_an_abandoned_evaluation_is_actually_retried(isolated_db, monkeypatch):
                         lambda session, **kw: _report(abandoned=["EVAL1"]))
     monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
     monkeypatch.setattr(alert_recovery, "_retryable_inputs",
-                        lambda session, abandoned, *, limit: [("INPUT1", "shadow")])
+                        lambda session, abandoned, *, limit, exhausted=None:
+                        [("INPUT1", "shadow")])
 
     result = alert_recovery.run_once()
     assert called == [("INPUT1", "shadow")], (
@@ -418,9 +419,12 @@ def test_a_retry_never_runs_in_a_more_permissive_mode_than_either(isolated_db):
     assert _retry_mode("live", "live") == "live"
     assert _retry_mode("shadow", "shadow") == "shadow"
 
-    # an unrecognised mode is treated as the most restrictive, not the least
-    assert _retry_mode("nonsense", "live") == "nonsense"
-    assert _retry_mode("live", "nonsense") == "nonsense"
+    # An unrecognised mode resolves to "disabled", not to itself. Returning the
+    # unknown string ranked it as most restrictive and then let the caller
+    # execute it, because it did not equal "disabled" — restrictive by the
+    # ranking, permissive by the outcome. This assertion used to encode that.
+    assert _retry_mode("nonsense", "live") == "disabled"
+    assert _retry_mode("live", "nonsense") == "disabled"
 
 
 def test_a_retry_is_skipped_entirely_once_alerting_is_disabled(isolated_db, monkeypatch):
@@ -434,7 +438,8 @@ def test_a_retry_is_skipped_entirely_once_alerting_is_disabled(isolated_db, monk
                         lambda session, **kw: _report(abandoned=["E"]))
     monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
     monkeypatch.setattr(alert_recovery, "_retryable_inputs",
-                        lambda session, abandoned, *, limit: [("I", "live")])
+                        lambda session, abandoned, *, limit, exhausted=None:
+                        [("I", "live")])
     monkeypatch.setenv("ALERTS_MODE", "shadow")
     from app.config import get_settings
     get_settings.cache_clear()
@@ -457,7 +462,7 @@ def _run_with_retries(monkeypatch, *, outcomes: dict, mode: str = "shadow"):
                         lambda session, **kw: _report(abandoned=list(outcomes)))
     monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
     monkeypatch.setattr(alert_recovery, "_retryable_inputs",
-                        lambda session, abandoned, *, limit:
+                        lambda session, abandoned, *, limit, exhausted=None:
                         [(i, mode) for i in outcomes])
     monkeypatch.setenv("ALERTS_MODE", mode)
     from app.config import get_settings
@@ -578,3 +583,46 @@ def test_a_committed_retry_is_recognised_however_the_status_is_typed(
         result = _run_with_retries(
             monkeypatch, outcomes={"A": SimpleNamespace(status=typed)})
         assert result["retries_failed"] == 1, typed
+
+
+def test_a_corrupt_stored_mode_is_never_executed(isolated_db, monkeypatch):
+    """The ranking said "most restrictive"; the outcome ran it anyway."""
+    from app.jobs import alert_recovery
+
+    called: list = []
+    monkeypatch.setattr("app.services.alert_integration.evaluate_input",
+                        lambda identity, **kw: called.append(kw.get("mode")))
+    monkeypatch.setattr(alert_recovery, "recover_evaluations",
+                        lambda session, **kw: _report(abandoned=["E"]))
+    monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
+    monkeypatch.setattr(alert_recovery, "_retryable_inputs",
+                        lambda session, abandoned, *, limit, exhausted=None:
+                        [("I", "nonsense")])
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    alert_recovery.run_once()
+    assert called == [], f"a corrupt stored mode was executed as {called!r}"
+
+
+def test_work_written_off_by_the_retry_budget_reaches_the_status(
+        isolated_db, monkeypatch):
+    """Bounding retries is right; reporting ok while writing work off is not.
+
+    Past its budget nothing will run that evaluation again, so those snapshots
+    never get their alerts — permanently. A green heartbeat over that is the
+    same silence this component exists to break.
+    """
+    from types import SimpleNamespace
+
+    from app.jobs.alert_recovery import _retryable_inputs
+
+    rows = {"SPENT": SimpleNamespace(input_identity="B", attempt_count=9,
+                                     mode="shadow")}
+    session = SimpleNamespace(get=lambda _model, key: rows.get(key))
+    exhausted: list[str] = []
+
+    out = _retryable_inputs(session, ["SPENT"], limit=2, exhausted=exhausted)
+    assert out == []
+    assert exhausted == ["SPENT"], "the write-off was invisible to the caller"

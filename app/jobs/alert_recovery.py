@@ -62,13 +62,20 @@ def _retry_mode(original: str, ambient: str) -> str:
     So neither wins on its own. A retry may resume what it was doing, and it
     may never do more than the operator currently permits.
     """
-    if _MODE_RANK.get(ambient, 0) <= _MODE_RANK.get(original, 0):
+    # An unrecognised mode resolves to "disabled" rather than to ITSELF. The
+    # previous version ranked it as the most restrictive and then returned the
+    # unknown string, which the caller compared against "disabled", failed to
+    # match, and executed — so a corrupt stored mode was treated as most
+    # restrictive by the ranking and least restrictive by the outcome.
+    if original not in _MODE_RANK or ambient not in _MODE_RANK:
+        return "disabled"
+    if _MODE_RANK[ambient] <= _MODE_RANK[original]:
         return ambient
     return original
 
 
-def _retryable_inputs(session: Any, abandoned: list[str], *,
-                      limit: int) -> list[tuple[str, str]]:
+def _retryable_inputs(session: Any, abandoned: list[str], *, limit: int,
+                      exhausted: list[str] | None = None) -> list[tuple[str, str]]:
     """(input identity, mode) for abandoned evaluations still in budget.
 
     The attempt count lives on the evaluation row, so a retry that abandons
@@ -83,6 +90,7 @@ def _retryable_inputs(session: Any, abandoned: list[str], *,
     """
     from app.alerts.models import AlertEvaluation
 
+    exhausted = exhausted if exhausted is not None else []
     out: list[tuple[str, str]] = []
     for evaluation_id in abandoned:
         row = session.get(AlertEvaluation, evaluation_id)
@@ -91,6 +99,7 @@ def _retryable_inputs(session: Any, abandoned: list[str], *,
         if (row.attempt_count or 0) > limit:
             log.warning("alert_evaluation_retry_budget_spent",
                         evaluation_id=evaluation_id, attempts=row.attempt_count)
+            exhausted.append(evaluation_id)
             continue
         out.append((row.input_identity, str(row.mode)))
     return out
@@ -106,8 +115,10 @@ def run_once() -> dict[str, Any]:
         gaps = reconcile_sidecars(session)
         # Which inputs the abandoned evaluations were for, read INSIDE the
         # sweep's session so the retry below works from what was just written.
+        exhausted: list[str] = []
         retryable = _retryable_inputs(session, report.abandoned,
-                                      limit=settings.alerts_eval_retry_max)
+                                      limit=settings.alerts_eval_retry_max,
+                                      exhausted=exhausted)
 
     # RETRY, outside that transaction. `recover_evaluations` records
     # "safe to retry" and nothing ever retried, so an outage that interrupted
@@ -163,9 +174,14 @@ def run_once() -> dict[str, Any]:
     # A component that reports "ok" while every re-run of abandoned work threw
     # is monitoring itself rather than the thing it exists to watch: total loss
     # of alert evaluation would evade the very check meant to surface it.
+    # Work past its retry budget is abandoned PERMANENTLY: nothing will run it
+    # again, so those snapshots never get their alerts. Bounding the retries is
+    # right — one stuck input must not occupy the job forever — but reporting
+    # `ok` while alert work is being written off is the same silence this
+    # component exists to break.
     if report.needs_operator or (failed and not retried):
         status = "critical"
-    elif failed or gaps:
+    elif failed or gaps or exhausted:
         status = "degraded"
     else:
         status = "ok"
@@ -176,6 +192,7 @@ def run_once() -> dict[str, Any]:
         "sidecar_gaps": len(gaps),
         "retried": len(retried),
         "retries_failed": len(failed),
+        "retries_budget_exhausted": len(exhausted),
     }
     heartbeat(COMPONENT, status, detail)
     return {"status": status, **detail}
