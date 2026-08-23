@@ -114,6 +114,7 @@ def run_once() -> dict[str, Any]:
     # marked recoverable and then abandoned in the ordinary sense of the word
     # (audit B-13).
     retried: list[str] = []
+    failed: list[str] = []
     if settings.alerts_mode != "disabled":
         from app.services.alert_integration import evaluate_input
         for identity, original_mode in retryable:
@@ -127,17 +128,31 @@ def run_once() -> dict[str, Any]:
                 evaluate_input(identity, mode=mode)
                 retried.append(identity)
             except Exception as exc:      # noqa: BLE001
-                # One stuck input must not stop the sweep or the job.
+                # One stuck input must not stop the sweep or the job — but it
+                # must not vanish either. Swallowing this and then reporting a
+                # healthy heartbeat is how the loss of every alert evaluation
+                # looks identical to a quiet week from the outside.
+                failed.append(identity)
                 log.error("alert_evaluation_retry_failed", input_identity=identity,
                           error_class=type(exc).__name__, error=sanitize(exc))
 
-    status = "critical" if report.needs_operator else ("degraded" if gaps else "ok")
+    # The heartbeat has to carry the retries' outcome, not just the sweep's.
+    # A component that reports "ok" while every re-run of abandoned work threw
+    # is monitoring itself rather than the thing it exists to watch: total loss
+    # of alert evaluation would evade the very check meant to surface it.
+    if report.needs_operator or (failed and not retried):
+        status = "critical"
+    elif failed or gaps:
+        status = "degraded"
+    else:
+        status = "ok"
     detail = {
         "abandoned": len(report.abandoned),
         "inconsistent": len(report.inconsistent),
         "in_progress": len(report.in_progress),
         "sidecar_gaps": len(gaps),
         "retried": len(retried),
+        "retries_failed": len(failed),
     }
     heartbeat(COMPONENT, status, detail)
     return {"status": status, **detail}

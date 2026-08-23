@@ -441,3 +441,52 @@ def test_a_retry_is_skipped_entirely_once_alerting_is_disabled(isolated_db, monk
 
     alert_recovery.run_once()
     assert called == ["I"], "the retry should still run, just not in live"
+
+
+def _run_with_retries(monkeypatch, *, outcomes: dict, mode: str = "shadow"):
+    """Drive run_once with a controlled set of retry results."""
+    from app.jobs import alert_recovery
+
+    def _evaluate(identity, **kw):
+        if isinstance(outcomes[identity], Exception):
+            raise outcomes[identity]
+        return outcomes[identity]
+
+    monkeypatch.setattr("app.services.alert_integration.evaluate_input", _evaluate)
+    monkeypatch.setattr(alert_recovery, "recover_evaluations",
+                        lambda session, **kw: _report(abandoned=list(outcomes)))
+    monkeypatch.setattr(alert_recovery, "reconcile_sidecars", lambda session: [])
+    monkeypatch.setattr(alert_recovery, "_retryable_inputs",
+                        lambda session, abandoned, *, limit:
+                        [(i, mode) for i in outcomes])
+    monkeypatch.setenv("ALERTS_MODE", mode)
+    from app.config import get_settings
+    get_settings.cache_clear()
+    return alert_recovery.run_once()
+
+
+def test_a_failing_retry_does_not_report_a_healthy_component(isolated_db, monkeypatch):
+    """The heartbeat has to watch the work, not itself.
+
+    Swallowing every retry exception and then reporting "ok" makes the total
+    loss of alert evaluation look identical to a quiet week from the outside —
+    which is exactly what component monitoring exists to distinguish.
+    """
+    result = _run_with_retries(monkeypatch, outcomes={"A": RuntimeError("boom")})
+    assert result["status"] == "critical", "every retry failed and it reported ok"
+    assert result["retries_failed"] == 1
+    assert result["retried"] == 0
+
+
+def test_a_partial_retry_failure_is_degraded_not_healthy(isolated_db, monkeypatch):
+    result = _run_with_retries(
+        monkeypatch, outcomes={"A": None, "B": RuntimeError("boom")})
+    assert result["status"] == "degraded"
+    assert result["retried"] == 1 and result["retries_failed"] == 1
+
+
+def test_clean_retries_still_report_ok(isolated_db, monkeypatch):
+    """The check must not cry wolf, or it stops being read."""
+    result = _run_with_retries(monkeypatch, outcomes={"A": None, "B": None})
+    assert result["status"] == "ok"
+    assert result["retries_failed"] == 0
