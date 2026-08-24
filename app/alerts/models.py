@@ -21,6 +21,7 @@ Every datetime is stored as aware UTC and returned as RFC 3339 `Z`.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     DDL,
@@ -541,6 +542,12 @@ class AlertDelivery(Base):
                                                 default=PlanningState.NONE)
     hold_reason_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     budget_recheck_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    planning_budget_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True)
+    dispatch_budget_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True)
+    dispatch_budget_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
     not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -48,11 +48,11 @@ from app.alerts.models import (
     AlertRuleState,
 )
 from app.alerts.outbox import (
-    budget_usage,
     cancel,
     claim,
     claimable,
     default_limits,
+    dispatch_budget_usage,
     hold_for_budget,
     mark_permanent,
     mark_render_failed,
@@ -61,6 +61,7 @@ from app.alerts.outbox import (
     mark_transient,
     mark_unknown,
     pending_planning_rulesets,
+    record_dispatch_budget_decision,
     recover_leases,
     release,
     release_due_holds,
@@ -534,8 +535,15 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # -- 3: authoritative budget recheck -------------------------------
         if (delivery.priority != Priority.P1
                 and delivery.delivery_kind in BUDGETED_KINDS):
-            usage = budget_usage(session, mode=mode, live_profile=live_profile, now=now)
+            usage = dispatch_budget_usage(
+                session,
+                mode=mode,
+                live_profile=live_profile,
+                now=now,
+                current_delivery_id=delivery.delivery_id,
+            )
             decision = check_budget(delivery.priority, usage, default_limits(settings))
+            record_dispatch_budget_decision(session, delivery, decision, now=now)
             if not decision.allowed:
                 hold_for_budget(session, delivery, decision.reason or "budget", now=now)
                 report.held += 1

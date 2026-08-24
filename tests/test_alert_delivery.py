@@ -243,6 +243,17 @@ def test_p2_is_held_by_budget_during_the_day():
     assert delivery.hold_reason_code == "cap_24h"
 
 
+def test_one_plan_reserves_each_p2_group_before_planning_the_next():
+    first = _p2(rule_id="p2.first", group="a")
+    second = _p2(rule_id="p2.second", group="b")
+    result = plan(_inputs(
+        [first, second], budget_usage=BudgetUsage(2, 2, 0, 0)))
+    assert [delivery.planning_state for delivery in result.deliveries] == [
+        PlanningState.READY,
+        PlanningState.HELD_BUDGET,
+    ]
+
+
 def test_p2_bundles_by_group_key():
     rules = [_p2("p2.a", "regime"), _p2("p2.b", "regime"), _p2("p2.c", "credit")]
     result = plan(_inputs(rules))

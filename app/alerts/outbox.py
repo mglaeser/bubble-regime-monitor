@@ -23,7 +23,15 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.alerts.budgets import BUDGETED_KINDS, RESERVED_STATUSES, BudgetLimits, BudgetUsage, window_start
+from app.alerts.budgets import (
+    BUDGETED_KINDS,
+    DISPATCH_RESERVED_STATUSES,
+    PLANNER_RESERVED_STATUSES,
+    BudgetDecision,
+    BudgetLimits,
+    BudgetUsage,
+    window_start,
+)
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import (
     ActorType,
@@ -134,6 +142,7 @@ def _insert_delivery(session: Session, intent: DeliveryIntent, *, mode: str,
             if intent.planning_state == PlanningState.HELD_BUDGET
             else None
         ),
+        planning_budget_snapshot=(intent.budget.as_dict() if intent.budget else None),
         not_before=intent.not_before,
         created_at=now,
         updated_at=now,
@@ -461,13 +470,16 @@ def revalidate_members(session: Session, delivery: AlertDelivery, *,
     return live
 
 
-def budget_usage(session: Session, *, mode: str, live_profile: str,
-                 now: datetime) -> BudgetUsage:
-    """The AUTHORITATIVE count, taken immediately before sending.
-
-    Only CONFIRMED sends count as delivered; in-flight reservations are counted
-    separately so two workers cannot spend the same headroom.
-    """
+def _budget_usage(
+    session: Session,
+    *,
+    mode: str,
+    live_profile: str,
+    now: datetime,
+    reserved_statuses: Collection[str],
+    exclude_delivery_id: str | None,
+) -> BudgetUsage:
+    """Shared sent/load counts plus a caller-defined reservation set."""
     def _sent(since: datetime) -> int:
         return int(session.execute(
             select(func.count()).select_from(AlertDelivery).where(
@@ -480,14 +492,22 @@ def budget_usage(session: Session, *, mode: str, live_profile: str,
             )
         ).scalar_one())
 
+    live_member_exists = select(AlertDeliveryMember.delivery_id).where(
+        AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id,
+        AlertDeliveryMember.dropped_at.is_(None),
+    ).exists()
+    reservation_conditions = [
+        AlertDelivery.mode == mode,
+        AlertDelivery.live_profile == live_profile,
+        AlertDelivery.priority > 1,
+        AlertDelivery.delivery_kind.in_(sorted(BUDGETED_KINDS)),
+        AlertDelivery.transport_status.in_(sorted(reserved_statuses)),
+        live_member_exists,
+    ]
+    if exclude_delivery_id is not None:
+        reservation_conditions.append(AlertDelivery.delivery_id != exclude_delivery_id)
     reserved = int(session.execute(
-        select(func.count()).select_from(AlertDelivery).where(
-            AlertDelivery.mode == mode,
-            AlertDelivery.live_profile == live_profile,
-            AlertDelivery.priority > 1,
-            AlertDelivery.delivery_kind.in_(sorted(BUDGETED_KINDS)),
-            AlertDelivery.transport_status.in_(sorted(RESERVED_STATUSES)),
-        )
+        select(func.count()).select_from(AlertDelivery).where(*reservation_conditions)
     ).scalar_one())
 
     digest = int(session.execute(
@@ -508,6 +528,38 @@ def budget_usage(session: Session, *, mode: str, live_profile: str,
     )
 
 
+def planner_budget_usage(session: Session, *, mode: str, live_profile: str,
+                         now: datetime) -> BudgetUsage:
+    """Advisory usage including every credible queued market send."""
+    return _budget_usage(
+        session,
+        mode=mode,
+        live_profile=live_profile,
+        now=now,
+        reserved_statuses=PLANNER_RESERVED_STATUSES,
+        exclude_delivery_id=None,
+    )
+
+
+def dispatch_budget_usage(
+    session: Session,
+    *,
+    mode: str,
+    live_profile: str,
+    now: datetime,
+    current_delivery_id: str,
+) -> BudgetUsage:
+    """Authoritative usage before send, excluding the current lease itself."""
+    return _budget_usage(
+        session,
+        mode=mode,
+        live_profile=live_profile,
+        now=now,
+        reserved_statuses=DISPATCH_RESERVED_STATUSES,
+        exclude_delivery_id=current_delivery_id,
+    )
+
+
 def hold_for_budget(session: Session, delivery: AlertDelivery, reason: str,
                     *, now: datetime) -> None:
     """Park a non-P1 back in the queue. Never called for a P1."""
@@ -522,6 +574,31 @@ def hold_for_budget(session: Session, delivery: AlertDelivery, reason: str,
     delivery.updated_at = now
     _event(session, now, action="delivery_held_budget", delivery_id=delivery.delivery_id,
            detail=reason)
+
+
+def record_dispatch_budget_decision(
+    session: Session,
+    delivery: AlertDelivery,
+    decision: BudgetDecision,
+    *,
+    now: datetime,
+) -> None:
+    """Persist the authoritative recheck and append its bounded audit fact."""
+    snapshot = decision.as_dict()
+    delivery.dispatch_budget_snapshot = snapshot
+    delivery.dispatch_budget_checked_at = now
+    _event(
+        session,
+        now,
+        action="delivery_budget_checked",
+        delivery_id=delivery.delivery_id,
+        detail=(
+            f"allowed={decision.allowed} reason={decision.reason or 'none'} "
+            f"sent_24h={decision.usage.sent_24h} "
+            f"sent_168h={decision.usage.sent_168h} "
+            f"reserved={decision.usage.reserved}"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

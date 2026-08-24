@@ -40,7 +40,7 @@ from app.alerts.enums import (
 )
 from app.alerts.errors import EvaluationConflict, EvaluationDeadlineExceeded, sanitize
 from app.alerts.models import AlertEvaluation, AlertEvaluationRuleset
-from app.alerts.outbox import budget_usage, default_limits, persist_plan
+from app.alerts.outbox import default_limits, persist_plan, planner_budget_usage
 from app.alerts.planner import PlanInputs, plan
 from app.alerts.primitives import EvaluationContext, evaluate_rule
 from app.alerts.registry import ValidatedRuleset, instance_fingerprint
@@ -475,8 +475,8 @@ def run_evaluation(
                     origin_rules_sha256=rules_sha,
                     phrase_set_version=artifacts.phrase_set_version,
                     phrase_set_sha256=artifacts.phrase_set_sha256,
-                    budget_usage=budget_usage(session, mode=mode,
-                                              live_profile=live_profile, now=now),
+                    budget_usage=planner_budget_usage(
+                        session, mode=mode, live_profile=live_profile, now=now),
                     budget_limits=limits,
                 ))
                 persist_plan(

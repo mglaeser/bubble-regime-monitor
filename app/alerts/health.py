@@ -465,6 +465,10 @@ def health_projection(
 
     critical = ruleset is None or any(not c["healthy"] for c in components.values())
     queue_degraded = bool(overdue_holds or holds_missing_next_check)
+    from app.alerts.outbox import planner_budget_usage
+
+    current_budget_usage = planner_budget_usage(
+        session, mode=mode, live_profile=profile, now=health_now)
     return {
         "status": (
             "critical" if critical
@@ -553,6 +557,10 @@ def health_projection(
             "non_p1_target_168h": settings.alerts_non_p1_target_168h,
             "non_p1_cap_24h": settings.alerts_non_p1_cap_24h,
             "non_p1_cap_168h": settings.alerts_non_p1_cap_168h,
+            "sent_24h": current_budget_usage.sent_24h,
+            "sent_168h": current_budget_usage.sent_168h,
+            "queued_reservations": current_budget_usage.reserved,
+            "digest_168h": current_budget_usage.digest_168h,
         },
         "heartbeats": heartbeats,
         "sqlite": sqlite_info,

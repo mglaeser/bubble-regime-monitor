@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from app.alerts.budgets import BudgetUsage
+from app.alerts.budgets import BudgetLimits, BudgetUsage, check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
 from app.alerts.models import AlertDelivery, AlertEvent, AlertRender
@@ -87,6 +87,11 @@ def test_new_budget_hold_persists_a_bounded_next_check():
             self.rows.append(row)
 
     sink = Sink()
+    planning_decision = check_budget(
+        2,
+        BudgetUsage(sent_24h=3, sent_168h=3, reserved=0, digest_168h=0),
+        BudgetLimits(target_168h=2, cap_24h=3, cap_168h=6),
+    )
     _insert_delivery(
         sink,
         DeliveryIntent(
@@ -97,6 +102,7 @@ def test_new_budget_hold_persists_a_bounded_next_check():
             planning_state=PlanningState.HELD_BUDGET,
             not_before=NOW,
             hold_reason_code="cap_24h",
+            budget=planning_decision,
         ),
         mode="shadow",
         live_profile="default",
@@ -106,6 +112,7 @@ def test_new_budget_hold_persists_a_bounded_next_check():
     )
     delivery = next(row for row in sink.rows if isinstance(row, AlertDelivery))
     assert delivery.budget_recheck_at == NOW + timedelta(minutes=30)
+    assert delivery.planning_budget_snapshot == planning_decision.as_dict()
 
 
 def test_budget_hold_is_reconsidered_and_can_send():
@@ -129,6 +136,8 @@ def test_budget_hold_is_reconsidered_and_can_send():
         assert delivery is not None
         assert delivery.transport_status == TransportStatus.SENT
         assert delivery.planning_state == PlanningState.NONE
+        assert delivery.dispatch_budget_snapshot["allowed"] is True
+        assert delivery.dispatch_budget_checked_at is not None
 
 
 def test_budget_hold_rechecks_and_reholds_when_cap_remains_full(monkeypatch):
@@ -138,7 +147,7 @@ def test_budget_hold_rechecks_and_reholds_when_cap_remains_full(monkeypatch):
     delivery_id = _held_market_delivery(PlanningState.HELD_BUDGET)
     monkeypatch.setattr(
         dispatcher_module,
-        "budget_usage",
+        "dispatch_budget_usage",
         lambda *args, **kwargs: BudgetUsage(3, 3, 0, 0),
     )
     report = dispatch_once(
@@ -164,7 +173,14 @@ def test_budget_hold_rechecks_and_reholds_when_cap_remains_full(monkeypatch):
         if recheck_at.tzinfo is None:
             recheck_at = recheck_at.replace(tzinfo=UTC)
         assert recheck_at == NOW + timedelta(minutes=30)
-        assert actions[-2:] == ["delivery_hold_released", "delivery_held_budget"]
+        assert delivery.dispatch_budget_snapshot["allowed"] is False
+        assert delivery.dispatch_budget_snapshot["reason"] == "cap_24h"
+        assert delivery.dispatch_budget_checked_at is not None
+        assert actions[-3:] == [
+            "delivery_hold_released",
+            "delivery_budget_checked",
+            "delivery_held_budget",
+        ]
 
 
 def _memberless_delivery(kind: DeliveryKind) -> tuple[str, object]:

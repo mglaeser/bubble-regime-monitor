@@ -301,6 +301,7 @@ def plan(inputs: PlanInputs) -> PlanResult:
     for item in p2:
         groups.setdefault(group_key_for(item[0]), []).append(item)
 
+    advisory_usage = inputs.budget_usage
     for group, items in sorted(groups.items()):
         members = [
             _member(rule, episode_id, memory, inputs,
@@ -312,7 +313,7 @@ def plan(inputs: PlanInputs) -> PlanResult:
         not_before = release_time_for(Priority.P2, now)
         held_quiet = not_before > now
         # -- step 10: advisory budget --------------------------------------
-        budget = check_budget(Priority.P2, inputs.budget_usage, inputs.budget_limits)
+        budget = check_budget(Priority.P2, advisory_usage, inputs.budget_limits)
 
         if held_quiet:
             state, hold = PlanningState.HELD_QUIET, "quiet_hours"
@@ -337,6 +338,16 @@ def plan(inputs: PlanInputs) -> PlanResult:
             hold_reason_code=hold,
             budget=budget,
         ))
+        # This intent is now credible queued work even when held, and every
+        # later group in the same pure plan must see that reservation. The
+        # database-backed usage catches earlier evaluations; this catches
+        # siblings not persisted until the plan returns.
+        advisory_usage = BudgetUsage(
+            sent_24h=advisory_usage.sent_24h,
+            sent_168h=advisory_usage.sent_168h,
+            reserved=advisory_usage.reserved + 1,
+            digest_168h=advisory_usage.digest_168h,
+        )
     return result
 
 

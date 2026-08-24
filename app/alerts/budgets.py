@@ -31,8 +31,14 @@ BUDGETED_KINDS: frozenset[str] = frozenset({
     DeliveryKind.WATCHDOG,
 })
 
-#: Statuses that count as a reservation the dispatcher must not double-spend.
-RESERVED_STATUSES: frozenset[str] = frozenset({
+#: Every credible future market send reserves planner headroom.
+PLANNER_RESERVED_STATUSES: frozenset[str] = frozenset({
+    TransportStatus.PENDING, TransportStatus.RETRY_DUE,
+    TransportStatus.LEASED, TransportStatus.SENDING,
+})
+
+#: At dispatch, only OTHER workers already at the wire reserve headroom.
+DISPATCH_RESERVED_STATUSES: frozenset[str] = frozenset({
     TransportStatus.LEASED, TransportStatus.SENDING,
 })
 

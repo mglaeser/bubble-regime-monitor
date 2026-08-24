@@ -137,7 +137,7 @@
         "non-P1 volume breached the 24h cap: 5 > 3",
         "non-P1 volume breached the 168h cap: 8 > 6"
       ],
-      "held_budget": 0,
+      "held_budget": 3,
       "held_grouping": 0,
       "held_quiet": 3,
       "indeterminate_band_excursions": 1,
@@ -232,7 +232,7 @@
         "non-P1 volume breached the 24h cap: 5 > 3",
         "non-P1 volume breached the 168h cap: 8 > 6"
       ],
-      "held_budget": 0,
+      "held_budget": 3,
       "held_grouping": 0,
       "held_quiet": 3,
       "indeterminate_band_excursions": 1,
