@@ -579,3 +579,82 @@ def test_revoking_a_ruleset_stops_the_messages_already_queued():
         blockers = delivery_admission_blockers(session, sha)
 
     assert any("REVOKED" in b for b in blockers)
+
+
+def _registry_clone(session, source_sha: str, *, sha: str, yaml_text: str):
+    """A second registry row. The bytes are immutable under a hash — correctly
+    — so a variant needs its own row rather than an edit to the original.
+    """
+    from datetime import UTC, datetime
+
+    from app.alerts.enums import RulesetStatus
+    from app.alerts.models import AlertRulesetRegistry
+
+    src = session.get(AlertRulesetRegistry, source_sha)
+    session.add(AlertRulesetRegistry(
+        rules_sha256=sha, rule_version=src.rule_version, canonical_yaml=yaml_text,
+        phrase_set_version=src.phrase_set_version,
+        phrase_set_sha256=src.phrase_set_sha256,
+        alert_input_schema_version=src.alert_input_schema_version,
+        methodology_version=src.methodology_version,
+        methodology_manifest_sha256=src.methodology_manifest_sha256,
+        min_service_version=src.min_service_version,
+        max_service_version=src.max_service_version,
+        validated_at=src.validated_at,
+        promoted_at=datetime(2026, 8, 1, tzinfo=UTC),
+        status=RulesetStatus.SUPERSEDED))
+    session.flush()
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_demotion_stops_deliveries_already_queued_at_the_higher_stage():
+    """The queue must not outlive the decision that lowered it.
+
+    Promotion authorises the ruleset's existence; it does not freeze the stage.
+    Checking only "was promoted" let a message planned at stage 3 under a
+    since-superseded ruleset go out after the operator demoted to stage 1 —
+    which is precisely when they are trying to make messages stop.
+    """
+    import yaml
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.models import AlertRulesetRegistry
+    from app.alerts.promotion import delivery_admission_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded, promote=True)
+        session.flush()
+        sha = loaded.ruleset.rules_sha256
+
+        # a continuation at the SAME stage still sends
+        assert delivery_admission_blockers(session, sha) == []
+
+        row = session.get(AlertRulesetRegistry, sha)
+        raised = yaml.safe_load(row.canonical_yaml)
+        raised["meta"]["active_stage"] = raised["meta"]["active_stage"] + 1
+        _registry_clone(session, sha, sha="9" * 64,
+                        yaml_text=yaml.safe_dump(raised))
+
+        blockers = delivery_admission_blockers(session, "9" * 64)
+
+    assert blockers
+    assert "must not outlive the decision that lowered it" in blockers[0]
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_ruleset_recording_no_stage_cannot_justify_a_send():
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.promotion import delivery_admission_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded, promote=True)
+        session.flush()
+        _registry_clone(session, loaded.ruleset.rules_sha256, sha="8" * 64,
+                        yaml_text="not: a ruleset")
+        blockers = delivery_admission_blockers(session, "8" * 64)
+
+    assert any("does not record a stage" in b for b in blockers)

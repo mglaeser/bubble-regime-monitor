@@ -296,6 +296,7 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
     So the test is `promoted_at is not None` — a deliberate act that happened,
     and that archiving does not undo.
     """
+    from app.alerts.artifacts import load_active
     from app.alerts.enums import RulesetStatus
     from app.alerts.models import AlertRulesetRegistry
 
@@ -317,4 +318,41 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
         return [f"the ruleset that planned this delivery "
                 f"({planning_rules_sha256[:12]}) was REVOKED, which withdraws "
                 "the promotion that authorised it"]
+
+    # Promotion authorises the ruleset's EXISTENCE; it does not freeze the
+    # stage. Checking only "was promoted" let a message planned at stage 3
+    # under a since-superseded ruleset go out after the operator demoted the
+    # deployment to stage 1 — the queue outliving the decision that stopped it.
+    #
+    # So the planning ruleset may not outrank what is permitted NOW. A
+    # continuation from an archived ruleset at the same stage still sends,
+    # which is what the previous fix was protecting; a demotion stops it, which
+    # is what that fix lost.
+    try:
+        current = load_active(session).ruleset.document.meta.active_stage
+    except Exception as exc:                       # noqa: BLE001 - reported, not raised
+        return [f"the active ruleset could not be loaded, so the stage this "
+                f"delivery was planned for cannot be compared to it: "
+                f"{type(exc).__name__}"]
+
+    planned_stage = _stage_of(row)
+    if planned_stage is None:
+        return [f"the ruleset that planned this delivery "
+                f"({planning_rules_sha256[:12]}) does not record a stage, so "
+                "what it was permitted to send cannot be established"]
+    if planned_stage > current:
+        return [f"this delivery was planned at stage {planned_stage} and the "
+                f"deployment now runs at stage {current}; the queue must not "
+                "outlive the decision that lowered it"]
     return []
+
+
+def _stage_of(row: Any) -> int | None:
+    """The `active_stage` recorded in a registry row's canonical YAML."""
+    import yaml
+
+    try:
+        document = yaml.safe_load(row.canonical_yaml)
+        return int(document["meta"]["active_stage"])
+    except Exception:                              # noqa: BLE001 - absent is a blocker
+        return None
