@@ -246,7 +246,49 @@ def test_a_queued_delivery_is_judged_by_the_rules_that_planned_it(monkeypatch):
                            live_profile="default", sender=_Explodes())
     assert seen == ["abc"], "the planning ruleset was not the one checked"
     assert report.sent == 0 and report.claimed == 0
-    assert any("planned under a stage" in n for n in report.notes)
+    assert report.held == 1
+    assert any("does not describe these rules" in n for n in report.notes)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_one_stale_delivery_does_not_silence_every_other_alert(monkeypatch):
+    """A control that can take down the whole alert path is worse than the
+    mismatch it prevents.
+
+    Refusing the entire pass turned one stale message from a superseded ruleset
+    into a permanent outage of every live alert — P1 included — with no way out
+    that did not involve editing the database.
+    """
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    def _gate(session, rules_sha, **kw):
+        return ["stage 3: superseded"] if rules_sha == "stale" else []
+
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: [])
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers", _gate)
+
+    def _deliveries(session, **kw):
+        return [type("D", (), {"delivery_id": "old", "planning_rules_sha256": "stale"})(),
+                type("D", (), {"delivery_id": "new", "planning_rules_sha256": "fine"})()]
+
+    monkeypatch.setattr(dispatcher_module, "claimable", _deliveries)
+
+    claimed: list[str] = []
+    monkeypatch.setattr(dispatcher_module, "claim",
+                        lambda session, delivery_id, **kw:
+                        claimed.append(delivery_id) or True)
+    monkeypatch.setattr(dispatcher_module, "_process",
+                        lambda *a, **kw: None)
+
+    report = dispatch_once(session_scope, phrase_set=None, mode="live",
+                           live_profile="default")
+    assert "old" not in claimed, "the stale delivery was dispatched"
+    assert claimed == ["new"], (
+        f"the healthy delivery was blocked by an unrelated one: {claimed}")
+    assert report.held == 1
 
 
 @pytest.mark.usefixtures("isolated_db")

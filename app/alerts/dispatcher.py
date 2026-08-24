@@ -182,6 +182,18 @@ def _headline_for(rule_id: str, phrase_set: ValidatedPhraseSet) -> str:
     return code if code in phrase_set.headlines else next(iter(phrase_set.headlines))
 
 
+def is_live(mode: str) -> bool:
+    """The one place that decides what "live" means.
+
+    It was spelled two ways — a `live` local in `dispatch_once` and a bare
+    `mode == "live"` in `_process` — which is the same predicate written twice
+    and read as a discrepancy by more than one reviewer. Nothing turned on the
+    difference; the point is that nothing should have to be checked to know
+    that.
+    """
+    return mode == "live"
+
+
 def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
                               outcome: Any, mode: str,
                               report: DispatchReport) -> bool:
@@ -203,7 +215,7 @@ def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
     A request that never started cannot have crossed anything, so it is not
     reported: that would turn a connection refused into an audit finding.
     """
-    if mode != "live" or not getattr(outcome, "request_started", False):
+    if not is_live(mode) or not getattr(outcome, "request_started", False):
         return False
     withdrawn = delivery_admission_blockers(session, delivery.planning_rules_sha256)
     if not withdrawn:
@@ -232,7 +244,7 @@ def dispatch_once(
 
     now = now or datetime.now(UTC)
     settings = settings or get_settings()
-    live = mode == "live"
+    live = is_live(mode)
     sender = sender or default_sender(live=live)
     owner = _owner()
     report = DispatchReport()
@@ -266,23 +278,31 @@ def dispatch_once(
         # and a promotion between planning and dispatch means that is no longer
         # the ruleset checked above. Judging a message by rules that did not
         # authorise it is the mismatch: something else being fine now does not
-        # make this one sendable. One unbacked delivery refuses the whole pass
-        # rather than being parked individually — an unauthorised stage is an
-        # operator's problem with the deployment, not a property of one message.
+        # make this one sendable.
+        #
+        # This is decided PER DELIVERY, not per pass. The previous version
+        # refused the whole pass if any queued delivery was unbacked, which
+        # turned one stale message from a superseded ruleset into a permanent
+        # outage of every live alert — including P1 — with no way out that did
+        # not involve editing the database. A control that can silence the
+        # alert path entirely is worse than the mismatch it prevents.
         if live:
-            planning_blockers: list[str] = []
-            for rules_sha in sorted({d.planning_rules_sha256 for d in pending}):
-                planning_blockers.extend(
-                    delivery_admission_blockers(session, rules_sha))
-            if planning_blockers:
-                report.notes.extend(planning_blockers)
-                report.notes.append(
-                    "live delivery withheld: a queued delivery was planned "
-                    "under a stage its gate evidence does not support")
-                log.error("alert_queued_admission_refused",
-                          blockers=planning_blockers)
-                _heartbeat(report)
-                return report
+            blocked_ids: set[str] = set()
+            by_sha: dict[str, list[str]] = {}
+            for delivery in pending:
+                by_sha.setdefault(delivery.planning_rules_sha256, []).append(
+                    delivery.delivery_id)
+            for rules_sha, ids in sorted(by_sha.items()):
+                found = delivery_admission_blockers(session, rules_sha)
+                if found:
+                    blocked_ids.update(ids)
+                    report.notes.extend(found)
+                    log.error("alert_queued_admission_refused",
+                              rules_sha256=rules_sha[:12], deliveries=len(ids),
+                              blockers=found)
+            if blocked_ids:
+                report.held += len(blocked_ids)
+                candidates = [d for d in candidates if d not in blocked_ids]
 
     for delivery_id in candidates:
         with session_factory() as session:
@@ -373,7 +393,7 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # No hold and no failure state: the delivery stays PENDING and the next
         # pass picks it up. An authorisation that has just been withdrawn is a
         # condition to wait out, not a property of this message.
-        if mode == "live":
+        if is_live(mode):
             late = delivery_admission_blockers(
                 session, delivery.planning_rules_sha256)
             if late:
