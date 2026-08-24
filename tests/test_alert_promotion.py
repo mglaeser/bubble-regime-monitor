@@ -1108,3 +1108,42 @@ def test_legacy_ungated_promotion_does_not_authorise_delivery():
 
     assert blockers
     assert "before promotion checked evidence" in blockers[0]
+
+
+def test_changed_caps_invalidate_the_evidence_that_never_saw_them(monkeypatch):
+    """The planner enforces settings; the evidence must name the caps it judged.
+
+    Raise an env cap after the replay and the deployment runs live under
+    limits the evidence never saw, with the artifact still reading "passed".
+    Changed caps need new evidence, not inherited approval.
+    """
+    artifact = {
+        "runs": {"stage_3": {
+            "evaluated_at_stage": 3, "passed": True, "failures": [],
+            "notification_planning_ran": True,
+            "budget_limits": {"cap_24h": 3, "cap_168h": 6, "target_168h": 2},
+        }},
+    }
+    assert promotion_blockers(target_stage=3, artifact=artifact) == []
+
+    monkeypatch.setenv("ALERTS_NON_P1_CAP_24H", "30")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    try:
+        blockers = promotion_blockers(target_stage=3, artifact=artifact)
+    finally:
+        monkeypatch.delenv("ALERTS_NON_P1_CAP_24H")
+        get_settings.cache_clear()
+
+    assert any("changed caps need new evidence" in b for b in blockers), blockers
+
+
+def test_a_volume_verdict_with_no_recorded_limits_is_not_a_verdict():
+    artifact = {
+        "runs": {"stage_3": {
+            "evaluated_at_stage": 3, "passed": True, "failures": [],
+            "notification_planning_ran": True,
+        }},
+    }
+    blockers = promotion_blockers(target_stage=3, artifact=artifact)
+    assert any("recorded no budget limits" in b for b in blockers)

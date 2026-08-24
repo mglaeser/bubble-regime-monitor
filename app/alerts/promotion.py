@@ -165,6 +165,33 @@ def promotion_blockers(*, target_stage: int, artifact: dict[str, Any],
     if failures:
         blockers.extend(f"stage {target_stage}: {failure}" for failure in failures)
 
+    # A run that judged volume must say WHICH caps it judged against, and they
+    # must be the caps this deployment enforces now. The planner reads its
+    # limits from settings, so an env var raised after the evidence was
+    # produced would run live under caps the evidence never saw — with the
+    # artifact still reading "passed". Evidence that names no limits cannot
+    # make a volume claim at all.
+    if run.get("notification_planning_ran"):
+        from app.alerts.outbox import default_limits
+        from app.config import get_settings
+
+        recorded = run.get("budget_limits")
+        current = default_limits(get_settings())
+        if not isinstance(recorded, dict) or not recorded:
+            blockers.append(
+                f"stage {target_stage}: the replay judged volume but recorded "
+                "no budget limits, so its verdict cannot be tied to any caps")
+        else:
+            for name, enforced in (("cap_24h", current.cap_24h),
+                                   ("cap_168h", current.cap_168h),
+                                   ("target_168h", current.target_168h)):
+                if recorded.get(name) != enforced:
+                    blockers.append(
+                        f"stage {target_stage}: the evidence was judged against "
+                        f"{name}={recorded.get(name)} and the deployment now "
+                        f"enforces {name}={enforced}; changed caps need new "
+                        "evidence, not inherited approval")
+
     # `passed` is not trusted on its own: a verdict that disagrees with its own
     # failure list is itself the finding.
     if run.get("passed") is not True and not failures:

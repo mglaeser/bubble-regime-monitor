@@ -154,6 +154,12 @@ class ReplaySummary:
     max_non_p1_24h: int = 0
     max_non_p1_168h: int = 0
     mean_non_p1_per_168h: float = 0.0
+    #: The cap values the verdict was judged AGAINST. Without these the
+    #: artifact says "passed" or "failed" while omitting the limits that
+    #: decision used — and the planner enforces whatever the runtime settings
+    #: say, so raising an env var would quietly run live under caps the
+    #: evidence never saw. Recording them is what lets admission notice.
+    budget_limits: dict[str, int] = field(default_factory=dict)
     p1_total: int = 0
 
     # -- governance metrics ----------------------------------------------
@@ -656,6 +662,9 @@ def _decide(summary: ReplaySummary) -> None:
         # "measured and ignored", which is the worse of the two: a number on a
         # dashboard that no one compares to its limit reads as compliance.
         limits = default_limits(get_settings())
+        summary.budget_limits = {"cap_24h": limits.cap_24h,
+                                 "cap_168h": limits.cap_168h,
+                                 "target_168h": limits.target_168h}
         span = _window_hours(summary)
 
         # A sliding-window MAXIMUM is monotonic in the window length, and that

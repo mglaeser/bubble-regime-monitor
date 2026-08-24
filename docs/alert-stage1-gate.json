@@ -18,6 +18,7 @@
     "stage_1": {
       "active_stage": 1,
       "band_excursion_months": 0.1,
+      "budget_limits": {},
       "cancelled_superseded": 0,
       "deliveries_by_kind": {},
       "deliveries_planned": 0,
@@ -83,6 +84,11 @@
     "stage_3": {
       "active_stage": 1,
       "band_excursion_months": 0.1,
+      "budget_limits": {
+        "cap_168h": 6,
+        "cap_24h": 3,
+        "target_168h": 2
+      },
       "cancelled_superseded": 0,
       "deliveries_by_kind": {
         "INITIAL": 13
@@ -173,6 +179,11 @@
     "stage_4": {
       "active_stage": 1,
       "band_excursion_months": 0.1,
+      "budget_limits": {
+        "cap_168h": 6,
+        "cap_24h": 3,
+        "target_168h": 2
+      },
       "cancelled_superseded": 0,
       "deliveries_by_kind": {
         "INITIAL": 13
