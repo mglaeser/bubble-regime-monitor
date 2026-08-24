@@ -396,7 +396,7 @@ class AlertEpisode(Base):
     #: before this timestamp", which a backfill can change between evaluation
     #: and dispatch. Nullable — a cold start has no predecessor.
     predecessor_input_identity: Mapped[str | None] = mapped_column(
-        String(SHA_LEN), nullable=True)
+        ForeignKey("alert_input_snapshot.input_identity"), nullable=True)
     trigger_input_identity: Mapped[str] = mapped_column(
         ForeignKey("alert_input_snapshot.input_identity"), nullable=False)
     candidate_expires_at: Mapped[datetime | None] = mapped_column(

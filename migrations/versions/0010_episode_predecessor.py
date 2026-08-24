@@ -18,6 +18,7 @@ column is nullable because a cold start genuinely has no predecessor.
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "0010"
@@ -27,8 +28,24 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE alert_episode ADD COLUMN predecessor_input_identity VARCHAR(64)")
+    # WITH a foreign key, like `trigger_input_identity` beside it. Without one
+    # the episode can outlive the sidecar it names, and then the render loses
+    # `F_BAND_PREVIOUS` and dies in RENDER_FAILED — which is the exact failure
+    # this column was added to prevent. Retention deletes events rather than
+    # sidecars today, so nothing is currently pruning them; "nothing does this
+    # yet" is not the same as "nothing can", and the constraint is what makes
+    # the difference.
+    #
+    # batch_alter_table because SQLite cannot add a constrained column in
+    # place: it rebuilds the table, which is also what makes the constraint
+    # apply to rows already there.
+    with op.batch_alter_table("alert_episode") as batch:
+        batch.add_column(
+            sa.Column("predecessor_input_identity", sa.String(64), nullable=True))
+        batch.create_foreign_key(
+            "fk_alert_episode_predecessor_input",
+            "alert_input_snapshot",
+            ["predecessor_input_identity"], ["input_identity"])
 
 
 def downgrade() -> None:

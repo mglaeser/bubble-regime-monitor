@@ -272,3 +272,65 @@ def test_the_renderer_reads_the_predecessor_rather_than_resolving_it(
         assert episodes, "the transition must have opened an episode"
         assert episodes[0].predecessor_input_identity == i1, (
             "the episode must record the input the decision was made against")
+
+
+def test_an_episode_cannot_name_a_predecessor_that_does_not_exist(isolated_db):
+    """`trigger_input_identity` has a foreign key; the predecessor needs one too.
+
+    Without it an episode can outlive the sidecar it names, and the render then
+    loses `F_BAND_PREVIOUS` and dies in RENDER_FAILED — the exact failure this
+    column was added to prevent. Nothing prunes sidecars today, but "nothing
+    does this yet" is not "nothing can".
+    """
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.exc import IntegrityError
+
+    from app.alerts.models import (
+        AlertEpisode,
+        AlertEvaluation,
+        AlertInputSnapshot,
+    )
+    from app.db import get_engine
+
+    keys = sa_inspect(get_engine()).get_foreign_keys("alert_episode")
+    assert any(k["constrained_columns"] == ["predecessor_input_identity"]
+               and k["referred_table"] == "alert_input_snapshot"
+               for k in keys), f"no foreign key on the predecessor: {keys}"
+
+    moment = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+    identity, evaluation_id = "t" * 64, "01M0PREDFKEVAL00000000000A"
+
+    with session_scope() as session:
+        from app.alerts.artifacts import load_active, register
+        artifacts = load_active(session)
+        register(session, artifacts)
+        rules_sha = artifacts.ruleset.rules_sha256
+        session.add(AlertInputSnapshot(
+            input_identity=identity, snapshot_id=None, origin="MANUAL",
+            built_at=moment, computed_at=moment, alert_input_schema_version=1,
+            methodology_version="v", methodology_sha256="m" * 64,
+            reconstructed=False, evaluation_eligibility="EVALUABLE",
+            ineligibility_reasons=[], payload="{}", payload_sha256="p" * 64))
+        session.flush()
+        session.add(AlertEvaluation(
+            evaluation_id=evaluation_id, idempotency_key="idem-predfk",
+            input_identity=identity, mode="shadow", live_profile="default",
+            current_rules_sha256=rules_sha, evaluation_set_sha256="s" * 64,
+            evaluated_ruleset_hashes=[rules_sha], evaluator_version="v",
+            status="COMMITTED", attempt_count=1, started_at=moment))
+        session.flush()
+
+        # a predecessor that was never captured is refused
+        with pytest.raises(IntegrityError):
+            session.add(AlertEpisode(
+                episode_id="01M0PREDFKEPISODE0000000A",
+                mode="shadow", live_profile="default",
+                origin_rules_sha256=rules_sha, instance_fingerprint="f" * 64,
+                rule_id="regime.band_to_derisk", labels={}, priority=1,
+                episode_status="FIRING", is_open=True, suppression_reasons=[],
+                opened_at=moment, trigger_input_identity=identity,
+                predecessor_input_identity="n" * 64,
+                created_evaluation_id=evaluation_id,
+                last_evaluation_id=evaluation_id))
+            session.flush()
+        session.rollback()
