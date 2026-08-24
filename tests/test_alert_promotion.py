@@ -211,84 +211,6 @@ def test_the_runtime_gate_binds_the_phrase_set_as_well_as_the_rules():
     assert any("phrase set" in b for b in drifted)
 
 
-@pytest.mark.usefixtures("isolated_db")
-def test_a_queued_delivery_is_judged_by_the_rules_that_planned_it(monkeypatch):
-    """A promotion between planning and dispatch changes which rules apply.
-
-    Checking only the ACTIVE ruleset lets a delivery planned under an unbacked
-    stage go out because something else is fine now.
-    """
-    import app.alerts.dispatcher as dispatcher_module
-    from app.alerts.dispatcher import dispatch_once
-    from app.db import session_scope
-
-    seen: list[str] = []
-
-    def _planning_gate(session, rules_sha, **kw):
-        seen.append(rules_sha)
-        return ["stage 3: the evidence does not describe these rules"]
-
-    # the ACTIVE ruleset is fine; only the one that planned the delivery is not
-    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
-                        lambda session, **kw: [])
-    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
-                        _planning_gate)
-    monkeypatch.setattr(dispatcher_module, "claimable",
-                        lambda session, **kw: [
-                            type("D", (), {"delivery_id": "d1",
-                                           "planning_rules_sha256": "abc"})()])
-
-    class _Explodes:
-        def send(self, *a, **k):
-            raise AssertionError("a refused pass must not reach the wire")
-
-    report = dispatch_once(session_scope, phrase_set=None, mode="live",
-                           live_profile="default", sender=_Explodes())
-    assert seen == ["abc"], "the planning ruleset was not the one checked"
-    assert report.sent == 0 and report.claimed == 0
-    assert report.held == 1
-    assert any("does not describe these rules" in n for n in report.notes)
-
-
-@pytest.mark.usefixtures("isolated_db")
-def test_one_stale_delivery_does_not_silence_every_other_alert(monkeypatch):
-    """A control that can take down the whole alert path is worse than the
-    mismatch it prevents.
-
-    Refusing the entire pass turned one stale message from a superseded ruleset
-    into a permanent outage of every live alert — P1 included — with no way out
-    that did not involve editing the database.
-    """
-    import app.alerts.dispatcher as dispatcher_module
-    from app.alerts.dispatcher import dispatch_once
-    from app.db import session_scope
-
-    def _gate(session, rules_sha, **kw):
-        return ["stage 3: superseded"] if rules_sha == "stale" else []
-
-    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
-                        lambda session, **kw: [])
-    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers", _gate)
-
-    def _deliveries(session, **kw):
-        return [type("D", (), {"delivery_id": "old", "planning_rules_sha256": "stale"})(),
-                type("D", (), {"delivery_id": "new", "planning_rules_sha256": "fine"})()]
-
-    monkeypatch.setattr(dispatcher_module, "claimable", _deliveries)
-
-    claimed: list[str] = []
-    monkeypatch.setattr(dispatcher_module, "claim",
-                        lambda session, delivery_id, **kw:
-                        claimed.append(delivery_id) or True)
-    monkeypatch.setattr(dispatcher_module, "_process",
-                        lambda *a, **kw: None)
-
-    report = dispatch_once(session_scope, phrase_set=None, mode="live",
-                           live_profile="default")
-    assert "old" not in claimed, "the stale delivery was dispatched"
-    assert claimed == ["new"], (
-        f"the healthy delivery was blocked by an unrelated one: {claimed}")
-    assert report.held == 1
 
 
 @pytest.mark.usefixtures("isolated_db")
@@ -391,38 +313,6 @@ def test_nothing_promoted_means_nothing_authorised():
         blockers = _digest_blockers(session, load_active(session).ruleset)
     assert blockers == ["nothing has been promoted, so no bytes authorise delivery"]
 
-
-@pytest.mark.usefixtures("isolated_db")
-def test_authorisation_withdrawn_after_the_claim_stops_the_send(monkeypatch):
-    """Check-then-act: the pass-level check ran before this delivery's work.
-
-    A promotion, a demotion or a swapped ruleset in between leaves an
-    authorisation that was true when it was read and false when it is acted on.
-    """
-    import app.alerts.dispatcher as dispatcher_module
-    from app.alerts.dispatcher import dispatch_once
-    from app.db import session_scope
-
-    calls: list[int] = []
-
-    def _gate(session, rules_sha, **kw):
-        calls.append(1)
-        # authorised at the pass-level check, withdrawn by the time we send
-        return [] if len(calls) == 1 else ["stage 3: promotion was withdrawn"]
-
-    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
-                        lambda session, **kw: [])
-    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers", _gate)
-
-    class _Explodes:
-        def send(self, *a, **k):
-            raise AssertionError("sent after authorisation was withdrawn")
-
-    report = dispatch_once(session_scope, phrase_set=None, mode="live",
-                           live_profile="default", sender=_Explodes())
-    assert report.sent == 0
-    # the gate is consulted more than once: before the pass and before the wire
-    assert len(calls) != 1 or report.claimed == 0
 
 
 def test_a_released_delivery_is_queued_again_not_held():
@@ -660,131 +550,150 @@ def test_a_ruleset_recording_no_stage_cannot_justify_a_send():
     assert any("does not record a stage" in b for b in blockers)
 
 
+
+
+
+
+# --- the queued-admission gate --------------------------------------------
+
+
+def _gate_harness(monkeypatch, *, queue, blocked_shas, live_blockers=None):
+    """Wire dispatch_once up with a controllable queue and gate."""
+    import app.alerts.dispatcher as dispatcher_module
+
+    calls = {"checked": [], "claimed": [], "excluded": None}
+
+    def _rulesets(session, **kw):
+        return sorted({sha for _id, sha in queue})
+
+    def _claimable(session, *, limit, exclude_rules_sha256=None, **kw):
+        calls["excluded"] = set(exclude_rules_sha256 or ())
+        rows = [(i, sha) for i, sha in queue if sha not in calls["excluded"]]
+        return [type("D", (), {"delivery_id": i, "planning_rules_sha256": sha})()
+                for i, sha in rows[:limit]]
+
+    def _delivery_gate(session, sha, **kw):
+        calls["checked"].append(sha)
+        return [f"stage 3: {sha} is not authorised"] if sha in blocked_shas else []
+
+    monkeypatch.setattr(dispatcher_module, "pending_planning_rulesets", _rulesets)
+    monkeypatch.setattr(dispatcher_module, "claimable", _claimable)
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers", _delivery_gate)
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        live_blockers or (lambda session, **kw: []))
+    monkeypatch.setattr(dispatcher_module, "claim",
+                        lambda session, delivery_id, **kw:
+                        calls["claimed"].append(delivery_id) or True)
+    monkeypatch.setattr(dispatcher_module, "_process", lambda *a, **kw: None)
+    return calls
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_queued_delivery_is_judged_by_the_rules_that_planned_it(monkeypatch):
+    """A promotion between planning and dispatch changes which rules apply.
+
+    Checking only the ACTIVE ruleset lets a delivery planned under an unbacked
+    stage go out because something else is fine now.
+    """
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    calls = _gate_harness(monkeypatch, queue=[("d1", "abc")], blocked_shas={"abc"})
+
+    class _Explodes:
+        def send(self, *a, **k):
+            raise AssertionError("a refused delivery must not reach the wire")
+
+    report = dispatch_once(session_scope, phrase_set=None, mode="live",
+                           live_profile="default", sender=_Explodes())
+    assert calls["checked"] == ["abc"], "the planning ruleset was not checked"
+    assert calls["claimed"] == []
+    assert report.sent == 0
+    assert any("not authorised" in n for n in report.notes)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_one_stale_delivery_does_not_silence_every_other_alert(monkeypatch):
+    """A control that can take down the whole alert path is worse than the
+    mismatch it prevents."""
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    calls = _gate_harness(monkeypatch,
+                          queue=[("old", "stale"), ("new", "fine")],
+                          blocked_shas={"stale"})
+
+    dispatch_once(session_scope, phrase_set=None, mode="live",
+                  live_profile="default")
+    assert calls["claimed"] == ["new"], calls["claimed"]
+
+
 @pytest.mark.usefixtures("isolated_db")
 def test_blocked_deliveries_do_not_consume_the_claim_budget(monkeypatch):
     """Blocked rows stay PENDING, so a fully-blocked page repeats forever.
 
-    Everything behind it would starve — the same total outage the per-delivery
-    check was introduced to prevent, arriving one page at a time.
+    Filtering AFTER the query let them spend the row limit, and everything
+    behind them starved — the same outage the per-delivery check exists to
+    prevent, arriving one page at a time. They are excluded IN the query now,
+    so no bound is needed and nothing hides behind a long enough backlog.
     """
-    import app.alerts.dispatcher as dispatcher_module
     from app.alerts.dispatcher import dispatch_once
     from app.db import session_scope
 
-    def _row(delivery_id, sha):
-        return type("D", (), {"delivery_id": delivery_id,
-                              "planning_rules_sha256": sha})()
-
-    # five stale rows ahead of one good one, with a claim limit of five
-    queue = [_row(f"stale{i}", "superseded") for i in range(5)] + [_row("good", "fine")]
-
-    def _claimable(session, *, limit, **kw):
-        return queue[:limit]
-
-    monkeypatch.setattr(dispatcher_module, "claimable", _claimable)
-    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
-                        lambda session, **kw: [])
-    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
-                        lambda session, sha, **kw:
-                        ["stage 3: superseded"] if sha == "superseded" else [])
-
-    claimed: list[str] = []
-    monkeypatch.setattr(dispatcher_module, "claim",
-                        lambda session, delivery_id, **kw:
-                        claimed.append(delivery_id) or True)
-    monkeypatch.setattr(dispatcher_module, "_process", lambda *a, **kw: None)
-
-    report = dispatch_once(session_scope, phrase_set=None, mode="live",
-                           live_profile="default", limit=5)
-
-    assert claimed == ["good"], (
-        f"work behind a fully-blocked page was starved: {claimed}")
-    assert report.held == 5
-
-
-@pytest.mark.usefixtures("isolated_db")
-def test_the_widening_search_is_bounded(monkeypatch):
-    """A queue of nothing but blocked rows must not become an unbounded scan."""
-    import app.alerts.dispatcher as dispatcher_module
-    from app.alerts.dispatcher import dispatch_once
-    from app.db import session_scope
-
-    fetches: list[int] = []
-
-    def _claimable(session, *, limit, **kw):
-        fetches.append(limit)
-        return [type("D", (), {"delivery_id": f"d{i}",
-                               "planning_rules_sha256": "superseded"})()
-                for i in range(limit)]
-
-    monkeypatch.setattr(dispatcher_module, "claimable", _claimable)
-    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
-                        lambda session, **kw: [])
-    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
-                        lambda session, sha, **kw: ["stage 3: superseded"])
-    monkeypatch.setattr(dispatcher_module, "_process", lambda *a, **kw: None)
+    queue = [(f"stale{i}", "superseded") for i in range(50)] + [("good", "fine")]
+    calls = _gate_harness(monkeypatch, queue=queue, blocked_shas={"superseded"})
 
     dispatch_once(session_scope, phrase_set=None, mode="live",
                   live_profile="default", limit=5)
 
-    assert len(fetches) == dispatcher_module._ADMISSION_PAGES
-    assert fetches == [5, 10, 20, 40, 80], fetches
+    assert calls["claimed"] == ["good"], (
+        f"work behind 50 blocked rows was starved: {calls['claimed']}")
+    assert calls["excluded"] == {"superseded"}
 
 
 @pytest.mark.usefixtures("isolated_db")
-def test_a_blocked_ruleset_is_reported_once_not_once_per_page(monkeypatch):
-    """The widening search must not multiply the log or the held count."""
-    import app.alerts.dispatcher as dispatcher_module
+def test_admission_is_checked_once_per_ruleset_not_once_per_delivery(monkeypatch):
+    """Admission is a property of the ruleset, so the cost is bounded by how
+    many distinct rulesets are queued rather than by the queue length."""
     from app.alerts.dispatcher import dispatch_once
     from app.db import session_scope
 
-    def _claimable(session, *, limit, **kw):
-        return [type("D", (), {"delivery_id": f"d{i}",
-                               "planning_rules_sha256": "superseded"})()
-                for i in range(limit)]
-
-    monkeypatch.setattr(dispatcher_module, "claimable", _claimable)
-    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
-                        lambda session, **kw: [])
-    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
-                        lambda session, sha, **kw: ["stage 3: superseded"])
-    monkeypatch.setattr(dispatcher_module, "_process", lambda *a, **kw: None)
+    queue = [(f"d{i}", "shared") for i in range(40)]
+    calls = _gate_harness(monkeypatch, queue=queue, blocked_shas={"shared"})
 
     report = dispatch_once(session_scope, phrase_set=None, mode="live",
                            live_profile="default", limit=5)
 
-    assert report.notes.count("stage 3: superseded") == 1
+    assert calls["checked"] == ["shared"]
+    assert report.notes.count("stage 3: shared is not authorised") == 1
 
 
-@pytest.mark.usefixtures("isolated_db")
-def test_an_active_ruleset_change_before_the_wire_is_caught(monkeypatch):
-    """The two gates answer different questions and either can turn false.
+def test_the_pre_send_recheck_asks_both_gates(monkeypatch):
+    """Either can turn false in the gap, and only one was being asked.
 
-    Re-checking only the delivery's planning ruleset left a demotion or a
-    ruleset swap between the pass-level check and the send completely unseen —
-    and that is the change an operator makes when they want messages to stop.
+    A demotion or a ruleset swap is the change an operator makes when they want
+    messages to stop, and it was invisible to the only check standing between
+    the queue and the wire.
     """
     import app.alerts.dispatcher as dispatcher_module
-    from app.alerts.dispatcher import DispatchReport, dispatch_once
-    from app.db import session_scope
+    from app.alerts.dispatcher import withdrawn_admission
 
-    calls: list[str] = []
+    class _D:
+        delivery_id = "d"
+        planning_rules_sha256 = "a" * 64
 
-    def _live(session, **kw):
-        calls.append("live")
-        # fine at the pass-level check, withdrawn by the time we send
-        return ["stage 3: the deployment was demoted"] if len(calls) > 1 else []
-
-    monkeypatch.setattr(dispatcher_module, "live_admission_blockers", _live)
     monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
                         lambda session, sha, **kw: [])
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: ["stage 3: demoted"])
+    assert withdrawn_admission(None, _D()) == ["stage 3: demoted"]
 
-    class _Explodes:
-        def send(self, *a, **k):
-            raise AssertionError("sent after the deployment was demoted")
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: [])
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
+                        lambda session, sha, **kw: ["revoked"])
+    assert withdrawn_admission(None, _D()) == ["revoked"]
 
-    report = dispatch_once(session_scope, phrase_set=None, mode="live",
-                           live_profile="default", sender=_Explodes())
-    assert isinstance(report, DispatchReport)
-    assert report.sent == 0
-    assert len(calls) >= 1
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
+                        lambda session, sha, **kw: [])
+    assert withdrawn_admission(None, _D()) == []

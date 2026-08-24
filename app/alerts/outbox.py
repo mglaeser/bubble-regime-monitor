@@ -17,6 +17,7 @@ to say it". Three things it has to get right:
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select, update
@@ -218,19 +219,50 @@ def cancel_unsent_for_rules(session: Session, rule_ids: frozenset[str], *, mode:
 
 
 def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
-              limit: int = 10) -> list[AlertDelivery]:
-    """READY rows whose `not_before` has passed. P1 first, then oldest."""
+              limit: int = 10,
+              exclude_rules_sha256: Collection[str] | None = None) -> list[AlertDelivery]:
+    """READY rows whose `not_before` has passed. P1 first, then oldest.
+
+    `exclude_rules_sha256` drops deliveries planned by named rulesets IN THE
+    QUERY. The caller could filter afterwards, but then unsendable rows would
+    still consume the row limit and everything behind them would starve —
+    excluding them here means the limit is spent on work that can actually go.
+    """
+    conditions = [
+        AlertDelivery.mode == mode,
+        AlertDelivery.live_profile == live_profile,
+        AlertDelivery.planning_state == PlanningState.READY,
+        AlertDelivery.transport_status.in_(
+            [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
+        (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
+    ]
+    if exclude_rules_sha256:
+        conditions.append(
+            AlertDelivery.planning_rules_sha256.notin_(list(exclude_rules_sha256)))
     return list(session.execute(
-        select(AlertDelivery).where(
+        select(AlertDelivery).where(*conditions)
+        .order_by(AlertDelivery.priority.asc(), AlertDelivery.created_at.asc())
+        .limit(limit)
+    ).scalars().all())
+
+
+def pending_planning_rulesets(session: Session, *, mode: str, live_profile: str,
+                              now: datetime) -> list[str]:
+    """Distinct planning rulesets among the deliveries waiting to go out.
+
+    Admission is a property of the RULESET, not of each message, so checking
+    it once per distinct ruleset costs a handful of queries however long the
+    queue is.
+    """
+    return list(session.execute(
+        select(AlertDelivery.planning_rules_sha256).where(
             AlertDelivery.mode == mode,
             AlertDelivery.live_profile == live_profile,
             AlertDelivery.planning_state == PlanningState.READY,
             AlertDelivery.transport_status.in_(
                 [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
             (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
-        )
-        .order_by(AlertDelivery.priority.asc(), AlertDelivery.created_at.asc())
-        .limit(limit)
+        ).distinct()
     ).scalars().all())
 
 
