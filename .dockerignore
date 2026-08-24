@@ -1,0 +1,46 @@
+# Host-only settings and credentials must never enter an image.
+.env
+.env.*
+!.env.example
+.envrc
+secrets
+.secrets
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Private verifier drafts and unreviewed local package artifacts.
+artifacts/verifier/mc3/*-skeleton.json
+artifacts/verifier/mc3/*-plan.json
+*.whl
+*.tar.gz
+
+# Version-control metadata is not an application runtime input.
+.git
+
+# Local Python environments.
+.venv
+venv
+env
+
+# Developer caches and generated build output.
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.cache
+.tox
+.nox
+.coverage
+.coverage.*
+htmlcov
+dist
+build
+*.egg-info
+
+# Runtime state is supplied through the /data bind mount.
+data
