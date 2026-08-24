@@ -182,6 +182,40 @@ def _headline_for(rule_id: str, phrase_set: ValidatedPhraseSet) -> str:
     return code if code in phrase_set.headlines else next(iter(phrase_set.headlines))
 
 
+def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
+                              outcome: Any, mode: str,
+                              report: DispatchReport) -> bool:
+    """Record a send that crossed a withdrawal. Returns whether one did.
+
+    A RESIDUAL RACE lives here and cannot be closed by checking harder. The
+    send is deliberately outside every transaction — no external I/O may hold a
+    write lock — so the last admission check is always followed by the send,
+    and an authorisation can be withdrawn in between. A demotion, a ruleset
+    swap: no amount of re-checking removes a window that exists BECAUSE the
+    check must end before the send begins.
+
+    What can be removed is the silence. An operator who lowered the stage to
+    stop messages needs to know one crossed, and a message that went out under
+    an authorisation that no longer holds should not be indistinguishable from
+    one that went out cleanly. Recording it turns an invisible race into an
+    auditable one, which is the honest limit of check-then-act.
+
+    A request that never started cannot have crossed anything, so it is not
+    reported: that would turn a connection refused into an audit finding.
+    """
+    if mode != "live" or not getattr(outcome, "request_started", False):
+        return False
+    withdrawn = delivery_admission_blockers(session, delivery.planning_rules_sha256)
+    if not withdrawn:
+        return False
+    report.notes.append(
+        f"{delivery.delivery_id}: sent under an authorisation withdrawn "
+        "while the request was in flight")
+    log.error("alert_sent_under_withdrawn_admission",
+              delivery_id=delivery.delivery_id, blockers=withdrawn)
+    return True
+
+
 def dispatch_once(
     session_factory: Any,
     *,
@@ -374,6 +408,9 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         delivery = session.get(AlertDelivery, delivery_id)
         if delivery is None:
             return
+
+        audit_withdrawn_admission(session, delivery, outcome=outcome, mode=mode,
+                                  report=report)
         if outcome.is_success:
             mark_sent(session, delivery, now=now, http_status=outcome.http_status)
             report.sent += 1

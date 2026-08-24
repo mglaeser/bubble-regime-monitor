@@ -408,3 +408,55 @@ def test_grouping_is_reversible_and_full_fidelity():
     digest = hashlib.sha256(b"a ruleset").hexdigest()
     assert ungroup_digest(group_digest(digest)) == digest
     assert max(len(p) for p in group_digest(digest).split("-")) <= 8
+
+
+def test_a_send_that_crossed_a_withdrawal_is_recorded(monkeypatch):
+    """The residual race cannot be closed, so it is made auditable."""
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import DispatchReport, audit_withdrawn_admission
+
+    class _D:
+        delivery_id = "01M0DELIVERY0000000000000A"
+        planning_rules_sha256 = "a" * 64
+
+    class _Outcome:
+        def __init__(self, started): self.request_started = started
+
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
+                        lambda session, sha, **kw: ["stage 3: withdrawn"])
+
+    report = DispatchReport()
+    assert audit_withdrawn_admission(None, _D(), outcome=_Outcome(True),
+                                     mode="live", report=report) is True
+    assert any("withdrawn while the request was in flight" in n
+               for n in report.notes)
+
+    # a request that never started cannot have crossed anything: reporting it
+    # would turn a connection refused into an audit finding
+    quiet = DispatchReport()
+    assert audit_withdrawn_admission(None, _D(), outcome=_Outcome(False),
+                                     mode="live", report=quiet) is False
+    assert quiet.notes == []
+
+    # and shadow sends nothing, so there is nothing to have crossed
+    shadow = DispatchReport()
+    assert audit_withdrawn_admission(None, _D(), outcome=_Outcome(True),
+                                     mode="shadow", report=shadow) is False
+
+
+def test_a_clean_send_is_not_flagged(monkeypatch):
+    """An audit that fires on healthy sends is noise, and stops being read."""
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import DispatchReport, audit_withdrawn_admission
+
+    class _D:
+        delivery_id = "d"
+        planning_rules_sha256 = "a" * 64
+
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
+                        lambda session, sha, **kw: [])
+    report = DispatchReport()
+    assert audit_withdrawn_admission(
+        None, _D(), outcome=type("O", (), {"request_started": True})(),
+        mode="live", report=report) is False
+    assert report.notes == []
