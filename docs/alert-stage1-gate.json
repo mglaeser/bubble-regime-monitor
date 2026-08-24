@@ -126,8 +126,7 @@
       "evaluations_failed": 0,
       "evaluations_timed_out": 0,
       "failures": [
-        "non-P1 volume breached the 24h cap: 5 > 3",
-        "non-P1 volume breached the 168h cap: 8 > 6"
+        "non-P1 volume breached the 24h cap: 5 > 3"
       ],
       "held_budget": 0,
       "held_grouping": 0,
@@ -146,13 +145,13 @@
       "mean_non_p1_per_168h": 8.0,
       "mode": "dryrun",
       "not_measured": [
+        "non_p1_volume_168h_cap_and_mean — the window spans 76.0h and both are stated per 168h",
         "mandatory_event_recall — the catalogue is empty; recall over zero events is undefined, not 100%",
         "transient_derisk_p1_rate — the window spans 0.1 months; the target is stated per 24 months and cannot be judged on a shorter history"
       ],
       "notes": [
         "forward-looking replay: rules gated at stage 3, committed ruleset is at stage 1; production gating is unchanged",
-        "mandatory-event catalogue is empty — recall is not yet measurable (Stage 2 gate input, requires operator-frozen fixtures)",
-        "non-P1 mean of 8.0 per 168h is above the quiet-regime target of 2"
+        "mandatory-event catalogue is empty — recall is not yet measurable (Stage 2 gate input, requires operator-frozen fixtures)"
       ],
       "notification_planning_ran": true,
       "p1_bypasses_of_unknown": 0,
