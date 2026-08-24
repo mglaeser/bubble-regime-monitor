@@ -9,13 +9,17 @@ as a dead component rather than as a quiet week.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import select
+
 from app.alerts.artifacts import load_active, register
-from app.alerts.calendars import digest_window_key
+from app.alerts.calendars import digest_window_key, last_closed_digest_window
 from app.alerts.digest import plan_digest
+from app.alerts.enums import DigestItemStatus
 from app.alerts.errors import sanitize
+from app.alerts.models import AlertDigestItem
 from app.config import get_settings
 from app.db import session_scope
 from app.jobs.alert_recovery import heartbeat
@@ -44,17 +48,36 @@ def run_once(*, now: datetime | None = None,
     #
     # Planning is idempotent through the window key, so re-offering windows
     # that already have a delivery costs one query each and changes nothing.
-    if window_key is not None:
-        targets = [window_key]
-    else:
-        targets = [digest_window_key(now - timedelta(days=days))
-                   for days in (1, 8, 15, 22)]
-        targets = list(dict.fromkeys(targets))
+    closed = last_closed_digest_window(now)
 
     plans = []
     with session_scope() as session:
         artifacts = load_active(session)
         register(session, artifacts)
+
+        if window_key is not None:
+            targets = [window_key]
+        else:
+            # The windows that still OWE a digest are exactly those with items
+            # waiting in them — the items say so themselves. A fixed lookback
+            # was arbitrary: four weeks stranded anything older, and any number
+            # I picked would have been a guess about how long an outage lasts.
+            #
+            # The just-closed window is always included even with no items,
+            # because a quiet week still sends: after Stage 4 that message is
+            # the proof the scheduler is alive.
+            pending = session.execute(
+                select(AlertDigestItem.digest_window_key)
+                .where(AlertDigestItem.status == DigestItemStatus.PENDING)
+                .distinct()
+            ).scalars().all()
+            # Never the window we are standing in: it is still accruing, and
+            # digesting it would summarise a few days and never mention the
+            # rest.
+            open_window = digest_window_key(now)
+            targets = [closed] + sorted(
+                w for w in pending if w != open_window and w != closed)
+
         for target in targets:
             plans.append(plan_digest(
                 session, mode=settings.alerts_mode,

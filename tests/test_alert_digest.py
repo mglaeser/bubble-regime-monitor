@@ -198,10 +198,41 @@ def test_the_job_digests_the_window_that_closed(monkeypatch):
 def test_a_missed_monday_does_not_lose_the_week(monkeypatch):
     """The scheduler's misfire grace is finite; a week is not recoverable.
 
-    A host down across Monday morning drops the trigger, and for the one
-    message that always goes out, "the week vanished with no trace" is the
-    failure this feature exists to remove.
+    The windows that still OWE a digest are exactly those with items waiting in
+    them, so the catch-up is derived from the items rather than from a
+    lookback I would have had to guess.
     """
+    from app.jobs import alert_digest
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    # an item stranded in a window from long before any fixed lookback
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="regime.band_to_derisk", window="2026-W02")
+
+    result = alert_digest.run_once(now=NOW)
+    assert "2026-W02" in result["recovered_windows"], (
+        "a window older than any fixed lookback was stranded")
+    assert result["windows_planned"] >= 2
+
+    # running again changes nothing: the window key is the identity
+    again = alert_digest.run_once(now=NOW)
+    assert again["windows_planned"] == 0
+
+
+def test_a_late_run_never_digests_the_week_it_is_standing_in(monkeypatch):
+    """`now - 1 day` is only correct on a Monday.
+
+    Run on a Tuesday — a catch-up, or an operator by hand — and yesterday is
+    still inside the current week, so the job would summarise a few days and
+    then never mention the rest of them.
+    """
+    from datetime import timedelta
+
     from app.alerts.calendars import digest_window_key
     from app.jobs import alert_digest
 
@@ -209,17 +240,11 @@ def test_a_missed_monday_does_not_lose_the_week(monkeypatch):
     from app.config import get_settings
     get_settings.cache_clear()
 
-    # three Mondays missed; the job runs once, late
-    result = alert_digest.run_once(now=NOW)
-    assert result["windows_planned"] >= 2, (
-        "only the current window was planned, so the missed ones are gone")
-
-    missed = digest_window_key(NOW - timedelta(days=8))
-    assert missed in result["recovered_windows"]
-
-    # and running again changes nothing: the window key is the identity
-    again = alert_digest.run_once(now=NOW)
-    assert again["windows_planned"] == 0
+    tuesday = NOW + timedelta(days=1)
+    result = alert_digest.run_once(now=tuesday)
+    assert result["window_key"] != digest_window_key(tuesday), (
+        "the job digested the open week")
+    assert result["window_key"] == digest_window_key(tuesday - timedelta(days=2))
 
 
 # --- the message itself ----------------------------------------------------
