@@ -40,14 +40,19 @@ from app.alerts.enums import (
 )
 from app.alerts.errors import EvaluationConflict, EvaluationDeadlineExceeded, sanitize
 from app.alerts.models import AlertEvaluation, AlertEvaluationRuleset
+from app.alerts.outbox import budget_usage, default_limits, persist_plan
+from app.alerts.planner import PlanInputs, plan
 from app.alerts.primitives import EvaluationContext, evaluate_rule
 from app.alerts.registry import ValidatedRuleset, instance_fingerprint
 from app.alerts.repository import (
     apply_decision,
+    load_active_silences,
     load_memories,
+    load_notification_memories,
     load_recent_inputs,
     open_episodes,
     origin_rulesets_with_open_episodes,
+    resolve_predecessor,
     utc_ms,
 )
 from app.alerts.rulespec import RuleSpec
@@ -57,6 +62,7 @@ from app.alerts.state_machine import (
     effective_prior_state,
     evaluate_state,
 )
+from app.config import get_settings
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -339,7 +345,26 @@ def run_evaluation(
                 open_by_hash.setdefault(episode.origin_rules_sha256, set()).add(
                     episode.instance_fingerprint)
 
-        previous = history[-1] if history else None
+        # THE SAME PREDECESSOR THE RENDERER WILL DESCRIBE.
+        #
+        # A transition rule decides against `previous`, and the message says
+        # what the state moved FROM. If the decision used the chronologically
+        # nearest sidecar while the render used snapshot lineage, the two can
+        # disagree — the alert fires on one basis and describes another, and
+        # nothing in the record would show the mismatch.
+        #
+        # Lineage is the correct one: `prev_snapshot_id` is what the scoring
+        # layer recorded, so it survives a skipped recompute, a retry or an
+        # out-of-order arrival. `history` stays chronological, because bases
+        # like `adjacent_snapshots` count snapshots and mean exactly that.
+        # ONE definition of "the input before this one", shared with the
+        # dispatcher. A transition rule decides against it and the message
+        # describes it; resolving it differently in the two places makes an
+        # alert fire on one predecessor and describe another, or fire and then
+        # be dropped at render. Neither leaves a trace.
+        with session_factory() as session:
+            previous = resolve_predecessor(session, alert_input)
+
         ctx = EvaluationContext(
             current=alert_input,
             previous=previous,
@@ -373,6 +398,17 @@ def run_evaluation(
                                          rules_sha256=rules_sha)
                 for rules_sha in [current.rules_sha256, *archived]
             }
+            # Keyed by (ruleset, fingerprint). One instance can hold an open
+            # episode under an ARCHIVED ruleset and a new one under the current
+            # ruleset at the same time — that is what continuation means — so a
+            # map keyed by fingerprint alone collides and a delivery can be
+            # attached to the wrong episode.
+            episode_ids_by_hash: dict[str, dict[str, str]] = {}
+            # Keyed by RULESET, then rule_id. Two rulesets in one batch can
+            # define the same rule_id with different specs — that is the whole
+            # reason an archived ruleset is loaded — so a flat map lets whichever
+            # was applied last decide how the other's members are planned.
+            rules_by_hash: dict[str, dict[str, Any]] = {}
             for rules_sha, rule, decision in planned:
                 existing, memory = memories_by_hash.get(rules_sha, {}).get(
                     decision.instance_fingerprint, (None, InstanceMemory()))
@@ -380,17 +416,82 @@ def run_evaluation(
                     raise EvaluationConflict(
                         f"{decision.rule_id}: state moved between planning and apply"
                     )
-                apply_decision(
+                affected = apply_decision(
                     session, decision, mode=mode, live_profile=live_profile,
                     rules_sha256=rules_sha, rule=rule, alert_input=alert_input,
                     evaluation_id=evaluation_id, now=now, existing=existing,
+                    predecessor_identity=(previous.input_identity
+                                          if previous is not None else None),
                 )
+                if affected:
+                    episode_ids_by_hash.setdefault(rules_sha, {})[
+                        decision.instance_fingerprint] = affected
+                rules_by_hash.setdefault(rules_sha, {})[decision.rule_id] = rule
+
+            # ---- planning, INSIDE the same transaction --------------------
+            #
+            # This is what makes the delivery stack reachable. Before it, a rule
+            # could go FIRING, an episode could open, and no delivery was ever
+            # created — the dispatcher had nothing to claim, so ALERTS_MODE=live
+            # would have sent nothing at all (audit B-01).
+            #
+            # It belongs here and not in a later job because mandate 18 requires
+            # the plan to be atomic with the state it was planned from: a CAS
+            # conflict or a deadline overrun must leave no episode without its
+            # delivery intent and no intent without its episode. Two
+            # transactions cannot promise that.
+            # PLANNED PER RULESET, because origin provenance is per member.
+            #
+            # A batch can mix rulesets: the current one for new candidates, plus
+            # any archived ruleset that still owns an open episode. Stamping
+            # every member with the CURRENT hash would tell a later reader that
+            # a continuation was planned under rules it never saw — and mandate
+            # 14.8 keeps `origin_rules_sha256` per member precisely so a queued
+            # delivery can be rendered from the artifact that produced it.
+            silences = _silence_kwargs(load_active_silences(session, now=now))
+            limits = default_limits(get_settings())
+            recipient = _recipient_ref(get_settings())
+
+            by_ruleset: dict[str, list[StateDecision]] = {}
+            for rules_sha, _rule, decision in planned:
+                by_ruleset.setdefault(rules_sha, []).append(decision)
+
+            for rules_sha, decisions in by_ruleset.items():
+                artifacts = archived.get(rules_sha, current)
+                # RE-READ between passes. Each `persist_plan` adds deliveries
+                # that count against the budget and bumps notification
+                # generations, so a snapshot taken once before the loop lets the
+                # second ruleset plan against headroom the first already spent —
+                # the caps would be respected per pass and breached in total.
+                plan_result = plan(PlanInputs(
+                    now=now,
+                    rules=rules_by_hash.get(rules_sha, {}),
+                    decisions=decisions,
+                    episode_ids=episode_ids_by_hash.get(rules_sha, {}),
+                    memories=load_notification_memories(
+                        session, mode=mode, live_profile=live_profile,
+                        fingerprints=set(episode_ids_by_hash.get(rules_sha, {}))),
+                    **silences,
+                    origin_rules_sha256=rules_sha,
+                    phrase_set_version=artifacts.phrase_set_version,
+                    phrase_set_sha256=artifacts.phrase_set_sha256,
+                    budget_usage=budget_usage(session, mode=mode,
+                                              live_profile=live_profile, now=now),
+                    budget_limits=limits,
+                ))
+                persist_plan(
+                    session, plan_result, mode=mode, live_profile=live_profile,
+                    planning_rules_sha256=rules_sha,
+                    recipient_ref=recipient, now=now,
+                )
+                session.flush()   # so the next pass SEES what this one wrote
             evaluation = session.get(AlertEvaluation, evaluation_id)
             if evaluation is not None:
                 evaluation.status = EvaluationRunStatus.COMMITTED
                 evaluation.plan_applied = True
                 evaluation.finished_at = now
                 evaluation.rules_evaluated = len(planned)
+                evaluation.plan_applied = True
                 evaluation.duration_ms = int((time.monotonic() - started) * 1000)
                 evaluation.lease_until = None
             for item in session.execute(
@@ -448,6 +549,25 @@ def _input_moment(alert_input: AlertInput, fallback: datetime) -> datetime:
     except ValueError:
         return fallback
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _silence_kwargs(active: dict[str, set[str]]) -> dict[str, Any]:
+    """Map persisted silence matchers onto the planner's frozensets."""
+    return {
+        "silenced_fingerprints": frozenset(active.get("instance", set())),
+        "silenced_rule_ids": frozenset(active.get("rule", set())),
+        "silenced_buckets": frozenset(active.get("bucket", set())),
+        "silence_all": bool(active.get("all")),
+    }
+
+
+def _recipient_ref(settings: Any) -> str:
+    """The opaque recipient handle stored on a delivery.
+
+    Never the address itself: mandate 13 forbids recipient PII in persisted or
+    returned data, and this row is both.
+    """
+    return str(getattr(settings, "alerts_live_profile", "default"))
 
 
 def _finish(session_factory: Any, evaluation_id: str, status: str, now: datetime,

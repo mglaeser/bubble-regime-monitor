@@ -243,10 +243,41 @@ def test_unmeasured_targets_are_named_not_silently_passed(tmp_path, artifacts):
     would turn "the planner never ran" into "governance holds".
     """
     summary = _run(tmp_path, artifacts)
-    assert summary.notification_planning_ran is False
     joined = " ".join(summary.not_measured)
-    assert "non_p1_volume_targets" in joined
     assert "mandatory_event_recall" in joined
+    if summary.notification_planning_ran:
+        # Planning ran, so the volume figures mean something and the gate must
+        # JUDGE them rather than list them as unmeasured. Reporting a number
+        # nobody compares to its limit reads as compliance.
+        assert "non_p1_volume_targets" not in joined
+    else:
+        assert "non_p1_volume_targets" in joined
+
+
+def test_a_breached_non_p1_cap_fails_the_gate(tmp_path, artifacts):
+    """Once the planner runs, the caps are enforceable — so enforce them.
+
+    Wiring the planner into the atomic apply turned every volume figure from
+    "0 by construction" into a real count. Leaving the gate merely reporting
+    them would convert "unmeasured" into "measured and ignored", which is the
+    worse of the two.
+    """
+    from app.alerts.replay import ReplaySummary, _decide
+
+    summary = ReplaySummary()
+    summary.mode = "DRYRUN"
+    summary.notification_planning_ran = True
+    summary.max_non_p1_24h = 5
+    summary.max_non_p1_168h = 8
+    summary.mean_non_p1_per_168h = 8.0
+    _decide(summary)
+
+    assert summary.passed is False
+    joined = " ".join(summary.failures)
+    assert "24h cap" in joined and "168h cap" in joined
+    # the mean is a TARGET, not a cap (mandate 9.2): reported, never failed
+    assert any("quiet-regime target" in n for n in summary.notes)
+    assert not any("target" in f for f in summary.failures)
 
 
 def test_an_empty_mandatory_catalogue_reports_zero_not_full_recall(tmp_path, artifacts):
@@ -389,7 +420,30 @@ def test_the_gate_artifact_exercises_more_than_the_committed_stage():
     stage3 = payload["runs"]["stage_3"]
     assert stage3["evaluated_at_stage"] == 3
     assert len(stage3["episodes_by_rule"]) >= 8
-    assert stage3["passed"] is True
+
+    # The verdict must follow its own evidence, in either direction.
+    assert stage3["passed"] is (stage3["failures"] == [])
+
+    # Stage 3 currently FAILS, and the exact failures are pinned so that CI
+    # cannot quietly absorb a NEW one.
+    #
+    # Wiring the planner into the atomic apply (B-01) turned every non-P1
+    # volume figure from "0 by construction" into a real count, and on this
+    # history the ruleset breaches its own caps. That is a Stage 2 input and an
+    # open decision for the operator — tune the rules or raise the caps
+    # deliberately — not something to relax here. Loosening this assertion to
+    # "some failure containing the word cap" would be the same defect class the
+    # rest of this branch exists to remove: a control that still looks armed.
+    #
+    # When the breach is resolved this list becomes empty and the test fails
+    # until it is updated, which is the point.
+    assert stage3["failures"] == [
+        "non-P1 volume breached the 24h cap: 5 > 3",
+        "non-P1 volume breached the 168h cap: 8 > 6",
+    ], (
+        "stage-3 failures changed. If the breach was FIXED, empty this list. "
+        f"If a NEW failure appeared, it needs its own decision: {stage3['failures']}"
+    )
 
 
 def test_the_gate_artifact_carries_no_pii():
@@ -427,6 +481,8 @@ def test_the_committed_history_carries_no_derived_content_hash():
     assert not re.search(r"\b[0-9a-f]{16,}\b", raw), (
         "the committed arc must contain no content digests")
     assert "economic_observation_key" not in raw
+
+
 
 
 def test_the_gate_artifact_records_artifact_identity_without_a_digest():
@@ -534,3 +590,5 @@ def test_the_replay_script_forwards_to_the_cli():
                                       "2026-01-01T00:00:00+00:00"])
     assert args.state_db == "/tmp/x.db"
     assert args.from_moment == "2026-01-01T00:00:00+00:00"
+
+

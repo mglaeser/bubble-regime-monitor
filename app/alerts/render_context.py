@@ -35,6 +35,17 @@ FACT_SOURCES: dict[str, str] = {
     "F_BAND_SCORE": "score_action_band",
 }
 
+#: Facts that can only come from the input BEFORE the trigger.
+#:
+#: A transition phrase says what the state moved FROM, and no single input
+#: carries that: `BAND_TO_DERISK` is "Stufe {F_BAND_EFFECTIVE} erreicht (vorher
+#: {F_BAND_PREVIOUS})". Without the predecessor the slot is unfillable, the
+#: render is rejected as an unauthorized fact, and the delivery dies in
+#: RENDER_FAILED — which is exactly where the whole P1 band path stopped.
+PREVIOUS_FACT_SOURCES: dict[str, str] = {
+    "F_BAND_PREVIOUS": "effective_action_state",
+}
+
 #: Facts read from typed evidence rather than a top-level field.
 EVIDENCE_FACTS: dict[str, tuple[str, str]] = {
     "F_BREADTH": ("indicator.d1.breadth", "percent"),
@@ -141,6 +152,10 @@ def build_member_context(
     origin_phrase_set_sha256: str,
     origin_rules_sha256: str,
     escalation_of: str | None = None,
+    # Keyword-only, so its position carries no meaning — but sitting between
+    # two required parameters it read like a syntax error to more than one
+    # reviewer, and it costs nothing to put the optional ones together.
+    previous: AlertInput | None = None,
 ) -> MemberContext:
     """Build one member's isolated fact set.
 
@@ -159,6 +174,12 @@ def build_member_context(
         notes.append("current input is not schema/methodology compatible with the trigger")
 
     facts: dict[str, str] = {}
+    # The predecessor is read for its OWN facts only, never mixed into the
+    # current ones: it answers "what did this move from", and nothing else.
+    for fact_id, attribute in PREVIOUS_FACT_SOURCES.items():
+        prior = getattr(previous, attribute, None) if previous is not None else None
+        if prior is not None:
+            facts[fact_id] = str(prior)
     for fact_id, attribute in FACT_SOURCES.items():
         value = getattr(source, attribute, None)
         if value is not None:

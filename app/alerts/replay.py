@@ -48,7 +48,9 @@ from app.alerts.enums import (
     SuppressionReason,
     TransportStatus,
 )
+from app.alerts.outbox import default_limits
 from app.alerts.registry import ValidatedRuleset
+from app.config import get_settings
 from app.engine.snapshot_contract import BAND_DERISK, STATE_SUPPRESSED
 from app.logging_conf import get_logger
 
@@ -623,16 +625,35 @@ def _decide(summary: ReplaySummary) -> None:
         failures.append(f"replay ran in mode {summary.mode!r}, not dryrun")
 
     if not summary.notification_planning_ran:
-        # The planner is a stage-3 component and does not run here, so the
-        # volume figures are structurally zero. Zero non-P1 messages trivially
-        # satisfies every cap — which is exactly why it must not be reported
-        # as satisfying them.
+        # No delivery rule was active at this stage, so the volume figures are
+        # structurally zero. Zero non-P1 messages trivially satisfies every cap
+        # — which is exactly why it must not be reported as satisfying them.
         unmeasured += [
-            "non_p1_volume_targets (24h cap, 168h cap, 168h mean) — the delivery "
-            "planner does not run at this stage, so every count is 0 by "
-            "construction rather than by governance",
+            "non_p1_volume_targets (24h cap, 168h cap, 168h mean) — no delivery "
+            "was planned at this stage, so every count is 0 by construction "
+            "rather than by governance",
             "quiet_hours_and_budget_holds — no delivery was planned to hold",
         ]
+    else:
+        # Planning ran, so the figures MEAN something and the gate must judge
+        # them. Leaving them merely reported would turn "unmeasured" into
+        # "measured and ignored", which is the worse of the two: a number on a
+        # dashboard that no one compares to its limit reads as compliance.
+        limits = default_limits(get_settings())
+        if summary.max_non_p1_24h > limits.cap_24h:
+            failures.append(
+                f"non-P1 volume breached the 24h cap: {summary.max_non_p1_24h} "
+                f"> {limits.cap_24h}")
+        if summary.max_non_p1_168h > limits.cap_168h:
+            failures.append(
+                f"non-P1 volume breached the 168h cap: {summary.max_non_p1_168h} "
+                f"> {limits.cap_168h}")
+        if summary.mean_non_p1_per_168h > limits.target_168h:
+            # A target, not a hard cap (mandate 9.2), so it is reported rather
+            # than failed — but it is reported as a miss, with both numbers.
+            summary.notes.append(
+                f"non-P1 mean of {summary.mean_non_p1_per_168h} per 168h is above "
+                f"the quiet-regime target of {limits.target_168h}")
     if not summary.mandatory_event_total:
         unmeasured.append(
             "mandatory_event_recall — the catalogue is empty; recall over zero "
