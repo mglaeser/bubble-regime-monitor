@@ -278,46 +278,43 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
                                 path: str | Path | None = None) -> list[str]:
     """Whether a QUEUED delivery may be sent, judged by the rules that planned it.
 
-    `live_admission_blockers` asks about the ruleset that is active now. That
-    is not the same question. A delivery sits in the outbox carrying the hash
-    of the ruleset that planned it, and a promotion between planning and
-    dispatch means the active ruleset is no longer the one whose stage
-    authorised this message. Checking only the active one lets a delivery
-    planned under an unbacked stage go out because something else is fine now.
+    This asks a NARROWER question than `live_admission_blockers`, and the
+    difference matters. That one asks whether the running deployment is
+    authorised — current evidence, currently promoted bytes. This one asks
+    whether the ruleset that planned THIS message was ever deliberately
+    promoted.
 
-    Fail-closed: a planning ruleset that cannot be rebuilt from the registry
-    is a blocker, since nothing then establishes what it was allowed to do.
+    They have to differ because of archived rulesets. An archived ruleset that
+    still owns open episodes keeps being evaluated until they close, and it is
+    never the currently promoted one — that is what "archived" means. Judging
+    its deliveries against the current promotion blocked every continuation
+    permanently: they could not be sent, and no operator action could ever make
+    them sendable, because the ruleset will not be promoted again. The gate's
+    purpose is to stop messages from rules nobody approved, not to strand
+    messages from rules somebody approved and later replaced.
+
+    So the test is `promoted_at is not None` — a deliberate act that happened,
+    and that archiving does not undo.
     """
-    from app.alerts.artifacts import load_by_hash
+    from app.alerts.enums import RulesetStatus
+    from app.alerts.models import AlertRulesetRegistry
 
-    unavailable = (f"the ruleset that planned this delivery "
-                   f"({planning_rules_sha256[:12]}) could not be rebuilt, so "
-                   f"what it was permitted to do cannot be established")
-    try:
-        loaded = load_by_hash(session, planning_rules_sha256)
-    except Exception as exc:                       # noqa: BLE001 - reported, not raised
-        return [f"{unavailable}: {type(exc).__name__}"]
-    if loaded is None:
-        # Not in the registry at all. The delivery names rules nothing can
-        # produce, so nothing establishes the stage that authorised it.
-        return [f"{unavailable}: it is not in the registry"]
-    ruleset = loaded.ruleset
-
-    stage = ruleset.document.meta.active_stage
-    if stage < EVIDENCE_REQUIRED_FROM_STAGE:
-        return []
-
-    evidence = load_evidence(path)
-    if evidence is None:
-        return [f"stage {stage}: the gate evidence at {EVIDENCE_PATH} is missing "
-                "or unreadable, so nothing justifies sending this delivery"]
-
-    blockers = promotion_blockers(
-        target_stage=stage, artifact=evidence,
-        rule_version=ruleset.document.meta.rule_version,
-        phrase_set_version=getattr(ruleset, "phrase_set_version", None),
-        rules_sha256=ruleset.rules_sha256,
-        phrase_set_sha256=ruleset.phrase_set_sha256,
-    )
-    blockers.extend(_digest_blockers(session, ruleset))
-    return blockers
+    row = session.get(AlertRulesetRegistry, planning_rules_sha256)
+    if row is None:
+        return [f"the ruleset that planned this delivery "
+                f"({planning_rules_sha256[:12]}) is not in the registry, so "
+                "nothing establishes what it was permitted to do"]
+    if row.promoted_at is None:
+        return [f"the ruleset that planned this delivery "
+                f"({planning_rules_sha256[:12]}) was never promoted, so no "
+                "operator ever authorised what it sends"]
+    # REVOKED is the one status that outranks a past promotion. Superseding a
+    # ruleset says "there is something newer"; revoking it says "this was
+    # wrong" — and an operator who revokes rules while their messages sit in
+    # the outbox means those messages, or revocation would only apply to
+    # alerts nobody had planned yet.
+    if str(row.status) == RulesetStatus.REVOKED.value:
+        return [f"the ruleset that planned this delivery "
+                f"({planning_rules_sha256[:12]}) was REVOKED, which withdraws "
+                "the promotion that authorised it"]
+    return []

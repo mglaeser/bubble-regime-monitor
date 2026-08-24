@@ -293,7 +293,7 @@ def test_one_stale_delivery_does_not_silence_every_other_alert(monkeypatch):
 
 @pytest.mark.usefixtures("isolated_db")
 def test_a_delivery_naming_rules_nobody_has_is_blocked():
-    """Absent rules cannot certify a stage, so they do not clear one."""
+    """Absent rules cannot certify anything, so they do not clear the gate."""
     from app.alerts.promotion import delivery_admission_blockers
     from app.db import session_scope
 
@@ -302,6 +302,55 @@ def test_a_delivery_naming_rules_nobody_has_is_blocked():
     assert blockers
     assert any("not in the registry" in b for b in blockers)
 
+
+@pytest.mark.usefixtures("isolated_db")
+def test_an_unpromoted_ruleset_cannot_send():
+    """The gate's actual purpose: rules nobody approved do not reach a phone."""
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.promotion import delivery_admission_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded)          # validated, NOT promoted
+        session.flush()
+        blockers = delivery_admission_blockers(session, loaded.ruleset.rules_sha256)
+
+    assert any("never promoted" in b for b in blockers)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_an_archived_ruleset_may_still_finish_what_it_started():
+    """Continuation deliveries must not be stranded forever.
+
+    An archived ruleset that still owns open episodes keeps being evaluated
+    until they close, and it is never the CURRENTLY promoted one — that is what
+    archived means. Judging its deliveries against the current promotion left
+    them unsendable with no operator action that could ever change it, because
+    the ruleset will not be promoted again.
+    """
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.enums import RulesetStatus
+    from app.alerts.models import AlertRulesetRegistry
+    from app.alerts.promotion import delivery_admission_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded, promote=True)
+        session.flush()
+        sha = loaded.ruleset.rules_sha256
+
+        # superseded by something newer: archived, but it WAS promoted
+        row = session.get(AlertRulesetRegistry, sha)
+        row.status = RulesetStatus.SUPERSEDED
+        row.superseded_at = datetime(2026, 8, 24, tzinfo=UTC)
+        session.flush()
+
+        assert delivery_admission_blockers(session, sha) == [], (
+            "a continuation delivery from a once-promoted ruleset was stranded")
 
 @pytest.mark.usefixtures("isolated_db")
 def test_a_ruleset_that_was_never_promoted_does_not_deliver_however_it_is_versioned():
@@ -502,3 +551,31 @@ def test_a_clean_send_is_not_flagged(monkeypatch):
         None, _D(), outcome=type("O", (), {"request_started": True})(),
         mode="live", report=report) is False
     assert report.notes == []
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_revoking_a_ruleset_stops_the_messages_already_queued():
+    """Revocation says "this was wrong", not "there is something newer".
+
+    An operator who revokes rules while their messages sit in the outbox means
+    those messages — otherwise revocation only ever applies to alerts nobody
+    had planned yet, which is the opposite of when it is reached for.
+    """
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.enums import RulesetStatus
+    from app.alerts.models import AlertRulesetRegistry
+    from app.alerts.promotion import delivery_admission_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded, promote=True)
+        session.flush()
+        sha = loaded.ruleset.rules_sha256
+
+        session.get(AlertRulesetRegistry, sha).status = RulesetStatus.REVOKED
+        session.flush()
+
+        blockers = delivery_admission_blockers(session, sha)
+
+    assert any("REVOKED" in b for b in blockers)
