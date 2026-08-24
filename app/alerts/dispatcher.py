@@ -51,6 +51,7 @@ from app.alerts.outbox import (
     mark_sent,
     mark_transient,
     mark_unknown,
+    pending_planning_rulesets,
     recover_leases,
     release,
     revalidate_members,
@@ -194,6 +195,21 @@ def is_live(mode: str) -> bool:
     return mode == "live"
 
 
+def withdrawn_admission(session: Any, delivery: AlertDelivery) -> list[str]:
+    """Everything that has stopped authorising this delivery since the pass began.
+
+    BOTH gates, because they answer different questions and either can turn
+    false in the gap. The deployment can be demoted or its ruleset swapped
+    (`live_admission_blockers`); this message's own planning ruleset can be
+    revoked (`delivery_admission_blockers`). Re-checking only the second left
+    an active-ruleset change between the pass-level check and the wire
+    completely unseen — and that is the change an operator makes when they want
+    messages to stop.
+    """
+    return [*live_admission_blockers(session),
+            *delivery_admission_blockers(session, delivery.planning_rules_sha256)]
+
+
 def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
                               outcome: Any, mode: str,
                               report: DispatchReport) -> bool:
@@ -217,7 +233,10 @@ def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
     """
     if not is_live(mode) or not getattr(outcome, "request_started", False):
         return False
-    withdrawn = delivery_admission_blockers(session, delivery.planning_rules_sha256)
+    # The same both-gates question as the pre-send check. A message that
+    # crossed a DEPLOYMENT-level withdrawal is exactly the one an operator
+    # needs told about.
+    withdrawn = withdrawn_admission(session, delivery)
     if not withdrawn:
         return False
     report.notes.append(
@@ -226,13 +245,6 @@ def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
     log.error("alert_sent_under_withdrawn_admission",
               delivery_id=delivery.delivery_id, blockers=withdrawn)
     return True
-
-
-#: How far the dispatcher will look past blocked deliveries for sendable work.
-#: Bounded so a queue of nothing but blocked rows cannot turn one pass into an
-#: unbounded scan; doubling means the reach is 2**N * limit, which covers any
-#: realistic backlog in a handful of queries.
-_ADMISSION_PAGES = 5
 
 
 def dispatch_once(
@@ -276,11 +288,6 @@ def dispatch_once(
     with session_factory() as session:
         report.recovered = recover_leases(session, now=now)
 
-    blocked_ids: set[str] = set()
-    # Per pass, not global: a ruleset cleared once does not need re-checking
-    # while the search widens, and the memo dies with the pass so a promotion
-    # or revocation between passes is always seen.
-    _checked_ok: set[str] = set()
     with session_factory() as session:
         # A queued delivery carries the hash of the ruleset that PLANNED it,
         # and a promotion between planning and dispatch means that is no longer
@@ -288,51 +295,29 @@ def dispatch_once(
         # authorise it is the mismatch: something else being fine now does not
         # make this one sendable.
         #
-        # Decided PER DELIVERY, not per pass. Refusing the whole pass turned one
-        # stale message from a superseded ruleset into a permanent outage of
-        # every live alert, P1 included.
-        #
-        # And blocked rows must not consume the claim budget either. They stay
-        # PENDING, so a page that is entirely blocked would come back
-        # identically on every pass and everything behind it would starve
-        # forever — the same outage arriving a page at a time. So the search
-        # widens past them, bounded, until enough sendable work is found or the
-        # queue is exhausted.
-        candidates: list[str] = []
-        fetch = limit
-        for _ in range(_ADMISSION_PAGES):
-            pending = list(claimable(session, mode=mode, live_profile=live_profile,
-                                     now=now, limit=fetch))
-            if not live:
-                candidates = [d.delivery_id for d in pending]
-                break
-
-            by_sha: dict[str, list[str]] = {}
-            for delivery in pending:
-                by_sha.setdefault(delivery.planning_rules_sha256, []).append(
-                    delivery.delivery_id)
-            for rules_sha, ids in sorted(by_sha.items()):
-                if rules_sha in _checked_ok:
-                    continue
+        # Admission is a property of the RULESET, so it is checked once per
+        # DISTINCT planning ruleset and the failures are excluded IN THE QUERY.
+        # Two earlier versions got this wrong in opposite directions: refusing
+        # the whole pass let one stale message silence every live alert
+        # including P1, and filtering after the fact let blocked rows consume
+        # the claim limit so everything behind them starved. Excluding them in
+        # the query means the limit is spent on work that can actually go, with
+        # no scan to bound and nothing left stranded behind a long enough
+        # backlog.
+        blocked: list[str] = []
+        if live:
+            for rules_sha in sorted(pending_planning_rulesets(
+                    session, mode=mode, live_profile=live_profile, now=now)):
                 found = delivery_admission_blockers(session, rules_sha)
                 if found:
-                    if not blocked_ids.intersection(ids):
-                        report.notes.extend(found)
-                        log.error("alert_queued_admission_refused",
-                                  rules_sha256=rules_sha[:12],
-                                  deliveries=len(ids), blockers=found)
-                    blocked_ids.update(ids)
-                else:
-                    _checked_ok.add(rules_sha)
+                    blocked.append(rules_sha)
+                    report.notes.extend(found)
+                    log.error("alert_queued_admission_refused",
+                              rules_sha256=rules_sha[:12], blockers=found)
 
-            candidates = [d.delivery_id for d in pending
-                          if d.delivery_id not in blocked_ids][:limit]
-            if len(candidates) >= limit or len(pending) < fetch:
-                break
-            fetch *= 2
-
-        if blocked_ids:
-            report.held += len(blocked_ids)
+        candidates = [d.delivery_id for d in claimable(
+            session, mode=mode, live_profile=live_profile, now=now, limit=limit,
+            exclude_rules_sha256=blocked)]
 
     for delivery_id in candidates:
         with session_factory() as session:
@@ -424,17 +409,7 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # pass picks it up. An authorisation that has just been withdrawn is a
         # condition to wait out, not a property of this message.
         if is_live(mode):
-            # BOTH gates, not just the delivery's. They answer different
-            # questions and either can turn false in the gap: the deployment
-            # can be demoted or its ruleset swapped (live_admission_blockers),
-            # and this message's own planning ruleset can be revoked
-            # (delivery_admission_blockers). Re-checking only the second left
-            # an active-ruleset change between the pass-level check and the
-            # wire completely unseen — which is the one an operator makes when
-            # they want messages to stop.
-            late = [*live_admission_blockers(session),
-                    *delivery_admission_blockers(
-                        session, delivery.planning_rules_sha256)]
+            late = withdrawn_admission(session, delivery)
             if late:
                 report.notes.extend(late)
                 report.held += 1
