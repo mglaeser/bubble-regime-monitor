@@ -32,8 +32,13 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     # ("unknown recipient someone@icloud.com") would otherwise persist a
     # contactable address into a field called `error_message_redacted`. The
     # phone pattern above covers only the other half of the same identifier.
-    (re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),
-     "[email]"),
+    # Deliberately broad rather than RFC-shaped. The ASCII-only version missed
+    # every internationalised address — `someone@münchen.de` went through
+    # untouched — and for a REDACTION the two kinds of mistake are not
+    # symmetric: over-matching costs a diagnostic string some detail,
+    # under-matching persists a contactable address.
+    (re.compile(r"[^\s@<>()\[\],;:\"']+@[^\s@<>()\[\],;:\"']+"
+                r"\.[^\s@<>()\[\],;:\".']{2,}"), "[email]"),
     # Bearer / Basic auth headers.
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}"), r"\1 [redacted]"),
     # api_key= / apikey= / apiKey= / token= / secret= …, header or query form.

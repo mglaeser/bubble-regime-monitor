@@ -457,6 +457,24 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
         )
 
     detail = sanitize(response.text[:500])
+
+    # A 3xx follows a POST that was fully transmitted, so the proxy may already
+    # have accepted and sent it — and the redirect target is not necessarily
+    # the send route. Falling through to the transient branch made this the one
+    # transmitted-request status the outbox would repeat unattended.
+    #
+    # Ambiguous rather than permanent: it IS a misconfiguration (the send route
+    # should not redirect), but "the request definitely did nothing" is exactly
+    # what cannot be claimed here.
+    if 300 <= status < 400:
+        return SendResult(outcome=SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION,
+                          http_status=status, error_code=f"HTTP_{status}",
+                          error_message_redacted=(
+                              f"{status} redirect on the send route; the "
+                              "request was transmitted and may have been "
+                              "accepted"),
+                          request_started=True)
+
     if status in _PERMANENT:
         return SendResult(outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
                           http_status=status, error_code=f"HTTP_{status}",

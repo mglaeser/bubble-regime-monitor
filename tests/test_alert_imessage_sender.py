@@ -420,3 +420,35 @@ def test_a_correlation_id_is_redacted_like_any_other_proxy_string(monkeypatch):
     assert "someone@icloud.com" not in correlation
     assert "+4915100000000" not in correlation
     assert len(correlation) <= 128
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+def test_a_redirect_is_not_repeated_unattended(monkeypatch, status):
+    """A 3xx follows a POST that was fully transmitted.
+
+    The proxy may already have accepted and sent it, and the redirect target is
+    not necessarily the send route. This was the one transmitted-request status
+    that fell through to the transient branch and would have been repeated
+    without a human.
+    """
+    _configured(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers={"Location": "https://elsewhere/"})
+
+    result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    assert result.outcome == SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION
+    assert result.may_retry_automatically is False
+
+
+def test_an_internationalised_address_is_redacted_too(monkeypatch):
+    """The ASCII-only pattern let `someone@münchen.de` through untouched."""
+    _configured(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, text='{"error":"unknown recipient someone@münchen.de"}')
+
+    result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    detail = result.error_message_redacted or ""
+    assert "münchen" not in detail
+    assert "[email]" in detail
