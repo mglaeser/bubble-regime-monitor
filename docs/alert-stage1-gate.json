@@ -169,6 +169,96 @@
       "unknown_blocks": 0,
       "window_first": "2026-07-10T02:00:00+00:00",
       "window_last": "2026-07-13T06:00:00+00:00"
+    },
+    "stage_4": {
+      "active_stage": 1,
+      "band_excursion_months": 0.1,
+      "cancelled_superseded": 0,
+      "deliveries_by_kind": {
+        "INITIAL": 13
+      },
+      "deliveries_planned": 13,
+      "deliveries_sent": 0,
+      "detection_times_slots": {},
+      "digest_items": 0,
+      "episodes_activated": 19,
+      "episodes_by_bucket": {
+        "constellation": 2,
+        "legs": 5,
+        "ops": 4,
+        "regime": 4,
+        "tripwire": 5
+      },
+      "episodes_by_priority": {
+        "P1": 8,
+        "P2": 10,
+        "P4": 2
+      },
+      "episodes_by_rule": {
+        "constellation.execution_armed": 2,
+        "legs.faber_spy_back_in": 1,
+        "legs.faber_spy_out_high_risk": 2,
+        "legs.faber_spy_out_standard": 2,
+        "ops.coverage_risk_masking": 2,
+        "ops.indicator_stale": 2,
+        "regime.band_hold_to_trim": 1,
+        "regime.band_to_derisk": 2,
+        "regime.band_trim_to_hold": 1,
+        "tripwire.rf4_all_clear": 1,
+        "tripwire.rf4_first": 2,
+        "tripwire.rf4_persistent": 2
+      },
+      "episodes_cancelled_stale": 0,
+      "episodes_cancelled_unconfirmed": 1,
+      "episodes_opened": 20,
+      "episodes_resolved": 17,
+      "evaluated_at_stage": 4,
+      "evaluations_committed": 20,
+      "evaluations_conflict": 0,
+      "evaluations_failed": 0,
+      "evaluations_timed_out": 0,
+      "failures": [
+        "non-P1 volume breached the 24h cap: 5 > 3",
+        "non-P1 volume breached the 168h cap: 8 > 6"
+      ],
+      "held_budget": 0,
+      "held_grouping": 0,
+      "held_quiet": 3,
+      "indeterminate_band_excursions": 1,
+      "inputs_evaluable": 20,
+      "inputs_not_evaluable": 0,
+      "inputs_partial": 0,
+      "inputs_reconstructed": 0,
+      "inputs_total": 20,
+      "mandatory_event_detected": 0,
+      "mandatory_event_not_evaluable": 0,
+      "mandatory_event_total": 0,
+      "max_non_p1_168h": 8,
+      "max_non_p1_24h": 5,
+      "mean_non_p1_per_168h": 8.0,
+      "mode": "dryrun",
+      "not_measured": [
+        "non_p1_mean_per_168h — a mean is not monotonic in the window length, so it cannot be inferred from a shorter history",
+        "mandatory_event_recall — the catalogue is empty; recall over zero events is undefined, not 100%",
+        "transient_derisk_p1_rate — the window spans 0.1 months; the target is stated per 24 months and cannot be judged on a shorter history"
+      ],
+      "notes": [
+        "forward-looking replay: rules gated at stage 4, committed ruleset is at stage 1; production gating is unchanged",
+        "mandatory-event catalogue is empty — recall is not yet measurable (Stage 2 gate input, requires operator-frozen fixtures)"
+      ],
+      "notification_planning_ran": true,
+      "p1_bypasses_of_unknown": 0,
+      "p1_total": 5,
+      "passed": false,
+      "schema_version": 1,
+      "suppressions_by_reason": {
+        "DATA_QUALITY_GUARD": 1,
+        "SUPERSEDED": 4
+      },
+      "transient_one_snapshot_band_p1": 1,
+      "unknown_blocks": 0,
+      "window_first": "2026-07-10T02:00:00+00:00",
+      "window_last": "2026-07-13T06:00:00+00:00"
     }
   }
 }

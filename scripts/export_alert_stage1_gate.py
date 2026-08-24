@@ -36,10 +36,16 @@ RULES = ROOT / "config" / "alert_rules.v3.2.yaml"
 PHRASES = ROOT / "config" / "alert_phrases.v3.2.json"
 EVENTS = ROOT / "config" / "alert_mandatory_events.v3.2.json"
 
-#: Replayed at the committed stage AND at the first delivery stage. The second
-#: is what makes the artifact useful: at stage 1 almost nothing is gated on, so
+#: Replayed at the committed stage AND at the delivery stages. Stage 3 is what
+#: makes the artifact useful at all: at stage 1 almost nothing is gated on, so
 #: a stage-1-only artifact would be nearly blind to evaluator regressions.
-STAGES = (1, 3)
+#:
+#: Stage 4 is here because that is where the cutover goes — the legacy daily
+#: digest off, the alert path carrying everything. Evidence for the stage the
+#: system is actually being moved to should not have to be produced by hand on
+#: the day, and its absence would have been discovered at exactly the wrong
+#: moment.
+STAGES = (1, 3, 4)
 
 #: Bare content digests are still not written into a per-run summary: an
 #: entropy detector cannot tell a 64-hex digest from a 64-hex token, which is

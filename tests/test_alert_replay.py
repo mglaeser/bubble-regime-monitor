@@ -728,3 +728,17 @@ def test_the_committed_stage_is_not_one_whose_replay_failed():
         f"the ruleset is committed at stage {committed}, and the committed "
         f"evidence says that stage FAILS: {run['failures']}. Fix the failures "
         "or lower the stage — do not ship a stage its own replay refuses.")
+
+
+def test_the_artifact_carries_evidence_for_the_stage_the_cutover_targets():
+    """Stage 4 is where the cutover goes, so its evidence is produced here.
+
+    Without it the Stage 4 decision would have had to generate its own evidence
+    by hand on the day, and the absence would have surfaced at exactly the
+    wrong moment.
+    """
+    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
+    assert "stage_4" in payload["runs"], sorted(payload["runs"])
+    stage4 = payload["runs"]["stage_4"]
+    assert stage4["evaluated_at_stage"] == 4
+    assert stage4["passed"] is (stage4["failures"] == [])
