@@ -815,14 +815,16 @@ END
 """,
     ),
     (
-        # A market/watchdog/bundle/digest delivery that reaches the wire with no
-        # member would be an SMS about nothing. TEST is the one exemption.
+        # A market/watchdog/bundle delivery that reaches the wire with no
+        # member would be an SMS about nothing. TEST and DIGEST are the
+        # exemptions: a quiet week's digest is a message ABOUT the absence,
+        # and after Stage 4 it is the only proof the scheduler still runs.
         "alert_delivery_requires_member",
         """
 CREATE TRIGGER IF NOT EXISTS alert_delivery_requires_member
 BEFORE UPDATE OF transport_status ON alert_delivery
 WHEN NEW.transport_status = 'SENDING'
-  AND NEW.delivery_kind <> 'TEST'
+  AND NEW.delivery_kind NOT IN ('TEST', 'DIGEST')
   AND NOT EXISTS (
       SELECT 1 FROM alert_delivery_member m
       WHERE m.delivery_id = NEW.delivery_id AND m.dropped_at IS NULL

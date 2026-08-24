@@ -664,7 +664,7 @@ def _artifacts(stage: int = 3, tmp_path=None):
     target.write_text(raw, encoding="utf-8")
     return validate_from_disk(
         rules_path=target,
-        phrase_path=Path("config/alert_phrases.v3.2.json"),
+        phrase_path=Path("config/alert_phrases.v3.3.json"),
         service_version="3.8.0",
     )
 

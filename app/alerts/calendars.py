@@ -262,6 +262,23 @@ def next_quiet_hours_release(moment: datetime) -> datetime:
     return target.astimezone(UTC)
 
 
+def last_closed_digest_window(moment: datetime) -> str:
+    """The most recent window that has ENDED, from any moment in the week.
+
+    `digest_window_key(moment - one day)` is only correct on a Monday. Run late
+    — a catch-up after an outage, an operator triggering it by hand on a
+    Tuesday — and yesterday is still inside the current week, so the job would
+    summarise a few days and then never mention the rest of them. Anchoring on
+    the start of the local week instead makes the answer independent of which
+    day the job happens to run.
+    """
+    local = _berlin(moment)
+    start_of_week = local - timedelta(days=local.weekday())
+    start_of_week = start_of_week.replace(hour=0, minute=0, second=0,
+                                          microsecond=0)
+    return digest_window_key(start_of_week - timedelta(seconds=1))
+
+
 def digest_window_key(moment: datetime) -> str:
     """ISO year-week identity of the weekly digest window, e.g. '2026-W33'."""
     local = _berlin(moment)

@@ -37,7 +37,7 @@ from tests.test_alert_evaluation import _artifacts, _rule
 
 NOW = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 RULES_PATH = Path("config/alert_rules.v3.2.yaml")
-PHRASES_PATH = Path("config/alert_phrases.v3.2.json")
+PHRASES_PATH = Path("config/alert_phrases.v3.3.json")
 
 
 @pytest.fixture()

@@ -99,7 +99,7 @@ def test_the_committed_stage_is_backed_by_the_committed_evidence():
 
     ruleset = validate_from_disk(
         rules_path=Path("config/alert_rules.v3.2.yaml"),
-        phrase_path=Path("config/alert_phrases.v3.2.json"),
+        phrase_path=Path("config/alert_phrases.v3.3.json"),
         service_version="3.8.0").ruleset
     committed = ruleset.document.meta.active_stage
     blockers = promotion_blockers(
