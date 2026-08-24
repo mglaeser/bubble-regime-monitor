@@ -450,7 +450,7 @@ def run_evaluation(
             # delivery can be rendered from the artifact that produced it.
             silences = _silence_kwargs(load_active_silences(session, now=now))
             limits = default_limits(get_settings())
-            recipient = _recipient_ref(get_settings())
+            recipient = _recipient_ref(live_profile)
 
             by_ruleset: dict[str, list[StateDecision]] = {}
             for rules_sha, _rule, decision in planned:
@@ -561,13 +561,17 @@ def _silence_kwargs(active: dict[str, set[str]]) -> dict[str, Any]:
     }
 
 
-def _recipient_ref(settings: Any) -> str:
+def _recipient_ref(live_profile: str) -> str:
     """The opaque recipient handle stored on a delivery.
 
-    Never the address itself: mandate 13 forbids recipient PII in persisted or
-    returned data, and this row is both.
+    It is THIS RUN's profile, not the ambient setting. Reading
+    `settings.alerts_live_profile` looked equivalent because they agree in a
+    single-profile deployment, and diverges exactly when it matters: an
+    evaluation running for one profile would stamp its deliveries with
+    whichever profile the process was configured for, and the sender resolves
+    the recipient from that ref.
     """
-    return str(getattr(settings, "alerts_live_profile", "default"))
+    return str(live_profile or "default")
 
 
 def _finish(session_factory: Any, evaluation_id: str, status: str, now: datetime,

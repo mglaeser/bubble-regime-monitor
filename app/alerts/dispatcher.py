@@ -106,25 +106,6 @@ def _existing_render(session, delivery_id: str) -> AlertRender | None:
     ).scalars().first()
 
 
-def _predecessor_from_lineage(session: Any, trigger: Any) -> Any:
-    """The trigger's recorded predecessor, resolved from lineage.
-
-    Used ONLY for episodes that predate `predecessor_input_identity`. It is the
-    same lineage the evaluator would have followed — `prev_snapshot_id`, what
-    scoring recorded as the predecessor — not "the most recent sidecar before
-    this timestamp", which is the query that drifts.
-    """
-    from app.alerts.repository import load_input_for_snapshot
-
-    prev_id = getattr(trigger, "prev_snapshot_id", None)
-    if prev_id is None:
-        return None
-    try:
-        return load_input_for_snapshot(session, prev_id)
-    except Exception:                              # noqa: BLE001 - best effort
-        return None
-
-
 def _build_context(session, delivery: AlertDelivery, members,
                    phrase_set: ValidatedPhraseSet) -> RenderContext:
     """One isolated context per member, built from persisted sidecars only."""
@@ -142,24 +123,12 @@ def _build_context(session, delivery: AlertDelivery, members,
         previous = (load_input(session, episode.predecessor_input_identity)
                     if episode is not None and episode.predecessor_input_identity
                     else None)
-        if previous is None and episode is not None \
-                and not episode.predecessor_input_identity:
-            # LEGACY only: episodes opened before this column existed recorded
-            # no predecessor, so a transition headline has no F_BAND_PREVIOUS
-            # to fill and dies in RENDER_FAILED — which is where they already
-            # were, since nothing filled that slot before either. Resolving
-            # from the trigger's own lineage is what the evaluator would have
-            # recorded, and it is strictly better than a message that never
-            # sends.
-            #
-            # Only for a NULL. Where a predecessor WAS recorded it is read and
-            # never re-resolved, because re-resolving is the drift this column
-            # exists to prevent.
-            previous = _predecessor_from_lineage(session, trigger)
-            if previous is not None:
-                log.info("alert_predecessor_reconstructed",
-                         episode_id=member.episode_id)
-
+        # NOT reconstructed when absent. An episode opened before this column
+        # existed has no recorded predecessor, and resolving one now would name
+        # a band from a sidecar the decision never saw — the precise substitution
+        # this column exists to prevent. Those episodes already failed to render
+        # for the same reason before this change; leaving them failing is worse
+        # for them and right for everyone else.
         status = "STILL_FIRING"
         if episode is not None and not episode.is_open:
             status = "RESOLVED_BEFORE_SEND"

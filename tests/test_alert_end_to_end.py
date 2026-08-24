@@ -334,3 +334,20 @@ def test_an_episode_cannot_name_a_predecessor_that_does_not_exist(isolated_db):
                 last_evaluation_id=evaluation_id))
             session.flush()
         session.rollback()
+
+
+def test_the_delivery_carries_the_runs_profile_not_the_ambient_one(monkeypatch):
+    """They agree in a single-profile deployment and diverge where it matters.
+
+    An evaluation running for one profile would otherwise stamp its deliveries
+    with whichever profile the process was configured for — and the sender
+    resolves the recipient from that ref.
+    """
+    from app.alerts.engine import _recipient_ref
+
+    monkeypatch.setenv("ALERTS_LIVE_PROFILE", "ambient")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    assert _recipient_ref("house") == "house"
+    assert _recipient_ref("") == "default"
