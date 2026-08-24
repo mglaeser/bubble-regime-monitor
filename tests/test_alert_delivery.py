@@ -41,7 +41,7 @@ NIGHT = datetime(2026, 8, 15, 23, 30, tzinfo=UTC)       # 01:30 Berlin — quiet
 
 @pytest.fixture(scope="module")
 def phrase_set():
-    with open("config/alert_phrases.v3.2.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
         return validate_phrase_set(fh.read())
 
 

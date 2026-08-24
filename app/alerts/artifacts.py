@@ -41,7 +41,7 @@ log = get_logger(__name__)
 #: Shipped defaults. An operator overrides them with ALERTS_RULES_PATH /
 #: ALERTS_PHRASE_PATH; the shipped copies are what CI validates.
 REPO_RULES = Path(__file__).resolve().parents[2] / "config" / "alert_rules.v3.2.yaml"
-REPO_PHRASES = Path(__file__).resolve().parents[2] / "config" / "alert_phrases.v3.2.json"
+REPO_PHRASES = Path(__file__).resolve().parents[2] / "config" / "alert_phrases.v3.3.json"
 
 
 @dataclass(frozen=True)

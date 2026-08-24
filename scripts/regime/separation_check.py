@@ -39,7 +39,7 @@ PROTECTED: tuple[tuple[str, str], ...] = (
     ("app/methodology.py", "the code that reads the frozen methodology"),
     ("app/alerts/", "the rules that decide whether a human is woken"),
     ("config/alert_rules.v3.2.yaml", "the alert ruleset artifact"),
-    ("config/alert_phrases.v3.2.json", "the alert phrasing artifact"),
+    ("config/alert_phrases.v3.3.json", "the alert phrasing artifact"),
 )
 
 

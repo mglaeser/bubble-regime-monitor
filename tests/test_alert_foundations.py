@@ -22,7 +22,7 @@ from app.alerts.registry import instance_fingerprint, unresolved_pins, validate_
 from tests.conftest import register_promoted
 
 RULES_PATH = "config/alert_rules.v3.2.yaml"
-PHRASES_PATH = "config/alert_phrases.v3.2.json"
+PHRASES_PATH = "config/alert_phrases.v3.3.json"
 
 
 # ---------------------------------------------------------------------------
@@ -222,10 +222,10 @@ def test_loader_rejects_authoritative_hysteresis(raw_rules, phrase_set):
 def test_loader_rejects_p1_that_is_not_exempt(raw_rules, phrase_set):
     broken = _mutate(raw_rules,
                      "    quiet_hours_exempt: true\n    budget_exempt: true\n"
-                     "    phrase_set: \"v3.2\"\n    required_caveat_codes: []\n\n"
+                     "    phrase_set: \"v3.3\"\n    required_caveat_codes: []\n\n"
                      "  - rule_id: regime.band_hold_to_trim",
                      "    quiet_hours_exempt: false\n    budget_exempt: true\n"
-                     "    phrase_set: \"v3.2\"\n    required_caveat_codes: []\n\n"
+                     "    phrase_set: \"v3.3\"\n    required_caveat_codes: []\n\n"
                      "  - rule_id: regime.band_hold_to_trim")
     with pytest.raises(RulesetInvalid):
         _validate(broken, phrase_set)
@@ -656,7 +656,7 @@ def test_the_ruleset_can_disable_capture(isolated_db, monkeypatch, tmp_path):
     off.write_text(raw.replace("capture:\n  enabled: true",
                                "capture:\n  enabled: false", 1), encoding="utf-8")
     monkeypatch.setenv("ALERTS_RULES_PATH", str(off))
-    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.2.json")
+    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.3.json")
     get_settings.cache_clear()
 
     snap_id = _persist_snapshot(isolated_db)
@@ -917,3 +917,58 @@ def test_live_admission_binds_the_phrase_set_and_not_only_the_rules(isolated_db)
     message = str(caught.value)
     assert "phrase set" in message
     assert "text change that was never promoted" in message
+
+
+# ---------------------------------------------------------------------------
+# a released phrase set is frozen
+# ---------------------------------------------------------------------------
+
+
+def test_every_phrase_file_declares_the_version_in_its_name():
+    """A file called v3.3 that declares v3.2 would register under the wrong key."""
+    import json
+    import re
+    from pathlib import Path
+
+    for path in sorted(Path("config").glob("alert_phrases.v*.json")):
+        declared = json.loads(path.read_text(encoding="utf-8"))["meta"][
+            "phrase_set_version"]
+        in_name = re.search(r"alert_phrases\.(v[\d.]+)\.json", path.name).group(1)
+        assert declared == in_name, f"{path.name} declares {declared}"
+
+
+def test_a_released_phrase_set_is_never_edited_in_place():
+    """`phrase_set_version` is the registry's PRIMARY KEY.
+
+    Queued work resolves phrases from the registry, never from disk — so a host
+    that already holds v3.2 keeps its bytes forever. Adding a fragment to a
+    released file therefore reaches nothing: the new code raises
+    `RenderRejected` for a phrase the registered set does not contain, on every
+    render, permanently, with no deploy-time error.
+
+    That is exactly what happened while building the weekly digest: DIGEST_QUIET
+    was added to v3.2 in place. Adding fragments means a NEW version.
+
+    The CANONICAL digest is pinned, not the file bytes: that is what the
+    registry stores and what a deployed host compares against, so reformatting
+    is harmless and a changed fragment is not. It is written in grouped form
+    because a bare 64-hex literal in a tracked file is indistinguishable from a
+    leaked credential to the secret scanner.
+    """
+    from pathlib import Path
+
+    from app.alerts.artifacts import validate_phrase_set
+
+    frozen = {
+        "config/alert_phrases.v3.2.json":
+            "cb395ca1-d90e8678-eff9f3b6-07f8b652"
+            "-cfb54628-8ae29a53-83696e26-e79820f0",
+    }
+    for name, grouped in frozen.items():
+        phrase_set = validate_phrase_set(
+            Path(name).read_text(encoding="utf-8"))
+        assert phrase_set.sha256 == grouped.replace("-", ""), (
+            f"{name} was edited. A released phrase set is immutable: its "
+            "version is a registry primary key, and hosts already hold these "
+            "bytes, so the change would reach nothing while breaking every "
+            "render that needs it. Add a NEW version file instead.")

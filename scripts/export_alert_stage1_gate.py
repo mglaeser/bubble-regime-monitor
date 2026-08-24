@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "docs" / "alert-stage1-gate.json"
 HISTORY = ROOT / "tests" / "fixtures" / "alert_replay_history.json"
 RULES = ROOT / "config" / "alert_rules.v3.2.yaml"
-PHRASES = ROOT / "config" / "alert_phrases.v3.2.json"
+PHRASES = ROOT / "config" / "alert_phrases.v3.3.json"
 EVENTS = ROOT / "config" / "alert_mandatory_events.v3.2.json"
 
 #: Replayed at the committed stage AND at the delivery stages. Stage 3 is what
