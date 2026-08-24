@@ -60,11 +60,22 @@ def test_a_verdict_that_contradicts_its_own_failure_list_is_the_finding():
                for b in promotion_blockers(target_stage=3, artifact=quiet))
 
 
-def test_stages_below_three_need_no_replay_evidence():
-    """Nothing is delivered below stage 3, so there is nothing to certify."""
-    assert promotion_blockers(target_stage=0, artifact={}) == []
-    assert promotion_blockers(target_stage=2, artifact={}) == []
+def test_a_low_stage_still_needs_evidence():
+    """Below stage 3 the MARKET rules are dormant. The ops rules are not.
 
+    `ops.indicator_stale` and `ops.coverage_degraded_info` are enabled from
+    stage 1, so a stage-1 deployment can plan and send — and the gate used to
+    skip the evidence check entirely there, waving everything through on
+    exactly the deployments with the least evidence behind them.
+    """
+    for stage in (0, 1, 2):
+        assert promotion_blockers(target_stage=stage, artifact={}), (
+            f"stage {stage} cleared the gate with no evidence at all")
+
+    # and a stage whose replay passed is fine
+    artifact = {"runs": {"stage_1": {"evaluated_at_stage": 1, "passed": True,
+                                     "failures": []}}}
+    assert promotion_blockers(target_stage=1, artifact=artifact) == []
 
 def test_a_failing_replay_blocks_and_quotes_its_own_reasons():
     artifact = {"runs": {"stage_3": {
@@ -753,3 +764,23 @@ def test_the_schema_binds_a_delivery_to_its_reviewed_text():
                                        row.phrase_set_version))
             session.flush()
         session.rollback()
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_stage_one_deployment_is_gated_by_its_own_evidence():
+    """End to end: the committed stage-1 ruleset is backed, so it delivers."""
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.promotion import live_admission_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        # nothing promoted yet: the gate blocks, which it could not even reach
+        # before, because stage 1 skipped the evidence check entirely
+        assert live_admission_blockers(session) == [
+            "nothing has been promoted, so no bytes authorise delivery"]
+
+        register(session, load_active(session), promote=True)
+        session.flush()
+
+        # promoted, and stage-1 evidence exists and passes
+        assert live_admission_blockers(session) == []

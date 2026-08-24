@@ -29,10 +29,17 @@ import json
 from pathlib import Path
 from typing import Any
 
-#: Stages at or below this need no replay evidence: no delivery rule is live,
-#: so there is nothing a replay could tell us that the ruleset does not.
-#: Mandate 13: delivery is gated at stage 3 and above.
-EVIDENCE_REQUIRED_FROM_STAGE = 3
+#: The stage from which the MARKET rules deliver. Kept for the per-delivery
+#: stage comparison; it is NOT a licence to skip evidence below it.
+#:
+#: It used to be exactly that, on the reasoning that no delivery rule is live
+#: under stage 3. That is true of the market rules and false of the ops ones:
+#: `ops.indicator_stale` and `ops.coverage_degraded_info` are enabled from
+#: stage 1, so a stage-1 deployment can plan and send. Skipping the evidence
+#: check there meant the one gate standing in front of the outbox waved
+#: everything through on exactly the deployments that have the least evidence
+#: behind them.
+MARKET_DELIVERY_STAGE = 3
 
 #: A sha256 written as eight hyphen-separated 8-character groups.
 #:
@@ -71,9 +78,6 @@ def promotion_blockers(*, target_stage: int, artifact: dict[str, Any],
     the artifact.
     """
     blockers: list[str] = []
-
-    if target_stage < EVIDENCE_REQUIRED_FROM_STAGE:
-        return blockers
 
     runs = artifact.get("runs")
     if not isinstance(runs, dict):
@@ -217,9 +221,6 @@ def live_admission_blockers(session: Any, *, path: str | Path | None = None,
                 f"be justified: {type(exc).__name__}"]
 
     stage = ruleset.document.meta.active_stage
-    if stage < EVIDENCE_REQUIRED_FROM_STAGE:
-        return []
-
     evidence = load_evidence(path)
     if evidence is None:
         return [f"stage {stage}: the gate evidence at {EVIDENCE_PATH} is missing "
