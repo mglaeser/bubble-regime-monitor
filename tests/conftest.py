@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 
 os.environ["TESTING"] = "true"   # before any Settings(): no boot threads/scheduler in tests
 
@@ -122,3 +123,37 @@ def make_golden_raw_inputs():
         hy_oas_as_of=today, breadth_as_of=today, margin_as_of=today,
         hyperscaler_as_of=today, lppls_as_of=today,
     )
+
+
+def register_promoted(session, artifacts, *, now=None, actor="tests"):
+    """Register artifacts and mark them PROMOTED, bypassing the evidence gate.
+
+    Most tests want a promoted ruleset as a FIXTURE — something to continue
+    from, supersede, or resolve bytes against — not to exercise promotion
+    itself. `register(promote=True)` used to serve that, and it also served
+    production, which is exactly why a failing ruleset could be marked promoted
+    with no evidence.
+
+    The production path is `promotion_service.validate_register_and_promote`
+    and it is tested on its own. This helper reaches the private state mutation
+    deliberately, from test code, so no production caller has to.
+    """
+    from app.alerts.artifacts import register
+    from app.alerts.promotion_service import _mark_promoted
+
+    now = now or datetime.now(UTC)
+    sha = register(session, artifacts, now=now, registered_by=actor)
+    _mark_promoted(session, sha, actor=actor, now=now)
+    session.flush()
+    return sha
+
+
+def register_promoted_legacy(session, artifacts, *, now=None, actor="tests"):
+    """A promotion as the OLD ungated path left it: promoted_at set, no
+    evidence stamp. Exists so tests can assert those rows are refused."""
+    from app.alerts.models import AlertRulesetRegistry
+
+    sha = register_promoted(session, artifacts, now=now, actor=actor)
+    session.get(AlertRulesetRegistry, sha).evidence_checked_at = None
+    session.flush()
+    return sha

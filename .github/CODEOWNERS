@@ -38,6 +38,7 @@
 /app/alerts/                        @mglaeser
 /config/alert_rules.v3.2.yaml       @mglaeser
 /config/alert_phrases.v3.2.json     @mglaeser
+/config/alert_phrases.v3.3.json     @mglaeser
 
 # The frozen-methodology governance surfaces (F-01/L-07)
 /frozen_methodology.json            @mglaeser

@@ -27,7 +27,7 @@ from app.alerts.replay import (
 from tests.test_alert_evaluation import make_input
 
 RULES = Path("config/alert_rules.v3.2.yaml")
-PHRASES = Path("config/alert_phrases.v3.2.json")
+PHRASES = Path("config/alert_phrases.v3.3.json")
 REPLAY_SOURCE = Path("app/alerts/replay.py")
 
 
@@ -243,10 +243,108 @@ def test_unmeasured_targets_are_named_not_silently_passed(tmp_path, artifacts):
     would turn "the planner never ran" into "governance holds".
     """
     summary = _run(tmp_path, artifacts)
-    assert summary.notification_planning_ran is False
     joined = " ".join(summary.not_measured)
-    assert "non_p1_volume_targets" in joined
     assert "mandatory_event_recall" in joined
+    if summary.notification_planning_ran:
+        # Planning ran, so the volume figures mean something and the gate must
+        # JUDGE them rather than list them as unmeasured. Reporting a number
+        # nobody compares to its limit reads as compliance.
+        assert "non_p1_volume_targets" not in joined
+    else:
+        assert "non_p1_volume_targets" in joined
+
+
+def test_a_breached_non_p1_cap_fails_the_gate(tmp_path, artifacts):
+    """Once the planner runs, the caps are enforceable — so enforce them.
+
+    Wiring the planner into the atomic apply turned every volume figure from
+    "0 by construction" into a real count. Leaving the gate merely reporting
+    them would convert "unmeasured" into "measured and ignored", which is the
+    worse of the two.
+    """
+    from app.alerts.replay import ReplaySummary, _decide
+
+    summary = ReplaySummary()
+    summary.mode = "DRYRUN"
+    summary.notification_planning_ran = True
+    summary.max_non_p1_24h = 5
+    summary.max_non_p1_168h = 8
+    summary.mean_non_p1_per_168h = 8.0
+    # Long enough for both caps to MEAN something. Without this the figures are
+    # judged against periods the window never covered — see
+    # test_a_cap_is_not_judged_on_a_window_shorter_than_its_period.
+    summary.window_first = "2026-07-01T00:00:00+00:00"
+    summary.window_last = "2026-07-15T00:00:00+00:00"
+    _decide(summary)
+
+    assert summary.passed is False
+    joined = " ".join(summary.failures)
+    assert "24h cap" in joined and "168h cap" in joined
+    # the mean is a TARGET, not a cap (mandate 9.2): reported, never failed
+    assert any("quiet-regime target" in n for n in summary.notes)
+    assert not any("target" in f for f in summary.failures)
+
+
+def test_a_breach_is_provable_on_a_short_window_but_compliance_is_not():
+    """A sliding-window MAXIMUM is monotonic in the window length.
+
+    Observing 8 non-P1 messages inside 76 hours means every 168-hour window
+    containing them holds at least 8, so a cap of 6 is broken and no extra
+    history can undo it. Staying UNDER a cap for 76 hours proves nothing about
+    a week, so that direction is unmeasured rather than passed.
+
+    An earlier version of this gate had the asymmetry backwards and suppressed
+    a proven breach.
+    """
+    from app.alerts.replay import ReplaySummary, _decide
+
+    short = ReplaySummary()
+    short.mode = "DRYRUN"
+    short.notification_planning_ran = True
+    short.max_non_p1_24h = 5
+    short.max_non_p1_168h = 8
+    short.mean_non_p1_per_168h = 8.0
+    short.window_first = "2026-07-10T02:00:00+00:00"
+    short.window_last = "2026-07-13T06:00:00+00:00"      # 76 hours
+    _decide(short)
+
+    joined = " ".join(short.failures)
+    assert "24h cap" in joined
+    assert "168h cap" in joined, "a proven breach was suppressed as unmeasured"
+    assert short.passed is False
+
+    # a mean is NOT monotonic, so it cannot be inferred from a short window
+    assert any("mean" in u for u in short.not_measured)
+    assert not any("quiet-regime target" in n for n in short.notes)
+
+    # under the caps on the same short window: proves nothing either way
+    quiet = ReplaySummary()
+    quiet.mode = "DRYRUN"
+    quiet.notification_planning_ran = True
+    quiet.max_non_p1_24h = 1
+    quiet.max_non_p1_168h = 2
+    quiet.window_first = "2026-07-10T02:00:00+00:00"
+    quiet.window_last = "2026-07-13T06:00:00+00:00"
+    _decide(quiet)
+
+    assert not any("cap" in f for f in quiet.failures)
+    assert any("168h_cap" in u for u in quiet.not_measured), (
+        "staying under a one-week cap for three days was read as compliance")
+
+
+def test_a_window_with_no_span_still_reports_a_breach():
+    """No span is no excuse: the count was observed somewhere."""
+    from app.alerts.replay import ReplaySummary, _decide
+
+    summary = ReplaySummary()
+    summary.mode = "DRYRUN"
+    summary.notification_planning_ran = True
+    summary.max_non_p1_24h = 99
+    _decide(summary)
+
+    assert any("24h cap" in f for f in summary.failures)
+    # but a figure UNDER the cap with no span establishes nothing
+    assert any("168h_cap" in u for u in summary.not_measured)
 
 
 def test_an_empty_mandatory_catalogue_reports_zero_not_full_recall(tmp_path, artifacts):
@@ -389,7 +487,34 @@ def test_the_gate_artifact_exercises_more_than_the_committed_stage():
     stage3 = payload["runs"]["stage_3"]
     assert stage3["evaluated_at_stage"] == 3
     assert len(stage3["episodes_by_rule"]) >= 8
-    assert stage3["passed"] is True
+
+    # The verdict must follow its own evidence, in either direction.
+    assert stage3["passed"] is (stage3["failures"] == [])
+
+    # Stage 3 currently FAILS, and the exact failures are pinned so that CI
+    # cannot quietly absorb a NEW one.
+    #
+    # Wiring the planner into the atomic apply (B-01) turned every non-P1
+    # volume figure from "0 by construction" into a real count, and on this
+    # history the ruleset breaches its own caps. That is a Stage 2 input and an
+    # open decision for the operator — tune the rules or raise the caps
+    # deliberately — not something to relax here. Loosening this assertion to
+    # "some failure containing the word cap" would be the same defect class the
+    # rest of this branch exists to remove: a control that still looks armed.
+    #
+    # When the breach is resolved this list becomes empty and the test fails
+    # until it is updated, which is the point.
+    assert stage3["failures"] == [
+        "non-P1 volume breached the 24h cap: 5 > 3",
+        "non-P1 volume breached the 168h cap: 8 > 6",
+    ], (
+        "stage-3 failures changed. If the breach was FIXED, empty this list. "
+        f"If a NEW failure appeared, it needs its own decision: {stage3['failures']}"
+    )
+
+    # the MEAN is the only volume figure a 76-hour window cannot establish
+    assert any("mean" in u for u in stage3["not_measured"])
+    assert stage3["passed"] is False
 
 
 def test_the_gate_artifact_carries_no_pii():
@@ -429,15 +554,48 @@ def test_the_committed_history_carries_no_derived_content_hash():
     assert "economic_observation_key" not in raw
 
 
-def test_the_gate_artifact_records_artifact_identity_without_a_digest():
-    """Versions, not hashes — and the omission is stated, not silent."""
+def test_the_gate_artifact_binds_to_bytes_and_not_only_to_versions():
+    """Versions AND digests — because a version string is something a human types.
+
+    This test previously asserted the digests were absent, which was true and
+    was the weakness: an edit that forgot to bump `rule_version` produced
+    evidence that still "described" the new ruleset. The digests are carried
+    grouped, which keeps the whole value while staying invisible to the entropy
+    detector — so per-run summaries can still omit bare digests, and the
+    provenance section can bind bytes.
+    """
+    from app.alerts.promotion import ungroup_digest
+
     payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
-    assert payload["artifacts"]["rule_version"]
-    assert payload["artifacts"]["phrase_set_version"]
-    assert "omitted by design" in payload["artifacts"]["digests"]
+    declared = payload["artifacts"]
+    assert declared["rule_version"]
+    assert declared["phrase_set_version"]
+
+    for key in ("rules_sha256_grouped", "phrase_set_sha256_grouped"):
+        grouped = declared[key]
+        assert "-" in grouped, "an ungrouped digest would trip the secret scan"
+        assert len(ungroup_digest(grouped)) == 64, "the digest was truncated"
+        assert max(len(part) for part in grouped.split("-")) <= 8
+
+    # the digests belong to the ARTIFACT's provenance, not to each run
     for run in payload["runs"].values():
         assert "rules_sha256" not in run
         assert "phrase_set_sha256" not in run
+
+
+def test_the_gate_artifact_digests_are_the_committed_ones():
+    """Evidence that binds to the wrong bytes binds to nothing."""
+    from app.alerts.artifacts import validate_from_disk
+    from app.alerts.promotion import ungroup_digest
+
+    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
+    ruleset = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
+                                 service_version="3.8.0").ruleset
+    declared = payload["artifacts"]
+    assert ungroup_digest(declared["rules_sha256_grouped"]) == ruleset.rules_sha256, (
+        "docs/alert-stage1-gate.json is stale — regenerate it")
+    assert ungroup_digest(declared["phrase_set_sha256_grouped"]) \
+        == ruleset.phrase_set_sha256
 
 
 # ---------------------------------------------------------------------------
@@ -534,3 +692,53 @@ def test_the_replay_script_forwards_to_the_cli():
                                       "2026-01-01T00:00:00+00:00"])
     assert args.state_db == "/tmp/x.db"
     assert args.from_moment == "2026-01-01T00:00:00+00:00"
+
+
+
+
+def test_the_committed_stage_is_not_one_whose_replay_failed():
+    """Stage 3 must not be activatable while its own replay says it fails.
+
+    The gate artifact records `stage_3.passed = false`, and pinning the exact
+    failures stops CI absorbing a NEW one — but pinning is bookkeeping, not
+    enforcement. Nothing stopped `active_stage: 3` being committed next to
+    evidence saying stage 3 breaches its budget.
+
+    This is the repository-level half of that enforcement, and it is
+    deliberately small: it reads the committed ruleset and the committed
+    artifact and refuses the combination. The runtime half — a container
+    checking the same thing before it delivers — is the promotion gate, which
+    is its own change.
+    """
+    ruleset = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
+                                 service_version="3.8.0").ruleset
+    committed = ruleset.document.meta.active_stage
+    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
+
+    run = payload["runs"].get(f"stage_{committed}")
+    if run is None:
+        # No replay at this stage. Below the delivery stages that is expected;
+        # at or above them it means the stage was raised without evidence.
+        assert committed < 3, (
+            f"the ruleset is committed at stage {committed} and the gate "
+            "artifact has no replay at that stage to justify it")
+        return
+
+    assert run["passed"] is True, (
+        f"the ruleset is committed at stage {committed}, and the committed "
+        f"evidence says that stage FAILS: {run['failures']}. Fix the failures "
+        "or lower the stage — do not ship a stage its own replay refuses.")
+
+
+def test_the_artifact_carries_evidence_for_the_stage_the_cutover_targets():
+    """Stage 4 is where the cutover goes, so its evidence is produced here.
+
+    Without it the Stage 4 decision would have had to generate its own evidence
+    by hand on the day, and the absence would have surfaced at exactly the
+    wrong moment.
+    """
+    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
+    assert "stage_4" in payload["runs"], sorted(payload["runs"])
+    stage4 = payload["runs"]["stage_4"]
+    assert stage4["evaluated_at_stage"] == 4
+    assert stage4["passed"] is (stage4["failures"] == [])

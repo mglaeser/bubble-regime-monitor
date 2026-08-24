@@ -452,3 +452,63 @@ def test_an_internationalised_address_is_redacted_too(monkeypatch):
     detail = result.error_message_redacted or ""
     assert "münchen" not in detail
     assert "[email]" in detail
+
+
+def test_an_unknown_profile_is_not_routed_to_the_configured_recipient(monkeypatch):
+    """One recipient configured makes this look harmless. It is not.
+
+    A delivery planned for a profile this deployment does not have would be
+    sent to the profile it does — the operator receiving someone else's alert
+    with nothing marking it as misrouted.
+    """
+    _configured(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request should be made for an unknown profile")
+
+    result = ImessageSender(_client(handler)).send("x", recipient_ref="secondary")
+    assert result.outcome == SenderOutcome.DEFINITE_PERMANENT_REJECTION
+    assert result.error_code == "NO_RECIPIENT"
+
+
+def test_the_known_profiles_still_route(monkeypatch):
+    """The check is about UNKNOWN labels, not a blanket refusal."""
+    _configured(monkeypatch)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append("sent")
+        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
+
+    for ref in ("default", "primary"):
+        result = ImessageSender(_client(handler)).send("x", recipient_ref=ref)
+        assert result.outcome == SenderOutcome.CONFIRMED_SUCCESS, ref
+    assert len(seen) == 2
+
+
+def test_a_deployment_that_names_its_profile_something_else_still_routes(monkeypatch):
+    """A hardcoded label set is the same routing bug pointing the other way.
+
+    It would refuse every delivery on a deployment whose profile is not called
+    "default" — silence instead of misdelivery, but silence caused by the check
+    rather than by anything being wrong.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setenv("ALERTS_LIVE_PROFILE", "house")
+    _clear()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
+
+    ok = ImessageSender(_client(handler)).send("x", recipient_ref="house")
+    assert ok.outcome == SenderOutcome.CONFIRMED_SUCCESS
+
+    # and a profile that is neither an alias nor the configured one still fails
+    other = ImessageSender(_client(handler)).send("x", recipient_ref="elsewhere")
+    assert other.error_code == "NO_RECIPIENT"
+
+    # the aliases do NOT follow: "default" names the default profile, and this
+    # deployment is not it. Accepting it would deliver another namespace's
+    # message to house's recipient.
+    alias = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    assert alias.error_code == "NO_RECIPIENT"

@@ -484,6 +484,148 @@ it, only status, timing, hashes and an already-redacted error string.
 
 ---
 
+## 11a2. Promotion is not a delivery switch
+
+Two questions that look like one, and must not be:
+
+* **May these artifact bytes be accepted as a Stage-N artifact?** —
+  `promotion_blockers`. It can pass at Stage 1, and passing means an operator
+  accepted the exact rules and phrase bytes against evidence for that stage.
+* **May this deployment construct a sender and deliver?** —
+  `live_admission_blockers`. Below `LIVE_DELIVERY_STAGE` (3) the answer is
+  always no, and neither passing evidence nor exact promotion lifts it.
+
+Stage 1 has no sender and no LLM by design. The dispatcher therefore refuses
+BEFORE constructing a sender rather than after: building one and declining to
+use it would break that promise quietly, since the object reads credentials and
+can open a client.
+
+The floor was briefly removed on the reasoning that `ops.indicator_stale` and
+`ops.coverage_degraded_info` are enabled at Stage 1 and could therefore send.
+They are enabled and they cannot send — both are P4, and the planner maps P4 to
+"API and log only", creating no delivery. Checking that the rules were enabled
+without checking what they produce turned a refusal into an evidence check, and
+a promoted Stage-1 artifact then cleared live admission.
+
+## 11b. Open Stage 2 blocker: the ruleset exceeds its own non-P1 budget
+
+Wiring the planner into the atomic apply (audit B-01) turned every non-P1
+volume figure in the replay from "0 by construction" into a real count. On the
+replayed history the stage-3 replay plans 13 deliveries and breaches both caps:
+
+```
+non-P1 24h  : 5   cap 3          BREACHED
+non-P1 168h : 8   cap 6          BREACHED
+non-P1 mean : 8.0 per 168h       UNMEASURED (see below)
+```
+
+`docs/alert-stage1-gate.json` records **stage 3 as FAILING**, and
+`tests/test_alert_replay.py` pins both failures exactly so a new one cannot be
+absorbed silently.
+
+### Why a 76-hour window can prove a one-week breach
+
+The replay covers 76 hours, which looks too short to judge a 168-hour cap. It
+is not, and the asymmetry is worth stating because I got it wrong once and had
+to be corrected.
+
+A sliding-window **maximum is monotonic** in the window length. Observing 8
+non-P1 messages inside 76 hours means every 168-hour window containing them
+holds at least 8 — so the cap of 6 is broken, and no additional history can
+undo it. A longer window only accumulates more.
+
+The converse does not hold. Staying *under* a cap for 76 hours says nothing
+about a week, so a non-breach on a short window is reported UNMEASURED rather
+than passed.
+
+The **mean** is different again: it is not monotonic, so a per-168h mean taken
+from 76 hours is an arithmetic accident rather than a rate. It is the one
+volume figure this window cannot establish.
+
+### Deciding what to do about it
+
+Two things are worth knowing:
+
+* The history is a **coverage fixture** (`history.source` in the artifact),
+  built to exercise every rule, so its density is a property of the fixture as
+  much as of the ruleset. Stage 2 exists to re-measure on real captured
+  sidecars. The breach is real; its magnitude is not a production forecast.
+* Grouping is working. P2s firing in the SAME evaluation bundle into one
+  delivery; these 13 are spread across 20 inputs over three days, so there is
+  nothing for bundling to collapse. Bundling messages hours apart would mean
+  delaying the first, which is not a trade the mandate makes.
+
+This is an operator decision, not an engineering one. The options are to tune
+the rules that generate the volume, to raise the caps deliberately with a
+recorded reason, or to accept the breach for Stage 3 and re-measure on real
+history before Stage 4. What must not happen is the caps being relaxed to make
+a gate pass: the budget exists precisely to catch a ruleset that talks too
+much, and it has just done its job on the first history it was ever able to
+measure.
+
+Until this is decided, Stage 3 must not be promoted. That is currently a
+statement, not a mechanism, and closing the gap is scheduled with audit
+finding **B-04** (live execution fail-closed on the promoted ruleset) because
+the two need the same missing piece.
+
+A promotion check has to bind the evidence to the *bytes* it certifies, and
+this artifact deliberately carries no digest: an entropy detector cannot tell a
+64-hex digest from a token, and `.secrets.baseline` is a byte-identical ratchet
+that may not grow to carry one (see `_DIGEST_FIELDS` in
+`scripts/export_alert_stage1_gate.py`). Binding on `rule_version` instead was
+tried and rejected in review, correctly — a version label is mutable, so an
+edited ruleset that failed to bump it would still be cleared by evidence
+describing different bytes.
+
+What does hold today: `tests/test_alert_replay.py` pins the two failures
+literally, so CI breaks if a new one appears **or** if the breach is fixed
+without updating the list, and the artifact-currency test regenerates the
+evidence on every run, so a ruleset edit that changed behaviour cannot reach
+`main` with stale numbers attached. The uncovered path is an edit made
+directly on the deployment host, which is exactly what B-04 exists to close —
+and the registry, unlike the committed artifact, does hold `rules_sha256`.
+
+---
+
+## 11c. The weekly digest
+
+The product this replaces sent one message every day at 10:00 whether or not
+anything had happened. The replacement is event alerts **plus** a weekly
+digest — and the digest half matters more than it looks, because the Stage 4
+cutover switches the daily message off.
+
+It runs Monday 08:30 Europe/Berlin and digests the window that has **closed**,
+never the one in progress. One delivery per window, identified by the window
+key itself, so a retried job, a restarted scheduler and a manual run all
+converge on the same single message rather than three.
+
+**A quiet week still sends.** This is the part that is easy to get wrong. If
+the digest only went out when something had happened, then after cutover an
+operator receiving nothing could not distinguish
+
+  * a genuinely quiet week, from
+  * a scheduler that died on Tuesday.
+
+The daily message used to make that distinction for free, by accident. The
+digest has to make it on purpose, so a week with no events sends
+`Wochenrueckblick: keine Ereignisse.` — the proof-of-life the old cadence
+provided without anyone designing it.
+
+Two consequences worth knowing:
+
+* A memberless digest is the one legitimate memberless market delivery. Both
+  the dispatcher and the `alert_delivery_requires_member` trigger (migration
+  0010) exempt `DIGEST` for exactly this reason; every other kind with no live
+  members is still aborted at the database rather than sent as an empty
+  message.
+* The digest reports a **count**, not a sample. One SMS is 160 septets and a
+  week of events does not fit; a message quietly containing the first three of
+  twelve would be lying about the other nine. The episodes are on record as
+  delivery members for anyone who needs to know which ones.
+
+Per mandate 9.2 the digest is reported in user load but does **not** consume
+the non-P1 budget: it is a scheduled summary, not an interruption.
+
 ## 12. Replay (the Stage 1 gate)
 
 Stage 1's gate is *deterministic replay; no PII; no scoring regression*.

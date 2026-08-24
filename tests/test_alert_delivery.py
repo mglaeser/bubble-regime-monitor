@@ -41,7 +41,7 @@ NIGHT = datetime(2026, 8, 15, 23, 30, tzinfo=UTC)       # 01:30 Berlin — quiet
 
 @pytest.fixture(scope="module")
 def phrase_set():
-    with open("config/alert_phrases.v3.2.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
         return validate_phrase_set(fh.read())
 
 
@@ -507,9 +507,19 @@ def test_optional_fragments_are_omitted_whole_never_truncated(phrase_set):
 # ---------------------------------------------------------------------------
 
 
-def test_2xx_is_confirmed_success():
+def test_only_the_contract_status_is_confirmed_success():
+    """Sipgate's contract is 204 No Content, exactly.
+
+    This test used to assert that a 200 counted as success too. A 200 did not
+    come from the send route — a captive portal, a health page, a wrong base
+    URL — and calling it success records an alert as delivered while it went
+    nowhere. The iMessage classifier had already fixed this; sipgate's kept
+    the defect, and this assertion kept it green.
+    """
     assert classify_response(204, "").outcome == SenderOutcome.CONFIRMED_SUCCESS
-    assert classify_response(200, "{}").outcome == SenderOutcome.CONFIRMED_SUCCESS
+    other = classify_response(200, "{}")
+    assert other.outcome == SenderOutcome.DEFINITE_PERMANENT_REJECTION
+    assert other.error_code == "UNEXPECTED_SUCCESS_STATUS"
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
@@ -519,11 +529,23 @@ def test_definite_rejections_are_permanent(status):
     assert result.may_retry_automatically is False
 
 
-@pytest.mark.parametrize("status", [429, 500, 502, 503])
-def test_provider_declines_are_transient(status):
-    result = classify_response(status, "try later")
+def test_a_429_is_a_definite_decline_and_safe_to_repeat():
+    result = classify_response(429, "try later")
     assert result.outcome == SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED
     assert result.may_retry_automatically is True
+
+
+@pytest.mark.parametrize("status", [301, 500, 502, 503])
+def test_a_transmitted_post_answered_oddly_is_ambiguous(status):
+    """A 3xx or 5xx follows a fully transmitted POST.
+
+    The message may already have been accepted, so auto-retrying is the
+    duplicate the four-outcome contract exists to prevent. These used to be
+    classified DEFINITE_TRANSIENT and retried unattended.
+    """
+    result = classify_response(status, "gateway says no")
+    assert result.outcome == SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION
+    assert result.may_retry_automatically is False
 
 
 @pytest.fixture()

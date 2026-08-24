@@ -183,7 +183,7 @@ def admin_promote(response: Response, _: None = Depends(require_admin_key)) -> A
     change ALERTS_MODE — going live is still a separate operator decision.
     """
     _no_store(response)
-    from app.alerts.artifacts import register, validate_from_disk
+    from app.alerts.artifacts import validate_from_disk
     from app.alerts.errors import AlertError
 
     try:
@@ -191,8 +191,22 @@ def admin_promote(response: Response, _: None = Depends(require_admin_key)) -> A
     except AlertError as exc:
         return problem(422, "Ruleset invalid", exc.redacted())
 
+    from app.alerts.promotion_service import validate_register_and_promote
+
     with session_scope() as session:
-        rules_sha = register(session, artifacts, promote=True, promoted_by="admin-api")
+        decision = validate_register_and_promote(
+            session, artifacts, actor="admin-api")
+    if not decision.promoted:
+        # 409: the request is well-formed and the artifact is valid; what
+        # refuses it is the committed evidence. Blockers go back
+        # machine-readably so an operator does not have to read a log to learn
+        # which gate said no.
+        return problem(409, "Promotion refused by gate evidence",
+                       "; ".join(decision.blockers),
+                       extra={"blockers": list(decision.blockers),
+                              "rules_sha256": decision.rules_sha256,
+                              "target_stage": decision.target_stage})
+    rules_sha = decision.rules_sha256
     return {
         "promoted_rules_sha256": rules_sha,
         "phrase_set_sha256": artifacts.phrase_set.sha256,

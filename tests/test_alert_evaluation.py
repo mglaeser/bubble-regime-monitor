@@ -22,6 +22,7 @@ from app.alerts.state_machine import (
     evaluate_state,
     flapping_projection,
 )
+from tests.conftest import register_promoted
 
 NOW = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
@@ -663,7 +664,7 @@ def _artifacts(stage: int = 3, tmp_path=None):
     target.write_text(raw, encoding="utf-8")
     return validate_from_disk(
         rules_path=target,
-        phrase_path=Path("config/alert_phrases.v3.2.json"),
+        phrase_path=Path("config/alert_phrases.v3.3.json"),
         service_version="3.8.0",
     )
 
@@ -700,12 +701,11 @@ def _store_input(alert_input: AlertInput, built_at: datetime) -> None:
 
 
 def _run(alert_input: AlertInput, artifacts, *, now: datetime):
-    from app.alerts.artifacts import register
     from app.alerts.engine import run_evaluation
     from app.db import session_scope
 
     with session_scope() as session:
-        register(session, artifacts, promote=True, now=now)
+        register_promoted(session, artifacts, now=now)
     return run_evaluation(
         session_scope, alert_input=alert_input, current=artifacts.ruleset,
         mode="shadow", live_profile="default", now=now,

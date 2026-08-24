@@ -1,8 +1,8 @@
-"""Loading and promoting the immutable artifacts.
+"""Loading the immutable artifacts.
 
-Promotion is an OPERATOR action. Nothing here promotes anything as a side
-effect of a boot, a deploy or a validation run — `promote=True` only ever comes
-from the CLI.
+Promotion is an OPERATOR action, and it does not live in this module at all —
+see `app.alerts.promotion_service`, which checks the replay evidence before
+writing any promotion metadata. Nothing here promotes anything.
 
 Fallback never escalates. If the candidate ruleset on disk is invalid, the
 service keeps evaluating the ruleset that was already promoted and reports
@@ -41,7 +41,7 @@ log = get_logger(__name__)
 #: Shipped defaults. An operator overrides them with ALERTS_RULES_PATH /
 #: ALERTS_PHRASE_PATH; the shipped copies are what CI validates.
 REPO_RULES = Path(__file__).resolve().parents[2] / "config" / "alert_rules.v3.2.yaml"
-REPO_PHRASES = Path(__file__).resolve().parents[2] / "config" / "alert_phrases.v3.2.json"
+REPO_PHRASES = Path(__file__).resolve().parents[2] / "config" / "alert_phrases.v3.3.json"
 
 
 @dataclass(frozen=True)
@@ -217,13 +217,21 @@ def load_by_hash(session: Session, rules_sha256: str, *,
     return LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set, source="registry")
 
 
-def register(session: Session, artifacts: LoadedArtifacts, *, now: datetime | None = None,
-             promote: bool = False, promoted_by: str | None = None) -> str:
-    """Persist the artifacts and optionally PROMOTE them.
+def register(session: Session, artifacts: LoadedArtifacts, *,
+             now: datetime | None = None,
+             registered_by: str | None = None) -> str:
+    """Persist the artifacts as VALIDATED. It does NOT promote.
 
     Registering is cheap and idempotent — the bytes are addressed by their
-    hash, and re-registering the same hash is a no-op. Promotion is the part an
-    operator has to mean.
+    hash, and re-registering the same hash is a no-op. It also carries no
+    authority, which is why promotion is no longer a keyword argument here.
+
+    `promote=True` used to write `promoted_at` with no reference to the replay
+    evidence, and `delivery_admission_blockers` trusts that timestamp when it
+    decides a queued delivery was authorised. A failing ruleset marked promoted
+    this way stayed authorised for its queued work even after a valid ruleset
+    superseded it. Promotion now lives in `app.alerts.promotion_service`,
+    behind the evidence check.
     """
     now = now or datetime.now(UTC)
     phrase = artifacts.phrase_set
@@ -235,7 +243,7 @@ def register(session: Session, artifacts: LoadedArtifacts, *, now: datetime | No
             validator_version=PHRASE_VALIDATOR_VERSION,
             validated_at=now,
             worst_case_test_sha256=phrase.worst_case_test_sha256,
-            created_by=sanitize(promoted_by) if promoted_by else None,
+            created_by=sanitize(registered_by) if registered_by else None,
         ))
         session.flush()
 
@@ -259,20 +267,6 @@ def register(session: Session, artifacts: LoadedArtifacts, *, now: datetime | No
         session.add(row)
         session.flush()
 
-    if promote:
-        for other in session.execute(
-            select(AlertRulesetRegistry).where(
-                AlertRulesetRegistry.status == RulesetStatus.PROMOTED,
-                AlertRulesetRegistry.rules_sha256 != ruleset.rules_sha256,
-            )
-        ).scalars().all():
-            other.status = RulesetStatus.SUPERSEDED
-            other.superseded_at = now
-        row.status = RulesetStatus.PROMOTED
-        row.promoted_at = now
-        row.promoted_by = sanitize(promoted_by) if promoted_by else None
-        log.info("alert_ruleset_promoted", rules_sha256=row.rules_sha256,
-                 rule_version=row.rule_version)
     return row.rules_sha256
 
 

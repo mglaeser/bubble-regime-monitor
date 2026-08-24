@@ -33,31 +33,36 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "docs" / "alert-stage1-gate.json"
 HISTORY = ROOT / "tests" / "fixtures" / "alert_replay_history.json"
 RULES = ROOT / "config" / "alert_rules.v3.2.yaml"
-PHRASES = ROOT / "config" / "alert_phrases.v3.2.json"
+PHRASES = ROOT / "config" / "alert_phrases.v3.3.json"
 EVENTS = ROOT / "config" / "alert_mandatory_events.v3.2.json"
 
-#: Replayed at the committed stage AND at the first delivery stage. The second
-#: is what makes the artifact useful: at stage 1 almost nothing is gated on, so
+#: Replayed at the committed stage AND at the delivery stages. Stage 3 is what
+#: makes the artifact useful at all: at stage 1 almost nothing is gated on, so
 #: a stage-1-only artifact would be nearly blind to evaluator regressions.
-STAGES = (1, 3)
+#:
+#: Stage 4 is here because that is where the cutover goes — the legacy daily
+#: digest off, the alert path carrying everything. Evidence for the stage the
+#: system is actually being moved to should not have to be produced by hand on
+#: the day, and its absence would have been discovered at exactly the wrong
+#: moment.
+STAGES = (1, 3, 4)
 
-#: Content digests are NOT written into the committed artifact, and truncating
-#: them is not the answer either.
+#: Bare content digests are still not written into a per-run summary: an
+#: entropy detector cannot tell a 64-hex digest from a 64-hex token, which is
+#: the correct default, and this repository's secret baseline is a
+#: byte-identical ratchet that may not grow to carry them. Truncation is not
+#: the answer either — the detector scores Shannon entropy rather than length,
+#: so whether a prefix passes depends on which characters the hash happened to
+#: produce, and a future ruleset edit would fail CI for reasons that have
+#: nothing to do with the ruleset.
 #:
-#: An entropy detector cannot tell a 64-hex content digest from a 64-hex token,
-#: which is the correct default, and this repository's secret baseline is a
-#: byte-identical ratchet that may not grow to carry digests. Truncation only
-#: looks like a fix: the detector scores Shannon entropy, not length, so
-#: whether a 12-character prefix passes depends on which characters the hash
-#: happened to produce — a future ruleset edit would fail CI for a reason that
-#: has nothing to do with the ruleset.
-#:
-#: Semantic versions carry the identity instead, and nothing is lost. Exact
-#: bytes are already gated by the separate "Alert artifacts" CI step, and a
-#: ruleset change the version failed to declare still moves the episode counts
-#: in this very document — a louder signal than a digest nobody diffs. The
-#: runtime report is unaffected: `ReplaySummary` carries the full digests, and
-#: `--out` writes them.
+#: The artifact's PROVENANCE section does carry them, GROUPED (see
+#: `app.alerts.promotion.group_digest`): the full digest, split into
+#: eight-character runs, none of which is long enough to score as
+#: high-entropy. Nothing is weakened and the result is stable rather than
+#: luck-of-the-hash — which matters, because the promotion gate binds evidence
+#: to bytes with it. Versions alone were not enough: a version string is
+#: something a human types, so an edit that forgot to bump it was invisible.
 _DIGEST_FIELDS = ("rules_sha256", "phrase_set_sha256")
 
 
@@ -67,6 +72,7 @@ def _without_digests(summary: dict) -> dict:
 
 def build_evidence() -> dict:
     from app.alerts.artifacts import validate_from_disk
+    from app.alerts.promotion import group_digest
     from app.alerts.replay import ReplayConfig, run_replay
     from tests.fixtures import alert_replay_history as history
 
@@ -92,12 +98,17 @@ def build_evidence() -> dict:
         "artifact": "alert-stage1-gate",
         "gate": "deterministic replay; no PII; no scoring regression",
         "artifacts": {
+            "rules_sha256_grouped": group_digest(artifacts.ruleset.rules_sha256),
+            "phrase_set_sha256_grouped": group_digest(
+                artifacts.ruleset.phrase_set_sha256),
             "rule_version": artifacts.ruleset.rule_version,
             "phrase_set_version": artifacts.ruleset.phrase_set_version,
-            "digests": ("omitted by design — see _DIGEST_FIELDS in "
-                        "scripts/export_alert_stage1_gate.py; exact bytes are "
-                        "gated by the 'Alert artifacts' CI step, and "
-                        "`app.alerts.cli ruleset` prints them"),
+            "digests": ("carried GROUPED above — the full sha256 split into "
+                        "eight-character runs, so an entropy detector does not "
+                        "read it as a credential. The promotion gate binds "
+                        "evidence to bytes with them; per-run summaries still "
+                        "omit bare digests. See app.alerts.promotion."
+                        "group_digest"),
         },
         "history": {
             "source": str(HISTORY.relative_to(ROOT)),
