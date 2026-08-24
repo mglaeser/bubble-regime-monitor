@@ -113,6 +113,11 @@ class AlertRulesetRegistry(Base):
     validated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     promoted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: Stamped ONLY by the evidence-gated promotion service. `promoted_at`
+    #: alone cannot distinguish a promotion an operator meant from one the old
+    #: ungated path wrote, and delivery admission requires both.
+    evidence_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False,
                                         default=RulesetStatus.VALIDATED)
@@ -390,6 +395,13 @@ class AlertEpisode(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolution_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    #: The input this episode's transition was decided AGAINST, resolved once
+    #: at plan time. The renderer reads it rather than resolving again: the
+    #: lineage half is immutable but the fallback is a query over "what exists
+    #: before this timestamp", which a backfill can change between evaluation
+    #: and dispatch. Nullable — a cold start has no predecessor.
+    predecessor_input_identity: Mapped[str | None] = mapped_column(
+        ForeignKey("alert_input_snapshot.input_identity"), nullable=True)
     trigger_input_identity: Mapped[str] = mapped_column(
         ForeignKey("alert_input_snapshot.input_identity"), nullable=False)
     candidate_expires_at: Mapped[datetime | None] = mapped_column(

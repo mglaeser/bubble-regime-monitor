@@ -48,7 +48,9 @@ from app.alerts.enums import (
     SuppressionReason,
     TransportStatus,
 )
+from app.alerts.outbox import default_limits
 from app.alerts.registry import ValidatedRuleset
+from app.config import get_settings
 from app.engine.snapshot_contract import BAND_DERISK, STATE_SUPPRESSED
 from app.logging_conf import get_logger
 
@@ -152,6 +154,12 @@ class ReplaySummary:
     max_non_p1_24h: int = 0
     max_non_p1_168h: int = 0
     mean_non_p1_per_168h: float = 0.0
+    #: The cap values the verdict was judged AGAINST. Without these the
+    #: artifact says "passed" or "failed" while omitting the limits that
+    #: decision used — and the planner enforces whatever the runtime settings
+    #: say, so raising an env var would quietly run live under caps the
+    #: evidence never saw. Recording them is what lets admission notice.
+    budget_limits: dict[str, int] = field(default_factory=dict)
     p1_total: int = 0
 
     # -- governance metrics ----------------------------------------------
@@ -333,9 +341,10 @@ def run_replay(
 
     Returns the summary. Nothing is sent, nothing in production is written.
     """
-    from app.alerts.artifacts import LoadedArtifacts, register
+    from app.alerts.artifacts import LoadedArtifacts
     from app.alerts.engine import run_evaluation
     from app.alerts.models import AlertDigestItem, AlertInputSnapshot
+    from app.alerts.promotion_service import seed_replay_artifacts
 
     committed_stage = ruleset.document.meta.active_stage
     if config.evaluate_at_stage is not None \
@@ -371,9 +380,11 @@ def run_replay(
         # Seed the isolated database with the artifacts and the sidecars, so a
         # replay is fully self-contained and can be re-run from its state DB.
         with scope() as session:
-            register(session, LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set,
-                                              source="replay"),
-                     now=_moment_of(records[0]), promote=True)
+            seed_replay_artifacts(
+                session,
+                LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set,
+                                source="replay"),
+                now=_moment_of(records[0]))
             for alert_input in records:
                 if session.get(AlertInputSnapshot, alert_input.input_identity) is not None:
                     continue
@@ -595,6 +606,19 @@ def _collect_mandatory_events(config: ReplayConfig, summary: ReplaySummary) -> N
     summary.mandatory_event_not_evaluable = summary.inputs_not_evaluable
 
 
+def _window_hours(summary: ReplaySummary) -> float | None:
+    """How long the replayed history actually covers, in hours."""
+    first, last = summary.window_first, summary.window_last
+    if not first or not last:
+        return None
+    try:
+        start = datetime.fromisoformat(str(first))
+        end = datetime.fromisoformat(str(last))
+    except ValueError:
+        return None
+    return (end - start).total_seconds() / 3600.0
+
+
 def _decide(summary: ReplaySummary) -> None:
     """The Stage 1 verdict. Fail-closed and explicit about WHY.
 
@@ -623,16 +647,68 @@ def _decide(summary: ReplaySummary) -> None:
         failures.append(f"replay ran in mode {summary.mode!r}, not dryrun")
 
     if not summary.notification_planning_ran:
-        # The planner is a stage-3 component and does not run here, so the
-        # volume figures are structurally zero. Zero non-P1 messages trivially
-        # satisfies every cap — which is exactly why it must not be reported
-        # as satisfying them.
+        # No delivery rule was active at this stage, so the volume figures are
+        # structurally zero. Zero non-P1 messages trivially satisfies every cap
+        # — which is exactly why it must not be reported as satisfying them.
         unmeasured += [
-            "non_p1_volume_targets (24h cap, 168h cap, 168h mean) — the delivery "
-            "planner does not run at this stage, so every count is 0 by "
-            "construction rather than by governance",
+            "non_p1_volume_targets (24h cap, 168h cap, 168h mean) — no delivery "
+            "was planned at this stage, so every count is 0 by construction "
+            "rather than by governance",
             "quiet_hours_and_budget_holds — no delivery was planned to hold",
         ]
+    else:
+        # Planning ran, so the figures MEAN something and the gate must judge
+        # them. Leaving them merely reported would turn "unmeasured" into
+        # "measured and ignored", which is the worse of the two: a number on a
+        # dashboard that no one compares to its limit reads as compliance.
+        limits = default_limits(get_settings())
+        summary.budget_limits = {"cap_24h": limits.cap_24h,
+                                 "cap_168h": limits.cap_168h,
+                                 "target_168h": limits.target_168h}
+        span = _window_hours(summary)
+
+        # A sliding-window MAXIMUM is monotonic in the window length, and that
+        # asymmetry decides what a short history can and cannot establish.
+        #
+        # Observing 8 non-P1 messages inside 76 hours means every 168-hour
+        # window containing them holds at least 8. The cap of 6 is therefore
+        # BREACHED, and no amount of additional history can undo it — a longer
+        # window only accumulates more. A breach is provable on any window.
+        #
+        # The converse is not. Staying under a cap for 76 hours says nothing
+        # about a week, so a non-breach on a short window is UNMEASURED rather
+        # than passed. My first attempt at this got the direction wrong and
+        # suppressed a proven breach; the panel was right to refuse it.
+        #
+        # The MEAN is different again: it is not monotonic, and a per-168h mean
+        # taken from 76 hours is an arithmetic accident rather than a rate.
+        for label, observed, cap, period in (
+            ("24h", summary.max_non_p1_24h, limits.cap_24h, 24.0),
+            ("168h", summary.max_non_p1_168h, limits.cap_168h, 168.0),
+        ):
+            if observed > cap:
+                failures.append(
+                    f"non-P1 volume breached the {label} cap: {observed} > {cap}")
+            elif span is None or span < period:
+                unmeasured.append(
+                    f"non_p1_volume_{label}_cap — the window spans "
+                    f"{'no time' if span is None else f'{span:.1f}h'} and the "
+                    f"cap is stated per {label}; staying under it here proves "
+                    "nothing about a full period")
+
+        if span is not None and span >= 168.0:
+            if summary.mean_non_p1_per_168h > limits.target_168h:
+                # A target, not a hard cap (mandate 9.2), so it is reported
+                # rather than failed — but reported as a miss, with both
+                # numbers.
+                summary.notes.append(
+                    f"non-P1 mean of {summary.mean_non_p1_per_168h} per 168h is "
+                    f"above the quiet-regime target of {limits.target_168h}")
+        else:
+            unmeasured.append(
+                "non_p1_mean_per_168h — a mean is not monotonic in the window "
+                "length, so it cannot be inferred from a shorter history")
+
     if not summary.mandatory_event_total:
         unmeasured.append(
             "mandatory_event_recall — the catalogue is empty; recall over zero "

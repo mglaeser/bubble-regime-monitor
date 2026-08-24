@@ -19,6 +19,7 @@ from app.alerts.errors import PhraseSetInvalid, RulesetInvalid, sanitize
 from app.alerts.gsm7 import Gsm7Error, fits_single_sms, septets
 from app.alerts.phrase_registry import validate_phrase_set
 from app.alerts.registry import instance_fingerprint, unresolved_pins, validate_ruleset
+from tests.conftest import register_promoted
 
 RULES_PATH = "config/alert_rules.v3.2.yaml"
 PHRASES_PATH = "config/alert_phrases.v3.2.json"
@@ -853,12 +854,12 @@ def test_live_mode_refuses_a_ruleset_that_was_never_promoted(isolated_db):
 
 
 def test_live_mode_accepts_the_ruleset_once_it_is_promoted(isolated_db):
-    from app.alerts.artifacts import load_active, load_active_for_mode, register
+    from app.alerts.artifacts import load_active, load_active_for_mode
     from app.db import session_scope
 
     with session_scope() as session:
         artifacts = load_active(session)
-        register(session, artifacts, promote=True, promoted_by="test")
+        register_promoted(session, artifacts)
 
     with session_scope() as session:
         admitted = load_active_for_mode(session, mode="live")
@@ -893,13 +894,13 @@ def test_live_admission_binds_the_phrase_set_and_not_only_the_rules(isolated_db)
     import pytest
 
     from app.alerts import artifacts as artifacts_module
-    from app.alerts.artifacts import load_active, load_active_for_mode, register
+    from app.alerts.artifacts import load_active, load_active_for_mode
     from app.alerts.errors import AlertingUnavailable
     from app.db import session_scope
 
     with session_scope() as session:
         loaded = load_active(session)
-        register(session, loaded, promote=True)
+        register_promoted(session, loaded)
         session.flush()
 
         # Same rules, different text: the one case the old check waved through.

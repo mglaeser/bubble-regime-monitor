@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.alerts.enums import EvaluationRunStatus
 from app.alerts.models import AlertEvaluation, AlertRulesetRegistry
 from app.db import session_scope
+from tests.conftest import register_promoted
 from tests.test_alert_evaluation import _artifacts, _store_input, make_input
 
 NOW = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
@@ -133,16 +134,15 @@ def test_reconcile_reports_snapshots_without_a_sidecar(isolated_db, monkeypatch)
 
 
 def test_promotion_supersedes_the_previous_ruleset(isolated_db, tmp_path):
-    from app.alerts.artifacts import register
 
     first = _artifacts(stage=1, tmp_path=tmp_path / "a")
     second = _artifacts(stage=3, tmp_path=tmp_path / "b")
     assert first.ruleset.rules_sha256 != second.ruleset.rules_sha256
 
     with session_scope() as session:
-        register(session, first, promote=True, now=NOW)
+        register_promoted(session, first, now=NOW)
     with session_scope() as session:
-        register(session, second, promote=True, now=NOW + timedelta(hours=1))
+        register_promoted(session, second, now=NOW + timedelta(hours=1))
 
     with session_scope() as session:
         rows = {r.rules_sha256: r.status for r in session.execute(
@@ -153,11 +153,11 @@ def test_promotion_supersedes_the_previous_ruleset(isolated_db, tmp_path):
 
 def test_origin_phrase_bytes_are_recoverable_from_the_registry(isolated_db, tmp_path):
     """Queued work must not depend on the file on disk still being there."""
-    from app.alerts.artifacts import load_by_hash, register
+    from app.alerts.artifacts import load_by_hash
 
     artifacts = _artifacts(stage=3, tmp_path=tmp_path)
     with session_scope() as session:
-        rules_sha = register(session, artifacts, promote=True, now=NOW)
+        rules_sha = register_promoted(session, artifacts, now=NOW)
 
     with session_scope() as session:
         rebuilt = load_by_hash(session, rules_sha)
@@ -168,7 +168,6 @@ def test_origin_phrase_bytes_are_recoverable_from_the_registry(isolated_db, tmp_
 
 def test_old_ruleset_episode_continues_after_promotion(isolated_db, tmp_path):
     """An episode opened under an archived ruleset stays evaluable under IT."""
-    from app.alerts.artifacts import register
     from app.alerts.engine import run_evaluation
     from app.alerts.models import AlertEpisode
     from app.alerts.repository import origin_rulesets_with_open_episodes
@@ -182,7 +181,7 @@ def test_old_ruleset_episode_continues_after_promotion(isolated_db, tmp_path):
     _store_input(after, NOW)
 
     with session_scope() as session:
-        register(session, old, promote=True, now=NOW)
+        register_promoted(session, old, now=NOW)
     run_evaluation(session_scope, alert_input=before, current=old.ruleset,
                    mode="shadow", now=datetime(2026, 8, 15, 6, 1, tzinfo=UTC))
     run_evaluation(session_scope, alert_input=after, current=old.ruleset,
@@ -198,7 +197,7 @@ def test_old_ruleset_episode_continues_after_promotion(isolated_db, tmp_path):
     new = _artifacts(stage=4, tmp_path=tmp_path / "new")
     assert new.ruleset.rules_sha256 != old.ruleset.rules_sha256
     with session_scope() as session:
-        register(session, new, promote=True, now=NOW + timedelta(hours=1))
+        register_promoted(session, new, now=NOW + timedelta(hours=1))
         origins = origin_rulesets_with_open_episodes(
             session, mode="shadow", live_profile="default",
             current_rules_sha256=new.ruleset.rules_sha256)
@@ -207,7 +206,6 @@ def test_old_ruleset_episode_continues_after_promotion(isolated_db, tmp_path):
 
 def test_cooldown_memory_survives_a_promotion(isolated_db, tmp_path):
     """Notification memory is keyed WITHOUT a rules hash, on purpose."""
-    from app.alerts.artifacts import register
     from app.alerts.engine import run_evaluation
     from app.alerts.models import AlertInstanceNotificationState
 
@@ -215,7 +213,7 @@ def test_cooldown_memory_survives_a_promotion(isolated_db, tmp_path):
     inp = make_input(identity="i1", effective="trim")
     _store_input(inp, NOW)
     with session_scope() as session:
-        register(session, old, promote=True, now=NOW)
+        register_promoted(session, old, now=NOW)
     run_evaluation(session_scope, alert_input=inp, current=old.ruleset,
                    mode="shadow", now=NOW)
 

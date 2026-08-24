@@ -46,6 +46,26 @@ TIMEOUT = httpx.Timeout(connect=5.0, read=25.0, write=10.0, pool=5.0)
 #: one of these forever would be the loudest possible way to achieve nothing.
 _PERMANENT = frozenset({400, 401, 402, 403, 404, 405, 409, 410, 413, 415, 422})
 
+#: Legacy labels for the DEFAULT profile only. They exist because rows queued
+#: before refs carried the run's own profile say "default" or "primary".
+_PROFILE_ALIASES = frozenset({"default", "primary"})
+
+
+def _routes_here(recipient_ref: str, settings: Any) -> bool:
+    """Whether this ref names the profile this deployment delivers for.
+
+    The configured profile's own name always routes. The aliases route ONLY
+    when the deployment IS the default profile — accepting "default" while
+    configured as "house" would deliver another namespace's message to house's
+    recipient, which is the cross-profile bypass this function exists to stop.
+    The dispatcher's claim query already filters by profile; this is the last
+    line, and the last line must not be looser than the first.
+    """
+    configured = str(getattr(settings, "alerts_live_profile", "") or "default")
+    if recipient_ref == configured:
+        return True
+    return configured == "default" and recipient_ref in _PROFILE_ALIASES
+
 
 @dataclass(frozen=True)
 class SendResult:
@@ -133,10 +153,43 @@ def _classify_exception(exc: Exception, *, request_started: bool) -> SendResult:
 
 
 def classify_response(status_code: int, body: str) -> SendResult:
-    """Map an HTTP response to a typed outcome. Pure; unit-testable."""
-    if 200 <= status_code < 300:
+    """Map a sipgate response to a typed outcome. Pure; unit-testable.
+
+    This carried every defect the iMessage classifier had already fixed, which
+    is what happens when two transports classify separately: only one of them
+    learns. Sipgate's contract is 204 No Content, exactly.
+
+    * Any other 2xx did NOT come from the send route — a captive portal, a
+      health page, a wrong base URL — and calling it success records an alert
+      as delivered while it went nowhere. Permanent, because the same request
+      to the same wrong place keeps "succeeding" at nothing.
+    * A 3xx or 5xx follows a fully transmitted POST, so the message may
+      already have been accepted. AMBIGUOUS — auto-retrying it is the
+      duplicate the four-outcome contract exists to prevent.
+    * A definite 4xx decline stays retryable only where the provider said
+      "not now" (429); the `_PERMANENT` set stays permanent.
+    """
+    if status_code == 204:
         return SendResult(outcome=SenderOutcome.CONFIRMED_SUCCESS,
                           http_status=status_code, request_started=True)
+    if 200 <= status_code < 300:
+        return SendResult(
+            outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+            http_status=status_code,
+            error_code="UNEXPECTED_SUCCESS_STATUS",
+            error_message_redacted=(f"{status_code} where the contract "
+                                    "specifies 204; this reply did not come "
+                                    "from the send route"),
+            request_started=True,
+        )
+    if 300 <= status_code < 400 or status_code >= 500:
+        return SendResult(
+            outcome=SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION,
+            http_status=status_code,
+            error_code=f"HTTP_{status_code}",
+            error_message_redacted=sanitize(body),
+            request_started=True,
+        )
     if status_code in _PERMANENT:
         return SendResult(
             outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
@@ -145,7 +198,7 @@ def classify_response(status_code: int, body: str) -> SendResult:
             error_message_redacted=sanitize(body),
             request_started=True,
         )
-    # 429 and 5xx with a real response: the provider answered and declined.
+    # 429 and unlisted 4xx: the provider answered and declined; safe to repeat.
     return SendResult(
         outcome=SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED,
         http_status=status_code,
@@ -219,7 +272,7 @@ def _resolve_recipient(recipient_ref: str, settings: object) -> str:
     The number itself never enters the database, an API response or a log —
     only this handle does.
     """
-    if recipient_ref in ("default", "primary"):
+    if _routes_here(recipient_ref, settings):
         return getattr(settings, "sipgate_recipient", "")
     return ""
 
@@ -498,9 +551,20 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
 
 
 def _resolve_imessage_recipient(recipient_ref: str, settings: Any) -> str:
-    """The configured handle. `recipient_ref` is an opaque profile label.
+    """The configured handle for a KNOWN profile label.
 
-    Never the address itself: mandate 13 forbids recipient PII in persisted or
-    returned data, and the delivery row carries this ref.
+    `recipient_ref` is an opaque profile label, never the address itself:
+    mandate 13 forbids recipient PII in persisted or returned data, and the
+    delivery row carries this ref.
+
+    It used to ignore the ref and return the configured handle for anything at
+    all. With one recipient configured that looks harmless, and it means a
+    delivery planned for a profile this deployment does not have would be sent
+    to the profile it does — the operator receiving someone else's alert with
+    nothing marking it as misrouted. An unknown profile resolves to nothing,
+    which the caller reports as NO_RECIPIENT: a permanent rejection that names
+    the problem beats a message delivered to the wrong person.
     """
+    if not _routes_here(recipient_ref, settings):
+        return ""
     return str(getattr(settings, "imessage_recipient", "") or "")
