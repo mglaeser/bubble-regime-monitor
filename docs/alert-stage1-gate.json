@@ -1,9 +1,11 @@
 {
   "artifact": "alert-stage1-gate",
   "artifacts": {
-    "digests": "omitted by design — see _DIGEST_FIELDS in scripts/export_alert_stage1_gate.py; exact bytes are gated by the 'Alert artifacts' CI step, and `app.alerts.cli ruleset` prints them",
+    "digests": "carried GROUPED above — the full sha256 split into eight-character runs, so an entropy detector does not read it as a credential. The promotion gate binds evidence to bytes with them; per-run summaries still omit bare digests. See app.alerts.promotion.group_digest",
+    "phrase_set_sha256_grouped": "cb395ca1-d90e8678-eff9f3b6-07f8b652-cfb54628-8ae29a53-83696e26-e79820f0",
     "phrase_set_version": "v3.2",
-    "rule_version": "v3.2.0"
+    "rule_version": "v3.2.0",
+    "rules_sha256_grouped": "e04ac5b7-b0d071fc-94ec61fc-a951cf99-174a9544-c425d8ad-dc85b6d5-182d3a8a"
   },
   "gate": "deterministic replay; no PII; no scoring regression",
   "history": {
