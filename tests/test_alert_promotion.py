@@ -697,3 +697,52 @@ def test_the_pre_send_recheck_asks_both_gates(monkeypatch):
     monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
                         lambda session, sha, **kw: [])
     assert withdrawn_admission(None, _D()) == []
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_the_schema_binds_a_delivery_to_its_reviewed_text():
+    """The delivery gate does NOT check this, because the database already does.
+
+    A delivery's ruleset is fetched by content hash, so its bytes are bound by
+    construction. Its phrase set is referenced by VERSION, which looks like the
+    remaining gap — and is closed by two schema guarantees that are stronger
+    than an application check: the bytes cannot change under a version, and a
+    referenced version cannot be deleted.
+
+    Both are pinned here so the guarantee fails loudly if either is dropped,
+    rather than silently moving the risk back into code that no longer looks
+    for it.
+    """
+    import pytest as _pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.models import AlertPhraseSetRegistry, AlertRulesetRegistry
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded, promote=True)
+        session.flush()
+        row = session.get(AlertRulesetRegistry, loaded.ruleset.rules_sha256)
+        version = row.phrase_set_version
+
+        # 1: the reviewed text cannot change under a version already issued
+        with _pytest.raises(IntegrityError) as immutable:
+            session.get(AlertPhraseSetRegistry, version).phrase_set_sha256 = "9" * 64
+            session.flush()
+        assert "immutable" in str(immutable.value)
+        session.rollback()
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register(session, loaded, promote=True)
+        session.flush()
+        row = session.get(AlertRulesetRegistry, loaded.ruleset.rules_sha256)
+
+        # 2: a phrase set a ruleset depends on cannot be deleted from under it
+        with _pytest.raises(IntegrityError):
+            session.delete(session.get(AlertPhraseSetRegistry,
+                                       row.phrase_set_version))
+            session.flush()
+        session.rollback()
