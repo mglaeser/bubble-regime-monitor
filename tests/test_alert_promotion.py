@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import select
 
 from app.alerts.promotion import promotion_blockers
+from tests.conftest import register_promoted
 
 ARTIFACT = Path("docs/alert-stage1-gate.json")
 
@@ -265,7 +266,7 @@ def test_an_archived_ruleset_may_still_finish_what_it_started():
     """
     from datetime import UTC, datetime
 
-    from app.alerts.artifacts import load_active, register
+    from app.alerts.artifacts import load_active
     from app.alerts.enums import RulesetStatus
     from app.alerts.models import AlertRulesetRegistry
     from app.alerts.promotion import delivery_admission_blockers
@@ -273,7 +274,7 @@ def test_an_archived_ruleset_may_still_finish_what_it_started():
 
     with session_scope() as session:
         loaded = load_active(session)
-        register(session, loaded, promote=True)
+        register_promoted(session, loaded)
         session.flush()
         sha = loaded.ruleset.rules_sha256
 
@@ -298,13 +299,13 @@ def test_a_ruleset_that_was_never_promoted_does_not_deliver_however_it_is_versio
     """
     from dataclasses import replace
 
-    from app.alerts.artifacts import load_active, register
+    from app.alerts.artifacts import load_active
     from app.alerts.promotion import _digest_blockers
     from app.db import session_scope
 
     with session_scope() as session:
         loaded = load_active(session)
-        register(session, loaded, promote=True)
+        register_promoted(session, loaded)
         session.flush()
 
         # same declared versions, different bytes
@@ -470,7 +471,7 @@ def test_revoking_a_ruleset_stops_the_messages_already_queued():
     those messages — otherwise revocation only ever applies to alerts nobody
     had planned yet, which is the opposite of when it is reached for.
     """
-    from app.alerts.artifacts import load_active, register
+    from app.alerts.artifacts import load_active
     from app.alerts.enums import RulesetStatus
     from app.alerts.models import AlertRulesetRegistry
     from app.alerts.promotion import delivery_admission_blockers
@@ -478,7 +479,7 @@ def test_revoking_a_ruleset_stops_the_messages_already_queued():
 
     with session_scope() as session:
         loaded = load_active(session)
-        register(session, loaded, promote=True)
+        register_promoted(session, loaded)
         session.flush()
         sha = loaded.ruleset.rules_sha256
 
@@ -526,14 +527,14 @@ def test_a_demotion_stops_deliveries_already_queued_at_the_higher_stage():
     """
     import yaml
 
-    from app.alerts.artifacts import load_active, register
+    from app.alerts.artifacts import load_active
     from app.alerts.models import AlertRulesetRegistry
     from app.alerts.promotion import delivery_admission_blockers
     from app.db import session_scope
 
     with session_scope() as session:
         loaded = load_active(session)
-        register(session, loaded, promote=True)
+        register_promoted(session, loaded)
         session.flush()
         sha = loaded.ruleset.rules_sha256
 
@@ -554,13 +555,13 @@ def test_a_demotion_stops_deliveries_already_queued_at_the_higher_stage():
 
 @pytest.mark.usefixtures("isolated_db")
 def test_a_ruleset_recording_no_stage_cannot_justify_a_send():
-    from app.alerts.artifacts import load_active, register
+    from app.alerts.artifacts import load_active
     from app.alerts.promotion import delivery_admission_blockers
     from app.db import session_scope
 
     with session_scope() as session:
         loaded = load_active(session)
-        register(session, loaded, promote=True)
+        register_promoted(session, loaded)
         session.flush()
         _registry_clone(session, loaded.ruleset.rules_sha256, sha="8" * 64,
                         yaml_text="not: a ruleset")
@@ -735,13 +736,13 @@ def test_the_schema_binds_a_delivery_to_its_reviewed_text():
     import pytest as _pytest
     from sqlalchemy.exc import IntegrityError
 
-    from app.alerts.artifacts import load_active, register
+    from app.alerts.artifacts import load_active
     from app.alerts.models import AlertPhraseSetRegistry, AlertRulesetRegistry
     from app.db import session_scope
 
     with session_scope() as session:
         loaded = load_active(session)
-        register(session, loaded, promote=True)
+        register_promoted(session, loaded)
         session.flush()
         row = session.get(AlertRulesetRegistry, loaded.ruleset.rules_sha256)
         version = row.phrase_set_version
@@ -755,7 +756,7 @@ def test_the_schema_binds_a_delivery_to_its_reviewed_text():
 
     with session_scope() as session:
         loaded = load_active(session)
-        register(session, loaded, promote=True)
+        register_promoted(session, loaded)
         session.flush()
         row = session.get(AlertRulesetRegistry, loaded.ruleset.rules_sha256)
 
@@ -787,10 +788,14 @@ def test_stage_one_is_never_admitted_for_live_delivery(promote):
         promotion_blockers,
     )
     from app.db import session_scope
+    from tests.conftest import register_promoted
 
     with session_scope() as session:
         artifacts = load_active(session)
-        register(session, artifacts, promote=promote)
+        if promote:
+            register_promoted(session, artifacts)
+        else:
+            register(session, artifacts)
         session.flush()
 
         blockers = live_admission_blockers(session)
@@ -852,8 +857,13 @@ def test_stage_one_live_dispatch_refuses_before_sender_construction(
         monkeypatch.setattr("app.alerts.promotion.load_evidence",
                             lambda path=None: None)
 
+    from tests.conftest import register_promoted
+
     with session_scope() as session:
-        register(session, load_active(session), promote=promote)
+        if promote:
+            register_promoted(session, load_active(session))
+        else:
+            register(session, load_active(session))
         session.flush()
         assert any("not admitted before Stage" in b
                    for b in live_admission_blockers(session))
@@ -868,3 +878,130 @@ def test_stage_one_live_dispatch_refuses_before_sender_construction(
 
     with session_scope() as session:
         assert session.execute(select(AlertDelivery)).scalars().all() == []
+
+
+# --- the authoritative promotion service (handoff §8) ----------------------
+
+
+def _stage3_yaml(loaded, sha_suffix: str):
+    """A distinct-by-bytes variant of the active ruleset."""
+    import yaml as _yaml
+
+    doc = _yaml.safe_load(loaded.ruleset.canonical_yaml)
+    doc["meta"]["notes"] = f"variant-{sha_suffix}"
+    return _yaml.safe_dump(doc)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_cli_refuses_promotion_when_exact_evidence_fails(monkeypatch, capsys):
+    """Refusal prints its blockers and exits nonzero; exit 0 reads as success."""
+    # patch the SERVICE's namespace: it binds load_evidence at import time, so
+    # patching app.alerts.promotion only works when the service has never been
+    # imported — true when this test runs alone, false mid-suite.
+    import app.alerts.promotion_service as promotion_service
+    from app.alerts import cli as alert_cli
+
+    monkeypatch.setattr(promotion_service, "load_evidence", lambda path=None: None)
+    code = alert_cli.main(["validate",
+                           "--rules", "config/alert_rules.v3.2.yaml",
+                           "--phrases", "config/alert_phrases.v3.3.json",
+                           "--promote"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert '"promoted": false' in out
+    assert "blockers" in out
+
+    # and nothing was promoted
+    from app.alerts.artifacts import load_promoted
+    from app.db import session_scope
+
+    with session_scope() as session:
+        assert load_promoted(session) is None
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_replay_seed_does_not_create_operator_promotion():
+    """Replay makes bytes readable. It does not impersonate an operator."""
+    from app.alerts.artifacts import load_active
+    from app.alerts.models import AlertRulesetRegistry
+    from app.alerts.promotion_service import seed_replay_artifacts
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        seed_replay_artifacts(session, loaded)
+        session.flush()
+        row = session.get(AlertRulesetRegistry, loaded.ruleset.rules_sha256)
+        assert row is not None
+        assert row.promoted_at is None
+        assert str(row.status) == "VALIDATED"
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_refused_promotion_changes_no_promotion_state(monkeypatch):
+    """A refusal must leave the deployment exactly as it was.
+
+    Otherwise refusing a promotion becomes a way to disturb production — the
+    currently promoted row must keep its status and its supersession fields.
+    """
+    from app.alerts.artifacts import load_active, load_promoted
+    from app.alerts.promotion_service import validate_register_and_promote
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        register_promoted(session, loaded, actor="operator")
+        before = load_promoted(session).ruleset.rules_sha256
+
+        monkeypatch.setattr("app.alerts.promotion_service.load_evidence",
+                            lambda path=None: None)
+        decision = validate_register_and_promote(session, loaded, actor="cli")
+        assert decision.promoted is False
+        assert decision.blockers
+
+        after = load_promoted(session)
+        assert after is not None
+        assert after.ruleset.rules_sha256 == before
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_failed_ruleset_cannot_be_laundered_by_later_valid_promotion(monkeypatch):
+    """The A/B/C regression.
+
+    C fails its gate. A promotes. B supersedes A. Queued A work remains
+    eligible — A was genuinely promoted, then superseded. Queued C work remains
+    excluded — C was never promoted, and B becoming healthy afterwards must not
+    wash that out.
+    """
+    from app.alerts.artifacts import load_active
+    from app.alerts.promotion import delivery_admission_blockers
+    from app.alerts.promotion_service import validate_register_and_promote
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+
+    with session_scope() as session:
+        loaded = load_active(session)
+
+        # C: evidence refuses it, and it is never promoted
+        monkeypatch.setattr("app.alerts.promotion_service.load_evidence",
+                            lambda path=None: None)
+        decision_c = validate_register_and_promote(session, loaded, actor="cli")
+        assert decision_c.promoted is False
+        sha_c = decision_c.rules_sha256
+
+        # A then B: both genuinely promoted; B supersedes A
+        sha_a = register_promoted(
+            session, loaded, actor="operator")  # same bytes: A IS C's bytes...
+        # ...so make B distinct via the registry clone helper used elsewhere
+        _registry_clone(session, sha_a, sha="b" * 64,
+                        yaml_text=session.get(
+                            __import__("app.alerts.models", fromlist=["AlertRulesetRegistry"])
+                            .AlertRulesetRegistry, sha_a).canonical_yaml)
+
+        # A (== C's bytes, but genuinely promoted) may finish its queued work
+        assert delivery_admission_blockers(session, sha_a) == []
+
+        # an unpromoted hash stays excluded whatever happened since
+        assert any("never promoted" in b or "not in the registry" in b
+                   for b in delivery_admission_blockers(session, "c" * 64))

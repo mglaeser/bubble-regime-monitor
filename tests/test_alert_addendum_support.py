@@ -18,6 +18,7 @@ from app.alerts.enums import (
     PlanningState,
     TransportStatus,
 )
+from tests.conftest import register_promoted
 
 NOW = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
 
@@ -36,13 +37,12 @@ def persist_snapshot() -> int:
 
 def register_ruleset(stage: int = 3) -> str:
     """Register (and promote) the shipped artifacts; return the rules hash."""
-    from app.alerts.artifacts import register
     from app.db import session_scope
     from tests.test_alert_evaluation import _artifacts
 
     artifacts = _artifacts(stage=stage)
     with session_scope() as session:
-        register(session, artifacts, now=NOW, promote=True, promoted_by="tests")
+        register_promoted(session, artifacts, now=NOW)
     return artifacts.ruleset.rules_sha256
 
 

@@ -53,12 +53,23 @@ MAX_PAGE = 500
 CURSOR_VERSION = "v1"
 
 
-def problem(status: int, title: str, detail: str, *, type_: str = "about:blank") -> JSONResponse:
-    """RFC 9457 problem details, with a sanitized detail string."""
+def problem(status: int, title: str, detail: str, *, type_: str = "about:blank",
+            extra: dict[str, object] | None = None) -> JSONResponse:
+    """RFC 9457 problem details, with a sanitized detail string.
+
+    `extra` carries machine-readable members alongside the prose. A refusal an
+    operator has to parse out of a sentence is a refusal their tooling cannot
+    act on.
+    """
+    content: dict[str, object] = {
+        "type": type_, "title": title, "status": status, "detail": detail,
+    }
+    if extra:
+        content.update(extra)
     return JSONResponse(
         status_code=status,
         media_type="application/problem+json",
-        content={"type": type_, "title": title, "status": status, "detail": detail},
+        content=content,
     )
 
 

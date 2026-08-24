@@ -335,9 +335,10 @@ def run_replay(
 
     Returns the summary. Nothing is sent, nothing in production is written.
     """
-    from app.alerts.artifacts import LoadedArtifacts, register
+    from app.alerts.artifacts import LoadedArtifacts
     from app.alerts.engine import run_evaluation
     from app.alerts.models import AlertDigestItem, AlertInputSnapshot
+    from app.alerts.promotion_service import seed_replay_artifacts
 
     committed_stage = ruleset.document.meta.active_stage
     if config.evaluate_at_stage is not None \
@@ -373,9 +374,11 @@ def run_replay(
         # Seed the isolated database with the artifacts and the sidecars, so a
         # replay is fully self-contained and can be re-run from its state DB.
         with scope() as session:
-            register(session, LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set,
-                                              source="replay"),
-                     now=_moment_of(records[0]), promote=True)
+            seed_replay_artifacts(
+                session,
+                LoadedArtifacts(ruleset=ruleset, phrase_set=phrase_set,
+                                source="replay"),
+                now=_moment_of(records[0]))
             for alert_input in records:
                 if session.get(AlertInputSnapshot, alert_input.input_identity) is not None:
                     continue
