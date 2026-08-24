@@ -484,6 +484,54 @@ it, only status, timing, hashes and an already-redacted error string.
 
 ---
 
+## 11b. Open Stage 2 blocker: the ruleset exceeds its own non-P1 budget
+
+Wiring the planner into the atomic apply (audit B-01) turned every non-P1
+volume figure in the replay from "0 by construction" into a real count. On the
+captured history the stage-3 replay plans 13 deliveries and breaches the budget
+the mandate sets for itself:
+
+```
+non-P1 24h  : 5   cap 3
+non-P1 168h : 8   cap 6
+non-P1 mean : 8.0 per 168h, quiet-regime target 2
+```
+
+`docs/alert-stage1-gate.json` therefore records **stage 3 as FAILING**, and
+`tests/test_alert_replay.py` pins those two failures exactly so a new one
+cannot be absorbed silently.
+
+This is an operator decision, not an engineering one. The options are to tune
+the rules that generate the volume, to raise the caps deliberately with a
+recorded reason, or to accept the breach for Stage 3 and re-measure before
+Stage 4. What must not happen is the caps being relaxed to make a gate pass:
+the budget exists precisely to catch a ruleset that talks too much, and it has
+just done its job on the first history it was ever able to measure.
+
+Until this is decided, Stage 3 must not be promoted. That is currently a
+statement, not a mechanism, and closing the gap is scheduled with audit
+finding **B-04** (live execution fail-closed on the promoted ruleset) because
+the two need the same missing piece.
+
+A promotion check has to bind the evidence to the *bytes* it certifies, and
+this artifact deliberately carries no digest: an entropy detector cannot tell a
+64-hex digest from a token, and `.secrets.baseline` is a byte-identical ratchet
+that may not grow to carry one (see `_DIGEST_FIELDS` in
+`scripts/export_alert_stage1_gate.py`). Binding on `rule_version` instead was
+tried and rejected in review, correctly — a version label is mutable, so an
+edited ruleset that failed to bump it would still be cleared by evidence
+describing different bytes.
+
+What does hold today: `tests/test_alert_replay.py` pins the two failures
+literally, so CI breaks if a new one appears **or** if the breach is fixed
+without updating the list, and the artifact-currency test regenerates the
+evidence on every run, so a ruleset edit that changed behaviour cannot reach
+`main` with stale numbers attached. The uncovered path is an edit made
+directly on the deployment host, which is exactly what B-04 exists to close —
+and the registry, unlike the committed artifact, does hold `rules_sha256`.
+
+---
+
 ## 12. Replay (the Stage 1 gate)
 
 Stage 1's gate is *deterministic replay; no PII; no scoring regression*.

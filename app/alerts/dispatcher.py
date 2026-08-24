@@ -109,6 +109,15 @@ def _build_context(session, delivery: AlertDelivery, members,
         trigger = load_input(session, episode.trigger_input_identity) if episode else None
         if trigger is None:
             continue
+        # READ, never re-resolved. The evaluator recorded which input it
+        # decided against; resolving again here would re-run a query whose
+        # answer can change — a backfill inserting a sidecar between the
+        # trigger and its original predecessor would make this message name a
+        # band the decision never saw, with nothing in the record to show it.
+        previous = (load_input(session, episode.predecessor_input_identity)
+                    if episode is not None and episode.predecessor_input_identity
+                    else None)
+
         status = "STILL_FIRING"
         if episode is not None and not episode.is_open:
             status = "RESOLVED_BEFORE_SEND"
@@ -118,6 +127,7 @@ def _build_context(session, delivery: AlertDelivery, members,
             priority=delivery.priority,
             trigger=trigger,
             current=trigger,
+            previous=previous,
             authorized_phrase_codes=frozenset(phrase_set.all_codes()),
             required_caveat_codes=(),
             condition_status=status,

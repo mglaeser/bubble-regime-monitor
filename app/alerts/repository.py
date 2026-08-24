@@ -13,7 +13,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.alerts.canonical import new_ulid
@@ -33,6 +33,7 @@ from app.alerts.models import (
     AlertInputSnapshot,
     AlertInstanceNotificationState,
     AlertRuleState,
+    AlertSilence,
 )
 from app.alerts.state_machine import InstanceMemory, StateDecision
 
@@ -66,10 +67,24 @@ def load_recent_inputs(session: Session, *, before: datetime, limit: int = 60) -
     provider — which is what makes a replay reproduce the original decision
     instead of re-deciding it with today's data.
     """
+    # Ordered and bounded by the ECONOMIC moment, not the write moment.
+    #
+    # The caller takes `before` from the input's `computed_at` — when the
+    # snapshot was scored — while this filtered on `built_at`, when the sidecar
+    # row was written. In steady state those are seconds apart and the mismatch
+    # is invisible. On a RECONSTRUCTION or a backfill they are days or months
+    # apart: every sidecar is written today for a snapshot scored long ago, so
+    # `built_at < before` excludes all of them, every rule sees an empty
+    # history, and every transition rule reports `cold_start_no_predecessor`.
+    # Nothing errors — the evaluation commits, reports OK, and detects nothing.
+    #
+    # `computed_at` is nullable (a watchdog input has no snapshot), so fall back
+    # to `built_at` for those rather than dropping them from history.
+    moment = func.coalesce(AlertInputSnapshot.computed_at, AlertInputSnapshot.built_at)
     rows = session.execute(
         select(AlertInputSnapshot)
-        .where(AlertInputSnapshot.built_at < before)
-        .order_by(AlertInputSnapshot.built_at.desc())
+        .where(moment < before)
+        .order_by(moment.desc())
         .limit(limit)
     ).scalars().all()
     return [AlertInput.model_validate(json.loads(row.payload)) for row in reversed(rows)]
@@ -165,6 +180,7 @@ def apply_decision(
     evaluation_id: str,
     now: datetime,
     existing: AlertRuleState | None,
+    predecessor_identity: str | None = None,
 ) -> str | None:
     """Persist one instance's decision. Returns the affected episode id.
 
@@ -192,6 +208,7 @@ def apply_decision(
             opened_at=now,
             activated_at=now if decision.activate_episode else None,
             trigger_input_identity=alert_input.input_identity,
+            predecessor_input_identity=predecessor_identity,
             candidate_expires_at=decision.candidate_expires_at,
             created_evaluation_id=evaluation_id,
             last_evaluation_id=evaluation_id,
@@ -368,3 +385,104 @@ def origin_rulesets_with_open_episodes(
         ).distinct()
     ).scalars().all()
     return sorted(set(rows))
+
+
+def load_notification_memories(
+    session: Session, *, mode: str, live_profile: str,
+    fingerprints: set[str],
+) -> dict[str, Any]:
+    """Hash-independent notification memory per instance.
+
+    Separate from `load_memories`, which is ruleset-scoped evaluation state.
+    This survives a promotion: a cooldown must not reset because the rules were
+    re-hashed.
+    """
+    from app.alerts.planner import NotificationMemory
+
+    if not fingerprints:
+        return {}
+    rows = session.execute(
+        select(AlertInstanceNotificationState).where(
+            AlertInstanceNotificationState.mode == mode,
+            AlertInstanceNotificationState.live_profile == live_profile,
+            AlertInstanceNotificationState.instance_fingerprint.in_(fingerprints),
+        )
+    ).scalars().all()
+    return {
+        row.instance_fingerprint: NotificationMemory(
+            last_sent_at=_aware(row.last_sent_at),
+            last_reminder_at=_aware(row.last_reminder_at),
+            reminder_count=row.reminder_count,
+            next_notification_generation=row.next_notification_generation,
+            open_unknown_delivery_id=row.open_unknown_delivery_id,
+            open_unknown_priority=row.open_unknown_priority,
+        )
+        for row in rows
+    }
+
+
+def load_active_silences(session: Session, *, now: datetime) -> dict[str, Any]:
+    """Silences in force at `now`, grouped by matcher kind.
+
+    A silence is a DELIVERY decision, never a condition one: the episode still
+    fires and is recorded, and only the message is withheld.
+    """
+    rows = session.execute(
+        select(AlertSilence).where(
+            AlertSilence.starts_at <= now, AlertSilence.ends_at > now
+        )
+    ).scalars().all()
+    out: dict[str, set[str]] = {"instance": set(), "rule": set(), "bucket": set(),
+                                "all": set()}
+    for row in rows:
+        out.setdefault(row.matcher_kind, set()).add(row.matcher_value)
+    return out
+
+
+def load_input_for_snapshot(session: Session, snapshot_id: int | None) -> AlertInput | None:
+    """The sidecar captured for a specific snapshot.
+
+    Lineage, not chronology. `prev_snapshot_id` is what the scoring layer
+    recorded as this snapshot's predecessor, so it stays correct when a
+    recompute is skipped, retried, or arrives out of order — none of which the
+    "most recent sidecar before this timestamp" answer survives.
+    """
+    if snapshot_id is None:
+        return None
+    row = session.execute(
+        select(AlertInputSnapshot).where(AlertInputSnapshot.snapshot_id == snapshot_id)
+    ).scalars().first()
+    if row is None:
+        return None
+    return AlertInput.model_validate(json.loads(row.payload))
+
+
+def resolve_predecessor(session: Session, alert_input: AlertInput) -> AlertInput | None:
+    """The input this one moved FROM. One definition, used by both sides.
+
+    A transition rule DECIDES against this, and the renderer DESCRIBES it. If
+    the evaluator and the dispatcher resolved it differently the alert would
+    fire on one predecessor and describe another — or, when only one of them
+    finds it, fire and then be dropped at render for an unauthorized fact.
+    Neither failure leaves a trace, so the two must share this function rather
+    than agree by coincidence.
+
+    Lineage first: `prev_snapshot_id` is what the scoring layer recorded, so it
+    survives a skipped recompute, a retry or an out-of-order arrival. Falling
+    back to the nearest earlier sidecar keeps replay over backfilled history
+    working, where rows predate the lineage column entirely.
+    """
+    lineage = load_input_for_snapshot(session, alert_input.prev_snapshot_id)
+    if lineage is not None:
+        return lineage
+    stamp = alert_input.computed_at or alert_input.built_at
+    if not stamp:
+        return None
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    earlier = load_recent_inputs(session, before=moment, limit=1)
+    return earlier[-1] if earlier else None
