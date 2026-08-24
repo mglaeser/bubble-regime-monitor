@@ -29,6 +29,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
+from app.alerts.artifacts import validate_phrase_set
 from app.alerts.budgets import check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.digest import render_digest_body
@@ -254,6 +255,38 @@ def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
     return True
 
 
+def planning_phrase_set(session: Any, delivery: AlertDelivery,
+                        fallback: ValidatedPhraseSet) -> ValidatedPhraseSet:
+    """The phrase set this delivery was PLANNED against, from the registry.
+
+    A queued message must render with the phrases it was planned against —
+    that is why `alert_phrase_set_registry` stores the bytes and why the
+    members carry an `origin_phrase_set_version`. Rendering from whatever the
+    process happens to hold and then STAMPING the member's version on the
+    render row is the worst of both: the provenance says one thing and the body
+    was built from another, and the record cannot be used to explain the text.
+
+    Falls back to the supplied set when the version is not in the registry —
+    that is a deployment that has not registered its own artifacts, and failing
+    the render there would be worse than rendering from what we have.
+    """
+    from app.alerts.models import AlertPhraseSetRegistry
+
+    version = session.execute(
+        select(AlertDeliveryMember.origin_phrase_set_version)
+        .where(AlertDeliveryMember.delivery_id == delivery.delivery_id)
+        .order_by(AlertDeliveryMember.included_at).limit(1)
+    ).scalar()
+    if not version or version == fallback.version:
+        return fallback
+    row = session.get(AlertPhraseSetRegistry, version)
+    if row is None:
+        log.warning("alert_planning_phrase_set_missing",
+                    delivery_id=delivery.delivery_id, version=version)
+        return fallback
+    return validate_phrase_set(row.canonical_json)
+
+
 def dispatch_once(
     session_factory: Any,
     *,
@@ -413,8 +446,12 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                            func.coalesce(AlertDeliveryMember.drop_reason, "")
                            != "SILENCED_BEFORE_SEND")
                 ).scalar_one()
+                # Render from the phrase set the members were PLANNED under,
+                # not from whatever this process is holding, so the body and
+                # the provenance recorded beside it describe the same text.
+                digest_phrases = planning_phrase_set(session, delivery, phrase_set)
                 try:
-                    result = render_digest_body(phrase_set,
+                    result = render_digest_body(digest_phrases,
                                                 item_count=int(planned))
                 except RenderRejected as exc:
                     mark_render_failed(session, delivery, now=now,
@@ -446,12 +483,17 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 delivery_id=delivery_id,
                 render_source=result.render_source,
                 fallback_reason=result.fallback_reason,
+                # What the body was ACTUALLY built from. For a digest that is
+                # the planning set resolved above; for everything else it is
+                # the member's own origin, which is the set the renderer used.
                 planning_phrase_set_version=(
-                    members[0].origin_phrase_set_version if members
-                    else phrase_set.version),
+                    digest_phrases.version
+                    if delivery.delivery_kind == DeliveryKind.DIGEST
+                    else members[0].origin_phrase_set_version),
                 planning_phrase_set_sha256=(
-                    members[0].origin_phrase_set_sha256 if members
-                    else phrase_set.sha256),
+                    digest_phrases.sha256
+                    if delivery.delivery_kind == DeliveryKind.DIGEST
+                    else members[0].origin_phrase_set_sha256),
                 render_context_hash=context.context_hash(),
                 fact_catalog_hash=context.fact_catalog_hash(),
                 selected_fact_ids=result.selected_fact_ids,

@@ -684,3 +684,67 @@ def test_a_late_item_inherits_the_message_it_joins():
     assert len(members) == 2
     assert {m.origin_phrase_set_version for m in members} == {"v3.2"}, (
         "one delivery ended up with members built from different phrase sets")
+
+
+def test_an_item_orphaned_by_a_sent_digest_is_carried_into_the_next_one():
+    """It had nowhere left to go.
+
+    The window key is its digest's identity, so no second delivery can carry
+    it, and its own window's query is finished. Late but true beats an event
+    the operator hears about in no message at all.
+    """
+    from app.alerts.enums import TransportStatus
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        # last week reported and sent
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="regime.band_to_derisk", window="2026-W33")
+        last = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha,
+                           window_key="2026-W33", now=NOW)
+        session.get(AlertDelivery, last.delivery_id).transport_status = \
+            TransportStatus.SENT
+        session.flush()
+
+        # an event surfaces for that week AFTER it was reported
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="tripwire.rf4_first", window="2026-W33")
+        stranded = plan_digest(session, mode="shadow", live_profile="default",
+                               planning_rules_sha256=rules_sha,
+                               window_key="2026-W33", now=NOW)
+        assert stranded.stranded == 1
+
+        # this week's digest picks it up rather than leaving it forever
+        this_week = plan_digest(session, mode="shadow", live_profile="default",
+                                planning_rules_sha256=rules_sha,
+                                window_key=WINDOW, now=NOW)
+
+    assert this_week.carried_forward == 1
+    assert len(this_week.item_ids) == 1
+    assert this_week.quiet is False
+
+
+def test_an_unreported_earlier_window_keeps_its_own_items():
+    """Carrying these forward would rob that digest of its content.
+
+    The distinction is whether the earlier window can still carry the item
+    itself: if its digest does not exist yet, it can.
+    """
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="regime.band_to_derisk", window="2026-W33")
+
+        # W33 has no digest yet, so its item is not swept into W34
+        this_week = plan_digest(session, mode="shadow", live_profile="default",
+                                planning_rules_sha256=rules_sha,
+                                window_key=WINDOW, now=NOW)
+        assert this_week.quiet is True
+        assert this_week.carried_forward == 0
+
+        # and W33's own digest still finds it
+        last = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha,
+                           window_key="2026-W33", now=NOW)
+        assert len(last.item_ids) == 1

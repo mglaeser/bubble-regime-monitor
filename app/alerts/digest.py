@@ -70,11 +70,14 @@ class DigestPlan:
     skipped_reason: str | None = None
     #: Items that arrived after this window's digest had already gone out.
     stranded: int = 0
+    #: Items from an earlier, already-reported window carried into this one.
+    carried_forward: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {"window_key": self.window_key, "delivery_id": self.delivery_id,
                 "items": len(self.item_ids), "quiet": self.quiet,
                 "stranded": self.stranded,
+                "carried_forward": self.carried_forward,
                 "skipped_reason": self.skipped_reason}
 
 
@@ -233,16 +236,48 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
     # the window would let a shadow digest consume live items, mark them
     # PLANNED, and report a count drawn from another namespace's week. The
     # delivery is namespaced; its contents have to be too.
-    items = session.execute(
+    # This window's items, PLUS anything still pending from a window whose
+    # digest has already gone out. An item that arrived after its own week was
+    # reported had nowhere left to go: the window key is that digest's
+    # identity, so no second delivery can ever carry it, and the next window's
+    # query would not look at it either. It was counted as stranded and then
+    # stayed stranded forever.
+    #
+    # Carrying it into the next digest is late but true — the alternative is
+    # silently dropping an event the operator was told about in no message at
+    # all. `<=` rather than `<` because this window's own items are included on
+    # the same pass.
+    candidates = session.execute(
         select(AlertDigestItem)
         .join(AlertEpisode, AlertEpisode.episode_id == AlertDigestItem.episode_id)
         .where(
-            AlertDigestItem.digest_window_key == window,
+            AlertDigestItem.digest_window_key <= window,
             AlertDigestItem.status == DigestItemStatus.PENDING,
             AlertEpisode.mode == mode,
             AlertEpisode.live_profile == live_profile,
         ).order_by(AlertDigestItem.pending_at)
     ).scalars().all()
+
+    # An earlier window's item is carried ONLY if that window can no longer
+    # carry it itself — i.e. its digest already exists. An earlier window with
+    # no digest yet still owns its items, and sweeping them in here would rob
+    # that digest of the content it is supposed to report.
+    orphaned = {
+        earlier for earlier in {i.digest_window_key for i in candidates}
+        if earlier != window and session.execute(
+            select(AlertDelivery.delivery_id).where(
+                AlertDelivery.dedupe_key == digest_dedupe_key(
+                    mode=mode, live_profile=live_profile, window_key=earlier))
+        ).first() is not None
+    }
+    items = [i for i in candidates
+             if i.digest_window_key == window or i.digest_window_key in orphaned]
+    carried = [i for i in items if i.digest_window_key != window]
+    if carried:
+        plan.carried_forward = len(carried)
+        log.info("alert_digest_carried_forward", window=window,
+                 count=len(carried),
+                 from_windows=sorted({i.digest_window_key for i in carried}))
 
     delivery_id = new_ulid(utc_ms(now))
     session.add(AlertDelivery(
