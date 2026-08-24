@@ -27,6 +27,7 @@ from sqlalchemy import select
 
 from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION, watchdog_input_identity
 from app.alerts.enums import Evaluability, InputOrigin
+from app.alerts.errors import sanitize
 from app.alerts.input_builder import build_watchdog_input, serialize
 from app.alerts.models import AlertInputSnapshot
 from app.config import get_settings
@@ -83,6 +84,28 @@ def evaluate_outage(*, last_snapshot_at: datetime | None, now: datetime) -> Watc
                            f"{len(missed)} consecutive slots missed past the grace window")
 
 
+def heartbeat_status(firing: bool, evaluation_status: str | None) -> str:
+    """What this pass should report about itself.
+
+    Its own function because the interesting case is the one that is easy to
+    get wrong and hard to reach from a test: the watchdog captured an outage,
+    failed to evaluate it, and swallowed the exception so the timer survives.
+    Catching is right; reporting "ok" afterwards is not.
+
+    On THIS component that is the worst place to hide it. The watchdog exists
+    to notice that recomputes have stopped, so a failed evaluation means it
+    noticed and could not tell anyone — and a green heartbeat states the
+    opposite of what happened.
+
+    Critical rather than degraded even when the verdict is not firing: the path
+    from observation to alert is broken either way, and this is the component
+    with nobody behind it to catch that.
+    """
+    if firing or evaluation_status == "FAILED":
+        return "critical"
+    return "ok"
+
+
 def run_once(*, now: datetime | None = None) -> dict[str, object]:
     """Check for an outage and, when firing, capture a watchdog input.
 
@@ -135,8 +158,36 @@ def run_once(*, now: datetime | None = None) -> dict[str, object]:
                 # record and must not open a second episode.
                 captured = identity
 
-    heartbeat(COMPONENT, "critical" if verdict.firing else "ok", verdict.as_dict())
-    result = {**verdict.as_dict(), "input_identity": captured}
+    # EVALUATE what was just captured. Capturing alone leaves the outage
+    # recorded and unreported: `ops.recompute_outage` can never open an
+    # episode, nothing is ever planned, and the standalone watchdog — the one
+    # component that runs OUTSIDE the recompute it watches — ends up detecting
+    # the failure and telling no one (audit B-02).
+    #
+    # Evaluation is deliberately outside the capture transaction and cannot
+    # roll it back: the evidence that recomputes have stopped is worth keeping
+    # even if the evaluation of it fails.
+    evaluated: str | None = None
+    if captured is not None:
+        settings = get_settings()
+        if settings.alerts_mode != "disabled":
+            from app.services.alert_integration import evaluate_input
+            try:
+                outcome = evaluate_input(captured, now=now)
+                evaluated = outcome.status
+            except Exception as exc:      # noqa: BLE001 - see below
+                # A watchdog that raises is a watchdog that stops running on
+                # its next timer tick. Report and carry on; the heartbeat below
+                # still records that this pass happened.
+                log.error("alert_watchdog_evaluation_failed",
+                          input_identity=captured, error=sanitize(exc))
+                evaluated = "FAILED"
+
+    # The evaluation's outcome has to reach the heartbeat — see
+    # `heartbeat_status`.
+    result = {**verdict.as_dict(), "input_identity": captured,
+              "evaluation_status": evaluated}
+    heartbeat(COMPONENT, heartbeat_status(verdict.firing, evaluated), result)
     log.info("alert_watchdog", **result)
     return result
 

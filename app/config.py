@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     imessage_enabled: bool = False
     imessage_api_base_url: str = ""  # origin only, e.g. https://messages.example.com
     imessage_api_key: str = ""       # scoped `messages:send` key, `imp_` prefix
+
     imessage_recipient: str = ""     # allowlisted handle: +E.164 or an Apple-ID email
     imessage_timeout_s: int = 30     # read cap; the proxy's own deadline is longer
 
@@ -195,6 +196,13 @@ class Settings(BaseSettings):
     alerts_dispatch_poll_s: int = 20
     alerts_dispatch_lease_s: int = 120
     alerts_eval_lease_s: int = 300
+    # How many times an ABANDONED evaluation is re-run before it is left for an
+    # operator. Recovery marks a lease-expired evaluation "safe to retry" and
+    # nothing retried it, so the work simply stopped — an outage that
+    # interrupted an evaluation silently cost that snapshot its alerts. Bounded
+    # because a retry that can loop is a way to turn one stuck input into a
+    # permanently busy recovery job.
+    alerts_eval_retry_max: int = 2
     alerts_eval_budget_ms: int = 1500
     alerts_unknown_escalate_h: int = 24
     alerts_metadata_retention_days: int = 800

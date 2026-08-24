@@ -276,9 +276,22 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             body = result.body
         mark_sending(session, delivery, now=now)
         recipient_ref = delivery.recipient_ref
+        # Read inside the transaction: the send happens outside it, and the
+        # object is detached by then.
+        #
+        # The DELIVERY ID, not the dedupe key. Both are stable across automatic
+        # retries — the row is reused, `attempts` increments — and both change
+        # when a reminder generation or an acknowledged manual retry means a
+        # second send is intended. The difference is what they disclose: the
+        # dedupe key spells out mode, profile and rule id, so it cannot go on
+        # the wire as-is and hashing it needed a secret that then had to
+        # survive credential rotation. A ULID discloses none of that and needs
+        # no secret to protect.
+        idempotency_key = delivery.delivery_id
 
     # -- 5: send. OUTSIDE any transaction: no external I/O holds a write lock.
-    outcome = sender.send(body or "", recipient_ref=recipient_ref)
+    outcome = sender.send(body or "", recipient_ref=recipient_ref,
+                          idempotency_key=idempotency_key)
 
     # -- 6: classify ---------------------------------------------------------
     with session_factory() as session:

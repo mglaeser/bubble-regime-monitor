@@ -106,6 +106,14 @@ def load_active(session: Session, *, service_version: str | None = None) -> Load
 
     Order: the candidate on disk, then the last-known-good file, then whatever
     is already PROMOTED in the registry. A fallback is reported, never silent.
+
+    THIS FUNCTION IS MODE-BLIND ON PURPOSE, and takes no `mode` argument.
+    Live mode must additionally receive the PROMOTED artifact (audit B-04), and
+    that check lives in `load_active_for_mode`. An earlier version of this took
+    a `mode` keyword and ignored it, which is worse than not offering one: a
+    caller passing mode="live" would read as guarded and receive an unpromoted
+    candidate. A parameter that looks like a control and is not is the exact
+    shape this system keeps removing.
     """
     rules_path, lkg_path, phrase_path = _candidate_paths()
     try:
@@ -130,6 +138,43 @@ def load_active(session: Session, *, service_version: str | None = None) -> Load
         )
     return LoadedArtifacts(ruleset=promoted.ruleset, phrase_set=promoted.phrase_set,
                            source="registry", fallback_reason=candidate_error)
+
+
+def load_active_for_mode(session: Session, *, mode: str,
+                         service_version: str | None = None) -> LoadedArtifacts:
+    """`load_active`, plus the live-mode admission check.
+
+    Kept as its own entry point so the check cannot be skipped by forgetting a
+    keyword: a caller that wants mode-aware loading has to say which mode.
+    """
+    artifacts = load_active(session, service_version=service_version)
+    if str(mode).lower() != "live":
+        return artifacts
+
+    promoted = load_promoted(session, service_version=service_version)
+    if promoted is None:
+        raise AlertingUnavailable(
+            "live mode requires a PROMOTED ruleset and the registry has none"
+        )
+    if promoted.ruleset.rules_sha256 != artifacts.ruleset.rules_sha256:
+        raise AlertingUnavailable(
+            "live mode refuses an unpromoted ruleset: loaded "
+            f"{artifacts.ruleset.rules_sha256[:12]} from {artifacts.source}, "
+            f"promoted is {promoted.ruleset.rules_sha256[:12]}. Promote it "
+            "deliberately or correct the file."
+        )
+    # The rules decide WHETHER to alert; the phrase set decides what the alert
+    # SAYS, and it is the half that reaches the phone. Binding only the rules
+    # would admit a ruleset whose rules were promoted while its text was not,
+    # which is the more dangerous of the two to get wrong unnoticed.
+    if promoted.ruleset.phrase_set_sha256 != artifacts.ruleset.phrase_set_sha256:
+        raise AlertingUnavailable(
+            "live mode refuses an unpromoted phrase set: loaded "
+            f"{artifacts.ruleset.phrase_set_sha256[:12]} from {artifacts.source}, "
+            f"promoted is {promoted.ruleset.phrase_set_sha256[:12]}. The rules "
+            "match, so this is a text change that was never promoted."
+        )
+    return artifacts
 
 
 def load_promoted(session: Session, *,

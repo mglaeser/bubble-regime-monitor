@@ -24,7 +24,12 @@ from typing import Any
 
 from sqlalchemy import select
 
-from app.alerts.artifacts import archived_rulesets, load_active, register
+from app.alerts.artifacts import (
+    archived_rulesets,
+    load_active,
+    load_active_for_mode,
+    register,
+)
 from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION
 from app.alerts.engine import run_evaluation
 from app.alerts.enums import InputOrigin
@@ -189,7 +194,9 @@ def evaluate_input(input_identity: str, *, mode: str | None = None,
         return None
 
     with session_scope() as session:
-        artifacts = load_active(session)
+        # Mode-aware: in LIVE the loaded ruleset must BE the promoted one, or
+        # promotion is advisory and a candidate file decides what ships.
+        artifacts = load_active_for_mode(session, mode=effective_mode)
         register(session, artifacts)
         alert_input = load_input(session, input_identity)
         if alert_input is None:

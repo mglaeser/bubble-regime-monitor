@@ -584,7 +584,12 @@ def test_dry_run_sender_never_constructs_a_live_client():
     from app.alerts.sender import default_sender
 
     assert isinstance(default_sender(live=False), NullSender)
-    assert isinstance(default_sender(live=True), SipgateSender)
+    # The invariant is about the DRY RUN: nothing reaches a transport unless
+    # live was asked for. Which live transport is chosen depends on what is
+    # enabled and configured, and in an unconfigured test environment the
+    # honest answer is "none" rather than sipgate — see
+    # test_a_half_configured_imessage_never_falls_back_to_disabled_sms.
+    assert not isinstance(default_sender(live=True), NullSender)
 
 
 def test_the_recipient_number_never_enters_a_result():
