@@ -35,6 +35,7 @@ from app.alerts.models import (
     AlertRuleState,
     AlertSilence,
 )
+from app.alerts.silences import ActiveSilences
 from app.alerts.state_machine import InstanceMemory, StateDecision
 
 
@@ -421,8 +422,8 @@ def load_notification_memories(
     }
 
 
-def load_active_silences(session: Session, *, now: datetime) -> dict[str, Any]:
-    """Silences in force at `now`, grouped by matcher kind.
+def load_active_silences(session: Session, *, now: datetime) -> ActiveSilences:
+    """Silences in force at `now`, in the canonical typed representation.
 
     A silence is a DELIVERY decision, never a condition one: the episode still
     fires and is recorded, and only the message is withheld.
@@ -432,11 +433,9 @@ def load_active_silences(session: Session, *, now: datetime) -> dict[str, Any]:
             AlertSilence.starts_at <= now, AlertSilence.ends_at > now
         )
     ).scalars().all()
-    out: dict[str, set[str]] = {"instance": set(), "rule": set(), "bucket": set(),
-                                "all": set()}
-    for row in rows:
-        out.setdefault(row.matcher_kind, set()).add(row.matcher_value)
-    return out
+    return ActiveSilences.from_matchers(
+        (row.matcher_kind, row.matcher_value) for row in rows
+    )
 
 
 def load_input_for_snapshot(session: Session, snapshot_id: int | None) -> AlertInput | None:

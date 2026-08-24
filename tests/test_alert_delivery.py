@@ -265,8 +265,11 @@ def test_p4_produces_neither():
 
 
 def test_a_silenced_rule_is_suppressed_not_delivered():
+    from app.alerts.silences import ActiveSilences
+
     rule = _p2()
-    result = plan(_inputs([rule], silenced_rule_ids=frozenset({rule.rule_id})))
+    result = plan(_inputs(
+        [rule], active_silences=ActiveSilences(rule_ids=frozenset({rule.rule_id}))))
     assert result.deliveries == []
     assert SuppressionReason.SILENCED in result.suppressions[f"EP-{rule.rule_id}"]
 

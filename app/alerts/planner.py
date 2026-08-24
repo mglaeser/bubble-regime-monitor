@@ -42,6 +42,7 @@ from app.alerts.enums import (
 )
 from app.alerts.quiet_hours import release_time_for
 from app.alerts.rulespec import RuleSpec
+from app.alerts.silences import ActiveSilences, matches_silence
 from app.alerts.state_machine import StateDecision
 
 DEDUPE_VERSION = 1
@@ -167,10 +168,7 @@ class PlanInputs:
     decisions: list[StateDecision]
     episode_ids: dict[str, str]                       # instance_fingerprint -> episode_id
     memories: dict[str, NotificationMemory]           # instance_fingerprint -> memory
-    silenced_fingerprints: frozenset[str] = frozenset()
-    silenced_rule_ids: frozenset[str] = frozenset()
-    silenced_buckets: frozenset[str] = frozenset()
-    silence_all: bool = False
+    active_silences: ActiveSilences = ActiveSilences()
     open_generations: frozenset[tuple[str, int]] = frozenset()   # (fingerprint, generation)
     origin_rules_sha256: str = ""
     phrase_set_version: str = ""
@@ -181,11 +179,11 @@ class PlanInputs:
 
 
 def _is_silenced(rule: RuleSpec, fingerprint: str, inputs: PlanInputs) -> bool:
-    return (
-        inputs.silence_all
-        or fingerprint in inputs.silenced_fingerprints
-        or rule.rule_id in inputs.silenced_rule_ids
-        or rule.bucket in inputs.silenced_buckets
+    return matches_silence(
+        inputs.active_silences,
+        instance_fingerprint=fingerprint,
+        rule_id=rule.rule_id,
+        bucket=rule.bucket,
     )
 
 

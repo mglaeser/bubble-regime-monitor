@@ -448,7 +448,7 @@ def run_evaluation(
             # a continuation was planned under rules it never saw — and mandate
             # 14.8 keeps `origin_rules_sha256` per member precisely so a queued
             # delivery can be rendered from the artifact that produced it.
-            silences = _silence_kwargs(load_active_silences(session, now=now))
+            active_silences = load_active_silences(session, now=now)
             limits = default_limits(get_settings())
             recipient = _recipient_ref(live_profile)
 
@@ -471,7 +471,7 @@ def run_evaluation(
                     memories=load_notification_memories(
                         session, mode=mode, live_profile=live_profile,
                         fingerprints=set(episode_ids_by_hash.get(rules_sha, {}))),
-                    **silences,
+                    active_silences=active_silences,
                     origin_rules_sha256=rules_sha,
                     phrase_set_version=artifacts.phrase_set_version,
                     phrase_set_sha256=artifacts.phrase_set_sha256,
@@ -549,16 +549,6 @@ def _input_moment(alert_input: AlertInput, fallback: datetime) -> datetime:
     except ValueError:
         return fallback
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _silence_kwargs(active: dict[str, set[str]]) -> dict[str, Any]:
-    """Map persisted silence matchers onto the planner's frozensets."""
-    return {
-        "silenced_fingerprints": frozenset(active.get("instance", set())),
-        "silenced_rule_ids": frozenset(active.get("rule", set())),
-        "silenced_buckets": frozenset(active.get("bucket", set())),
-        "silence_all": bool(active.get("all")),
-    }
 
 
 def _recipient_ref(live_profile: str) -> str:

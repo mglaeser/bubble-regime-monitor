@@ -53,6 +53,7 @@ from app.alerts.enums import (
     RulesetItemStatus,
     RulesetRole,
     RulesetStatus,
+    SilenceMatcherKind,
     TransportStatus,
 )
 from app.models import Base
@@ -717,10 +718,8 @@ class AlertSilence(Base):
 
     __table_args__ = (
         CheckConstraint("ends_at > starts_at", name="ck_alert_silence_window"),
-        CheckConstraint(
-            "matcher_kind IN ('RULE_ID','INSTANCE_FINGERPRINT','BUCKET','ALL')",
-            name="ck_alert_silence_matcher",
-        ),
+        CheckConstraint(_enum_check("matcher_kind", SilenceMatcherKind),
+                        name="ck_alert_silence_matcher"),
     )
 
 

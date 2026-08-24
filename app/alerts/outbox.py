@@ -40,9 +40,11 @@ from app.alerts.models import (
     AlertEpisode,
     AlertEvent,
     AlertInstanceNotificationState,
+    AlertRuleState,
 )
 from app.alerts.planner import DeliveryIntent, DigestIntent, PlanResult
-from app.alerts.repository import utc_ms
+from app.alerts.repository import load_active_silences, utc_ms
+from app.alerts.silences import matches_silence
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -353,6 +355,7 @@ def revalidate_members(session: Session, delivery: AlertDelivery, *,
             AlertDeliveryMember.delivery_id == delivery.delivery_id,
             AlertDeliveryMember.dropped_at.is_(None))
     ).scalars().all()
+    active_silences = load_active_silences(session, now=now)
     live: list[AlertDeliveryMember] = []
     for member in members:
         episode = session.get(AlertEpisode, member.episode_id)
@@ -364,9 +367,27 @@ def revalidate_members(session: Session, delivery: AlertDelivery, *,
             member.dropped_at = now
             member.drop_reason = "RESOLVED_BEFORE_SEND"
             continue
-        if "SILENCED" in (episode.suppression_reasons or []):
+        origin_state = session.get(AlertRuleState, (
+            delivery.mode,
+            delivery.live_profile,
+            member.origin_rules_sha256,
+            member.instance_fingerprint,
+        ))
+        if matches_silence(
+            active_silences,
+            instance_fingerprint=member.instance_fingerprint,
+            rule_id=member.rule_id,
+            bucket=origin_state.bucket if origin_state is not None else None,
+        ):
             member.dropped_at = now
             member.drop_reason = "SILENCED_BEFORE_SEND"
+            _event(
+                session,
+                now,
+                action="delivery_member_silenced_before_send",
+                delivery_id=delivery.delivery_id,
+                detail=f"episode_id={member.episode_id}",
+            )
             continue
         live.append(member)
     return live

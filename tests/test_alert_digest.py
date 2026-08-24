@@ -16,7 +16,13 @@ from sqlalchemy import select
 from app.alerts.artifacts import load_active, register
 from app.alerts.digest import digest_dedupe_key, plan_digest
 from app.alerts.enums import DeliveryKind, DigestItemStatus, Priority
-from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertDigestItem, AlertEpisode
+from app.alerts.models import (
+    AlertDelivery,
+    AlertDeliveryMember,
+    AlertDigestItem,
+    AlertEpisode,
+    AlertSilence,
+)
 from app.alerts.repository import new_ulid, utc_ms
 from app.db import session_scope
 
@@ -90,6 +96,16 @@ def _pending_item(session, *, rules_sha: str, rule_id: str,
         digest_item_id=item_id, episode_id=episode_id, digest_window_key=window,
         status=DigestItemStatus.PENDING, pending_at=NOW))
     return item_id
+
+
+def _silence_rule(session, rule_id: str) -> None:
+    """Create the same active silence an operator creates through the API."""
+    session.add(AlertSilence(
+        silence_id=new_ulid(utc_ms(NOW)), matcher_kind="RULE_ID",
+        matcher_value=rule_id, starts_at=NOW - timedelta(minutes=1),
+        ends_at=NOW + timedelta(hours=1), comment="test",
+        created_by_redacted="operator", created_at=NOW,
+    ))
 
 
 def test_a_window_becomes_one_delivery_with_its_items_as_members():
@@ -443,7 +459,7 @@ def test_a_silenced_episode_is_not_disclosed_by_the_count():
 
         episodes = session.execute(select(AlertEpisode)).scalars().all()
         # one silenced, one resolved, one still open
-        episodes[0].suppression_reasons = ["SILENCED"]
+        _silence_rule(session, episodes[0].rule_id)
         episodes[1].is_open = False
         episodes[1].episode_status = EpisodeStatus.RESOLVED
         episodes[1].resolved_at = NOW
@@ -494,7 +510,7 @@ def test_a_silence_after_the_first_render_is_not_disclosed_by_a_stale_body():
 
         # then one of them is silenced
         episode = session.execute(select(AlertEpisode)).scalars().first()
-        episode.suppression_reasons = ["SILENCED"]
+        _silence_rule(session, episode.rule_id)
 
     sender = NullSender()
     dispatch_once(session_scope, phrase_set=_phrase_set(), mode="shadow",
