@@ -331,7 +331,11 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
     # wrong" — and an operator who revokes rules while their messages sit in
     # the outbox means those messages, or revocation would only apply to
     # alerts nobody had planned yet.
-    if str(row.status) == RulesetStatus.REVOKED.value:
+    # Compared as the enum, which is equal to its own value: `RulesetStatus`
+    # is a StrEnum, so this holds whether the column hands back the member or
+    # the bare string. Reaching for `str(...)` on one side and `.value` on the
+    # other worked too, and read like it was compensating for something.
+    if row.status == RulesetStatus.REVOKED:
         return [f"the ruleset that planned this delivery "
                 f"({planning_rules_sha256[:12]}) was REVOKED, which withdraws "
                 "the promotion that authorised it"]

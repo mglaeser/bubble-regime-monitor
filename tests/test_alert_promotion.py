@@ -434,8 +434,15 @@ def test_a_clean_send_is_not_flagged(monkeypatch):
         delivery_id = "d"
         planning_rules_sha256 = "a" * 64
 
+    # BOTH gates are patched. Leaving the live one real made this test's
+    # outcome depend on the committed `active_stage` — it passes today only
+    # because stage 1 needs no evidence, and would start failing the moment the
+    # repository moved to stage 3, for reasons having nothing to do with the
+    # audit it is meant to be testing.
     monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
                         lambda session, sha, **kw: [])
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: [])
     report = DispatchReport()
     assert audit_withdrawn_admission(
         None, _D(), outcome=type("O", (), {"request_started": True})(),
