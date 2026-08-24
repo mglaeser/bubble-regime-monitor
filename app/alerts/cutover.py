@@ -85,18 +85,32 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
     check("live_admission", not blockers,
           "admitted" if not blockers else "; ".join(blockers))
 
-    # 2: two stable weeks of live deterministic alerts
+    # 2: two stable weeks of live deterministic alerts. "Two weeks" is a
+    # property of the OBSERVATION SPAN, not of the count: one delivery sent
+    # yesterday is one data point, however recent. The earliest live send has
+    # to predate the window, and the window has to be failure-free — a week of
+    # DEAD_PERMANENT outcomes is observed instability, not observed stability.
     window_start = now - timedelta(days=STABLE_DAYS)
-    sent = session.execute(
-        select(func.count()).select_from(AlertDelivery).where(
+    first_sent = session.execute(
+        select(func.min(AlertDelivery.sent_at)).where(
             AlertDelivery.mode == "live",
             AlertDelivery.transport_status == TransportStatus.SENT,
-            AlertDelivery.sent_at >= window_start,
+        )
+    ).scalar()
+    span_ok = first_sent is not None and _aware(first_sent) <= window_start
+    failures = session.execute(
+        select(func.count()).select_from(AlertDelivery).where(
+            AlertDelivery.mode == "live",
+            AlertDelivery.transport_status.in_(
+                [TransportStatus.DEAD_PERMANENT, TransportStatus.RENDER_FAILED]),
+            AlertDelivery.updated_at >= window_start,
         )
     ).scalar_one()
-    check("stable_weeks", sent > 0,
-          f"{sent} live deliveries SENT in the last {STABLE_DAYS}d "
-          "(zero means there is nothing observed to cut over TO)")
+    check("stable_weeks", span_ok and failures == 0,
+          (f"first live send {first_sent}, {failures} terminal failure(s) in "
+           f"the last {STABLE_DAYS}d" if first_sent is not None else
+           "no live delivery has ever been SENT — there is nothing observed "
+           "to cut over TO"))
 
     # 3: zero P1 suppression, ever inside the window
     p1_held = session.execute(
@@ -111,18 +125,24 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
           f"{p1_held} P1 deliveries in a held state (the target is zero, "
           "always)")
 
-    # 4: two successful weekly digests
+    # 4: two successful weekly digests — RECENT ones. A digest sent months
+    # ago proves the machinery worked then; the gate is about the channel that
+    # will carry the proof-of-life from next Monday on, so both must fall
+    # inside the current observation period (two weekly windows plus grace).
+    digest_window = now - timedelta(days=STABLE_DAYS + 7)
     digests = session.execute(
         select(func.count()).select_from(AlertDelivery).where(
             AlertDelivery.mode == "live",
             AlertDelivery.delivery_kind == DeliveryKind.DIGEST,
             AlertDelivery.transport_status == TransportStatus.SENT,
+            AlertDelivery.sent_at >= digest_window,
         )
     ).scalar_one()
     check("weekly_digests", digests >= REQUIRED_DIGESTS,
-          f"{digests} digest(s) SENT; the gate wants {REQUIRED_DIGESTS} — the "
-          "digest replaces the daily message's proof-of-life, so it must have "
-          "proven itself first")
+          f"{digests} digest(s) SENT in the last {STABLE_DAYS + 7}d; the gate "
+          f"wants {REQUIRED_DIGESTS} — the digest replaces the daily message's "
+          "proof-of-life, so it must have proven itself in the same period "
+          "being judged")
 
     # 5: no UNKNOWN delivery left unreconciled
     stale_unknown = session.execute(
@@ -138,13 +158,28 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
     # 6: the components that replace the daily message are alive
     for component in ("dispatcher", "watchdog", "digest"):
         row = session.get(AlertComponentHeartbeat, component)
-        fresh = (row is not None and row.last_heartbeat_at is not None
-                 and _aware(row.last_heartbeat_at)
-                 >= now - timedelta(hours=HEARTBEAT_FRESH_HOURS))
-        check(f"heartbeat_{component}", fresh,
-              "fresh" if fresh else
-              f"no heartbeat in {HEARTBEAT_FRESH_HOURS}h — after cutover this "
-              "component is load-bearing")
+        beat = _aware(row.last_heartbeat_at) if (
+            row is not None and row.last_heartbeat_at is not None) else None
+        # Bounded on BOTH sides. A timestamp from the future satisfies any
+        # `>= now - 2h` check forever, so a clock fault would read as a
+        # component that never goes stale — the exact component this gate
+        # exists to distrust. Small forward skew is tolerated; beyond it the
+        # heartbeat is evidence of a broken clock, not of health.
+        if beat is None:
+            fresh, detail = False, (
+                f"no heartbeat in {HEARTBEAT_FRESH_HOURS}h — after cutover "
+                "this component is load-bearing")
+        elif beat > now + timedelta(minutes=5):
+            fresh, detail = False, (
+                f"heartbeat is {beat.isoformat()} — in the future, which is a "
+                "clock fault, not health")
+        elif beat >= now - timedelta(hours=HEARTBEAT_FRESH_HOURS):
+            fresh, detail = True, "fresh"
+        else:
+            fresh, detail = False, (
+                f"last heartbeat {beat.isoformat()}, older than "
+                f"{HEARTBEAT_FRESH_HOURS}h")
+        check(f"heartbeat_{component}", fresh, detail)
 
     # 7: there is still something to cut over
     check("legacy_still_on", settings.effective_daily_sms_enabled,

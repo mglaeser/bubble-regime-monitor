@@ -9,7 +9,7 @@ survives an empty database.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -84,3 +84,87 @@ def test_ready_requires_an_empty_unsatisfied_list():
     assert report.ready is True
     report.unsatisfied.append("b: no")
     assert report.ready is False
+
+
+def _live_sent(session, *, sent_at, status=None, kind=None):
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import (
+        DeliveryKind,
+        PlanningState,
+        Priority,
+        TransportStatus,
+    )
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+
+    artifacts = load_active(session)
+    register(session, artifacts)
+    delivery_id = new_ulid(utc_ms(sent_at))
+    session.add(AlertDelivery(
+        delivery_id=delivery_id, dedupe_key=f"v1|CUT|{delivery_id}",
+        dedupe_version=1, manual_retry_sequence=0, mode="live",
+        live_profile="default",
+        planning_rules_sha256=artifacts.ruleset.rules_sha256,
+        delivery_kind=kind or DeliveryKind.TEST, priority=Priority.P2,
+        transport_status=status or TransportStatus.SENT,
+        planning_state=PlanningState.NONE, not_before=sent_at,
+        created_at=sent_at, updated_at=sent_at, attempts=1,
+        sent_at=sent_at if (status or TransportStatus.SENT)
+        == TransportStatus.SENT else None,
+        duplicate_risk_acknowledged=False, recipient_ref="default"))
+    session.flush()
+    return delivery_id
+
+
+def test_one_recent_delivery_is_not_two_stable_weeks():
+    """Two weeks is a property of the observation SPAN, not the count."""
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(days=1))
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
+        "a single delivery sent yesterday satisfied the two-week gate")
+
+
+def test_a_terminal_failure_inside_the_window_breaks_stability():
+    from app.alerts.enums import TransportStatus
+
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(days=STABLE_DAYS + 2))
+        _live_sent(session, sent_at=NOW - timedelta(days=3),
+                   status=TransportStatus.DEAD_PERMANENT)
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
+        "a week with permanent failures was read as stable")
+
+
+def test_an_old_digest_does_not_satisfy_the_recent_digest_gate():
+    from app.alerts.enums import DeliveryKind
+
+    with session_scope() as session:
+        for days in (90, 97):
+            _live_sent(session, sent_at=NOW - timedelta(days=days),
+                       kind=DeliveryKind.DIGEST)
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
+        "digests from months ago satisfied the gate for next Monday's channel")
+
+
+def test_a_future_heartbeat_is_a_clock_fault_not_health():
+    from app.alerts.models import AlertComponentHeartbeat
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="dispatcher",
+            last_heartbeat_at=NOW + timedelta(days=2),
+            status="ok", detail_json={}))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_dispatcher")]
+    assert faults and "clock" in faults[0], (
+        "a heartbeat from the future was read as a component that never "
+        f"goes stale: {faults}")
