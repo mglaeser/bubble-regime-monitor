@@ -484,48 +484,61 @@ it, only status, timing, hashes and an already-redacted error string.
 
 ---
 
-## 11b. Open Stage 2 blocker: the ruleset exceeds its own 24h non-P1 budget
+## 11b. Open Stage 2 blocker: the ruleset exceeds its own non-P1 budget
 
 Wiring the planner into the atomic apply (audit B-01) turned every non-P1
 volume figure in the replay from "0 by construction" into a real count. On the
-replayed history the stage-3 replay plans 13 deliveries, and one cap is
-genuinely breached:
+replayed history the stage-3 replay plans 13 deliveries and breaches both caps:
 
 ```
-non-P1 24h  : 5   cap 3          MEASURED  -> stage 3 FAILS
-non-P1 168h : 8   cap 6          UNMEASURED (see below)
+non-P1 24h  : 5   cap 3          BREACHED
+non-P1 168h : 8   cap 6          BREACHED
 non-P1 mean : 8.0 per 168h       UNMEASURED (see below)
 ```
 
-**Half of the original blocker was a measurement error, not a breach.** The
-replay window spans 76 hours. A cap stated per 168 hours cannot be judged on
-three days: eight messages exceeds a one-week cap only if a week elapsed.
-Reporting it as a failure measured the fixture rather than the rules. The
-24-month excursion target already carried exactly this rule; it had simply
-never been applied to the volume figures. Both 168h figures are now reported as
-UNMEASURED — never as passed, because a cap nobody could evaluate must not read
-as a cap that was met.
+`docs/alert-stage1-gate.json` records **stage 3 as FAILING**, and
+`tests/test_alert_replay.py` pins both failures exactly so a new one cannot be
+absorbed silently.
 
-The 24h cap IS measurable on a 76-hour window, and it fails. That one stands.
+### Why a 76-hour window can prove a one-week breach
 
-Two things worth knowing when deciding what to do about it:
+The replay covers 76 hours, which looks too short to judge a 168-hour cap. It
+is not, and the asymmetry is worth stating because I got it wrong once and had
+to be corrected.
+
+A sliding-window **maximum is monotonic** in the window length. Observing 8
+non-P1 messages inside 76 hours means every 168-hour window containing them
+holds at least 8 — so the cap of 6 is broken, and no additional history can
+undo it. A longer window only accumulates more.
+
+The converse does not hold. Staying *under* a cap for 76 hours says nothing
+about a week, so a non-breach on a short window is reported UNMEASURED rather
+than passed.
+
+The **mean** is different again: it is not monotonic, so a per-168h mean taken
+from 76 hours is an arithmetic accident rather than a rate. It is the one
+volume figure this window cannot establish.
+
+### Deciding what to do about it
+
+Two things are worth knowing:
 
 * The history is a **coverage fixture** (`history.source` in the artifact),
-  built to exercise every rule. Its density is a property of the fixture as much
-  as of the ruleset, so the number is a floor for concern rather than a
-  production forecast. Stage 2 exists to re-measure this on real captured
-  sidecars.
-* Grouping is working. P2s that fire in the SAME evaluation bundle into one
+  built to exercise every rule, so its density is a property of the fixture as
+  much as of the ruleset. Stage 2 exists to re-measure on real captured
+  sidecars. The breach is real; its magnitude is not a production forecast.
+* Grouping is working. P2s firing in the SAME evaluation bundle into one
   delivery; these 13 are spread across 20 inputs over three days, so there is
   nothing for bundling to collapse. Bundling messages hours apart would mean
-  delaying the first one, which is not a trade the mandate makes.
+  delaying the first, which is not a trade the mandate makes.
 
 This is an operator decision, not an engineering one. The options are to tune
-the rules that generate the volume, to raise the cap deliberately with a
+the rules that generate the volume, to raise the caps deliberately with a
 recorded reason, or to accept the breach for Stage 3 and re-measure on real
-history before Stage 4. What must not happen is the cap being relaxed to make a
-gate pass: the budget exists precisely to catch a ruleset that talks too much,
-and it has just done its job on the first history it was ever able to measure.
+history before Stage 4. What must not happen is the caps being relaxed to make
+a gate pass: the budget exists precisely to catch a ruleset that talks too
+much, and it has just done its job on the first history it was ever able to
+measure.
 
 Until this is decided, Stage 3 must not be promoted. That is currently a
 statement, not a mechanism, and closing the gap is scheduled with audit

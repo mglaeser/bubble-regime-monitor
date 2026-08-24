@@ -655,48 +655,48 @@ def _decide(summary: ReplaySummary) -> None:
         limits = default_limits(get_settings())
         span = _window_hours(summary)
 
-        # A cap stated per N hours cannot be judged on a window shorter than N
-        # hours, and reporting a breach anyway is measuring the fixture rather
-        # than the rules: eight non-P1 messages is over the 168h cap of six
-        # only if 168 hours actually elapsed. This is the same rule the
-        # 24-month excursion target already gets a few lines below; it simply
-        # was never applied to the volume figures, so a 76-hour replay was
-        # failing a one-week cap.
+        # A sliding-window MAXIMUM is monotonic in the window length, and that
+        # asymmetry decides what a short history can and cannot establish.
         #
-        # Too short is UNMEASURED, never PASSED. A cap nobody could evaluate
-        # must not read as a cap that was met.
-        if span is None:
-            unmeasured.append(
-                "non_p1_volume_targets — the replay window has no span, so no "
-                "period-based cap can be evaluated")
-        else:
-            if span >= 24.0:
-                if summary.max_non_p1_24h > limits.cap_24h:
-                    failures.append(
-                        f"non-P1 volume breached the 24h cap: "
-                        f"{summary.max_non_p1_24h} > {limits.cap_24h}")
-            else:
+        # Observing 8 non-P1 messages inside 76 hours means every 168-hour
+        # window containing them holds at least 8. The cap of 6 is therefore
+        # BREACHED, and no amount of additional history can undo it — a longer
+        # window only accumulates more. A breach is provable on any window.
+        #
+        # The converse is not. Staying under a cap for 76 hours says nothing
+        # about a week, so a non-breach on a short window is UNMEASURED rather
+        # than passed. My first attempt at this got the direction wrong and
+        # suppressed a proven breach; the panel was right to refuse it.
+        #
+        # The MEAN is different again: it is not monotonic, and a per-168h mean
+        # taken from 76 hours is an arithmetic accident rather than a rate.
+        for label, observed, cap, period in (
+            ("24h", summary.max_non_p1_24h, limits.cap_24h, 24.0),
+            ("168h", summary.max_non_p1_168h, limits.cap_168h, 168.0),
+        ):
+            if observed > cap:
+                failures.append(
+                    f"non-P1 volume breached the {label} cap: {observed} > {cap}")
+            elif span is None or span < period:
                 unmeasured.append(
-                    f"non_p1_volume_24h_cap — the window spans {span:.1f}h and "
-                    "the cap is stated per 24h")
+                    f"non_p1_volume_{label}_cap — the window spans "
+                    f"{'no time' if span is None else f'{span:.1f}h'} and the "
+                    f"cap is stated per {label}; staying under it here proves "
+                    "nothing about a full period")
 
-            if span >= 168.0:
-                if summary.max_non_p1_168h > limits.cap_168h:
-                    failures.append(
-                        f"non-P1 volume breached the 168h cap: "
-                        f"{summary.max_non_p1_168h} > {limits.cap_168h}")
-                if summary.mean_non_p1_per_168h > limits.target_168h:
-                    # A target, not a hard cap (mandate 9.2), so it is reported
-                    # rather than failed — but reported as a miss, with both
-                    # numbers.
-                    summary.notes.append(
-                        f"non-P1 mean of {summary.mean_non_p1_per_168h} per 168h "
-                        f"is above the quiet-regime target of "
-                        f"{limits.target_168h}")
-            else:
-                unmeasured.append(
-                    f"non_p1_volume_168h_cap_and_mean — the window spans "
-                    f"{span:.1f}h and both are stated per 168h")
+        if span is not None and span >= 168.0:
+            if summary.mean_non_p1_per_168h > limits.target_168h:
+                # A target, not a hard cap (mandate 9.2), so it is reported
+                # rather than failed — but reported as a miss, with both
+                # numbers.
+                summary.notes.append(
+                    f"non-P1 mean of {summary.mean_non_p1_per_168h} per 168h is "
+                    f"above the quiet-regime target of {limits.target_168h}")
+        else:
+            unmeasured.append(
+                "non_p1_mean_per_168h — a mean is not monotonic in the window "
+                "length, so it cannot be inferred from a shorter history")
+
     if not summary.mandatory_event_total:
         unmeasured.append(
             "mandatory_event_recall — the catalogue is empty; recall over zero "
