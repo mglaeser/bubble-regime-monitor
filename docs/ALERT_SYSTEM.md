@@ -484,29 +484,48 @@ it, only status, timing, hashes and an already-redacted error string.
 
 ---
 
-## 11b. Open Stage 2 blocker: the ruleset exceeds its own non-P1 budget
+## 11b. Open Stage 2 blocker: the ruleset exceeds its own 24h non-P1 budget
 
 Wiring the planner into the atomic apply (audit B-01) turned every non-P1
 volume figure in the replay from "0 by construction" into a real count. On the
-captured history the stage-3 replay plans 13 deliveries and breaches the budget
-the mandate sets for itself:
+replayed history the stage-3 replay plans 13 deliveries, and one cap is
+genuinely breached:
 
 ```
-non-P1 24h  : 5   cap 3
-non-P1 168h : 8   cap 6
-non-P1 mean : 8.0 per 168h, quiet-regime target 2
+non-P1 24h  : 5   cap 3          MEASURED  -> stage 3 FAILS
+non-P1 168h : 8   cap 6          UNMEASURED (see below)
+non-P1 mean : 8.0 per 168h       UNMEASURED (see below)
 ```
 
-`docs/alert-stage1-gate.json` therefore records **stage 3 as FAILING**, and
-`tests/test_alert_replay.py` pins those two failures exactly so a new one
-cannot be absorbed silently.
+**Half of the original blocker was a measurement error, not a breach.** The
+replay window spans 76 hours. A cap stated per 168 hours cannot be judged on
+three days: eight messages exceeds a one-week cap only if a week elapsed.
+Reporting it as a failure measured the fixture rather than the rules. The
+24-month excursion target already carried exactly this rule; it had simply
+never been applied to the volume figures. Both 168h figures are now reported as
+UNMEASURED — never as passed, because a cap nobody could evaluate must not read
+as a cap that was met.
+
+The 24h cap IS measurable on a 76-hour window, and it fails. That one stands.
+
+Two things worth knowing when deciding what to do about it:
+
+* The history is a **coverage fixture** (`history.source` in the artifact),
+  built to exercise every rule. Its density is a property of the fixture as much
+  as of the ruleset, so the number is a floor for concern rather than a
+  production forecast. Stage 2 exists to re-measure this on real captured
+  sidecars.
+* Grouping is working. P2s that fire in the SAME evaluation bundle into one
+  delivery; these 13 are spread across 20 inputs over three days, so there is
+  nothing for bundling to collapse. Bundling messages hours apart would mean
+  delaying the first one, which is not a trade the mandate makes.
 
 This is an operator decision, not an engineering one. The options are to tune
-the rules that generate the volume, to raise the caps deliberately with a
-recorded reason, or to accept the breach for Stage 3 and re-measure before
-Stage 4. What must not happen is the caps being relaxed to make a gate pass:
-the budget exists precisely to catch a ruleset that talks too much, and it has
-just done its job on the first history it was ever able to measure.
+the rules that generate the volume, to raise the cap deliberately with a
+recorded reason, or to accept the breach for Stage 3 and re-measure on real
+history before Stage 4. What must not happen is the cap being relaxed to make a
+gate pass: the budget exists precisely to catch a ruleset that talks too much,
+and it has just done its job on the first history it was ever able to measure.
 
 Until this is decided, Stage 3 must not be promoted. That is currently a
 statement, not a mechanism, and closing the gap is scheduled with audit

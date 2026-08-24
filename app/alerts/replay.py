@@ -597,6 +597,19 @@ def _collect_mandatory_events(config: ReplayConfig, summary: ReplaySummary) -> N
     summary.mandatory_event_not_evaluable = summary.inputs_not_evaluable
 
 
+def _window_hours(summary: ReplaySummary) -> float | None:
+    """How long the replayed history actually covers, in hours."""
+    first, last = summary.window_first, summary.window_last
+    if not first or not last:
+        return None
+    try:
+        start = datetime.fromisoformat(str(first))
+        end = datetime.fromisoformat(str(last))
+    except ValueError:
+        return None
+    return (end - start).total_seconds() / 3600.0
+
+
 def _decide(summary: ReplaySummary) -> None:
     """The Stage 1 verdict. Fail-closed and explicit about WHY.
 
@@ -640,20 +653,50 @@ def _decide(summary: ReplaySummary) -> None:
         # "measured and ignored", which is the worse of the two: a number on a
         # dashboard that no one compares to its limit reads as compliance.
         limits = default_limits(get_settings())
-        if summary.max_non_p1_24h > limits.cap_24h:
-            failures.append(
-                f"non-P1 volume breached the 24h cap: {summary.max_non_p1_24h} "
-                f"> {limits.cap_24h}")
-        if summary.max_non_p1_168h > limits.cap_168h:
-            failures.append(
-                f"non-P1 volume breached the 168h cap: {summary.max_non_p1_168h} "
-                f"> {limits.cap_168h}")
-        if summary.mean_non_p1_per_168h > limits.target_168h:
-            # A target, not a hard cap (mandate 9.2), so it is reported rather
-            # than failed — but it is reported as a miss, with both numbers.
-            summary.notes.append(
-                f"non-P1 mean of {summary.mean_non_p1_per_168h} per 168h is above "
-                f"the quiet-regime target of {limits.target_168h}")
+        span = _window_hours(summary)
+
+        # A cap stated per N hours cannot be judged on a window shorter than N
+        # hours, and reporting a breach anyway is measuring the fixture rather
+        # than the rules: eight non-P1 messages is over the 168h cap of six
+        # only if 168 hours actually elapsed. This is the same rule the
+        # 24-month excursion target already gets a few lines below; it simply
+        # was never applied to the volume figures, so a 76-hour replay was
+        # failing a one-week cap.
+        #
+        # Too short is UNMEASURED, never PASSED. A cap nobody could evaluate
+        # must not read as a cap that was met.
+        if span is None:
+            unmeasured.append(
+                "non_p1_volume_targets — the replay window has no span, so no "
+                "period-based cap can be evaluated")
+        else:
+            if span >= 24.0:
+                if summary.max_non_p1_24h > limits.cap_24h:
+                    failures.append(
+                        f"non-P1 volume breached the 24h cap: "
+                        f"{summary.max_non_p1_24h} > {limits.cap_24h}")
+            else:
+                unmeasured.append(
+                    f"non_p1_volume_24h_cap — the window spans {span:.1f}h and "
+                    "the cap is stated per 24h")
+
+            if span >= 168.0:
+                if summary.max_non_p1_168h > limits.cap_168h:
+                    failures.append(
+                        f"non-P1 volume breached the 168h cap: "
+                        f"{summary.max_non_p1_168h} > {limits.cap_168h}")
+                if summary.mean_non_p1_per_168h > limits.target_168h:
+                    # A target, not a hard cap (mandate 9.2), so it is reported
+                    # rather than failed — but reported as a miss, with both
+                    # numbers.
+                    summary.notes.append(
+                        f"non-P1 mean of {summary.mean_non_p1_per_168h} per 168h "
+                        f"is above the quiet-regime target of "
+                        f"{limits.target_168h}")
+            else:
+                unmeasured.append(
+                    f"non_p1_volume_168h_cap_and_mean — the window spans "
+                    f"{span:.1f}h and both are stated per 168h")
     if not summary.mandatory_event_total:
         unmeasured.append(
             "mandatory_event_recall — the catalogue is empty; recall over zero "
