@@ -500,6 +500,8 @@ def record_actionability(body: ActionabilityRequest, response: Response,
     selector only if these labels show a material improvement, and AMBIGUOUS
     exists so an unsure reviewer does not inflate the KPI either way.
     """
+    from sqlalchemy import select
+
     from app.alerts.models import AlertActionabilityReview, AlertEpisode
 
     _no_store(response)
@@ -507,6 +509,25 @@ def record_actionability(body: ActionabilityRequest, response: Response,
     with session_scope() as session:
         if session.get(AlertEpisode, body.episode_id) is None:
             return problem(404, "No such episode", body.episode_id)
+        # One label per (episode, delivery). The KPI counts labels, so a
+        # second contradictory one would double-count the same alert — and
+        # silently replacing the first would erase evidence. Reviews are
+        # append-only; a genuine change of mind is a conversation, not a POST.
+        existing = session.execute(
+            select(AlertActionabilityReview).where(
+                AlertActionabilityReview.episode_id == body.episode_id,
+                AlertActionabilityReview.delivery_id.is_(body.delivery_id)
+                if body.delivery_id is None else
+                AlertActionabilityReview.delivery_id == body.delivery_id,
+            )
+        ).scalars().first()
+        if existing is not None:
+            return problem(
+                409, "Already reviewed",
+                f"episode {body.episode_id} already carries label "
+                f"{existing.actionable}; reviews are append-only evidence",
+                extra={"review_id": existing.review_id,
+                       "actionable": existing.actionable})
         review_id = new_ulid(utc_ms(now))
         session.add(AlertActionabilityReview(
             review_id=review_id,

@@ -106,7 +106,7 @@ def _live_sent(session, *, sent_at, status=None, kind=None):
         dedupe_version=1, manual_retry_sequence=0, mode="live",
         live_profile="default",
         planning_rules_sha256=artifacts.ruleset.rules_sha256,
-        delivery_kind=kind or DeliveryKind.TEST, priority=Priority.P2,
+        delivery_kind=kind or DeliveryKind.INITIAL, priority=Priority.P2,
         transport_status=status or TransportStatus.SENT,
         planning_state=PlanningState.NONE, not_before=sent_at,
         created_at=sent_at, updated_at=sent_at, attempts=1,
@@ -168,3 +168,51 @@ def test_a_future_heartbeat_is_a_clock_fault_not_health():
     assert faults and "clock" in faults[0], (
         "a heartbeat from the future was read as a component that never "
         f"goes stale: {faults}")
+
+
+def test_test_probes_do_not_count_as_stable_live_history():
+    """Two weeks of send-test proves the wire, not the system."""
+    from app.alerts.enums import DeliveryKind
+
+    with session_scope() as session:
+        # only TEST deliveries, spanning well past two weeks
+        for days in (30, 20, 10, 2):
+            _live_sent(session, sent_at=NOW - timedelta(days=days),
+                       kind=DeliveryKind.TEST)
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
+        "a history of transport probes satisfied the deterministic-alert gate")
+
+
+def test_a_fresh_unknown_blocks_cutover_whatever_its_age():
+    """An UNKNOWN is unresolved by definition; age softens nothing."""
+    from app.alerts.enums import TransportStatus
+
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(hours=1),
+                   status=TransportStatus.UNKNOWN)
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("unknowns_reconciled") for u in report.unsatisfied), (
+        "an hour-old UNKNOWN passed the gate that exists for exactly it")
+
+
+def test_the_audit_comment_is_sanitized_before_persistence():
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertEvent
+
+    with session_scope() as session:
+        event_id = record_decision(
+            session, action="cutover_rollback",
+            comment=("see https://user:hunter2@internal/why "  # pragma: allowlist secret
+                     "token=abc123def456ghi"),
+            now=NOW)
+        session.flush()
+        row = session.execute(
+            select(AlertEvent).where(AlertEvent.event_id == event_id)
+        ).scalars().one()
+
+    assert "hunter2" not in row.detail_redacted
+    assert "abc123def456ghi" not in row.detail_redacted

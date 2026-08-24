@@ -522,18 +522,30 @@ def test_actionability_review_is_recorded_with_ambiguous_first_class(client):
         episode_id = session.execute(
             select(AlertEpisode.episode_id)).scalars().first()
 
-    for label in ("YES", "AMBIGUOUS"):
-        response = client.post(
-            "/api/v1/admin/alerts/actionability",
-            headers={"X-API-Key": TEST_ADMIN_KEY},
-            json={"episode_id": episode_id, "actionable": label,
-                  "comment": "reviewed"})
-        assert response.status_code == 200, response.text
+    response = client.post(
+        "/api/v1/admin/alerts/actionability",
+        headers={"X-API-Key": TEST_ADMIN_KEY},
+        json={"episode_id": episode_id, "actionable": "AMBIGUOUS",
+              "comment": "reviewed"})
+    assert response.status_code == 200, response.text
+
+    # a second, contradictory label for the SAME alert is refused: the KPI
+    # counts labels, and a duplicate would double-count while silently
+    # replacing the first would erase evidence. This test originally posted
+    # YES and AMBIGUOUS for one episode and asserted both were stored —
+    # asserting the defect.
+    contradiction = client.post(
+        "/api/v1/admin/alerts/actionability",
+        headers={"X-API-Key": TEST_ADMIN_KEY},
+        json={"episode_id": episode_id, "actionable": "YES",
+              "comment": "second thoughts"})
+    assert contradiction.status_code == 409
+    assert contradiction.json()["actionable"] == "AMBIGUOUS"
 
     with session_scope() as session:
         from sqlalchemy import select
         rows = session.execute(select(AlertActionabilityReview)).scalars().all()
-        assert {r.actionable for r in rows} == {"YES", "AMBIGUOUS"}
+        assert [r.actionable for r in rows] == ["AMBIGUOUS"]
         assert all(r.reviewed_at is not None for r in rows)
         _ = datetime.now(UTC)
 

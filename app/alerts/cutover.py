@@ -39,6 +39,7 @@ from app.alerts.promotion import live_admission_blockers
 from app.alerts.repository import utc_ms
 from app.config import get_settings
 from app.logging_conf import get_logger
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 
@@ -91,10 +92,18 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
     # to predate the window, and the window has to be failure-free — a week of
     # DEAD_PERMANENT outcomes is observed instability, not observed stability.
     window_start = now - timedelta(days=STABLE_DAYS)
+    # MARKET deliveries only. A TEST probe proves the wire, not the system:
+    # two weeks of send-test invocations is two weeks of nothing observed
+    # about evaluation, planning or rendering, and the digest has its own
+    # gate below.
+    market_kinds = [DeliveryKind.INITIAL, DeliveryKind.REMINDER,
+                    DeliveryKind.BUNDLE, DeliveryKind.STORM,
+                    DeliveryKind.WATCHDOG]
     first_sent = session.execute(
         select(func.min(AlertDelivery.sent_at)).where(
             AlertDelivery.mode == "live",
             AlertDelivery.transport_status == TransportStatus.SENT,
+            AlertDelivery.delivery_kind.in_(market_kinds),
         )
     ).scalar()
     span_ok = first_sent is not None and _aware(first_sent) <= window_start
@@ -144,16 +153,20 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
           "proof-of-life, so it must have proven itself in the same period "
           "being judged")
 
-    # 5: no UNKNOWN delivery left unreconciled
-    stale_unknown = session.execute(
+    # 5: no UNKNOWN delivery at all. The earlier version only counted
+    # UNKNOWNs older than 24h, so a delivery that went ambiguous an hour
+    # before the cutover passed the gate — but an UNKNOWN is by definition
+    # unresolved, and cutting over the fallback channel while one is open is
+    # exactly the moment its ambiguity stops being recoverable. Age only
+    # softens the wording, never the verdict.
+    open_unknown = session.execute(
         select(func.count()).select_from(AlertDelivery).where(
             AlertDelivery.transport_status == TransportStatus.UNKNOWN,
-            AlertDelivery.updated_at < now - timedelta(hours=UNKNOWN_STALE_HOURS),
         )
     ).scalar_one()
-    check("unknowns_reconciled", stale_unknown == 0,
-          f"{stale_unknown} UNKNOWN delivery/deliveries older than "
-          f"{UNKNOWN_STALE_HOURS}h without operator action")
+    check("unknowns_reconciled", open_unknown == 0,
+          f"{open_unknown} UNKNOWN delivery/deliveries awaiting operator "
+          "reconciliation (any open UNKNOWN blocks cutover, whatever its age)")
 
     # 6: the components that replace the daily message are alive
     for component in ("dispatcher", "watchdog", "digest"):
@@ -199,7 +212,9 @@ def record_decision(session: Session, *, action: str, comment: str,
         causation_type="OPERATOR", causation_id=event_id,
         actor_type="OPERATOR", actor_id_redacted="cli",
         action=action, suppression_reasons=[],
-        detail_redacted=comment[:255],
+        # sanitized like every other operator string: a comment is exactly
+        # where a pasted URL with a token ends up
+        detail_redacted=sanitize(comment),
     ))
     log.info("alert_cutover_decision", action=action)
     return event_id
