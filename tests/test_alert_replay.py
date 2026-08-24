@@ -285,37 +285,55 @@ def test_a_breached_non_p1_cap_fails_the_gate(tmp_path, artifacts):
     assert not any("target" in f for f in summary.failures)
 
 
-def test_a_cap_is_not_judged_on_a_window_shorter_than_its_period():
-    """Eight messages is over a one-week cap only if a week elapsed.
+def test_a_breach_is_provable_on_a_short_window_but_compliance_is_not():
+    """A sliding-window MAXIMUM is monotonic in the window length.
 
-    The committed replay covers 76 hours, and its volume figures were being
-    compared to a 24h cap AND a 168h cap. The second is not a measurement of
-    the rules; it is a measurement of the fixture. The 24-month excursion
-    target already gets this treatment a few lines away — it simply was never
-    applied to the volume figures.
+    Observing 8 non-P1 messages inside 76 hours means every 168-hour window
+    containing them holds at least 8, so a cap of 6 is broken and no extra
+    history can undo it. Staying UNDER a cap for 76 hours proves nothing about
+    a week, so that direction is unmeasured rather than passed.
+
+    An earlier version of this gate had the asymmetry backwards and suppressed
+    a proven breach.
     """
     from app.alerts.replay import ReplaySummary, _decide
 
-    summary = ReplaySummary()
-    summary.mode = "DRYRUN"
-    summary.notification_planning_ran = True
-    summary.max_non_p1_24h = 5
-    summary.max_non_p1_168h = 8
-    summary.mean_non_p1_per_168h = 8.0
-    summary.window_first = "2026-07-10T02:00:00+00:00"
-    summary.window_last = "2026-07-13T06:00:00+00:00"      # 76 hours
-    _decide(summary)
+    short = ReplaySummary()
+    short.mode = "DRYRUN"
+    short.notification_planning_ran = True
+    short.max_non_p1_24h = 5
+    short.max_non_p1_168h = 8
+    short.mean_non_p1_per_168h = 8.0
+    short.window_first = "2026-07-10T02:00:00+00:00"
+    short.window_last = "2026-07-13T06:00:00+00:00"      # 76 hours
+    _decide(short)
 
-    joined = " ".join(summary.failures)
-    assert "168h cap" not in joined, "a one-week cap was judged on three days"
-    assert "24h cap" in joined, "the 24h cap IS measurable here and was skipped"
+    joined = " ".join(short.failures)
+    assert "24h cap" in joined
+    assert "168h cap" in joined, "a proven breach was suppressed as unmeasured"
+    assert short.passed is False
 
-    # unmeasured, never passed: a cap nobody could evaluate must not read as met
-    assert any("168h" in u for u in summary.not_measured)
-    assert summary.passed is False
+    # a mean is NOT monotonic, so it cannot be inferred from a short window
+    assert any("mean" in u for u in short.not_measured)
+    assert not any("quiet-regime target" in n for n in short.notes)
+
+    # under the caps on the same short window: proves nothing either way
+    quiet = ReplaySummary()
+    quiet.mode = "DRYRUN"
+    quiet.notification_planning_ran = True
+    quiet.max_non_p1_24h = 1
+    quiet.max_non_p1_168h = 2
+    quiet.window_first = "2026-07-10T02:00:00+00:00"
+    quiet.window_last = "2026-07-13T06:00:00+00:00"
+    _decide(quiet)
+
+    assert not any("cap" in f for f in quiet.failures)
+    assert any("168h_cap" in u for u in quiet.not_measured), (
+        "staying under a one-week cap for three days was read as compliance")
 
 
-def test_a_window_with_no_span_measures_no_cap_at_all():
+def test_a_window_with_no_span_still_reports_a_breach():
+    """No span is no excuse: the count was observed somewhere."""
     from app.alerts.replay import ReplaySummary, _decide
 
     summary = ReplaySummary()
@@ -324,8 +342,9 @@ def test_a_window_with_no_span_measures_no_cap_at_all():
     summary.max_non_p1_24h = 99
     _decide(summary)
 
-    assert not any("cap" in f for f in summary.failures)
-    assert any("no span" in u for u in summary.not_measured)
+    assert any("24h cap" in f for f in summary.failures)
+    # but a figure UNDER the cap with no span establishes nothing
+    assert any("168h_cap" in u for u in summary.not_measured)
 
 
 def test_an_empty_mandatory_catalogue_reports_zero_not_full_recall(tmp_path, artifacts):
@@ -485,19 +504,16 @@ def test_the_gate_artifact_exercises_more_than_the_committed_stage():
     #
     # When the breach is resolved this list becomes empty and the test fails
     # until it is updated, which is the point.
-    # ONE failure, not two. The 168h cap was a measurement error: this window
-    # spans 76 hours, and a one-week cap cannot be judged on three days. It is
-    # now reported UNMEASURED — see the assertion below, which pins that it is
-    # not quietly counted as passed either.
     assert stage3["failures"] == [
         "non-P1 volume breached the 24h cap: 5 > 3",
+        "non-P1 volume breached the 168h cap: 8 > 6",
     ], (
         "stage-3 failures changed. If the breach was FIXED, empty this list. "
         f"If a NEW failure appeared, it needs its own decision: {stage3['failures']}"
     )
 
-    # unmeasured, and named — never folded into "nothing to report"
-    assert any("168h" in u for u in stage3["not_measured"])
+    # the MEAN is the only volume figure a 76-hour window cannot establish
+    assert any("mean" in u for u in stage3["not_measured"])
     assert stage3["passed"] is False
 
 

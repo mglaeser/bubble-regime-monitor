@@ -126,7 +126,8 @@
       "evaluations_failed": 0,
       "evaluations_timed_out": 0,
       "failures": [
-        "non-P1 volume breached the 24h cap: 5 > 3"
+        "non-P1 volume breached the 24h cap: 5 > 3",
+        "non-P1 volume breached the 168h cap: 8 > 6"
       ],
       "held_budget": 0,
       "held_grouping": 0,
@@ -145,7 +146,7 @@
       "mean_non_p1_per_168h": 8.0,
       "mode": "dryrun",
       "not_measured": [
-        "non_p1_volume_168h_cap_and_mean — the window spans 76.0h and both are stated per 168h",
+        "non_p1_mean_per_168h — a mean is not monotonic in the window length, so it cannot be inferred from a shorter history",
         "mandatory_event_recall — the catalogue is empty; recall over zero events is undefined, not 100%",
         "transient_derisk_p1_rate — the window spans 0.1 months; the target is stated per 24 months and cannot be judged on a shorter history"
       ],
