@@ -409,13 +409,28 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
                            f"{original.transport_status}. Definite failures are "
                            "retried automatically and successes need nothing.")
 
+        # The next sequence comes from what EXISTS, not from the original's
+        # own counter. The original never advances — it is the frozen record
+        # of the ambiguous send — so two operators retrying under different
+        # idempotency keys would both compute original+1 and collide on the
+        # dedupe key. Each authorised retry is a distinct duplicate-risk
+        # decision and gets a distinct sequence.
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import select as sa_select
+
+        highest = session.execute(
+            sa_select(sa_func.max(AlertDelivery.manual_retry_sequence)).where(
+                (AlertDelivery.prior_unknown_delivery_id == original.delivery_id)
+                | (AlertDelivery.delivery_id == original.delivery_id))
+        ).scalar() or 0
+        next_sequence = highest + 1
+
         new_id = new_ulid(utc_ms(now))
         session.add(AlertDelivery(
             delivery_id=new_id,
-            dedupe_key=(f"{original.dedupe_key}|retry"
-                        f"{original.manual_retry_sequence + 1}"),
+            dedupe_key=f"{original.dedupe_key}|retry{next_sequence}",
             dedupe_version=original.dedupe_version,
-            manual_retry_sequence=original.manual_retry_sequence + 1,
+            manual_retry_sequence=next_sequence,
             mode=original.mode,
             live_profile=original.live_profile,
             planning_rules_sha256=original.planning_rules_sha256,

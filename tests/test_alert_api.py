@@ -584,3 +584,38 @@ def test_a_review_cannot_attribute_another_deliverys_verdict(client):
               "actionable": "YES"})
     assert response.status_code == 409
     assert "no member row" in response.json()["detail"]
+
+
+def test_two_authorised_retries_get_distinct_sequences(client):
+    """Each retry is its own duplicate-risk decision, and must not collide.
+
+    The original's counter never advances — it is the frozen record of the
+    ambiguous send — so deriving the next sequence from it made two operators
+    with different idempotency keys both compute original+1 and collide on
+    the dedupe key.
+    """
+    from app.alerts.models import AlertDelivery
+    from app.db import session_scope
+
+    with session_scope() as session:
+        original = _unknown_delivery(session)
+
+    ids = []
+    for key in ("retry-a", "retry-b"):
+        response = client.post(
+            f"/api/v1/admin/alerts/deliveries/{original}/retry",
+            headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": key},
+            json={"comment": f"attempt {key}",
+                  "acknowledge_duplicate_risk": True})
+        assert response.status_code == 200, response.text
+        ids.append(response.json()["delivery_id"])
+
+    assert len(set(ids)) == 2
+    with session_scope() as session:
+        first = session.get(AlertDelivery, ids[0])
+        second = session.get(AlertDelivery, ids[1])
+        assert {first.manual_retry_sequence, second.manual_retry_sequence} \
+            == {1, 2}
+        assert first.dedupe_key != second.dedupe_key
+        assert first.prior_unknown_delivery_id == original
+        assert second.prior_unknown_delivery_id == original
