@@ -99,15 +99,24 @@ def _classify_exception(exc: Exception, *, request_started: bool) -> SendResult:
     successful write means the provider may already be sending the SMS.
     """
     name = type(exc).__name__
-    if isinstance(exc, httpx.ConnectError | httpx.ConnectTimeout | httpx.ProxyError):
+    # Nothing was written. A connect error or connect timeout means the
+    # connection was never established; a PoolTimeout means one was never even
+    # taken from the pool, so the request did not begin — it was grouped with
+    # the read/write failures below, which made a case that is definitely safe
+    # to retry look like one needing an operator.
+    if isinstance(exc, httpx.ConnectError | httpx.ConnectTimeout
+                  | httpx.ProxyError | httpx.PoolTimeout):
         return SendResult(
             outcome=SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED,
             error_code=name,
             error_message_redacted=sanitize(exc),
             request_started=False,
         )
+    # Bytes may have gone out. A write failure can leave a partial request on
+    # the wire, and a read failure follows a complete one — in both cases the
+    # proxy may already have accepted and sent.
     if isinstance(exc, httpx.ReadTimeout | httpx.ReadError | httpx.RemoteProtocolError
-                  | httpx.WriteError | httpx.WriteTimeout | httpx.PoolTimeout):
+                  | httpx.WriteError | httpx.WriteTimeout):
         return SendResult(
             outcome=SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION,
             error_code=name,

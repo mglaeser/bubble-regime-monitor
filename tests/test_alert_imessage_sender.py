@@ -373,3 +373,28 @@ def test_rotating_the_credential_cannot_change_retry_identity(monkeypatch):
                                           idempotency_key="01M0DELIVERY0000000000000A")
 
     assert keys[0] == keys[1]
+
+
+@pytest.mark.parametrize("exc,retryable", [
+    (httpx.ConnectTimeout("no route"), True),
+    (httpx.ConnectError("refused"), True),
+    (httpx.PoolTimeout("no free connection"), True),
+    (httpx.WriteTimeout("stalled mid-write"), False),
+    (httpx.ReadTimeout("no reply"), False),
+])
+def test_only_failures_that_wrote_nothing_are_auto_retryable(monkeypatch, exc,
+                                                             retryable):
+    """The line is whether bytes could have reached the proxy.
+
+    A PoolTimeout never took a connection from the pool, so the request did not
+    begin — grouping it with the read/write failures made a case that is
+    definitely safe to retry look like one needing an operator.
+    """
+    _configured(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise exc
+
+    result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    assert result.may_retry_automatically is retryable, result.outcome
+    assert result.request_started is not retryable
