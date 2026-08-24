@@ -254,6 +254,33 @@ def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
     return True
 
 
+def _phrase_set_of_ruleset(session: Any, rules_sha256: str,
+                           fallback: ValidatedPhraseSet
+                           ) -> ValidatedPhraseSet | None:
+    """The phrase set a ruleset was validated against, from the registry.
+
+    For a delivery with no members this is the only record of what its wording
+    was planned against — the ruleset row names the version AND carries the
+    digest it was validated with, so both can be checked exactly as they are
+    for a member.
+    """
+    from app.alerts.models import AlertPhraseSetRegistry, AlertRulesetRegistry
+
+    row = session.get(AlertRulesetRegistry, rules_sha256)
+    if row is None:
+        log.error("alert_planning_ruleset_missing", rules_sha256=rules_sha256[:12])
+        return None
+    if row.phrase_set_version == fallback.version \
+            and row.phrase_set_sha256 == fallback.sha256:
+        return fallback
+    registered = session.get(AlertPhraseSetRegistry, row.phrase_set_version)
+    if registered is None or registered.phrase_set_sha256 != row.phrase_set_sha256:
+        log.error("alert_planning_phrase_set_unavailable",
+                  version=row.phrase_set_version)
+        return None
+    return validate_phrase_set(registered.canonical_json)
+
+
 def planning_phrase_set(session: Any, delivery: AlertDelivery,
                         fallback: ValidatedPhraseSet) -> ValidatedPhraseSet | None:
     """The phrase set this delivery was PLANNED against, or None if it is gone.
@@ -283,9 +310,14 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
         .order_by(AlertDeliveryMember.included_at).limit(1)
     ).first()
     if row is None:
-        # No members at all — a quiet digest. Nothing was planned against a
-        # particular text, so the running set is the only honest answer.
-        return fallback
+        # No members at all — a quiet digest. It still has a planned text: the
+        # RULESET it was planned under names a phrase set, and that is what its
+        # wording was reviewed against. Falling back to the running set meant a
+        # digest queued before a deploy could go out worded from phrases nobody
+        # planned it against, which is the same substitution the member path
+        # refuses.
+        return _phrase_set_of_ruleset(session, delivery.planning_rules_sha256,
+                                      fallback)
 
     version, digest = row
     if not version or not digest:

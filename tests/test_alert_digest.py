@@ -902,8 +902,14 @@ def test_a_phrase_set_whose_bytes_moved_fails_the_render():
         assert planning_phrase_set(session, delivery, _phrase_set()) is None
 
 
-def test_a_quiet_digest_has_no_planned_text_to_reproduce():
-    """No members means nothing was planned against a particular phrase set."""
+def test_a_quiet_digest_takes_its_text_from_the_ruleset_that_planned_it():
+    """A memberless digest still HAS a planned text.
+
+    The ruleset it was planned under names a phrase set, and that is what its
+    wording was reviewed against — so falling back to the running set would let
+    a digest queued before a deploy go out worded from phrases nobody planned
+    it against.
+    """
     from app.alerts.dispatcher import planning_phrase_set
 
     with session_scope() as session:
@@ -960,3 +966,35 @@ def test_plan_digest_will_not_record_a_member_without_provenance():
     for name in ("phrase_set_version", "phrase_set_sha256"):
         assert signature.parameters[name].default is inspect.Parameter.empty, (
             f"{name} has a default again, which re-enables the hole")
+
+
+def test_a_quiet_digest_whose_ruleset_text_is_gone_fails_the_render():
+    """Same rule as the member path: unreproducible planned text fails."""
+    from app.alerts.dispatcher import planning_phrase_set
+    from app.alerts.models import AlertRulesetRegistry
+
+    class _Different:
+        """A running set that is NOT the planned one, forcing the registry path."""
+        version = "v0.0-running"
+        sha256 = "0" * 64
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
+                           window_key=WINDOW, now=NOW)
+        assert plan.quiet is True
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+
+        # the ruleset's phrase set IS registered, so it resolves
+        resolved = planning_phrase_set(session, delivery, _Different())
+        assert resolved is not None
+        assert resolved.version != _Different.version
+
+        # and when the ruleset names a digest the registry does not hold,
+        # the planned text cannot be reproduced
+        session.get(AlertRulesetRegistry, rules_sha).phrase_set_sha256 = "9" * 64
+        session.flush()
+        assert planning_phrase_set(session, delivery, _Different()) is None
