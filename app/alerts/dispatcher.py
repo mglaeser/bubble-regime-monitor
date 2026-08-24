@@ -29,7 +29,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from app.alerts.budgets import check_budget
+from app.alerts.budgets import BUDGETED_KINDS, check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.digest import render_digest_body
 from app.alerts.enums import (
@@ -63,6 +63,7 @@ from app.alerts.outbox import (
     pending_planning_rulesets,
     recover_leases,
     release,
+    release_due_holds,
     revalidate_members,
 )
 from app.alerts.phrase_registry import ValidatedPhraseSet, validate_phrase_set
@@ -99,6 +100,9 @@ class DispatchReport:
     unknown: int = 0
     render_failed: int = 0
     recovered: dict[str, int] = field(default_factory=dict)
+    released: dict[str, int] = field(
+        default_factory=lambda: {"quiet": 0, "budget": 0}
+    )
     notes: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -106,7 +110,8 @@ class DispatchReport:
             "claimed": self.claimed, "sent": self.sent, "held": self.held,
             "cancelled": self.cancelled, "failed": self.failed,
             "unknown": self.unknown, "render_failed": self.render_failed,
-            "recovered": self.recovered, "notes": self.notes[:20],
+            "recovered": self.recovered, "released": self.released,
+            "notes": self.notes[:20],
         }
 
 
@@ -458,6 +463,8 @@ def dispatch_once(
         report.recovered = recover_leases(session, now=now)
 
     with session_factory() as session:
+        report.released = release_due_holds(
+            session, mode=mode, live_profile=live_profile, now=now)
         # A queued delivery carries the hash of the ruleset that PLANNED it,
         # and a promotion between planning and dispatch means that is no longer
         # the ruleset checked above. Judging a message by rules that did not
@@ -525,7 +532,8 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             return
 
         # -- 3: authoritative budget recheck -------------------------------
-        if delivery.priority != Priority.P1:
+        if (delivery.priority != Priority.P1
+                and delivery.delivery_kind in BUDGETED_KINDS):
             usage = budget_usage(session, mode=mode, live_profile=live_profile, now=now)
             decision = check_budget(delivery.priority, usage, default_limits(settings))
             if not decision.allowed:

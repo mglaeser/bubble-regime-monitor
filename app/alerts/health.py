@@ -386,6 +386,7 @@ def health_projection(
         "watchdog": _WATCHDOG_MAX_SILENCE_S,
         "dispatcher": _DISPATCHER_MAX_SILENCE_S,
     }
+    health_now = _now_utc()
     components: dict[str, Any] = {}
     conditions: list[str] = []
     for name, max_silence in expected.items():
@@ -401,7 +402,7 @@ def health_projection(
         last_seen = row.get("last_heartbeat_at")
         age: float | None = None
         if isinstance(last_seen, str) and last_seen:
-            age = (_now_utc() - _parse_iso(last_seen)).total_seconds()
+            age = (health_now - _parse_iso(last_seen)).total_seconds()
         # A heartbeat dated in the FUTURE gives a negative age, which sails
         # under any "older than" test and pins the component healthy forever —
         # silence masked by a clock, which is the failure this whole projection
@@ -422,9 +423,54 @@ def health_projection(
         if not healthy:
             conditions.append(components[name]["reason"])
 
+    hold_scope = (
+        AlertDelivery.mode == mode,
+        AlertDelivery.live_profile == profile,
+        AlertDelivery.transport_status.in_(
+            [TransportStatus.PENDING, TransportStatus.RETRY_DUE]
+        ),
+    )
+    overdue_held_quiet = _count(
+        AlertDelivery,
+        *hold_scope,
+        AlertDelivery.planning_state == PlanningState.HELD_QUIET,
+        AlertDelivery.not_before.is_not(None),
+        AlertDelivery.not_before <= health_now,
+    )
+    overdue_held_budget = _count(
+        AlertDelivery,
+        *hold_scope,
+        AlertDelivery.planning_state == PlanningState.HELD_BUDGET,
+        AlertDelivery.budget_recheck_at.is_not(None),
+        AlertDelivery.budget_recheck_at <= health_now,
+    )
+    holds_missing_next_check = _count(
+        AlertDelivery,
+        *hold_scope,
+        (
+            (AlertDelivery.planning_state == PlanningState.HELD_QUIET)
+            & AlertDelivery.not_before.is_(None)
+        ) | (
+            (AlertDelivery.planning_state == PlanningState.HELD_BUDGET)
+            & AlertDelivery.budget_recheck_at.is_(None)
+        ),
+    )
+    overdue_holds = overdue_held_quiet + overdue_held_budget
+    if overdue_holds:
+        conditions.append(f"outbox: {overdue_holds} overdue hold(s) await release")
+    if holds_missing_next_check:
+        conditions.append(
+            f"outbox: {holds_missing_next_check} hold(s) have no next-check time"
+        )
+
     critical = ruleset is None or any(not c["healthy"] for c in components.values())
+    queue_degraded = bool(overdue_holds or holds_missing_next_check)
     return {
-        "status": "critical" if critical else ("degraded" if fallback_reason else "ok"),
+        "status": (
+            "critical" if critical
+            else "degraded" if fallback_reason or queue_degraded
+            else "ok"
+        ),
         "components": components,
         "conditions": conditions,
         "capture_enabled": bool(settings.alert_input_capture),
@@ -479,6 +525,9 @@ def health_projection(
                                  AlertDelivery.planning_state == PlanningState.HELD_QUIET),
             "held_budget": _count(AlertDelivery,
                                   AlertDelivery.planning_state == PlanningState.HELD_BUDGET),
+            "overdue_held_quiet": overdue_held_quiet,
+            "overdue_held_budget": overdue_held_budget,
+            "holds_missing_next_check": holds_missing_next_check,
             "held_grouping": _count(
                 AlertDelivery, AlertDelivery.planning_state == PlanningState.HELD_GROUPING),
             "unknown": _count(AlertDelivery,

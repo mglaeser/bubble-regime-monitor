@@ -51,6 +51,7 @@ log = get_logger(__name__)
 
 WINDOW_24H = timedelta(hours=24)
 WINDOW_168H = timedelta(hours=168)
+BUDGET_RECHECK_INTERVAL = timedelta(minutes=30)
 
 
 def _aware(moment: datetime | None) -> datetime | None:
@@ -128,6 +129,11 @@ def _insert_delivery(session: Session, intent: DeliveryIntent, *, mode: str,
         transport_status=TransportStatus.PENDING,
         planning_state=intent.planning_state,
         hold_reason_code=intent.hold_reason_code,
+        budget_recheck_at=(
+            now + BUDGET_RECHECK_INTERVAL
+            if intent.planning_state == PlanningState.HELD_BUDGET
+            else None
+        ),
         not_before=intent.not_before,
         created_at=now,
         updated_at=now,
@@ -220,6 +226,68 @@ def cancel_unsent_for_rules(session: Session, rule_ids: frozenset[str], *, mode:
 # ---------------------------------------------------------------------------
 # claiming
 # ---------------------------------------------------------------------------
+
+
+def release_due_holds(
+    session: Session,
+    *,
+    mode: str,
+    live_profile: str,
+    now: datetime,
+) -> dict[str, int]:
+    """Move due quiet/budget holds back to READY before claiming.
+
+    Budget headroom is checked again after claim, so a due budget hold either
+    sends or receives a new bounded `budget_recheck_at`; it never disappears
+    from observation.
+    """
+    released = {"quiet": 0, "budget": 0}
+    rows = session.execute(
+        select(AlertDelivery).where(
+            AlertDelivery.mode == mode,
+            AlertDelivery.live_profile == live_profile,
+            AlertDelivery.transport_status.in_(
+                [TransportStatus.PENDING, TransportStatus.RETRY_DUE]
+            ),
+            AlertDelivery.planning_state.in_(
+                [PlanningState.HELD_QUIET, PlanningState.HELD_BUDGET]
+            ),
+        )
+    ).scalars().all()
+    for delivery in rows:
+        if delivery.priority == 1:
+            # The database check makes this unreachable for persisted rows.
+            log.error("alert_p1_hold_refused", delivery_id=delivery.delivery_id)
+            continue
+
+        hold = PlanningState(delivery.planning_state)
+        if hold == PlanningState.HELD_QUIET:
+            due_at = _aware(delivery.not_before)
+            key = "quiet"
+        else:
+            due_at = _aware(delivery.budget_recheck_at)
+            # Recover pre-release-mechanism rows after the same bounded
+            # interval rather than stranding them forever.
+            if due_at is None:
+                updated_at = _aware(delivery.updated_at)
+                due_at = updated_at + BUDGET_RECHECK_INTERVAL if updated_at else None
+            key = "budget"
+        if due_at is None or due_at > now:
+            continue
+
+        delivery.planning_state = PlanningState.READY
+        delivery.hold_reason_code = None
+        delivery.budget_recheck_at = None
+        delivery.updated_at = now
+        released[key] += 1
+        _event(
+            session,
+            now,
+            action="delivery_hold_released",
+            delivery_id=delivery.delivery_id,
+            detail=f"released {hold.value} due_at={due_at.isoformat()}",
+        )
+    return released
 
 
 def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
@@ -450,7 +518,7 @@ def hold_for_budget(session: Session, delivery: AlertDelivery, reason: str,
     delivery.hold_reason_code = reason
     delivery.lease_owner = None
     delivery.lease_until = None
-    delivery.budget_recheck_at = now + timedelta(minutes=30)
+    delivery.budget_recheck_at = now + BUDGET_RECHECK_INTERVAL
     delivery.updated_at = now
     _event(session, now, action="delivery_held_budget", delivery_id=delivery.delivery_id,
            detail=reason)

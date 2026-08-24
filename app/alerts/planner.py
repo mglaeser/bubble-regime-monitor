@@ -399,15 +399,15 @@ def reminder_intent(
         origin_phrase_set_sha256=inputs.phrase_set_sha256,
         priority=rule.priority,
     )
+    release_at = release_time_for(rule.priority, inputs.now)
+    held_quiet = rule.priority != Priority.P1 and release_at > inputs.now
     return DeliveryIntent(
         delivery_kind=DeliveryKind.REMINDER,
         priority=rule.priority,
         members=[member],
         dedupe_key=dedupe_key(delivery_kind=DeliveryKind.REMINDER, members=[member],
                               scheduled_window_key=None, manual_retry_sequence=0),
-        planning_state=(PlanningState.READY if rule.priority == Priority.P1
-                        else PlanningState.HELD_QUIET
-                        if release_time_for(rule.priority, inputs.now) > inputs.now
-                        else PlanningState.READY),
-        not_before=release_time_for(rule.priority, inputs.now),
+        planning_state=(PlanningState.HELD_QUIET if held_quiet else PlanningState.READY),
+        not_before=release_at,
+        hold_reason_code="quiet_hours" if held_quiet else None,
     )
