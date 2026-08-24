@@ -40,6 +40,11 @@ END_1986, END_CV90, END_CV95 = 1.1315, 1.1769, 1.4315          # does not reject
 _CACHED = (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology)
 
 
+def s4_gsadf_module():
+    from app.indicators import s4_gsadf
+    return s4_gsadf
+
+
 @pytest.fixture
 def scored_as(monkeypatch):
     """Flip the import-time selection for one test.
@@ -208,7 +213,13 @@ class TestABadArtifactRefusesToIMPORT:
             fn.cache_clear()
         try:
             import app.indicators.s4_gsadf as mod
-            return importlib.reload(mod), None
+            reloaded = importlib.reload(mod)
+            # Snapshot the values NOW: the finally below reloads the same module
+            # object back to the real artifact, so returning `mod` would hand
+            # back the restored constants and the test would assert nothing.
+            return {"SCORED_STATISTIC": reloaded.SCORED_STATISTIC,
+                    "CONTESTED_RULE": reloaded.CONTESTED_RULE,
+                    "ASYMMETRIC_CONTESTED": reloaded.ASYMMETRIC_CONTESTED}, None
         except Exception as exc:                       # noqa: BLE001 -- that IS the assertion
             return None, exc
         finally:
@@ -231,23 +242,37 @@ class TestABadArtifactRefusesToIMPORT:
         ("gsadf section absent", lambda d: d.pop("gsadf"), Exception),
     ])
     def test_it_refuses_to_import(self, tmp_path, label, mutate, expected):
-        mod, exc = self._import_with(tmp_path, mutate)
+        _vals, exc = self._import_with(tmp_path, mutate)
         assert exc is not None, f"{label}: imported anyway, so it would be scored around"
         assert isinstance(exc, expected), f"{label}: {type(exc).__name__}: {exc}"
 
     def test_a_healthy_artifact_imports_and_scores(self, tmp_path):
         """The guard that matters most: refusing a BAD artifact is worthless if
         it also refuses a good one, and that failure would be total."""
-        mod, exc = self._import_with(tmp_path, lambda d: None)
+        vals, exc = self._import_with(tmp_path, lambda d: None)
         assert exc is None, f"healthy artifact refused to import: {exc}"
-        assert mod.SCORED_STATISTIC == "bsadf_endpoint"
-        assert mod.CONTESTED_RULE == "asymmetric" and mod.ASYMMETRIC_CONTESTED is True
+        assert vals["SCORED_STATISTIC"] == "bsadf_endpoint"
+        assert vals["CONTESTED_RULE"] == "asymmetric"
+        assert vals["ASYMMETRIC_CONTESTED"] is True
         snap = compute_snapshot(_raw_diverging(), gsadf_contested=False)
         assert snap.indicators["s4"].state == "COMPUTED"
         assert snap.coverage["degraded"] is False
 
+    def test_asymmetric_is_derived_from_the_rule_not_assumed(self, tmp_path):
+        """ASYMMETRIC_CONTESTED must follow CONTESTED_RULE. Hardcoding it True
+        survives every test that sets both explicitly, so this reloads the module
+        under "symmetric" and checks the derivation itself."""
+        vals, exc = self._import_with(
+            tmp_path, lambda d: d["gsadf"].__setitem__("contested_rule", "symmetric"))
+        assert exc is None, exc
+        assert vals["CONTESTED_RULE"] == "symmetric"
+        assert vals["ASYMMETRIC_CONTESTED"] is False
+        # ...and the shipped artifact is the other way round, restored after.
+        assert s4_gsadf_module().CONTESTED_RULE == "asymmetric"
+        assert s4_gsadf_module().ASYMMETRIC_CONTESTED is True
+
     def test_the_error_names_the_constant_and_the_allowed_values(self, tmp_path):
-        _, exc = self._import_with(
+        _vals, exc = self._import_with(
             tmp_path, lambda d: d["gsadf"].__setitem__("statistic", "sadf"))
         text = str(exc)
         assert "gsadf.statistic" in text and "sadf" in text

@@ -109,6 +109,8 @@ def _frozen_enum(key: str) -> str:
             f"frozen_methodology.json gsadf.{key}={value!r} is not one of "
             f"{_ALLOWED[key]}; refusing to import rather than score under a rule "
             "nobody chose")
+    # str() is for the TYPE, not the value: get_path is typed Any, and membership
+    # in _ALLOWED already proves this is one of those exact strings.
     return str(value)
 
 
