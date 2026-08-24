@@ -398,3 +398,25 @@ def test_only_failures_that_wrote_nothing_are_auto_retryable(monkeypatch, exc,
     result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
     assert result.may_retry_automatically is retryable, result.outcome
     assert result.request_started is not retryable
+
+
+def test_a_correlation_id_is_redacted_like_any_other_proxy_string(monkeypatch):
+    """It is server-controlled text that lands on the delivery row.
+
+    A correlation id has no business carrying a recipient, but that is a
+    statement about the proxy's intent rather than a property this code can
+    rely on.
+    """
+    _configured(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json={
+            "operation_id": "op-for-someone@icloud.com-and-+4915100000000",
+            "state": "accepted"})
+
+    result = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    assert result.outcome == SenderOutcome.CONFIRMED_SUCCESS
+    correlation = result.provider_correlation_id or ""
+    assert "someone@icloud.com" not in correlation
+    assert "+4915100000000" not in correlation
+    assert len(correlation) <= 128

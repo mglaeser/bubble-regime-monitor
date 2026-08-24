@@ -436,8 +436,16 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
                 error_message_redacted="202 carried no accepted SendOperation",
                 request_started=True,
             )
+        # The operation id is SERVER-CONTROLLED text that gets persisted on the
+        # delivery row, so it goes through the same redaction as any other
+        # string the proxy hands us. A correlation id has no business carrying
+        # a recipient or a credential, but "has no business" is a statement
+        # about the proxy's intent, not a property this code can rely on — and
+        # a misconfigured or hostile one echoing the destination would put it
+        # somewhere nothing ever looks again.
         return SendResult(outcome=SenderOutcome.CONFIRMED_SUCCESS, http_status=status,
-                          provider_correlation_id=operation_id, request_started=True)
+                          provider_correlation_id=sanitize(operation_id, limit=128),
+                          request_started=True)
 
     if 200 <= status < 300:
         return SendResult(
