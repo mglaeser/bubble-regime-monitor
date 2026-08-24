@@ -658,3 +658,99 @@ def test_a_ruleset_recording_no_stage_cannot_justify_a_send():
         blockers = delivery_admission_blockers(session, "8" * 64)
 
     assert any("does not record a stage" in b for b in blockers)
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_blocked_deliveries_do_not_consume_the_claim_budget(monkeypatch):
+    """Blocked rows stay PENDING, so a fully-blocked page repeats forever.
+
+    Everything behind it would starve — the same total outage the per-delivery
+    check was introduced to prevent, arriving one page at a time.
+    """
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    def _row(delivery_id, sha):
+        return type("D", (), {"delivery_id": delivery_id,
+                              "planning_rules_sha256": sha})()
+
+    # five stale rows ahead of one good one, with a claim limit of five
+    queue = [_row(f"stale{i}", "superseded") for i in range(5)] + [_row("good", "fine")]
+
+    def _claimable(session, *, limit, **kw):
+        return queue[:limit]
+
+    monkeypatch.setattr(dispatcher_module, "claimable", _claimable)
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: [])
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
+                        lambda session, sha, **kw:
+                        ["stage 3: superseded"] if sha == "superseded" else [])
+
+    claimed: list[str] = []
+    monkeypatch.setattr(dispatcher_module, "claim",
+                        lambda session, delivery_id, **kw:
+                        claimed.append(delivery_id) or True)
+    monkeypatch.setattr(dispatcher_module, "_process", lambda *a, **kw: None)
+
+    report = dispatch_once(session_scope, phrase_set=None, mode="live",
+                           live_profile="default", limit=5)
+
+    assert claimed == ["good"], (
+        f"work behind a fully-blocked page was starved: {claimed}")
+    assert report.held == 5
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_the_widening_search_is_bounded(monkeypatch):
+    """A queue of nothing but blocked rows must not become an unbounded scan."""
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    fetches: list[int] = []
+
+    def _claimable(session, *, limit, **kw):
+        fetches.append(limit)
+        return [type("D", (), {"delivery_id": f"d{i}",
+                               "planning_rules_sha256": "superseded"})()
+                for i in range(limit)]
+
+    monkeypatch.setattr(dispatcher_module, "claimable", _claimable)
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: [])
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
+                        lambda session, sha, **kw: ["stage 3: superseded"])
+    monkeypatch.setattr(dispatcher_module, "_process", lambda *a, **kw: None)
+
+    dispatch_once(session_scope, phrase_set=None, mode="live",
+                  live_profile="default", limit=5)
+
+    assert len(fetches) == dispatcher_module._ADMISSION_PAGES
+    assert fetches == [5, 10, 20, 40, 80], fetches
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_a_blocked_ruleset_is_reported_once_not_once_per_page(monkeypatch):
+    """The widening search must not multiply the log or the held count."""
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import dispatch_once
+    from app.db import session_scope
+
+    def _claimable(session, *, limit, **kw):
+        return [type("D", (), {"delivery_id": f"d{i}",
+                               "planning_rules_sha256": "superseded"})()
+                for i in range(limit)]
+
+    monkeypatch.setattr(dispatcher_module, "claimable", _claimable)
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers",
+                        lambda session, **kw: [])
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
+                        lambda session, sha, **kw: ["stage 3: superseded"])
+    monkeypatch.setattr(dispatcher_module, "_process", lambda *a, **kw: None)
+
+    report = dispatch_once(session_scope, phrase_set=None, mode="live",
+                           live_profile="default", limit=5)
+
+    assert report.notes.count("stage 3: superseded") == 1

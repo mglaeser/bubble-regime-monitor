@@ -228,6 +228,13 @@ def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
     return True
 
 
+#: How far the dispatcher will look past blocked deliveries for sendable work.
+#: Bounded so a queue of nothing but blocked rows cannot turn one pass into an
+#: unbounded scan; doubling means the reach is 2**N * limit, which covers any
+#: realistic backlog in a handful of queries.
+_ADMISSION_PAGES = 5
+
+
 def dispatch_once(
     session_factory: Any,
     *,
@@ -269,40 +276,63 @@ def dispatch_once(
     with session_factory() as session:
         report.recovered = recover_leases(session, now=now)
 
+    blocked_ids: set[str] = set()
+    # Per pass, not global: a ruleset cleared once does not need re-checking
+    # while the search widens, and the memo dies with the pass so a promotion
+    # or revocation between passes is always seen.
+    _checked_ok: set[str] = set()
     with session_factory() as session:
-        pending = list(claimable(session, mode=mode, live_profile=live_profile,
-                                 now=now, limit=limit))
-        candidates = [d.delivery_id for d in pending]
-
         # A queued delivery carries the hash of the ruleset that PLANNED it,
         # and a promotion between planning and dispatch means that is no longer
         # the ruleset checked above. Judging a message by rules that did not
         # authorise it is the mismatch: something else being fine now does not
         # make this one sendable.
         #
-        # This is decided PER DELIVERY, not per pass. The previous version
-        # refused the whole pass if any queued delivery was unbacked, which
-        # turned one stale message from a superseded ruleset into a permanent
-        # outage of every live alert — including P1 — with no way out that did
-        # not involve editing the database. A control that can silence the
-        # alert path entirely is worse than the mismatch it prevents.
-        if live:
-            blocked_ids: set[str] = set()
+        # Decided PER DELIVERY, not per pass. Refusing the whole pass turned one
+        # stale message from a superseded ruleset into a permanent outage of
+        # every live alert, P1 included.
+        #
+        # And blocked rows must not consume the claim budget either. They stay
+        # PENDING, so a page that is entirely blocked would come back
+        # identically on every pass and everything behind it would starve
+        # forever — the same outage arriving a page at a time. So the search
+        # widens past them, bounded, until enough sendable work is found or the
+        # queue is exhausted.
+        candidates: list[str] = []
+        fetch = limit
+        for _ in range(_ADMISSION_PAGES):
+            pending = list(claimable(session, mode=mode, live_profile=live_profile,
+                                     now=now, limit=fetch))
+            if not live:
+                candidates = [d.delivery_id for d in pending]
+                break
+
             by_sha: dict[str, list[str]] = {}
             for delivery in pending:
                 by_sha.setdefault(delivery.planning_rules_sha256, []).append(
                     delivery.delivery_id)
             for rules_sha, ids in sorted(by_sha.items()):
+                if rules_sha in _checked_ok:
+                    continue
                 found = delivery_admission_blockers(session, rules_sha)
                 if found:
+                    if not blocked_ids.intersection(ids):
+                        report.notes.extend(found)
+                        log.error("alert_queued_admission_refused",
+                                  rules_sha256=rules_sha[:12],
+                                  deliveries=len(ids), blockers=found)
                     blocked_ids.update(ids)
-                    report.notes.extend(found)
-                    log.error("alert_queued_admission_refused",
-                              rules_sha256=rules_sha[:12], deliveries=len(ids),
-                              blockers=found)
-            if blocked_ids:
-                report.held += len(blocked_ids)
-                candidates = [d for d in candidates if d not in blocked_ids]
+                else:
+                    _checked_ok.add(rules_sha)
+
+            candidates = [d.delivery_id for d in pending
+                          if d.delivery_id not in blocked_ids][:limit]
+            if len(candidates) >= limit or len(pending) < fetch:
+                break
+            fetch *= 2
+
+        if blocked_ids:
+            report.held += len(blocked_ids)
 
     for delivery_id in candidates:
         with session_factory() as session:
