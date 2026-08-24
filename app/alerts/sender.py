@@ -46,6 +46,11 @@ TIMEOUT = httpx.Timeout(connect=5.0, read=25.0, write=10.0, pool=5.0)
 #: one of these forever would be the loudest possible way to achieve nothing.
 _PERMANENT = frozenset({400, 401, 402, 403, 404, 405, 409, 410, 413, 415, 422})
 
+#: Profile labels this deployment can route. One recipient is configured, so
+#: these are the labels that mean it; anything else is a delivery planned for a
+#: profile that does not exist here, and must not be sent to the one that does.
+_KNOWN_PROFILES = frozenset({"default", "primary"})
+
 
 @dataclass(frozen=True)
 class SendResult:
@@ -219,7 +224,7 @@ def _resolve_recipient(recipient_ref: str, settings: object) -> str:
     The number itself never enters the database, an API response or a log —
     only this handle does.
     """
-    if recipient_ref in ("default", "primary"):
+    if recipient_ref in _KNOWN_PROFILES:
         return getattr(settings, "sipgate_recipient", "")
     return ""
 
@@ -498,9 +503,20 @@ def _classify_imessage_response(response: httpx.Response, accepted_id: Any) -> S
 
 
 def _resolve_imessage_recipient(recipient_ref: str, settings: Any) -> str:
-    """The configured handle. `recipient_ref` is an opaque profile label.
+    """The configured handle for a KNOWN profile label.
 
-    Never the address itself: mandate 13 forbids recipient PII in persisted or
-    returned data, and the delivery row carries this ref.
+    `recipient_ref` is an opaque profile label, never the address itself:
+    mandate 13 forbids recipient PII in persisted or returned data, and the
+    delivery row carries this ref.
+
+    It used to ignore the ref and return the configured handle for anything at
+    all. With one recipient configured that looks harmless, and it means a
+    delivery planned for a profile this deployment does not have would be sent
+    to the profile it does — the operator receiving someone else's alert with
+    nothing marking it as misrouted. An unknown profile resolves to nothing,
+    which the caller reports as NO_RECIPIENT: a permanent rejection that names
+    the problem beats a message delivered to the wrong person.
     """
+    if recipient_ref not in _KNOWN_PROFILES:
+        return ""
     return str(getattr(settings, "imessage_recipient", "") or "")
