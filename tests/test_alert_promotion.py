@@ -754,3 +754,37 @@ def test_a_blocked_ruleset_is_reported_once_not_once_per_page(monkeypatch):
                            live_profile="default", limit=5)
 
     assert report.notes.count("stage 3: superseded") == 1
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_an_active_ruleset_change_before_the_wire_is_caught(monkeypatch):
+    """The two gates answer different questions and either can turn false.
+
+    Re-checking only the delivery's planning ruleset left a demotion or a
+    ruleset swap between the pass-level check and the send completely unseen —
+    and that is the change an operator makes when they want messages to stop.
+    """
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.dispatcher import DispatchReport, dispatch_once
+    from app.db import session_scope
+
+    calls: list[str] = []
+
+    def _live(session, **kw):
+        calls.append("live")
+        # fine at the pass-level check, withdrawn by the time we send
+        return ["stage 3: the deployment was demoted"] if len(calls) > 1 else []
+
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers", _live)
+    monkeypatch.setattr(dispatcher_module, "delivery_admission_blockers",
+                        lambda session, sha, **kw: [])
+
+    class _Explodes:
+        def send(self, *a, **k):
+            raise AssertionError("sent after the deployment was demoted")
+
+    report = dispatch_once(session_scope, phrase_set=None, mode="live",
+                           live_profile="default", sender=_Explodes())
+    assert isinstance(report, DispatchReport)
+    assert report.sent == 0
+    assert len(calls) >= 1

@@ -424,8 +424,17 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # pass picks it up. An authorisation that has just been withdrawn is a
         # condition to wait out, not a property of this message.
         if is_live(mode):
-            late = delivery_admission_blockers(
-                session, delivery.planning_rules_sha256)
+            # BOTH gates, not just the delivery's. They answer different
+            # questions and either can turn false in the gap: the deployment
+            # can be demoted or its ruleset swapped (live_admission_blockers),
+            # and this message's own planning ruleset can be revoked
+            # (delivery_admission_blockers). Re-checking only the second left
+            # an active-ruleset change between the pass-level check and the
+            # wire completely unseen — which is the one an operator makes when
+            # they want messages to stop.
+            late = [*live_admission_blockers(session),
+                    *delivery_admission_blockers(
+                        session, delivery.planning_rules_sha256)]
             if late:
                 report.notes.extend(late)
                 report.held += 1
