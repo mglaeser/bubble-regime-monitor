@@ -277,9 +277,11 @@ def _green(votes: list[dict]) -> list[dict]:
 
 
 def strict_any_refutation(votes: list[dict], models: list[str]) -> dict[str, Any]:
-    """OPT-IN strict mode (VERIFIER_STRICT_ANY_REFUTATION=true): block when ANY
-    valid voice refutes with confidence high/medium — not only the required
-    approver. OFF by default to stay mechanism-identical to the reference,
+    """Strict mode (VERIFIER_STRICT_ANY_REFUTATION): block when ANY valid voice
+    refutes with confidence high/medium — not only the required approver.
+
+    ON unless explicitly disabled, so an absent or misspelled variable cannot
+    retire the gate. It exists because the reference mechanism
     whose documented semantics green on Sol + one corroborator even if a third
     voice refutes (that property was flagged by the panel itself — Sol veto on
     PR #21 — and is hereby operator-selectable)."""
@@ -1546,7 +1548,24 @@ def main() -> int:
     # Gates in order, short-circuiting on the FIRST block — the order is the
     # semantics and does not change. What is new is that the gates evaluated so
     # far are collected, so the summary can name which one blocked and why.
-    strict_on = (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").lower() in ("1", "true", "yes")
+    # STRICT MODE, configurable but FAIL-CLOSED ON ABSENCE.
+    #
+    # This was hardcoded "true" because "a merge control that a variable can
+    # silently switch off is not a control". Operator decision: make it settable
+    # again. The hole that reasoning guarded against is that the old predicate
+    # treated UNSET as OFF, so deleting the variable — or misspelling it in the
+    # workflow, or a repo restore that drops repo vars — retires the gate with no
+    # signal anywhere. So absence now means ON: only an EXPLICIT off value turns
+    # it off, and whichever way it resolves is named in the step summary, so a
+    # relaxation appears in the run log instead of being invisible.
+    _strict_raw = (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").strip()
+    strict_on = _strict_raw.lower() not in ("0", "false", "no", "off")
+    strict_source = (
+        "unset -> ON (fail-closed default)" if not _strict_raw
+        else f"VERIFIER_STRICT_ANY_REFUTATION={_strict_raw!r} -> "
+             f"{'ON' if strict_on else 'OFF'}")
+    print(f"[independent-verify] strict mode: {strict_source}")
+    gates_prefix: list[tuple[str, dict]] = []
     pending: list[tuple[str, str, Any]] = [
         ("distinct-voices gate", "distinct voices", lambda: require_distinct_voices(models)),
         ("required-approver gate", "required-approver",
@@ -1555,6 +1574,14 @@ def main() -> int:
     if strict_on:
         pending.append(("strict-mode gate", "strict mode",
                         lambda: strict_any_refutation(votes, models)))
+    else:
+        # Recorded as an explicitly DISABLED gate rather than omitted: a gate that
+        # vanishes from the report is indistinguishable from one that never
+        # existed, which is how a silently switched-off control stays silent.
+        gates_prefix.append(
+            ("strict mode", {"block": False,
+                             "reason": f"DISABLED by configuration ({strict_source}) — "
+                                       "a single refuting voice no longer blocks"}))
     require_ledger = (os.environ.get("VERIFIER_REQUIRE_DEFECT_LIST") or "").lower() in (
         "1", "true", "yes")
     pending += [
@@ -1565,6 +1592,7 @@ def main() -> int:
     ]
 
     gates: list[tuple[str, dict]] = []
+    gates.extend(gates_prefix)
     for log_name, summary_name, run in pending:
         result = run()
         gates.append((summary_name, result))

@@ -178,7 +178,16 @@ jobs:
           VERIFIER_PANEL_MODELS: ${{ vars.VERIFIER_PANEL_MODELS }}
           VERIFIER_REQUIRED_APPROVER: ${{ vars.VERIFIER_REQUIRED_APPROVER }}
           VERIFIER_MIN_OTHER_APPROVERS: ${{ vars.VERIFIER_MIN_OTHER_APPROVERS }}
-          VERIFIER_STRICT_ANY_REFUTATION: "true"
+          # Operator-settable again (repo variable). It was hardcoded on the
+          # reasoning that "a merge control that a variable can silently switch
+          # off is not a control" — that hole is closed in the script instead:
+          # an ABSENT or blank value now resolves to ON, so deleting the
+          # variable, misspelling it here, or restoring a repo without its vars
+          # cannot retire the gate. Only an explicit off value disables it, and
+          # the resolution is printed and shown in the step summary as an
+          # explicitly DISABLED gate, so a relaxation is visible in the run
+          # rather than being an absence nobody notices.
+          VERIFIER_STRICT_ANY_REFUTATION: ${{ vars.VERIFIER_STRICT_ANY_REFUTATION }}
           # Require every APPROVING voice to carry a machine-readable "defects"
           # ledger, and block when that ledger contradicts the boolean. Hardcoded
           # rather than a repo variable for the same reason as the line above: a

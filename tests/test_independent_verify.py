@@ -10,6 +10,7 @@ runtime; here the same guarantees ride the normal pytest suite.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -133,6 +134,33 @@ class TestPanelFindingsOnItself:
     def test_privacy_excludes_are_case_insensitive(self):
         # uppercase .PNG/.SVG/.PDF must be excluded exactly like lowercase
         assert all(spec.startswith(":(exclude,icase,glob)") for spec in iv._EXCLUDES)
+
+    @pytest.mark.parametrize("value,expected_on", [
+        (None, True),          # variable deleted
+        ("", True),            # variable present but empty
+        ("   ", True),         # whitespace only
+        ("flase", True),       # typo'd value
+        ("maybe", True),       # anything unrecognised
+        ("true", True),
+        ("1", True),
+        ("false", False),      # the only way off is to SAY so
+        ("FALSE", False),
+        ("off", False),
+        ("0", False),
+    ])
+    def test_strict_mode_resolves_fail_closed(self, monkeypatch, value, expected_on):
+        """Absence must not disable the gate.
+
+        The flag was hardcoded because "a merge control that a variable can
+        silently switch off is not a control". Making it settable is only safe
+        while the ABSENT case means ON: otherwise deleting the variable,
+        misspelling it in the workflow, or restoring a repo without its vars
+        retires the gate with no signal. Only an explicit off value disables it."""
+        monkeypatch.delenv("VERIFIER_STRICT_ANY_REFUTATION", raising=False)
+        if value is not None:
+            monkeypatch.setenv("VERIFIER_STRICT_ANY_REFUTATION", value)
+        raw = (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").strip()
+        assert (raw.lower() not in ("0", "false", "no", "off")) is expected_on
 
     def test_strict_mode_blocks_any_high_medium_refutation(self):
         models = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
