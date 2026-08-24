@@ -153,10 +153,43 @@ def _classify_exception(exc: Exception, *, request_started: bool) -> SendResult:
 
 
 def classify_response(status_code: int, body: str) -> SendResult:
-    """Map an HTTP response to a typed outcome. Pure; unit-testable."""
-    if 200 <= status_code < 300:
+    """Map a sipgate response to a typed outcome. Pure; unit-testable.
+
+    This carried every defect the iMessage classifier had already fixed, which
+    is what happens when two transports classify separately: only one of them
+    learns. Sipgate's contract is 204 No Content, exactly.
+
+    * Any other 2xx did NOT come from the send route — a captive portal, a
+      health page, a wrong base URL — and calling it success records an alert
+      as delivered while it went nowhere. Permanent, because the same request
+      to the same wrong place keeps "succeeding" at nothing.
+    * A 3xx or 5xx follows a fully transmitted POST, so the message may
+      already have been accepted. AMBIGUOUS — auto-retrying it is the
+      duplicate the four-outcome contract exists to prevent.
+    * A definite 4xx decline stays retryable only where the provider said
+      "not now" (429); the `_PERMANENT` set stays permanent.
+    """
+    if status_code == 204:
         return SendResult(outcome=SenderOutcome.CONFIRMED_SUCCESS,
                           http_status=status_code, request_started=True)
+    if 200 <= status_code < 300:
+        return SendResult(
+            outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
+            http_status=status_code,
+            error_code="UNEXPECTED_SUCCESS_STATUS",
+            error_message_redacted=(f"{status_code} where the contract "
+                                    "specifies 204; this reply did not come "
+                                    "from the send route"),
+            request_started=True,
+        )
+    if 300 <= status_code < 400 or status_code >= 500:
+        return SendResult(
+            outcome=SenderOutcome.AMBIGUOUS_AFTER_TRANSMISSION,
+            http_status=status_code,
+            error_code=f"HTTP_{status_code}",
+            error_message_redacted=sanitize(body),
+            request_started=True,
+        )
     if status_code in _PERMANENT:
         return SendResult(
             outcome=SenderOutcome.DEFINITE_PERMANENT_REJECTION,
@@ -165,7 +198,7 @@ def classify_response(status_code: int, body: str) -> SendResult:
             error_message_redacted=sanitize(body),
             request_started=True,
         )
-    # 429 and 5xx with a real response: the provider answered and declined.
+    # 429 and unlisted 4xx: the provider answered and declined; safe to repeat.
     return SendResult(
         outcome=SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED,
         http_status=status_code,

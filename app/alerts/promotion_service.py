@@ -146,6 +146,10 @@ def _mark_promoted(session: Session, rules_sha256: str, *, actor: str,
     row.promoted_at = now
     row.promoted_by = sanitize(actor)
     row.evidence_checked_at = now
+    # A re-promoted row is not superseded any more. Leaving the old stamp made
+    # the row say two things at once, and anything reading `superseded_at` as
+    # "no longer current" would treat the CURRENT promotion as retired.
+    row.superseded_at = None
 
 
 def evidence_verdict(evidence_path: str | Path | None = None) -> dict[str, Any]:

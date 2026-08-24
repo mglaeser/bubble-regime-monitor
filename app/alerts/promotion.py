@@ -390,6 +390,14 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
         return [f"this delivery was planned at stage {planned_stage} and the "
                 f"deployment now runs at stage {current}; the queue must not "
                 "outlive the decision that lowered it"]
+    if planned_stage < LIVE_DELIVERY_STAGE:
+        # Planned while delivery was not admitted at all. Promotion to stage 3
+        # must not drain a queue that predates it: those messages were built
+        # when nothing was allowed to reach a phone, are stale by the time the
+        # stage rises, and were never part of what the operator promoted.
+        return [f"this delivery was planned at stage {planned_stage}, below "
+                f"the delivery floor (stage {LIVE_DELIVERY_STAGE}); raising "
+                "the stage later does not authorise work queued before it"]
 
     return []
 

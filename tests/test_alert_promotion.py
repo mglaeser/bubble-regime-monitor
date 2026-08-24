@@ -255,7 +255,7 @@ def test_an_unpromoted_ruleset_cannot_send():
 
 
 @pytest.mark.usefixtures("isolated_db")
-def test_an_archived_ruleset_may_still_finish_what_it_started():
+def test_an_archived_ruleset_may_still_finish_what_it_started(monkeypatch):
     """Continuation deliveries must not be stranded forever.
 
     An archived ruleset that still owns open episodes keeps being evaluated
@@ -266,17 +266,14 @@ def test_an_archived_ruleset_may_still_finish_what_it_started():
     """
     from datetime import UTC, datetime
 
-    from app.alerts.artifacts import load_active
     from app.alerts.enums import RulesetStatus
     from app.alerts.models import AlertRulesetRegistry
     from app.alerts.promotion import delivery_admission_blockers
     from app.db import session_scope
 
     with session_scope() as session:
-        loaded = load_active(session)
-        register_promoted(session, loaded)
-        session.flush()
-        sha = loaded.ruleset.rules_sha256
+        sha = _promoted_stage3(session, sha="3" * 64)
+        _deployment_at_stage(monkeypatch, 3)
 
         # superseded by something newer: archived, but it WAS promoted
         row = session.get(AlertRulesetRegistry, sha)
@@ -491,6 +488,64 @@ def test_revoking_a_ruleset_stops_the_messages_already_queued():
     assert any("REVOKED" in b for b in blockers)
 
 
+def _deployment_at_stage(monkeypatch, stage: int) -> None:
+    """Make `delivery_admission_blockers` see the deployment at `stage`.
+
+    The committed ruleset is stage 1 and the floor blocks per-delivery
+    admission below stage 3 outright — so tests exercising promotion,
+    supersession and revocation semantics stub the ACTIVE stage rather than
+    editing config on disk.
+    """
+    from types import SimpleNamespace
+
+    import app.alerts.artifacts as artifacts_module
+
+    real = artifacts_module.load_active
+
+    def _stubbed(session, **kw):
+        loaded = real(session, **kw)
+        meta = SimpleNamespace(active_stage=stage,
+                               rule_version=loaded.ruleset.document.meta.rule_version)
+        document = SimpleNamespace(meta=meta)
+        ruleset = SimpleNamespace(
+            document=document,
+            rules_sha256=loaded.ruleset.rules_sha256,
+            phrase_set_sha256=loaded.ruleset.phrase_set_sha256,
+            phrase_set_version=getattr(loaded.ruleset, "phrase_set_version", None))
+        return SimpleNamespace(ruleset=ruleset, phrase_set=loaded.phrase_set)
+
+    monkeypatch.setattr(artifacts_module, "load_active", _stubbed)
+
+
+def _promoted_stage3(session, *, sha: str, superseded: bool = False):
+    """A promoted registry row whose ruleset declares stage 3.
+
+    The committed ruleset is stage 1, and the delivery floor now blocks
+    anything planned below stage 3 — so per-delivery admission tests that mean
+    to exercise promotion, supersession and revocation semantics need a
+    planning ruleset that is allowed to deliver at all.
+    """
+    import yaml as _yaml
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.enums import RulesetStatus
+    from app.alerts.models import AlertRulesetRegistry
+    from tests.conftest import register_promoted
+
+    loaded = load_active(session)
+    base = register_promoted(session, loaded)
+    doc = _yaml.safe_load(session.get(AlertRulesetRegistry, base).canonical_yaml)
+    doc["meta"]["active_stage"] = 3
+    _registry_clone(session, base, sha=sha, yaml_text=_yaml.safe_dump(doc))
+    row = session.get(AlertRulesetRegistry, sha)
+    row.evidence_checked_at = row.promoted_at
+    if not superseded:
+        row.status = RulesetStatus.PROMOTED
+        row.superseded_at = None
+    session.flush()
+    return sha
+
+
 def _registry_clone(session, source_sha: str, *, sha: str, yaml_text: str):
     """A second registry row. The bytes are immutable under a hash — correctly
     — so a variant needs its own row rather than an edit to the original.
@@ -518,40 +573,64 @@ def _registry_clone(session, source_sha: str, *, sha: str, yaml_text: str):
 
 
 @pytest.mark.usefixtures("isolated_db")
-def test_a_demotion_stops_deliveries_already_queued_at_the_higher_stage():
+def test_a_demotion_stops_deliveries_already_queued_at_the_higher_stage(monkeypatch):
     """The queue must not outlive the decision that lowered it.
 
     Promotion authorises the ruleset's existence; it does not freeze the stage.
-    Checking only "was promoted" let a message planned at stage 3 under a
-    since-superseded ruleset go out after the operator demoted to stage 1 —
+    Checking only "was promoted" let a message planned at stage 4 under a
+    since-superseded ruleset go out after the operator demoted to stage 3 —
     which is precisely when they are trying to make messages stop.
     """
     import yaml
 
-    from app.alerts.artifacts import load_active
     from app.alerts.models import AlertRulesetRegistry
     from app.alerts.promotion import delivery_admission_blockers
     from app.db import session_scope
 
     with session_scope() as session:
-        loaded = load_active(session)
-        register_promoted(session, loaded)
-        session.flush()
-        sha = loaded.ruleset.rules_sha256
+        sha = _promoted_stage3(session, sha="3" * 64)
+        _deployment_at_stage(monkeypatch, 3)
 
         # a continuation at the SAME stage still sends
         assert delivery_admission_blockers(session, sha) == []
 
         row = session.get(AlertRulesetRegistry, sha)
         raised = yaml.safe_load(row.canonical_yaml)
-        raised["meta"]["active_stage"] = raised["meta"]["active_stage"] + 1
+        raised["meta"]["active_stage"] = 4
         _registry_clone(session, sha, sha="9" * 64,
                         yaml_text=yaml.safe_dump(raised))
+        clone = session.get(AlertRulesetRegistry, "9" * 64)
+        clone.evidence_checked_at = clone.promoted_at
+        session.flush()
 
         blockers = delivery_admission_blockers(session, "9" * 64)
 
     assert blockers
     assert "must not outlive the decision that lowered it" in blockers[0]
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_work_planned_below_the_delivery_floor_never_becomes_sendable(monkeypatch):
+    """Raising the stage later does not authorise a queue that predates it.
+
+    A delivery planned at stage 1 was built when nothing was allowed to reach
+    a phone. Promotion to stage 3 must not drain it: those messages are stale
+    by the time the stage rises and were never part of what the operator
+    promoted.
+    """
+    from app.alerts.artifacts import load_active
+    from app.alerts.promotion import delivery_admission_blockers
+    from app.db import session_scope
+
+    with session_scope() as session:
+        loaded = load_active(session)
+        sha = register_promoted(session, loaded)      # committed stage: 1
+        _deployment_at_stage(monkeypatch, 3)          # promoted upward later
+
+        blockers = delivery_admission_blockers(session, sha)
+
+    assert blockers
+    assert "below the delivery floor" in blockers[0]
 
 
 @pytest.mark.usefixtures("isolated_db")
@@ -979,7 +1058,6 @@ def test_failed_ruleset_cannot_be_laundered_by_later_valid_promotion(monkeypatch
     from app.alerts.promotion import delivery_admission_blockers
     from app.alerts.promotion_service import validate_register_and_promote
     from app.db import session_scope
-    from tests.conftest import register_promoted
 
     with session_scope() as session:
         loaded = load_active(session)
@@ -991,19 +1069,21 @@ def test_failed_ruleset_cannot_be_laundered_by_later_valid_promotion(monkeypatch
         assert decision_c.promoted is False
         sha_c = decision_c.rules_sha256
 
-        # A then B: both genuinely promoted; B supersedes A
-        sha_a = register_promoted(
-            session, loaded, actor="operator")  # same bytes: A IS C's bytes...
-        # ...so make B distinct via the registry clone helper used elsewhere
-        _registry_clone(session, sha_a, sha="b" * 64,
-                        yaml_text=session.get(
-                            __import__("app.alerts.models", fromlist=["AlertRulesetRegistry"])
-                            .AlertRulesetRegistry, sha_a).canonical_yaml)
+        # C — registered, refused, never promoted — is excluded RIGHT NOW.
+        # (Asserted before anything else is promoted: C's bytes are also the
+        # base the stage-3 fixture below will legitimately promote, and once
+        # an operator genuinely promotes those bytes they are A, not C.)
+        assert any("never promoted" in b
+                   for b in delivery_admission_blockers(session, sha_c))
 
-        # A (== C's bytes, but genuinely promoted) may finish its queued work
+        # A then B: both genuinely promoted at a delivery stage; B supersedes A
+        sha_a = _promoted_stage3(session, sha="a" * 64)
+        _deployment_at_stage(monkeypatch, 3)
+
+        # A (genuinely promoted, evidence-stamped) may finish its queued work
         assert delivery_admission_blockers(session, sha_a) == []
 
-        # an unpromoted hash stays excluded whatever happened since
+        # a hash nobody ever registered stays excluded whatever happened since
         assert any("never promoted" in b or "not in the registry" in b
                    for b in delivery_admission_blockers(session, "c" * 64))
 
