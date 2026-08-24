@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.alerts.calendars import digest_window_key, last_closed_digest_window
@@ -279,7 +280,19 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
                  count=len(carried),
                  from_windows=sorted({i.digest_window_key for i in carried}))
 
+    # CHECK-THEN-INSERT is a race. Two runs of the job — a scheduler restart
+    # overlapping a manual trigger, two workers — can both find no delivery for
+    # this window and both proceed. `dedupe_key` is UNIQUE, so the database
+    # refuses the second rather than producing two digests for one week, which
+    # is the outcome that matters. But an unhandled IntegrityError turns the
+    # loser into a crashed job and a critical heartbeat, when the correct
+    # answer is the one the winner already produced.
+    #
+    # The insert therefore runs in a SAVEPOINT: if the unique constraint fires,
+    # only the savepoint rolls back, the surrounding transaction survives, and
+    # the existing delivery is returned as though the check had seen it.
     delivery_id = new_ulid(utc_ms(now))
+    savepoint = session.begin_nested()
     session.add(AlertDelivery(
         delivery_id=delivery_id,
         dedupe_key=digest_dedupe_key(mode=mode, live_profile=live_profile,
@@ -333,6 +346,24 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
     # A QUIET WEEK STILL SENDS. After Stage 4 this is the only scheduled
     # message the operator gets, so "nothing fired" is the proof that the
     # machinery is alive — the job the daily digest was doing by accident.
+    try:
+        session.flush()
+        savepoint.commit()
+    except IntegrityError:
+        savepoint.rollback()
+        existing = session.execute(
+            select(AlertDelivery).where(
+                AlertDelivery.dedupe_key == digest_dedupe_key(
+                    mode=mode, live_profile=live_profile, window_key=window))
+        ).scalars().first()
+        log.info("alert_digest_lost_planning_race", window=window,
+                 delivery_id=existing.delivery_id if existing else None)
+        plan.item_ids = []
+        plan.carried_forward = 0
+        plan.delivery_id = existing.delivery_id if existing else None
+        plan.skipped_reason = "another run planned this window first"
+        return plan
+
     # A digest with no members is the one legitimate memberless market
     # delivery, and it is marked so the dispatcher does not cancel it as
     # "all members resolved".
