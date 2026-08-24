@@ -748,3 +748,63 @@ def test_an_unreported_earlier_window_keeps_its_own_items():
                            planning_rules_sha256=rules_sha,
                            window_key="2026-W33", now=NOW)
         assert len(last.item_ids) == 1
+
+
+def test_every_kind_renders_from_the_phrase_set_it_was_planned_under():
+    """The registry stores the bytes precisely so this is possible.
+
+    A delivery queued before a deploy must render with the phrases it was
+    planned against. Building the body from whatever the process holds and then
+    stamping the member's version on the render row leaves a record that cannot
+    explain its own text — and resolving it for digests only left the market
+    path doing exactly that.
+    """
+    from app.alerts.artifacts import register
+    from app.alerts.dispatcher import planning_phrase_set
+    from app.alerts.models import AlertPhraseSetRegistry
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version="v3.2", phrase_set_sha256="x" * 64,
+                           window_key=WINDOW, now=NOW)
+
+        # the registry holds v3.2's real bytes; the process is holding v3.3
+        loaded = load_active(session)
+        register(session, loaded)
+        from app.alerts.phrase_registry import validate_phrase_set
+        v32 = validate_phrase_set(
+            open("config/alert_phrases.v3.2.json", encoding="utf-8").read())
+        session.add(AlertPhraseSetRegistry(
+            phrase_set_version=v32.version, phrase_set_sha256=v32.sha256,
+            canonical_json=v32.canonical_json,
+            validator_version="1", validated_at=NOW,
+            worst_case_test_sha256=v32.worst_case_test_sha256))
+        session.flush()
+
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        resolved = planning_phrase_set(session, delivery, _phrase_set())
+
+    assert resolved.version == "v3.2", (
+        "the render would have used the running phrase set, not the planned one")
+
+
+def test_an_unregistered_planning_phrase_set_falls_back_rather_than_failing():
+    """Failing the render there is worse than rendering from what we have."""
+    from app.alerts.dispatcher import planning_phrase_set
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version="v0.0-never-registered",
+                           phrase_set_sha256="z" * 64,
+                           window_key=WINDOW, now=NOW)
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        current = _phrase_set()
+        resolved = planning_phrase_set(session, delivery, current)
+
+    assert resolved.version == current.version

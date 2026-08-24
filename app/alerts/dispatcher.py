@@ -423,8 +423,15 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 and delivery.attempts == 0):
             body = existing.final_message
         else:
-            # A digest has no single subject to render facts from, so it is
-            # assembled from its own reviewed fragments and its item count.
+            # EVERY kind renders from the phrase set its members were PLANNED
+            # under, resolved from the registry. That is why the registry
+            # stores the bytes: a delivery queued before a deploy must render
+            # with the phrases it was planned against, not with whatever this
+            # process happens to hold. Resolving it for digests only — which is
+            # where I started — left the market path building a body from one
+            # phrase set and recording another beside it, so the record could
+            # not explain its own text.
+            render_phrases = planning_phrase_set(session, delivery, phrase_set)
             if delivery.delivery_kind == DeliveryKind.DIGEST:
                 context = RenderContext(members=[])
                 # NOT len(members), and not every planned member either.
@@ -445,12 +452,8 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                            func.coalesce(AlertDeliveryMember.drop_reason, "")
                            != "SILENCED_BEFORE_SEND")
                 ).scalar_one()
-                # Render from the phrase set the members were PLANNED under,
-                # not from whatever this process is holding, so the body and
-                # the provenance recorded beside it describe the same text.
-                digest_phrases = planning_phrase_set(session, delivery, phrase_set)
                 try:
-                    result = render_digest_body(digest_phrases,
+                    result = render_digest_body(render_phrases,
                                                 item_count=int(planned))
                 except RenderRejected as exc:
                     mark_render_failed(session, delivery, now=now,
@@ -458,16 +461,17 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                     report.render_failed += 1
                     return
             else:
-                context = _build_context(session, delivery, members, phrase_set)
+                context = _build_context(session, delivery, members,
+                                         render_phrases)
                 if not context.members:
                     mark_render_failed(session, delivery, now=now,
                                        reason="no renderable member context")
                     report.render_failed += 1
                     return
-                headline = _headline_for(members[0].rule_id, phrase_set)
+                headline = _headline_for(members[0].rule_id, render_phrases)
                 try:
                     result = render_with_cascade(
-                        context=context, phrase_set=phrase_set,
+                        context=context, phrase_set=render_phrases,
                         headline_code=headline, phrase_codes=[],
                         next_check_code="NEXT_RECOMPUTE", caveat_codes=[],
                         render_source=RenderSource.TEMPLATE_FULL,
@@ -482,17 +486,9 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 delivery_id=delivery_id,
                 render_source=result.render_source,
                 fallback_reason=result.fallback_reason,
-                # What the body was ACTUALLY built from. For a digest that is
-                # the planning set resolved above; for everything else it is
-                # the member's own origin, which is the set the renderer used.
-                planning_phrase_set_version=(
-                    digest_phrases.version
-                    if delivery.delivery_kind == DeliveryKind.DIGEST
-                    else members[0].origin_phrase_set_version),
-                planning_phrase_set_sha256=(
-                    digest_phrases.sha256
-                    if delivery.delivery_kind == DeliveryKind.DIGEST
-                    else members[0].origin_phrase_set_sha256),
+                # What the body was ACTUALLY built from, for every kind.
+                planning_phrase_set_version=render_phrases.version,
+                planning_phrase_set_sha256=render_phrases.sha256,
                 render_context_hash=context.context_hash(),
                 fact_catalog_hash=context.fact_catalog_hash(),
                 selected_fact_ids=result.selected_fact_ids,
