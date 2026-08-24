@@ -620,3 +620,67 @@ def test_a_hand_run_cannot_burn_the_open_week(monkeypatch):
 
     with session_scope() as session:
         assert session.execute(select(AlertDelivery)).scalars().all() == []
+
+
+def test_the_library_default_is_the_closed_window_not_the_open_one():
+    """The job passed an explicit window, so the default was the unguarded path.
+
+    Any caller omitting the argument consumed a partial week — and the window
+    key IS the digest's identity, so that week could never produce a real
+    digest afterwards.
+    """
+    from app.alerts.calendars import digest_window_key, last_closed_digest_window
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha, now=NOW)
+
+    assert plan.window_key == last_closed_digest_window(NOW)
+    assert plan.window_key != digest_window_key(NOW)
+
+
+def test_plan_digest_refuses_an_open_or_future_window():
+    """Guarding only the job left every other caller able to burn a window."""
+    from app.alerts.calendars import digest_window_key
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        for window in (digest_window_key(NOW), "2099-W40"):
+            plan = plan_digest(session, mode="shadow", live_profile="default",
+                               planning_rules_sha256=rules_sha,
+                               window_key=window, now=NOW)
+            assert plan.delivery_id is None, window
+            assert "has not closed" in (plan.skipped_reason or ""), window
+
+        assert session.execute(select(AlertDelivery)).scalars().all() == []
+
+
+def test_a_late_item_inherits_the_message_it_joins():
+    """Provenance that varies inside one message cannot answer its question."""
+    from app.alerts.models import AlertDeliveryMember
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        first = plan_digest(session, mode="shadow", live_profile="default",
+                            planning_rules_sha256=rules_sha,
+                            phrase_set_version="v3.2",
+                            phrase_set_sha256="a" * 64,
+                            window_key=WINDOW, now=NOW)
+
+        # the phrase set moves on before the late item arrives
+        _pending_item(session, rules_sha=rules_sha, rule_id="tripwire.rf4_first")
+        plan_digest(session, mode="shadow", live_profile="default",
+                    planning_rules_sha256=rules_sha,
+                    phrase_set_version="v9.9", phrase_set_sha256="b" * 64,
+                    window_key=WINDOW, now=NOW)
+
+        members = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == first.delivery_id)
+        ).scalars().all()
+
+    assert len(members) == 2
+    assert {m.origin_phrase_set_version for m in members} == {"v3.2"}, (
+        "one delivery ended up with members built from different phrase sets")

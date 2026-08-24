@@ -30,7 +30,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.alerts.calendars import digest_window_key
+from app.alerts.calendars import digest_window_key, last_closed_digest_window
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import (
     DeliveryKind,
@@ -138,6 +138,25 @@ def _absorb(session: Session, delivery: AlertDelivery, *, mode: str,
     return absorbed
 
 
+def _delivery_provenance(session: Session, delivery_id: str,
+                         fallback: tuple[str, str]) -> tuple[str, str]:
+    """The phrase set the delivery's EXISTING members were planned under.
+
+    A late item joins a message that was already assembled, so it has to carry
+    the same provenance as the rest of it. Stamping today's artifacts on it
+    would leave one delivery whose members disagree about which reviewed text
+    they were built from — and provenance that varies inside a single message
+    cannot answer the question it exists for.
+    """
+    row = session.execute(
+        select(AlertDeliveryMember.origin_phrase_set_version,
+               AlertDeliveryMember.origin_phrase_set_sha256)
+        .where(AlertDeliveryMember.delivery_id == delivery_id)
+        .order_by(AlertDeliveryMember.included_at).limit(1)
+    ).first()
+    return (row[0], row[1]) if row else fallback
+
+
 def plan_digest(session: Session, *, mode: str, live_profile: str,
                 planning_rules_sha256: str,
                 phrase_set_version: str = "", phrase_set_sha256: str = "",
@@ -150,8 +169,24 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
     same single delivery rather than three.
     """
     now = now or datetime.now(UTC)
-    window = window_key or digest_window_key(now)
+    # The DEFAULT must be the window that closed, not the one we are standing
+    # in. Defaulting to the current week meant any caller who omitted the
+    # argument consumed a partial week — and since the window key IS the
+    # digest's identity, that week could never produce a real digest
+    # afterwards. The job passed an explicit window, so the library's own
+    # default was the unguarded path.
+    window = window_key or last_closed_digest_window(now)
     plan = DigestPlan(window_key=window)
+
+    # The same invariant, enforced where it belongs. Guarding only the job left
+    # every other caller — a replay, the CLI, a test — able to burn a window
+    # that has not finished accruing.
+    if window >= digest_window_key(now):
+        plan.skipped_reason = (
+            f"{window} has not closed; digesting it would consume the window "
+            "and leave the rest of it unreported")
+        log.warning("alert_digest_refused_open_window", window=window)
+        return plan
 
     existing = session.execute(
         select(AlertDelivery).where(
@@ -169,10 +204,13 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         # both correct and what the operator expects: the message has not gone
         # anywhere, and it is supposed to describe the whole week.
         if existing.transport_status in _UNSENT:
+            inherited = _delivery_provenance(
+                session, existing.delivery_id,
+                (phrase_set_version, phrase_set_sha256))
             plan.item_ids = _absorb(session, existing, mode=mode,
                                     live_profile=live_profile, window=window,
-                                    phrase_set_version=phrase_set_version,
-                                    phrase_set_sha256=phrase_set_sha256,
+                                    phrase_set_version=inherited[0],
+                                    phrase_set_sha256=inherited[1],
                                     planning_rules_sha256=planning_rules_sha256,
                                     now=now)
             plan.skipped_reason = (
