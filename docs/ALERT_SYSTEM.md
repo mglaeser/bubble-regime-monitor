@@ -626,6 +626,50 @@ Two consequences worth knowing:
 Per mandate 9.2 the digest is reported in user load but does **not** consume
 the non-P1 budget: it is a scheduled summary, not an interruption.
 
+## 11d. The audited admin surface
+
+Four operator actions, all admin-scoped, all `no-store`:
+
+* **`POST /admin/alerts/send-test`** — queues a memberless TEST delivery. TEST
+  is the one kind allowed zero members (it is about the transport, not any
+  market condition), it is outside the non-P1 budgets, and its body is the
+  reviewed `TEST_MESSAGE` fragment. It goes through the ordinary dispatcher —
+  same claim, same admission, same classification — because a test that
+  bypassed the pipeline would prove the wrong thing.
+* **`POST /admin/alerts/deliveries/{id}/retry`** — the ONLY way past an
+  UNKNOWN outcome. Requires an `Idempotency-Key`, an operator comment, and
+  `acknowledge_duplicate_risk=true`; creates a NEW delivery with the same
+  members and generation, `manual_retry_sequence` incremented (which changes
+  the dedupe key), linked through `prior_unknown_delivery_id`. Same key with a
+  different body is 409. Anything not UNKNOWN is refused: definite failures
+  retry automatically, successes need nothing.
+* **`POST /admin/alerts/actionability`** — one human label per alert
+  (YES / NO / AMBIGUOUS), the Stage 7 evidence. AMBIGUOUS is first-class so an
+  unsure reviewer cannot inflate the KPI.
+* **`bubblegauge alerts cutover status|preflight|apply|rollback`** — the Stage
+  4 gate made checkable. Preflight evaluates every mandate condition from the
+  database (two stable live weeks, two sent digests, zero P1 holds, fresh
+  component heartbeats, reconciled UNKNOWNs) and names each unmet one. `apply`
+  refuses until preflight is clean, records an audit event, and prints the
+  exact change — the toggle itself stays the documented `DAILY_SMS_ENABLED`
+  env var, so a reversal survives an empty database and the cutover can never
+  be something the app did to itself. `rollback` is always recordable: the
+  operator reversing a cutover must not be gated on the health that prompted
+  the reversal.
+
+## 11e. Render-time truth (mandate 17.5)
+
+A member is rendered under one of four statuses, and the dispatcher now
+consults all four rather than the two easy ones: `STILL_FIRING` renders;
+`RESOLVED_BEFORE_SEND` drops the member (telling somebody about a condition
+that has cleared is worse than silence); `UNKNOWN_AT_RENDER` renders WITH the
+data-quality caveat and claims no resolution; `MATERIALLY_CHANGED_BUT_ACTIVE`
+renders trigger and current values rather than presenting stale numbers as
+now. Current facts join a render only when their schema and methodology match
+the trigger's (17.4) — otherwise the member renders from trigger facts with
+`CONTEXT_STALE`, because mixing numbers computed two different ways into one
+comparison is worse than admitting staleness.
+
 ## 12. Replay (the Stage 1 gate)
 
 Stage 1's gate is *deterministic replay; no PII; no scoring regression*.

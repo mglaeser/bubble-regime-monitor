@@ -351,3 +351,67 @@ def test_the_delivery_carries_the_runs_profile_not_the_ambient_one(monkeypatch):
 
     assert _recipient_ref("house") == "house"
     assert _recipient_ref("") == "default"
+
+
+def test_render_time_status_covers_all_four_outcomes(isolated_db):
+    """Mandate 17.5 — the two hard outcomes, not only the two easy ones.
+
+    UNKNOWN at render must carry its data-quality caveat and claim no
+    resolution; a resolved member is dropped; a materially changed member
+    renders trigger AND current rather than presenting stale numbers as now.
+    """
+    from app.alerts.render_context import render_time_status
+
+    assert render_time_status(condition_state="FIRING", resolved=True,
+                              materially_changed=False) == "RESOLVED_BEFORE_SEND"
+    assert render_time_status(condition_state="UNKNOWN", resolved=False,
+                              materially_changed=True) == "UNKNOWN_AT_RENDER"
+    assert render_time_status(condition_state="FIRING", resolved=False,
+                              materially_changed=True) \
+        == "MATERIALLY_CHANGED_BUT_ACTIVE"
+    assert render_time_status(condition_state="FIRING", resolved=False,
+                              materially_changed=False) == "STILL_FIRING"
+
+    # and the dispatcher actually consults it now — U-02 recorded this helper
+    # as having no callers, which meant 17.5 was implemented and unenforced
+    import inspect
+
+    from app.alerts import dispatcher
+
+    assert "render_time_status(" in inspect.getsource(dispatcher._build_context)
+
+
+def test_an_unknown_condition_renders_with_its_caveat(isolated_db):
+    """The message may go out; it may not pretend the condition is readable."""
+    from app.alerts.phrase_registry import validate_phrase_set
+    from app.alerts.render_context import build_member_context
+    from app.alerts.renderer import render_with_cascade
+
+    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
+        phrase_set = validate_phrase_set(fh.read())
+
+    from tests.test_alert_evaluation import make_input
+
+    trigger = make_input(identity="u1", computed_at="2026-08-24T06:00:00+00:00",
+                         effective="de-risk", base="de-risk")
+    previous = make_input(identity="u0", computed_at="2026-08-24T02:00:00+00:00",
+                          effective="hold", base="hold")
+    context_member = build_member_context(
+        episode_id="01M0UNKNOWNRENDER00000000A", rule_id="regime.band_to_derisk",
+        priority=1, trigger=trigger, current=trigger, previous=previous,
+        authorized_phrase_codes=frozenset(phrase_set.all_codes()),
+        required_caveat_codes=(), condition_status="UNKNOWN_AT_RENDER",
+        origin_phrase_set_version=phrase_set.version,
+        origin_phrase_set_sha256=phrase_set.sha256,
+        origin_rules_sha256="r" * 64)
+
+    from app.alerts.render_context import RenderContext
+
+    result = render_with_cascade(
+        context=RenderContext(members=[context_member]), phrase_set=phrase_set,
+        headline_code="BAND_TO_DERISK", phrase_codes=[],
+        next_check_code="NEXT_RECOMPUTE", caveat_codes=[])
+
+    caveat = phrase_set.caveats["UNKNOWN_AT_RENDER"].text
+    assert caveat in result.body, (
+        f"an UNKNOWN condition rendered without its caveat: {result.body!r}")

@@ -342,3 +342,202 @@ def test_health_does_not_let_a_future_heartbeat_mask_silence(client, monkeypatch
     assert watchdog["present"] is True
     assert watchdog["healthy"] is False, "a future heartbeat must not read as healthy"
     assert "future" in watchdog["reason"].lower()
+
+
+# ---------------------------------------------------------------------------
+# the audited admin surface (mandate 21.3)
+# ---------------------------------------------------------------------------
+
+
+def test_send_test_queues_an_audited_memberless_test_delivery(client):
+    """TEST is the one kind allowed zero members, and it stays out of budgets.
+
+    Inventing an episode to hang the test on would put a fake market event in
+    the audit trail; counting it against the caps would spend the operator's
+    budget on proving the wire.
+    """
+    from sqlalchemy import select
+
+    from app.alerts.budgets import BUDGETED_KINDS
+    from app.alerts.enums import DeliveryKind
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEvent
+    from app.db import session_scope
+
+    response = client.post("/api/v1/admin/alerts/send-test",
+                           headers={"X-API-Key": TEST_ADMIN_KEY})
+    assert response.status_code == 200
+    delivery_id = response.json()["delivery_id"]
+    assert response.headers["Cache-Control"] == "no-store"
+
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery.delivery_kind == DeliveryKind.TEST
+        members = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == delivery_id)
+        ).scalars().all()
+        assert members == []          # test_test_delivery_may_have_zero_members
+        events = session.execute(
+            select(AlertEvent).where(AlertEvent.delivery_id == delivery_id)
+        ).scalars().all()
+        assert any(e.action == "test_delivery_queued" for e in events)
+
+    assert DeliveryKind.TEST not in BUDGETED_KINDS
+
+
+def test_send_test_requires_the_admin_scope(client):
+    for key in (READ_KEY, WRITE_KEY):
+        assert client.post("/api/v1/admin/alerts/send-test",
+                           headers={"X-API-Key": key}).status_code == 401
+
+
+def test_manual_retry_requires_duplicate_ack(client):
+    """The duplicate risk is the point; it cannot be defaulted away."""
+    response = client.post(
+        "/api/v1/admin/alerts/deliveries/01M0NOSUCH000000000000000A/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "k1"},
+        json={"comment": "checking", "acknowledge_duplicate_risk": False})
+    assert response.status_code == 400
+    assert "acknowledge_duplicate_risk" in response.json()["detail"]
+
+    # and no key at all is refused before anything is looked up
+    response = client.post(
+        "/api/v1/admin/alerts/deliveries/01M0NOSUCH000000000000000A/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY},
+        json={"comment": "checking", "acknowledge_duplicate_risk": True})
+    assert response.status_code == 400
+    assert "Idempotency-Key" in response.json()["title"]
+
+
+def _unknown_delivery(session) -> str:
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import (
+        DeliveryKind,
+        PlanningState,
+        Priority,
+        TransportStatus,
+    )
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+
+    now = datetime(2026, 8, 24, 9, 0, tzinfo=UTC)
+    artifacts = load_active(session)
+    register(session, artifacts)
+    delivery_id = new_ulid(utc_ms(now))
+    session.add(AlertDelivery(
+        delivery_id=delivery_id, dedupe_key=f"v1|MARKET|{delivery_id}",
+        dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+        live_profile="default",
+        planning_rules_sha256=artifacts.ruleset.rules_sha256,
+        delivery_kind=DeliveryKind.TEST, priority=Priority.P2,
+        transport_status=TransportStatus.UNKNOWN,
+        planning_state=PlanningState.NONE, not_before=now, created_at=now,
+        updated_at=now, attempts=1, duplicate_risk_acknowledged=False,
+        recipient_ref="default"))
+    session.flush()
+    return delivery_id
+
+
+def test_manual_retry_creates_a_new_acknowledged_delivery(client):
+    """Same generation, incremented sequence, linked to the UNKNOWN original."""
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.db import session_scope
+
+    with session_scope() as session:
+        original = _unknown_delivery(session)
+
+    response = client.post(
+        f"/api/v1/admin/alerts/deliveries/{original}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "retry-1"},
+        json={"comment": "silence is worse than a duplicate here",
+              "acknowledge_duplicate_risk": True})
+    assert response.status_code == 200, response.text
+    new_id = response.json()["delivery_id"]
+    assert new_id != original
+
+    with session_scope() as session:
+        fresh = session.get(AlertDelivery, new_id)
+        old = session.get(AlertDelivery, original)
+        assert fresh.manual_retry_sequence == old.manual_retry_sequence + 1
+        assert fresh.prior_unknown_delivery_id == original
+        assert fresh.duplicate_risk_acknowledged is True
+        assert fresh.dedupe_key != old.dedupe_key   # sequence is in the material
+        assert old.transport_status == TransportStatus.UNKNOWN  # untouched
+
+    # replaying the same key + body returns the SAME new delivery
+    replay = client.post(
+        f"/api/v1/admin/alerts/deliveries/{original}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "retry-1"},
+        json={"comment": "silence is worse than a duplicate here",
+              "acknowledge_duplicate_risk": True})
+    assert replay.json()["delivery_id"] == new_id
+
+    # same key + DIFFERENT body is a conflict, never a silent re-execution
+    conflict = client.post(
+        f"/api/v1/admin/alerts/deliveries/{original}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "retry-1"},
+        json={"comment": "different words", "acknowledge_duplicate_risk": True})
+    assert conflict.status_code == 409
+
+
+def test_manual_retry_refuses_anything_not_unknown(client):
+    """Definite failures retry automatically; successes need nothing."""
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.db import session_scope
+
+    with session_scope() as session:
+        delivery_id = _unknown_delivery(session)
+        session.get(AlertDelivery, delivery_id).transport_status = \
+            TransportStatus.SENT
+
+    response = client.post(
+        f"/api/v1/admin/alerts/deliveries/{delivery_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "retry-2"},
+        json={"comment": "why not", "acknowledge_duplicate_risk": True})
+    assert response.status_code == 409
+    assert "UNKNOWN" in response.json()["detail"]
+
+
+def test_actionability_review_is_recorded_with_ambiguous_first_class(client):
+    """AMBIGUOUS must not round to YES; an unsure reviewer must not inflate
+    the KPI."""
+    from datetime import UTC, datetime
+
+    from app.alerts.models import AlertActionabilityReview
+    from app.db import session_scope
+    from tests.test_alert_digest import _pending_item, _registered
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="regime.band_to_derisk")
+        from sqlalchemy import select
+
+        from app.alerts.models import AlertEpisode
+        episode_id = session.execute(
+            select(AlertEpisode.episode_id)).scalars().first()
+
+    for label in ("YES", "AMBIGUOUS"):
+        response = client.post(
+            "/api/v1/admin/alerts/actionability",
+            headers={"X-API-Key": TEST_ADMIN_KEY},
+            json={"episode_id": episode_id, "actionable": label,
+                  "comment": "reviewed"})
+        assert response.status_code == 200, response.text
+
+    with session_scope() as session:
+        from sqlalchemy import select
+        rows = session.execute(select(AlertActionabilityReview)).scalars().all()
+        assert {r.actionable for r in rows} == {"YES", "AMBIGUOUS"}
+        assert all(r.reviewed_at is not None for r in rows)
+        _ = datetime.now(UTC)
+
+    bad = client.post("/api/v1/admin/alerts/actionability",
+                      headers={"X-API-Key": TEST_ADMIN_KEY},
+                      json={"episode_id": episode_id, "actionable": "MAYBE"})
+    assert bad.status_code == 422

@@ -265,3 +265,258 @@ def admin_get_render(response: Response, render_id: str,
             "body_redacted_at": iso(row.body_redacted_at),
             "created_at": iso(row.created_at),
         }
+
+
+# ---------------------------------------------------------------------------
+# send-test — the audited way to prove the transport works (mandate 21.3)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/admin/alerts/send-test", summary="Queue an audited TEST delivery")
+def send_test(response: Response,
+              _: None = Depends(require_admin_key)) -> dict[str, Any]:
+    """Create a TEST delivery for the dispatcher to send.
+
+    TEST is the one delivery kind allowed zero members: it is about the
+    TRANSPORT, not about any market condition, and inventing an episode to
+    hang it on would put a fake market event in the audit trail. It is also
+    outside `BUDGETED_KINDS`, so proving the wire works never spends the
+    operator's non-P1 budget — and its body is a reviewed phrase-set fragment
+    like every other message, not prose typed into a request.
+
+    The actual send happens through the ordinary dispatcher: same claim, same
+    admission, same classification. A test that bypassed the pipeline would
+    prove something other than the thing the operator needs proven.
+    """
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.enums import (
+        DeliveryKind,
+        PlanningState,
+        Priority,
+        TransportStatus,
+    )
+    from app.alerts.models import AlertDelivery, AlertEvent
+
+    _no_store(response)
+    settings = get_settings()
+    now = datetime.now(UTC)
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        # registered, because the delivery row references the ruleset by hash
+        # and a foreign key is the wrong place to discover it was never stored
+        register(session, artifacts, now=now, registered_by="admin-api")
+        delivery_id = new_ulid(utc_ms(now))
+        session.add(AlertDelivery(
+            delivery_id=delivery_id,
+            # unique per request BY DESIGN: every test send is its own intent,
+            # and deduping two of them would hide the second transport probe
+            dedupe_key=f"v1|TEST|{delivery_id}",
+            dedupe_version=1,
+            manual_retry_sequence=0,
+            mode=settings.alerts_mode,
+            live_profile=settings.alerts_live_profile,
+            planning_rules_sha256=artifacts.ruleset.rules_sha256,
+            delivery_kind=DeliveryKind.TEST,
+            priority=Priority.P4,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY,
+            not_before=now,
+            created_at=now,
+            updated_at=now,
+            attempts=0,
+            duplicate_risk_acknowledged=False,
+            recipient_ref=settings.alerts_live_profile,
+        ))
+        session.add(AlertEvent(
+            event_id=new_ulid(utc_ms(now)), occurred_at=now,
+            causation_type="OPERATOR", causation_id=delivery_id,
+            actor_type="OPERATOR", actor_id_redacted="admin-api",
+            delivery_id=delivery_id, action="test_delivery_queued",
+            suppression_reasons=[],
+            detail_redacted="audited TEST delivery queued via admin API",
+            rules_sha256=artifacts.ruleset.rules_sha256,
+        ))
+
+    log.info("alert_test_delivery_queued", delivery_id=delivery_id)
+    return {"delivery_id": delivery_id, "delivery_kind": "TEST",
+            "note": "queued; the ordinary dispatcher sends it on its next pass"}
+
+
+# ---------------------------------------------------------------------------
+# manual retry after UNKNOWN — duplicate risk made explicit (mandate 16.2/16.5)
+# ---------------------------------------------------------------------------
+
+
+class ManualRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    comment: str = Field(min_length=1, max_length=255)
+    acknowledge_duplicate_risk: bool
+
+
+@router.post("/admin/alerts/deliveries/{delivery_id}/retry",
+             summary="Manually retry an UNKNOWN delivery")
+def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
+                 idempotency_key: str | None = Header(default=None,
+                                                      alias="Idempotency-Key"),
+                 _: None = Depends(require_admin_key)) -> Any:
+    """A NEW delivery that admits it may duplicate the old one.
+
+    An UNKNOWN outcome means the bytes may have reached the phone, so nothing
+    retries it automatically — that is the four-outcome contract's whole point.
+    When a human decides the silence is worse than a possible duplicate, that
+    decision is recorded, not smuggled: the retry requires an Idempotency-Key,
+    an operator comment, and an explicit duplicate-risk acknowledgement, and it
+    creates a NEW delivery row with `manual_retry_sequence` incremented — same
+    members, same notification generation — linked to the original through
+    `prior_unknown_delivery_id`. The dedupe key differs BECAUSE the sequence is
+    in its material; the audit trail survives because nothing is overwritten.
+    """
+    from app.alerts.enums import PlanningState, TransportStatus
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEvent
+
+    _no_store(response)
+    if not idempotency_key:
+        return problem(400, "Idempotency-Key required",
+                       "a manual retry without an idempotency key cannot be "
+                       "distinguished from an accidental double submit")
+    if not body.acknowledge_duplicate_risk:
+        return problem(400, "Duplicate risk not acknowledged",
+                       "an UNKNOWN delivery may already have arrived; the retry "
+                       "requires acknowledge_duplicate_risk=true")
+
+    route = f"/admin/alerts/deliveries/{delivery_id}/retry"
+    now = datetime.now(UTC)
+
+    with session_scope() as session:
+        seen, ref = _check_idempotency(
+            session, idempotency_key, route, body.model_dump())
+        if seen and ref == "CONFLICT":
+            return problem(409, "Idempotency conflict",
+                           "this Idempotency-Key was used with a different "
+                           "request body")
+        if seen:
+            _no_store(response)
+            return {"delivery_id": ref, "replayed": True}
+
+        original = session.get(AlertDelivery, delivery_id)
+        if original is None:
+            return problem(404, "No such delivery", delivery_id)
+        if original.transport_status != TransportStatus.UNKNOWN:
+            return problem(409, "Not retryable",
+                           f"manual retry is for UNKNOWN deliveries; this one is "
+                           f"{original.transport_status}. Definite failures are "
+                           "retried automatically and successes need nothing.")
+
+        new_id = new_ulid(utc_ms(now))
+        session.add(AlertDelivery(
+            delivery_id=new_id,
+            dedupe_key=(f"{original.dedupe_key}|retry"
+                        f"{original.manual_retry_sequence + 1}"),
+            dedupe_version=original.dedupe_version,
+            manual_retry_sequence=original.manual_retry_sequence + 1,
+            mode=original.mode,
+            live_profile=original.live_profile,
+            planning_rules_sha256=original.planning_rules_sha256,
+            delivery_kind=original.delivery_kind,
+            priority=original.priority,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY,
+            not_before=now,
+            created_at=now,
+            updated_at=now,
+            attempts=0,
+            duplicate_risk_acknowledged=True,
+            prior_unknown_delivery_id=original.delivery_id,
+            recipient_ref=original.recipient_ref,
+        ))
+        for member in session.execute(
+            AlertDeliveryMember.__table__.select().where(
+                AlertDeliveryMember.delivery_id == original.delivery_id)
+        ).mappings():
+            session.add(AlertDeliveryMember(
+                delivery_id=new_id,
+                episode_id=member["episode_id"],
+                rule_id=member["rule_id"],
+                instance_fingerprint=member["instance_fingerprint"],
+                member_role=member["member_role"],
+                # SAME generation: this is the same logical notification, and a
+                # new generation would let the same message dodge its own
+                # UNKNOWN block
+                notification_generation=member["notification_generation"],
+                origin_rules_sha256=member["origin_rules_sha256"],
+                origin_phrase_set_version=member["origin_phrase_set_version"],
+                origin_phrase_set_sha256=member["origin_phrase_set_sha256"],
+                included_at=now,
+            ))
+        session.add(AlertEvent(
+            event_id=new_ulid(utc_ms(now)), occurred_at=now,
+            causation_type="OPERATOR", causation_id=new_id,
+            actor_type="OPERATOR", actor_id_redacted="admin-api",
+            delivery_id=new_id, action="manual_retry_authorised",
+            suppression_reasons=[],
+            detail_redacted=sanitize(
+                f"manual retry of {delivery_id} after UNKNOWN; duplicate risk "
+                f"acknowledged; comment: {body.comment}"),
+            rules_sha256=original.planning_rules_sha256,
+        ))
+        session.add(ApiIdempotencyRecord(
+            idempotency_key=idempotency_key, route=route,
+            request_sha256=sha256_of(body.model_dump()), response_ref=new_id,
+            status_code=200, created_at=now,
+            expires_at=now + timedelta(hours=IDEMPOTENCY_TTL_HOURS),
+        ))
+
+    log.info("alert_manual_retry", original=delivery_id, retry=new_id)
+    return {"delivery_id": new_id, "prior_unknown_delivery_id": delivery_id,
+            "manual_retry_sequence_incremented": True}
+
+
+# ---------------------------------------------------------------------------
+# actionability reviews — the Stage 7 evidence trail (mandate 17.11 / A.18)
+# ---------------------------------------------------------------------------
+
+
+class ActionabilityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: str = Field(min_length=1, max_length=32)
+    delivery_id: str | None = Field(default=None, max_length=32)
+    actionable: str = Field(pattern="^(YES|NO|AMBIGUOUS)$")
+    action_type: str | None = Field(default=None, max_length=64)
+    reason_code: str | None = Field(default=None, max_length=64)
+    comment: str | None = Field(default=None, max_length=255)
+
+
+@router.post("/admin/alerts/actionability",
+             summary="Record whether an alert was actionable")
+def record_actionability(body: ActionabilityRequest, response: Response,
+                         _: None = Depends(require_admin_key)) -> Any:
+    """One human label per alert, for the question the metrics cannot answer.
+
+    Everything else in this system measures whether a message went out;
+    nothing measures whether it was worth receiving. Stage 7 retains the LLM
+    selector only if these labels show a material improvement, and AMBIGUOUS
+    exists so an unsure reviewer does not inflate the KPI either way.
+    """
+    from app.alerts.models import AlertActionabilityReview, AlertEpisode
+
+    _no_store(response)
+    now = datetime.now(UTC)
+    with session_scope() as session:
+        if session.get(AlertEpisode, body.episode_id) is None:
+            return problem(404, "No such episode", body.episode_id)
+        review_id = new_ulid(utc_ms(now))
+        session.add(AlertActionabilityReview(
+            review_id=review_id,
+            episode_id=body.episode_id,
+            delivery_id=body.delivery_id,
+            actionable=body.actionable,
+            action_type=body.action_type,
+            reason_code=body.reason_code,
+            reviewer_redacted="admin-api",
+            reviewed_at=now,
+            comment_redacted=sanitize(body.comment) if body.comment else None,
+        ))
+    return {"review_id": review_id, "actionable": body.actionable}

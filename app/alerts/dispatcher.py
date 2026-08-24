@@ -39,11 +39,13 @@ from app.alerts.enums import (
     TransportStatus,
 )
 from app.alerts.errors import RenderRejected, sanitize
+from app.alerts.gsm7 import septets
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
     AlertEpisode,
     AlertRender,
+    AlertRuleState,
 )
 from app.alerts.outbox import (
     budget_usage,
@@ -68,9 +70,17 @@ from app.alerts.promotion import (
     delivery_admission_blockers,
     live_admission_blockers,
 )
-from app.alerts.render_context import RenderContext, build_member_context
-from app.alerts.renderer import render_with_cascade
-from app.alerts.repository import load_input, utc_ms
+from app.alerts.render_context import (
+    RenderContext,
+    build_member_context,
+    render_time_status,
+)
+from app.alerts.renderer import RenderResult, render_with_cascade
+from app.alerts.repository import (
+    load_input,
+    load_latest_compatible_input,
+    utc_ms,
+)
 from app.alerts.sender import Sender, default_sender
 from app.logging_conf import get_logger
 
@@ -136,18 +146,47 @@ def _build_context(session, delivery: AlertDelivery, members,
         # this column exists to prevent. Those episodes already failed to render
         # for the same reason before this change; leaving them failing is worse
         # for them and right for everyone else.
-        status = "STILL_FIRING"
-        if episode is not None and not episode.is_open:
-            status = "RESOLVED_BEFORE_SEND"
+        # Mandate 17.5, all four outcomes — not the two easy ones. The rule
+        # state row says whether the condition is UNKNOWN at render (a message
+        # must not claim resolution it cannot see), and a compatible CURRENT
+        # sidecar says whether the world moved since the trigger (then the
+        # message shows trigger AND current rather than presenting stale
+        # numbers as now). Compatibility is schema + methodology (17.4);
+        # incompatible or absent falls back to trigger facts with
+        # CONTEXT_STALE, because mixing numbers computed two different ways
+        # into one comparison is worse than admitting staleness.
+        current = load_latest_compatible_input(session, like=trigger)
+        stale_context = current is None
+        if current is None:
+            current = trigger
+        condition_state = ""
+        if episode is not None:
+            state_row = session.get(AlertRuleState, (
+                delivery.mode, delivery.live_profile,
+                member.origin_rules_sha256, member.instance_fingerprint))
+            if state_row is not None:
+                condition_state = str(state_row.condition_state)
+        status = render_time_status(
+            condition_state=condition_state,
+            resolved=bool(episode is not None and not episode.is_open),
+            materially_changed=bool(
+                current is not trigger
+                and current.effective_action_state
+                != trigger.effective_action_state),
+        )
+        if status == "RESOLVED_BEFORE_SEND":
+            # revalidation caught most of these; a resolution landing between
+            # revalidate and render is caught here, for the same reason
+            continue
         contexts.append(build_member_context(
             episode_id=member.episode_id,
             rule_id=member.rule_id,
             priority=delivery.priority,
             trigger=trigger,
-            current=trigger,
+            current=current,
             previous=previous,
             authorized_phrase_codes=frozenset(phrase_set.all_codes()),
-            required_caveat_codes=(),
+            required_caveat_codes=(("CONTEXT_STALE",) if stale_context else ()),
             condition_status=status,
             origin_phrase_set_version=member.origin_phrase_set_version,
             origin_phrase_set_sha256=member.origin_phrase_set_sha256,
@@ -525,7 +564,26 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                     reason="the planned phrase set is unavailable or changed")
                 report.render_failed += 1
                 return
-            if delivery.delivery_kind == DeliveryKind.DIGEST:
+            # A TEST delivery is about the TRANSPORT: its body is the
+            # reviewed TEST_MESSAGE fragment, and it takes the ordinary path
+            # from here — same claim, same admission, same classification —
+            # because a test that bypassed the pipeline would prove the wrong
+            # thing.
+            if delivery.delivery_kind == DeliveryKind.TEST:
+                fragment = render_phrases.headlines.get("TEST_MESSAGE")
+                if fragment is None:
+                    mark_render_failed(session, delivery, now=now,
+                                       reason="phrase set has no TEST_MESSAGE")
+                    report.render_failed += 1
+                    return
+                context = RenderContext(members=[])
+                result = RenderResult(
+                    body=fragment.text, septet_count=septets(fragment.text),
+                    render_source=RenderSource.TEMPLATE_FULL,
+                    selected_phrase_codes=["TEST_MESSAGE"],
+                    validation={"gsm7": True, "fits_single_sms": True},
+                )
+            elif delivery.delivery_kind == DeliveryKind.DIGEST:
                 context = RenderContext(members=[])
                 # NOT len(members), and not every planned member either.
                 #

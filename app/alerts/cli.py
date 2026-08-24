@@ -381,6 +381,15 @@ def build_parser() -> argparse.ArgumentParser:
     validate.set_defaults(func=cmd_validate)
 
     sub.add_parser("preflight", help="pre-stage checks").set_defaults(func=cmd_preflight)
+    cutover = sub.add_parser("cutover", help="Stage 4 cutover gate and audit")
+    cutover_sub = cutover.add_subparsers(dest="cutover_cmd", required=True)
+    cutover_sub.add_parser("status", help="toggle state plus full preflight")
+    cutover_sub.add_parser("preflight", help="every gate condition; exit 1 if unmet")
+    for name in ("apply", "rollback"):
+        c = cutover_sub.add_parser(name, help=f"record an audited {name} decision")
+        c.add_argument("--comment", required=True,
+                       help="why; stored on the audit event")
+    cutover.set_defaults(func=cmd_cutover)
     watchdog = sub.add_parser("watchdog", help="check for missed recompute slots")
     watchdog.add_argument("--once", action="store_true", default=True)
     watchdog.set_defaults(func=cmd_watchdog)
@@ -426,6 +435,67 @@ def build_parser() -> argparse.ArgumentParser:
     recover.add_argument("--once", action="store_true", default=True)
     recover.set_defaults(func=cmd_recover)
     return parser
+
+
+
+
+def cmd_cutover(args: argparse.Namespace) -> int:
+    """Stage 4 cutover operations: status, preflight, apply, rollback.
+
+    `apply` and `rollback` record audited operator decisions and print the
+    exact environment change; they do not perform it. The toggle is the
+    documented env var so a reversal survives an empty database, and so the
+    cutover cannot be something the app did to itself.
+    """
+    from app.alerts.cutover import preflight, record_decision
+    from app.config import get_settings
+    from app.db import session_scope
+
+    settings = get_settings()
+    if args.cutover_cmd == "status":
+        with session_scope() as session:
+            report = preflight(session)
+        print(json.dumps({
+            "effective_daily_sms_enabled": settings.effective_daily_sms_enabled,
+            "alerts_mode": settings.alerts_mode,
+            "preflight": report.as_dict(),
+        }, indent=2, sort_keys=True))
+        return 0
+
+    if args.cutover_cmd == "preflight":
+        with session_scope() as session:
+            report = preflight(session)
+        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+        return 0 if report.ready else 1
+
+    if args.cutover_cmd == "apply":
+        with session_scope() as session:
+            report = preflight(session)
+            if not report.ready:
+                print(json.dumps({"applied": False,
+                                  "unsatisfied": report.unsatisfied},
+                                 indent=2, sort_keys=True))
+                return 1
+            event_id = record_decision(session, action="cutover_apply",
+                                       comment=args.comment)
+        print(json.dumps({
+            "applied": True, "audit_event": event_id,
+            "next_step": "set DAILY_SMS_ENABLED=false in the deployment "
+                         "environment and restart; rollback is unsetting it",
+        }, indent=2, sort_keys=True))
+        return 0
+
+    # rollback: always recordable — an operator reversing a cutover must not
+    # be gated on the health checks that prompted the reversal
+    with session_scope() as session:
+        event_id = record_decision(session, action="cutover_rollback",
+                                   comment=args.comment)
+    print(json.dumps({
+        "rolled_back": True, "audit_event": event_id,
+        "next_step": "unset DAILY_SMS_ENABLED (or set it true) and restart; "
+                     "the legacy schedule resumes with no data migration",
+    }, indent=2, sort_keys=True))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

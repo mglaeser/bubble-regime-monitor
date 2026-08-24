@@ -861,3 +861,92 @@ def test_the_model_prompt_contains_only_codes_numbers_and_enums(phrase_set):
     }
     for value in payload["facts"].values():
         assert isinstance(value, str) and len(value) <= 12
+
+
+# ---------------------------------------------------------------------------
+# named mandate properties (§27.8 / §21.3)
+# ---------------------------------------------------------------------------
+
+
+def test_stale_sending_becomes_unknown(isolated_db):
+    """A crash mid-send may have reached the provider; only UNKNOWN is honest."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.outbox import recover_leases
+    from app.alerts.repository import utc_ms
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts)
+        delivery_id = new_ulid(utc_ms(now))
+        session.add(AlertDelivery(
+            delivery_id=delivery_id, dedupe_key=f"v1|X|{delivery_id}",
+            dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=artifacts.ruleset.rules_sha256,
+            delivery_kind=DeliveryKind.TEST, priority=2,
+            transport_status=TransportStatus.SENDING,
+            planning_state=PlanningState.NONE,
+            not_before=now - timedelta(minutes=30),
+            created_at=now - timedelta(minutes=30),
+            updated_at=now - timedelta(minutes=30), attempts=1,
+            lease_owner="dead-worker",
+            lease_until=now - timedelta(minutes=10),
+            request_started_at=now - timedelta(minutes=11),
+            duplicate_risk_acknowledged=False, recipient_ref="default"))
+        session.flush()
+        recover_leases(session, now=now)
+        assert session.get(AlertDelivery, delivery_id).transport_status \
+            == TransportStatus.UNKNOWN
+
+
+def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):
+    """send-test proves the REAL pipeline: claim, render, classify.
+
+    The body is the reviewed TEST_MESSAGE fragment — text typed into a request
+    would bypass the one gate every phone-bound word goes through.
+    """
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active, register, validate_phrase_set
+    from app.alerts.canonical import new_ulid
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+    from app.alerts.sender import NullSender
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts)
+        delivery_id = new_ulid(utc_ms(now))
+        session.add(AlertDelivery(
+            delivery_id=delivery_id, dedupe_key=f"v1|TEST|{delivery_id}",
+            dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=artifacts.ruleset.rules_sha256,
+            delivery_kind=DeliveryKind.TEST, priority=4,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY, not_before=now,
+            created_at=now, updated_at=now, attempts=0,
+            duplicate_risk_acknowledged=False, recipient_ref="default"))
+
+    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
+        phrase_set = validate_phrase_set(fh.read())
+    sender = NullSender()
+    dispatch_once(session_scope, phrase_set=phrase_set, mode="shadow",
+                  live_profile="default", sender=sender, now=now)
+
+    assert sender.sent, "the TEST delivery was not dispatched"
+    assert sender.sent[0][1] == phrase_set.headlines["TEST_MESSAGE"].text
+    with session_scope() as session:
+        assert session.get(AlertDelivery, delivery_id).transport_status \
+            == TransportStatus.SENT
