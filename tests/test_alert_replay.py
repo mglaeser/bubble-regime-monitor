@@ -663,3 +663,37 @@ def test_the_replay_script_forwards_to_the_cli():
     assert args.from_moment == "2026-01-01T00:00:00+00:00"
 
 
+
+
+def test_the_committed_stage_is_not_one_whose_replay_failed():
+    """Stage 3 must not be activatable while its own replay says it fails.
+
+    The gate artifact records `stage_3.passed = false`, and pinning the exact
+    failures stops CI absorbing a NEW one — but pinning is bookkeeping, not
+    enforcement. Nothing stopped `active_stage: 3` being committed next to
+    evidence saying stage 3 breaches its budget.
+
+    This is the repository-level half of that enforcement, and it is
+    deliberately small: it reads the committed ruleset and the committed
+    artifact and refuses the combination. The runtime half — a container
+    checking the same thing before it delivers — is the promotion gate, which
+    is its own change.
+    """
+    ruleset = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
+                                 service_version="3.8.0").ruleset
+    committed = ruleset.document.meta.active_stage
+    payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))
+
+    run = payload["runs"].get(f"stage_{committed}")
+    if run is None:
+        # No replay at this stage. Below the delivery stages that is expected;
+        # at or above them it means the stage was raised without evidence.
+        assert committed < 3, (
+            f"the ruleset is committed at stage {committed} and the gate "
+            "artifact has no replay at that stage to justify it")
+        return
+
+    assert run["passed"] is True, (
+        f"the ruleset is committed at stage {committed}, and the committed "
+        f"evidence says that stage FAILS: {run['failures']}. Fix the failures "
+        "or lower the stage — do not ship a stage its own replay refuses.")
