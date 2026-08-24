@@ -1012,7 +1012,7 @@ def selftest() -> None:
                                GV("docs only"), GV("fine")], M3)["block"] is True,
            "one negation must not launder a real claim later in the same reason")
     # Group A's refutation of the ledger: "required" must mean required.
-    _GM = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+    _GM = ["combo/SOTA-A", "combo/SOTA-B", "combo/SOTA-C"]
 
     def _gv(**kw):
         return {"ok": True, "v": {"refuted": False, "reason": "docs only change", **kw}}
@@ -1127,14 +1127,14 @@ def selftest() -> None:
     # rotates over its own members; the server answers with the group id, never
     # the member, so this script cannot see a vendor at all. What it CAN check is
     # that two voices are not the same group.
-    expect(require_distinct_voices(["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"])["block"] is False,
+    expect(require_distinct_voices(["combo/SOTA-A", "combo/SOTA-B", "combo/SOTA-C"])["block"] is False,
            "three distinct groups are three voices")
     _dup = require_distinct_voices(["combo/SOTA-A", "combo/SOTA-A", "combo/SOTA-C"])
     expect(_dup["block"] and "more than once" in _dup["reason"],
            "one opinion counted twice is not corroboration")
     expect(require_distinct_voices(["combo/SOTA-A", "", "combo/SOTA-C"])["block"] is False,
            "an empty slot is not a duplicate; resolution failure is caught before this gate")
-    _G = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+    _G = ["combo/SOTA-A", "combo/SOTA-B", "combo/SOTA-C"]
     expect(approving_models([A, {"ok": False, "reason": "504"}, RF], _G) == ["combo/SOTA-A"],
            "an errored or refuting voice never counts as approving")
     # The composition rule: A must agree, plus either B or C.
@@ -1217,8 +1217,11 @@ def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
     # degradation: the panel reviews with voices the operator did not choose,
     # every gate downstream passes, and the run goes green. Two ways it fires
     # in practice, both cheap: a group not yet published to /v1/models, and a
-    # one-character slip in an id -- `combo/SOAT-B` and `combo/SOTA-B` differ by
-    # a transposition, and only one of them exists.
+    # one-character slip in an id -- `combo/SOTA-B` and `combo/SOAT-B` differ by
+    # a transposition, and only combo/SOTA-B exists today. The registry itself
+    # shipped the SOAT-B typo first and later renamed it, so the live spelling
+    # has already flipped once -- a substitute picked by this script would have
+    # guessed wrong on both sides of that rename.
     #
     # A voice that cannot be resolved is a panel that cannot be assembled.
     missing = [w for w in wanted if not pick_for_pref(ids, w)]
@@ -1277,6 +1280,15 @@ def parse_verdict(content: str) -> Any:
 
 
 def _extract_responses_text(data: Any) -> str:
+    """Text out of a /responses response OBJECT — the FALLBACK source only.
+
+    The /responses wire is streamed, and the authoritative text is the
+    accumulated `response.output_text.delta` strings (_sse_fold). This
+    extractor reads the response object captured from `response.completed`,
+    which has been observed live on this gateway to arrive with an EMPTY
+    "output" array even when text WAS streamed — hence fallback, consulted
+    only when the delta accumulation is empty and the object actually
+    carries output."""
     if isinstance(data, dict) and isinstance(data.get("output_text"), str) and data["output_text"]:
         return data["output_text"]
     parts = []
@@ -1289,77 +1301,221 @@ def _extract_responses_text(data: Any) -> str:
 
 # Transient = a retry can help: network error (no status), rate-limit/timeout/
 # conflict and 5xx. 401 counts as transient too (observed flaky LB behavior in
-# the reference). Deterministic client errors (400/403/404) are never retried.
+# the reference). Deterministic client errors (400/403/404) are never retried
+# on the SAME wire — a 404/405 may still earn the one-shot chat-wire attempt
+# (see should_fallback_chat), which is a different wire, not a repeat.
 def is_transient(status: int) -> bool:
     return status in (0, 401, 408, 409, 429) or status >= 500
 
 
-def should_fallback_responses(status: int, body: Any) -> bool:
-    """Chat-completions rejection that names the Responses API — 404 or 400."""
-    return (status in (400, 404) and isinstance(body, str)
-            and re.search(r"v1/responses|responses endpoint|only supported in", body, re.I) is not None)
-
-
 def wire_may_differ(status: int) -> bool:
-    """A chat-completions failure the RESPONSES wire might not reproduce.
+    """A wire-level failure the OTHER wire might not reproduce.
 
-    NOT a guess. Measured by the operator across 13,815 logged gateway requests:
-    of 516 chat-protocol requests NOT ONE has ever exceeded 91 seconds, with 150
-    clustered at ~90s, while `responses` runs to 380s freely. The ~90s cluster
-    spans unrelated upstreams -- Anthropic via combo/SOAT-B and NVIDIA via
-    combo/SOTA-C -- which do not share a server-side behaviour, so the common
-    factor is the wire. 78 of 82 combo/SOAT-B failures produced no first output
-    token at all, while its successes have a p50 first-token time of 69s and a
-    max of 84.9s: the successes are simply the requests whose thinking phase
-    finished before the ~90s axe fell.
+    WHY /responses IS THE PRIMARY WIRE — measured, not guessed. Operator
+    telemetry across 13,815 logged gateway requests: of 516 chat-protocol
+    requests NOT ONE ever exceeded 91 seconds, with 150 clustered at ~90s,
+    while `responses` runs to 380s freely. The ~90s cluster spans unrelated
+    upstreams -- Anthropic via combo/SOTA-B (logged under its since-retired
+    SOAT-B spelling) and NVIDIA via combo/SOTA-C -- which do not share a
+    server-side behaviour, so the common factor is the wire. 78 of 82
+    combo/SOTA-B failures produced no first output token at all, while its
+    successes have a p50 first-token time of 69s and a max of 84.9s: the
+    successes are simply the requests whose thinking phase finished before the
+    ~90s axe fell.
 
-    Confirmed live: driving combo/SOAT-B over chat-completions with curl and NO
+    Confirmed live: driving combo/SOTA-B over chat-completions with curl and NO
     client timeout ran 458 seconds to a clean [DONE], 32,000 output tokens,
     HTTP 200. The gateway imposes no wall of its own. The ceiling is the chat
     wire's SSE translation not emitting a keepalive during the thinking phase,
-    and a client idle timeout collecting the silence.
+    and an edge idle timeout collecting the silence — while the /responses
+    wire, driven with "stream": true, trickles SSE bytes at a ~2s heartbeat
+    cadence through the same edge and never goes dark (380s and 458s runs on
+    record). Chat-first also poisoned its own rescue: the ~90s chat death
+    marked the upstream failed at the edge, so the immediate /responses
+    failover answered an instant 504. That is why every attempt now STARTS on
+    streaming /responses and chat/completions is the failover, not the other
+    way around.
 
-    So a 5xx or a network-level failure is worth ONE attempt on the other wire
-    before the voice is lost. Deliberately NOT 429 and NOT 401: a rate limit or
-    an exhausted account pool is upstream state both wires share, and retrying
-    the same condition on a second wire only burns the budget twice."""
+    So a 5xx or a network-level failure on /responses is worth ONE attempt on
+    the chat wire before the voice is lost. Deliberately NOT 429 and NOT 401: a
+    rate limit or an exhausted account pool is upstream state both wires share,
+    and retrying the same condition on a second wire only burns the budget
+    twice."""
     return status == 0 or status >= 500
 
 
+def should_fallback_chat(status: int) -> bool:
+    """A /responses failure worth the ONE chat-completions attempt: everything
+    wire_may_differ() names, plus 404/405 for a gateway that does not route
+    /responses at all (absent route -> 404, path present but method not wired
+    -> 405). Those two are DETERMINISTIC on the /responses wire but say nothing
+    about the chat wire, which such a gateway usually does serve."""
+    return wire_may_differ(status) or status in (404, 405)
+
+
+# should_fallback_responses() used to live here: with chat/completions PRIMARY,
+# a 400/404 whose body named the Responses API meant "this model is served on
+# /responses only" and earned the one-shot wire switch (round-3 panel finding:
+# a 400-only model would have blocked the panel permanently). With /responses
+# now the primary wire, that whole class is answered on the FIRST attempt, so
+# the body-sniffing predicate is deleted rather than kept as a reader-facing
+# description of a mechanism that no longer runs -- the same reasoning that
+# removed MODEL_PREFERENCE/FALLBACK_MODEL above.
+
+
+def _sse_fold(resp: Any) -> tuple[str, Any] | str:
+    """Fold a /responses SSE stream into ``(text, completed_response_object)``.
+
+    ``resp`` is the file-like urllib response: iterating it reads line by line
+    off the socket, so the urlopen timeout applies PER READ — trivially met by
+    the gateway's ~2s heartbeat cadence (max inter-event gap measured live:
+    9.3s, on a 38.9s/1121-event combo/SOTA-C run). Events arrive as
+    blank-line-delimited blocks of ``event:`` and ``data:`` lines; all
+    ``data:`` payload lines of one block are accumulated and JSON-parsed
+    together (multi-line data is legal SSE), and every payload carries a
+    ``type`` field.
+
+    Folding rules, in order of authority:
+      * ``response.output_text.delta`` — the PRIMARY text source. Observed
+        live on this gateway: the terminal completed object can arrive with an
+        EMPTY "output" array even when text WAS streamed, so the deltas are
+        accumulated verbatim and the completed object serves only as the
+        fallback extractor's input (_extract_responses_text) and the usage/id
+        record.
+      * ``response.completed`` — the terminal event; its ``response`` object
+        is captured and returned alongside the folded text.
+
+    A stream that ends WITHOUT ``response.completed``, or that carries an
+    error-typed event, returns a transient-failure MARKER (a str). The caller
+    reports it as status 0 — the same class as a network failure — so the
+    retry loop treats a torn stream exactly like a torn connection."""
+    text_parts: list[str] = []
+    data_lines: list[str] = []
+    completed: Any = None
+    done = False
+    error = ""
+    events = 0
+
+    def _flush() -> None:
+        nonlocal completed, done, error, events
+        if not data_lines:
+            return
+        raw = "\n".join(data_lines)
+        data_lines.clear()
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return                       # not JSON (comment/keepalive token)
+        if not isinstance(payload, dict):
+            return
+        events += 1
+        typ = payload.get("type")
+        if typ == "response.output_text.delta" and isinstance(payload.get("delta"), str):
+            text_parts.append(payload["delta"])
+        elif typ == "response.completed":
+            completed, done = payload.get("response"), True
+        elif typ == "error" or (isinstance(typ, str) and typ.endswith(".failed")):
+            error = f"stream error event: {raw[:200]}"
+
+    for raw_line in resp:
+        line = raw_line.decode("utf-8", "replace").rstrip("\r\n")
+        if not line:                     # a blank line closes the event block
+            _flush()
+            if done or error:
+                break
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].removeprefix(" "))
+        # "event:" and ":"-comment lines carry no payload of their own
+    _flush()                             # a final block may end at EOF instead
+    if error:
+        return error
+    if not done:
+        return f"stream ended without response.completed ({events} events folded)"
+    return "".join(text_parts), completed
+
+
 def _responses_attempt(model: str, sys_prompt: str, user_prompt: str) -> tuple[int, Any]:
-    return _http_json(f"{BASE}/responses",
-                      {"model": model, "instructions": sys_prompt, "input": user_prompt})
+    """POST {BASE}/responses with ``"stream": true`` and fold the SSE reply.
+
+    Both request-shape details are PROVIDER-ENFORCED, verified live through
+    the real edge on all three panel voices:
+      * "input" must be a MESSAGE LIST. A plain string draws
+        400 {"detail": "Input must be a list"} — the exact bug behind the ~29
+        instant 400s combo/SOTA-A left in today's proxy log while this body
+        was string-shaped.
+      * "stream" must be TRUE. combo/SOTA-C's provider rejects the
+        non-streaming form outright (400 {"detail": "Stream must be set to
+        true"}), and a deterministic 400 never reaches the chat failover, so
+        a non-streaming primary would lose that voice permanently.
+
+    Streaming is also the mechanism that defeats the edge's 90s idle timer:
+    the gateway emits SSE bytes at a ~2s heartbeat cadence while the model
+    thinks, and continuous bytes keep proxy_read_timeout from ever firing
+    (operator telemetry records 380s and 458s /responses runs through this
+    same edge). That only works if this side reads progressively too, so the
+    200 path hands the socket to _sse_fold line by line — never one blocking
+    full-body read whose silence would be the client's own fault.
+
+    Returns (200, (text, completed)) for a folded stream; (0, marker) for a
+    torn or error-carrying stream — transient, the same class as a network
+    failure; and (status, body) for non-200 HTTP, whose body is a small JSON
+    error read whole as before, so the existing retry/failover classification
+    is untouched."""
+    req = urllib.request.Request(  # noqa: S310 -- operator-configured https endpoint (VERIFIER_BASE_URL)
+        f"{BASE}/responses",
+        headers={"Content-Type": "application/json", **auth_header()},
+        data=json.dumps({
+            "model": model,
+            "instructions": sys_prompt,
+            "input": [{"role": "user", "content": user_prompt}],
+            "stream": True,
+        }).encode(),
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:  # noqa: S310 -- fixed https base
+            folded = _sse_fold(resp)
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode()[:300]
+        except Exception:
+            body = "(no body)"
+        return exc.code, body
+    except Exception as exc:             # DNS/TLS/reset, or a per-read timeout
+        return 0, str(exc)[:300]
+    if isinstance(folded, str):          # transient marker from the fold
+        return 0, folded
+    return 200, folded
 
 
-def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
-    status, data = _http_json(f"{BASE}/chat/completions", {
+def _chat_attempt(model: str, sys_prompt: str, user_prompt: str) -> tuple[int, Any]:
+    return _http_json(f"{BASE}/chat/completions", {
         "model": model,
         "messages": [{"role": "system", "content": sys_prompt},
                      {"role": "user", "content": user_prompt}],
     })
-    if status == 200 and isinstance(data, dict):
-        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        v = parse_verdict(content or "")
+
+
+def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
+    status, data = _responses_attempt(model, sys_prompt, user_prompt)
+    if status == 200:
+        text, completed = data
+        # Deltas first: the completed object is consulted only when the delta
+        # accumulation is empty AND it actually carries output — it has been
+        # observed to arrive empty even after text was streamed.
+        v = parse_verdict(text or _extract_responses_text(completed))
         return {"ok": True, "v": v, "decision": decide(v)}
-    # Some models only support the Responses API — the rejection may be a 404 OR
-    # a documented 400 (panel round-3 finding: a 400-only model would have
-    # blocked the panel permanently); switch on either when the body says so.
-    if should_fallback_responses(status, data):
-        s2, d2 = _responses_attempt(model, sys_prompt, user_prompt)
-        if s2 == 200:
-            v = parse_verdict(_extract_responses_text(d2))
-            return {"ok": True, "v": v, "decision": decide(v)}
-        return {"ok": False, "status": s2, "reason": f"Responses API {s2}: {str(d2)[:300]}"}
-    # The wire itself may be the fault — see wire_may_differ. One attempt on the
-    # other wire, and the ORIGINAL failure is what gets reported if it also
+    # The wire itself may be the fault (see wire_may_differ), or the gateway
+    # may not route /responses at all (404/405). One attempt on the chat wire,
+    # and the ORIGINAL /responses failure is what gets reported if that also
     # fails, because that is the one an operator needs to see.
-    if wire_may_differ(status):
-        print(f"  [wire] {model}: chat/completions {status or 'network error'} "
-              f"-> retrying once on /responses")
-        s2, d2 = _responses_attempt(model, sys_prompt, user_prompt)
-        if s2 == 200:
-            v = parse_verdict(_extract_responses_text(d2))
-            return {"ok": True, "v": v, "decision": decide(v), "wire": "responses"}
+    if should_fallback_chat(status):
+        print(f"  [wire] {model}: /responses {status or 'network error'} "
+              f"-> retrying once on chat/completions")
+        s2, d2 = _chat_attempt(model, sys_prompt, user_prompt)
+        if s2 == 200 and isinstance(d2, dict):
+            content = (d2.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            v = parse_verdict(content or "")
+            return {"ok": True, "v": v, "decision": decide(v), "wire": "chat"}
     return {"ok": False, "status": status, "reason": f"API {status}: {str(data)[:300]}"}
 
 
