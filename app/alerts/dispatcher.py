@@ -29,7 +29,6 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from app.alerts.artifacts import validate_phrase_set
 from app.alerts.budgets import check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.digest import render_digest_body
@@ -59,7 +58,7 @@ from app.alerts.outbox import (
     release,
     revalidate_members,
 )
-from app.alerts.phrase_registry import ValidatedPhraseSet
+from app.alerts.phrase_registry import ValidatedPhraseSet, validate_phrase_set
 from app.alerts.promotion import (
     delivery_admission_blockers,
     live_admission_blockers,
