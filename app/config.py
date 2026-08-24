@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     imessage_enabled: bool = False
     imessage_api_base_url: str = ""  # origin only, e.g. https://messages.example.com
     imessage_api_key: str = ""       # scoped `messages:send` key, `imp_` prefix
+
     imessage_recipient: str = ""     # allowlisted handle: +E.164 or an Apple-ID email
     imessage_timeout_s: int = 30     # read cap; the proxy's own deadline is longer
 
