@@ -96,9 +96,11 @@ jobs:
 
           raw = os.environ.get("VERIFIER_BASE_URL", "").strip()
           if not raw:
-              # No gateway configured. The script falls back to the vendor
-              # default and there is nothing endpoint-shaped to hide.
-              sys.exit(0)
+              # This credential belongs to one configured gateway. Falling
+              # back while the key remains present would send that key to the
+              # wrong host, so a missing/mis-scoped endpoint is a refusal.
+              print("::error::VERIFIER_BASE_URL is missing; refusing to run the credentialed panel without its pinned endpoint")
+              sys.exit(1)
 
           try:
               parts = urlsplit(raw)

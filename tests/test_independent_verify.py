@@ -20,6 +20,7 @@ import urllib.error
 from pathlib import Path
 
 import pytest
+import yaml
 
 _SPEC = importlib.util.spec_from_file_location(
     "independent_verify", Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
@@ -161,6 +162,34 @@ class TestEmptyEnvVarsAreAbsent:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         assert mod.BASE == "https://api.openai.com/v1"
+
+
+class TestTrustedWorkflowEndpointPreflight:
+    @staticmethod
+    def _mask_step() -> str:
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[1]
+             / ".github/workflows/independent-verify.yml").read_text()
+        )
+        steps = workflow["jobs"]["panel"]["steps"]
+        return next(
+            step["run"] for step in steps
+            if step.get("name") == "Mask the verifier endpoint in the log"
+        )
+
+    def test_blank_endpoint_refuses_before_the_credentialed_panel(self):
+        env = os.environ.copy()
+        env["VERIFIER_BASE_URL"] = ""
+        env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            ["bash", "-c", self._mask_step()],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode != 0
+        assert "refus" in (result.stdout + result.stderr).casefold()
 
 
 class TestPanelFindingsOnItself:
