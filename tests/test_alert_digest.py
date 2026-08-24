@@ -473,3 +473,76 @@ def test_a_silence_after_the_first_render_is_not_disclosed_by_a_stale_body():
     body = sender.sent[0][1]
     assert "1 Ereignisse" in body, (
         f"the stale render disclosed the silenced episode: {body!r}")
+
+
+def test_the_catch_up_does_not_look_into_another_namespace(monkeypatch):
+    """`AlertDigestItem` carries no mode or profile; the episode does.
+
+    An unqualified DISTINCT lets a shadow job discover windows that only ever
+    had live activity, learn something happened in them, and plan empty digests
+    that consume the window keys the live job needs.
+    """
+    from app.jobs import alert_digest
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="regime.band_to_derisk", window="2026-W02")
+
+    # the item above belongs to a shadow episode; run the job as LIVE
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    result = alert_digest.run_once(now=NOW)
+    assert "2026-W02" not in result["recovered_windows"], (
+        "a live job discovered a shadow namespace's window")
+
+
+def test_the_recovered_list_survives_an_already_planned_current_window(monkeypatch):
+    """`planned[1:]` assumed the current window is always planned and first.
+
+    When it already has a delivery it is not in the list at all, so the
+    genuinely recovered window sitting at index zero was reported as the
+    routine one and dropped from the log.
+    """
+    from app.alerts.calendars import last_closed_digest_window
+    from app.jobs import alert_digest
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    current = last_closed_digest_window(NOW)
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        # the current window is already done...
+        plan_digest(session, mode="shadow", live_profile="default",
+                    planning_rules_sha256=rules_sha, window_key=current, now=NOW)
+        # ...and an older one is still owed
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="regime.band_to_derisk", window="2026-W02")
+
+    result = alert_digest.run_once(now=NOW)
+    assert result["recovered_windows"] == ["2026-W02"], result["recovered_windows"]
+
+
+def test_quiet_windows_spanned_by_an_outage_are_not_replayed(monkeypatch):
+    """A fortnight of downtime must not deliver a dozen empty messages.
+
+    That is worse than the gap it fills: it trains the operator to ignore the
+    one channel Stage 4 leaves them. The resumed cadence is the proof-of-life;
+    history that held nothing carries no information.
+    """
+    from app.jobs import alert_digest
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    with session_scope() as session:
+        _registered(session)
+
+    result = alert_digest.run_once(now=NOW)
+    assert result["windows_planned"] == 1, (
+        f"an outage replayed empty weeks: {result['recovered_windows']}")

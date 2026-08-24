@@ -19,7 +19,7 @@ from app.alerts.calendars import digest_window_key, last_closed_digest_window
 from app.alerts.digest import plan_digest
 from app.alerts.enums import DigestItemStatus
 from app.alerts.errors import sanitize
-from app.alerts.models import AlertDigestItem
+from app.alerts.models import AlertDigestItem, AlertEpisode
 from app.config import get_settings
 from app.db import session_scope
 from app.jobs.alert_recovery import heartbeat
@@ -28,6 +28,8 @@ from app.logging_conf import get_logger
 log = get_logger(__name__)
 
 COMPONENT = "digest"
+
+
 
 
 def run_once(*, now: datetime | None = None,
@@ -66,17 +68,42 @@ def run_once(*, now: datetime | None = None,
             # The just-closed window is always included even with no items,
             # because a quiet week still sends: after Stage 4 that message is
             # the proof the scheduler is alive.
+            # NAMESPACED, like the digest itself. `AlertDigestItem` carries no
+            # mode or profile — those live on the episode — so an unqualified
+            # DISTINCT lets a shadow job discover windows that only ever had
+            # live activity, learn that something happened in them, and plan
+            # (empty) digests that consume the window keys the live job needs.
             pending = session.execute(
                 select(AlertDigestItem.digest_window_key)
-                .where(AlertDigestItem.status == DigestItemStatus.PENDING)
+                .join(AlertEpisode,
+                      AlertEpisode.episode_id == AlertDigestItem.episode_id)
+                .where(AlertDigestItem.status == DigestItemStatus.PENDING,
+                       AlertEpisode.mode == settings.alerts_mode,
+                       AlertEpisode.live_profile == settings.alerts_live_profile)
                 .distinct()
             ).scalars().all()
+
             # Never the window we are standing in: it is still accruing, and
             # digesting it would summarise a few days and never mention the
             # rest.
             open_window = digest_window_key(now)
             targets = [closed] + sorted(
-                w for w in pending if w != open_window and w != closed)
+                (w for w in pending if w not in (open_window, closed)),
+                reverse=True)
+
+            # Quiet windows spanned by an outage are deliberately NOT
+            # reconstructed. Reconstructing them is easy — walk back a week at
+            # a time — and it is wrong: a fortnight's downtime would deliver a
+            # dozen "nothing happened" messages, which is worse than the gap it
+            # fills and trains the operator to ignore the one channel Stage 4
+            # leaves them.
+            #
+            # The proof-of-life argument is about the CURRENT run, not about
+            # history. This run sends the just-closed window's digest, which is
+            # itself the proof the scheduler is alive again, and every window
+            # that actually held events is recovered with its contents. A week
+            # in which nothing happened, reported three weeks late, carries no
+            # information that the resumed cadence does not already carry.
 
         for target in targets:
             plans.append(plan_digest(
@@ -89,12 +116,18 @@ def run_once(*, now: datetime | None = None,
                 recipient_ref=settings.alerts_live_profile, now=now))
 
     planned = [p for p in plans if p.skipped_reason is None]
+    # A RECOVERED window is any planned window that is not the one this run was
+    # due to produce. Slicing `planned[1:]` assumed the just-closed window was
+    # always planned and always first — but when it already had a delivery it
+    # is not in the list at all, so the genuinely recovered window in position
+    # zero was reported as the routine one and dropped from the log.
+    current = plans[0].window_key if plans else closed
+    recovered = [p.window_key for p in planned if p.window_key != current]
     detail = {**plans[0].as_dict(), "windows_offered": len(targets),
               "windows_planned": len(planned),
-              "recovered_windows": [p.window_key for p in planned[1:]]}
-    if len(planned) > 1:
-        log.warning("alert_digest_recovered_missed_windows",
-                    windows=[p.window_key for p in planned[1:]])
+              "recovered_windows": recovered}
+    if recovered:
+        log.warning("alert_digest_recovered_missed_windows", windows=recovered)
     heartbeat(COMPONENT, "ok", detail)
     return {"status": "ok", **detail}
 
