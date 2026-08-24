@@ -46,18 +46,25 @@ TIMEOUT = httpx.Timeout(connect=5.0, read=25.0, write=10.0, pool=5.0)
 #: one of these forever would be the loudest possible way to achieve nothing.
 _PERMANENT = frozenset({400, 401, 402, 403, 404, 405, 409, 410, 413, 415, 422})
 
-#: Labels that always mean "this deployment's own profile", whatever it is
-#: named. The CONFIGURED profile is added to these at resolution time — a
-#: hardcoded set would have refused a deployment that named its profile
-#: anything else, which is the same routing bug pointing the other way.
+#: Legacy labels for the DEFAULT profile only. They exist because rows queued
+#: before refs carried the run's own profile say "default" or "primary".
 _PROFILE_ALIASES = frozenset({"default", "primary"})
 
 
 def _routes_here(recipient_ref: str, settings: Any) -> bool:
-    """Whether this ref names the profile this deployment delivers for."""
-    configured = str(getattr(settings, "alerts_live_profile", "") or "")
-    return recipient_ref in _PROFILE_ALIASES or (
-        bool(configured) and recipient_ref == configured)
+    """Whether this ref names the profile this deployment delivers for.
+
+    The configured profile's own name always routes. The aliases route ONLY
+    when the deployment IS the default profile — accepting "default" while
+    configured as "house" would deliver another namespace's message to house's
+    recipient, which is the cross-profile bypass this function exists to stop.
+    The dispatcher's claim query already filters by profile; this is the last
+    line, and the last line must not be looser than the first.
+    """
+    configured = str(getattr(settings, "alerts_live_profile", "") or "default")
+    if recipient_ref == configured:
+        return True
+    return configured == "default" and recipient_ref in _PROFILE_ALIASES
 
 
 @dataclass(frozen=True)

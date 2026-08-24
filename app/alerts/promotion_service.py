@@ -145,6 +145,7 @@ def _mark_promoted(session: Session, rules_sha256: str, *, actor: str,
     row.status = RulesetStatus.PROMOTED
     row.promoted_at = now
     row.promoted_by = sanitize(actor)
+    row.evidence_checked_at = now
 
 
 def evidence_verdict(evidence_path: str | Path | None = None) -> dict[str, Any]:

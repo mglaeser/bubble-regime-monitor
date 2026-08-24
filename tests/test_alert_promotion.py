@@ -512,6 +512,7 @@ def _registry_clone(session, source_sha: str, *, sha: str, yaml_text: str):
         max_service_version=src.max_service_version,
         validated_at=src.validated_at,
         promoted_at=datetime(2026, 8, 1, tzinfo=UTC),
+        evidence_checked_at=datetime(2026, 8, 1, tzinfo=UTC),
         status=RulesetStatus.SUPERSEDED))
     session.flush()
 
@@ -1005,3 +1006,25 @@ def test_failed_ruleset_cannot_be_laundered_by_later_valid_promotion(monkeypatch
         # an unpromoted hash stays excluded whatever happened since
         assert any("never promoted" in b or "not in the registry" in b
                    for b in delivery_admission_blockers(session, "c" * 64))
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_legacy_ungated_promotion_does_not_authorise_delivery():
+    """`promoted_at` written by the old path proves nothing was checked.
+
+    After the upgrade those rows block until re-promoted once through the
+    gated service — one command, and the honest reading of "promotion cannot
+    bypass the evidence". Grandfathering them would keep the laundering path
+    open for exactly the rows nobody can vouch for.
+    """
+    from app.alerts.artifacts import load_active
+    from app.alerts.promotion import delivery_admission_blockers
+    from app.db import session_scope
+    from tests.conftest import register_promoted_legacy
+
+    with session_scope() as session:
+        sha = register_promoted_legacy(session, load_active(session))
+        blockers = delivery_admission_blockers(session, sha)
+
+    assert blockers
+    assert "before promotion checked evidence" in blockers[0]

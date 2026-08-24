@@ -343,6 +343,14 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
         return [f"the ruleset that planned this delivery "
                 f"({planning_rules_sha256[:12]}) was never promoted, so no "
                 "operator ever authorised what it sends"]
+    if row.evidence_checked_at is None:
+        # Promoted, but through the OLD path that checked nothing. The
+        # timestamp alone cannot say whether an operator meant it, so it does
+        # not authorise delivery; re-promoting once through the gated service
+        # is the deliberate, one-command fix.
+        return [f"the ruleset that planned this delivery "
+                f"({planning_rules_sha256[:12]}) was promoted before promotion "
+                "checked evidence; re-promote it through the gated service"]
     # REVOKED is the one status that outranks a past promotion. Superseding a
     # ruleset says "there is something newer"; revoking it says "this was
     # wrong" — and an operator who revokes rules while their messages sit in

@@ -146,3 +146,14 @@ def register_promoted(session, artifacts, *, now=None, actor="tests"):
     _mark_promoted(session, sha, actor=actor, now=now)
     session.flush()
     return sha
+
+
+def register_promoted_legacy(session, artifacts, *, now=None, actor="tests"):
+    """A promotion as the OLD ungated path left it: promoted_at set, no
+    evidence stamp. Exists so tests can assert those rows are refused."""
+    from app.alerts.models import AlertRulesetRegistry
+
+    sha = register_promoted(session, artifacts, now=now, actor=actor)
+    session.get(AlertRulesetRegistry, sha).evidence_checked_at = None
+    session.flush()
+    return sha

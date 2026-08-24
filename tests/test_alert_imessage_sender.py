@@ -506,3 +506,9 @@ def test_a_deployment_that_names_its_profile_something_else_still_routes(monkeyp
     # and a profile that is neither an alias nor the configured one still fails
     other = ImessageSender(_client(handler)).send("x", recipient_ref="elsewhere")
     assert other.error_code == "NO_RECIPIENT"
+
+    # the aliases do NOT follow: "default" names the default profile, and this
+    # deployment is not it. Accepting it would deliver another namespace's
+    # message to house's recipient.
+    alias = ImessageSender(_client(handler)).send("x", recipient_ref="default")
+    assert alias.error_code == "NO_RECIPIENT"
