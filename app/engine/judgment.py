@@ -1,4 +1,4 @@
-"""Judgment-call generator: Anthropic Messages API with graceful degradation.
+"""Judgment-call generator: hosted LLM gateway with graceful degradation.
 
 After each recompute, produce a <=300-character "judgment call" written for a
 COMPLETE NON-EXPERT (no finance background): plain everyday language, no jargon,
@@ -6,9 +6,9 @@ naming in plain words the single biggest thing making it look more bubble-like
 and the single biggest calming factor. Constraints in the prompt: NO probability
 language, NO investment advice, NO price targets — an observation, not advice.
 
-API notes (verified July 2026): model claude-opus-4-8 (released 28 May 2026);
-thinking={"type": "adaptive"} + output_config={"effort": "max"};
-budget_tokens / temperature return HTTP 400 on Opus 4.7+ — do NOT set them.
+The gateway route is entirely operator-configured. The application sends one
+streaming Responses request to that exact route and never substitutes a model;
+any provider/model fallback is gateway-controlled and opaque to this service.
 
 Degradation: on any API error/timeout, persist the last successful text with
 stale:true and continue — never block the recompute or return a 500.
@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from app.config import get_settings
 from app.logging_conf import get_logger
+from app.redaction import sanitize
 
 log = get_logger(__name__)
 
@@ -74,60 +75,18 @@ def _clean_completion(text: str, limit: int = 300) -> str:
 
 
 def run_completion(prompt: str) -> str:
-    """Run the Anthropic model-fallback chain; return raw text or RAISE.
+    """Run the one configured gateway route; return raw text or raise safely.
 
-    Chain (spec 5): primary -> sonnet-5 -> sonnet-4-6, all with adaptive
-    thinking + effort=max; then one plain retry with neither. The minimal
-    request NEVER sends budget_tokens or temperature (both HTTP 400 with
-    adaptive thinking / this effort config). Shared by the judgment call and
-    the daily SMS digest."""
-    import anthropic  # raises ImportError if the SDK is absent
+    Shared by the judgment call and the daily digest. There is deliberately no
+    application-side model fallback list: the configured gateway route owns
+    provider failover, while callers retain their deterministic/stale fallback.
+    """
+    from app.llm_gateway import complete
 
     settings = get_settings()
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    models = [settings.anthropic_model, "claude-sonnet-5", "claude-sonnet-4-6"]
-    last_exc: Exception | None = None
-
-    def _call(model: str, thinking: bool) -> str:
-        base: dict[str, object] = {
-            "model": model,
-            "max_tokens": settings.anthropic_max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if thinking:
-            try:
-                resp = client.messages.create(
-                    **base, thinking={"type": "adaptive"},
-                    output_config={"effort": settings.anthropic_effort})
-            except TypeError:
-                # SDK predates the kwargs: pass them straight through.
-                resp = client.messages.create(
-                    **base, extra_body={"thinking": {"type": "adaptive"},
-                                        "output_config": {"effort": settings.anthropic_effort}})
-        else:
-            resp = client.messages.create(**base)
-        text = "".join(b.text for b in resp.content if b.type == "text").strip()
-        if not text:
-            raise ValueError("empty completion")
-        return text
-
-    for model in models:
-        try:
-            text = _call(model, thinking=True)
-            log.info("completion_ok", model=model, shape="adaptive+effort")
-            return text
-        except Exception as exc:
-            last_exc = exc
-            log.warning("completion_model_failed", model=model, error_class=type(exc).__name__,
-                        error=repr(exc)[:300])
-
-    # Tertiary: plain request, no thinking/output_config, on the primary model.
-    # Any exception from this final attempt propagates to the caller (which
-    # applies its own degradation), carrying the accumulated failure context.
-    del last_exc
-    text = _call(settings.anthropic_model, thinking=False)
-    log.info("completion_ok", model=settings.anthropic_model, shape="plain")
-    return text
+    result = complete(user=prompt, max_tokens=settings.llm_max_tokens, settings=settings)
+    log.info("completion_ok", model=settings.llm_model, wire=result.wire)
+    return result.text
 
 
 def generate(median: float, iqr: tuple[float, float], band: str,
@@ -135,7 +94,7 @@ def generate(median: float, iqr: tuple[float, float], band: str,
              red_flag_detail: dict[str, bool], override: bool,
              spy_state: str, qqq_state: str, fast_alarm: dict[str, object],
              last_successful: str | None = None) -> JudgmentCall:
-    """Call the Messages API; degrade to the last successful text on failure."""
+    """Call the gateway; degrade to the last successful text on failure."""
     prompt = PROMPT_TEMPLATE.format(
         median=round(median), iqr_lo=round(iqr[0]), iqr_hi=round(iqr[1]), band=band,
         s_scores=s_scores, d_scores=d_scores, v=v,
@@ -146,7 +105,8 @@ def generate(median: float, iqr: tuple[float, float], band: str,
         text = run_completion(prompt)
         return JudgmentCall(text=_clean_completion(text, 300), stale=False)
     except Exception as exc:
-        log.warning("judgment_call_degraded", error_class=type(exc).__name__, error=repr(exc)[:300])
+        log.warning("judgment_call_degraded", error_class=type(exc).__name__,
+                    error=sanitize(exc, limit=300))
         if last_successful:
             return JudgmentCall(text=last_successful, stale=True, error_class=type(exc).__name__)
         # No prior judgment: text is null (machine-detectable), not a placeholder.

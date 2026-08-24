@@ -547,7 +547,7 @@ class TestSelftestAttestsOnlyWhatItRan:
             "review_range() is never exercised with a non-hex VERIFIER_HEAD_SHA")
 
 class TestAuthHeader:
-    """The gateway's auth header is configurable because inference.klee.me runs
+    """The gateway's auth header is configurable because the deployed adapter runs
     providers.openai with authMode="forward" and reserves Authorization for
     upstream forwarding: Bearer answers 401 "opencodex API key required" for
     every model, X-OpenCodex-API-Key answers 200. Verified live."""

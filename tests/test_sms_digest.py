@@ -61,8 +61,8 @@ class TestDeterministicReport:
 
 class TestGenerateBody:
     def test_degrades_to_deterministic_without_llm(self, isolated_db):
-        # anthropic is not installed in this venv -> LLM path fails ->
-        # deterministic fallback, always <= limit ASCII.
+        # The gateway is deliberately unconfigured -> deterministic fallback,
+        # always <= limit ASCII.
         body, llm_used = generate_sms_body(_snap())
         assert llm_used is False
         assert len(body) <= 160 and body.isascii()

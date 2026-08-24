@@ -780,7 +780,10 @@ def test_llm_budget_exhaustion_falls_back_without_delaying(isolated_db, phrase_s
     from app.alerts.llm_selector import select_codes
     from app.db import session_scope
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_API_BASE_URL", "https://gateway.example.test/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_MODEL", "provider/model")
+    monkeypatch.setenv("LLM_AUTH_HEADER", "X-Gateway-Key")
     monkeypatch.setenv("ALERTS_LLM_RENDER_CAP_24H", "0")
     from app.config import get_settings
 
@@ -801,7 +804,10 @@ def test_every_llm_attempt_is_recorded_including_failures(isolated_db, phrase_se
     from app.alerts.llm_selector import select_codes
     from app.db import session_scope
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_API_BASE_URL", "https://gateway.example.test/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_MODEL", "provider/model")
+    monkeypatch.setenv("LLM_AUTH_HEADER", "X-Gateway-Key")
     from app.config import get_settings
 
     get_settings.cache_clear()
@@ -825,6 +831,54 @@ def test_every_llm_attempt_is_recorded_including_failures(isolated_db, phrase_se
         row = session.execute(sa_select(AlertLlmAttempt)).scalars().one()
     assert row.status == "TIMEOUT"
     assert row.error_code == "TimeoutError"
+    get_settings.cache_clear()
+
+
+def test_alert_selector_uses_gateway_with_its_own_cap_and_deadline(
+        isolated_db, phrase_set, monkeypatch):
+    import json
+
+    from sqlalchemy import select as sa_select
+
+    import app.llm_gateway as gateway
+    from app.alerts.llm_selector import SYSTEM_PROMPT, select_codes
+    from app.alerts.models import AlertLlmAttempt
+    from app.config import get_settings
+    from app.db import session_scope
+    from app.llm_gateway import Completion
+
+    monkeypatch.setenv("LLM_API_BASE_URL", "https://gateway.example.test/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_MODEL", "provider/model")
+    monkeypatch.setenv("LLM_AUTH_HEADER", "X-Gateway-Key")
+    get_settings.cache_clear()
+    captured = {}
+
+    def fake_complete(**kwargs):
+        captured.update(kwargs)
+        return Completion(text=json.dumps({
+            "headline_code": "BAND_TO_DERISK",
+            "phrase_codes": [],
+            "fact_ids": [],
+            "next_check_code": None,
+            "caveat_codes": [],
+        }), request_id="gateway-request")
+
+    monkeypatch.setattr(gateway, "complete", fake_complete)
+    _seed_delivery()
+    context = _context(phrase_set)
+    with session_scope() as session:
+        result = select_codes(session, delivery_id="D1", priority=2, context=context,
+                              phrase_set=phrase_set, now=NOW)
+
+    assert result.status == "SUCCESS"
+    assert captured["system"] == SYSTEM_PROMPT
+    assert captured["max_tokens"] == 400
+    assert captured["deadline_s"] == 6.0
+    with session_scope() as session:
+        row = session.execute(sa_select(AlertLlmAttempt)).scalars().one()
+    assert row.model == "provider/model"
+    assert row.request_id == "gateway-request"
     get_settings.cache_clear()
 
 

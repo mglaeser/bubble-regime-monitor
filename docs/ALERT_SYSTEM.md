@@ -296,8 +296,9 @@ still the explicit Stage 4 gate — and note that the transport change did not
 advance it: the legacy digest simply moved transports underneath a gate that has
 not moved.
 
-Volume, lease, retention and LLM settings: see `app/config.py` — every one has
-a safe default and none of them is read by anything that sends.
+Volume, lease and retention settings: see `app/config.py`. The `ALERTS_LLM_*`
+settings reserve a dormant future Stage-7/A-B selector; the dispatcher does not
+invoke it, and configuring the runtime gateway activates only judgment/digest.
 
 ---
 
@@ -422,7 +423,7 @@ Present and honest about it, rather than half-built:
 | 4 | legacy daily-digest cutover | not started |
 | 5 | constellations, bundled P2 | rules present, delivery not built |
 | 6 | EWMA / CUSUM | not started — needs immutable calibration artifacts |
-| 7 | P3 enrichment, LLM A/B review | not started |
+| 7 | P3 enrichment, LLM A/B review | not started — selector exists but is not wired into the dispatcher |
 
 Concretely absent: the **weekly digest job** (digest ITEMS are created and
 tracked; the job that turns a window's items into one SMS is not written), the
@@ -437,12 +438,16 @@ satisfied — zero non-P1 messages arithmetically satisfies every cap, and
 saying so would turn "nothing ran" into "governance holds".
 
 Built but deliberately unreachable: the planner, the outbox, the renderer, the
-LLM code selector, the typed sipgate sender and the dispatcher. They run end to
-end under `ALERTS_MODE=shadow` against the `NullSender` — claiming,
-revalidation, budget recheck, rendering and outcome classification all execute
-and persist — but no SMS can leave the host until an operator sets
-`ALERTS_MODE=live`, and the Stage 2 and Stage 3 gates (calibrated pins, replay
-budgets, mandatory-event recall) have not been met.
+typed sipgate sender and the dispatcher. They run end to end under
+`ALERTS_MODE=shadow` against the `NullSender` — claiming, revalidation, budget
+recheck, rendering and outcome classification all execute and persist — but no
+SMS can leave the host until an operator sets `ALERTS_MODE=live`, and the Stage
+2 and Stage 3 gates (calibrated pins, replay budgets, mandatory-event recall)
+have not been met.
+
+The LLM code selector is different: it is dormant future Stage-7/A-B work. The
+dispatcher neither imports nor calls it, so neither shadow nor live alert
+delivery opens the gateway for alert phrasing.
 
 `ops.*` rules that are raised by machinery rather than evaluated from the
 sidecar (`ops.rules_invalid`, `ops.delivery_unknown`,
@@ -479,8 +484,9 @@ could still reuse that exact render), and events belonging to an open episode
 needed). Inverted horizons — metadata shorter than messages — are refused
 outright rather than half-applied.
 
-Raw model output needs no sweep at all: `alert_llm_attempt` has never stored
-it, only status, timing, hashes and an already-redacted error string.
+The dormant selector's attempt schema needs no raw-output sweep:
+`alert_llm_attempt` stores only status, timing, hashes and an already-redacted
+error string, never raw model output.
 
 ---
 
@@ -495,10 +501,11 @@ Two questions that look like one, and must not be:
   `live_admission_blockers`. Below `LIVE_DELIVERY_STAGE` (3) the answer is
   always no, and neither passing evidence nor exact promotion lifts it.
 
-Stage 1 has no sender and no LLM by design. The dispatcher therefore refuses
-BEFORE constructing a sender rather than after: building one and declining to
-use it would break that promise quietly, since the object reads credentials and
-can open a client.
+Stage 1 has no sender by design. The dispatcher therefore refuses BEFORE
+constructing one rather than after: building one and declining to use it would
+break that promise quietly, since the object reads credentials and can open a
+client. Separately, the dispatcher has no LLM path at any current stage: it
+never imports or calls the dormant future Stage-7/A-B selector.
 
 The floor was briefly removed on the reasoning that `ops.indicator_stale` and
 `ops.coverage_degraded_info` are enabled at Stage 1 and could therefore send.
@@ -708,7 +715,8 @@ The headline is a structured 0–100 regime heuristic. It is **not a
 probability**, it is uncalibrated, and the reference class is far too small for
 honest probability calibration. Alert text never states crash odds, certainty,
 buy/sell instructions or guaranteed outcomes — the phrase-set validator checks
-for that vocabulary, and the model may only select reviewed codes.
+for that vocabulary. If the future Stage-7/A-B selector is wired after review,
+the model may only select reviewed codes.
 
 Exactly-once SMS delivery is not promised. Ambiguous delivery outcomes are made
 visible and handled conservatively rather than retried into duplicates.

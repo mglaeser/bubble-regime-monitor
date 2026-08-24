@@ -280,7 +280,7 @@ def test_persisted_snapshot_carries_the_typed_contract(isolated_db, monkeypatch)
     from app.services.compute import compute_snapshot, persist_snapshot
     from tests.conftest import make_golden_raw_inputs
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("LLM_API_KEY", "")
     raw = make_golden_raw_inputs()
     data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711, gsadf_contested=True)
     snap_id = persist_snapshot(data, raw)

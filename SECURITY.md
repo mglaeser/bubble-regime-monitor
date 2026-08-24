@@ -14,9 +14,13 @@ This is a single-maintainer, self-hosted research service. Report security issue
 
 ### Credential rotation (REQUIRED — audit B-06)
 
-Every provider key/token used by this service was disclosed in a development chat channel during construction. **A secret shown to any third party is published, even if never committed.** Rotate all of them — revoke and reissue at each provider, then update `.env`:
+Provider keys/tokens used during the original construction were disclosed in a development chat channel. **A secret shown to any third party is published, even if never committed.** Revoke the retired `ANTHROPIC_API_KEY`; rotate every still-active disclosed credential, then update `.env`:
 
-`ANTHROPIC_API_KEY` · `FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN`.
+`FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN`.
+
+`LLM_API_KEY` is the active inference credential. It is host-only configuration and must be rotated if it has been shared; unlike the legacy list above, this document has no evidence that its value was disclosed.
+
+Historical container builds used an unfiltered repository context with `COPY . .`, so an existing image or build cache may contain the deploy host's `.env` and runtime `data/`. The synchronized `.dockerignore`/`.containerignore` files prevent new copies; they cannot cleanse old artifacts. Deploy a fixed image, purge prior bubblegauge images/build cache, then rotate every credential that may have been baked.
 
 There is no vault/rotation automation (residual risk — `audit/06`). Rotate manually and record the date here:
 
@@ -24,7 +28,7 @@ There is no vault/rotation automation (residual risk — `audit/06`). Rotate man
 
 ## AI / model data-use (C-34)
 
-The only model call is a numbers-in / short-text-out request to the Anthropic hosted API (the ≤300-char "judgment call" and ≤160-char SMS). **The prompt contains only computed indicator numbers and enum states — no personal data, no secrets, no third-party data** (`app/engine/judgment.py`). Anthropic's commercial API does not train on API inputs by default; because the prompt carries nothing sensitive, the exposure is nil regardless.
+Runtime model calls go through an operator-configured OpenAI-compatible hosted gateway and produce the ≤300-char judgment and ≤160-char digest. The repository also contains a dormant future Stage-7/A-B non-P1 fragment-code selector, but the alert dispatcher does not invoke it. **No external free text reaches either the runtime prompts or the dormant selector's prompt:** inputs are computed indicator numbers/enums, preapproved codes, and—only in the digest—a bounded prior LLM judgment; never personal data, secrets, scraped text, or third-party prose (`app/engine/judgment.py`, `app/engine/sms_report.py`, `app/alerts/llm_selector.py`). The configured route is opaque: this service cannot attest which underlying provider/model served a request or that provider's retention/training policy. Disclosure impact remains low because the structural input containment does not depend on provider policy.
 
 ## Personal data (C-04/C-23)
 

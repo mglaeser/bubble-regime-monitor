@@ -500,7 +500,7 @@ class TestThePublishedRecordDescribesTheScoredStatistic:
         from app.models import Snapshot
         from app.services.compute import persist_snapshot
 
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        monkeypatch.setenv("LLM_API_KEY", "")
         raw = _raw_diverging()
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,
                                 gsadf_contested=False)
@@ -527,7 +527,7 @@ class TestThePublishedRecordDescribesTheScoredStatistic:
         from app.models import Snapshot
         from app.services.compute import persist_snapshot
 
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        monkeypatch.setenv("LLM_API_KEY", "")
         raw = _raw_diverging()
         raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = 2.0, 1.9, 1.5   # cv90 > cv95
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,
@@ -550,7 +550,7 @@ class TestThePublishedRecordDescribesTheScoredStatistic:
         from app.models import Snapshot
         from app.services.compute import persist_snapshot
 
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+        monkeypatch.setenv("LLM_API_KEY", "")
         raw = _raw_diverging()
         raw.bsadf_stat = END_CV95 + 0.5
         data = compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,

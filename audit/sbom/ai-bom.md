@@ -6,10 +6,10 @@ A machine-readable CycloneDX SBOM should be generated per build in CI (Wave 2). 
 
 | Component | Kind | Version / id | Provenance | Notes |
 |---|---|---|---|---|
-| Anthropic Messages API | hosted model | alias `claude-opus-4-8` (+ fallbacks `claude-sonnet-5`, `claude-sonnet-4-6`) | vendor-hosted; SDK `anthropic>=0.116` | **Floating alias, not a dated snapshot → B-13.** Used only for the ≤300-char judgment note + the ≤160-char daily digest. The digest body is unchanged by the transport work — the same generator, the same cap — but it now leaves the host over either sipgate or imessage-proxy. |
+| Operator-configured OpenAI-compatible gateway | hosted inference route | host-only `LLM_MODEL` value | direct HTTPS/SSE through existing `httpx`; no provider SDK | **Opaque floating route → B-13.** The requested route is not proof of which underlying provider/model served it, and gateway-side failover is not observable here. Runtime consumers are the ≤300-char judgment and ≤160-char digest. The non-P1 fragment-code selector is a dormant future Stage-7/A-B component not invoked by the dispatcher. |
 | Fine-tuned / custom weights | — | none | — | No fine-tuning, no adapters, no local weights (C-21 N/A). |
 | Embedding model / vector store | — | none | — | No RAG/embeddings (C-32/C-22/B-33 N/A). |
-| Prompt templates | prompt artifact | `app/engine/judgment.py:PROMPT_TEMPLATE`, `app/engine/sms_report.py:SMS_PROMPT` | version-controlled in git | Inputs are computed numbers/enums only. |
+| Prompt templates | prompt artifact | `app/engine/judgment.py:PROMPT_TEMPLATE`, `app/engine/sms_report.py:SMS_PROMPT`, `app/alerts/llm_selector.py:SYSTEM_PROMPT` | version-controlled in git | Judgment/digest are runtime templates. The selector template is dormant Stage-7/A-B work. Inputs are computed numbers/enums, a bounded prior LLM judgment in the digest, and preapproved codes; no user, scraped, or other external free text. |
 | Training/tuning datasets | — | none | — | Nothing is trained/tuned (C-21 N/A). |
 | Evaluation datasets | golden fixtures | `tests/test_golden_fixture.py`, `tests/conftest.py` | version-controlled | Deterministic-score regression, frozen seed 20260711. |
 
@@ -21,7 +21,7 @@ FRED · Tiingo · Twelve Data · Alpha Vantage · Polygon/Massive · SSGA (SPDR 
 
 ## Software dependency inventory (from `pyproject.toml`)
 
-Runtime: fastapi, uvicorn[standard], pydantic, pydantic-settings, SQLAlchemy, alembic, httpx, tenacity, APScheduler(<4), structlog, slowapi, numpy(<2.3), pandas(<3.0), openpyxl, xlrd, beautifulsoup4, lxml, anthropic, **lppls==0.6.24**. Optional: pyarrow (`.[parquet]`), yfinance (`.[yfinance]`). Native: R `exuber` 1.1.0 (CRAN) via subprocess. Dev: pytest, ruff, mypy.
+Runtime: fastapi, uvicorn[standard], pydantic, pydantic-settings, SQLAlchemy, alembic, httpx, tenacity, APScheduler(<4), structlog, slowapi, numpy(<2.3), pandas(<3.0), openpyxl, xlrd, beautifulsoup4, lxml, **lppls==0.6.24**, PyYAML. Optional: pyarrow (`.[parquet]`), yfinance (`.[yfinance]`). Native: R `exuber` 1.1.0 (CRAN) via subprocess. Dev: pytest, ruff, mypy.
 
 **Existence verification (finding B-04/C-03):** every package above was resolved to a real registry entry during this engagement; **no hallucinated or newly-registered/typo-adjacent dependency was found.** The gap is that this verification is manual and one-off — there is no lockfile/hash pinning and no pre-install existence gate.
 

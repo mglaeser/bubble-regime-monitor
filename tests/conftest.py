@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
-
-os.environ["TESTING"] = "true"   # before any Settings(): no boot threads/scheduler in tests
-
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
+os.environ["TESTING"] = "true"   # before any Settings(): no boot threads/scheduler in tests
+# Never inherit a developer/deploy gateway configuration: an offline test run
+# must not spend money or send even the numeric-only prompt outside the process.
+for _llm_name in ("LLM_API_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "LLM_AUTH_HEADER"):
+    os.environ[_llm_name] = ""
+os.environ["LLM_MAX_TOKENS"] = "8000"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -25,7 +29,9 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("MC_SAMPLES", "20000")
     monkeypatch.setenv("FRED_API_KEY", "")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    for name in ("LLM_API_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "LLM_AUTH_HEADER"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "8000")
     # A real (non-placeholder) admin key: the fail-closed guard (B-06/C-01)
     # refuses to authenticate against the shipped placeholder default.
     monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)

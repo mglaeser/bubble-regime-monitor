@@ -245,7 +245,7 @@ def _science_audit(snap: Snapshot | None, sources: list[dict[str, Any]],
         if snap.judgment_error:
             flags.append({"id": "judgment", "severity": "warn", "category": "llm-degraded",
                           "title": "Judgment call degraded",
-                          "detail": f"Anthropic call failed ({snap.judgment_error}); the stored "
+                          "detail": f"LLM gateway call failed ({snap.judgment_error}); the stored "
                                     "text may be stale or absent.", "ref": "engine.judgment"})
         elif snap.judgment_stale:
             flags.append({"id": "judgment-stale", "severity": "info", "category": "llm-degraded",

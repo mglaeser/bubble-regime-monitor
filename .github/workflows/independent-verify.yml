@@ -173,7 +173,7 @@ jobs:
           # starve every open PR's panel including the one carrying the fix.
           VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
           # Gateways that reserve Authorization for upstream forwarding need a
-          # different header; inference.klee.me answers Bearer with 401.
+          # different header; the configured gateway answers Bearer with 401.
           VERIFIER_AUTH_HEADER: ${{ vars.VERIFIER_AUTH_HEADER }}
           VERIFIER_PANEL_MODELS: ${{ vars.VERIFIER_PANEL_MODELS }}
           VERIFIER_REQUIRED_APPROVER: ${{ vars.VERIFIER_REQUIRED_APPROVER }}

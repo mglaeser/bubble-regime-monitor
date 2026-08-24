@@ -893,7 +893,8 @@ def test_replay_never_queries_current_provider_state():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "app" / "alerts"
-    forbidden = ("app.sources", "httpx", "anthropic", "app.http_client", "requests")
+    forbidden = ("app.sources", "httpx", "anthropic", "app.http_client",
+                 "app.llm_gateway", "requests")
     for path in sorted(root.glob("*.py")):
         if path.name in {"sender.py", "llm_selector.py", "dispatcher.py"}:
             continue          # transport modules, evaluated by their own tests

@@ -107,7 +107,7 @@ def auth_header() -> dict[str, str]:
     """The configured gateway's auth header. Defaults to the OpenAI convention
     ``Authorization: Bearer``. VERIFIER_AUTH_HEADER names a DIFFERENT header for
     gateways that reserve Authorization for upstream forwarding — verified live
-    against inference.klee.me, whose providers.openai runs authMode="forward"
+    against the configured private gateway, whose provider adapter runs authMode="forward"
     and answers Bearer with 401 "opencodex API key required" while accepting
     X-OpenCodex-API-Key. Same `or`-not-`.get(default)` reason as BASE above:
     Actions injects an EMPTY STRING for an unset repo variable."""
@@ -1521,7 +1521,7 @@ def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
 
 # A 401 whose body names an exhausted upstream account pool is a DETERMINISTIC
 # gateway state, not a flaky auth hiccup: retrying burns the backoff budget and
-# still fails. Observed live on inference.klee.me while its OpenAI account pool
+# still fails. Observed live on the configured gateway while its upstream account pool
 # was empty ("OpenAI account pool has no usable account credential").
 _POOL_EXHAUSTED = re.compile(r"no usable account credential", re.I)
 

@@ -152,7 +152,7 @@ def test_replay_module_cannot_reach_a_provider_or_a_transport():
     A replay that could import the sipgate sender is one careless call away
     from sending real SMS out of a historical simulation.
     """
-    forbidden = {"httpx", "requests", "anthropic", "app.alerts.sender",
+    forbidden = {"httpx", "requests", "anthropic", "app.llm_gateway", "app.alerts.sender",
                  "app.alerts.dispatcher", "app.alerts.llm_selector",
                  "app.jobs.alert_dispatch", "app.services.sms"}
     tree = ast.parse(REPLAY_SOURCE.read_text(encoding="utf-8"))

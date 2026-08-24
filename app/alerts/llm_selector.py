@@ -161,11 +161,11 @@ def select_codes(
         # Deliberate: a P1 must not depend on a network call completing.
         return SelectionResult(None, RenderSource.TEMPLATE_FULL, "P1_DETERMINISTIC",
                                LlmAttemptStatus.BUDGET_SKIPPED)
-    if not settings.alerts_llm_enabled or not settings.anthropic_api_key:
+    if not settings.alerts_llm_enabled or not settings.llm_configured:
         return SelectionResult(None, RenderSource.TEMPLATE_FULL, "LLM_UNAVAILABLE",
                                LlmAttemptStatus.BUDGET_SKIPPED)
     if _budget_used(session, now=now, hours=24) >= settings.alerts_llm_render_cap_24h:
-        _record(session, delivery_id=delivery_id, now=now, model=settings.anthropic_model,
+        _record(session, delivery_id=delivery_id, now=now, model=settings.llm_model,
                 status=LlmAttemptStatus.BUDGET_SKIPPED, duration_ms=0,
                 context_hash=context_hash)
         return SelectionResult(None, RenderSource.TEMPLATE_FULL,
@@ -179,14 +179,14 @@ def select_codes(
         selection = validate_selection(raw, context, phrase_set)
     except TimeoutError as exc:
         duration = int((time.monotonic() - started) * 1000)
-        _record(session, delivery_id=delivery_id, now=now, model=settings.anthropic_model,
+        _record(session, delivery_id=delivery_id, now=now, model=settings.llm_model,
                 status=LlmAttemptStatus.TIMEOUT, duration_ms=duration,
                 context_hash=context_hash, error=exc)
         return SelectionResult(None, RenderSource.TEMPLATE_FULL, "LLM_TIMEOUT",
                                LlmAttemptStatus.TIMEOUT, duration)
     except ValueError as exc:
         duration = int((time.monotonic() - started) * 1000)
-        _record(session, delivery_id=delivery_id, now=now, model=settings.anthropic_model,
+        _record(session, delivery_id=delivery_id, now=now, model=settings.llm_model,
                 status=LlmAttemptStatus.REJECTED, duration_ms=duration,
                 context_hash=context_hash, error=exc)
         log.warning("alert_llm_selection_rejected", reason=sanitize(exc))
@@ -194,14 +194,14 @@ def select_codes(
                                LlmAttemptStatus.REJECTED, duration)
     except Exception as exc:
         duration = int((time.monotonic() - started) * 1000)
-        _record(session, delivery_id=delivery_id, now=now, model=settings.anthropic_model,
+        _record(session, delivery_id=delivery_id, now=now, model=settings.llm_model,
                 status=LlmAttemptStatus.ERROR, duration_ms=duration,
                 context_hash=context_hash, error=exc)
         return SelectionResult(None, RenderSource.TEMPLATE_FULL, "LLM_ERROR",
                                LlmAttemptStatus.ERROR, duration)
 
     duration = int((time.monotonic() - started) * 1000)
-    _record(session, delivery_id=delivery_id, now=now, model=settings.anthropic_model,
+    _record(session, delivery_id=delivery_id, now=now, model=settings.llm_model,
             status=LlmAttemptStatus.SUCCESS, duration_ms=duration,
             context_hash=context_hash, request_id=request_id)
     return SelectionResult(selection, RenderSource.LLM_SELECTION, None,
@@ -215,19 +215,16 @@ def _call_model(context: RenderContext, phrase_set: ValidatedPhraseSet,
     if client is not None:
         return client.select(system=SYSTEM_PROMPT, user=prompt), None
 
-    import anthropic
+    from app.llm_gateway import complete
 
-    api = anthropic.Anthropic(api_key=settings.anthropic_api_key,
-                              timeout=float(settings.alerts_llm_timeout_s))
-    response = api.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=400,
+    response = complete(
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
+        user=prompt,
+        max_tokens=min(400, settings.llm_max_tokens),
+        deadline_s=float(settings.alerts_llm_timeout_s),
+        settings=settings,
     )
-    text = "".join(block.text for block in response.content
-                   if getattr(block, "type", "") == "text")
-    return json.loads(text), getattr(response, "id", None)
+    return json.loads(response.text), response.request_id
 
 
 def context_fingerprint(context: RenderContext) -> str:

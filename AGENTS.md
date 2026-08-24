@@ -4,11 +4,11 @@
 
 ## What this is
 
-`bubblegauge` is a single-tenant, self-hosted FastAPI research service publishing a 0–100 "AI-bubble regime" heuristic for US equities. **Research, not advice.** It has no user accounts, no multi-tenancy, no agents/tools, no RAG, no fine-tuning. The only LLM use is a hosted Anthropic call that turns computed numbers into a short plain-language note. See `audit/00-system-map.md` for the full map.
+`bubblegauge` is a single-tenant, self-hosted FastAPI research service publishing a 0–100 "AI-bubble regime" heuristic for US equities. **Research, not advice.** It has no user accounts, no multi-tenancy, no agents/tools, no RAG, no fine-tuning. Runtime LLM use is confined to an operator-configured, OpenAI-compatible hosted gateway: computed numbers/enums become a short note/digest. `app/alerts/llm_selector.py` is a dormant future Stage-7/A-B component that can select preapproved fragment codes, but the alert dispatcher does not invoke it. See `audit/00-system-map.md` for the full map.
 
 ## Ground rules (the frozen invariants)
 
-1. **The LLM prompt takes numbers only.** `app/engine/judgment.py:PROMPT_TEMPLATE` must interpolate only computed floats/enums — never external free-text. This is the architectural containment for prompt injection (audit A-10/C-07/C-08). A regression test enforces it (`tests/test_audit_v331.py::TestPromptIsNumbersOnly`). Do not add a free-text field.
+1. **No external free text enters an LLM prompt.** `app/engine/judgment.py:PROMPT_TEMPLATE` must interpolate only computed floats/enums; the dormant future Stage-7/A-B `app/alerts/llm_selector.py` may expose only numeric/enumerated facts plus preapproved codes if it is ever wired; and the digest prompt's sole nonnumeric input remains a bounded prior LLM judgment, never upstream/user text. This is the architectural containment for prompt injection (audit A-10/C-07/C-08). Regression tests enforce the contracts (`tests/test_audit_v331.py::TestPromptIsNumbersOnly`, `tests/test_alert_delivery.py::test_the_model_prompt_contains_only_codes_numbers_and_enums`). Do not add an external free-text field.
 2. **The model has no tools and takes no actions.** Do not give it function-calling, file access, or an outbound channel. If you ever need to, re-run the agentic-risk checks (audit C-06/B-20) first.
 3. **Never HTTP 500 on data failure.** Upstream failures degrade (fallback chain → drop-and-renormalize with a provenance note) or return 503, never 500. Validate all client input at the boundary (audit A-25).
 4. **Never a neutral placeholder for a failed indicator.** Drop it and renormalize its block (see `app/services/compute.py`, `app/indicators/d4_lppls.py`).
@@ -24,7 +24,7 @@ Every change must pass `.github/workflows/ci.yml`, which is **blocking**:
 - `detect-secrets` (no new secrets)
 - `pytest` (must be green; the suite is hermetic — LPPLS/R paths self-skip when the engine is absent)
 
-Type-checking (`mypy app`) is **blocking**, as a ratchet: CI fails if the error count rises above `MYPY_CEILING` in `.github/workflows/ci.yml` (**217** today, audit A-13). Lower the ceiling in the same commit that lowers the count; never raise it. The step also refuses if mypy exits >= 2 or checks fewer than `MYPY_MIN_FILES` source files, because a count of error lines is not a measure of work done. Driving the count to zero is a tracked task. A change is not done until CI is green.
+Type-checking (`mypy app`) is **blocking**, as a ratchet: CI fails if the error count rises above `MYPY_CEILING` in `.github/workflows/ci.yml` (**197** today, audit A-13). Lower the ceiling in the same commit that lowers the count; never raise it. The step also refuses if mypy exits >= 2 or checks fewer than `MYPY_MIN_FILES` source files, because a count of error lines is not a measure of work done. Driving the count to zero is a tracked task. A change is not done until CI is green.
 
 ### Verification tier by change class (audit A-14/C-33)
 

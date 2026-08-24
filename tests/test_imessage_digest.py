@@ -866,6 +866,7 @@ class TestMisspeltEnvDetection:
 
     @pytest.mark.parametrize("typo", [
         "IMESSAGE_ENABLE", "IMESSAGEE_ENABLED", "IMESSAGE_ENABLEDD", "IMESSAGE_API_KEYS",
+        "LLM_AUTH_HEADE", "LLM_API_BASE_UR",
     ])
     def test_catches_other_single_edits(self, typo):
         assert near_miss_env_keys({typo: "x"}), f"{typo} should be flagged"
@@ -887,7 +888,7 @@ class TestMisspeltEnvDetection:
             "IMESSAGE_ENABLED": "true",
             "SMS_ENABLED": "false",
             "PATH": "/usr/bin",
-            "ANTHROPIC_API_KEY": "",   # value irrelevant: the detector reads keys only
+            "LLM_API_KEY": "",   # value irrelevant: the detector reads keys only
         }) == []
 
     def test_every_typo_prone_name_is_a_real_setting(self):
