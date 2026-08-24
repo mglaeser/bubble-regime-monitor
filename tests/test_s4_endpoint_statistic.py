@@ -40,36 +40,30 @@ END_1986, END_CV90, END_CV95 = 1.1315, 1.1769, 1.4315          # does not reject
 _CACHED = (M.frozen_bytes, M.frozen_sha256, M.frozen_methodology)
 
 
-@pytest.fixture
-def frozen_gsadf(monkeypatch, tmp_path):
-    """Rewrite any key in the frozen gsadf block, off-disk."""
-    def _apply(**kw):
-        data = json.loads(M.FROZEN_PATH.read_bytes())
-        data["gsadf"].update(kw)
-        f = tmp_path / "frozen.json"
-        f.write_text(json.dumps(data))
-        monkeypatch.setattr(M, "FROZEN_PATH", f)
-        for fn in _CACHED:
-            fn.cache_clear()
-    yield _apply
-    for fn in _CACHED:
-        fn.cache_clear()
+def s4_gsadf_module():
+    from app.indicators import s4_gsadf
+    return s4_gsadf
 
 
 @pytest.fixture
-def frozen_statistic(monkeypatch, tmp_path):
-    """Rewrite gsadf.statistic in an off-disk copy of the frozen artifact."""
-    def _apply(value):
-        data = json.loads(M.FROZEN_PATH.read_bytes())
-        data["gsadf"]["statistic"] = value
-        f = tmp_path / "frozen.json"
-        f.write_text(json.dumps(data))
-        monkeypatch.setattr(M, "FROZEN_PATH", f)
-        for fn in _CACHED:
-            fn.cache_clear()
-    yield _apply
-    for fn in _CACHED:
-        fn.cache_clear()          # restore the real artifact for every other test
+def scored_as(monkeypatch):
+    """Flip the import-time selection for one test.
+
+    The constants are module attributes now, not per-request reads, so this is
+    the honest seam: it exercises the SAME values production runs under, without
+    pretending the artifact can change mid-process (it cannot — see
+    TestABadArtifactRefusesToIMPORT)."""
+    from app.indicators import s4_gsadf as _s4
+
+    def _apply(*, statistic=None, contested_rule=None):
+        if statistic is not None:
+            monkeypatch.setattr(_s4, "SCORED_STATISTIC", statistic)
+        if contested_rule is not None:
+            monkeypatch.setattr(_s4, "CONTESTED_RULE", contested_rule)
+            monkeypatch.setattr(_s4, "ASYMMETRIC_CONTESTED",
+                                contested_rule == "asymmetric")
+    return _apply
+
 
 
 def _raw_diverging():
@@ -116,10 +110,10 @@ class TestTheArtifactOwnsTheChoice:
         from app.config import Settings
         assert not [f for f in Settings.model_fields if "statistic" in f.lower()]
 
-    def test_the_selection_reads_the_artifact_not_the_raw_order(self, frozen_statistic):
+    def test_the_selection_follows_the_constant_not_the_raw_order(self, scored_as):
         raw = _raw_diverging()
         assert scored_s4_statistic(raw) == (END_1986, END_CV90, END_CV95)
-        frozen_statistic("gsadf_sup")
+        scored_as(statistic="gsadf_sup")
         assert scored_s4_statistic(raw) == (SUP_1986, SUP_CV90, SUP_CV95)
 
 
@@ -138,10 +132,10 @@ class TestTheDivergenceIsScored:
         snap = compute_snapshot(_raw_diverging(), gsadf_contested=False)
         assert snap.red_flags.gsadf_explosive_noncontested is False
 
-    def test_scoring_the_sup_would_have_flagged_the_present(self, frozen_statistic):
+    def test_scoring_the_sup_would_have_flagged_the_present(self, scored_as):
         # Pins the counterfactual, so the regression this change prevents is
         # itself under test rather than only described in a comment.
-        frozen_statistic("gsadf_sup")
+        scored_as(statistic="gsadf_sup")
         snap = compute_snapshot(_raw_diverging(), gsadf_contested=False)
         assert snap.indicators["s4"].sub_score == 1.0
         assert snap.red_flags.gsadf_explosive_noncontested is True
@@ -154,288 +148,104 @@ class TestTheDivergenceIsScored:
         assert snap.red_flags.gsadf_explosive_noncontested is True
 
 
-class TestAMalformedArtifactIsNamed:
-    """A corrupt SPECIFICATION must not read as a quiet data gap.
+class TestABadArtifactRefusesToIMPORT:
+    """These replace an entire family of runtime tests, and the trade is the
+    point of the change.
 
-    Coverage is a WEIGHT measure and cannot express this: s4 is 0.07 of Block S,
-    so losing it moves the block from 0.909 to 0.839 against a 1/3 threshold —
-    never degrading. Measured before this gate, absent gsadf.statistic on an
-    explosive endpoint with gsadf_contested=False: red flag #1 True -> False,
-    the non-compensatory override True -> False, band de-risk 70.00 -> trim
-    57.38, coverage.degraded false throughout. A corrupt specification silently
-    disarming the override is what this prevents."""
+    Until now gsadf.statistic and gsadf.contested_rule were read on EVERY
+    recompute, so a missing, unrecognised or malformed value was a per-request
+    condition — and defending it produced four successive defects: a KeyError
+    surfacing as a 500; a silent degradation when that was fixed; a scoring-time
+    read whose failure the integrity gate could not see; and an unmeasured
+    statistic published as a measured margin. Each fix was right and each opened
+    the next hole, because the fault was the read, not the path.
 
-    @pytest.fixture
-    def frozen_broken(self, monkeypatch, tmp_path):
-        def _apply(mutate):
-            data = json.loads(M.FROZEN_PATH.read_bytes())
-            mutate(data)
-            f = tmp_path / "frozen.json"
-            f.write_text(json.dumps(data))
-            monkeypatch.setattr(M, "FROZEN_PATH", f)
-            for fn in _CACHED:
-                fn.cache_clear()
-        yield _apply
-        for fn in _CACHED:
-            fn.cache_clear()
+    Read at import, like every other score-effective constant, none of those
+    states can reach a request: the process refuses to start. What used to need
+    an integrity gate, a latched read and a coverage annotation is now one
+    property — a bad artifact is not importable."""
 
     @staticmethod
-    def _explosive():
-        raw = _raw_diverging()
-        raw.bsadf_stat = END_CV95 + 0.5          # rf1 would fire on a good artifact
-        return raw
+    def _import_with(tmp_path, mutate):
+        """Re-import s4_gsadf against a mutated artifact, in a clean module
+        registry, and report what happened."""
+        import importlib
+        import json as _json
 
-    def test_a_healthy_artifact_is_not_degraded(self):
-        snap = compute_snapshot(self._explosive(), gsadf_contested=False)
-        assert snap.coverage["degraded"] is False
-        assert "integrity" not in snap.coverage
-        assert snap.red_flags.gsadf_explosive_noncontested is True
-
-    @pytest.mark.parametrize("label,mutate,expected", [
-        ("statistic absent", lambda d: d["gsadf"].pop("statistic"), ["gsadf.statistic"]),
-        ("rule absent", lambda d: d["gsadf"].pop("contested_rule"), ["gsadf.contested_rule"]),
-        ("statistic unknown", lambda d: d["gsadf"].__setitem__("statistic", "sadf"),
-         ["gsadf.statistic"]),
-        ("rule unknown", lambda d: d["gsadf"].__setitem__("contested_rule", "lenient"),
-         ["gsadf.contested_rule"]),
-        ("gsadf not a mapping", lambda d: d.__setitem__("gsadf", "nope"),
-         ["gsadf.statistic", "gsadf.contested_rule"]),
-    ])
-    def test_a_malformed_constant_degrades_and_is_named(self, frozen_broken, label,
-                                                        mutate, expected):
-        frozen_broken(mutate)
-        snap = compute_snapshot(self._explosive(), gsadf_contested=False)
-        assert snap.coverage["degraded"] is True, label
-        assert snap.coverage["integrity"]["constants"] == expected, label
-        assert snap.coverage["integrity"]["frozen_artifact"] == "scored_constant_unidentified"
-        # and it refuses an action band it cannot stand behind
-        assert "suppressed" in snap.action_band or "degraded" in snap.action_band, label
-
-    @staticmethod
-    def _three_flags_without_rf1():
-        """rf2 + rf3 + rf4 fire; rf1 does NOT. The override is then entirely
-        independent of the frozen artifact — semis run-up, HY OAS widening and
-        breadth near the ATH say nothing about which GSADF statistic is scored."""
-        raw = _raw_diverging()
-        raw.bsadf_stat = END_1986                                     # rf1 off
-        raw.smh_2yr_return_pct, raw.spy_2yr_return_pct = 200.0, 32.0  # rf2
-        raw.hy_oas_bps, raw.hy_oas_history_bps = 400.0, [250.0] * 800  # rf3
-        raw.breadth_pct, raw.index_within_2pct_of_ath = 30.0, True    # rf4
-        return raw
-
-    def test_it_does_not_mask_an_override_it_did_not_break(self, frozen_broken):
-        """The integrity verdict must not RE-LABEL a fired override as merely
-        suppressed. Masking a forced de-risk hides the strongest bearish signal
-        — fail-dangerous, and precisely what refusing to compute would do.
-
-        The three other tripwires are measured from data the artifact cannot
-        touch, so degrading the snapshot must leave their verdict intact and
-        only annotate it."""
-        good = compute_snapshot(self._three_flags_without_rf1(), gsadf_contested=False)
-        assert good.red_flags.count == 3 and good.red_flags.override_fired is True
-        assert good.action_band == "de-risk"
-
-        frozen_broken(lambda d: d["gsadf"].pop("statistic"))
-        bad = compute_snapshot(self._three_flags_without_rf1(), gsadf_contested=False)
-        assert bad.coverage["integrity"]["constants"] == ["gsadf.statistic"]
-        assert bad.red_flags.count == 3, "the artifact cannot reach rf2/rf3/rf4"
-        assert bad.red_flags.override_fired is True
-        assert bad.action_band == "de-risk (data degraded)"
-        assert "suppressed" not in bad.action_band
-
-    @pytest.mark.parametrize("failing_reads", [1, 2])
-    def test_a_scoring_time_read_failure_is_latched(self, monkeypatch, failing_reads):
-        """The constants must be read ONCE and the result carried forward.
-
-        They used to be read three times per request — when s4 was scored, by the
-        integrity gate, and by persist_snapshot for the rf1 record. A read that
-        failed only during SCORING was invisible to the gate, which re-read a
-        healthy artifact. Measured before the latch, exactly the vetoed shape:
-        s4 FLOOR, rf1 False, coverage.degraded False, band 'trim'."""
-        from app.services import compute as C
-
-        real = C.frozen_gsadf
-        state = {"n": 0}
-
-        def flaky(key):
-            state["n"] += 1
-            return None if state["n"] <= failing_reads else real(key)
-
-        monkeypatch.setattr(C, "frozen_gsadf", flaky)
-        raw = _raw_diverging()
-        raw.bsadf_stat = END_CV95 + 0.5
-        snap = C.compute_snapshot(raw, gsadf_contested=False)
-        # Whatever else it does, it must not look ordinary.
-        assert snap.coverage["degraded"] is True
-        assert "integrity" in snap.coverage
-        assert "suppressed" in snap.action_band
-        # CONSISTENCY is the point of latching, not merely "something degraded":
-        # if the verdict says the constants were unidentifiable, then the score
-        # must be the floored one. A second, luckier read that scored s4 normally
-        # while the verdict said otherwise is the bug this pins.
-        assert snap.indicators["s4"].state == "FLOOR"
-        assert snap.indicators["s4"].sub_score == 0.25
-        assert snap.s4_scored_stat is None and snap.s4_scored_cv95 is None
-
-    def test_only_the_rule_read_failing_is_still_latched(self, monkeypatch):
-        """Discriminating case for the RULE specifically. If only the second read
-        fails, a re-reading caller gets a healthy rule while the latched verdict
-        says it was unidentifiable — so s4 would score COMPUTED beside an
-        integrity verdict saying the rule could not be identified. The two must
-        agree, and they can only agree if both come from the same read."""
-        from app.services import compute as C
-
-        real = C.frozen_gsadf
-        state = {"n": 0}
-
-        def flaky(key):
-            state["n"] += 1
-            return None if state["n"] == 2 else real(key)   # rule read only
-
-        monkeypatch.setattr(C, "frozen_gsadf", flaky)
-        raw = _raw_diverging()
-        snap = C.compute_snapshot(raw, gsadf_contested=False)
-        assert snap.coverage["integrity"]["constants"] == ["gsadf.contested_rule"]
-        assert snap.indicators["s4"].state == "FLOOR", (
-            "scored COMPUTED while the integrity verdict said the rule was "
-            "unidentifiable — the two came from different reads")
-        assert snap.indicators["s4"].sub_score == 0.25
-
-    def test_the_published_rf1_record_cannot_outrun_the_score(self, monkeypatch,
-                                                              isolated_db):
-        """persist_snapshot used to re-read the artifact for the rf1 record — a
-        third independent read. Under a transient failure it could publish a
-        distance derived from a healthy statistic beside a flag that came from a
-        floored score."""
-        from sqlalchemy import select
-
-        from app.db import session_scope
-        from app.models import Snapshot
-        from app.services import compute as C
-
-        real = C.frozen_gsadf
-        state = {"n": 0}
-
-        def flaky(key):
-            state["n"] += 1
-            return None if state["n"] <= 2 else real(key)
-
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-        monkeypatch.setattr(C, "frozen_gsadf", flaky)
-        raw = _raw_diverging()
-        raw.bsadf_stat = END_CV95 + 0.5
-        data = C.compute_snapshot(raw, mc_samples=2_000, mc_seed=20260711,
-                                  gsadf_contested=False)
-        assert data.indicators["s4"].state == "FLOOR"
-        snap_id = C.persist_snapshot(data, raw)
-        with session_scope() as session:
-            row = session.execute(
-                select(Snapshot).where(Snapshot.id == snap_id)).scalars().one()
-            rf1 = row.red_flag_meta["flags"]["rf1"]
-        # s4 was not scored, so rf1's input is UNAVAILABLE — never a live margin.
-        assert rf1["active"] is False
-        assert rf1["distance_to_threshold"] is None
-
-    def test_it_cannot_silently_disarm_the_override(self, frozen_broken):
-        """The safety property, stated as a test: whatever else happens, a
-        malformed artifact must not produce a snapshot that looks ordinary."""
-        good = compute_snapshot(self._explosive(), gsadf_contested=False)
-        frozen_broken(lambda d: d["gsadf"].pop("statistic"))
-        bad = compute_snapshot(self._explosive(), gsadf_contested=False)
-        assert good.red_flags.gsadf_explosive_noncontested is True
-        assert bad.red_flags.gsadf_explosive_noncontested is False   # unknown, not not-fired
-        # ...and THAT is why the snapshot must not present itself as clean.
-        assert good.coverage["degraded"] is False
-        assert bad.coverage["degraded"] is True
-        assert bad.action_band != good.action_band
-
-
-class TestAnAbsentKeyFailsClosedNotFiveHundred:
-    """Guardrail 5: never surface an upstream/config fault as a 500. An ABSENT
-    key is the same fault as an unrecognised value — the artifact is not the one
-    this code was written against — but get_path raises, so both selectors had to
-    catch it. Verified: before the fix, compute_snapshot propagated KeyError.
-
-    NOT covered here: removing the whole `gsadf` SECTION. The loader rejects that
-    with "missing required sections" before any key lookup, which is its own
-    fail-closed contract and breaks every consumer, not just s4 — pre-existing
-    and deliberately not worked around."""
-
-    @pytest.fixture
-    def frozen_without(self, monkeypatch, tmp_path):
-        def _apply(key):
-            data = json.loads(M.FROZEN_PATH.read_bytes())
-            data["gsadf"].pop(key)
-            f = tmp_path / "frozen.json"
-            f.write_text(json.dumps(data))
-            monkeypatch.setattr(M, "FROZEN_PATH", f)
-            for fn in _CACHED:
-                fn.cache_clear()
-        yield _apply
-        for fn in _CACHED:
-            fn.cache_clear()
-
-    def test_the_healthy_artifact_still_reads(self):
-        """The guard that nearly broke everything: the loader returns a
-        MappingProxyType, so `isinstance(block, dict)` rejects the HEALTHY
-        artifact and floors s4 forever. Pin the happy path, not just the
-        malformed ones."""
-        from app.services.compute import frozen_gsadf
-
-        assert frozen_gsadf("statistic") == "bsadf_endpoint"
-        assert frozen_gsadf("contested_rule") == "asymmetric"
-        s4 = compute_snapshot(_raw_diverging()).indicators["s4"]
-        assert (s4.state, s4.sub_score) == ("COMPUTED", 0.05)
-
-    @pytest.mark.parametrize("shape,mutate", [
-        ("gsadf is a string", lambda d: d.__setitem__("gsadf", "nope")),
-        ("gsadf is a list", lambda d: d.__setitem__("gsadf", [])),
-        ("gsadf is null", lambda d: d.__setitem__("gsadf", None)),
-        ("statistic is a list", lambda d: d["gsadf"].__setitem__("statistic", ["x"])),
-    ])
-    def test_a_malformed_gsadf_section_floors(self, monkeypatch, tmp_path, shape, mutate):
-        """The loader validates that gsadf EXISTS, not that it is a mapping, so a
-        scalar or a list survives it and reaches the constant reads."""
-        data = json.loads(M.FROZEN_PATH.read_bytes())
+        data = _json.loads(M.FROZEN_PATH.read_bytes())
         mutate(data)
         f = tmp_path / "frozen.json"
-        f.write_text(json.dumps(data))
-        monkeypatch.setattr(M, "FROZEN_PATH", f)
+        f.write_text(_json.dumps(data))
+        original = M.FROZEN_PATH
+        M.FROZEN_PATH = f
         for fn in _CACHED:
             fn.cache_clear()
         try:
-            s4 = compute_snapshot(_raw_diverging(), gsadf_contested=False).indicators["s4"]
-            assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25), shape
+            import app.indicators.s4_gsadf as mod
+            reloaded = importlib.reload(mod)
+            # Snapshot the values NOW: the finally below reloads the same module
+            # object back to the real artifact, so returning `mod` would hand
+            # back the restored constants and the test would assert nothing.
+            return {"SCORED_STATISTIC": reloaded.SCORED_STATISTIC,
+                    "CONTESTED_RULE": reloaded.CONTESTED_RULE,
+                    "ASYMMETRIC_CONTESTED": reloaded.ASYMMETRIC_CONTESTED}, None
+        except Exception as exc:                       # noqa: BLE001 -- that IS the assertion
+            return None, exc
         finally:
+            M.FROZEN_PATH = original
             for fn in _CACHED:
                 fn.cache_clear()
+            import app.indicators.s4_gsadf as mod
+            importlib.reload(mod)                      # restore the real constants
 
-    def test_an_unreadable_artifact_floors_rather_than_propagating(self, monkeypatch):
-        """The loader itself can raise (invalid JSON, a <PIN> in a scored path, a
-        missing required section). The helper must absorb that too — reached
-        through compute_snapshot it would be a 500."""
-        from app.services import compute as C
+    @pytest.mark.parametrize("label,mutate,expected", [
+        ("statistic absent", lambda d: d["gsadf"].pop("statistic"), KeyError),
+        ("rule absent", lambda d: d["gsadf"].pop("contested_rule"), KeyError),
+        ("statistic unrecognised", lambda d: d["gsadf"].__setitem__("statistic", "sadf"),
+         ValueError),
+        ("rule unrecognised", lambda d: d["gsadf"].__setitem__("contested_rule", "lenient"),
+         ValueError),
+        ("statistic not a string", lambda d: d["gsadf"].__setitem__("statistic", ["x"]),
+         ValueError),
+        ("gsadf not a mapping", lambda d: d.__setitem__("gsadf", "nope"), Exception),
+        ("gsadf section absent", lambda d: d.pop("gsadf"), Exception),
+    ])
+    def test_it_refuses_to_import(self, tmp_path, label, mutate, expected):
+        _vals, exc = self._import_with(tmp_path, mutate)
+        assert exc is not None, f"{label}: imported anyway, so it would be scored around"
+        assert isinstance(exc, expected), f"{label}: {type(exc).__name__}: {exc}"
 
-        def boom():
-            raise ValueError("frozen_methodology: missing required sections ['gsadf']")
-
-        monkeypatch.setattr(C._M, "frozen_methodology", boom)
-        assert C.frozen_gsadf("statistic") is None
-        assert C.frozen_gsadf("contested_rule") is None
-
-    @pytest.mark.parametrize("key", ["statistic", "contested_rule"])
-    def test_an_absent_key_floors_instead_of_raising(self, frozen_without, key):
-        frozen_without(key)
+    def test_a_healthy_artifact_imports_and_scores(self, tmp_path):
+        """The guard that matters most: refusing a BAD artifact is worthless if
+        it also refuses a good one, and that failure would be total."""
+        vals, exc = self._import_with(tmp_path, lambda d: None)
+        assert exc is None, f"healthy artifact refused to import: {exc}"
+        assert vals["SCORED_STATISTIC"] == "bsadf_endpoint"
+        assert vals["CONTESTED_RULE"] == "asymmetric"
+        assert vals["ASYMMETRIC_CONTESTED"] is True
         snap = compute_snapshot(_raw_diverging(), gsadf_contested=False)
-        s4 = snap.indicators["s4"]
-        assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25)
+        assert snap.indicators["s4"].state == "COMPUTED"
+        assert snap.coverage["degraded"] is False
 
-    @pytest.mark.parametrize("key", ["statistic", "contested_rule"])
-    def test_the_report_survives_an_absent_key(self, frozen_without, key):
-        # extra.s4_statistic reads the same keys; it must not raise either.
-        frozen_without(key)
-        extra = compute_snapshot(_raw_diverging()).indicators["s4"].extra
-        assert "s4_statistic" in extra
+    def test_asymmetric_is_derived_from_the_rule_not_assumed(self, tmp_path):
+        """ASYMMETRIC_CONTESTED must follow CONTESTED_RULE. Hardcoding it True
+        survives every test that sets both explicitly, so this reloads the module
+        under "symmetric" and checks the derivation itself."""
+        vals, exc = self._import_with(
+            tmp_path, lambda d: d["gsadf"].__setitem__("contested_rule", "symmetric"))
+        assert exc is None, exc
+        assert vals["CONTESTED_RULE"] == "symmetric"
+        assert vals["ASYMMETRIC_CONTESTED"] is False
+        # ...and the shipped artifact is the other way round, restored after.
+        assert s4_gsadf_module().CONTESTED_RULE == "asymmetric"
+        assert s4_gsadf_module().ASYMMETRIC_CONTESTED is True
+
+    def test_the_error_names_the_constant_and_the_allowed_values(self, tmp_path):
+        _vals, exc = self._import_with(
+            tmp_path, lambda d: d["gsadf"].__setitem__("statistic", "sadf"))
+        text = str(exc)
+        assert "gsadf.statistic" in text and "sadf" in text
+        assert "bsadf_endpoint" in text and "gsadf_sup" in text
 
 
 class TestTheContestedRuleIsAFrozenConstant:
@@ -460,55 +270,25 @@ class TestTheContestedRuleIsAFrozenConstant:
         raw.bsadf_stat = END_CV90 + 1e-9
         assert compute_snapshot(raw).indicators["s4"].sub_score == 0.25
 
-    def test_symmetric_restores_the_cap(self, frozen_gsadf):
-        frozen_gsadf(contested_rule="symmetric")
+    def test_symmetric_restores_the_cap(self, scored_as):
+        scored_as(contested_rule="symmetric")
         assert compute_snapshot(_raw_diverging()).indicators["s4"].sub_score == 0.25
 
-    def test_an_unknown_rule_floors_rather_than_guessing(self, frozen_gsadf):
-        frozen_gsadf(contested_rule="lenient")      # plausible, but not a rule we ship
-        s4 = compute_snapshot(_raw_diverging()).indicators["s4"]
-        assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25)
-
-    def test_an_unknown_rule_floors_the_SCORE_not_just_the_label(self, frozen_gsadf):
-        """FLOOR must floor the number. The sub-score is computed and published
-        BEFORE the _s4_ok gate, and before v4.1 `not _s4_ok` was equivalent to
-        sub_score's own data-missing guard, so FLOOR implied 0.25 by
-        construction. Adding the rule check broke that: an unrecognised rule
-        reaches the gate with a fully scorable triple.
-
-        The non-contested REJECTION is the case that exposes it — measured, it
-        published 1.0 under a FLOOR label, with a headline bit-identical to the
-        recognised-rule run. Both conditions are required: contested=True or a
-        non-rejection both mask it."""
-        frozen_gsadf(contested_rule="lenient")
-        raw = _raw_diverging()
-        raw.bsadf_stat = END_CV95 + 0.5                       # a REJECTION
-        snap = compute_snapshot(raw, gsadf_contested=False)   # and NON-contested
-        s4 = snap.indicators["s4"]
-        assert (s4.state, s4.quality) == ("FLOOR", 0.0)
-        assert s4.sub_score == 0.25, "FLOOR published a scored value, i.e. failed OPEN"
-        # and the headline must differ from the recognised-rule run
-        frozen_gsadf(contested_rule="asymmetric")
-        assert compute_snapshot(raw, gsadf_contested=False).point_score != snap.point_score
-
-    def test_a_floor_feeds_the_floored_value_to_the_monte_carlo(self, frozen_gsadf):
+    def test_a_floor_feeds_the_floored_value_to_the_monte_carlo(self):
         """The MC band must be drawn around the value that was actually scored.
-        Re-flooring the point score but not mc_in.s4_sub would publish a band
-        centred somewhere the headline never was."""
+        FLOOR is now reached only through DATA faults — a degenerate CV pair
+        here — because a bad rule can no longer reach a request at all."""
         raw = _raw_diverging()
-        raw.bsadf_stat = END_CV95 + 0.5
-        frozen_gsadf(contested_rule="lenient")
+        raw.bsadf_stat, raw.bsadf_cv90, raw.bsadf_cv95 = 2.0, 1.9, 1.5   # cv90 > cv95
         floored = compute_snapshot(raw, mc_samples=20_000, mc_seed=20260711,
                                    gsadf_contested=False)
-        # A run that legitimately floors s4 to the same 0.25 must give the SAME band.
-        frozen_gsadf(contested_rule="asymmetric")
         raw2 = _raw_diverging()
-        raw2.bsadf_stat = raw2.bsadf_cv90 = raw2.bsadf_cv95 = None   # data-missing FLOOR
+        raw2.bsadf_stat = raw2.bsadf_cv90 = raw2.bsadf_cv95 = None
         reference = compute_snapshot(raw2, mc_samples=20_000, mc_seed=20260711,
                                      gsadf_contested=False)
+        assert floored.indicators["s4"].state == "FLOOR"
         assert floored.indicators["s4"].sub_score == reference.indicators["s4"].sub_score == 0.25
         assert floored.point_score == pytest.approx(reference.point_score, abs=1e-9)
-        # point_score is deterministic; the MC outputs are what mc_in.s4_sub feeds.
         assert floored.median == pytest.approx(reference.median, abs=1e-9)
         assert floored.iqr == pytest.approx(reference.iqr, abs=1e-9)
         assert floored.band_5_95 == pytest.approx(reference.band_5_95, abs=1e-9)
@@ -526,13 +306,6 @@ class TestTheContestedRuleIsAFrozenConstant:
 
 
 class TestFailClosed:
-    def test_an_unknown_statistic_floors_and_does_not_guess(self, frozen_statistic):
-        frozen_statistic("sadf")            # a real statistic, but not one we score
-        assert scored_s4_statistic(_raw_diverging()) == (None, None, None)
-        snap = compute_snapshot(_raw_diverging(), gsadf_contested=False)
-        s4 = snap.indicators["s4"]
-        assert (s4.state, s4.quality, s4.sub_score) == ("FLOOR", 0.0, 0.25)
-
     def test_a_missing_endpoint_floors_rather_than_falling_back_to_the_sup(self):
         raw = _raw_diverging()
         raw.bsadf_stat = raw.bsadf_cv90 = raw.bsadf_cv95 = None
@@ -568,11 +341,11 @@ class TestPartialMetadataNeverCrashes:
         assert compute_snapshot(raw).indicators["s4"].state == "COMPUTED"
 
     def test_the_note_labels_follow_the_selection_not_a_hardcoded_string(
-            self, frozen_statistic):
+            self, scored_as):
         """Panel finding #3: the labels were hardcoded, so in gsadf_sup mode the
         note called the SCORED statistic "reported, not scored" and the
         reported-only one "scored", while s4.value carried the right number."""
-        frozen_statistic("gsadf_sup")
+        scored_as(statistic="gsadf_sup")
         s4 = compute_snapshot(_raw_diverging()).indicators["s4"]
         assert s4.value == SUP_1986
         assert f"scored GSADF sup {SUP_1986:.4f}" in s4.note
@@ -667,8 +440,8 @@ class TestTheFloorNoteNamesTheScoredStatistic:
         assert "GSADF not computable" not in s4.note
         assert s4.extra["s4_statistic"]["gsadf_sup"]["stat"] == SUP_1986
 
-    def test_the_note_follows_the_frozen_selection(self, frozen_statistic):
-        frozen_statistic("gsadf_sup")
+    def test_the_note_follows_the_frozen_selection(self, scored_as):
+        scored_as(statistic="gsadf_sup")
         raw = _raw_diverging()
         raw.gsadf_stat = None                      # now the SUP is the missing one
         s4 = compute_snapshot(raw, gsadf_contested=False).indicators["s4"]

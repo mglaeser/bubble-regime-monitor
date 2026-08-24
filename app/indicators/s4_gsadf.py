@@ -75,6 +75,57 @@ from __future__ import annotations
 
 from app import methodology as _M
 
+# ---- Scored methodology constants, read AT IMPORT --------------------------
+# Every other score-effective constant in this service is read at import (see
+# the SUB_* values below, and d1/d2/d3/s2/...), so a frozen artifact that cannot
+# supply one aborts STARTUP rather than being scored around per request.
+#
+# These two were the exception: v4.0/v4.1 introduced them and read them on every
+# recompute. That single difference produced an entire class of defects — a
+# KeyError surfacing as a 500, then a silent degradation when that was fixed,
+# then a scoring-time read whose failure the integrity gate could not see, then
+# an unmeasured statistic published as a measured margin. Each fix was correct
+# and each opened the next hole, because the fault was the per-request read, not
+# any one path. Reading them here deletes the class: within a process the values
+# are fixed, so there is no window in which scoring and reporting can disagree,
+# and a malformed artifact cannot reach a request at all.
+#
+# A scored value still must not move by configuration: these come only from the
+# SHA-pinned artifact, and there is deliberately no environment override.
+_ALLOWED: dict[str, tuple[str, ...]] = {
+    "statistic": ("bsadf_endpoint", "gsadf_sup"),
+    "contested_rule": ("asymmetric", "symmetric"),
+}
+
+
+def _frozen_enum(key: str) -> str:
+    """Read one gsadf string constant, or refuse to import.
+
+    KeyError (absent) and ValueError (unrecognised) both abort startup, which is
+    the same posture the float constants below have always had."""
+    value = _M.get_path("gsadf", key)          # KeyError if absent -> startup fails
+    if value not in _ALLOWED[key]:
+        raise ValueError(
+            f"frozen_methodology.json gsadf.{key}={value!r} is not one of "
+            f"{_ALLOWED[key]}; refusing to import rather than score under a rule "
+            "nobody chose")
+    # str() is for the TYPE, not the value: get_path is typed Any, and membership
+    # in _ALLOWED already proves this is one of those exact strings.
+    return str(value)
+
+
+#: Which statistic s4 scores. "bsadf_endpoint" (v4.0) is the BSADF at the LAST
+#: observation against the endpoint row of the simulated BSADF CVs — the
+#: current-regime read. "gsadf_sup" (v3) is the sup over ALL endpoints, which
+#: answers a historical question and stays rejected while a spent episode is in
+#: sample.
+SCORED_STATISTIC: str = _frozen_enum("statistic")
+
+#: "asymmetric" (v4.1) releases a contested NON-rejection to SUB_NULL while a
+#: contested REJECTION stays capped; "symmetric" is the pre-v4.1 blanket cap.
+CONTESTED_RULE: str = _frozen_enum("contested_rule")
+ASYMMETRIC_CONTESTED: bool = CONTESTED_RULE == "asymmetric"
+
 SUB_EXPLOSIVE_NONCONTESTED: float = _M.get_path("indicators", "s4", "sub_explosive_noncontested")
 SUB_CV90: float = _M.get_path("indicators", "s4", "sub_cv90")
 SUB_CONTESTED_OR_STALE: float = _M.get_path("indicators", "s4", "sub_contested_or_stale")
