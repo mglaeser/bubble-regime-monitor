@@ -484,3 +484,25 @@ def test_the_known_profiles_still_route(monkeypatch):
         result = ImessageSender(_client(handler)).send("x", recipient_ref=ref)
         assert result.outcome == SenderOutcome.CONFIRMED_SUCCESS, ref
     assert len(seen) == 2
+
+
+def test_a_deployment_that_names_its_profile_something_else_still_routes(monkeypatch):
+    """A hardcoded label set is the same routing bug pointing the other way.
+
+    It would refuse every delivery on a deployment whose profile is not called
+    "default" — silence instead of misdelivery, but silence caused by the check
+    rather than by anything being wrong.
+    """
+    _configured(monkeypatch)
+    monkeypatch.setenv("ALERTS_LIVE_PROFILE", "house")
+    _clear()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json={"operation_id": "op", "state": "accepted"})
+
+    ok = ImessageSender(_client(handler)).send("x", recipient_ref="house")
+    assert ok.outcome == SenderOutcome.CONFIRMED_SUCCESS
+
+    # and a profile that is neither an alias nor the configured one still fails
+    other = ImessageSender(_client(handler)).send("x", recipient_ref="elsewhere")
+    assert other.error_code == "NO_RECIPIENT"

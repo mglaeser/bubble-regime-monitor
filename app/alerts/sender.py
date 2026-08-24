@@ -46,10 +46,18 @@ TIMEOUT = httpx.Timeout(connect=5.0, read=25.0, write=10.0, pool=5.0)
 #: one of these forever would be the loudest possible way to achieve nothing.
 _PERMANENT = frozenset({400, 401, 402, 403, 404, 405, 409, 410, 413, 415, 422})
 
-#: Profile labels this deployment can route. One recipient is configured, so
-#: these are the labels that mean it; anything else is a delivery planned for a
-#: profile that does not exist here, and must not be sent to the one that does.
-_KNOWN_PROFILES = frozenset({"default", "primary"})
+#: Labels that always mean "this deployment's own profile", whatever it is
+#: named. The CONFIGURED profile is added to these at resolution time — a
+#: hardcoded set would have refused a deployment that named its profile
+#: anything else, which is the same routing bug pointing the other way.
+_PROFILE_ALIASES = frozenset({"default", "primary"})
+
+
+def _routes_here(recipient_ref: str, settings: Any) -> bool:
+    """Whether this ref names the profile this deployment delivers for."""
+    configured = str(getattr(settings, "alerts_live_profile", "") or "")
+    return recipient_ref in _PROFILE_ALIASES or (
+        bool(configured) and recipient_ref == configured)
 
 
 @dataclass(frozen=True)
@@ -224,7 +232,7 @@ def _resolve_recipient(recipient_ref: str, settings: object) -> str:
     The number itself never enters the database, an API response or a log —
     only this handle does.
     """
-    if recipient_ref in _KNOWN_PROFILES:
+    if _routes_here(recipient_ref, settings):
         return getattr(settings, "sipgate_recipient", "")
     return ""
 
@@ -517,6 +525,6 @@ def _resolve_imessage_recipient(recipient_ref: str, settings: Any) -> str:
     which the caller reports as NO_RECIPIENT: a permanent rejection that names
     the problem beats a message delivered to the wrong person.
     """
-    if recipient_ref not in _KNOWN_PROFILES:
+    if not _routes_here(recipient_ref, settings):
         return ""
     return str(getattr(settings, "imessage_recipient", "") or "")
