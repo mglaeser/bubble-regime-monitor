@@ -255,35 +255,55 @@ def audit_withdrawn_admission(session: Any, delivery: AlertDelivery, *,
 
 
 def planning_phrase_set(session: Any, delivery: AlertDelivery,
-                        fallback: ValidatedPhraseSet) -> ValidatedPhraseSet:
-    """The phrase set this delivery was PLANNED against, from the registry.
+                        fallback: ValidatedPhraseSet) -> ValidatedPhraseSet | None:
+    """The phrase set this delivery was PLANNED against, or None if it is gone.
 
     A queued message must render with the phrases it was planned against —
     that is why `alert_phrase_set_registry` stores the bytes and why the
-    members carry an `origin_phrase_set_version`. Rendering from whatever the
-    process happens to hold and then STAMPING the member's version on the
-    render row is the worst of both: the provenance says one thing and the body
-    was built from another, and the record cannot be used to explain the text.
+    members carry both an `origin_phrase_set_version` and its DIGEST.
 
-    Falls back to the supplied set when the version is not in the registry —
-    that is a deployment that has not registered its own artifacts, and failing
-    the render there would be worse than rendering from what we have.
+    Both are checked. Resolving by version alone would trust that a version
+    still means what it meant when the delivery was planned; the digest is the
+    thing that actually says so, and the member recorded it precisely so this
+    could be verified rather than assumed.
+
+    Returns None when the planned text cannot be produced — an unregistered
+    version, or one whose bytes no longer match what was recorded. That is
+    fail-CLOSED on purpose: the previous version fell back to whatever this
+    process was holding, which meant a message could go out worded differently
+    from the one that was planned and reviewed. A render failure is visible and
+    recoverable; a quietly re-worded alert is neither.
     """
     from app.alerts.models import AlertPhraseSetRegistry
 
-    version = session.execute(
-        select(AlertDeliveryMember.origin_phrase_set_version)
+    row = session.execute(
+        select(AlertDeliveryMember.origin_phrase_set_version,
+               AlertDeliveryMember.origin_phrase_set_sha256)
         .where(AlertDeliveryMember.delivery_id == delivery.delivery_id)
         .order_by(AlertDeliveryMember.included_at).limit(1)
-    ).scalar()
-    if not version or version == fallback.version:
-        return fallback
-    row = session.get(AlertPhraseSetRegistry, version)
+    ).first()
     if row is None:
-        log.warning("alert_planning_phrase_set_missing",
-                    delivery_id=delivery.delivery_id, version=version)
+        # No members at all — a quiet digest. Nothing was planned against a
+        # particular text, so the running set is the only honest answer.
         return fallback
-    return validate_phrase_set(row.canonical_json)
+
+    version, digest = row
+    if not version:
+        return fallback
+    if version == fallback.version and (not digest or digest == fallback.sha256):
+        return fallback
+
+    registered = session.get(AlertPhraseSetRegistry, version)
+    if registered is None:
+        log.error("alert_planning_phrase_set_missing",
+                  delivery_id=delivery.delivery_id, version=version)
+        return None
+    if digest and registered.phrase_set_sha256 != digest:
+        log.error("alert_planning_phrase_set_changed",
+                  delivery_id=delivery.delivery_id, version=version,
+                  planned=digest[:12], registered=registered.phrase_set_sha256[:12])
+        return None
+    return validate_phrase_set(registered.canonical_json)
 
 
 def dispatch_once(
@@ -432,6 +452,15 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             # phrase set and recording another beside it, so the record could
             # not explain its own text.
             render_phrases = planning_phrase_set(session, delivery, phrase_set)
+            if render_phrases is None:
+                # The reviewed text this message was planned against cannot be
+                # reproduced. Sending it worded from a different phrase set
+                # would be sending something nobody approved for this alert.
+                mark_render_failed(
+                    session, delivery, now=now,
+                    reason="the planned phrase set is unavailable or changed")
+                report.render_failed += 1
+                return
             if delivery.delivery_kind == DeliveryKind.DIGEST:
                 context = RenderContext(members=[])
                 # NOT len(members), and not every planned member either.

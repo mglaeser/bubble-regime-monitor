@@ -762,21 +762,23 @@ def test_every_kind_renders_from_the_phrase_set_it_was_planned_under():
     from app.alerts.artifacts import register
     from app.alerts.dispatcher import planning_phrase_set
     from app.alerts.models import AlertPhraseSetRegistry
+    from app.alerts.phrase_registry import validate_phrase_set
+
+    v32 = validate_phrase_set(
+        open("config/alert_phrases.v3.2.json", encoding="utf-8").read())
 
     with session_scope() as session:
         rules_sha = _registered(session)
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        # planned against v3.2, recording the version AND the digest
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=rules_sha,
-                           phrase_set_version="v3.2", phrase_set_sha256="x" * 64,
+                           phrase_set_version=v32.version,
+                           phrase_set_sha256=v32.sha256,
                            window_key=WINDOW, now=NOW)
 
         # the registry holds v3.2's real bytes; the process is holding v3.3
-        loaded = load_active(session)
-        register(session, loaded)
-        from app.alerts.phrase_registry import validate_phrase_set
-        v32 = validate_phrase_set(
-            open("config/alert_phrases.v3.2.json", encoding="utf-8").read())
+        register(session, load_active(session))
         session.add(AlertPhraseSetRegistry(
             phrase_set_version=v32.version, phrase_set_sha256=v32.sha256,
             canonical_json=v32.canonical_json,
@@ -791,8 +793,13 @@ def test_every_kind_renders_from_the_phrase_set_it_was_planned_under():
         "the render would have used the running phrase set, not the planned one")
 
 
-def test_an_unregistered_planning_phrase_set_falls_back_rather_than_failing():
-    """Failing the render there is worse than rendering from what we have."""
+def test_an_unregistered_planning_phrase_set_fails_the_render(monkeypatch):
+    """Fail-closed. A quietly re-worded alert is worse than a visible failure.
+
+    Falling back to whatever this process holds meant the message could go out
+    worded differently from the one that was planned and reviewed. A render
+    failure is visible and recoverable; that is not.
+    """
     from app.alerts.dispatcher import planning_phrase_set
 
     with session_scope() as session:
@@ -804,74 +811,53 @@ def test_an_unregistered_planning_phrase_set_falls_back_rather_than_failing():
                            phrase_set_sha256="z" * 64,
                            window_key=WINDOW, now=NOW)
         delivery = session.get(AlertDelivery, plan.delivery_id)
-        current = _phrase_set()
-        resolved = planning_phrase_set(session, delivery, current)
-
-    assert resolved.version == current.version
+        assert planning_phrase_set(session, delivery, _phrase_set()) is None
 
 
-def test_losing_a_planning_race_is_a_no_op_not_a_crash():
-    """Check-then-insert is a race; the unique key decides it correctly.
+def test_a_phrase_set_whose_bytes_moved_fails_the_render():
+    """Resolving by VERSION alone trusts that a version still means what it did.
 
-    Two runs — a scheduler restart overlapping a manual trigger, two workers —
-    can both find no delivery for the window and both proceed. `dedupe_key` is
-    UNIQUE, so no week ever gets two digests. But an unhandled IntegrityError
-    turns the loser into a crashed job and a critical heartbeat, when the right
-    answer is the one the winner already produced.
+    The member recorded the digest precisely so that could be verified rather
+    than assumed.
     """
+    from app.alerts.artifacts import register
+    from app.alerts.dispatcher import planning_phrase_set
+    from app.alerts.models import AlertPhraseSetRegistry
+    from app.alerts.phrase_registry import validate_phrase_set
+
     with session_scope() as session:
         rules_sha = _registered(session)
+        v32 = validate_phrase_set(
+            open("config/alert_phrases.v3.2.json", encoding="utf-8").read())
+        session.add(AlertPhraseSetRegistry(
+            phrase_set_version=v32.version, phrase_set_sha256=v32.sha256,
+            canonical_json=v32.canonical_json, validator_version="1",
+            validated_at=NOW, worst_case_test_sha256=v32.worst_case_test_sha256))
+        register(session, load_active(session))
+        session.flush()
+
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        # planned against v3.2's VERSION but a digest that is not v3.2's
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version=v32.version,
+                           phrase_set_sha256="9" * 64,
+                           window_key=WINDOW, now=NOW)
+        delivery = session.get(AlertDelivery, plan.delivery_id)
 
-        winner = plan_digest(session, mode="shadow", live_profile="default",
-                             planning_rules_sha256=rules_sha,
-                             window_key=WINDOW, now=NOW)
-        session.flush()
-
-        # simulate the loser: its check saw nothing, so it inserts anyway
-        loser = plan_digest(session, mode="shadow", live_profile="default",
-                            planning_rules_sha256=rules_sha,
-                            window_key=WINDOW, now=NOW)
-
-        # the session is still usable — the savepoint absorbed the failure
-        deliveries = session.execute(select(AlertDelivery)).scalars().all()
-
-    assert loser.delivery_id == winner.delivery_id
-    assert len([d for d in deliveries
-                if d.delivery_kind == DeliveryKind.DIGEST]) == 1
+        assert planning_phrase_set(session, delivery, _phrase_set()) is None
 
 
-def test_a_lost_race_does_not_poison_the_surrounding_transaction():
-    """The savepoint is the point: only it rolls back."""
-    from sqlalchemy.exc import IntegrityError
-
-    from app.alerts.models import AlertDelivery as _AD
+def test_a_quiet_digest_has_no_planned_text_to_reproduce():
+    """No members means nothing was planned against a particular phrase set."""
+    from app.alerts.dispatcher import planning_phrase_set
 
     with session_scope() as session:
         rules_sha = _registered(session)
-        first = plan_digest(session, mode="shadow", live_profile="default",
-                            planning_rules_sha256=rules_sha,
-                            window_key=WINDOW, now=NOW)
-        session.flush()
-
-        # force the race by inserting the same dedupe key directly
-        try:
-            with session.begin_nested():
-                session.add(_AD(
-                    delivery_id="01M0RACEDUP0000000000000A",
-                    dedupe_key=digest_dedupe_key(mode="shadow",
-                                                 live_profile="default",
-                                                 window_key=WINDOW),
-                    dedupe_version=1, manual_retry_sequence=0, mode="shadow",
-                    live_profile="default", planning_rules_sha256=rules_sha,
-                    delivery_kind=DeliveryKind.DIGEST, priority=Priority.P3,
-                    transport_status="PENDING", planning_state="READY",
-                    not_before=NOW, created_at=NOW, updated_at=NOW, attempts=0,
-                    duplicate_risk_acknowledged=False, recipient_ref="default"))
-                session.flush()
-            raise AssertionError("the unique key did not fire")
-        except IntegrityError:
-            pass
-
-        # the transaction is still alive and the original delivery intact
-        assert session.get(AlertDelivery, first.delivery_id) is not None
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha,
+                           window_key=WINDOW, now=NOW)
+        assert plan.quiet is True
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        current = _phrase_set()
+        assert planning_phrase_set(session, delivery, current) is current
