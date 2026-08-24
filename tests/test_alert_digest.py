@@ -998,3 +998,35 @@ def test_a_quiet_digest_whose_ruleset_text_is_gone_fails_the_render():
         session.get(AlertRulesetRegistry, rules_sha).phrase_set_sha256 = "9" * 64
         session.flush()
         assert planning_phrase_set(session, delivery, _Different()) is None
+
+
+def test_a_retry_after_a_definite_failure_re_renders_the_digest():
+    """A definite non-acceptance delivered nothing, so the text may change.
+
+    `attempts == 0` froze the wording after the first failed attempt, so a
+    silence landing afterwards was disclosed by a stale count on every retry.
+    Only an AMBIGUOUS outcome — the bytes may have arrived — should freeze it.
+    """
+    from app.alerts.dispatcher import _digest_may_rerender
+    from app.alerts.enums import TransportStatus
+
+    class _D:
+        transport_status = TransportStatus.RETRY_DUE
+        prior_unknown_delivery_id = None
+        duplicate_risk_acknowledged = False
+
+    assert _digest_may_rerender(_D()) is True
+
+    # ambiguous: it may already have arrived, so the wording is frozen
+    ambiguous = _D()
+    ambiguous.transport_status = TransportStatus.UNKNOWN
+    assert _digest_may_rerender(ambiguous) is False
+
+    # and it stays frozen once an ambiguous send is on record
+    after = _D()
+    after.prior_unknown_delivery_id = "01M0PRIORUNKNOWN0000000000"
+    assert _digest_may_rerender(after) is False
+
+    acknowledged = _D()
+    acknowledged.duplicate_risk_acknowledged = True
+    assert _digest_may_rerender(acknowledged) is False

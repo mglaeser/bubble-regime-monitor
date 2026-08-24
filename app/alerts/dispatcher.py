@@ -32,7 +32,12 @@ from sqlalchemy import func, select
 from app.alerts.budgets import check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.digest import render_digest_body
-from app.alerts.enums import DeliveryKind, Priority, RenderSource
+from app.alerts.enums import (
+    DeliveryKind,
+    Priority,
+    RenderSource,
+    TransportStatus,
+)
 from app.alerts.errors import RenderRejected, sanitize
 from app.alerts.models import (
     AlertDelivery,
@@ -344,6 +349,27 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
     return validate_phrase_set(registered.canonical_json)
 
 
+def _digest_may_rerender(delivery: AlertDelivery) -> bool:
+    """Whether a digest's body may still change.
+
+    Render reuse exists so a retry does not alter the text of a message that
+    may already have arrived. `attempts == 0` was too strict a reading of that:
+    an attempt ending in a DEFINITE non-acceptance delivered nothing, so the
+    text is still free to change — and it should, because the count is computed
+    from suppression state that moves between passes. A silence landing after
+    the first render would otherwise be disclosed by a stale number on every
+    subsequent retry.
+
+    Only an AMBIGUOUS outcome — the bytes may have reached the proxy — freezes
+    the wording, and it freezes it for good: at that point a differently worded
+    duplicate is worse than a stale one.
+    """
+    if delivery.transport_status == TransportStatus.UNKNOWN:
+        return False
+    return delivery.prior_unknown_delivery_id is None \
+        and not delivery.duplicate_risk_acknowledged
+
+
 def dispatch_once(
     session_factory: Any,
     *,
@@ -478,7 +504,7 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # render would otherwise be disclosed by a stale number.
         if existing is not None and not (
                 delivery.delivery_kind == DeliveryKind.DIGEST
-                and delivery.attempts == 0):
+                and _digest_may_rerender(delivery)):
             body = existing.final_message
         else:
             # EVERY kind renders from the phrase set its members were PLANNED
