@@ -509,6 +509,22 @@ def record_actionability(body: ActionabilityRequest, response: Response,
     with session_scope() as session:
         if session.get(AlertEpisode, body.episode_id) is None:
             return problem(404, "No such episode", body.episode_id)
+        if body.delivery_id is not None:
+            # The delivery must be the one that actually CARRIED this episode.
+            # An unchecked delivery_id lets a review attribute episode A's
+            # verdict to episode B's message — and the Stage 7 comparison is
+            # precisely about which rendering earned the label, so
+            # cross-attributed evidence is worse than none.
+            from app.alerts.models import AlertDeliveryMember
+
+            carried = session.get(
+                AlertDeliveryMember, (body.delivery_id, body.episode_id))
+            if carried is None:
+                return problem(
+                    409, "Delivery did not carry this episode",
+                    f"delivery {body.delivery_id} has no member row for "
+                    f"episode {body.episode_id}; a label must attach to the "
+                    "message that actually carried the alert")
         # One label per (episode, delivery). The KPI counts labels, so a
         # second contradictory one would double-count the same alert — and
         # silently replacing the first would erase evidence. Reviews are

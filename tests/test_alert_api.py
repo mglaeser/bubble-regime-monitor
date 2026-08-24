@@ -553,3 +553,34 @@ def test_actionability_review_is_recorded_with_ambiguous_first_class(client):
                       headers={"X-API-Key": TEST_ADMIN_KEY},
                       json={"episode_id": episode_id, "actionable": "MAYBE"})
     assert bad.status_code == 422
+
+
+def test_a_review_cannot_attribute_another_deliverys_verdict(client):
+    """The label must attach to the message that actually carried the alert.
+
+    An unchecked delivery_id let a review cite episode A's verdict against
+    episode B's message — and the Stage 7 comparison is precisely about which
+    RENDERING earned the label, so cross-attributed evidence is worse than
+    none.
+    """
+    from app.db import session_scope
+    from tests.test_alert_digest import _pending_item, _registered
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="regime.band_to_derisk")
+        unrelated = _unknown_delivery(session)   # a delivery with NO members
+        from sqlalchemy import select
+
+        from app.alerts.models import AlertEpisode
+        episode_id = session.execute(
+            select(AlertEpisode.episode_id)).scalars().first()
+
+    response = client.post(
+        "/api/v1/admin/alerts/actionability",
+        headers={"X-API-Key": TEST_ADMIN_KEY},
+        json={"episode_id": episode_id, "delivery_id": unrelated,
+              "actionable": "YES"})
+    assert response.status_code == 409
+    assert "no member row" in response.json()["detail"]
