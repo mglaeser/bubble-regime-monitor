@@ -288,9 +288,15 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
         return fallback
 
     version, digest = row
-    if not version:
-        return fallback
-    if version == fallback.version and (not digest or digest == fallback.sha256):
+    if not version or not digest:
+        # A member with no recorded text provenance cannot have its planned
+        # wording reproduced or verified. Falling back would render it from
+        # whatever is loaded now, which is the substitution this function was
+        # written to prevent.
+        log.error("alert_planning_phrase_set_unrecorded",
+                  delivery_id=delivery.delivery_id)
+        return None
+    if version == fallback.version and digest == fallback.sha256:
         return fallback
 
     registered = session.get(AlertPhraseSetRegistry, version)

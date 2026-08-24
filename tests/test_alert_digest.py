@@ -62,6 +62,14 @@ def _graph(session, rules_sha: str) -> tuple[str, str]:
     return identity, evaluation_id
 
 
+
+def _provenance() -> tuple[str, str]:
+    """Real phrase-set provenance. `plan_digest` requires it, so tests supply
+    it rather than leaning on a default that used to disable the check."""
+    ps = _phrase_set()
+    return ps.version, ps.sha256
+
+
 def _pending_item(session, *, rules_sha: str, rule_id: str,
                   window: str = WINDOW) -> str:
     identity, evaluation_id = _graph(session, rules_sha)
@@ -91,6 +99,8 @@ def test_a_window_becomes_one_delivery_with_its_items_as_members():
         _pending_item(session, rules_sha=sha, rule_id="regime.derisk_edge_approach")
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                            window_key=WINDOW, now=NOW)
 
     assert plan.quiet is False
@@ -120,6 +130,8 @@ def test_a_quiet_week_still_sends():
         sha = _registered(session)
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                            window_key=WINDOW, now=NOW)
 
     assert plan.quiet is True
@@ -141,10 +153,14 @@ def test_replanning_the_same_window_is_a_no_op():
         _pending_item(session, rules_sha=sha, rule_id="structure.s2_saturation")
         first = plan_digest(session, mode="shadow", live_profile="default",
                             planning_rules_sha256=sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                             window_key=WINDOW, now=NOW)
     with session_scope() as session:
         second = plan_digest(session, mode="shadow", live_profile="default",
                              planning_rules_sha256=sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                              window_key=WINDOW, now=NOW)
 
     assert second.delivery_id == first.delivery_id
@@ -168,6 +184,8 @@ def test_an_item_from_another_window_is_not_swept_in():
         _pending_item(session, rules_sha=sha, rule_id="structure.s2_saturation", window="2026-W33")
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                            window_key=WINDOW, now=NOW)
     assert plan.quiet is True, "last week's item belongs to last week's digest"
 
@@ -304,7 +322,9 @@ def test_a_memberless_digest_is_not_cancelled_as_all_resolved():
     with session_scope() as session:
         rules_sha = _registered(session)
         plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha, window_key=WINDOW,
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                            now=NOW)
         assert plan.quiet is True
         delivery_id = plan.delivery_id
@@ -335,14 +355,18 @@ def test_a_digest_never_consumes_another_namespace_s_items():
 
         # the live namespace has nothing of its own this week
         plan = plan_digest(session, mode="live", live_profile="default",
-                           planning_rules_sha256=rules_sha, window_key=WINDOW,
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                            now=NOW)
         assert plan.quiet is True, "a live digest consumed a shadow item"
         assert plan.item_ids == []
 
         # and the shadow item is still there for the shadow digest to take
         shadow = plan_digest(session, mode="shadow", live_profile="default",
-                             planning_rules_sha256=rules_sha, window_key=WINDOW,
+                             planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                              now=NOW)
         assert len(shadow.item_ids) == 1
         assert shadow.quiet is False
@@ -366,7 +390,9 @@ def test_the_count_is_what_happened_not_what_is_still_open():
                      "tripwire.rf4_first"):
             _pending_item(session, rules_sha=rules_sha, rule_id=rule)
         plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha, window_key=WINDOW,
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                            now=NOW)
         delivery_id = plan.delivery_id
         assert len(plan.item_ids) == 3
@@ -409,7 +435,9 @@ def test_a_silenced_episode_is_not_disclosed_by_the_count():
                      "tripwire.rf4_first"):
             _pending_item(session, rules_sha=rules_sha, rule_id=rule)
         plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha, window_key=WINDOW,
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                            now=NOW)
         assert len(plan.item_ids) == 3
 
@@ -446,7 +474,9 @@ def test_a_silence_after_the_first_render_is_not_disclosed_by_a_stale_body():
         for rule in ("regime.band_to_derisk", "regime.band_hold_to_trim"):
             _pending_item(session, rules_sha=rules_sha, rule_id=rule)
         plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha, window_key=WINDOW,
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                            now=NOW)
         delivery_id = plan.delivery_id
 
@@ -518,7 +548,9 @@ def test_the_recovered_list_survives_an_already_planned_current_window(monkeypat
         rules_sha = _registered(session)
         # the current window is already done...
         plan_digest(session, mode="shadow", live_profile="default",
-                    planning_rules_sha256=rules_sha, window_key=current, now=NOW)
+                    planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=current, now=NOW)
         # ...and an older one is still owed
         _pending_item(session, rules_sha=rules_sha,
                       rule_id="regime.band_to_derisk", window="2026-W02")
@@ -556,14 +588,18 @@ def test_an_item_arriving_late_joins_a_digest_that_has_not_been_sent():
         rules_sha = _registered(session)
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
         first = plan_digest(session, mode="shadow", live_profile="default",
-                            planning_rules_sha256=rules_sha, window_key=WINDOW,
+                            planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                             now=NOW)
         assert len(first.item_ids) == 1
 
         # an episode opens late for the same, still-unsent window
         _pending_item(session, rules_sha=rules_sha, rule_id="tripwire.rf4_first")
         second = plan_digest(session, mode="shadow", live_profile="default",
-                             planning_rules_sha256=rules_sha, window_key=WINDOW,
+                             planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                              now=NOW)
 
         assert second.delivery_id == first.delivery_id, "a second digest appeared"
@@ -585,7 +621,9 @@ def test_an_item_arriving_after_the_send_is_counted_not_folded_in():
         rules_sha = _registered(session)
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
         first = plan_digest(session, mode="shadow", live_profile="default",
-                            planning_rules_sha256=rules_sha, window_key=WINDOW,
+                            planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                             now=NOW)
         session.get(AlertDelivery, first.delivery_id).transport_status = \
             TransportStatus.SENT
@@ -593,7 +631,9 @@ def test_an_item_arriving_after_the_send_is_counted_not_folded_in():
 
         _pending_item(session, rules_sha=rules_sha, rule_id="tripwire.rf4_first")
         after = plan_digest(session, mode="shadow", live_profile="default",
-                            planning_rules_sha256=rules_sha, window_key=WINDOW,
+                            planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                             now=NOW)
 
     assert after.item_ids == []
@@ -634,7 +674,9 @@ def test_the_library_default_is_the_closed_window_not_the_open_one():
     with session_scope() as session:
         rules_sha = _registered(session)
         plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha, now=NOW)
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1], now=NOW)
 
     assert plan.window_key == last_closed_digest_window(NOW)
     assert plan.window_key != digest_window_key(NOW)
@@ -649,6 +691,8 @@ def test_plan_digest_refuses_an_open_or_future_window():
         for window in (digest_window_key(NOW), "2099-W40"):
             plan = plan_digest(session, mode="shadow", live_profile="default",
                                planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                                window_key=window, now=NOW)
             assert plan.delivery_id is None, window
             assert "has not closed" in (plan.skipped_reason or ""), window
@@ -702,6 +746,8 @@ def test_an_item_orphaned_by_a_sent_digest_is_carried_into_the_next_one():
                       rule_id="regime.band_to_derisk", window="2026-W33")
         last = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                            window_key="2026-W33", now=NOW)
         session.get(AlertDelivery, last.delivery_id).transport_status = \
             TransportStatus.SENT
@@ -712,12 +758,16 @@ def test_an_item_orphaned_by_a_sent_digest_is_carried_into_the_next_one():
                       rule_id="tripwire.rf4_first", window="2026-W33")
         stranded = plan_digest(session, mode="shadow", live_profile="default",
                                planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                                window_key="2026-W33", now=NOW)
         assert stranded.stranded == 1
 
         # this week's digest picks it up rather than leaving it forever
         this_week = plan_digest(session, mode="shadow", live_profile="default",
                                 planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                                 window_key=WINDOW, now=NOW)
 
     assert this_week.carried_forward == 1
@@ -739,6 +789,8 @@ def test_an_unreported_earlier_window_keeps_its_own_items():
         # W33 has no digest yet, so its item is not swept into W34
         this_week = plan_digest(session, mode="shadow", live_profile="default",
                                 planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                                 window_key=WINDOW, now=NOW)
         assert this_week.quiet is True
         assert this_week.carried_forward == 0
@@ -746,6 +798,8 @@ def test_an_unreported_earlier_window_keeps_its_own_items():
         # and W33's own digest still finds it
         last = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                            window_key="2026-W33", now=NOW)
         assert len(last.item_ids) == 1
 
@@ -856,8 +910,53 @@ def test_a_quiet_digest_has_no_planned_text_to_reproduce():
         rules_sha = _registered(session)
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                            window_key=WINDOW, now=NOW)
         assert plan.quiet is True
         delivery = session.get(AlertDelivery, plan.delivery_id)
         current = _phrase_set()
         assert planning_phrase_set(session, delivery, current) is current
+
+
+def test_a_member_with_no_recorded_provenance_fails_the_render():
+    """A default that quietly disables an integrity control is worse than none.
+
+    `plan_digest` used to let the phrase-set version and digest default to
+    empty strings, and a member with no provenance was then rendered from
+    whatever the process held — so a queued digest's wording could change
+    across a deploy with nothing recording that it had.
+    """
+    from app.alerts.dispatcher import planning_phrase_set
+    from app.alerts.models import AlertDeliveryMember
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        plan = plan_digest(session, mode="shadow", live_profile="default",
+                           planning_rules_sha256=rules_sha,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
+                           window_key=WINDOW, now=NOW)
+
+        # a member that predates the requirement, carrying nothing
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == plan.delivery_id)
+        ).scalars().first()
+        member.origin_phrase_set_version = ""
+        member.origin_phrase_set_sha256 = ""
+        session.flush()
+
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        assert planning_phrase_set(session, delivery, _phrase_set()) is None
+
+
+def test_plan_digest_will_not_record_a_member_without_provenance():
+    """The parameters are required, so the empty case cannot be created."""
+    import inspect
+
+    signature = inspect.signature(plan_digest)
+    for name in ("phrase_set_version", "phrase_set_sha256"):
+        assert signature.parameters[name].default is inspect.Parameter.empty, (
+            f"{name} has a default again, which re-enables the hole")

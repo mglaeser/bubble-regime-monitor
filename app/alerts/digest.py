@@ -163,7 +163,7 @@ def _delivery_provenance(session: Session, delivery_id: str,
 
 def plan_digest(session: Session, *, mode: str, live_profile: str,
                 planning_rules_sha256: str,
-                phrase_set_version: str = "", phrase_set_sha256: str = "",
+                phrase_set_version: str, phrase_set_sha256: str,
                 window_key: str | None = None, recipient_ref: str = "default",
                 now: datetime | None = None) -> DigestPlan:
     """Turn a window's PENDING digest items into one delivery.
@@ -171,6 +171,14 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
     Runs in the caller's transaction. Idempotent through the dedupe key, so a
     retried job, a restarted scheduler and a manual run all converge on the
     same single delivery rather than three.
+
+    `phrase_set_version` and `phrase_set_sha256` are REQUIRED. They used to
+    default to empty strings, which meant a caller could create members with no
+    text provenance at all — and a member with no provenance was then rendered
+    from whatever phrase set the process happened to hold, so a queued digest's
+    wording could change across a deploy with nothing recording that it had.
+    A default that quietly disables an integrity control is worse than no
+    control.
     """
     now = now or datetime.now(UTC)
     # The DEFAULT must be the window that closed, not the one we are standing
