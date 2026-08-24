@@ -1,46 +1,77 @@
 # Host-only settings and credentials must never enter an image.
 .env
 .env.*
+**/.env
+**/.env.*
 !.env.example
 .envrc
+**/.envrc
 secrets
+**/secrets
 .secrets
+**/.secrets
 *.key
+**/*.key
 *.pem
+**/*.pem
 *.p12
+**/*.p12
 *.pfx
+**/*.pfx
 
 # Private verifier drafts and unreviewed local package artifacts.
 artifacts/verifier/mc3/*-skeleton.json
 artifacts/verifier/mc3/*-plan.json
 *.whl
+**/*.whl
 *.tar.gz
+**/*.tar.gz
 
 # Version-control metadata is not an application runtime input.
 .git
+**/.git
 
 # Local Python environments.
 .venv
+**/.venv
 venv
+**/venv
 env
+**/env
 
 # Developer caches and generated build output.
 __pycache__
+**/__pycache__
 *.pyc
+**/*.pyc
 *.pyo
+**/*.pyo
 *.pyd
+**/*.pyd
 .pytest_cache
+**/.pytest_cache
 .mypy_cache
+**/.mypy_cache
 .ruff_cache
+**/.ruff_cache
 .cache
+**/.cache
 .tox
+**/.tox
 .nox
+**/.nox
 .coverage
+**/.coverage
 .coverage.*
+**/.coverage.*
 htmlcov
+**/htmlcov
 dist
+**/dist
 build
+**/build
 *.egg-info
+**/*.egg-info
 
 # Runtime state is supplied through the /data bind mount.
 data

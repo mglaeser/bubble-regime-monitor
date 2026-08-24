@@ -24,7 +24,9 @@ HOST_ONLY_PATHS = (
     "ops/.env",
     "ops/.env.production",
     "secrets/gateway-token",
+    "ops/secrets/gateway-token",
     ".secrets/signing-token",
+    "ops/.secrets/signing-token",
     "tls/private.key",
     "tls/client.pem",
     "artifacts/verifier/mc3/local-skeleton.json",
@@ -32,9 +34,13 @@ HOST_ONLY_PATHS = (
     "vendor/unreviewed.whl",
     "vendor/unreviewed.tar.gz",
     ".git/config",
+    "vendor/source/.git/config",
     ".venv/bin/python",
+    "tools/.venv/bin/python",
     "tools/venv/bin/python",
+    "tools/env/bin/python",
     "app/__pycache__/main.pyc",
+    "app/services/__pycache__/compute.pyc",
     ".pytest_cache/v/cache/nodeids",
     ".mypy_cache/3.11/meta.json",
     ".ruff_cache/content",
@@ -69,10 +75,33 @@ def _rules(policy: Path) -> tuple[str, ...]:
 
 
 def _matches(path: str, pattern: str) -> bool:
-    """Match the portable subset used by both container ignore files."""
-    if "/" in pattern:
-        return fnmatch.fnmatchcase(path, pattern)
-    return any(fnmatch.fnmatchcase(part, pattern) for part in path.split("/"))
+    """Match the rooted portable subset used by both container engines.
+
+    Docker patterns without a slash apply at the context root, not to every
+    basename. ``**/`` is the explicit recursive form and may match zero
+    directories. Matching a parent directory excludes its descendants.
+    """
+    candidates = [
+        "/".join(path.split("/")[:index])
+        for index in range(1, len(path.split("/")) + 1)
+    ]
+
+    def rooted(candidate: str, rooted_pattern: str) -> bool:
+        candidate_parts = candidate.split("/")
+        pattern_parts = rooted_pattern.split("/")
+        return len(candidate_parts) == len(pattern_parts) and all(
+            fnmatch.fnmatchcase(part, wanted)
+            for part, wanted in zip(candidate_parts, pattern_parts, strict=True)
+        )
+
+    if pattern.startswith("**/"):
+        suffix = pattern.removeprefix("**/")
+        return any(
+            any(rooted("/".join(candidate.split("/")[start:]), suffix)
+                for start in range(len(candidate.split("/"))))
+            for candidate in candidates
+        )
+    return any(rooted(candidate, pattern) for candidate in candidates)
 
 
 def _is_excluded(path: str, rules: tuple[str, ...]) -> bool:
