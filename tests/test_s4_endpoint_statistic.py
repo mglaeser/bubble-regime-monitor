@@ -65,37 +65,6 @@ def scored_as(monkeypatch):
     return _apply
 
 
-@pytest.fixture
-def frozen_gsadf(monkeypatch, tmp_path):
-    """Rewrite any key in the frozen gsadf block, off-disk."""
-    def _apply(**kw):
-        data = json.loads(M.FROZEN_PATH.read_bytes())
-        data["gsadf"].update(kw)
-        f = tmp_path / "frozen.json"
-        f.write_text(json.dumps(data))
-        monkeypatch.setattr(M, "FROZEN_PATH", f)
-        for fn in _CACHED:
-            fn.cache_clear()
-    yield _apply
-    for fn in _CACHED:
-        fn.cache_clear()
-
-
-@pytest.fixture
-def frozen_statistic(monkeypatch, tmp_path):
-    """Rewrite gsadf.statistic in an off-disk copy of the frozen artifact."""
-    def _apply(value):
-        data = json.loads(M.FROZEN_PATH.read_bytes())
-        data["gsadf"]["statistic"] = value
-        f = tmp_path / "frozen.json"
-        f.write_text(json.dumps(data))
-        monkeypatch.setattr(M, "FROZEN_PATH", f)
-        for fn in _CACHED:
-            fn.cache_clear()
-    yield _apply
-    for fn in _CACHED:
-        fn.cache_clear()          # restore the real artifact for every other test
-
 
 def _raw_diverging():
     """The sup rejects; the endpoint does not. The two rules disagree maximally."""
