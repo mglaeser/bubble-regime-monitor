@@ -269,7 +269,6 @@ def dispatch_once(
     now = now or datetime.now(UTC)
     settings = settings or get_settings()
     live = is_live(mode)
-    sender = sender or default_sender(live=live)
     owner = _owner()
     report = DispatchReport()
 
@@ -282,6 +281,11 @@ def dispatch_once(
         with session_factory() as session:
             blockers = live_admission_blockers(session)
         if blockers:
+            # Refused BEFORE any sender exists. Stage 1 promises no sender is
+            # constructed at all, and building one to then not use it would
+            # break that promise silently — the object reads credentials and
+            # can open a client. `is None` rather than `or` so an injected
+            # sender is never quietly replaced.
             report.notes.extend(blockers)
             report.notes.append(
                 "live delivery withheld: the ruleset's active stage is not "
@@ -289,6 +293,9 @@ def dispatch_once(
             log.error("alert_live_admission_refused", blockers=blockers)
             _heartbeat(report)
             return report
+
+    if sender is None:
+        sender = default_sender(live=live)
 
     with session_factory() as session:
         report.recovered = recover_leases(session, now=now)

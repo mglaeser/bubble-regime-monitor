@@ -484,6 +484,29 @@ it, only status, timing, hashes and an already-redacted error string.
 
 ---
 
+## 11a2. Promotion is not a delivery switch
+
+Two questions that look like one, and must not be:
+
+* **May these artifact bytes be accepted as a Stage-N artifact?** —
+  `promotion_blockers`. It can pass at Stage 1, and passing means an operator
+  accepted the exact rules and phrase bytes against evidence for that stage.
+* **May this deployment construct a sender and deliver?** —
+  `live_admission_blockers`. Below `LIVE_DELIVERY_STAGE` (3) the answer is
+  always no, and neither passing evidence nor exact promotion lifts it.
+
+Stage 1 has no sender and no LLM by design. The dispatcher therefore refuses
+BEFORE constructing a sender rather than after: building one and declining to
+use it would break that promise quietly, since the object reads credentials and
+can open a client.
+
+The floor was briefly removed on the reasoning that `ops.indicator_stale` and
+`ops.coverage_degraded_info` are enabled at Stage 1 and could therefore send.
+They are enabled and they cannot send — both are P4, and the planner maps P4 to
+"API and log only", creating no delivery. Checking that the rules were enabled
+without checking what they produce turned a refusal into an evidence check, and
+a promoted Stage-1 artifact then cleared live admission.
+
 ## 11b. Open Stage 2 blocker: the ruleset exceeds its own non-P1 budget
 
 Wiring the planner into the atomic apply (audit B-01) turned every non-P1

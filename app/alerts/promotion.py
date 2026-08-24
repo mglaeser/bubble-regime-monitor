@@ -29,17 +29,22 @@ import json
 from pathlib import Path
 from typing import Any
 
-#: The stage from which the MARKET rules deliver. Kept for the per-delivery
-#: stage comparison; it is NOT a licence to skip evidence below it.
+#: The stage at which provider-backed delivery begins. Below it, live delivery
+#: is REFUSED — not merely unevidenced.
 #:
-#: It used to be exactly that, on the reasoning that no delivery rule is live
-#: under stage 3. That is true of the market rules and false of the ops ones:
-#: `ops.indicator_stale` and `ops.coverage_degraded_info` are enabled from
-#: stage 1, so a stage-1 deployment can plan and send. Skipping the evidence
-#: check there meant the one gate standing in front of the outbox waved
-#: everything through on exactly the deployments that have the least evidence
-#: behind them.
-MARKET_DELIVERY_STAGE = 3
+#: I previously removed this floor, reasoning that `ops.indicator_stale` and
+#: `ops.coverage_degraded_info` are enabled from stage 1 and could therefore
+#: send. They are enabled, and they cannot send: both are P4, and the planner
+#: maps P4 to "API and log only", creating no delivery at all. Checking that
+#: the rules were enabled without checking what they produce turned the floor
+#: into an evidence check, and a promoted stage-1 artifact then cleared live
+#: admission — which is the opposite of what stage 1 promises.
+#:
+#: Passing evidence and exact promotion cannot lift this. They answer a
+#: different question: whether these bytes may be ACCEPTED as a stage-N
+#: artifact. Whether this deployment may construct a sender and deliver is
+#: this constant's question alone.
+LIVE_DELIVERY_STAGE = 3
 
 #: A sha256 written as eight hyphen-separated 8-character groups.
 #:
@@ -221,12 +226,23 @@ def live_admission_blockers(session: Any, *, path: str | Path | None = None,
                 f"be justified: {type(exc).__name__}"]
 
     stage = ruleset.document.meta.active_stage
+    blockers: list[str] = []
+    if stage < LIVE_DELIVERY_STAGE:
+        blockers.append(
+            f"live delivery is not admitted before Stage {LIVE_DELIVERY_STAGE} "
+            f"(active_stage={stage})")
+
+    # NOT an early return. Evidence and promoted-byte checks still run, so a
+    # deployment that is both too early AND unevidenced reports both rather
+    # than hiding the second behind the first.
     evidence = load_evidence(path)
     if evidence is None:
-        return [f"stage {stage}: the gate evidence at {EVIDENCE_PATH} is missing "
-                "or unreadable, so nothing justifies delivering at this stage"]
+        blockers.append(
+            f"stage {stage}: the gate evidence at {EVIDENCE_PATH} is missing "
+            "or unreadable, so nothing justifies delivering at this stage")
+        return blockers
 
-    blockers = promotion_blockers(
+    blockers += promotion_blockers(
         target_stage=stage, artifact=evidence,
         rule_version=ruleset.document.meta.rule_version,
         phrase_set_version=getattr(ruleset, "phrase_set_version", None),

@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from app.alerts.promotion import promotion_blockers
 
@@ -766,21 +767,104 @@ def test_the_schema_binds_a_delivery_to_its_reviewed_text():
         session.rollback()
 
 
+@pytest.mark.parametrize("promote", [False, True])
 @pytest.mark.usefixtures("isolated_db")
-def test_a_stage_one_deployment_is_gated_by_its_own_evidence():
-    """End to end: the committed stage-1 ruleset is backed, so it delivers."""
+def test_stage_one_is_never_admitted_for_live_delivery(promote):
+    """Promotion accepts ARTIFACT BYTES. It is not a delivery switch.
+
+    Passing stage-1 evidence proves stage-1 EVALUATION behaviour. Stage 1 has
+    no sender and no LLM by design, and delivery begins at stage 3 — so no
+    amount of evidence or operator promotion may admit it.
+
+    An earlier version of this test asserted the opposite: it promoted the
+    stage-1 artifact and expected NO blockers, which is how the floor came to
+    be removed.
+    """
     from app.alerts.artifacts import load_active, register
+    from app.alerts.promotion import (
+        LIVE_DELIVERY_STAGE,
+        live_admission_blockers,
+        promotion_blockers,
+    )
+    from app.db import session_scope
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts, promote=promote)
+        session.flush()
+
+        blockers = live_admission_blockers(session)
+        assert any("not admitted before Stage" in b for b in blockers), blockers
+        assert any(f"active_stage={artifacts.ruleset.document.meta.active_stage}"
+                   in b for b in blockers)
+
+        # ...while the artifact itself may still be perfectly promotable
+        evidence = json.loads(ARTIFACT.read_text(encoding="utf-8"))
+        assert promotion_blockers(
+            target_stage=1, artifact=evidence,
+            rule_version=artifacts.ruleset.document.meta.rule_version) == []
+
+    assert LIVE_DELIVERY_STAGE == 3
+
+
+@pytest.mark.usefixtures("isolated_db")
+def test_the_stage_floor_does_not_hide_missing_evidence():
+    """Both answers, not the first one only.
+
+    An early return on the stage floor would make a deployment that is also
+    unevidenced look like it has exactly one problem.
+    """
     from app.alerts.promotion import live_admission_blockers
     from app.db import session_scope
 
     with session_scope() as session:
-        # nothing promoted yet: the gate blocks, which it could not even reach
-        # before, because stage 1 skipped the evidence check entirely
-        assert live_admission_blockers(session) == [
-            "nothing has been promoted, so no bytes authorise delivery"]
+        blockers = live_admission_blockers(session)
 
-        register(session, load_active(session), promote=True)
+    assert any("not admitted before Stage" in b for b in blockers)
+    assert any("promoted" in b for b in blockers), blockers
+
+
+@pytest.mark.parametrize("evidence,promote", [
+    ("missing", False), ("present", False), ("present", True),
+])
+@pytest.mark.usefixtures("isolated_db")
+def test_stage_one_live_dispatch_refuses_before_sender_construction(
+        monkeypatch, tmp_path, evidence, promote):
+    """Stage 1 constructs no sender, claims nothing, and sends nothing.
+
+    Parameterised across every combination that might look like authority:
+    no evidence, valid stage-1 evidence, and valid evidence with the exact
+    artifact promoted. None of them admit delivery.
+    """
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.models import AlertDelivery
+    from app.alerts.promotion import live_admission_blockers
+    from app.db import session_scope
+
+    constructed: list[int] = []
+    monkeypatch.setattr(
+        dispatcher_module, "default_sender",
+        lambda **kw: constructed.append(1) or (_ for _ in ()).throw(
+            AssertionError("a sender was constructed at stage 1")))
+
+    if evidence == "missing":
+        monkeypatch.setattr("app.alerts.promotion.load_evidence",
+                            lambda path=None: None)
+
+    with session_scope() as session:
+        register(session, load_active(session), promote=promote)
         session.flush()
+        assert any("not admitted before Stage" in b
+                   for b in live_admission_blockers(session))
 
-        # promoted, and stage-1 evidence exists and passes
-        assert live_admission_blockers(session) == []
+    report = dispatcher_module.dispatch_once(
+        session_scope, phrase_set=None, mode="live", live_profile="default")
+
+    assert constructed == [], "stage 1 built a sender"
+    assert report.claimed == 0
+    assert report.sent == 0
+    assert any("withheld" in n for n in report.notes)
+
+    with session_scope() as session:
+        assert session.execute(select(AlertDelivery)).scalars().all() == []
