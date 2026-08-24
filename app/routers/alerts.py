@@ -54,7 +54,8 @@ CURSOR_VERSION = "v1"
 
 
 def problem(status: int, title: str, detail: str, *, type_: str = "about:blank",
-            extra: dict[str, object] | None = None) -> JSONResponse:
+            extra: dict[str, object] | None = None,
+            headers: dict[str, str] | None = None) -> JSONResponse:
     """RFC 9457 problem details, with a sanitized detail string.
 
     `extra` carries machine-readable members alongside the prose. A refusal an
@@ -70,6 +71,7 @@ def problem(status: int, title: str, detail: str, *, type_: str = "about:blank",
         status_code=status,
         media_type="application/problem+json",
         content=content,
+        headers=headers,
     )
 
 

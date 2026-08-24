@@ -8,6 +8,7 @@ phone number.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -409,6 +410,41 @@ def test_manual_retry_requires_duplicate_ack(client):
     assert "Idempotency-Key" in response.json()["title"]
 
 
+def _seed_render(session, delivery_id: str, *, body: str = "Original reviewed alert.") -> str:
+    """Persist the exact bytes an UNKNOWN delivery may already have sent."""
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import RenderSource
+    from app.alerts.gsm7 import septets
+    from app.alerts.models import AlertRender
+    from app.alerts.render_context import RenderContext
+    from app.alerts.repository import utc_ms
+
+    now = datetime(2026, 8, 24, 9, 0, tzinfo=UTC)
+    phrase_set = load_active(session).phrase_set
+    context = RenderContext(members=[])
+    render_id = new_ulid(utc_ms(now))
+    session.add(AlertRender(
+        render_id=render_id,
+        delivery_id=delivery_id,
+        render_source=RenderSource.TEMPLATE_FULL,
+        planning_phrase_set_version=phrase_set.version,
+        planning_phrase_set_sha256=phrase_set.sha256,
+        render_context_hash=context.context_hash(),
+        fact_catalog_hash=context.fact_catalog_hash(),
+        selected_fact_ids=[],
+        selected_phrase_codes=["TEST_MESSAGE"],
+        validation_results={"gsm7": True, "fits_single_sms": True},
+        final_message=body,
+        gsm7_septets=septets(body),
+        created_at=now,
+    ))
+    session.flush()
+    return render_id
+
+
 def _unknown_delivery(session) -> str:
     from datetime import UTC, datetime
 
@@ -421,15 +457,24 @@ def _unknown_delivery(session) -> str:
         TransportStatus,
     )
     from app.alerts.models import AlertDelivery
+    from app.alerts.planner import dedupe_key
     from app.alerts.repository import utc_ms
 
     now = datetime(2026, 8, 24, 9, 0, tzinfo=UTC)
     artifacts = load_active(session)
     register(session, artifacts)
     delivery_id = new_ulid(utc_ms(now))
+    window_key = delivery_id
     session.add(AlertDelivery(
-        delivery_id=delivery_id, dedupe_key=f"v1|MARKET|{delivery_id}",
+        delivery_id=delivery_id,
+        dedupe_key=dedupe_key(
+            delivery_kind=DeliveryKind.TEST,
+            members=[],
+            scheduled_window_key=window_key,
+            manual_retry_sequence=0,
+        ),
         dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+        scheduled_window_key=window_key,
         live_profile="default",
         planning_rules_sha256=artifacts.ruleset.rules_sha256,
         delivery_kind=DeliveryKind.TEST, priority=Priority.P2,
@@ -438,13 +483,42 @@ def _unknown_delivery(session) -> str:
         updated_at=now, attempts=1, duplicate_risk_acknowledged=False,
         recipient_ref="default"))
     session.flush()
+    _seed_render(session, delivery_id)
     return delivery_id
+
+
+def _post_concurrently(client, requests):
+    """Start real HTTP calls together and fail on a hung or leaked exception."""
+    barrier = threading.Barrier(len(requests))
+    responses = [None] * len(requests)
+    failures = []
+
+    def _run(index, request):
+        try:
+            barrier.wait(timeout=5)
+            responses[index] = client.post(**request)
+        except BaseException as exc:  # assertion reports worker exceptions
+            failures.append(exc)
+
+    threads = [threading.Thread(target=_run, args=(i, request), daemon=True)
+               for i, request in enumerate(requests)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert not [thread for thread in threads if thread.is_alive()], \
+        "a concurrent admin request did not finish within the bounded join"
+    assert failures == []
+    assert all(response is not None for response in responses)
+    return responses
 
 
 def test_manual_retry_creates_a_new_acknowledged_delivery(client):
     """Same generation, incremented sequence, linked to the UNKNOWN original."""
+    from sqlalchemy import select
+
     from app.alerts.enums import TransportStatus
-    from app.alerts.models import AlertDelivery
+    from app.alerts.models import AlertDelivery, AlertRender
     from app.db import session_scope
 
     with session_scope() as session:
@@ -467,6 +541,16 @@ def test_manual_retry_creates_a_new_acknowledged_delivery(client):
         assert fresh.duplicate_risk_acknowledged is True
         assert fresh.dedupe_key != old.dedupe_key   # sequence is in the material
         assert old.transport_status == TransportStatus.UNKNOWN  # untouched
+        old_render = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == original)
+        ).scalar_one()
+        retry_render = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == new_id)
+        ).scalar_one()
+        assert retry_render.render_id != old_render.render_id
+        assert retry_render.final_message == old_render.final_message
+        assert retry_render.render_context_hash == old_render.render_context_hash
+        assert retry_render.selected_phrase_codes == old_render.selected_phrase_codes
 
     # replaying the same key + body returns the SAME new delivery
     replay = client.post(
@@ -555,6 +639,44 @@ def test_actionability_review_is_recorded_with_ambiguous_first_class(client):
     assert bad.status_code == 422
 
 
+def test_concurrent_actionability_conflict_has_one_winner(client):
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertActionabilityReview, AlertEpisode
+    from app.db import session_scope
+    from tests.test_alert_digest import _pending_item, _registered
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="regime.band_to_derisk")
+        episode_id = session.execute(
+            select(AlertEpisode.episode_id)).scalar_one()
+
+    requests = [{
+        "url": "/api/v1/admin/alerts/actionability",
+        "headers": {"X-API-Key": TEST_ADMIN_KEY},
+        "json": {"episode_id": episode_id, "actionable": actionable,
+                 "comment": f"concurrent {actionable}"},
+    } for actionable in ("YES", "NO")]
+    responses = _post_concurrently(client, requests)
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    winner_response = next(response for response in responses
+                           if response.status_code == 200)
+    loser_response = next(response for response in responses
+                          if response.status_code == 409)
+    assert loser_response.json()["review_id"] \
+        == winner_response.json()["review_id"]
+    assert loser_response.json()["actionable"] \
+        == winner_response.json()["actionable"]
+
+    with session_scope() as session:
+        reviews = session.execute(select(AlertActionabilityReview)).scalars().all()
+        assert len(reviews) == 1
+        assert reviews[0].review_id == winner_response.json()["review_id"]
+        assert reviews[0].actionable == winner_response.json()["actionable"]
+
+
 def test_a_review_cannot_attribute_another_deliverys_verdict(client):
     """The label must attach to the message that actually carried the alert.
 
@@ -586,7 +708,97 @@ def test_a_review_cannot_attribute_another_deliverys_verdict(client):
     assert "no member row" in response.json()["detail"]
 
 
-def test_two_authorised_retries_get_distinct_sequences(client):
+def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.alerts.digest import plan_digest
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertRender
+    from app.alerts.planner import MemberIntent, dedupe_key
+    from app.db import session_scope
+    from tests.test_alert_digest import (
+        WINDOW,
+        _pending_item,
+        _provenance,
+        _registered,
+    )
+
+    now = datetime(2026, 8, 24, 9, 0, tzinfo=UTC)
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="structure.cape_record_near")
+        _pending_item(session, rules_sha=rules_sha,
+                      rule_id="regime.derisk_edge_approach")
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=now,
+        )
+        original_id = plan.delivery_id
+        original = session.get(AlertDelivery, original_id)
+        original.transport_status = TransportStatus.UNKNOWN
+        original.attempts = 1
+        source_members = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == original_id)
+            .order_by(AlertDeliveryMember.episode_id)
+        ).scalars().all()
+        assert len(source_members) == 2
+        source_members[0].dropped_at = now
+        source_members[0].drop_reason = "SILENCED_BEFORE_SEND"
+        survivor = source_members[1]
+        expected_key = dedupe_key(
+            delivery_kind=original.delivery_kind,
+            members=[MemberIntent(
+                episode_id=survivor.episode_id,
+                rule_id=survivor.rule_id,
+                instance_fingerprint=survivor.instance_fingerprint,
+                member_role=survivor.member_role,
+                notification_generation=survivor.notification_generation,
+                origin_rules_sha256=survivor.origin_rules_sha256,
+                origin_phrase_set_version=survivor.origin_phrase_set_version,
+                origin_phrase_set_sha256=survivor.origin_phrase_set_sha256,
+                priority=original.priority,
+            )],
+            scheduled_window_key=WINDOW,
+            manual_retry_sequence=1,
+        )
+        _seed_render(session, original_id, body="Exact digest bytes.")
+
+    response = client.post(
+        f"/api/v1/admin/alerts/deliveries/{original_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY,
+                 "Idempotency-Key": "digest-member-retry"},
+        json={"comment": "retry only what may have been sent",
+              "acknowledge_duplicate_risk": True},
+    )
+    assert response.status_code == 200, response.text
+    retry_id = response.json()["delivery_id"]
+
+    with session_scope() as session:
+        retry = session.get(AlertDelivery, retry_id)
+        copied = session.execute(select(AlertDeliveryMember).where(
+            AlertDeliveryMember.delivery_id == retry_id)
+        ).scalars().all()
+        copied_render = session.execute(select(AlertRender).where(
+            AlertRender.delivery_id == retry_id)
+        ).scalar_one()
+        assert retry.dedupe_key == expected_key
+        assert retry.scheduled_window_key == WINDOW
+        assert [member.episode_id for member in copied] == [survivor.episode_id]
+        assert copied[0].dropped_at is None
+        assert copied_render.final_message == "Exact digest bytes."
+
+
+def test_concurrent_manual_retries_allocate_distinct_root_sequences(client):
     """Each retry is its own duplicate-risk decision, and must not collide.
 
     The original's counter never advances — it is the frozen record of the
@@ -594,21 +806,29 @@ def test_two_authorised_retries_get_distinct_sequences(client):
     with different idempotency keys both compute original+1 and collide on
     the dedupe key.
     """
-    from app.alerts.models import AlertDelivery
+    from sqlalchemy import select
+
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertEvent,
+        ApiIdempotencyRecord,
+    )
     from app.db import session_scope
 
     with session_scope() as session:
         original = _unknown_delivery(session)
 
-    ids = []
-    for key in ("retry-a", "retry-b"):
-        response = client.post(
-            f"/api/v1/admin/alerts/deliveries/{original}/retry",
-            headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": key},
-            json={"comment": f"attempt {key}",
-                  "acknowledge_duplicate_risk": True})
-        assert response.status_code == 200, response.text
-        ids.append(response.json()["delivery_id"])
+    url = f"/api/v1/admin/alerts/deliveries/{original}/retry"
+    responses = _post_concurrently(client, [
+        {"url": url,
+         "headers": {"X-API-Key": TEST_ADMIN_KEY,
+                     "Idempotency-Key": key},
+         "json": {"comment": f"attempt {key}",
+                  "acknowledge_duplicate_risk": True}}
+        for key in ("retry-a", "retry-b")
+    ])
+    assert [response.status_code for response in responses] == [200, 200]
+    ids = [response.json()["delivery_id"] for response in responses]
 
     assert len(set(ids)) == 2
     with session_scope() as session:
@@ -619,3 +839,172 @@ def test_two_authorised_retries_get_distinct_sequences(client):
         assert first.dedupe_key != second.dedupe_key
         assert first.prior_unknown_delivery_id == original
         assert second.prior_unknown_delivery_id == original
+        assert first.manual_retry_root_delivery_id == original
+        assert second.manual_retry_root_delivery_id == original
+        retries = session.execute(select(AlertDelivery).where(
+            AlertDelivery.manual_retry_root_delivery_id == original)
+        ).scalars().all()
+        idempotency = session.execute(select(ApiIdempotencyRecord).where(
+            ApiIdempotencyRecord.route
+            == f"/admin/alerts/deliveries/{original}/retry")
+        ).scalars().all()
+        events = session.execute(select(AlertEvent).where(
+            AlertEvent.action == "manual_retry_authorised",
+            AlertEvent.delivery_id.in_(ids),
+        )).scalars().all()
+        assert len(retries) == len(idempotency) == len(events) == 2
+        assert {event.causation_id for event in events} == set(ids)
+
+
+def test_concurrent_manual_retry_same_key_same_body_replays_winner(client):
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertDelivery, AlertEvent, ApiIdempotencyRecord
+    from app.db import session_scope
+
+    with session_scope() as session:
+        original = _unknown_delivery(session)
+
+    url = f"/api/v1/admin/alerts/deliveries/{original}/retry"
+    request = {
+        "url": url,
+        "headers": {"X-API-Key": TEST_ADMIN_KEY,
+                    "Idempotency-Key": "retry-same"},
+        "json": {"comment": "same decision",
+                 "acknowledge_duplicate_risk": True},
+    }
+    responses = _post_concurrently(client, [request, request])
+    assert [response.status_code for response in responses] == [200, 200]
+    bodies = [response.json() for response in responses]
+    assert len({body["delivery_id"] for body in bodies}) == 1
+    assert sorted(bool(body.get("replayed")) for body in bodies) == [False, True]
+
+    with session_scope() as session:
+        retries = session.execute(select(AlertDelivery).where(
+            AlertDelivery.manual_retry_root_delivery_id == original)
+        ).scalars().all()
+        records = session.execute(select(ApiIdempotencyRecord).where(
+            ApiIdempotencyRecord.idempotency_key == "retry-same")
+        ).scalars().all()
+        events = session.execute(select(AlertEvent).where(
+            AlertEvent.action == "manual_retry_authorised")
+        ).scalars().all()
+        assert len(retries) == len(records) == len(events) == 1
+        assert events[0].delivery_id == retries[0].delivery_id
+
+
+def test_concurrent_manual_retry_same_key_different_body_is_409(client):
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertDelivery, AlertEvent, ApiIdempotencyRecord
+    from app.db import session_scope
+
+    with session_scope() as session:
+        original = _unknown_delivery(session)
+
+    url = f"/api/v1/admin/alerts/deliveries/{original}/retry"
+    requests = [{
+        "url": url,
+        "headers": {"X-API-Key": TEST_ADMIN_KEY,
+                    "Idempotency-Key": "retry-conflict"},
+        "json": {"comment": comment, "acknowledge_duplicate_risk": True},
+    } for comment in ("decision A", "decision B")]
+    responses = _post_concurrently(client, requests)
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    loser = next(response for response in responses if response.status_code == 409)
+    assert loser.json()["title"] == "Idempotency conflict"
+
+    with session_scope() as session:
+        retries = session.execute(select(AlertDelivery).where(
+            AlertDelivery.manual_retry_root_delivery_id == original)
+        ).scalars().all()
+        records = session.execute(select(ApiIdempotencyRecord).where(
+            ApiIdempotencyRecord.idempotency_key == "retry-conflict")
+        ).scalars().all()
+        events = session.execute(select(AlertEvent).where(
+            AlertEvent.action == "manual_retry_authorised")
+        ).scalars().all()
+        assert len(retries) == len(records) == len(events) == 1
+
+
+def test_manual_retry_database_busy_is_sanitized_503(isolated_db, monkeypatch):
+    import sqlite3
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("ALERTS_BUSY_TIMEOUT_MS", "25")
+    monkeypatch.setenv("ALERTS_READ_API_KEY", READ_KEY)
+    monkeypatch.setenv("ALERTS_WRITE_API_KEY", WRITE_KEY)
+    from app.config import get_settings
+    from app.db import reset_engine, session_scope
+    from app.main import create_app
+
+    get_settings.cache_clear()
+    reset_engine()
+    with TestClient(create_app()) as test_client:
+        with session_scope() as session:
+            original = _unknown_delivery(session)
+        lock = sqlite3.connect(str(isolated_db), timeout=0)
+        try:
+            lock.execute("BEGIN IMMEDIATE")
+            response = test_client.post(
+                f"/api/v1/admin/alerts/deliveries/{original}/retry",
+                headers={"X-API-Key": TEST_ADMIN_KEY,
+                         "Idempotency-Key": "busy-retry"},
+                json={"comment": "retry after contention",
+                      "acknowledge_duplicate_risk": True},
+            )
+        finally:
+            lock.rollback()
+            lock.close()
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "1"
+    assert response.json()["title"] == "Alert database busy"
+    assert "locked" not in response.text.lower()
+    reset_engine()
+    get_settings.cache_clear()
+
+
+def test_manual_retry_chain_keeps_root_and_immediate_unknown(client):
+    from sqlalchemy import select
+
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery, AlertRender
+    from app.db import session_scope
+
+    with session_scope() as session:
+        original = _unknown_delivery(session)
+
+    payload = {"comment": "first decision", "acknowledge_duplicate_risk": True}
+    first_response = client.post(
+        f"/api/v1/admin/alerts/deliveries/{original}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "chain-1"},
+        json=payload,
+    )
+    assert first_response.status_code == 200
+    first_id = first_response.json()["delivery_id"]
+    with session_scope() as session:
+        session.get(AlertDelivery, first_id).transport_status = TransportStatus.UNKNOWN
+
+    second_response = client.post(
+        f"/api/v1/admin/alerts/deliveries/{first_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "chain-2"},
+        json={"comment": "second decision", "acknowledge_duplicate_risk": True},
+    )
+    assert second_response.status_code == 200, second_response.text
+    second_id = second_response.json()["delivery_id"]
+
+    with session_scope() as session:
+        first = session.get(AlertDelivery, first_id)
+        second = session.get(AlertDelivery, second_id)
+        assert (first.manual_retry_root_delivery_id,
+                second.manual_retry_root_delivery_id) == (original, original)
+        assert second.prior_unknown_delivery_id == first_id
+        assert (first.manual_retry_sequence, second.manual_retry_sequence) == (1, 2)
+        renders = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id.in_(
+                [original, first_id, second_id]))
+        ).scalars().all()
+        assert len(renders) == 3
+        assert {render.final_message for render in renders} \
+            == {"Original reviewed alert."}

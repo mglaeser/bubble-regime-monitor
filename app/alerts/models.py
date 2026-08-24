@@ -519,6 +519,14 @@ class AlertDelivery(Base):
     dedupe_key: Mapped[str] = mapped_column(String(SHA_LEN), unique=True, nullable=False)
     dedupe_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     manual_retry_sequence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Stable root across a retry-of-a-retry chain.  ``prior_unknown`` below is
+    #: deliberately different: it is the immediately preceding ambiguous
+    #: delivery, while this field owns the monotonic sequence namespace.
+    manual_retry_root_delivery_id: Mapped[str | None] = mapped_column(
+        ForeignKey("alert_delivery.delivery_id"), nullable=True)
+    #: Part of the canonical dedupe material.  Persist it so an authorised
+    #: retry can reproduce the original intent instead of parsing a hash.
+    scheduled_window_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     live_profile: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -571,6 +579,12 @@ class AlertDelivery(Base):
         CheckConstraint("priority BETWEEN 1 AND 4", name="ck_alert_delivery_priority"),
         CheckConstraint("attempts >= 0", name="ck_alert_delivery_attempts"),
         CheckConstraint("manual_retry_sequence >= 0", name="ck_alert_delivery_manual_seq"),
+        CheckConstraint(
+            "(manual_retry_root_delivery_id IS NULL AND manual_retry_sequence = 0) OR "
+            "(manual_retry_root_delivery_id IS NOT NULL AND manual_retry_sequence >= 1 "
+            "AND prior_unknown_delivery_id IS NOT NULL)",
+            name="ck_alert_delivery_manual_retry_identity",
+        ),
         # A P1 may never be parked by quiet hours or by budget. Enforced here so
         # a future planner bug cannot even persist the mistake.
         CheckConstraint(
@@ -578,6 +592,12 @@ class AlertDelivery(Base):
             name="ck_alert_delivery_p1_never_held",
         ),
         Index("ix_alert_delivery_claim", "transport_status", "not_before", "priority"),
+        Index(
+            "uq_alert_delivery_manual_retry_root_sequence",
+            "manual_retry_root_delivery_id", "manual_retry_sequence",
+            unique=True,
+            sqlite_where=text("manual_retry_root_delivery_id IS NOT NULL"),
+        ),
     )
 
 
@@ -727,6 +747,18 @@ class AlertActionabilityReview(Base):
     """
 
     __tablename__ = "alert_actionability_review"
+    __table_args__ = (
+        # the DB-level backstop for "one label per alert": the route's
+        # duplicate check is a race, and the race's loser must become a
+        # constraint violation, not a second label. Two partial indexes
+        # because SQLite treats NULLs as distinct in a plain unique index.
+        Index("uq_alert_actionability_episode_delivery", "episode_id", "delivery_id",
+              unique=True, sqlite_where=text("delivery_id IS NOT NULL")),
+        Index("uq_alert_actionability_episode_memberless", "episode_id",
+              unique=True, sqlite_where=text("delivery_id IS NULL")),
+        CheckConstraint("actionable IN ('YES','NO','AMBIGUOUS')",
+                        name="ck_alert_actionability_value"),
+    )
 
     review_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
     episode_id: Mapped[str] = mapped_column(
@@ -739,11 +771,6 @@ class AlertActionabilityReview(Base):
     reviewer_redacted: Mapped[str | None] = mapped_column(String(128), nullable=True)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     comment_redacted: Mapped[str | None] = mapped_column(String(512), nullable=True)
-
-    __table_args__ = (
-        CheckConstraint("actionable IN ('YES','NO','AMBIGUOUS')",
-                        name="ck_alert_actionability_value"),
-    )
 
 
 class AlertComponentHeartbeat(Base):

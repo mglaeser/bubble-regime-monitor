@@ -21,7 +21,7 @@ from app.alerts.errors import sanitize
 from app.alerts.models import AlertSilence, ApiIdempotencyRecord
 from app.alerts.repository import utc_ms
 from app.config import get_settings
-from app.db import session_scope
+from app.db import immediate_session_scope, session_scope
 from app.logging_conf import get_logger
 from app.routers.alerts import problem
 from app.security import require_admin_key, require_alerts_write
@@ -44,6 +44,13 @@ class SilenceRequest(BaseModel):
 
 def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
+
+
+def _is_sqlite_busy(exc: BaseException) -> bool:
+    """True only for the retryable SQLite lock outcomes we sanitize as 503."""
+    original = getattr(exc, "orig", exc)
+    message = str(original).lower()
+    return "locked" in message or "busy" in message
 
 
 def _check_idempotency(session: Any, key: str | None, route: str,
@@ -296,6 +303,7 @@ def send_test(response: Response,
         TransportStatus,
     )
     from app.alerts.models import AlertDelivery, AlertEvent
+    from app.alerts.planner import dedupe_key
 
     _no_store(response)
     settings = get_settings()
@@ -307,13 +315,21 @@ def send_test(response: Response,
         # and a foreign key is the wrong place to discover it was never stored
         register(session, artifacts, now=now, registered_by="admin-api")
         delivery_id = new_ulid(utc_ms(now))
+        window_key = delivery_id
         session.add(AlertDelivery(
             delivery_id=delivery_id,
             # unique per request BY DESIGN: every test send is its own intent,
             # and deduping two of them would hide the second transport probe
-            dedupe_key=f"v1|TEST|{delivery_id}",
+            dedupe_key=dedupe_key(
+                delivery_kind=DeliveryKind.TEST,
+                members=[],
+                scheduled_window_key=window_key,
+                manual_retry_sequence=0,
+            ),
             dedupe_version=1,
             manual_retry_sequence=0,
+            manual_retry_root_delivery_id=None,
+            scheduled_window_key=window_key,
             mode=settings.alerts_mode,
             live_profile=settings.alerts_live_profile,
             planning_rules_sha256=artifacts.ruleset.rules_sha256,
@@ -373,8 +389,18 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
     `prior_unknown_delivery_id`. The dedupe key differs BECAUSE the sequence is
     in its material; the audit trail survives because nothing is overwritten.
     """
-    from app.alerts.enums import PlanningState, TransportStatus
-    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEvent
+    from sqlalchemy import func as sa_func
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.exc import IntegrityError, OperationalError
+
+    from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertEvent,
+        AlertRender,
+    )
+    from app.alerts.planner import MemberIntent, dedupe_key
 
     _no_store(response)
     if not idempotency_key:
@@ -389,103 +415,195 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
     route = f"/admin/alerts/deliveries/{delivery_id}/retry"
     now = datetime.now(UTC)
 
-    with session_scope() as session:
-        seen, ref = _check_idempotency(
-            session, idempotency_key, route, body.model_dump())
-        if seen and ref == "CONFLICT":
-            return problem(409, "Idempotency conflict",
-                           "this Idempotency-Key was used with a different "
-                           "request body")
-        if seen:
-            _no_store(response)
-            return {"delivery_id": ref, "replayed": True}
+    payload = body.model_dump()
+    for conflict_attempt in range(3):
+        try:
+            # The immediate transaction begins before idempotency and MAX
+            # reads. A competing SQLite request waits, then sees this commit.
+            with immediate_session_scope() as session:
+                seen, ref = _check_idempotency(
+                    session, idempotency_key, route, payload)
+                if seen and ref == "CONFLICT":
+                    return problem(409, "Idempotency conflict",
+                                   "this Idempotency-Key was used with a different "
+                                   "request body")
+                if seen:
+                    return {"delivery_id": ref, "replayed": True}
 
-        original = session.get(AlertDelivery, delivery_id)
-        if original is None:
-            return problem(404, "No such delivery", delivery_id)
-        if original.transport_status != TransportStatus.UNKNOWN:
-            return problem(409, "Not retryable",
-                           f"manual retry is for UNKNOWN deliveries; this one is "
-                           f"{original.transport_status}. Definite failures are "
-                           "retried automatically and successes need nothing.")
+                original = session.get(AlertDelivery, delivery_id)
+                if original is None:
+                    return problem(404, "No such delivery", delivery_id)
+                if original.transport_status != TransportStatus.UNKNOWN:
+                    return problem(
+                        409, "Not retryable",
+                        f"manual retry is for UNKNOWN deliveries; this one is "
+                        f"{original.transport_status}. Definite failures are "
+                        "retried automatically and successes need nothing.")
 
-        # The next sequence comes from what EXISTS, not from the original's
-        # own counter. The original never advances — it is the frozen record
-        # of the ambiguous send — so two operators retrying under different
-        # idempotency keys would both compute original+1 and collide on the
-        # dedupe key. Each authorised retry is a distinct duplicate-risk
-        # decision and gets a distinct sequence.
-        from sqlalchemy import func as sa_func
-        from sqlalchemy import select as sa_select
+                source_render = session.execute(
+                    sa_select(AlertRender).where(
+                        AlertRender.delivery_id == original.delivery_id,
+                    ).order_by(AlertRender.created_at.desc()).limit(1)
+                ).scalars().first()
+                if (source_render is None or source_render.body_redacted_at is not None
+                        or not source_render.final_message):
+                    return problem(
+                        409, "Original render unavailable",
+                        "an UNKNOWN delivery can be retried only while the exact "
+                        "reviewed message that may already have arrived is "
+                        "available; re-rendering current facts is forbidden")
 
-        highest = session.execute(
-            sa_select(sa_func.max(AlertDelivery.manual_retry_sequence)).where(
-                (AlertDelivery.prior_unknown_delivery_id == original.delivery_id)
-                | (AlertDelivery.delivery_id == original.delivery_id))
-        ).scalar() or 0
-        next_sequence = highest + 1
+                root_id = (original.manual_retry_root_delivery_id
+                           or original.delivery_id)
+                highest = session.execute(
+                    sa_select(sa_func.max(
+                        AlertDelivery.manual_retry_sequence)).where(
+                            AlertDelivery.manual_retry_root_delivery_id == root_id)
+                ).scalar() or 0
+                next_sequence = int(highest) + 1
 
-        new_id = new_ulid(utc_ms(now))
-        session.add(AlertDelivery(
-            delivery_id=new_id,
-            dedupe_key=f"{original.dedupe_key}|retry{next_sequence}",
-            dedupe_version=original.dedupe_version,
-            manual_retry_sequence=next_sequence,
-            mode=original.mode,
-            live_profile=original.live_profile,
-            planning_rules_sha256=original.planning_rules_sha256,
-            delivery_kind=original.delivery_kind,
-            priority=original.priority,
-            transport_status=TransportStatus.PENDING,
-            planning_state=PlanningState.READY,
-            not_before=now,
-            created_at=now,
-            updated_at=now,
-            attempts=0,
-            duplicate_risk_acknowledged=True,
-            prior_unknown_delivery_id=original.delivery_id,
-            recipient_ref=original.recipient_ref,
-        ))
-        for member in session.execute(
-            AlertDeliveryMember.__table__.select().where(
-                AlertDeliveryMember.delivery_id == original.delivery_id)
-        ).mappings():
-            session.add(AlertDeliveryMember(
-                delivery_id=new_id,
-                episode_id=member["episode_id"],
-                rule_id=member["rule_id"],
-                instance_fingerprint=member["instance_fingerprint"],
-                member_role=member["member_role"],
-                # SAME generation: this is the same logical notification, and a
-                # new generation would let the same message dodge its own
-                # UNKNOWN block
-                notification_generation=member["notification_generation"],
-                origin_rules_sha256=member["origin_rules_sha256"],
-                origin_phrase_set_version=member["origin_phrase_set_version"],
-                origin_phrase_set_sha256=member["origin_phrase_set_sha256"],
-                included_at=now,
-            ))
-        session.add(AlertEvent(
-            event_id=new_ulid(utc_ms(now)), occurred_at=now,
-            causation_type="OPERATOR", causation_id=new_id,
-            actor_type="OPERATOR", actor_id_redacted="admin-api",
-            delivery_id=new_id, action="manual_retry_authorised",
-            suppression_reasons=[],
-            detail_redacted=sanitize(
-                f"manual retry of {delivery_id} after UNKNOWN; duplicate risk "
-                f"acknowledged; comment: {body.comment}"),
-            rules_sha256=original.planning_rules_sha256,
-        ))
-        session.add(ApiIdempotencyRecord(
-            idempotency_key=idempotency_key, route=route,
-            request_sha256=sha256_of(body.model_dump()), response_ref=new_id,
-            status_code=200, created_at=now,
-            expires_at=now + timedelta(hours=IDEMPOTENCY_TTL_HOURS),
-        ))
+                rows = session.execute(
+                    sa_select(AlertDeliveryMember).where(
+                        AlertDeliveryMember.delivery_id == original.delivery_id,
+                        AlertDeliveryMember.dropped_at.is_(None),
+                    ).order_by(AlertDeliveryMember.included_at)
+                ).scalars().all()
+                members = [MemberIntent(
+                    episode_id=member.episode_id,
+                    rule_id=member.rule_id,
+                    instance_fingerprint=member.instance_fingerprint,
+                    member_role=member.member_role,
+                    notification_generation=member.notification_generation,
+                    origin_rules_sha256=member.origin_rules_sha256,
+                    origin_phrase_set_version=member.origin_phrase_set_version,
+                    origin_phrase_set_sha256=member.origin_phrase_set_sha256,
+                    priority=original.priority,
+                ) for member in rows]
 
-    log.info("alert_manual_retry", original=delivery_id, retry=new_id)
-    return {"delivery_id": new_id, "prior_unknown_delivery_id": delivery_id,
-            "manual_retry_sequence_incremented": True}
+                scheduled_window = original.scheduled_window_key
+                if scheduled_window is None \
+                        and original.delivery_kind == DeliveryKind.TEST:
+                    # TEST is intentionally memberless. Its original delivery
+                    # id supplies the otherwise-empty canonical identity.
+                    scheduled_window = root_id
+
+                new_id = new_ulid(utc_ms(now))
+                canonical_key = dedupe_key(
+                    delivery_kind=original.delivery_kind,
+                    members=members,
+                    scheduled_window_key=scheduled_window,
+                    manual_retry_sequence=next_sequence,
+                )
+                session.add(AlertDelivery(
+                    delivery_id=new_id,
+                    dedupe_key=canonical_key,
+                    dedupe_version=original.dedupe_version,
+                    manual_retry_sequence=next_sequence,
+                    manual_retry_root_delivery_id=root_id,
+                    scheduled_window_key=scheduled_window,
+                    mode=original.mode,
+                    live_profile=original.live_profile,
+                    planning_rules_sha256=original.planning_rules_sha256,
+                    delivery_kind=original.delivery_kind,
+                    priority=original.priority,
+                    transport_status=TransportStatus.PENDING,
+                    planning_state=PlanningState.READY,
+                    not_before=now,
+                    created_at=now,
+                    updated_at=now,
+                    attempts=0,
+                    duplicate_risk_acknowledged=True,
+                    prior_unknown_delivery_id=original.delivery_id,
+                    recipient_ref=original.recipient_ref,
+                ))
+                for member in rows:
+                    session.add(AlertDeliveryMember(
+                        delivery_id=new_id,
+                        episode_id=member.episode_id,
+                        rule_id=member.rule_id,
+                        instance_fingerprint=member.instance_fingerprint,
+                        member_role=member.member_role,
+                        # SAME generation: this remains one logical notice.
+                        notification_generation=member.notification_generation,
+                        origin_rules_sha256=member.origin_rules_sha256,
+                        origin_phrase_set_version=member.origin_phrase_set_version,
+                        origin_phrase_set_sha256=member.origin_phrase_set_sha256,
+                        included_at=now,
+                    ))
+                # UNKNOWN means these exact bytes may already be on the phone.
+                # A new delivery needs its own immutable render row, but every
+                # content/provenance field is cloned from that source render;
+                # current facts and a newly deployed phrase set never enter.
+                session.add(AlertRender(
+                    render_id=new_ulid(utc_ms(now)),
+                    delivery_id=new_id,
+                    render_source=source_render.render_source,
+                    fallback_reason=source_render.fallback_reason,
+                    prompt_version=source_render.prompt_version,
+                    planning_phrase_set_version=(
+                        source_render.planning_phrase_set_version),
+                    planning_phrase_set_sha256=(
+                        source_render.planning_phrase_set_sha256),
+                    model=source_render.model,
+                    model_request_id=source_render.model_request_id,
+                    render_context_hash=source_render.render_context_hash,
+                    fact_catalog_hash=source_render.fact_catalog_hash,
+                    selected_fact_ids=list(source_render.selected_fact_ids),
+                    selected_phrase_codes=list(source_render.selected_phrase_codes),
+                    validation_results=dict(source_render.validation_results),
+                    final_message=source_render.final_message,
+                    gsm7_septets=source_render.gsm7_septets,
+                    created_at=now,
+                    body_redacted_at=None,
+                ))
+                session.add(AlertEvent(
+                    event_id=new_ulid(utc_ms(now)), occurred_at=now,
+                    causation_type="OPERATOR", causation_id=new_id,
+                    actor_type="OPERATOR", actor_id_redacted="admin-api",
+                    delivery_id=new_id, action="manual_retry_authorised",
+                    suppression_reasons=[],
+                    detail_redacted=sanitize(
+                        f"manual retry of {delivery_id} after UNKNOWN; duplicate "
+                        f"risk acknowledged; comment: {body.comment}"),
+                    rules_sha256=original.planning_rules_sha256,
+                ))
+                session.add(ApiIdempotencyRecord(
+                    idempotency_key=idempotency_key, route=route,
+                    request_sha256=sha256_of(payload), response_ref=new_id,
+                    status_code=200, created_at=now,
+                    expires_at=now + timedelta(hours=IDEMPOTENCY_TTL_HOURS),
+                ))
+                # Catch uniqueness errors inside this bounded retry boundary,
+                # not later in FastAPI's response teardown.
+                session.flush()
+
+            log.info("alert_manual_retry", original=delivery_id, retry=new_id,
+                     root=root_id, sequence=next_sequence)
+            return {"delivery_id": new_id,
+                    "prior_unknown_delivery_id": delivery_id,
+                    "manual_retry_root_delivery_id": root_id,
+                    "manual_retry_sequence": next_sequence,
+                    "manual_retry_sequence_incremented": True}
+        except IntegrityError:
+            # The unique indexes are the cross-database backstop. Re-enter the
+            # whole decision so an idempotency winner is replayed or MAX is
+            # recalculated from the committed retry.
+            if conflict_attempt < 2:
+                continue
+            return problem(409, "Concurrent retry conflict",
+                           "another authorised retry won the allocation race; "
+                           "resubmit with the same Idempotency-Key")
+        except OperationalError as exc:
+            if not _is_sqlite_busy(exc):
+                raise
+            return problem(503, "Alert database busy",
+                           "the retry decision could not acquire the short "
+                           "write transaction; retry with the same "
+                           "Idempotency-Key",
+                           headers={"Retry-After": "1",
+                                    "Cache-Control": "no-store"})
+
+    raise AssertionError("bounded retry loop returned no result")  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -516,59 +634,93 @@ def record_actionability(body: ActionabilityRequest, response: Response,
     exists so an unsure reviewer does not inflate the KPI either way.
     """
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError, OperationalError
 
     from app.alerts.models import AlertActionabilityReview, AlertEpisode
 
     _no_store(response)
     now = datetime.now(UTC)
-    with session_scope() as session:
-        if session.get(AlertEpisode, body.episode_id) is None:
-            return problem(404, "No such episode", body.episode_id)
-        if body.delivery_id is not None:
-            # The delivery must be the one that actually CARRIED this episode.
-            # An unchecked delivery_id lets a review attribute episode A's
-            # verdict to episode B's message — and the Stage 7 comparison is
-            # precisely about which rendering earned the label, so
-            # cross-attributed evidence is worse than none.
-            from app.alerts.models import AlertDeliveryMember
+    try:
+        with immediate_session_scope() as session:
+            if session.get(AlertEpisode, body.episode_id) is None:
+                return problem(404, "No such episode", body.episode_id)
+            if body.delivery_id is not None:
+                # The delivery must be the one that actually CARRIED this
+                # episode. An unchecked delivery_id lets a review attribute
+                # episode A's verdict to episode B's message — and the Stage 7
+                # comparison is precisely about which rendering earned the
+                # label, so cross-attributed evidence is worse than none.
+                from app.alerts.models import AlertDeliveryMember
 
-            carried = session.get(
-                AlertDeliveryMember, (body.delivery_id, body.episode_id))
-            if carried is None:
+                carried = session.get(
+                    AlertDeliveryMember, (body.delivery_id, body.episode_id))
+                if carried is None:
+                    return problem(
+                        409, "Delivery did not carry this episode",
+                        f"delivery {body.delivery_id} has no member row for "
+                        f"episode {body.episode_id}; a label must attach to the "
+                        "message that actually carried the alert")
+            # One label per (episode, delivery). The KPI counts labels, so a
+            # second contradictory one would double-count the same alert — and
+            # silently replacing the first would erase evidence. Reviews are
+            # append-only; a genuine change of mind is a conversation, not a
+            # POST.
+            existing = session.execute(
+                select(AlertActionabilityReview).where(
+                    AlertActionabilityReview.episode_id == body.episode_id,
+                    AlertActionabilityReview.delivery_id.is_(body.delivery_id)
+                    if body.delivery_id is None else
+                    AlertActionabilityReview.delivery_id == body.delivery_id,
+                )
+            ).scalars().first()
+            if existing is not None:
                 return problem(
-                    409, "Delivery did not carry this episode",
-                    f"delivery {body.delivery_id} has no member row for "
-                    f"episode {body.episode_id}; a label must attach to the "
-                    "message that actually carried the alert")
-        # One label per (episode, delivery). The KPI counts labels, so a
-        # second contradictory one would double-count the same alert — and
-        # silently replacing the first would erase evidence. Reviews are
-        # append-only; a genuine change of mind is a conversation, not a POST.
-        existing = session.execute(
-            select(AlertActionabilityReview).where(
-                AlertActionabilityReview.episode_id == body.episode_id,
-                AlertActionabilityReview.delivery_id.is_(body.delivery_id)
-                if body.delivery_id is None else
-                AlertActionabilityReview.delivery_id == body.delivery_id,
-            )
-        ).scalars().first()
-        if existing is not None:
+                    409, "Already reviewed",
+                    f"episode {body.episode_id} already carries label "
+                    f"{existing.actionable}; reviews are append-only evidence",
+                    extra={"review_id": existing.review_id,
+                           "actionable": existing.actionable})
+            review_id = new_ulid(utc_ms(now))
+            session.add(AlertActionabilityReview(
+                review_id=review_id,
+                episode_id=body.episode_id,
+                delivery_id=body.delivery_id,
+                actionable=body.actionable,
+                action_type=body.action_type,
+                reason_code=body.reason_code,
+                reviewer_redacted="admin-api",
+                reviewed_at=now,
+                comment_redacted=sanitize(body.comment) if body.comment else None,
+            ))
+            session.flush()
+        return {"review_id": review_id, "actionable": body.actionable}
+    except IntegrityError:
+        # A non-SQLite backend can reach the unique-index race despite not
+        # having BEGIN IMMEDIATE. Re-read and return the winning append-only
+        # evidence rather than leaking a commit error.
+        with session_scope() as session:
+            winner = session.execute(
+                select(AlertActionabilityReview).where(
+                    AlertActionabilityReview.episode_id == body.episode_id,
+                    AlertActionabilityReview.delivery_id.is_(body.delivery_id)
+                    if body.delivery_id is None else
+                    AlertActionabilityReview.delivery_id == body.delivery_id,
+                )
+            ).scalars().first()
+        if winner is not None:
             return problem(
                 409, "Already reviewed",
                 f"episode {body.episode_id} already carries label "
-                f"{existing.actionable}; reviews are append-only evidence",
-                extra={"review_id": existing.review_id,
-                       "actionable": existing.actionable})
-        review_id = new_ulid(utc_ms(now))
-        session.add(AlertActionabilityReview(
-            review_id=review_id,
-            episode_id=body.episode_id,
-            delivery_id=body.delivery_id,
-            actionable=body.actionable,
-            action_type=body.action_type,
-            reason_code=body.reason_code,
-            reviewer_redacted="admin-api",
-            reviewed_at=now,
-            comment_redacted=sanitize(body.comment) if body.comment else None,
-        ))
-    return {"review_id": review_id, "actionable": body.actionable}
+                f"{winner.actionable}; reviews are append-only evidence",
+                extra={"review_id": winner.review_id,
+                       "actionable": winner.actionable})
+        return problem(409, "Concurrent review conflict",
+                       "another review changed this alert concurrently")
+    except OperationalError as exc:
+        if not _is_sqlite_busy(exc):
+            raise
+        return problem(503, "Alert database busy",
+                       "the review could not acquire the short write "
+                       "transaction; retry the same request",
+                       headers={"Retry-After": "1",
+                                "Cache-Control": "no-store"})

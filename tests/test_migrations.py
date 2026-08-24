@@ -232,3 +232,126 @@ def test_ensure_schema_never_raises(tmp_path):
     from app.db_migrate import ensure_schema
 
     _run_with_db(str(tmp_path / "boot.db"), ensure_schema)  # must not raise
+
+
+def test_alert_admin_atomicity_indexes_exist_in_create_all_and_alembic(tmp_path):
+    from app.db import get_engine
+    from app.db_migrate import upgrade_to_head
+    from app.models import Base
+
+    migrated = str(tmp_path / "atomic-migrated.db")
+    created = str(tmp_path / "atomic-create-all.db")
+    _run_with_db(migrated, upgrade_to_head)
+    _run_with_db(created, lambda: Base.metadata.create_all(get_engine()))
+
+    expected = {
+        "uq_alert_delivery_manual_retry_root_sequence": (
+            "alert_delivery", ("manual_retry_root_delivery_id",
+                               "manual_retry_sequence"), 1, 1),
+        "uq_alert_actionability_episode_delivery": (
+            "alert_actionability_review", ("episode_id", "delivery_id"), 1, 1),
+        "uq_alert_actionability_episode_memberless": (
+            "alert_actionability_review", ("episode_id",), 1, 1),
+    }
+    for path in (migrated, created):
+        schema = _schema(path)["indexes"]
+        for index_name, (table, columns, unique, partial) in expected.items():
+            definition = schema[f"{table}.{index_name}"]
+            assert definition[0] == table
+            assert definition[1] == columns
+            assert definition[2] == unique
+            assert definition[4] == partial
+
+
+def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
+    db = str(tmp_path / "atomic-cycle.db")
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "head")
+        connection = sqlite3.connect(db)
+        assert {"manual_retry_root_delivery_id", "scheduled_window_key"} \
+            <= {row[1] for row in connection.execute(
+                "pragma table_info('alert_delivery')")}
+        assert connection.execute(
+            "select 1 from sqlite_master where type='trigger' "
+            "and name='alert_delivery_requires_member'").fetchone()
+        connection.close()
+
+        command.downgrade(cfg, "0012")
+        connection = sqlite3.connect(db)
+        assert {"manual_retry_root_delivery_id", "scheduled_window_key"}.isdisjoint(
+            {row[1] for row in connection.execute(
+                "pragma table_info('alert_delivery')")})
+        names = {row[0] for row in connection.execute(
+            "select name from sqlite_master where type='index'")}
+        assert "uq_alert_delivery_manual_retry_root_sequence" not in names
+        assert "uq_alert_actionability_episode_delivery" not in names
+        assert "uq_alert_actionability_episode_memberless" not in names
+        assert connection.execute(
+            "select 1 from sqlite_master where type='trigger' "
+            "and name='alert_delivery_requires_member'").fetchone()
+        connection.close()
+
+        command.upgrade(cfg, "head")
+
+    _run_with_db(db, _cycle)
+    connection = sqlite3.connect(db)
+    assert connection.execute(
+        "select version_num from alembic_version").fetchone() == ("0013",)
+    connection.close()
+
+
+def test_admin_atomicity_migration_backfills_retry_chain_and_window(tmp_path):
+    db = str(tmp_path / "atomic-backfill.db")
+
+    def _seed_then_upgrade():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0012")
+        connection = sqlite3.connect(db)
+        insert = """
+            INSERT INTO alert_delivery (
+                delivery_id, dedupe_key, dedupe_version,
+                manual_retry_sequence, mode, live_profile,
+                planning_rules_sha256, delivery_kind, priority,
+                transport_status, planning_state, created_at, updated_at,
+                attempts, blocks_replanning, duplicate_risk_acknowledged,
+                prior_unknown_delivery_id, recipient_ref
+            ) VALUES (?, ?, 1, ?, 'shadow', 'default', ?, 'TEST', 2,
+                      'UNKNOWN', 'NONE', ?, ?, 1, 0, ?, ?, 'default')
+        """
+        root = "01M0ATOMICROOT0000000000000"
+        first = "01M0ATOMICFIRST00000000000"
+        second = "01M0ATOMICSECOND0000000000"
+        rules = "r" * 64
+        timestamp = "2026-08-24 09:00:00+00:00"
+        connection.execute(insert, (
+            root, f"v1|TEST|{root}", 0, rules, timestamp, timestamp, 0, None))
+        connection.execute(insert, (
+            first, "a" * 64, 1, rules, timestamp, timestamp, 1, root))
+        connection.execute(insert, (
+            second, "b" * 64, 2, rules, timestamp, timestamp, 1, first))
+        connection.commit()
+        connection.close()
+        command.upgrade(cfg, "head")
+
+    _run_with_db(db, _seed_then_upgrade)
+    connection = sqlite3.connect(db)
+    rows = list(connection.execute(
+        "select delivery_id, manual_retry_root_delivery_id, "
+        "scheduled_window_key from alert_delivery order by manual_retry_sequence"))
+    root = "01M0ATOMICROOT0000000000000"
+    assert rows == [
+        (root, None, root),
+        ("01M0ATOMICFIRST00000000000", root, root),
+        ("01M0ATOMICSECOND0000000000", root, root),
+    ]
+    connection.close()
