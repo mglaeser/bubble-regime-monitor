@@ -295,6 +295,23 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
 
     So the test is `promoted_at is not None` — a deliberate act that happened,
     and that archiving does not undo.
+
+    On byte binding, which the panel asked about twice: there is nothing here
+    to check, and adding a check would have been theatre.
+
+    The registry row is fetched BY the planning hash, which is that table's
+    primary key — so what is read is exactly the bytes that hash names.
+    Resolving by version or by name would need a digest comparison; resolving
+    BY digest is the comparison.
+
+    The row's phrase set is referenced by version rather than by hash, which
+    looks like the remaining gap, and the schema already closes it more firmly
+    than this function could: a trigger makes phrase-set bytes immutable under
+    an existing version, and a foreign key stops a referenced set being
+    deleted. I wrote both checks before discovering they were unreachable —
+    `test_the_schema_binds_a_delivery_to_its_reviewed_text` pins the
+    constraints instead, so the guarantee fails loudly if either is ever
+    dropped.
     """
     from app.alerts.artifacts import load_active
     from app.alerts.enums import RulesetStatus
@@ -344,6 +361,7 @@ def delivery_admission_blockers(session: Any, planning_rules_sha256: str, *,
         return [f"this delivery was planned at stage {planned_stage} and the "
                 f"deployment now runs at stage {current}; the queue must not "
                 "outlive the decision that lowered it"]
+
     return []
 
 
