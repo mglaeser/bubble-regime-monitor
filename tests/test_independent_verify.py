@@ -162,6 +162,48 @@ class TestPanelFindingsOnItself:
         raw = (os.environ.get("VERIFIER_STRICT_ANY_REFUTATION") or "").strip()
         assert (raw.lower() not in ("0", "false", "no", "off")) is expected_on
 
+    @pytest.mark.parametrize("min_others", [1, 0, -5, "", "abc", None])
+    def test_the_two_voice_floor_is_code_not_configuration(self, min_others):
+        """Strict mode off must not mean "anything passes".
+
+        The floor is TWO distinct approving voices, one of them the required
+        approver, and no repo variable can go below it: MIN_OTHER_APPROVERS
+        degrades to 1 on zero, negative, blank and garbage. What the operator
+        selects is "2 of 3 including the approver" vs "unanimous" — not whether
+        review happens."""
+        models = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+
+        def vote(refuted, conf="high", reason="checked the gate assembly; it holds"):
+            return {"ok": True, "v": {"refuted": refuted, "confidence": conf,
+                                      "reason": reason}}
+
+        ok, refute = vote(False), vote(True)
+        approver_alone = iv.require_approvals([ok, refute, refute], models,
+                                              "combo/SOTA-A", min_others)
+        assert approver_alone["block"] is True, "the approver alone must never suffice"
+        approver_plus_one = iv.require_approvals([ok, ok, refute], models,
+                                                 "combo/SOTA-A", min_others)
+        assert approver_plus_one["block"] is False, "two distinct approvals must suffice"
+
+    def test_the_required_approver_veto_is_unconditional(self):
+        """Off-switch or not, the required approver can always stop a merge."""
+        models = ["combo/SOTA-A", "combo/SOAT-B", "combo/SOTA-C"]
+
+        def vote(refuted, conf="high", reason="checked the gate assembly; it holds"):
+            return {"ok": True, "v": {"refuted": refuted, "confidence": conf,
+                                      "reason": reason}}
+
+        ok = vote(False)
+        # a refutation at the LOWEST confidence still vetoes
+        assert iv.require_approvals([vote(True, "low"), ok, ok], models,
+                                    "combo/SOTA-A", 1)["block"] is True
+        # so does a sham approval carrying no substantive reason
+        assert iv.require_approvals([vote(False, "high", ""), ok, ok], models,
+                                    "combo/SOTA-A", 1)["block"] is True
+        # and so does the approver not being in the panel at all
+        assert iv.require_approvals([ok, ok], ["combo/SOAT-B", "combo/SOTA-C"],
+                                    "combo/SOTA-A", 1)["block"] is True
+
     def test_strict_mode_blocks_any_high_medium_refutation(self):
         models = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
         ok = {"ok": True, "v": {"refuted": False, "reason": "reason long enough"}}

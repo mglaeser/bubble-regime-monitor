@@ -1550,6 +1550,37 @@ def main() -> int:
     # far are collected, so the summary can name which one blocked and why.
     # STRICT MODE, configurable but FAIL-CLOSED ON ABSENCE.
     #
+    # WHY THIS IS SAFE TO MAKE SETTABLE — the objection answered.
+    # The reasonable worry is "a mutable repo variable disables the refutation
+    # veto, so a required status can pass despite valid dissent". The second
+    # half is true and INTENDED; the first half is not, and the difference is
+    # the whole design.
+    #
+    # Turning strict mode off does not disable review. It changes exactly one
+    # thing: whether a dissenting voice OTHER than the required approver is also
+    # a veto. Everything below is untouched by it, and none of it is reachable
+    # by any repo variable:
+    #
+    #   * the required approver's veto is ABSOLUTE and UNCONDITIONAL. Refuting
+    #     at any confidence — even "low" — blocks. So does approving without a
+    #     substantive own reason, or without a valid proof-of-check when a
+    #     challenge is set, or not being resolved in the panel at all.
+    #   * at least one DISTINCT other model must approve. Repeat votes from the
+    #     same model never corroborate.
+    #   * VERIFIER_MIN_OTHER_APPROVERS cannot lower that floor. Measured:
+    #     0, -5, blank, "abc" and None all degrade to 1 — the approver-alone
+    #     case BLOCKS under every one of them.
+    #   * the distinct-voices gate and the defect-ledger gate still run.
+    #
+    # So the floor is TWO distinct approving voices, one of which must be the
+    # required approver, and that floor is not configuration — it is code. What
+    # the operator selects is whether the bar is "2 of 3 including the required
+    # approver" or "unanimous". Unanimity is a defensible policy for some repos
+    # and needless for others; which one applies here is an operator judgement,
+    # not a safety property. The control cannot be switched off, only tuned
+    # between two positions that both require real, independent, reasoned
+    # approval.
+    #
     # This was hardcoded "true" because "a merge control that a variable can
     # silently switch off is not a control". Operator decision: make it settable
     # again. The hole that reasoning guarded against is that the old predicate

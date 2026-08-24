@@ -187,6 +187,15 @@ jobs:
           # the resolution is printed and shown in the step summary as an
           # explicitly DISABLED gate, so a relaxation is visible in the run
           # rather than being an absence nobody notices.
+          #
+          # And it tunes the bar, it does not remove it: the required approver's
+          # veto stays absolute (a refutation at ANY confidence blocks, as does
+          # an approval without a substantive reason), and at least one DISTINCT
+          # other model must still approve. MIN_OTHER_APPROVERS cannot lower
+          # that floor -- 0, negative, blank and garbage all degrade to 1. So
+          # the operator chooses between "2 of 3 including the required
+          # approver" and "unanimous"; there is no setting for "fewer than 2",
+          # and none for "without the required approver".
           VERIFIER_STRICT_ANY_REFUTATION: ${{ vars.VERIFIER_STRICT_ANY_REFUTATION }}
           # Require every APPROVING voice to carry a machine-readable "defects"
           # ledger, and block when that ledger contradicts the boolean. Hardcoded
