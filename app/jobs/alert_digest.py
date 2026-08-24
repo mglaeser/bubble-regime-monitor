@@ -52,6 +52,17 @@ def run_once(*, now: datetime | None = None,
     # that already have a delivery costs one query each and changes nothing.
     closed = last_closed_digest_window(now)
 
+    # An override must still name a CLOSED window, and this is checked before
+    # anything touches the database. Planning the open one burns its dedupe key
+    # on a partial week — and because that key IS the window's identity, the
+    # real digest can never be planned afterwards. One hand-run with the
+    # current week would silently cost that week its report, permanently.
+    if window_key is not None and window_key >= digest_window_key(now):
+        log.warning("alert_digest_refused_open_window", window_key=window_key)
+        return {"status": "refused", "window_key": window_key,
+                "reason": (f"{window_key} has not closed; digesting it would "
+                           "consume the window and leave the rest unreported")}
+
     plans = []
     with session_scope() as session:
         artifacts = load_active(session)

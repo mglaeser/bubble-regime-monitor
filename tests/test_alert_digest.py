@@ -546,3 +546,77 @@ def test_quiet_windows_spanned_by_an_outage_are_not_replayed(monkeypatch):
     result = alert_digest.run_once(now=NOW)
     assert result["windows_planned"] == 1, (
         f"an outage replayed empty weeks: {result['recovered_windows']}")
+
+
+def test_an_item_arriving_late_joins_a_digest_that_has_not_been_sent():
+    """The window key IS the digest's identity, so no second delivery can
+    ever carry a late item. Returning early left it PENDING forever.
+    """
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        first = plan_digest(session, mode="shadow", live_profile="default",
+                            planning_rules_sha256=rules_sha, window_key=WINDOW,
+                            now=NOW)
+        assert len(first.item_ids) == 1
+
+        # an episode opens late for the same, still-unsent window
+        _pending_item(session, rules_sha=rules_sha, rule_id="tripwire.rf4_first")
+        second = plan_digest(session, mode="shadow", live_profile="default",
+                             planning_rules_sha256=rules_sha, window_key=WINDOW,
+                             now=NOW)
+
+        assert second.delivery_id == first.delivery_id, "a second digest appeared"
+        assert len(second.item_ids) == 1, "the late item was stranded"
+        assert "absorbed" in (second.skipped_reason or "")
+
+        remaining = session.execute(
+            select(AlertDigestItem).where(
+                AlertDigestItem.status == DigestItemStatus.PENDING)
+        ).scalars().all()
+        assert remaining == []
+
+
+def test_an_item_arriving_after_the_send_is_counted_not_folded_in():
+    """Absorbing then would claim the message said something it did not."""
+    from app.alerts.enums import TransportStatus
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        first = plan_digest(session, mode="shadow", live_profile="default",
+                            planning_rules_sha256=rules_sha, window_key=WINDOW,
+                            now=NOW)
+        session.get(AlertDelivery, first.delivery_id).transport_status = \
+            TransportStatus.SENT
+        session.flush()
+
+        _pending_item(session, rules_sha=rules_sha, rule_id="tripwire.rf4_first")
+        after = plan_digest(session, mode="shadow", live_profile="default",
+                            planning_rules_sha256=rules_sha, window_key=WINDOW,
+                            now=NOW)
+
+    assert after.item_ids == []
+    assert after.stranded == 1, "a late item vanished without being counted"
+    assert "already sent" in (after.skipped_reason or "")
+
+
+def test_a_hand_run_cannot_burn_the_open_week(monkeypatch):
+    """The window key is the identity, so consuming it is permanent.
+
+    One hand-run naming the current week would leave that week unable to
+    produce a digest at all, silently.
+    """
+    from app.alerts.calendars import digest_window_key
+    from app.jobs import alert_digest
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    result = alert_digest.run_once(now=NOW, window_key=digest_window_key(NOW))
+    assert result["status"] == "refused"
+    assert "has not closed" in result["reason"]
+
+    with session_scope() as session:
+        assert session.execute(select(AlertDelivery)).scalars().all() == []

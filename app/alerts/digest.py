@@ -68,16 +68,74 @@ class DigestPlan:
     item_ids: list[str] = field(default_factory=list)
     quiet: bool = False
     skipped_reason: str | None = None
+    #: Items that arrived after this window's digest had already gone out.
+    stranded: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {"window_key": self.window_key, "delivery_id": self.delivery_id,
                 "items": len(self.item_ids), "quiet": self.quiet,
+                "stranded": self.stranded,
                 "skipped_reason": self.skipped_reason}
 
 
 def digest_dedupe_key(*, mode: str, live_profile: str, window_key: str) -> str:
     """One digest per window per namespace. Re-running the job is a no-op."""
     return f"v{DEDUPE_VERSION}|DIGEST|{mode}|{live_profile}|{window_key}"
+
+
+
+#: Transport states in which a digest has definitely not reached the wire, so
+#: its contents may still change.
+_UNSENT = (TransportStatus.PENDING, TransportStatus.RETRY_DUE)
+
+
+def _pending_items(session: Session, *, mode: str, live_profile: str,
+                   window: str) -> list[AlertDigestItem]:
+    return list(session.execute(
+        select(AlertDigestItem)
+        .join(AlertEpisode, AlertEpisode.episode_id == AlertDigestItem.episode_id)
+        .where(AlertDigestItem.digest_window_key == window,
+               AlertDigestItem.status == DigestItemStatus.PENDING,
+               AlertEpisode.mode == mode,
+               AlertEpisode.live_profile == live_profile)
+        .order_by(AlertDigestItem.pending_at)
+    ).scalars().all())
+
+
+def _count_pending(session: Session, *, mode: str, live_profile: str,
+                   window: str) -> int:
+    return len(_pending_items(session, mode=mode, live_profile=live_profile,
+                              window=window))
+
+
+def _absorb(session: Session, delivery: AlertDelivery, *, mode: str,
+            live_profile: str, window: str, phrase_set_version: str,
+            phrase_set_sha256: str, planning_rules_sha256: str,
+            now: datetime) -> list[str]:
+    """Add late items to a digest that has not been sent yet."""
+    absorbed: list[str] = []
+    for item in _pending_items(session, mode=mode, live_profile=live_profile,
+                               window=window):
+        episode = session.get(AlertEpisode, item.episode_id)
+        session.add(AlertDeliveryMember(
+            delivery_id=delivery.delivery_id,
+            episode_id=item.episode_id,
+            rule_id=episode.rule_id if episode is not None else "",
+            instance_fingerprint=(episode.instance_fingerprint if episode else ""),
+            member_role=MemberRole.SUMMARY,
+            notification_generation=1,
+            origin_rules_sha256=(episode.origin_rules_sha256 if episode
+                                 else planning_rules_sha256),
+            origin_phrase_set_version=phrase_set_version,
+            origin_phrase_set_sha256=phrase_set_sha256,
+            included_at=now,
+        ))
+        item.status = DigestItemStatus.PLANNED
+        item.planned_at = now
+        item.delivery_id = delivery.delivery_id
+        item.still_active_summary = bool(episode is not None and episode.is_open)
+        absorbed.append(item.digest_item_id)
+    return absorbed
 
 
 def plan_digest(session: Session, *, mode: str, live_profile: str,
@@ -102,7 +160,34 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
     ).scalars().first()
     if existing is not None:
         plan.delivery_id = existing.delivery_id
-        plan.skipped_reason = "already planned for this window"
+        # An item can arrive for a window whose digest is already planned — an
+        # episode opened late, a replay, a slow evaluation. Returning here left
+        # it PENDING forever: the window key is the digest's identity, so no
+        # second delivery can ever be planned to carry it.
+        #
+        # While the digest is still UNSENT it can simply take them, which is
+        # both correct and what the operator expects: the message has not gone
+        # anywhere, and it is supposed to describe the whole week.
+        if existing.transport_status in _UNSENT:
+            plan.item_ids = _absorb(session, existing, mode=mode,
+                                    live_profile=live_profile, window=window,
+                                    phrase_set_version=phrase_set_version,
+                                    phrase_set_sha256=phrase_set_sha256,
+                                    planning_rules_sha256=planning_rules_sha256,
+                                    now=now)
+            plan.skipped_reason = (
+                f"already planned; absorbed {len(plan.item_ids)} late item(s)"
+                if plan.item_ids else "already planned for this window")
+            return plan
+        # Already on the wire or past it. Absorbing now would claim the message
+        # said something it did not, so the items stay PENDING and are counted
+        # as stranded rather than quietly folded in.
+        plan.stranded = _count_pending(session, mode=mode,
+                                       live_profile=live_profile, window=window)
+        plan.skipped_reason = "already sent for this window"
+        if plan.stranded:
+            log.warning("alert_digest_items_stranded", window=window,
+                        count=plan.stranded)
         return plan
 
     # The namespace is NOT optional here. `AlertDigestItem` carries no mode or
