@@ -254,6 +254,20 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
     return result.rowcount == 1
 
 
+def release(session: Session, delivery: AlertDelivery, *, now: datetime) -> None:
+    """Give a claimed delivery back to the queue, unchanged.
+
+    Not a hold and not a failure: the message is still exactly as sendable as
+    it was, and something outside it — an authorisation withdrawn between the
+    claim and the wire — means not yet. A hold state would tell an operator
+    this delivery has a problem, and it does not.
+    """
+    delivery.transport_status = TransportStatus.PENDING
+    delivery.lease_owner = None
+    delivery.lease_until = None
+    delivery.updated_at = now
+
+
 def recover_leases(session: Session, *, now: datetime) -> dict[str, int]:
     """Sweep expired leases (mandate 16.6).
 
