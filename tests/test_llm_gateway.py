@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socketserver
+import subprocess
+import sys
 import threading
 import time
 import tomllib
@@ -178,6 +181,47 @@ class TestConfiguration:
         assert settings.llm_api_key.get_secret_value() == ""
         assert settings.llm_model == ""
         assert settings.llm_auth_header == ""
+
+    def test_pytest_bootstrap_clears_inherited_gateway_configuration(self):
+        root = Path(__file__).resolve().parents[1]
+        probe = (
+            "import importlib.util\n"
+            "import pathlib\n"
+            "import sys\n"
+            "root = pathlib.Path(sys.argv[1])\n"
+            "spec = importlib.util.spec_from_file_location("
+            "'hostile_ambient_conftest', root / 'tests' / 'conftest.py')\n"
+            "if spec is None or spec.loader is None:\n"
+            "    raise SystemExit('could not load pytest bootstrap')\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(module)\n"
+            "from app.config import Settings\n"
+            "settings = Settings(_env_file=None)\n"
+            "actual = (settings.llm_api_base_url, settings.llm_api_key.get_secret_value(), "
+            "settings.llm_model, settings.llm_auth_header, settings.llm_max_tokens)\n"
+            "expected = ('', '', '', '', 8000)\n"
+            "if actual != expected:\n"
+            "    raise SystemExit(f'inherited gateway configuration survived: {actual!r}')\n"
+        )
+        env = os.environ.copy()
+        env.update({
+            "LLM_API_BASE_URL": "https://ambient-gateway.example.test/v1",
+            "LLM_API_KEY": "ambient-test-credential",  # pragma: allowlist secret
+            "LLM_MODEL": "ambient/model",
+            "LLM_AUTH_HEADER": "X-Ambient-Key",
+            "LLM_MAX_TOKENS": "99",
+        })
+
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(root)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=root,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
 
     def test_key_is_secret_typed_in_settings(self, monkeypatch):
         from app.config import Settings

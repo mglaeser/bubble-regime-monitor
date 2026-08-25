@@ -38,6 +38,32 @@ A2 = {"ok": True, "v": {"refuted": False, "reason": "reason long enough b"}}
 RF = {"ok": True, "v": {"refuted": True, "confidence": "high", "reason": "real bug"}}
 ERR = {"ok": False, "reason": "API 500"}
 
+_VERIFIER_ENV = (
+    "GITHUB_BASE_REF",
+    "GITHUB_STEP_SUMMARY",
+    "OPENAI_API_KEY",
+    "SECOND_VENDOR_API_KEY",
+    "VERIFIER_AUTH_HEADER",
+    "VERIFIER_BASE_BRANCH",
+    "VERIFIER_BASE_URL",
+    "VERIFIER_HEAD_SHA",
+    "VERIFIER_MIN_OTHER_APPROVERS",
+    "VERIFIER_MODEL",
+    "VERIFIER_PANEL",
+    "VERIFIER_PANEL_MODELS",
+    "VERIFIER_REQUIRED_APPROVER",
+    "VERIFIER_REQUIRE_DEFECT_LIST",
+    "VERIFIER_REQUIRE_KEY",
+    "VERIFIER_STRICT_ANY_REFUTATION",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_verifier_environment(monkeypatch):
+    """Unit verdicts must not inherit an operator's live panel settings."""
+    for name in _VERIFIER_ENV:
+        monkeypatch.delenv(name, raising=False)
+
 
 def _sse_events(events: list[dict]) -> list[bytes]:
     """Encode payloads in the gateway's observed SSE framing: an ``event:``
@@ -156,6 +182,24 @@ class TestNoKeyResidualMode:
 
 
 class TestEmptyEnvVarsAreAbsent:
+    def test_suite_ignores_a_hostile_ambient_auth_header(self):
+        target = (
+            f"{Path(__file__).resolve()}::TestVerifierDiagnosticsAreSecretSafe"
+            "::test_peer_error_bodies_cannot_echo_key_or_endpoint"
+        )
+        env = os.environ.copy()
+        env["VERIFIER_AUTH_HEADER"] = "Bad Header"
+
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", target],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
     def test_empty_base_url_has_no_implicit_host(self, monkeypatch):
         # This key belongs to one operator-pinned endpoint.  An empty Actions
         # secret must never select a different host on the key's behalf.
