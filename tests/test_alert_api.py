@@ -849,8 +849,13 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
     from sqlalchemy import select
 
     from app.alerts.digest import plan_digest
-    from app.alerts.enums import TransportStatus
-    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertRender
+    from app.alerts.enums import DigestItemStatus, TransportStatus
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertDigestItem,
+        AlertRender,
+    )
     from app.alerts.planner import MemberIntent, dedupe_key
     from app.db import session_scope
     from tests.test_alert_digest import (
@@ -890,6 +895,17 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
         source_members[0].dropped_at = now
         source_members[0].drop_reason = "SILENCED_BEFORE_SEND"
         survivor = source_members[1]
+        dropped_episode_id = source_members[0].episode_id
+        survivor_episode_id = survivor.episode_id
+        digest_items = session.execute(
+            select(AlertDigestItem).where(
+                AlertDigestItem.delivery_id == original_id)
+        ).scalars().all()
+        by_episode = {item.episode_id: item for item in digest_items}
+        by_episode[source_members[0].episode_id].status = DigestItemStatus.CANCELLED
+        by_episode[source_members[0].episode_id].last_error_code = "SILENCED"
+        by_episode[survivor.episode_id].status = DigestItemStatus.UNKNOWN
+        by_episode[survivor.episode_id].last_error_code = "AMBIGUOUS"
         expected_key = dedupe_key(
             delivery_kind=original.delivery_kind,
             members=[MemberIntent(
@@ -928,9 +944,22 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
         ).scalar_one()
         assert retry.dedupe_key == expected_key
         assert retry.scheduled_window_key == WINDOW
-        assert [member.episode_id for member in copied] == [survivor.episode_id]
+        assert [member.episode_id for member in copied] == [survivor_episode_id]
         assert copied[0].dropped_at is None
         assert copied_render.final_message == "Exact digest bytes."
+        moved_item = session.execute(
+            select(AlertDigestItem).where(
+                AlertDigestItem.episode_id == survivor_episode_id)
+        ).scalar_one()
+        cancelled_item = session.execute(
+            select(AlertDigestItem).where(
+                AlertDigestItem.episode_id == dropped_episode_id)
+        ).scalar_one()
+        assert moved_item.delivery_id == retry_id
+        assert moved_item.status == DigestItemStatus.PLANNED
+        assert moved_item.last_error_code is None
+        assert cancelled_item.delivery_id == original_id
+        assert cancelled_item.status == DigestItemStatus.CANCELLED
 
 
 def test_concurrent_manual_retries_allocate_distinct_root_sequences(client):

@@ -315,6 +315,7 @@ def test_cutover_apply_is_a_request_until_restarted_state_is_observed(
         monkeypatch, capsys):
     """The CLI must not claim it changed a deployment environment."""
     import argparse
+
     from sqlalchemy import select
 
     import app.alerts.cutover as cutover_module
@@ -371,6 +372,7 @@ def test_cutover_apply_is_a_request_until_restarted_state_is_observed(
 
 def test_cutover_rollback_is_also_two_phase(monkeypatch, capsys):
     import argparse
+
     from app.alerts.cli import cmd_cutover
     from app.config import get_settings
 

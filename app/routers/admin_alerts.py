@@ -423,10 +423,16 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
     from sqlalchemy import select as sa_select
     from sqlalchemy.exc import IntegrityError, OperationalError
 
-    from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
+    from app.alerts.enums import (
+        DeliveryKind,
+        DigestItemStatus,
+        PlanningState,
+        TransportStatus,
+    )
     from app.alerts.models import (
         AlertDelivery,
         AlertDeliveryMember,
+        AlertDigestItem,
         AlertEvent,
         AlertRender,
     )
@@ -560,6 +566,31 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
                         origin_phrase_set_sha256=member.origin_phrase_set_sha256,
                         included_at=now,
                     ))
+                if original.delivery_kind == DeliveryKind.DIGEST:
+                    surviving_episode_ids = [member.episode_id for member in rows]
+                    digest_items = session.execute(
+                        sa_select(AlertDigestItem).where(
+                            AlertDigestItem.delivery_id == original.delivery_id,
+                            AlertDigestItem.episode_id.in_(surviving_episode_ids),
+                            AlertDigestItem.status.in_([
+                                DigestItemStatus.UNKNOWN,
+                                # Compatibility for an UNKNOWN created before
+                                # digest outcome transitions were installed.
+                                DigestItemStatus.PLANNED,
+                            ]),
+                        )
+                    ).scalars().all()
+                    if len(digest_items) != len(surviving_episode_ids):
+                        return problem(
+                            409, "Digest lifecycle unavailable",
+                            "the UNKNOWN digest cannot be retried because its "
+                            "surviving member/item evidence is incomplete")
+                    for item in digest_items:
+                        item.delivery_id = new_id
+                        item.status = DigestItemStatus.PLANNED
+                        item.planned_at = now
+                        item.delivered_at = None
+                        item.last_error_code = None
                 # UNKNOWN means these exact bytes may already be on the phone.
                 # A new delivery needs its own immutable render row, but every
                 # content/provenance field is cloned from that source render;

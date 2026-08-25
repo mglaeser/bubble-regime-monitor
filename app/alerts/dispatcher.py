@@ -385,6 +385,24 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
         return _phrase_set_of_ruleset(session, delivery.planning_rules_sha256,
                                       fallback)
 
+    # A digest's reviewed body comes from the ruleset that planned the weekly
+    # provider intent, but its members are historical evidence and each keeps
+    # its own episode-origin artifact. Mixed *valid* origins are therefore
+    # expected in one retrospective. Validate every pair independently before
+    # resolving the delivery-level digest wording.
+    for member_version, member_digest, rules_sha in rows:
+        origin = load_by_hash(session, rules_sha)
+        if origin is None \
+                or origin.phrase_set.version != member_version \
+                or origin.phrase_set.sha256 != member_digest:
+            log.error("alert_member_origin_phrase_mismatch",
+                      delivery_id=delivery.delivery_id,
+                      rules_sha256=str(rules_sha)[:12])
+            return None
+    if delivery.delivery_kind == DeliveryKind.DIGEST:
+        return _phrase_set_of_ruleset(
+            session, delivery.planning_rules_sha256, fallback)
+
     phrase_pairs = {(str(version), str(digest)) for version, digest, _rules in rows}
     if len(phrase_pairs) != 1:
         log.error("alert_mixed_phrase_provenance",
@@ -400,18 +418,6 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
                   delivery_id=delivery.delivery_id)
         return None
 
-    # A member's phrase pair is not self-authorizing.  Verify it against the
-    # exact archived ruleset that produced that member, so a tampered member
-    # row cannot select unrelated reviewed bytes with a plausible version/hash.
-    for member_version, member_digest, rules_sha in rows:
-        origin = load_by_hash(session, rules_sha)
-        if origin is None \
-                or origin.phrase_set.version != member_version \
-                or origin.phrase_set.sha256 != member_digest:
-            log.error("alert_member_origin_phrase_mismatch",
-                      delivery_id=delivery.delivery_id,
-                      rules_sha256=str(rules_sha)[:12])
-            return None
     if version == fallback.version and digest == fallback.sha256:
         return fallback
 

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -49,6 +49,7 @@ from app.alerts.models import (
     AlertDeliveryMember,
     AlertDigestItem,
     AlertEpisode,
+    AlertRulesetRegistry,
 )
 from app.alerts.phrase_registry import JOIN
 from app.alerts.renderer import RenderResult, honesty_lint
@@ -112,53 +113,45 @@ def _count_pending(session: Session, *, mode: str, live_profile: str,
                               window=window))
 
 
+def _origin_phrase_pair(session: Session, episode: AlertEpisode) -> tuple[str, str]:
+    """The exact phrase artifact bound to an episode's origin ruleset."""
+    origin = session.get(AlertRulesetRegistry, episode.origin_rules_sha256)
+    if origin is None:
+        raise ValueError(
+            f"origin ruleset {episode.origin_rules_sha256[:12]} is unavailable")
+    return origin.phrase_set_version, origin.phrase_set_sha256
+
+
 def _absorb(session: Session, delivery: AlertDelivery, *, mode: str,
-            live_profile: str, window: str, phrase_set_version: str,
-            phrase_set_sha256: str, planning_rules_sha256: str,
-            now: datetime) -> list[str]:
+            live_profile: str, window: str, now: datetime) -> list[str]:
     """Add late items to a digest that has not been sent yet."""
     absorbed: list[str] = []
     for item in _pending_items(session, mode=mode, live_profile=live_profile,
                                window=window):
         episode = session.get(AlertEpisode, item.episode_id)
+        if episode is None:
+            raise ValueError(
+                f"digest item {item.digest_item_id} has no episode evidence")
+        origin_phrase_version, origin_phrase_sha = _origin_phrase_pair(
+            session, episode)
         session.add(AlertDeliveryMember(
             delivery_id=delivery.delivery_id,
             episode_id=item.episode_id,
-            rule_id=episode.rule_id if episode is not None else "",
-            instance_fingerprint=(episode.instance_fingerprint if episode else ""),
+            rule_id=episode.rule_id,
+            instance_fingerprint=episode.instance_fingerprint,
             member_role=MemberRole.SUMMARY,
             notification_generation=1,
-            origin_rules_sha256=(episode.origin_rules_sha256 if episode
-                                 else planning_rules_sha256),
-            origin_phrase_set_version=phrase_set_version,
-            origin_phrase_set_sha256=phrase_set_sha256,
+            origin_rules_sha256=episode.origin_rules_sha256,
+            origin_phrase_set_version=origin_phrase_version,
+            origin_phrase_set_sha256=origin_phrase_sha,
             included_at=now,
         ))
         item.status = DigestItemStatus.PLANNED
         item.planned_at = now
         item.delivery_id = delivery.delivery_id
-        item.still_active_summary = bool(episode is not None and episode.is_open)
+        item.still_active_summary = episode.is_open
         absorbed.append(item.digest_item_id)
     return absorbed
-
-
-def _delivery_provenance(session: Session, delivery_id: str,
-                         fallback: tuple[str, str]) -> tuple[str, str]:
-    """The phrase set the delivery's EXISTING members were planned under.
-
-    A late item joins a message that was already assembled, so it has to carry
-    the same provenance as the rest of it. Stamping today's artifacts on it
-    would leave one delivery whose members disagree about which reviewed text
-    they were built from — and provenance that varies inside a single message
-    cannot answer the question it exists for.
-    """
-    row = session.execute(
-        select(AlertDeliveryMember.origin_phrase_set_version,
-               AlertDeliveryMember.origin_phrase_set_sha256)
-        .where(AlertDeliveryMember.delivery_id == delivery_id)
-        .order_by(AlertDeliveryMember.included_at).limit(1)
-    ).first()
-    return (row[0], row[1]) if row else fallback
 
 
 def plan_digest(session: Session, *, mode: str, live_profile: str,
@@ -181,6 +174,15 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
     control.
     """
     now = now or datetime.now(UTC)
+    planning_ruleset = session.get(AlertRulesetRegistry, planning_rules_sha256)
+    if planning_ruleset is None:
+        raise ValueError(
+            f"planning ruleset {planning_rules_sha256[:12]} is unavailable")
+    if (planning_ruleset.phrase_set_version, planning_ruleset.phrase_set_sha256) != (
+            phrase_set_version, phrase_set_sha256):
+        raise ValueError(
+            "the supplied planning phrase artifact does not match the exact "
+            "planning ruleset registry binding")
     # The DEFAULT must be the window that closed, not the one we are standing
     # in. Defaulting to the current week meant any caller who omitted the
     # argument consumed a partial week — and since the window key IS the
@@ -216,14 +218,8 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         # both correct and what the operator expects: the message has not gone
         # anywhere, and it is supposed to describe the whole week.
         if existing.transport_status in _UNSENT:
-            inherited = _delivery_provenance(
-                session, existing.delivery_id,
-                (phrase_set_version, phrase_set_sha256))
             plan.item_ids = _absorb(session, existing, mode=mode,
                                     live_profile=live_profile, window=window,
-                                    phrase_set_version=inherited[0],
-                                    phrase_set_sha256=inherited[1],
-                                    planning_rules_sha256=planning_rules_sha256,
                                     now=now)
             plan.skipped_reason = (
                 f"already planned; absorbed {len(plan.item_ids)} late item(s)"
@@ -261,7 +257,13 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         .join(AlertEpisode, AlertEpisode.episode_id == AlertDigestItem.episode_id)
         .where(
             AlertDigestItem.digest_window_key <= window,
-            AlertDigestItem.status == DigestItemStatus.PENDING,
+            or_(
+                AlertDigestItem.status == DigestItemStatus.PENDING,
+                and_(
+                    AlertDigestItem.status == DigestItemStatus.FAILED,
+                    AlertDigestItem.digest_window_key < window,
+                ),
+            ),
             AlertEpisode.mode == mode,
             AlertEpisode.live_profile == live_profile,
         ).order_by(AlertDigestItem.pending_at)
@@ -330,27 +332,32 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
 
     for item in items:
         episode = session.get(AlertEpisode, item.episode_id)
+        if episode is None:
+            raise ValueError(
+                f"digest item {item.digest_item_id} has no episode evidence")
+        origin_phrase_version, origin_phrase_sha = _origin_phrase_pair(
+            session, episode)
         session.add(AlertDeliveryMember(
             delivery_id=delivery_id,
             episode_id=item.episode_id,
-            rule_id=episode.rule_id if episode is not None else "",
-            instance_fingerprint=(episode.instance_fingerprint if episode
-                                  else ""),
+            rule_id=episode.rule_id,
+            instance_fingerprint=episode.instance_fingerprint,
             member_role=MemberRole.SUMMARY,
             notification_generation=1,
             # The member keeps the artifacts its EPISODE was planned under, so
             # a digest assembled weeks later still renders from what produced
             # the item rather than whatever is active on the Monday.
-            origin_rules_sha256=(episode.origin_rules_sha256 if episode
-                                 else planning_rules_sha256),
-            origin_phrase_set_version=phrase_set_version,
-            origin_phrase_set_sha256=phrase_set_sha256,
+            origin_rules_sha256=episode.origin_rules_sha256,
+            origin_phrase_set_version=origin_phrase_version,
+            origin_phrase_set_sha256=origin_phrase_sha,
             included_at=now,
         ))
         item.status = DigestItemStatus.PLANNED
         item.planned_at = now
         item.delivery_id = delivery_id
-        item.still_active_summary = bool(episode is not None and episode.is_open)
+        item.delivered_at = None
+        item.last_error_code = None
+        item.still_active_summary = episode.is_open
         plan.item_ids.append(item.digest_item_id)
 
     # A QUIET WEEK STILL SENDS. After Stage 4 this is the only scheduled

@@ -38,6 +38,7 @@ from app.alerts.enums import (
     ActorType,
     CausationType,
     DeliveryKind,
+    DigestItemStatus,
     EpisodeStatus,
     PlanningState,
     TransportStatus,
@@ -482,6 +483,7 @@ def revalidate_members(session: Session, delivery: AlertDelivery, *,
         ):
             member.dropped_at = now
             member.drop_reason = "SILENCED_BEFORE_SEND"
+            _cancel_digest_item_for_member(session, delivery, member)
             _event(
                 session,
                 now,
@@ -492,6 +494,48 @@ def revalidate_members(session: Session, delivery: AlertDelivery, *,
             continue
         live.append(member)
     return live
+
+
+def _cancel_digest_item_for_member(
+    session: Session,
+    delivery: AlertDelivery,
+    member: AlertDeliveryMember,
+) -> None:
+    if delivery.delivery_kind != DeliveryKind.DIGEST:
+        return
+    item = session.execute(
+        select(AlertDigestItem).where(
+            AlertDigestItem.delivery_id == delivery.delivery_id,
+            AlertDigestItem.episode_id == member.episode_id,
+            AlertDigestItem.status == DigestItemStatus.PLANNED,
+        )
+    ).scalars().first()
+    if item is not None:
+        item.status = DigestItemStatus.CANCELLED
+        item.last_error_code = "SILENCED"
+
+
+def _set_digest_item_outcome(
+    session: Session,
+    delivery: AlertDelivery,
+    *,
+    status: str,
+    now: datetime,
+    error_code: str | None = None,
+) -> None:
+    """Advance every still-planned item with its provider intent outcome."""
+    if delivery.delivery_kind != DeliveryKind.DIGEST:
+        return
+    items = session.execute(
+        select(AlertDigestItem).where(
+            AlertDigestItem.delivery_id == delivery.delivery_id,
+            AlertDigestItem.status == DigestItemStatus.PLANNED,
+        )
+    ).scalars().all()
+    for item in items:
+        item.status = status
+        item.delivered_at = now if status == DigestItemStatus.DELIVERED else None
+        item.last_error_code = error_code
 
 
 def apply_silences_to_unsent(
@@ -557,6 +601,7 @@ def apply_silences_to_unsent(
         for member in matched:
             member.dropped_at = now
             member.drop_reason = "SILENCED_BEFORE_SEND"
+            _cancel_digest_item_for_member(session, delivery, member)
             result["members_dropped"] += 1
             _event(
                 session,
@@ -811,6 +856,8 @@ def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
             represented=len(represented),
             surviving=len(members),
         )
+    _set_digest_item_outcome(
+        session, delivery, status=DigestItemStatus.DELIVERED, now=now)
     _event(session, now, action="delivery_sent", delivery_id=delivery.delivery_id,
            detail=f"members={len(members)} represented={len(represented)}")
 
@@ -840,6 +887,9 @@ def mark_permanent(session: Session, delivery: AlertDelivery, *, now: datetime,
     delivery.lease_owner = None
     delivery.lease_until = None
     delivery.updated_at = now
+    _set_digest_item_outcome(
+        session, delivery, status=DigestItemStatus.FAILED, now=now,
+        error_code=error_code or "PERMANENT_REJECTION")
     _event(session, now, action="delivery_dead", delivery_id=delivery.delivery_id,
            detail=error_code or "permanent rejection")
 
@@ -860,6 +910,9 @@ def mark_unknown(session: Session, delivery: AlertDelivery, *, now: datetime,
     delivery.lease_owner = None
     delivery.lease_until = None
     delivery.updated_at = now
+    _set_digest_item_outcome(
+        session, delivery, status=DigestItemStatus.UNKNOWN, now=now,
+        error_code=error_code or "AMBIGUOUS")
 
     members = session.execute(
         select(AlertDeliveryMember).where(
@@ -887,6 +940,9 @@ def mark_render_failed(session: Session, delivery: AlertDelivery, *, now: dateti
     delivery.lease_owner = None
     delivery.lease_until = None
     delivery.updated_at = now
+    _set_digest_item_outcome(
+        session, delivery, status=DigestItemStatus.FAILED, now=now,
+        error_code="RENDER_REJECTED")
     _event(session, now, action="delivery_render_failed",
            delivery_id=delivery.delivery_id, detail=reason)
 

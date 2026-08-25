@@ -459,7 +459,9 @@ def test_a_silenced_episode_is_not_disclosed_by_the_count():
 
         episodes = session.execute(select(AlertEpisode)).scalars().all()
         # one silenced, one resolved, one still open
-        _silence_rule(session, episodes[0].rule_id)
+        silenced_rule = episodes[0].rule_id
+        resolved_rule = episodes[1].rule_id
+        _silence_rule(session, silenced_rule)
         episodes[1].is_open = False
         episodes[1].episode_status = EpisodeStatus.RESOLVED
         episodes[1].resolved_at = NOW
@@ -471,6 +473,16 @@ def test_a_silenced_episode_is_not_disclosed_by_the_count():
     body = sender.sent[0][1]
     assert "2 Ereignisse" in body, (
         f"the silenced episode was disclosed, or the resolved one dropped: {body!r}")
+    with session_scope() as session:
+        items = session.execute(
+            select(AlertDigestItem).order_by(AlertDigestItem.digest_item_id)
+        ).scalars().all()
+        by_rule = {
+            session.get(AlertEpisode, item.episode_id).rule_id: item
+            for item in items
+        }
+        assert by_rule[silenced_rule].status == DigestItemStatus.CANCELLED
+        assert by_rule[resolved_rule].status == DigestItemStatus.DELIVERED
 
 
 def test_a_silence_after_the_first_render_is_not_disclosed_by_a_stale_body():
@@ -716,8 +728,8 @@ def test_plan_digest_refuses_an_open_or_future_window():
         assert session.execute(select(AlertDelivery)).scalars().all() == []
 
 
-def test_a_late_item_inherits_the_message_it_joins():
-    """Provenance that varies inside one message cannot answer its question."""
+def test_a_late_item_keeps_its_episode_origin_not_the_callers_current_pair():
+    """Digest membership provenance comes from the episode registry binding."""
     from app.alerts.models import AlertDeliveryMember
 
     with session_scope() as session:
@@ -725,15 +737,16 @@ def test_a_late_item_inherits_the_message_it_joins():
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
         first = plan_digest(session, mode="shadow", live_profile="default",
                             planning_rules_sha256=rules_sha,
-                            phrase_set_version="v3.2",
-                            phrase_set_sha256="a" * 64,
+                            phrase_set_version=_provenance()[0],
+                            phrase_set_sha256=_provenance()[1],
                             window_key=WINDOW, now=NOW)
 
-        # the phrase set moves on before the late item arrives
+        # A late planning call cannot stamp arbitrary current bytes on it.
         _pending_item(session, rules_sha=rules_sha, rule_id="tripwire.rf4_first")
         plan_digest(session, mode="shadow", live_profile="default",
                     planning_rules_sha256=rules_sha,
-                    phrase_set_version="v9.9", phrase_set_sha256="b" * 64,
+                    phrase_set_version=_provenance()[0],
+                    phrase_set_sha256=_provenance()[1],
                     window_key=WINDOW, now=NOW)
 
         members = session.execute(
@@ -742,8 +755,8 @@ def test_a_late_item_inherits_the_message_it_joins():
         ).scalars().all()
 
     assert len(members) == 2
-    assert {m.origin_phrase_set_version for m in members} == {"v3.2"}, (
-        "one delivery ended up with members built from different phrase sets")
+    assert {m.origin_phrase_set_version for m in members} == {_provenance()[0]}
+    assert {m.origin_phrase_set_sha256 for m in members} == {_provenance()[1]}
 
 
 def test_an_item_orphaned_by_a_sent_digest_is_carried_into_the_next_one():
@@ -833,13 +846,12 @@ def test_member_phrase_pair_must_match_its_exact_origin_ruleset():
     with session_scope() as session:
         rules_sha = _registered(session)
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
-        # Deliberately stamp v3.2 even though the episode's exact origin
-        # ruleset is bound to v3.4.  Both phrase artifacts are valid; the pair
-        # is still false provenance and must fail closed.
+        # Plan truthfully, then tamper the persisted member to an unrelated but
+        # otherwise valid artifact. The member cannot self-authorise it.
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=rules_sha,
-                           phrase_set_version=v32.version,
-                           phrase_set_sha256=v32.sha256,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                            window_key=WINDOW, now=NOW)
 
         # The registry holds v3.2's real bytes; mere registry presence does not
@@ -852,41 +864,46 @@ def test_member_phrase_pair_must_match_its_exact_origin_ruleset():
             worst_case_test_sha256=v32.worst_case_test_sha256))
         session.flush()
 
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == plan.delivery_id)
+        ).scalars().one()
+        member.origin_phrase_set_version = v32.version
+        member.origin_phrase_set_sha256 = v32.sha256
+        session.flush()
+
         delivery = session.get(AlertDelivery, plan.delivery_id)
         resolved = planning_phrase_set(session, delivery, _phrase_set())
 
     assert resolved is None
 
 
-def test_an_unregistered_planning_phrase_set_fails_the_render(monkeypatch):
+def test_an_unregistered_planning_phrase_set_is_refused_before_queueing(monkeypatch):
     """Fail-closed. A quietly re-worded alert is worse than a visible failure.
 
     Falling back to whatever this process holds meant the message could go out
     worded differently from the one that was planned and reviewed. A render
     failure is visible and recoverable; that is not.
     """
-    from app.alerts.dispatcher import planning_phrase_set
-
     with session_scope() as session:
         rules_sha = _registered(session)
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
-        plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha,
-                           phrase_set_version="v0.0-never-registered",
-                           phrase_set_sha256="z" * 64,
-                           window_key=WINDOW, now=NOW)
-        delivery = session.get(AlertDelivery, plan.delivery_id)
-        assert planning_phrase_set(session, delivery, _phrase_set()) is None
+        with pytest.raises(ValueError, match="registry binding"):
+            plan_digest(session, mode="shadow", live_profile="default",
+                        planning_rules_sha256=rules_sha,
+                        phrase_set_version="v0.0-never-registered",
+                        phrase_set_sha256="z" * 64,
+                        window_key=WINDOW, now=NOW)
+        assert session.execute(select(AlertDelivery)).scalars().all() == []
 
 
-def test_a_phrase_set_whose_bytes_moved_fails_the_render():
+def test_a_phrase_set_whose_bytes_moved_is_refused_before_queueing():
     """Resolving by VERSION alone trusts that a version still means what it did.
 
     The member recorded the digest precisely so that could be verified rather
     than assumed.
     """
     from app.alerts.artifacts import register
-    from app.alerts.dispatcher import planning_phrase_set
     from app.alerts.models import AlertPhraseSetRegistry
     from app.alerts.phrase_registry import validate_phrase_set
 
@@ -903,14 +920,13 @@ def test_a_phrase_set_whose_bytes_moved_fails_the_render():
 
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
         # planned against v3.2's VERSION but a digest that is not v3.2's
-        plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha,
-                           phrase_set_version=v32.version,
-                           phrase_set_sha256="9" * 64,
-                           window_key=WINDOW, now=NOW)
-        delivery = session.get(AlertDelivery, plan.delivery_id)
-
-        assert planning_phrase_set(session, delivery, _phrase_set()) is None
+        with pytest.raises(ValueError, match="registry binding"):
+            plan_digest(session, mode="shadow", live_profile="default",
+                        planning_rules_sha256=rules_sha,
+                        phrase_set_version=v32.version,
+                        phrase_set_sha256="9" * 64,
+                        window_key=WINDOW, now=NOW)
+        assert session.execute(select(AlertDelivery)).scalars().all() == []
 
 
 def test_a_quiet_digest_takes_its_text_from_the_ruleset_that_planned_it():
@@ -1041,3 +1057,116 @@ def test_a_retry_after_a_definite_failure_re_renders_the_digest():
     acknowledged = _D()
     acknowledged.duplicate_risk_acknowledged = True
     assert _digest_may_rerender(acknowledged) is False
+
+
+def test_digest_item_becomes_delivered_only_after_confirmed_send():
+    from app.alerts.outbox import mark_sent
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        plan = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW, now=NOW)
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        mark_sent(session, delivery, now=NOW, http_status=200)
+        item = session.get(AlertDigestItem, item_id)
+        assert item.status == DigestItemStatus.DELIVERED
+        assert item.delivered_at == NOW
+        assert item.last_error_code is None
+
+
+@pytest.mark.parametrize("outcome", ["permanent", "render"])
+def test_definite_digest_failure_marks_its_items_failed(outcome):
+    from app.alerts.outbox import mark_permanent, mark_render_failed
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        plan = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW, now=NOW)
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        if outcome == "permanent":
+            mark_permanent(
+                session, delivery, now=NOW, error_code="HTTP_400",
+                message="definite rejection", http_status=400)
+            expected_error = "HTTP_400"
+        else:
+            mark_render_failed(
+                session, delivery, now=NOW, reason="reviewed text unavailable")
+            expected_error = "RENDER_REJECTED"
+        item = session.get(AlertDigestItem, item_id)
+        assert item.status == DigestItemStatus.FAILED
+        assert item.delivered_at is None
+        assert item.last_error_code == expected_error
+
+
+def test_ambiguous_digest_marks_items_unknown_and_blocks_carry_forward():
+    from app.alerts.outbox import mark_unknown
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session, rules_sha=rules_sha, rule_id="regime.band_to_derisk",
+            window="2026-W33")
+        first = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key="2026-W33", now=NOW)
+        delivery = session.get(AlertDelivery, first.delivery_id)
+        mark_unknown(session, delivery, now=NOW, reason="socket closed")
+
+        later = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW, now=NOW)
+        item = session.get(AlertDigestItem, item_id)
+        assert item.status == DigestItemStatus.UNKNOWN
+        assert item.last_error_code == "AMBIGUOUS"
+        assert later.quiet is True
+        assert later.item_ids == []
+
+
+def test_definitely_failed_digest_item_is_replanned_in_the_next_window():
+    from app.alerts.outbox import mark_permanent
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session, rules_sha=rules_sha, rule_id="regime.band_to_derisk",
+            window="2026-W33")
+        first = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key="2026-W33", now=NOW)
+        mark_permanent(
+            session, session.get(AlertDelivery, first.delivery_id), now=NOW,
+            error_code="HTTP_400", message="rejected", http_status=400)
+
+        later = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW, now=NOW)
+        item = session.get(AlertDigestItem, item_id)
+        assert later.carried_forward == 1
+        assert later.item_ids == [item_id]
+        assert item.status == DigestItemStatus.PLANNED
+        assert item.delivery_id == later.delivery_id
+        assert item.last_error_code is None
