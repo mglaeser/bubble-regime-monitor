@@ -23,6 +23,8 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+import app.alerts.health as alert_health
+from app.alerts.artifacts import load_active
 from app.alerts.calendars import last_closed_digest_window
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import (
@@ -31,6 +33,7 @@ from app.alerts.enums import (
     Priority,
     TransportStatus,
 )
+from app.alerts.errors import AlertingUnavailable
 from app.alerts.models import (
     AlertComponentHeartbeat,
     AlertDelivery,
@@ -106,6 +109,46 @@ def preflight(
     blockers = live_admission_blockers(session)
     check("live_admission", not blockers,
           "admitted" if not blockers else "; ".join(blockers))
+
+    # Stage 4 does not invent a smaller notion of health.  The public health
+    # projection already owns schema integrity, artifact matching, component
+    # liveness, overdue queue work, UNKNOWN blockers and P1 latency.  Fresh
+    # dispatcher/watchdog rows alone must not let a critical database or a
+    # degraded outbox retire the legacy channel.
+    try:
+        artifacts = load_active(session)
+        health_ruleset = artifacts.ruleset
+        health_source = artifacts.source
+        health_fallback = artifacts.fallback_reason
+    except AlertingUnavailable as exc:
+        health_ruleset = None
+        health_source = "unavailable"
+        health_fallback = str(exc)
+    health = alert_health.health_projection(
+        session,
+        settings=settings,
+        ruleset=health_ruleset,
+        artifact_source=health_source,
+        fallback_reason=health_fallback,
+        now=now,
+    )
+    health_status = str(health.get("status", "critical"))
+    raw_health_conditions = health.get("conditions")
+    health_conditions = (
+        [str(value) for value in raw_health_conditions]
+        if isinstance(raw_health_conditions, list)
+        else ["health projection returned no conditions ledger"]
+    )
+    check(
+        "health_accepted",
+        health_status == "ok",
+        (
+            "canonical alert health is ok"
+            if health_status == "ok"
+            else f"canonical alert health is {health_status!r}; "
+                 f"conditions={health_conditions[:10]}"
+        ),
+    )
 
     # 2: two stable weeks of live deterministic alerts. "Two weeks" is a
     # property of the OBSERVATION SPAN, not of the count: one delivery sent

@@ -806,35 +806,37 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 created_at=now,
             )
             body = result.body
-        # Rendering can cross an exact quiet-hours boundary. The planning-time
-        # hold and the pass-start release are advisory; this is the final
-        # wire-time decision. P1 remains exempt by construction.
-        # Quiet admission follows the ACTUAL wire clock.  It must stay
-        # separate from the monotonic timestamp clamp below: if NTP moves the
-        # wall clock backwards across 07:00 Berlin, clamping first would turn a
-        # real quiet instant into an allowed one and put a non-P1 on the wire.
+        # Persisted lifecycle timestamps remain monotonic even when the wall
+        # clock moved backwards. Besides corrupting latency evidence, an
+        # earlier request_started_at can make a fresh lease look stale.
         pass_now = _utc_clock_value(lambda: now)
-        wire_now = _utc_clock_value(clock)
-        attempt_now = max(pass_now, wire_now)
-        if would_be_held(int(delivery.priority), wire_now):
-            hold_for_quiet(
-                session,
-                delivery,
-                now=wire_now,
-                recorded_at=attempt_now,
-            )
-            report.held += 1
-            return
+        attempt_now = pass_now
+
+        # Re-check live admission before the final wire-time gates. The
+        # pass-level check ran before this delivery's work; promotion or
+        # demotion during rendering must not authorise bytes under stale state.
+        if is_live(mode):
+            late = withdrawn_admission(session, delivery)
+            if late:
+                report.notes.extend(late)
+                report.held += 1
+                log.error("alert_admission_withdrawn_before_send",
+                          delivery_id=delivery_id, blockers=late)
+                release(session, delivery, now=attempt_now)
+                return
+
         # Rendering is not instantaneous.  A silence can begin after the
         # pass-start revalidation yet before the provider boundary, so perform
         # the same membership decision against the actual wire clock.  Persist
         # evidence at the monotonic attempt time when the wall clock rolled
         # backwards, but never use that clamp to decide whether a silence is
         # active.
+        membership_now = _utc_clock_value(clock)
+        attempt_now = max(attempt_now, membership_now)
         wire_members = revalidate_members(
             session,
             delivery,
-            now=wire_now,
+            now=membership_now,
             recorded_at=attempt_now,
         )
         wire_member_ids = frozenset(member.episode_id for member in wire_members)
@@ -884,28 +886,24 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                     "released for a fresh render"
                 )
                 return
-        # Persisted lifecycle timestamps remain monotonic even when the wall
-        # clock moved backwards.  Besides corrupting latency evidence, an
-        # earlier request_started_at can make a fresh lease look stale.
-        # Re-check admission HERE, inside the transaction that marks the
-        # delivery as sending. The pass-level check ran before any of this
-        # delivery's work: a promotion, a demotion or a swapped ruleset between
-        # then and now would leave an authorisation that was true when it was
-        # read and false when it is acted on. Checking again immediately before
-        # the wire narrows that to the transaction itself.
-        #
-        # No hold and no failure state: the delivery stays PENDING and the next
-        # pass picks it up. An authorisation that has just been withdrawn is a
-        # condition to wait out, not a property of this message.
-        if is_live(mode):
-            late = withdrawn_admission(session, delivery)
-            if late:
-                report.notes.extend(late)
-                report.held += 1
-                log.error("alert_admission_withdrawn_before_send",
-                          delivery_id=delivery_id, blockers=late)
-                release(session, delivery, now=attempt_now)
-                return
+        # Quiet admission is the LAST database-side gate and takes a fresh
+        # clock sample after revalidation. Sampling before that query left an
+        # exact-boundary TOCTOU: 21:59:59 admitted, revalidation crossed 22:00,
+        # and the stale sample still put a non-P1 on the wire. P1 remains
+        # exempt by construction. Keep the actual clock separate from the
+        # monotonic persistence clamp so an NTP rollback into quiet hours is
+        # never clamped into an allowed instant.
+        quiet_now = _utc_clock_value(clock)
+        attempt_now = max(attempt_now, quiet_now)
+        if would_be_held(int(delivery.priority), quiet_now):
+            hold_for_quiet(
+                session,
+                delivery,
+                now=quiet_now,
+                recorded_at=attempt_now,
+            )
+            report.held += 1
+            return
 
         # A render becomes immutable FINAL evidence only after every gate that
         # can still refuse the provider call has passed. This ordering also

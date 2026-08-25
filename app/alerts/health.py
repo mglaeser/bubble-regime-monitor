@@ -542,6 +542,7 @@ def health_projection(
     ruleset: ValidatedRuleset | None,
     artifact_source: str,
     fallback_reason: str | None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """The one endpoint that must never lie about what is running."""
     mode = settings.alerts_mode
@@ -673,7 +674,7 @@ def health_projection(
         "sidecar_reconciliation": _RECOVERY_MAX_SILENCE_S,
         "retention": _RETENTION_MAX_SILENCE_S,
     }
-    health_now = _now_utc()
+    health_now = now or _now_utc()
     components: dict[str, Any] = {}
     conditions: list[str] = []
     for name, max_silence in expected.items():

@@ -338,6 +338,45 @@ def test_wire_time_quiet_boundary_reholds_without_persisting_a_render():
         assert "delivery_held_quiet" in actions
 
 
+def test_quiet_boundary_crossed_during_final_revalidation_still_reholds():
+    """Quiet admission is sampled after the last database-side wire gate."""
+    from app.alerts.dispatcher import dispatch_once
+
+    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    pass_start = datetime(2026, 8, 24, 19, 59, 58, tzinfo=UTC)
+    before_boundary = datetime(2026, 8, 24, 19, 59, 59, tzinfo=UTC)
+    boundary = datetime(2026, 8, 24, 20, 0, 0, tzinfo=UTC)
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        delivery.priority = 2
+
+    clock_values = iter((before_boundary, boundary))
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=pass_start,
+        clock=lambda: next(clock_values),
+    )
+
+    assert sender.sent == []
+    assert report.held == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        renders = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == delivery_id)
+        ).scalars().all()
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.PENDING
+        assert delivery.planning_state == PlanningState.HELD_QUIET
+        assert delivery.request_started_at is None
+        assert renders == []
+
+
 def test_wire_clock_rollback_into_quiet_hours_reholds_without_sending():
     """Admission follows the actual wire clock, not a monotonic timestamp clamp.
 
@@ -396,7 +435,11 @@ def test_wire_clock_regression_cannot_precede_the_dispatch_pass():
     from app.alerts.dispatcher import dispatch_once
 
     delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
-    clock_values = iter((NOW - timedelta(seconds=5), NOW - timedelta(seconds=4)))
+    clock_values = iter((
+        NOW - timedelta(seconds=5),
+        NOW - timedelta(seconds=4),
+        NOW - timedelta(seconds=3),
+    ))
     sender = NullSender()
 
     report = dispatch_once(

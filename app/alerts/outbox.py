@@ -43,6 +43,7 @@ from app.alerts.enums import (
     EpisodeStatus,
     MemberRole,
     PlanningState,
+    SuppressionReason,
     TransportStatus,
 )
 from app.alerts.models import (
@@ -416,7 +417,14 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
                 [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
         )
         .values(transport_status=TransportStatus.LEASED, lease_owner=owner,
-                lease_until=now + timedelta(seconds=lease_seconds), updated_at=now)
+                lease_until=now + timedelta(seconds=lease_seconds),
+                # A RETRY_DUE row retains the previous attempt timestamp for
+                # observability. Once this new lease is won, clear that scalar
+                # so lease recovery can distinguish a crash before this
+                # attempt's wire boundary from an in-flight request. The
+                # append-only attempt event remains the durable audit record.
+                request_started_at=None,
+                updated_at=now)
     )
     rowcount = getattr(result, "rowcount", None)
     return isinstance(rowcount, int) and rowcount == 1
@@ -526,14 +534,12 @@ def revalidate_members(
             rule_id=member.rule_id,
             bucket=origin_state.bucket if origin_state is not None else None,
         ):
-            member.dropped_at = evidence_at
-            member.drop_reason = "SILENCED_BEFORE_SEND"
-            _cancel_digest_item_for_member(session, delivery, member)
-            _event(
+            _record_member_silenced(
                 session,
-                evidence_at,
-                action="delivery_member_silenced_before_send",
-                delivery_id=delivery.delivery_id,
+                delivery,
+                member,
+                episode=episode,
+                now=evidence_at,
                 detail=f"episode_id={member.episode_id}",
             )
             continue
@@ -558,6 +564,40 @@ def _cancel_digest_item_for_member(
     if item is not None:
         item.status = DigestItemStatus.CANCELLED
         item.last_error_code = "SILENCED"
+
+
+def _record_member_silenced(
+    session: Session,
+    delivery: AlertDelivery,
+    member: AlertDeliveryMember,
+    *,
+    now: datetime,
+    detail: str,
+    episode: AlertEpisode | None = None,
+) -> None:
+    """Persist both delivery withdrawal and Stage-4 suppression evidence."""
+    member.dropped_at = now
+    member.drop_reason = "SILENCED_BEFORE_SEND"
+    _cancel_digest_item_for_member(session, delivery, member)
+    episode = episode or session.get(AlertEpisode, member.episode_id)
+    if episode is not None:
+        reasons = set(episode.suppression_reasons or [])
+        reasons.add(SuppressionReason.SILENCED)
+        episode.suppression_reasons = sorted(reasons)
+    _event(
+        session,
+        now,
+        action="delivery_member_silenced_before_send",
+        delivery_id=delivery.delivery_id,
+        detail=detail,
+        episode_id=member.episode_id,
+        evaluation_id=(episode.last_evaluation_id if episode is not None else None),
+        input_identity=(episode.trigger_input_identity if episode is not None else None),
+        instance_fingerprint=member.instance_fingerprint,
+        rule_id=member.rule_id,
+        suppression_reasons=[SuppressionReason.SILENCED],
+        rules_sha256=member.origin_rules_sha256,
+    )
 
 
 def _set_digest_item_outcome(
@@ -635,8 +675,10 @@ def apply_silences_to_unsent(
 
         if not matched:
             continue
-        if delivery.transport_status == TransportStatus.SENDING \
-                or delivery.request_started_at is not None:
+        if delivery.transport_status == TransportStatus.SENDING or (
+            delivery.transport_status == TransportStatus.LEASED
+            and delivery.request_started_at is not None
+        ):
             # The attempt was admitted before this silence transaction won the
             # single-writer reservation. It may already be on the wire; do not
             # falsify member-delivery evidence by retroactively dropping it.
@@ -644,17 +686,15 @@ def apply_silences_to_unsent(
             continue
 
         for member in matched:
-            member.dropped_at = now
-            member.drop_reason = "SILENCED_BEFORE_SEND"
-            _cancel_digest_item_for_member(session, delivery, member)
-            result["members_dropped"] += 1
-            _event(
+            _record_member_silenced(
                 session,
-                now,
-                action="delivery_member_silenced_before_send",
-                delivery_id=delivery.delivery_id,
-                detail=f"episode_id={member.episode_id}; applied at silence creation",
+                delivery,
+                member,
+                now=now,
+                detail=(f"episode_id={member.episode_id}; "
+                        "applied at silence creation"),
             )
+            result["members_dropped"] += 1
 
         remaining = session.execute(
             select(func.count()).select_from(AlertDeliveryMember).where(
@@ -935,6 +975,13 @@ def mark_sending(session: Session, delivery: AlertDelivery, *, now: datetime) ->
     delivery.request_started_at = now
     delivery.attempts += 1
     delivery.updated_at = now
+    _event(
+        session,
+        now,
+        action="delivery_attempt_started",
+        delivery_id=delivery.delivery_id,
+        detail=f"attempt={delivery.attempts}",
+    )
 
 
 def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
@@ -1000,9 +1047,16 @@ def mark_transient(session: Session, delivery: AlertDelivery, *, now: datetime,
     delivery.last_http_status = http_status
     delivery.lease_owner = None
     delivery.lease_until = None
-    delivery.request_started_at = None
     delivery.not_before = now + timedelta(seconds=min(300, 30 * max(1, delivery.attempts)))
     delivery.updated_at = now
+    _event(
+        session,
+        now,
+        action="delivery_retry_due",
+        delivery_id=delivery.delivery_id,
+        detail=(f"attempt={delivery.attempts} error={error_code or 'transient'} "
+                f"http_status={http_status if http_status is not None else 'none'}"),
+    )
 
 
 def mark_permanent(session: Session, delivery: AlertDelivery, *, now: datetime,
@@ -1136,18 +1190,37 @@ def cancel(session: Session, delivery: AlertDelivery, *, now: datetime,
            detail=reason)
 
 
-def _event(session: Session, now: datetime, *, action: str, delivery_id: str,
-           detail: str) -> None:
+def _event(
+    session: Session,
+    now: datetime,
+    *,
+    action: str,
+    delivery_id: str,
+    detail: str,
+    episode_id: str | None = None,
+    evaluation_id: str | None = None,
+    input_identity: str | None = None,
+    instance_fingerprint: str | None = None,
+    rule_id: str | None = None,
+    suppression_reasons: Collection[str] = (),
+    rules_sha256: str | None = None,
+) -> None:
     session.add(AlertEvent(
         event_id=new_ulid(utc_ms(now)),
         occurred_at=now,
         causation_type=CausationType.DELIVERY,
         causation_id=delivery_id,
         actor_type=ActorType.SYSTEM,
+        evaluation_id=evaluation_id,
+        input_identity=input_identity,
         delivery_id=delivery_id,
+        episode_id=episode_id,
+        instance_fingerprint=instance_fingerprint,
+        rule_id=rule_id,
         action=action,
-        suppression_reasons=[],
+        suppression_reasons=list(suppression_reasons),
         detail_redacted=detail[:1000],
+        rules_sha256=rules_sha256,
     ))
 
 

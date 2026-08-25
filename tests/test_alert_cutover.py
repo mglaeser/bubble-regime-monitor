@@ -138,6 +138,7 @@ def _suppressed_p1_episode(
     mode="live",
     profile="default",
     suppression_event_at=None,
+    suppression_reasons=None,
 ):
     """Persist a real episode graph but deliberately create no delivery."""
     from app.alerts.artifacts import load_active, register
@@ -199,6 +200,11 @@ def _suppressed_p1_episode(
 
     episode_id = new_ulid(utc_ms(observed_at) + 1)
     is_activated = activated_at is not None
+    snapshot_suppressions = (
+        [SuppressionReason.SILENCED]
+        if suppression_reasons is None
+        else list(suppression_reasons)
+    )
     session.add(AlertEpisode(
         episode_id=episode_id,
         mode=mode,
@@ -211,7 +217,7 @@ def _suppressed_p1_episode(
         episode_status=(EpisodeStatus.FIRING if is_activated
                         else EpisodeStatus.PENDING),
         is_open=True,
-        suppression_reasons=[SuppressionReason.SILENCED],
+        suppression_reasons=snapshot_suppressions,
         opened_at=observed_at,
         activated_at=activated_at,
         trigger_input_identity=identity,
@@ -363,6 +369,133 @@ def test_persist_plan_records_timestamped_suppression_provenance():
         assert event.rule_id == episode.rule_id
         assert event.rules_sha256 == episode.origin_rules_sha256
         assert event.suppression_reasons == [SuppressionReason.SILENCED]
+
+
+def test_p1_silenced_after_planning_blocks_cutover():
+    """Dispatch-time silence is Stage-4 suppression, not just delivery detail."""
+    from sqlalchemy import select
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import (
+        DeliveryKind,
+        MemberRole,
+        PlanningState,
+        SilenceMatcherKind,
+        SuppressionReason,
+        TransportStatus,
+    )
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertEpisode,
+        AlertEvent,
+        AlertSilence,
+    )
+    from app.alerts.outbox import revalidate_members
+    from app.alerts.repository import utc_ms
+
+    with session_scope() as session:
+        episode_id = _suppressed_p1_episode(
+            session,
+            suppression_reasons=[],
+        )
+        episode = session.get(AlertEpisode, episode_id)
+        artifacts = load_active(session)
+        assert episode is not None
+        delivery_id = new_ulid(utc_ms(NOW) + 2)
+        session.add(AlertDelivery(
+            delivery_id=delivery_id,
+            dedupe_key=f"cutover-late-silence-{delivery_id}",
+            dedupe_version=1,
+            manual_retry_sequence=0,
+            mode="live",
+            live_profile="default",
+            planning_rules_sha256=episode.origin_rules_sha256,
+            delivery_kind=DeliveryKind.INITIAL,
+            priority=1,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY,
+            not_before=NOW,
+            created_at=NOW - timedelta(minutes=1),
+            updated_at=NOW - timedelta(minutes=1),
+            attempts=0,
+            recipient_ref="default",
+        ))
+        session.flush()
+        session.add(AlertDeliveryMember(
+            delivery_id=delivery_id,
+            episode_id=episode_id,
+            rule_id=episode.rule_id,
+            instance_fingerprint=episode.instance_fingerprint,
+            member_role=MemberRole.PRIMARY,
+            notification_generation=1,
+            origin_rules_sha256=episode.origin_rules_sha256,
+            origin_phrase_set_version=artifacts.phrase_set.version,
+            origin_phrase_set_sha256=artifacts.phrase_set.sha256,
+            included_at=NOW - timedelta(minutes=1),
+            delivered=False,
+        ))
+        session.add(AlertSilence(
+            silence_id="cutover-late-p1-silence",
+            matcher_kind=SilenceMatcherKind.ALL,
+            matcher_value="*",
+            starts_at=NOW - timedelta(seconds=1),
+            ends_at=NOW + timedelta(hours=1),
+            comment="test",
+            created_by_redacted="operator",
+            created_at=NOW - timedelta(seconds=1),
+        ))
+        session.flush()
+
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        assert revalidate_members(session, delivery, now=NOW) == []
+        session.flush()
+        suppression_event = session.execute(
+            select(AlertEvent).where(
+                AlertEvent.delivery_id == delivery_id,
+                AlertEvent.action == "delivery_member_silenced_before_send",
+            )
+        ).scalars().one()
+        report = preflight(session, now=NOW)
+
+        assert suppression_event.episode_id == episode_id
+        assert suppression_event.suppression_reasons == [
+            SuppressionReason.SILENCED,
+        ]
+        assert episode.suppression_reasons == [SuppressionReason.SILENCED]
+        assert any(
+            entry.startswith("p1_never_suppressed")
+            for entry in report.unsatisfied
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_collection"),
+    [("ok", "satisfied"), ("critical", "unsatisfied")],
+)
+def test_cutover_consumes_the_real_health_verdict(
+    monkeypatch, status, expected_collection,
+):
+    """Fresh heartbeats alone cannot bypass the canonical health decision."""
+    import app.alerts.health as health_module
+
+    monkeypatch.setattr(
+        health_module,
+        "health_projection",
+        lambda *_args, **_kwargs: {
+            "status": status,
+            "conditions": [] if status == "ok" else ["database: schema broken"],
+        },
+    )
+    with session_scope() as session:
+        report = preflight(session, now=NOW)
+
+    entries = getattr(report, expected_collection)
+    assert any(entry.startswith("health_accepted") for entry in entries)
+    if status == "critical":
+        assert any("schema broken" in entry for entry in entries)
 
 
 def test_one_recent_delivery_is_not_two_stable_weeks():

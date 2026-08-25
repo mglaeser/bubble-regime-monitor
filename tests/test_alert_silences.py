@@ -391,6 +391,36 @@ def test_silence_sweep_reports_but_does_not_rewrite_in_flight_evidence():
         assert delivery.transport_status == TransportStatus.SENDING
 
 
+def test_retry_due_attempt_history_is_not_mistaken_for_in_flight_work():
+    """A definite rejection keeps audit time but remains safe to silence."""
+    from app.alerts.outbox import apply_silences_to_unsent
+    from app.alerts.silences import ActiveSilences
+
+    delivery_id, episode_id = _queued_delivery()
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        delivery.transport_status = TransportStatus.RETRY_DUE
+        delivery.attempts = 1
+        delivery.request_started_at = NOW - timedelta(minutes=1)
+
+        effect = apply_silences_to_unsent(
+            session,
+            ActiveSilences.from_matchers([(SilenceMatcherKind.ALL, "*")]),
+            now=NOW,
+        )
+
+        member = session.get(AlertDeliveryMember, (delivery_id, episode_id))
+        assert effect == {
+            "members_dropped": 1,
+            "deliveries_cancelled": 1,
+            "in_flight": 0,
+        }
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert member is not None
+        assert member.drop_reason == "SILENCED_BEFORE_SEND"
+
+
 def test_silence_does_not_resolve_condition_or_episode():
     _delivery_id, episode_id = _queued_delivery()
     _persist_silence(SilenceMatcherKind.ALL, "*")

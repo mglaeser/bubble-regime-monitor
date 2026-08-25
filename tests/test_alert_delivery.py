@@ -1030,6 +1030,79 @@ def test_stale_sending_becomes_unknown(isolated_db):
             == TransportStatus.UNKNOWN
 
 
+def test_automatic_retry_preserves_append_only_attempt_timestamps(isolated_db):
+    """Retry scheduling cannot erase proof of the provider attempt it follows."""
+    from sqlalchemy import select
+
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery, AlertEvent
+    from app.alerts.outbox import (
+        claim,
+        mark_sending,
+        mark_transient,
+        recover_leases,
+    )
+    from app.db import session_scope
+
+    delivery_id = _seed_delivery("D-retry-audit")
+    first_start = NOW + timedelta(seconds=1)
+    first_finish = NOW + timedelta(seconds=2)
+    retry_claimed = NOW + timedelta(minutes=1)
+
+    with session_scope() as session:
+        assert claim(
+            session,
+            delivery_id,
+            owner="worker-1",
+            now=NOW,
+            lease_seconds=30,
+        )
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        mark_sending(session, delivery, now=first_start)
+        mark_transient(
+            session,
+            delivery,
+            now=first_finish,
+            error_code="TEMPORARY",
+            message="definitely not accepted",
+            http_status=503,
+        )
+        assert delivery.transport_status == TransportStatus.RETRY_DUE
+        assert delivery.request_started_at == first_start
+
+    with session_scope() as session:
+        assert claim(
+            session,
+            delivery_id,
+            owner="worker-2",
+            now=retry_claimed,
+            lease_seconds=30,
+        )
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.request_started_at is None
+        delivery.lease_until = retry_claimed - timedelta(seconds=1)
+        recovered = recover_leases(
+            session,
+            now=retry_claimed + timedelta(seconds=1),
+        )
+        assert recovered == {"retry_due": 1, "unknown": 0}
+
+        events = session.execute(
+            select(AlertEvent).where(AlertEvent.delivery_id == delivery_id)
+            .order_by(AlertEvent.occurred_at, AlertEvent.event_id)
+        ).scalars().all()
+        assert [event.action for event in events] == [
+            "delivery_attempt_started",
+            "delivery_retry_due",
+            "delivery_lease_recovered",
+        ]
+        assert events[0].occurred_at == first_start.replace(tzinfo=None)
+        assert "attempt=1" in (events[0].detail_redacted or "")
+
+
 def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):
     """send-test proves the REAL pipeline: claim, render, classify.
 
@@ -1066,9 +1139,10 @@ def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):
     with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())
     sender = NullSender()
-    request_started = now + timedelta(seconds=1)
+    render_finished = now + timedelta(seconds=1)
+    request_started = now + timedelta(seconds=2)
     provider_finished = now + timedelta(seconds=4)
-    clock_values = iter((request_started, provider_finished))
+    clock_values = iter((render_finished, request_started, provider_finished))
     dispatch_once(session_scope, phrase_set=phrase_set, mode="shadow",
                   live_profile="default", sender=sender, now=now,
                   clock=lambda: next(clock_values))
