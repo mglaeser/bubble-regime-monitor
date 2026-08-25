@@ -893,6 +893,53 @@ def test_stage_one_is_never_admitted_for_live_delivery(promote):
 
 
 @pytest.mark.usefixtures("isolated_db")
+def test_live_health_consumes_the_same_stage_floor_as_dispatch(monkeypatch):
+    """Health cannot say ``ok`` while the dispatcher refuses to build a sender."""
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.health import health_projection
+    from app.alerts.promotion import live_admission_blockers
+    from app.config import get_settings
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    monkeypatch.setenv("ALERTS_LIVE_PROFILE", "default")
+    get_settings.cache_clear()
+    now = datetime(2026, 8, 25, 7, 0, tzinfo=UTC)
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        # Remove artifact-promotion mismatch as an alternative explanation.
+        # Even exact promotion cannot lift the Stage-3 delivery floor.
+        register_promoted(session, artifacts)
+        session.flush()
+        expected = live_admission_blockers(session)
+        payload = health_projection(
+            session,
+            settings=get_settings(),
+            ruleset=artifacts.ruleset,
+            artifact_source=artifacts.source,
+            fallback_reason=None,
+            now=now,
+        )
+
+    assert any("not admitted before Stage" in blocker for blocker in expected)
+    assert payload["status"] == "critical"
+    assert payload["live_admission"] == {
+        "evaluated": True,
+        "permitted": False,
+        "blockers": expected,
+    }
+    assert any(
+        condition.startswith("live admission:")
+        for condition in payload["conditions"]
+    )
+    get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("isolated_db")
 def test_the_stage_floor_does_not_hide_missing_evidence():
     """Both answers, not the first one only.
 

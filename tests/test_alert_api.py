@@ -1042,11 +1042,16 @@ def test_send_test_queues_an_audited_memberless_test_delivery(client):
     the audit trail; counting it against the caps would spend the operator's
     budget on proving the wire.
     """
+    from datetime import UTC, timedelta
+
     from sqlalchemy import select
 
+    from app.alerts.artifacts import validate_phrase_set
     from app.alerts.budgets import BUDGETED_KINDS
-    from app.alerts.enums import DeliveryKind
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import DeliveryKind, TransportStatus
     from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEvent
+    from app.alerts.sender import NullSender
     from app.db import session_scope
 
     response = client.post("/api/v1/admin/alerts/send-test",
@@ -1057,7 +1062,11 @@ def test_send_test_queues_an_audited_memberless_test_delivery(client):
 
     with session_scope() as session:
         delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
         assert delivery.delivery_kind == DeliveryKind.TEST
+        delivery_created_at = delivery.created_at
+        delivery_mode = delivery.mode
+        live_profile = delivery.live_profile
         members = session.execute(
             select(AlertDeliveryMember).where(
                 AlertDeliveryMember.delivery_id == delivery_id)
@@ -1069,6 +1078,38 @@ def test_send_test_queues_an_audited_memberless_test_delivery(client):
         assert any(e.action == "test_delivery_queued" for e in events)
 
     assert DeliveryKind.TEST not in BUDGETED_KINDS
+
+    # Drive the row created by the real admin endpoint through the ordinary
+    # dispatcher.  This is deliberately one integrated assertion: a manually
+    # seeded TEST could pass while the endpoint's exact memberless shape is
+    # cancelled before render.
+    if delivery_created_at.tzinfo is None:
+        delivery_created_at = delivery_created_at.replace(tzinfo=UTC)
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+        phrase_set = validate_phrase_set(fh.read())
+    sender = NullSender()
+    clock_values = iter((
+        delivery_created_at + timedelta(seconds=1),
+        delivery_created_at + timedelta(seconds=2),
+        delivery_created_at + timedelta(seconds=3),
+    ))
+    report = dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode=delivery_mode,
+        live_profile=live_profile,
+        sender=sender,
+        now=delivery_created_at,
+        clock=lambda: next(clock_values),
+    )
+
+    assert report.cancelled == 0
+    assert report.sent == 1
+    assert sender.sent[0][1] == phrase_set.headlines["TEST_MESSAGE"].text
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.SENT
 
 
 def test_send_test_requires_the_admin_scope(client):
