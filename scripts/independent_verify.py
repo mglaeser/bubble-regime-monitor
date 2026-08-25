@@ -55,7 +55,7 @@ hence one exclude per extension).
 
 ENV (same contract as the reference):
   SECOND_VENDOR_API_KEY / OPENAI_API_KEY   activates the panel
-  VERIFIER_BASE_URL       default https://api.openai.com/v1
+  VERIFIER_BASE_URL       required explicit HTTPS /v1 endpoint when panel is active
   VERIFIER_MODEL          single pin: this one model for ALL voices
   VERIFIER_PANEL_MODELS   comma list — one DIFFERENT model per voice
   VERIFIER_PANEL          voice count in single-pin mode (default 3, cap 64)
@@ -86,7 +86,7 @@ import urllib.request
 from typing import Any
 
 KEY = os.environ.get("SECOND_VENDOR_API_KEY") or os.environ.get("OPENAI_API_KEY")
-def normalize_base(raw: str) -> str:
+def normalize_base(raw: str | None) -> str:
     """Trailing slashes off. Every call site builds f"{BASE}/models" and
     friends, so a base ending in "/" produces "//models", which this gateway
     answers 404 — a configuration slip that would otherwise surface as an
@@ -95,12 +95,122 @@ def normalize_base(raw: str) -> str:
     return (raw or "").strip().rstrip("/")
 
 
-# `or`, not .get(default): the workflow passes VERIFIER_BASE_URL from a repo
-# VARIABLE, and GitHub Actions injects an EMPTY STRING when the variable is
-# unset — .get(name, default) would keep "" and every request would crash with
-# "unknown url type" (observed live on PR #21). The reference JS used ||,
-# which is empty-string-safe; this is the Python equivalent.
-BASE = normalize_base(os.environ.get("VERIFIER_BASE_URL")) or "https://api.openai.com/v1"
+# This key belongs to one operator-pinned endpoint.  Keep an absent Actions
+# secret absent: choosing a public provider default here would send a private
+# gateway credential to the wrong host outside the workflow's own preflight.
+BASE = normalize_base(os.environ.get("VERIFIER_BASE_URL"))
+
+_API_PATHS = frozenset({"/models", "/responses", "/chat/completions"})
+_BASE_ERROR = (
+    "VERIFIER_BASE_URL must be an explicit HTTPS endpoint ending in /v1; "
+    "refusing the credentialed verifier request"
+)
+
+
+def _api_url(path: str) -> str:
+    """Build one fixed API URL or refuse before an auth header reaches I/O."""
+    if path not in _API_PATHS:
+        raise ValueError("verifier API path is not an allowed internal route")
+    try:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(BASE)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except (TypeError, ValueError):
+        raise ProviderConfigError(_BASE_ERROR) from None
+    if (
+        parsed.scheme.casefold() != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or "?" in BASE
+        or "#" in BASE
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.rstrip("/").endswith("/v1")
+        or "//" in parsed.path
+        or any(ord(char) < 32 or char.isspace() for char in BASE)
+    ):
+        raise ProviderConfigError(_BASE_ERROR)
+    return f"{BASE}{path}"
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward a verifier credential across an HTTP redirect."""
+
+    def redirect_request(
+        self,
+        _req: urllib.request.Request,
+        _fp: Any,
+        _code: int,
+        _msg: str,
+        _headers: Any,
+        _newurl: str,
+    ) -> None:
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _NoRedirectHandler(),
+)
+
+
+def _urlopen(req: urllib.request.Request, timeout: int = 180) -> Any:
+    """Open only through the no-proxy, no-redirect verifier transport."""
+    return _NO_REDIRECT_OPENER.open(req, timeout=timeout)  # noqa: S310 -- URL validated above
+
+
+def _endpoint_literals() -> tuple[str, ...]:
+    values = {BASE} if isinstance(BASE, str) and BASE else set()
+    try:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(BASE)
+        values.update(value for value in (parsed.netloc, parsed.hostname) if value)
+    except (TypeError, ValueError):
+        pass
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _safe_diag(value: object, limit: int | None = 300) -> str:
+    """Bound an untrusted diagnostic and remove credential/endpoint echoes."""
+    text = str(value)
+    if isinstance(KEY, str) and KEY:
+        text = text.replace(KEY, "<redacted>")
+    for literal in _endpoint_literals():
+        text = re.sub(re.escape(literal), "<redacted>", text, flags=re.IGNORECASE)
+    return text if limit is None else text[:limit]
+
+
+def _contains_protected_text(value: str) -> bool:
+    return _safe_diag(value, limit=None) != value
+
+
+def _contains_protected_value(value: object) -> bool:
+    """Scan parsed peer output after JSON escapes have been materialized."""
+    if isinstance(value, str):
+        return _contains_protected_text(value)
+    if isinstance(value, dict):
+        return any(
+            _contains_protected_value(key) or _contains_protected_value(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_protected_value(item) for item in value)
+    return False
+
+
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    """Classify one allowlisted condition; never publish a peer-controlled body."""
+    try:
+        body = exc.read(4096).decode(errors="replace")
+    except Exception:
+        body = ""
+    if re.search(r"no usable account credential", body, re.IGNORECASE):
+        return "no usable account credential (response body withheld)"
+    return "response body withheld"
 
 
 def auth_header() -> dict[str, str]:
@@ -109,8 +219,8 @@ def auth_header() -> dict[str, str]:
     gateways that reserve Authorization for upstream forwarding — verified live
     against the configured private gateway, whose provider adapter runs authMode="forward"
     and answers Bearer with 401 "opencodex API key required" while accepting
-    X-OpenCodex-API-Key. Same `or`-not-`.get(default)` reason as BASE above:
-    Actions injects an EMPTY STRING for an unset repo variable."""
+    X-OpenCodex-API-Key. Actions injects an EMPTY STRING for an unset repo
+    variable, so the empty form must retain the Authorization default."""
     name = (os.environ.get("VERIFIER_AUTH_HEADER") or "").strip()
     if name and name.lower() != "authorization":
         return {name: KEY or ""}
@@ -834,6 +944,8 @@ def build_system_prompt(challenge: str) -> str:
 
 
 def selftest() -> None:
+    global BASE
+
     def expect(cond: bool, msg: str) -> None:
         if not cond:
             print(f"BLOCK selftest: {msg}", file=sys.stderr)
@@ -1120,8 +1232,21 @@ def selftest() -> None:
     expect(normalize_base("https://h/v1/") == "https://h/v1", "trailing slash must be stripped")
     expect(normalize_base("https://h/v1///") == "https://h/v1", "repeated slashes must be stripped")
     expect(normalize_base("  https://h/v1  ") == "https://h/v1", "surrounding whitespace must be stripped")
-    expect(normalize_base("") == "", "empty stays empty so the `or` default applies")
-    expect(normalize_base(None) == "", "None stays empty so the `or` default applies")
+    expect(normalize_base("") == "", "empty stays empty so credentialed use refuses")
+    expect(normalize_base(None) == "", "None stays empty so credentialed use refuses")
+    _saved_base = BASE
+    try:
+        BASE = "https://verifier.example.test/v1"
+        expect(_api_url("/models") == f"{BASE}/models",
+               "an explicit HTTPS /v1 endpoint must build a fixed API URL")
+        BASE = ""
+        try:
+            _api_url("/models")
+            expect(False, "a blank verifier endpoint must fail closed")
+        except ProviderConfigError:
+            pass
+    finally:
+        BASE = _saved_base
 
     # Voice distinctness. Each configured voice is an inference-server GROUP that
     # rotates over its own members; the server answers with the group id, never
@@ -1152,28 +1277,25 @@ def selftest() -> None:
     print("   OK selftest: decide() + model_matches() + require_approvals() (required approver Sol "
           "+ corroboration) + attest_reasons() + attest_proof() + declared_defects() + "
           "attest_consistency() (ledger 7/7; literal prose scan 7/7 on the shared corpus) + "
-          "auth_header() + review_range() + normalize_base() correct.")
+          "auth_header() + review_range() + normalize_base() + _api_url() correct.")
 
 
 # --------------------------------------------------------------- API plumbing --
 
 
-def _http_json(url: str, payload: dict | None = None, timeout: int = 180) -> tuple[int, Any]:
+def _http_json(path: str, payload: dict | None = None, timeout: int = 180) -> tuple[int, Any]:
+    url = _api_url(path)
     req = urllib.request.Request(  # noqa: S310 -- operator-configured https endpoint (VERIFIER_BASE_URL)
         url, headers={"Content-Type": "application/json", **auth_header()},
         data=json.dumps(payload).encode() if payload is not None else None,
         method="POST" if payload is not None else "GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 -- fixed https base
+        with _urlopen(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        try:
-            body = exc.read().decode()[:300]
-        except Exception:
-            body = "(no body)"
-        return exc.code, body
+        return exc.code, _http_error_detail(exc)
     except Exception as exc:
-        return 0, str(exc)[:300]
+        return 0, _safe_diag(exc)
 
 
 def pick_for_pref(ids: list[str], p: str) -> str | None:
@@ -1186,13 +1308,16 @@ def pick_for_pref(ids: list[str], p: str) -> str | None:
 
 
 def fetch_model_ids() -> tuple[list[str] | None, str]:
-    """(model ids, diagnostic). The diagnostic carries the status and a short
-    body so a misconfigured endpoint can be READ from the log rather than
-    guessed at from three identical vote errors."""
-    status, data = _http_json(f"{BASE}/models")
+    """Return model ids or a status-bearing, peer-body-free diagnostic."""
+    status, data = _http_json("/models")
     if status == 200 and isinstance(data, dict):
-        return [m.get("id") for m in data.get("data", []) if m.get("id")], ""
-    return None, f"GET {BASE}/models -> {status or 'no response'}: {str(data)[:200]}"
+        ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
+        if any(isinstance(model_id, str) and _contains_protected_text(model_id)
+               for model_id in ids):
+            return None, "model catalogue echoed protected verifier configuration"
+        return ids, ""
+    return None, (f"GET configured /models -> {status or 'no response'}: "
+                  f"{_safe_diag(data, limit=200)}")
 
 
 def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
@@ -1203,13 +1328,13 @@ def resolve_panel_models(panel_size: int, wanted: list[str]) -> list[str]:
         # An unreachable catalogue used to degrade silently to a pinned fallback
         # for every voice; each vote then errored on a model the gateway does
         # not serve, and the operator saw three identical failures with no hint
-        # that the BASE URL was the cause. The most common cause is exactly
-        # that: a base without the version segment, or with a trailing slash.
+        # that endpoint configuration was the cause. Common causes include a
+        # missing version segment or the wrong auth-header setting.
         # Verified live: ".../v1/models" 200, ".../models" 401, ".../v1//models" 404.
         raise ProviderConfigError(
             f"model catalogue unreachable, so the panel cannot be resolved -- {why}\n"
-            f"  VERIFIER_BASE_URL is {BASE!r}. It must include the API version "
-            f"segment (e.g. 'https://host/v1'), and the auth header must be the "
+            f"  The configured VERIFIER_BASE_URL must include the API version "
+            f"segment (for example an HTTPS /v1 endpoint), and the auth header must be the "
             f"one this gateway expects (VERIFIER_AUTH_HEADER).")
     # SUBSTITUTION IS FAIL-OPEN, so it is gone. A configured voice that the
     # account does not serve used to print a WARNING and be replaced by the
@@ -1415,7 +1540,7 @@ def _sse_fold(resp: Any) -> tuple[str, Any] | str:
         elif typ == "response.completed":
             completed, done = payload.get("response"), True
         elif typ == "error" or (isinstance(typ, str) and typ.endswith(".failed")):
-            error = f"stream error event: {raw[:200]}"
+            error = "stream error event (peer detail withheld)"
 
     for raw_line in resp:
         line = raw_line.decode("utf-8", "replace").rstrip("\r\n")
@@ -1458,11 +1583,11 @@ def _responses_attempt(model: str, sys_prompt: str, user_prompt: str) -> tuple[i
 
     Returns (200, (text, completed)) for a folded stream; (0, marker) for a
     torn or error-carrying stream — transient, the same class as a network
-    failure; and (status, body) for non-200 HTTP, whose body is a small JSON
-    error read whole as before, so the existing retry/failover classification
-    is untouched."""
+    failure; and (status, static diagnostic) for non-200 HTTP. Peer-controlled
+    bodies are never logged; at most 4096 bytes are inspected for the one
+    allowlisted account-pool classification, so retry/failover stays intact."""
     req = urllib.request.Request(  # noqa: S310 -- operator-configured https endpoint (VERIFIER_BASE_URL)
-        f"{BASE}/responses",
+        _api_url("/responses"),
         headers={"Content-Type": "application/json", **auth_header()},
         data=json.dumps({
             "model": model,
@@ -1472,23 +1597,19 @@ def _responses_attempt(model: str, sys_prompt: str, user_prompt: str) -> tuple[i
         }).encode(),
         method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:  # noqa: S310 -- fixed https base
+        with _urlopen(req, timeout=180) as resp:
             folded = _sse_fold(resp)
     except urllib.error.HTTPError as exc:
-        try:
-            body = exc.read().decode()[:300]
-        except Exception:
-            body = "(no body)"
-        return exc.code, body
+        return exc.code, _http_error_detail(exc)
     except Exception as exc:             # DNS/TLS/reset, or a per-read timeout
-        return 0, str(exc)[:300]
+        return 0, _safe_diag(exc)
     if isinstance(folded, str):          # transient marker from the fold
         return 0, folded
     return 200, folded
 
 
 def _chat_attempt(model: str, sys_prompt: str, user_prompt: str) -> tuple[int, Any]:
-    return _http_json(f"{BASE}/chat/completions", {
+    return _http_json("/chat/completions", {
         "model": model,
         "messages": [{"role": "system", "content": sys_prompt},
                      {"role": "user", "content": user_prompt}],
@@ -1502,7 +1623,14 @@ def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
         # Deltas first: the completed object is consulted only when the delta
         # accumulation is empty AND it actually carries output — it has been
         # observed to arrive empty even after text was streamed.
-        v = parse_verdict(text or _extract_responses_text(completed))
+        candidate = text or _extract_responses_text(completed)
+        if _contains_protected_text(candidate):
+            return {"ok": False, "status": 400,
+                    "reason": "API response echoed protected verifier configuration"}
+        v = parse_verdict(candidate)
+        if _contains_protected_value(v):
+            return {"ok": False, "status": 400,
+                    "reason": "API response echoed protected verifier configuration"}
         return {"ok": True, "v": v, "decision": decide(v)}
     # The wire itself may be the fault (see wire_may_differ), or the gateway
     # may not route /responses at all (404/405). One attempt on the chat wire,
@@ -1514,9 +1642,19 @@ def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
         s2, d2 = _chat_attempt(model, sys_prompt, user_prompt)
         if s2 == 200 and isinstance(d2, dict):
             content = (d2.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            if not isinstance(content, str):
+                return {"ok": False, "status": 400,
+                        "reason": "API response carried invalid verifier content"}
+            if _contains_protected_text(content):
+                return {"ok": False, "status": 400,
+                        "reason": "API response echoed protected verifier configuration"}
             v = parse_verdict(content or "")
+            if _contains_protected_value(v):
+                return {"ok": False, "status": 400,
+                        "reason": "API response echoed protected verifier configuration"}
             return {"ok": True, "v": v, "decision": decide(v), "wire": "chat"}
-    return {"ok": False, "status": status, "reason": f"API {status}: {str(data)[:300]}"}
+    return {"ok": False, "status": status,
+            "reason": f"API {status}: {_safe_diag(data)}"}
 
 
 # A 401 whose body names an exhausted upstream account pool is a DETERMINISTIC
@@ -1641,6 +1779,12 @@ def main() -> int:
               "  deterministic CI gate remains the sole merge authority. To activate: set the\n"
               "  secret (see docs/INDEPENDENT_REVIEW_PANEL.md).")
         return 0   # same-repo only: no fake block; the residual is documented and visible
+
+    try:
+        _api_url("/models")
+    except ProviderConfigError as exc:
+        print(f"BLOCK provider configuration — {exc}; fail-closed.", file=sys.stderr)
+        return 1
 
     try:
         d = build_diff()

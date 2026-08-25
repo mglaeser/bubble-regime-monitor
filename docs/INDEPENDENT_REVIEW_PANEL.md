@@ -72,16 +72,21 @@ gates that judge it.
 
 ## Activation (operator actions — the panel ships dormant-but-visible)
 
-1. Create an **OpenAI API key** and store it as the repo secret
-   `SECOND_VENDOR_API_KEY` (or reuse an existing `OPENAI_API_KEY` secret).
-2. Optionally set repo **variables**: `VERIFIER_PANEL_MODELS`,
+1. Create a key for the chosen OpenAI-compatible verifier endpoint and store it
+   as the repo secret `SECOND_VENDOR_API_KEY` (or reuse an existing
+   `OPENAI_API_KEY` secret).
+2. Store the endpoint as the `trusted-verifier` **environment secret**
+   `VERIFIER_BASE_URL` — NOT as a variable. It is required even for direct
+   OpenAI use (`https://api.openai.com/v1` must be explicit); there is no host
+   fallback because the key belongs to the operator-selected endpoint. The
+   transport accepts HTTPS `/v1` endpoints only and refuses redirects and
+   ambient proxies so the credential cannot be forwarded to another host.
+   The runner prints every env block into the job log, and this log is public:
+   it redacts secrets there and never variables, so a variable publishes the
+   endpoint on every run.
+3. Optionally set repo **variables**: `VERIFIER_PANEL_MODELS`,
    `VERIFIER_MODEL` (single pin), `VERIFIER_REQUIRED_APPROVER`,
    `VERIFIER_MIN_OTHER_APPROVERS`.
-3. If the panel votes through a gateway rather than the vendor directly, store
-   that endpoint as the `trusted-verifier` **environment secret**
-   `VERIFIER_BASE_URL` — NOT as a variable. The runner prints every env block
-   into the job log, and this log is public: it redacts secrets there and
-   never variables, so a variable publishes the endpoint on every run.
 4. Branch protection (the standing B-35 item, repo settings): mark
    `cross-vendor` (and `test`) as **required status checks**, and enable
    **Require review from Code Owners** so CODEOWNERS actually enforces.

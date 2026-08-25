@@ -26,6 +26,10 @@ _SPEC = importlib.util.spec_from_file_location(
     "independent_verify", Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
 iv = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(iv)
+TEST_BASE_URL = "https://verifier.example.test/v1"
+# Network-shape tests use a visibly inert, explicit endpoint.  Missing-config
+# tests below import a fresh module or override this value to exercise refusal.
+iv.BASE = TEST_BASE_URL
 
 MDL = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
 A = {"ok": True, "v": {"refuted": False, "reason": "reason long enough a"}}
@@ -151,17 +155,86 @@ class TestNoKeyResidualMode:
 
 
 class TestEmptyEnvVarsAreAbsent:
-    def test_empty_base_url_falls_back_to_default(self, monkeypatch):
-        # GitHub Actions injects EMPTY strings for unset repo variables; an
-        # empty VERIFIER_BASE_URL must behave like an absent one (observed
-        # live: BASE="" crashed every request with "unknown url type").
+    def test_empty_base_url_has_no_implicit_host(self, monkeypatch):
+        # This key belongs to one operator-pinned endpoint.  An empty Actions
+        # secret must never select a different host on the key's behalf.
         monkeypatch.setenv("VERIFIER_BASE_URL", "")
         spec = importlib.util.spec_from_file_location(
             "independent_verify_emptyenv",
             Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        assert mod.BASE == "https://api.openai.com/v1"
+        assert mod.BASE == ""
+
+    def test_credentialed_main_refuses_a_blank_endpoint_before_diff_io(
+            self, monkeypatch, capsys):
+        credential = "verifier-credential-must-not-leak"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", "")
+        monkeypatch.setattr(
+            iv, "build_diff",
+            lambda: pytest.fail("credentialed verifier read the diff without an endpoint"),
+        )
+        monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
+
+        assert iv.main() == 1
+        captured = capsys.readouterr()
+        assert "VERIFIER_BASE_URL" in captured.err
+        assert credential not in captured.out + captured.err
+
+    def test_blank_endpoint_is_guarded_at_both_network_sinks(self, monkeypatch):
+        monkeypatch.setattr(iv, "BASE", "")
+        opened = False
+
+        def forbidden_urlopen(*args, **kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("verifier opened a network sink without its endpoint")
+
+        monkeypatch.setattr(iv, "_urlopen", forbidden_urlopen)
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_BASE_URL"):
+            iv._http_json("/models")
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_BASE_URL"):
+            iv._responses_attempt("model", "system", "user")
+
+        assert opened is False
+
+    @pytest.mark.parametrize("base", [
+        "http://verifier.example.test/v1",
+        "https://user:password@verifier.example.test/v1",  # pragma: allowlist secret
+        "https://verifier.example.test/v1?route=other",
+        "https://verifier.example.test/v1?",
+        "https://verifier.example.test/v1#fragment",
+        "https://verifier.example.test/v1#",
+        "https://verifier.example.test/not-v1",
+        "https://verifier.example.test:not-a-port/v1",
+    ])
+    def test_unsafe_endpoint_shapes_are_rejected(self, monkeypatch, base):
+        monkeypatch.setattr(iv, "BASE", base)
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_BASE_URL"):
+            iv._api_url("/responses")
+
+    def test_endpoint_builder_accepts_only_internal_relative_paths(self, monkeypatch):
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        assert iv._api_url("/responses") == TEST_BASE_URL + "/responses"
+        with pytest.raises(ValueError):
+            iv._api_url("https://wrong.example/v1/responses")
+
+    def test_verifier_transport_disables_redirects_and_ambient_proxies(self):
+        assert any(
+            isinstance(handler, iv._NoRedirectHandler)
+            for handler in iv._NO_REDIRECT_OPENER.handlers
+        )
+        # Supplying ProxyHandler({}) suppresses build_opener's ambient default;
+        # the empty handler itself has no protocol methods and is not retained.
+        assert not any(
+            isinstance(handler, iv.urllib.request.ProxyHandler)
+            for handler in iv._NO_REDIRECT_OPENER.handlers
+        )
+        redirect = iv._NoRedirectHandler()
+        assert redirect.redirect_request(
+            None, None, 302, "Found", {}, "https://wrong.example/v1"
+        ) is None
 
 
 class TestTrustedWorkflowEndpointPreflight:
@@ -190,6 +263,141 @@ class TestTrustedWorkflowEndpointPreflight:
         )
         assert result.returncode != 0
         assert "refus" in (result.stdout + result.stderr).casefold()
+
+
+class TestVerifierDiagnosticsAreSecretSafe:
+    ESCAPED_KEY = "secret-key-123"  # pragma: allowlist secret
+    ESCAPED_VERDICT = (
+        r'{"refuted":false,"confidence":"high","reason":"approved secret-key-\u0031\u0032\u0033",'
+        r'"defects":[],"proof":"challenge-1"}'
+    )
+
+    def test_peer_error_bodies_cannot_echo_key_or_endpoint(self, monkeypatch):
+        credential = "peer-echo-verifier-credential"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+
+        def rejected(req, timeout=None):
+            body = f"bad credential {credential} at {TEST_BASE_URL}".encode()
+            raise urllib.error.HTTPError(
+                req.full_url, 401, "unauthorized", None, io.BytesIO(body)
+            )
+
+        monkeypatch.setattr(iv, "_urlopen", rejected)
+        json_failure = iv._http_json("/models")
+        stream_failure = iv._responses_attempt("model", "system", "user")
+        rendered = repr((json_failure, stream_failure))
+
+        assert json_failure[0] == stream_failure[0] == 401
+        assert credential not in rendered
+        assert TEST_BASE_URL not in rendered
+        assert "withheld" in rendered
+
+    def test_transport_exceptions_cannot_publish_the_private_endpoint(self, monkeypatch):
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+
+        def unreachable(req, timeout=None):
+            raise OSError(f"could not resolve {TEST_BASE_URL}")
+
+        monkeypatch.setattr(iv, "_urlopen", unreachable)
+        failures = (
+            iv._http_json("/models"),
+            iv._responses_attempt("model", "system", "user"),
+        )
+        rendered = repr(failures)
+        assert all(status == 0 for status, _detail in failures)
+        assert TEST_BASE_URL not in rendered
+        assert "verifier.example.test" not in rendered
+
+    def test_success_body_that_echoes_the_key_is_rejected_not_rendered(
+            self, monkeypatch):
+        credential = "model-echo-verifier-credential"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": f"approved with {credential}",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-echo"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+        assert out["ok"] is False
+        assert out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_chat_fallback_that_echoes_the_key_is_rejected_not_rendered(
+            self, monkeypatch):
+        credential = "chat-echo-verifier-credential"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        calls = 0
+
+        def routed(req, timeout=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise urllib.error.HTTPError(
+                    req.full_url, 404, "no responses route", None, io.BytesIO(b"missing")
+                )
+            content = json.dumps({
+                "refuted": False,
+                "confidence": "high",
+                "reason": f"approved with {credential}",
+                "defects": [],
+                "proof": "challenge-1",
+            })
+            return _FakeWire([json.dumps({
+                "choices": [{"message": {"content": content}}],
+            }).encode()])
+
+        monkeypatch.setattr(iv, "_urlopen", routed)
+        out = iv.attempt_once("model", "system", "user")
+        assert calls == 2
+        assert out["ok"] is False
+        assert out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_responses_json_escaped_key_echo_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", self.ESCAPED_KEY)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": self.ESCAPED_VERDICT},
+            {"type": "response.completed", "response": {"id": "resp-escaped"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+        assert out["ok"] is False and out["status"] == 400
+        assert self.ESCAPED_KEY not in repr(out)
+
+    def test_chat_json_escaped_key_echo_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", self.ESCAPED_KEY)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        calls = 0
+
+        def routed(req, timeout=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise urllib.error.HTTPError(
+                    req.full_url, 404, "no responses route", None, io.BytesIO(b"missing")
+                )
+            return _FakeWire([json.dumps({
+                "choices": [{"message": {"content": self.ESCAPED_VERDICT}}],
+            }).encode()])
+
+        monkeypatch.setattr(iv, "_urlopen", routed)
+        out = iv.attempt_once("model", "system", "user")
+        assert calls == 2
+        assert out["ok"] is False and out["status"] == 400
+        assert self.ESCAPED_KEY not in repr(out)
 
 
 class TestPanelFindingsOnItself:
@@ -328,7 +536,7 @@ class TestPanelFindingsOnItself:
                           '"reason": "docs only change", "defects": [], "proof": "x-1"}'},
                 {"type": "response.completed", "response": {"id": "resp_r3", "output": []}},
             ]))
-        monkeypatch.setattr(iv.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(iv, "_urlopen", fake_urlopen)
         out = iv.attempt_once("responses-only-model", "sys", "usr")
         assert out["ok"] is True and out["v"]["refuted"] is False
 
@@ -519,7 +727,7 @@ class TestSelftestAttestsOnlyWhatItRan:
     the attestation, so the print must not outlive the code.
 
     Editing the consistency block once sliced past its own boundary and deleted
-    the auth_header, review_range and normalize_base coverage — including the
+    the auth_header, review_range, normalize_base and _api_url coverage — including the
     guard keeping a non-hex VERIFIER_HEAD_SHA out of a git argv — while the
     print went on naming all three. A false green on a security gate, which is
     the very defect class this file exists to catch.
@@ -532,7 +740,7 @@ class TestSelftestAttestsOnlyWhatItRan:
     #: Exactly the functions the closing summary claims were checked.
     ATTESTED = ("decide", "model_matches", "require_approvals", "attest_reasons",
                 "attest_proof", "attest_consistency", "auth_header", "review_range",
-                "normalize_base")
+                "normalize_base", "_api_url")
 
     @staticmethod
     def _run_recording(monkeypatch):
@@ -1432,7 +1640,7 @@ class TestWireFailover:
             raise urllib.error.HTTPError(url, status, "error", None,
                                          io.BytesIO(str(body).encode()))
 
-        monkeypatch.setattr(iv.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(iv, "_urlopen", fake_urlopen)
         return calls
 
     def test_a_504_is_retried_on_the_other_wire(self, monkeypatch, capsys):
@@ -1537,7 +1745,7 @@ class TestWireFailover:
             raise urllib.error.HTTPError(req.full_url, 504, "gateway timeout", None,
                                          io.BytesIO(b"gateway timeout"))
 
-        monkeypatch.setattr(iv.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(iv, "_urlopen", fake_urlopen)
         out = iv.verify_once("combo/SOTA-B", "sys", "usr")
         assert out["ok"] is True
         assert calls == ["responses", "chat", "responses"]
