@@ -44,9 +44,10 @@ INTEGRITY GATES (all fail-closed, in order):
                            compensated by the deterministic CI gate remaining
                            the sole merge authority.
 
-NO-KEY MODE: without SECOND_VENDOR_API_KEY (or OPENAI_API_KEY) the panel is
-inactive; the run prints the documented residual and exits 0 — visible, never
-fake-green and never fake-blocking.
+NO-KEY MODE: without SECOND_VENDOR_API_KEY (or OPENAI_API_KEY) the standalone
+script prints the documented residual and exits 0 unless VERIFIER_REQUIRE_KEY
+is true. The hosted workflow defaults that control to true; an operator must
+explicitly set its repo variable to false to select dormant mode.
 
 PRIVACY: only CODE leaves the origin. Images (raster AND vector), fonts,
 binaries and data files are excluded from both the --stat overview and the
@@ -61,6 +62,7 @@ ENV (same contract as the reference):
   VERIFIER_PANEL          voice count in single-pin mode (default 3, cap 64)
   VERIFIER_REQUIRED_APPROVER      required-approver model prefix (default gpt-5.6-sol)
   VERIFIER_MIN_OTHER_APPROVERS    independent corroborations required (default 1)
+  VERIFIER_REQUIRE_KEY            fail closed without a key when true (hosted default)
   VERIFIER_REQUIRE_DEFECT_LIST    a GREEN vote MUST carry a "defects" ledger (default
                                   off; turn on only once the run logs show every
                                   configured voice emitting the field, then it is on
@@ -1838,14 +1840,13 @@ def main() -> int:
         # on a fork PR is NOT the operator's documented residual state — it is
         # an untrusted origin that must FAIL CLOSED, or a required cross-vendor
         # check would pass with zero review. The workflow sets
-        # VERIFIER_REQUIRE_KEY=true for a fork-origin or Dependabot run. The
-        # trusted workflow skips forks before this script and retains this
-        # check as defence in depth; Dependabot is same-repo but still has
-        # Actions secrets withheld.
+        # The trusted workflow defaults VERIFIER_REQUIRE_KEY to true. Only an
+        # explicit operator-set false enables an ordinary same-repo dormant
+        # run; fork and Dependabot origins override that opt-out and remain
+        # fail-closed.
         if (os.environ.get("VERIFIER_REQUIRE_KEY") or "").lower() == "true":
-            print("BLOCK untrusted no-key origin (fork or Dependabot): the verifier "
-                  "credential is unavailable, so the panel cannot review — fail-closed.",
-                  file=sys.stderr)
+            print("BLOCK required verifier run without a vendor key: the credential "
+                  "is unavailable, so the panel cannot review — fail-closed.", file=sys.stderr)
             return 1
         print("[independent-verify] RESIDUAL: no second-vendor key (SECOND_VENDOR_API_KEY or "
               "OPENAI_API_KEY) provisioned.\n"

@@ -278,27 +278,47 @@ class TestTrustedWorkflowEndpointPreflight:
             if step.get("name") == "Mask the verifier endpoint in the log"
         )
 
-    def _run_mask_step(self, *, base_url: str, key_configured: str) -> subprocess.CompletedProcess:
+    @staticmethod
+    def _publisher_step() -> dict:
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[1]
+             / ".github/workflows/independent-verify.yml").read_text()
+        )
+        return next(
+            step for step in workflow["jobs"]["panel"]["steps"]
+            if step.get("name") == "Publish the verdict onto the candidate head"
+        )
+
+    def _run_mask_step(
+            self, tmp_path, *, base_url: str, key_configured: str,
+            require_key_setting: str = "", is_fork: str = "false",
+            is_dependabot_pr: str = "false") -> tuple[subprocess.CompletedProcess, dict[str, str]]:
+        github_output = tmp_path / "verifier-config-output"
         env = os.environ.copy()
         env["VERIFIER_BASE_URL"] = base_url
-        env["VERIFIER_KEY_CONFIGURED"] = key_configured
+        env["SECOND_VENDOR_API_KEY_CONFIGURED"] = key_configured
+        env["VERIFIER_REQUIRE_KEY_SETTING"] = require_key_setting
+        env["IS_FORK"] = is_fork
+        env["IS_DEPENDABOT_PR"] = is_dependabot_pr
+        env["GITHUB_OUTPUT"] = str(github_output)
         env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-        return subprocess.run(
+        result = subprocess.run(
             ["bash", "-c", self._mask_step()["run"]],
             capture_output=True,
             text=True,
             timeout=10,
             env=env,
         )
+        outputs = {}
+        if github_output.exists():
+            outputs = dict(
+                line.split("=", 1)
+                for line in github_output.read_text().splitlines()
+            )
+        return result, outputs
 
-    def test_workflow_derives_presence_without_giving_the_step_the_key(self):
+    def test_workflow_binds_presence_and_runtime_key_to_the_same_secret(self):
         mask_step = self._mask_step()
-        assert mask_step["env"]["VERIFIER_KEY_CONFIGURED"] == (
-            "${{ secrets.TRUSTED_VERIFIER_API_KEY != '' }}"
-        )
-        assert "SECOND_VENDOR_API_KEY" not in mask_step["env"]
-
-    def test_workflow_only_requires_a_key_for_untrusted_origins(self):
         workflow = yaml.safe_load(
             (Path(__file__).resolve().parents[1]
              / ".github/workflows/independent-verify.yml").read_text()
@@ -307,20 +327,150 @@ class TestTrustedWorkflowEndpointPreflight:
             step for step in workflow["jobs"]["panel"]["steps"]
             if step.get("name") == "Cross-vendor review panel"
         )
+        assert mask_step["env"]["SECOND_VENDOR_API_KEY_CONFIGURED"] == (
+            "${{ secrets.TRUSTED_VERIFIER_API_KEY != '' }}"
+        )
+        assert panel_step["env"]["SECOND_VENDOR_API_KEY"] == (
+            "${{ secrets.TRUSTED_VERIFIER_API_KEY }}"
+        )
+        assert panel_step["env"]["OPENAI_API_KEY"] == ""
+        assert "SECOND_VENDOR_API_KEY" not in mask_step["env"]
+
+    def test_workflow_derives_one_config_from_raw_setting_and_pr_identity(self):
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[1]
+             / ".github/workflows/independent-verify.yml").read_text()
+        )
+        panel_step = next(
+            step for step in workflow["jobs"]["panel"]["steps"]
+            if step.get("name") == "Cross-vendor review panel"
+        )
+        mask_step = self._mask_step()
+        assert mask_step["id"] == "verifier_config"
+        assert mask_step["env"]["VERIFIER_REQUIRE_KEY_SETTING"] == (
+            "${{ vars.VERIFIER_REQUIRE_KEY }}"
+        )
+        assert mask_step["env"]["IS_FORK"] == (
+            "${{ github.event.pull_request.head.repo.full_name != github.repository }}"
+        )
+        assert mask_step["env"]["IS_DEPENDABOT_PR"] == (
+            "${{ startsWith(github.event.pull_request.user.login, 'dependabot') }}"
+        )
         assert panel_step["env"]["VERIFIER_REQUIRE_KEY"] == (
-            "${{ github.event.pull_request.head.repo.full_name != github.repository "
-            "|| startsWith(github.actor, 'dependabot') }}"
+            "${{ steps.verifier_config.outputs.require_key }}"
         )
 
-    def test_blank_endpoint_refuses_before_the_credentialed_panel(self):
-        result = self._run_mask_step(base_url="", key_configured="true")
+    def test_publisher_derives_dormancy_from_the_same_explicit_opt_out(self):
+        assert self._publisher_step()["env"]["PANEL_DORMANT"] == (
+            "${{ steps.verifier_config.outputs.panel_dormant }}"
+        )
+
+    @pytest.mark.parametrize(
+        ("setting", "expected_require_key", "expected_dormant", "expected_returncode"),
+        [
+            ("", "true", "false", 1),
+            ("true", "true", "false", 1),
+            ("FALSE", "true", "false", 1),
+            ("False", "true", "false", 1),
+            ("garbage", "true", "false", 1),
+            ("false", "false", "true", 0),
+        ],
+    )
+    def test_only_exact_lowercase_false_selects_dormant_mode(
+            self, tmp_path, setting, expected_require_key,
+            expected_dormant, expected_returncode):
+        result, outputs = self._run_mask_step(
+            tmp_path,
+            base_url="",
+            key_configured="false",
+            require_key_setting=setting,
+        )
+        assert result.returncode == expected_returncode
+        assert outputs == {
+            "require_key": expected_require_key,
+            "panel_dormant": expected_dormant,
+        }
+
+    @pytest.mark.parametrize("origin", ["fork", "dependabot"])
+    def test_untrusted_origin_cannot_select_dormant_mode(self, tmp_path, origin):
+        result, outputs = self._run_mask_step(
+            tmp_path,
+            base_url="",
+            key_configured="false",
+            require_key_setting="false",
+            is_fork="true" if origin == "fork" else "false",
+            is_dependabot_pr="true" if origin == "dependabot" else "false",
+        )
+        assert result.returncode != 0
+        assert outputs == {"require_key": "true", "panel_dormant": "false"}
+
+    @pytest.mark.parametrize(
+        ("outcome", "expected_returncode", "expected_description"),
+        [
+            ("success", 0, "panel dormant — deterministic CI only"),
+            ("failure", 1, "cross-vendor panel refused — see job log"),
+        ],
+    )
+    def test_publisher_names_dormancy_without_hiding_an_upstream_failure(
+            self, tmp_path, outcome, expected_returncode, expected_description):
+        capture = tmp_path / "gh-args"
+        fake_gh = tmp_path / "gh"
+        fake_gh.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n")
+        fake_gh.chmod(0o700)
+        env = os.environ.copy()
+        env.update({
+            "CAPTURE": str(capture),
+            "PATH": str(tmp_path) + os.pathsep + env.get("PATH", ""),
+            "HEAD_SHA": "a" * 40,
+            "IS_FORK": "false",
+            "OUTCOME": outcome,
+            "PANEL_DORMANT": "true",
+            "GITHUB_REPOSITORY": "owner/repository",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_SERVER_URL": "https://example.test",
+        })
+        result = subprocess.run(
+            ["bash", "-c", self._publisher_step()["run"]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == expected_returncode
+        assert f"description={expected_description}" in capture.read_text()
+
+    @pytest.mark.parametrize("setting", ["", "false"])
+    def test_blank_endpoint_refuses_before_the_credentialed_panel(
+            self, tmp_path, setting):
+        result, _ = self._run_mask_step(
+            tmp_path,
+            base_url="",
+            key_configured="true",
+            require_key_setting=setting,
+        )
+        assert result.returncode != 0
+        assert "refus" in (result.stdout + result.stderr).casefold()
+
+    @pytest.mark.parametrize("base_url", ["", TEST_BASE_URL, "not-an-endpoint"])
+    def test_required_panel_refuses_a_missing_key(self, tmp_path, base_url):
+        result, _ = self._run_mask_step(
+            tmp_path,
+            base_url=base_url,
+            key_configured="false",
+        )
         assert result.returncode != 0
         assert "refus" in (result.stdout + result.stderr).casefold()
 
     @pytest.mark.parametrize("base_url", ["", "not-an-endpoint"])
-    def test_endpoint_preflight_preserves_the_documented_no_key_mode(self, base_url):
-        result = self._run_mask_step(base_url=base_url, key_configured="false")
+    def test_explicit_dormant_mode_skips_endpoint_preflight(self, tmp_path, base_url):
+        result, outputs = self._run_mask_step(
+            tmp_path,
+            base_url=base_url,
+            key_configured="false",
+            require_key_setting="false",
+        )
         assert result.returncode == 0
+        assert outputs == {"require_key": "false", "panel_dormant": "true"}
         assert "error" not in (result.stdout + result.stderr).casefold()
 
 
@@ -570,7 +720,7 @@ class TestPanelFindingsOnItself:
         out = subprocess.run([sys.executable, script], capture_output=True, text=True,
                              timeout=60, env=env)
         assert out.returncode == 1
-        assert "fork or Dependabot" in out.stderr
+        assert "required verifier run" in out.stderr
 
     def test_round3_data_denylist_extended(self):
         for ext in ("csv", "tsv", "sql", "jsonl", "parquet", "sqlite", "dump", "bak"):
@@ -1160,7 +1310,7 @@ class TestMainFailsClosedOnAnUnreviewableDiff:
         monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
         monkeypatch.setenv("VERIFIER_REQUIRE_KEY", "true")
         assert iv.main() == 1
-        assert "fork or Dependabot" in capsys.readouterr().err
+        assert "required verifier run" in capsys.readouterr().err
 
     def test_a_same_repo_run_without_a_key_reports_the_residual(self, monkeypatch, capsys):
         monkeypatch.setattr(iv, "KEY", "")
