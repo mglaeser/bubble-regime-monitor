@@ -34,6 +34,7 @@ from app.alerts.enums import (
 from app.alerts.models import (
     AlertComponentHeartbeat,
     AlertDelivery,
+    AlertEpisode,
     AlertEvent,
 )
 from app.alerts.promotion import live_admission_blockers
@@ -158,7 +159,14 @@ def preflight(
            "no live delivery has ever been SENT — there is nothing observed "
            "to cut over TO"))
 
-    # 3: zero P1 suppression, ever inside the window
+    # 3: zero P1 suppression inside the exact two-week evidence window.
+    #
+    # A delivery hold is only the final planning representation, and P1 holds
+    # are structurally forbidden by both application code and a DB CHECK.  It
+    # therefore cannot prove that a P1 activation reached planning: silencing,
+    # flapping, cooldown, dominance or a data-quality guard can suppress the
+    # notification before any delivery row exists.  Read the activated episode
+    # evidence as well, scoped to this live namespace and observation window.
     p1_held = session.execute(
         select(func.count()).select_from(AlertDelivery).where(
             AlertDelivery.mode == "live",
@@ -167,11 +175,35 @@ def preflight(
             AlertDelivery.priority == Priority.P1,
             AlertDelivery.planning_state.in_(
                 [PlanningState.HELD_BUDGET, PlanningState.HELD_QUIET]),
+            AlertDelivery.created_at <= now,
         )
     ).scalar_one()
     check("p1_never_held", p1_held == 0,
           f"{p1_held} P1 deliveries in a held state (the target is zero, "
           "always)")
+
+    p1_activations = session.execute(
+        select(
+            AlertEpisode.episode_id,
+            AlertEpisode.rule_id,
+            AlertEpisode.suppression_reasons,
+        ).where(
+            AlertEpisode.mode == "live",
+            AlertEpisode.live_profile == live_profile,
+            AlertEpisode.priority == Priority.P1,
+            AlertEpisode.activated_at.is_not(None),
+            AlertEpisode.activated_at >= window_start,
+            AlertEpisode.activated_at <= now,
+        )
+    ).all()
+    suppressed_p1 = [row for row in p1_activations if row.suppression_reasons]
+    suppressed_rules = sorted({row.rule_id for row in suppressed_p1})
+    check(
+        "p1_never_suppressed",
+        not suppressed_p1,
+        f"{len(suppressed_p1)} activated P1 episode(s) carry notification "
+        f"suppression in the last {STABLE_DAYS}d; rules={suppressed_rules}",
+    )
 
     # 4: one confirmed digest for EACH of the two immediately closed weekly
     # windows. Delivery-row count is not window count: a manually-authorised

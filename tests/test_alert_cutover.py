@@ -131,6 +131,133 @@ def _live_sent(session, *, sent_at, status=None, kind=None,
     return delivery_id
 
 
+def _suppressed_p1_episode(
+    session,
+    *,
+    activated_at=NOW - timedelta(days=1),
+    mode="live",
+    profile="default",
+):
+    """Persist a real episode graph but deliberately create no delivery."""
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import EpisodeStatus, Priority, SuppressionReason
+    from app.alerts.models import AlertEpisode, AlertEvaluation, AlertInputSnapshot
+    from app.alerts.repository import utc_ms
+
+    artifacts = load_active(session)
+    register(session, artifacts)
+    session.flush()
+    identity = "cutover-suppressed-p1".ljust(64, "0")
+    observed_at = activated_at or NOW - timedelta(days=1)
+    session.add(AlertInputSnapshot(
+        input_identity=identity,
+        snapshot_id=None,
+        origin="MANUAL",
+        built_at=observed_at,
+        computed_at=observed_at,
+        alert_input_schema_version=1,
+        methodology_version="test",
+        methodology_sha256="m" * 64,
+        reconstructed=False,
+        evaluation_eligibility="EVALUABLE",
+        ineligibility_reasons=[],
+        payload="{}",
+        payload_sha256="p" * 64,
+    ))
+    session.flush()
+    evaluation_id = new_ulid(utc_ms(observed_at))
+    session.add(AlertEvaluation(
+        evaluation_id=evaluation_id,
+        idempotency_key=f"cutover-{evaluation_id}",
+        input_identity=identity,
+        mode=mode,
+        live_profile=profile,
+        current_rules_sha256=artifacts.ruleset.rules_sha256,
+        evaluation_set_sha256="e" * 64,
+        evaluated_ruleset_hashes=[artifacts.ruleset.rules_sha256],
+        evaluator_version="test",
+        status="COMMITTED",
+        attempt_count=1,
+        started_at=observed_at,
+        finished_at=observed_at,
+        plan_applied=True,
+    ))
+    session.flush()
+
+    episode_id = new_ulid(utc_ms(observed_at) + 1)
+    is_activated = activated_at is not None
+    session.add(AlertEpisode(
+        episode_id=episode_id,
+        mode=mode,
+        live_profile=profile,
+        origin_rules_sha256=artifacts.ruleset.rules_sha256,
+        instance_fingerprint="suppressed-p1".ljust(64, "0"),
+        rule_id="regime.band_to_derisk",
+        labels={},
+        priority=Priority.P1,
+        episode_status=(EpisodeStatus.FIRING if is_activated
+                        else EpisodeStatus.PENDING),
+        is_open=True,
+        suppression_reasons=[SuppressionReason.SILENCED],
+        opened_at=observed_at,
+        activated_at=activated_at,
+        trigger_input_identity=identity,
+        created_evaluation_id=evaluation_id,
+        last_evaluation_id=evaluation_id,
+    ))
+    session.flush()
+    return episode_id
+
+
+def test_suppressed_activated_p1_without_a_delivery_blocks_cutover():
+    """Stage 4 must see a P1 refused before a delivery row could exist."""
+    from sqlalchemy import func, select
+
+    from app.alerts.models import AlertDelivery
+
+    with session_scope() as session:
+        _suppressed_p1_episode(session)
+        deliveries = session.execute(
+            select(func.count()).select_from(AlertDelivery)
+        ).scalar_one()
+        assert deliveries == 0, "the fixture must exercise pre-delivery suppression"
+        report = preflight(session, now=NOW)
+
+    assert any(
+        entry.startswith("p1_never_suppressed")
+        for entry in report.unsatisfied
+    ), "a suppressed P1 activation passed the Stage 4 gate"
+
+
+@pytest.mark.parametrize(
+    ("mode", "profile", "activated_at"),
+    [
+        ("shadow", "default", NOW - timedelta(days=1)),
+        ("live", "another-profile", NOW - timedelta(days=1)),
+        ("live", "default", NOW - timedelta(days=STABLE_DAYS, seconds=1)),
+        ("live", "default", None),
+    ],
+)
+def test_p1_suppression_gate_uses_the_exact_live_evidence_scope(
+    mode, profile, activated_at,
+):
+    """Only genuine activations in this live/profile/two-week window count."""
+    with session_scope() as session:
+        _suppressed_p1_episode(
+            session,
+            mode=mode,
+            profile=profile,
+            activated_at=activated_at,
+        )
+        report = preflight(session, now=NOW)
+
+    assert any(
+        entry.startswith("p1_never_suppressed")
+        for entry in report.satisfied
+    )
+
+
 def test_one_recent_delivery_is_not_two_stable_weeks():
     """Two weeks is a property of the observation SPAN, not the count."""
     with session_scope() as session:

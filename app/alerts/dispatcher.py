@@ -808,19 +808,25 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # Rendering can cross an exact quiet-hours boundary. The planning-time
         # hold and the pass-start release are advisory; this is the final
         # wire-time decision. P1 remains exempt by construction.
-        # A wall-clock correction must not date the request before the pass
-        # that claimed it.  Besides corrupting latency evidence, an earlier
-        # request_started_at can make a fresh lease look stale.  Clamp to the
-        # pass instant while still re-reading the clock for real boundary
-        # crossings in the ordinary (forward-moving) case.
-        attempt_now = max(
-            _utc_clock_value(lambda: now),
-            _utc_clock_value(clock),
-        )
-        if would_be_held(int(delivery.priority), attempt_now):
-            hold_for_quiet(session, delivery, now=attempt_now)
+        # Quiet admission follows the ACTUAL wire clock.  It must stay
+        # separate from the monotonic timestamp clamp below: if NTP moves the
+        # wall clock backwards across 07:00 Berlin, clamping first would turn a
+        # real quiet instant into an allowed one and put a non-P1 on the wire.
+        pass_now = _utc_clock_value(lambda: now)
+        wire_now = _utc_clock_value(clock)
+        attempt_now = max(pass_now, wire_now)
+        if would_be_held(int(delivery.priority), wire_now):
+            hold_for_quiet(
+                session,
+                delivery,
+                now=wire_now,
+                recorded_at=attempt_now,
+            )
             report.held += 1
             return
+        # Persisted lifecycle timestamps remain monotonic even when the wall
+        # clock moved backwards.  Besides corrupting latency evidence, an
+        # earlier request_started_at can make a fresh lease look stale.
         # Re-check admission HERE, inside the transaction that marks the
         # delivery as sending. The pass-level check ran before any of this
         # delivery's work: a promotion, a demotion or a swapped ruleset between

@@ -671,9 +671,10 @@ The HTTP operator actions are admin-scoped and `no-store`:
 * **`bubblegauge alerts cutover status|preflight|apply|confirm|rollback|confirm-rollback`** — the Stage
   4 gate made checkable. Preflight evaluates every mandate condition from the
   database (a two-week live span with recent market activity, one successful
-  digest in each of the exact two closed weekly windows, zero P1 holds, fresh
-  healthy live-namespace heartbeats, reconciled live UNKNOWNs) and names each
-  unmet one. `apply` records a request and prints the exact deployment change;
+  digest in each of the exact two closed weekly windows, zero suppressed P1
+  activations and zero P1 holds, fresh healthy live-namespace heartbeats,
+  reconciled live UNKNOWNs) and names each unmet one. `apply` records a request
+  and prints the exact deployment change;
   it reports `applied=false`. After setting `DAILY_SMS_ENABLED=false` and
   restarting, `confirm --request-event …` rechecks the gate, observes that the
   explicit toggle and effective transport are off, then records completion.

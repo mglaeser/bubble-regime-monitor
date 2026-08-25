@@ -338,6 +338,59 @@ def test_wire_time_quiet_boundary_reholds_without_persisting_a_render():
         assert "delivery_held_quiet" in actions
 
 
+def test_wire_clock_rollback_into_quiet_hours_reholds_without_sending():
+    """Admission follows the actual wire clock, not a monotonic timestamp clamp.
+
+    A pass may start just after Berlin quiet hours end and then observe a wall-
+    clock correction to just before the boundary.  That correction must not be
+    clamped away: the message is held against the real wire instant, while the
+    persisted audit clock remains ordered after the pass start.
+    """
+    from app.alerts.dispatcher import dispatch_once
+
+    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    pass_start = datetime(2026, 8, 25, 5, 0, 1, tzinfo=UTC)  # 07:00:01 Berlin
+    wire_now = datetime(2026, 8, 25, 4, 59, 59, tzinfo=UTC)  # 06:59:59 Berlin
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        delivery.priority = 2
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=pass_start,
+        clock=lambda: wire_now,
+    )
+
+    assert sender.sent == []
+    assert report.held == 1
+    assert report.sent == 0
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        renders = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == delivery_id)
+        ).scalars().all()
+        held_event = session.execute(
+            select(AlertEvent).where(
+                AlertEvent.delivery_id == delivery_id,
+                AlertEvent.action == "delivery_held_quiet",
+            )
+        ).scalars().one()
+
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.PENDING
+        assert delivery.planning_state == PlanningState.HELD_QUIET
+        assert delivery.not_before == datetime(2026, 8, 25, 5, 0)
+        assert delivery.updated_at >= pass_start.replace(tzinfo=None)
+        assert held_event.occurred_at >= pass_start.replace(tzinfo=None)
+        assert renders == [], "a refused wire attempt must not freeze a body"
+
+
 def test_wire_clock_regression_cannot_precede_the_dispatch_pass():
     """Persisted attempt/completion time remains ordered across clock rollback."""
     from app.alerts.dispatcher import dispatch_once

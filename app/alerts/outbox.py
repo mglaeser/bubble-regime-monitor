@@ -742,10 +742,22 @@ def hold_for_budget(session: Session, delivery: AlertDelivery, reason: str,
            detail=reason)
 
 
-def hold_for_quiet(session: Session, delivery: AlertDelivery, *, now: datetime) -> None:
-    """Return a claimed non-P1 delivery to a durable quiet-hours hold."""
+def hold_for_quiet(
+    session: Session,
+    delivery: AlertDelivery,
+    *,
+    now: datetime,
+    recorded_at: datetime | None = None,
+) -> None:
+    """Return a claimed non-P1 delivery to a durable quiet-hours hold.
+
+    ``now`` is the observed wall clock that decides the next allowed wire
+    instant. ``recorded_at`` may be clamped forward to keep persisted lifecycle
+    timestamps monotonic when the wall clock has moved backwards.
+    """
     if delivery.priority == 1:
         raise ValueError("a P1 is never held by quiet hours")
+    recorded_at = recorded_at or now
     next_release = release_time_for(int(delivery.priority), now)
     if next_release <= now:
         raise ValueError("quiet hold requested during the allowed interval")
@@ -757,10 +769,10 @@ def hold_for_quiet(session: Session, delivery: AlertDelivery, *, now: datetime) 
     delivery.lease_owner = None
     delivery.lease_until = None
     delivery.request_started_at = None
-    delivery.updated_at = now
+    delivery.updated_at = recorded_at
     _event(
         session,
-        now,
+        recorded_at,
         action="delivery_held_quiet",
         delivery_id=delivery.delivery_id,
         detail=f"wire-time boundary; next release {next_release.isoformat()}",
