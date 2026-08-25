@@ -297,10 +297,17 @@ class Settings(BaseSettings):
     def daily_digest_transport(self) -> Literal["imessage", "sipgate", "none"]:
         """Which transport carries the daily digest.
 
-        iMessage wins when both switches are on — see the IMESSAGE_* block. The
-        scheduler gates on this rather than on `effective_daily_sms_enabled`,
-        because an operator who set SMS_ENABLED=false and IMESSAGE_ENABLED=true
-        means "send my digest over iMessage", not "stop sending my digest".
+        ``DAILY_SMS_ENABLED=false`` is the documented Stage-4 MASTER cutover
+        for the legacy daily digest, regardless of whether that digest was
+        carried by sipgate or iMessage. Without this first check an iMessage
+        deployment kept scheduling the legacy message after the operator had
+        performed the documented cutover.
+
+        In the absence of that explicit Stage-4 value, iMessage wins when both
+        transport switches are on — see the IMESSAGE_* block. Legacy
+        ``SMS_ENABLED=false`` plus ``IMESSAGE_ENABLED=true`` still means "send
+        my digest over iMessage"; only the explicit migration alias is the
+        cross-transport cutover authority.
 
         REQUIRES `imessage_configured`, not merely the switch. Selecting on the
         switch alone meant that adding IMESSAGE_ENABLED=true to a WORKING SMS
@@ -315,6 +322,8 @@ class Settings(BaseSettings):
         configured one over nothing loses no information. The unconfigured
         switch is reported loudly by every operator surface rather than being
         absorbed here: see `imessage_enabled_but_unconfigured`."""
+        if self.daily_sms_enabled is False:
+            return "none"
         if self.imessage_enabled and self.imessage_configured:
             return "imessage"
         if self.effective_daily_sms_enabled:

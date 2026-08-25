@@ -144,12 +144,11 @@ def start() -> BackgroundScheduler:
                            id="stuck_watchdog", replace_existing=True,
                            coalesce=True, misfire_grace_time=1800, max_instances=1)
         digest_schedule = "disabled"
-        # Gated on the TRANSPORT, not on effective_daily_sms_enabled: an
-        # operator who sets SMS_ENABLED=false and IMESSAGE_ENABLED=true means
-        # "send my digest over iMessage", and gating on the SMS switch alone
-        # would silently unschedule the job they just reconfigured.
-        # DAILY_SMS_ENABLED remains the migration-friendly alias for the
-        # sipgate path; turning the alert system on still never disables this.
+        # Gated on the selected TRANSPORT. With DAILY_SMS_ENABLED unset, a
+        # legacy SMS_ENABLED=false plus IMESSAGE_ENABLED=true still selects
+        # iMessage. Explicit DAILY_SMS_ENABLED=false is different: it is the
+        # documented Stage-4 master cutover and selects no legacy transport at
+        # all. Turning the alert system on still never changes that switch.
         digest_transport = settings.daily_digest_transport
         if settings.imessage_enabled_but_unconfigured:
             # Loud at boot, whatever the digest ends up doing: the switch is on

@@ -28,19 +28,37 @@ log = get_logger(__name__)
 COMPONENT = "recovery"
 
 
-def heartbeat(component: str, status: str, detail: dict[str, Any] | None = None) -> None:
-    """Record liveness. A watchdog nobody watches is not a watchdog."""
+def heartbeat(
+    component: str,
+    status: str,
+    detail: dict[str, Any] | None = None,
+    *,
+    mode: str | None = None,
+    live_profile: str | None = None,
+) -> None:
+    """Record liveness with the namespace whose work was actually checked.
+
+    A fresh shadow heartbeat is not evidence that the live profile is healthy.
+    Stamping the namespace at the shared write boundary keeps every component
+    from inventing its own partially-compatible heartbeat shape.
+    """
     now = datetime.now(UTC)
+    settings = get_settings()
+    payload = {
+        **(detail or {}),
+        "mode": mode or settings.alerts_mode,
+        "live_profile": live_profile or settings.alerts_live_profile,
+    }
     with session_scope() as session:
         row = session.get(AlertComponentHeartbeat, component)
         if row is None:
             session.add(AlertComponentHeartbeat(
                 component=component, last_heartbeat_at=now, status=status,
-                detail_json=detail or {}))
+                detail_json=payload))
         else:
             row.last_heartbeat_at = now
             row.status = status
-            row.detail_json = detail or {}
+            row.detail_json = payload
 
 
 #: Ordered by how much a mode is permitted to do. `live` is the only one that

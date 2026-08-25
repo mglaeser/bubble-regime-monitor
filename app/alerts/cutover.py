@@ -17,12 +17,13 @@ the decision, and says exactly what to set; it does not set it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.alerts.calendars import last_closed_digest_window
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import (
     DeliveryKind,
@@ -50,6 +51,19 @@ HEARTBEAT_FRESH_HOURS = 2
 UNKNOWN_STALE_HOURS = 24
 
 
+def required_digest_windows(now: datetime) -> tuple[str, ...]:
+    """The exact consecutive weekly windows Stage 4 must have observed."""
+    latest = last_closed_digest_window(now)
+    year_text, week_text = latest.split("-W", 1)
+    latest_monday = date.fromisocalendar(int(year_text), int(week_text), 1)
+    windows = []
+    for offset in reversed(range(REQUIRED_DIGESTS)):
+        monday = latest_monday - timedelta(days=7 * offset)
+        iso_year, iso_week, _ = monday.isocalendar()
+        windows.append(f"{iso_year}-W{iso_week:02d}")
+    return tuple(windows)
+
+
 @dataclass
 class CutoverPreflight:
     satisfied: list[str] = field(default_factory=list)
@@ -64,7 +78,12 @@ class CutoverPreflight:
                 "unsatisfied": self.unsatisfied}
 
 
-def preflight(session: Session, *, now: datetime | None = None) -> CutoverPreflight:
+def preflight(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    require_legacy_on: bool = True,
+) -> CutoverPreflight:
     """Every Stage 4 condition, answered from what actually happened.
 
     Each check appends to exactly one list, so the report always accounts for
@@ -73,6 +92,7 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
     """
     now = now or datetime.now(UTC)
     settings = get_settings()
+    live_profile = settings.alerts_live_profile
     report = CutoverPreflight()
 
     def check(name: str, ok: bool, detail: str) -> None:
@@ -102,22 +122,39 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
     first_sent = session.execute(
         select(func.min(AlertDelivery.sent_at)).where(
             AlertDelivery.mode == "live",
+            AlertDelivery.live_profile == live_profile,
             AlertDelivery.transport_status == TransportStatus.SENT,
             AlertDelivery.delivery_kind.in_(market_kinds),
+            AlertDelivery.sent_at <= now,
         )
     ).scalar()
     span_ok = first_sent is not None and _aware(first_sent) <= window_start
+    recent_market_sends = session.execute(
+        select(func.count()).select_from(AlertDelivery).where(
+            AlertDelivery.mode == "live",
+            AlertDelivery.live_profile == live_profile,
+            AlertDelivery.transport_status == TransportStatus.SENT,
+            AlertDelivery.delivery_kind.in_(market_kinds),
+            AlertDelivery.sent_at >= window_start,
+            AlertDelivery.sent_at <= now,
+        )
+    ).scalar_one()
     failures = session.execute(
         select(func.count()).select_from(AlertDelivery).where(
             AlertDelivery.mode == "live",
+            AlertDelivery.live_profile == live_profile,
+            AlertDelivery.delivery_kind.in_(market_kinds),
             AlertDelivery.transport_status.in_(
                 [TransportStatus.DEAD_PERMANENT, TransportStatus.RENDER_FAILED]),
             AlertDelivery.updated_at >= window_start,
+            AlertDelivery.updated_at <= now,
         )
     ).scalar_one()
-    check("stable_weeks", span_ok and failures == 0,
-          (f"first live send {first_sent}, {failures} terminal failure(s) in "
-           f"the last {STABLE_DAYS}d" if first_sent is not None else
+    check("stable_weeks", span_ok and recent_market_sends > 0 and failures == 0,
+          (f"profile={live_profile}; first live send {first_sent}; "
+           f"{recent_market_sends} market send(s) and {failures} terminal "
+           f"failure(s) in the last {STABLE_DAYS}d"
+           if first_sent is not None else
            "no live delivery has ever been SENT — there is nothing observed "
            "to cut over TO"))
 
@@ -125,6 +162,8 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
     p1_held = session.execute(
         select(func.count()).select_from(AlertDelivery).where(
             AlertDelivery.mode == "live",
+            AlertDelivery.live_profile == live_profile,
+            AlertDelivery.delivery_kind.in_(market_kinds),
             AlertDelivery.priority == Priority.P1,
             AlertDelivery.planning_state.in_(
                 [PlanningState.HELD_BUDGET, PlanningState.HELD_QUIET]),
@@ -134,24 +173,26 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
           f"{p1_held} P1 deliveries in a held state (the target is zero, "
           "always)")
 
-    # 4: two successful weekly digests — RECENT ones. A digest sent months
-    # ago proves the machinery worked then; the gate is about the channel that
-    # will carry the proof-of-life from next Monday on, so both must fall
-    # inside the current observation period (two weekly windows plus grace).
-    digest_window = now - timedelta(days=STABLE_DAYS + 7)
-    digests = session.execute(
-        select(func.count()).select_from(AlertDelivery).where(
+    # 4: one confirmed digest for EACH of the two immediately closed weekly
+    # windows. Delivery-row count is not window count: a manually-authorised
+    # retry for W34 remains evidence for W34, not a second successful week.
+    wanted_windows = required_digest_windows(now)
+    digest_rows = session.execute(
+        select(AlertDelivery.scheduled_window_key).where(
             AlertDelivery.mode == "live",
+            AlertDelivery.live_profile == live_profile,
             AlertDelivery.delivery_kind == DeliveryKind.DIGEST,
             AlertDelivery.transport_status == TransportStatus.SENT,
-            AlertDelivery.sent_at >= digest_window,
+            AlertDelivery.scheduled_window_key.in_(wanted_windows),
+            AlertDelivery.sent_at <= now,
         )
-    ).scalar_one()
-    check("weekly_digests", digests >= REQUIRED_DIGESTS,
-          f"{digests} digest(s) SENT in the last {STABLE_DAYS + 7}d; the gate "
-          f"wants {REQUIRED_DIGESTS} — the digest replaces the daily message's "
-          "proof-of-life, so it must have proven itself in the same period "
-          "being judged")
+    ).scalars().all()
+    observed_windows = {str(window) for window in digest_rows if window is not None}
+    missing_windows = [window for window in wanted_windows
+                       if window not in observed_windows]
+    check("weekly_digests", not missing_windows,
+          f"observed={sorted(observed_windows)}; required={list(wanted_windows)}; "
+          f"missing={missing_windows} (retries count once by scheduled window)")
 
     # 5: no UNKNOWN delivery at all. The earlier version only counted
     # UNKNOWNs older than 24h, so a delivery that went ambiguous an hour
@@ -159,8 +200,12 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
     # unresolved, and cutting over the fallback channel while one is open is
     # exactly the moment its ambiguity stops being recoverable. Age only
     # softens the wording, never the verdict.
+    load_bearing_kinds = [*market_kinds, DeliveryKind.DIGEST]
     open_unknown = session.execute(
         select(func.count()).select_from(AlertDelivery).where(
+            AlertDelivery.mode == "live",
+            AlertDelivery.live_profile == live_profile,
+            AlertDelivery.delivery_kind.in_(load_bearing_kinds),
             AlertDelivery.transport_status == TransportStatus.UNKNOWN,
         )
     ).scalar_one()
@@ -178,6 +223,14 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
         # component that never goes stale — the exact component this gate
         # exists to distrust. Small forward skew is tolerated; beyond it the
         # heartbeat is evidence of a broken clock, not of health.
+        detail_json = row.detail_json if row is not None else {}
+        namespace_ok = bool(
+            isinstance(detail_json, dict)
+            and detail_json.get("mode") == "live"
+            and detail_json.get("live_profile") == live_profile
+        )
+        row_status = row.status if row is not None else None
+        status_ok = row_status == "ok"
         if beat is None:
             fresh, detail = False, (
                 f"no heartbeat in {HEARTBEAT_FRESH_HOURS}h — after cutover "
@@ -186,8 +239,16 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
             fresh, detail = False, (
                 f"heartbeat is {beat.isoformat()} — in the future, which is a "
                 "clock fault, not health")
+        elif not namespace_ok:
+            fresh, detail = False, (
+                f"fresh heartbeat belongs to another namespace; expected "
+                f"mode='live', live_profile={live_profile!r}, observed="
+                f"{detail_json!r}")
+        elif not status_ok:
+            fresh, detail = False, (
+                f"heartbeat status is {row_status!r}, not accepted health")
         elif beat >= now - timedelta(hours=HEARTBEAT_FRESH_HOURS):
-            fresh, detail = True, "fresh"
+            fresh, detail = True, "fresh, healthy, and live-namespace matched"
         else:
             fresh, detail = False, (
                 f"last heartbeat {beat.isoformat()}, older than "
@@ -195,9 +256,15 @@ def preflight(session: Session, *, now: datetime | None = None) -> CutoverPrefli
         check(f"heartbeat_{component}", fresh, detail)
 
     # 7: there is still something to cut over
-    check("legacy_still_on", settings.effective_daily_sms_enabled,
-          "daily digest is enabled" if settings.effective_daily_sms_enabled
-          else "daily digest is already off; nothing to apply")
+    legacy_on = settings.daily_digest_transport != "none"
+    legacy_state_ok = legacy_on if require_legacy_on else not legacy_on
+    check(
+        "legacy_still_on",
+        legacy_state_ok,
+        (f"legacy daily digest is enabled via {settings.daily_digest_transport}"
+         if legacy_on else
+         "every legacy daily-digest transport is off"),
+    )
 
     return report
 

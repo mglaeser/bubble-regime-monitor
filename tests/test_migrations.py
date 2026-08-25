@@ -248,10 +248,14 @@ def test_alert_admin_atomicity_indexes_exist_in_create_all_and_alembic(tmp_path)
         "uq_alert_delivery_manual_retry_root_sequence": (
             "alert_delivery", ("manual_retry_root_delivery_id",
                                "manual_retry_sequence"), 1, 1),
-        "uq_alert_actionability_episode_delivery": (
-            "alert_actionability_review", ("episode_id", "delivery_id"), 1, 1),
+        "uq_alert_actionability_delivery": (
+            "alert_actionability_review", ("delivery_id",), 1, 1),
         "uq_alert_actionability_episode_memberless": (
             "alert_actionability_review", ("episode_id",), 1, 1),
+        "ix_alert_actionability_reviewed_at": (
+            "alert_actionability_review", ("reviewed_at",), 0, 0),
+        "ix_alert_actionability_value_reviewed_at": (
+            "alert_actionability_review", ("actionable", "reviewed_at"), 0, 0),
     }
     for path in (migrated, created):
         schema = _schema(path)["indexes"]
@@ -291,6 +295,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
             "select name from sqlite_master where type='index'")}
         assert "uq_alert_delivery_manual_retry_root_sequence" not in names
         assert "uq_alert_actionability_episode_delivery" not in names
+        assert "uq_alert_actionability_delivery" not in names
         assert "uq_alert_actionability_episode_memberless" not in names
         assert connection.execute(
             "select 1 from sqlite_master where type='trigger' "
@@ -302,7 +307,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     _run_with_db(db, _cycle)
     connection = sqlite3.connect(db)
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0014",)
+        "select version_num from alembic_version").fetchone() == ("0015",)
     connection.close()
 
 

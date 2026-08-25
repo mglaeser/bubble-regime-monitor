@@ -284,17 +284,14 @@ Three separate scopes. **Alert reads do not fall back to the admin key** —
 unlike the scoring API, which does. That fallback is exactly what would put an
 admin credential in a browser.
 
-`DAILY_SMS_ENABLED` is a migration-friendly alias for `SMS_ENABLED`. The legacy
-daily digest keeps its own switches — plural since it gained an iMessage
-transport: `IMESSAGE_ENABLED` and `SMS_ENABLED`/`DAILY_SMS_ENABLED`, with the
-scheduler gating on `Settings.daily_digest_transport` rather than on the SMS
-alias. iMessage wins when both are on, and there is no fallback. **Stopping the
-legacy digest therefore needs both switches off; clearing only the SMS one
-leaves an iMessage deployment sending.** Turning the alert system on still never
-disables the legacy digest. Cutover to the alert system's own delivery path is
-still the explicit Stage 4 gate — and note that the transport change did not
-advance it: the legacy digest simply moved transports underneath a gate that has
-not moved.
+`DAILY_SMS_ENABLED` is the migration alias for `SMS_ENABLED` and the explicit
+Stage-4 **master switch** for the whole legacy daily digest. Before cutover,
+when the alias is unset, `IMESSAGE_ENABLED` may select iMessage and iMessage
+wins when both configured transports are on; there is no send-failure fallback.
+After the observed Stage-4 gate, setting `DAILY_SMS_ENABLED=false` disables the
+legacy schedule regardless of whether its previous carrier was sipgate or
+iMessage. Turning the alert system on still never changes this value or
+implicitly disables the legacy digest.
 
 Volume, lease, retention and LLM settings: see `app/config.py` — every one has
 a safe default and none of them is read by anything that sends.
@@ -643,19 +640,21 @@ Four operator actions, all admin-scoped, all `no-store`:
   the dedupe key), linked through `prior_unknown_delivery_id`. Same key with a
   different body is 409. Anything not UNKNOWN is refused: definite failures
   retry automatically, successes need nothing.
-* **`POST /admin/alerts/actionability`** — one human label per alert
-  (YES / NO / AMBIGUOUS), the Stage 7 evidence. AMBIGUOUS is first-class so an
-  unsure reviewer cannot inflate the KPI.
-* **`bubblegauge alerts cutover status|preflight|apply|rollback`** — the Stage
+* **`POST /admin/alerts/actionability`** — one human label per confirmed-SENT
+  provider message (or per episode when no delivery is supplied), the Stage 7
+  evidence. Dropped/undelivered members, TEST and DIGEST messages are refused;
+  AMBIGUOUS is first-class so an unsure reviewer cannot inflate the KPI.
+* **`bubblegauge alerts cutover status|preflight|apply|confirm|rollback|confirm-rollback`** — the Stage
   4 gate made checkable. Preflight evaluates every mandate condition from the
-  database (two stable live weeks, two sent digests, zero P1 holds, fresh
-  component heartbeats, reconciled UNKNOWNs) and names each unmet one. `apply`
-  refuses until preflight is clean, records an audit event, and prints the
-  exact change — the toggle itself stays the documented `DAILY_SMS_ENABLED`
-  env var, so a reversal survives an empty database and the cutover can never
-  be something the app did to itself. `rollback` is always recordable: the
-  operator reversing a cutover must not be gated on the health that prompted
-  the reversal.
+  database (a two-week live span with recent market activity, one successful
+  digest in each of the exact two closed weekly windows, zero P1 holds, fresh
+  healthy live-namespace heartbeats, reconciled live UNKNOWNs) and names each
+  unmet one. `apply` records a request and prints the exact deployment change;
+  it reports `applied=false`. After setting `DAILY_SMS_ENABLED=false` and
+  restarting, `confirm --request-event …` rechecks the gate, observes that the
+  explicit toggle and effective transport are off, then records completion.
+  Rollback uses the same request/observation split, but requesting a rollback
+  is never gated on the health that prompted it.
 
 ## 11e. Render-time truth (mandate 17.5)
 

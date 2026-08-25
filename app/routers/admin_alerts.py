@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.alerts.canonical import new_ulid, sha256_of
 from app.alerts.errors import sanitize
@@ -40,6 +40,20 @@ class SilenceRequest(BaseModel):
     duration_seconds: int = Field(ge=60, le=60 * 60 * 24 * 30)
     comment: str = Field(min_length=1, max_length=255)
     starts_in_seconds: int = Field(default=0, ge=0, le=60 * 60 * 24 * 30)
+
+    @model_validator(mode="after")
+    def validate_matcher_shape(self) -> SilenceRequest:
+        from app.alerts.enums import SilenceMatcherKind
+
+        kind = SilenceMatcherKind(self.matcher_kind)
+        if kind == SilenceMatcherKind.ALL and self.matcher_value != "*":
+            raise ValueError("ALL silences must use matcher_value='*'")
+        if kind == SilenceMatcherKind.INSTANCE_FINGERPRINT:
+            value = self.matcher_value.lower()
+            if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+                raise ValueError(
+                    "INSTANCE_FINGERPRINT must be exactly 64 hexadecimal characters")
+        return self
 
 
 def _no_store(response: Response) -> None:
@@ -83,7 +97,11 @@ def create_silence(
     route = "POST /api/v1/alerts/silences"
     payload = body.model_dump()
 
-    with session_scope() as session:
+    affected = {"members_dropped": 0, "deliveries_cancelled": 0, "in_flight": 0}
+    # Reserve SQLite's writer before reading idempotency or touching queued
+    # work. This gives silence creation one serialisation point with admin
+    # writes and ensures the response describes the committed outbox state.
+    with immediate_session_scope() as session:
         seen, ref = _check_idempotency(session, idempotency_key, route, payload)
         if seen and ref == "CONFLICT":
             return problem(409, "Idempotency conflict",
@@ -103,6 +121,17 @@ def create_silence(
             created_by_redacted="operator",
             created_at=now,
         ))
+        if starts_at <= now:
+            from app.alerts.outbox import apply_silences_to_unsent
+            from app.alerts.silences import ActiveSilences
+
+            affected = apply_silences_to_unsent(
+                session,
+                ActiveSilences.from_matchers([
+                    (body.matcher_kind, body.matcher_value),
+                ]),
+                now=now,
+            )
         if idempotency_key:
             session.add(ApiIdempotencyRecord(
                 idempotency_key=idempotency_key, route=route,
@@ -113,7 +142,8 @@ def create_silence(
     log.info("alert_silence_created", silence_id=silence_id,
              matcher_kind=body.matcher_kind)
     response.status_code = 201
-    return {"silence_id": silence_id, "replayed": False}
+    return {"silence_id": silence_id, "replayed": False,
+            "outbox_effect": affected}
 
 
 @router.delete("/alerts/silences/{silence_id}", summary="End a silence early")
@@ -617,8 +647,10 @@ class ActionabilityRequest(BaseModel):
     episode_id: str = Field(min_length=1, max_length=32)
     delivery_id: str | None = Field(default=None, max_length=32)
     actionable: str = Field(pattern="^(YES|NO|AMBIGUOUS)$")
-    action_type: str | None = Field(default=None, max_length=64)
-    reason_code: str | None = Field(default=None, max_length=64)
+    action_type: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+    reason_code: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
     comment: str | None = Field(default=None, max_length=255)
 
 
@@ -636,7 +668,14 @@ def record_actionability(body: ActionabilityRequest, response: Response,
     from sqlalchemy import select
     from sqlalchemy.exc import IntegrityError, OperationalError
 
-    from app.alerts.models import AlertActionabilityReview, AlertEpisode
+    from app.alerts.budgets import BUDGETED_KINDS
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import (
+        AlertActionabilityReview,
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertEpisode,
+    )
 
     _no_store(response)
     now = datetime.now(UTC)
@@ -650,28 +689,46 @@ def record_actionability(body: ActionabilityRequest, response: Response,
                 # episode A's verdict to episode B's message — and the Stage 7
                 # comparison is precisely about which rendering earned the
                 # label, so cross-attributed evidence is worse than none.
-                from app.alerts.models import AlertDeliveryMember
-
                 carried = session.get(
                     AlertDeliveryMember, (body.delivery_id, body.episode_id))
-                if carried is None:
+                delivery = session.get(AlertDelivery, body.delivery_id)
+                if carried is None or delivery is None:
                     return problem(
                         409, "Delivery did not carry this episode",
                         f"delivery {body.delivery_id} has no member row for "
                         f"episode {body.episode_id}; a label must attach to the "
                         "message that actually carried the alert")
-            # One label per (episode, delivery). The KPI counts labels, so a
+                if delivery.delivery_kind not in BUDGETED_KINDS:
+                    return problem(
+                        409, "Delivery is not actionability-eligible",
+                        f"delivery kind {delivery.delivery_kind} is not a "
+                        "human-reviewed market alert")
+                if delivery.transport_status != TransportStatus.SENT:
+                    return problem(
+                        409, "Delivery was not confirmed sent",
+                        f"delivery {body.delivery_id} has status "
+                        f"{delivery.transport_status}; only confirmed SENT "
+                        "messages can receive an actionability outcome")
+                if carried.dropped_at is not None or not carried.delivered:
+                    return problem(
+                        409, "Episode was not delivered in this message",
+                        f"delivery {body.delivery_id} has no delivered member "
+                        f"for episode {body.episode_id}")
+            # One label per provider message, or per episode when no delivery
+            # is supplied. The KPI counts labels, so a
             # second contradictory one would double-count the same alert — and
             # silently replacing the first would erase evidence. Reviews are
             # append-only; a genuine change of mind is a conversation, not a
             # POST.
+            identity = (
+                AlertActionabilityReview.episode_id == body.episode_id
+                if body.delivery_id is None else
+                AlertActionabilityReview.delivery_id == body.delivery_id
+            )
+            if body.delivery_id is None:
+                identity = identity & AlertActionabilityReview.delivery_id.is_(None)
             existing = session.execute(
-                select(AlertActionabilityReview).where(
-                    AlertActionabilityReview.episode_id == body.episode_id,
-                    AlertActionabilityReview.delivery_id.is_(body.delivery_id)
-                    if body.delivery_id is None else
-                    AlertActionabilityReview.delivery_id == body.delivery_id,
-                )
+                select(AlertActionabilityReview).where(identity)
             ).scalars().first()
             if existing is not None:
                 return problem(
@@ -686,8 +743,10 @@ def record_actionability(body: ActionabilityRequest, response: Response,
                 episode_id=body.episode_id,
                 delivery_id=body.delivery_id,
                 actionable=body.actionable,
-                action_type=body.action_type,
-                reason_code=body.reason_code,
+                action_type=(sanitize(body.action_type, limit=64)
+                             if body.action_type else None),
+                reason_code=(sanitize(body.reason_code, limit=64)
+                             if body.reason_code else None),
                 reviewer_redacted="admin-api",
                 reviewed_at=now,
                 comment_redacted=sanitize(body.comment) if body.comment else None,
@@ -699,13 +758,15 @@ def record_actionability(body: ActionabilityRequest, response: Response,
         # having BEGIN IMMEDIATE. Re-read and return the winning append-only
         # evidence rather than leaking a commit error.
         with session_scope() as session:
+            identity = (
+                AlertActionabilityReview.episode_id == body.episode_id
+                if body.delivery_id is None else
+                AlertActionabilityReview.delivery_id == body.delivery_id
+            )
+            if body.delivery_id is None:
+                identity = identity & AlertActionabilityReview.delivery_id.is_(None)
             winner = session.execute(
-                select(AlertActionabilityReview).where(
-                    AlertActionabilityReview.episode_id == body.episode_id,
-                    AlertActionabilityReview.delivery_id.is_(body.delivery_id)
-                    if body.delivery_id is None else
-                    AlertActionabilityReview.delivery_id == body.delivery_id,
-                )
+                select(AlertActionabilityReview).where(identity)
             ).scalars().first()
         if winner is not None:
             return problem(

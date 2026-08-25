@@ -386,9 +386,20 @@ def build_parser() -> argparse.ArgumentParser:
     cutover_sub.add_parser("status", help="toggle state plus full preflight")
     cutover_sub.add_parser("preflight", help="every gate condition; exit 1 if unmet")
     for name in ("apply", "rollback"):
-        c = cutover_sub.add_parser(name, help=f"record an audited {name} decision")
+        c = cutover_sub.add_parser(
+            name, help=f"request an audited {name}; never claims the env changed")
         c.add_argument("--comment", required=True,
                        help="why; stored on the audit event")
+    for name, request_action in (
+        ("confirm", "cutover_apply_requested"),
+        ("confirm-rollback", "cutover_rollback_requested"),
+    ):
+        c = cutover_sub.add_parser(
+            name, help="confirm the requested deployment change after restart")
+        c.add_argument("--request-event", required=True,
+                       help=f"audit event id whose action is {request_action}")
+        c.add_argument("--comment", required=True,
+                       help="what deployment observation confirmed the change")
     cutover.set_defaults(func=cmd_cutover)
     watchdog = sub.add_parser("watchdog", help="check for missed recompute slots")
     watchdog.add_argument("--once", action="store_true", default=True)
@@ -442,10 +453,11 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_cutover(args: argparse.Namespace) -> int:
     """Stage 4 cutover operations: status, preflight, apply, rollback.
 
-    `apply` and `rollback` record audited operator decisions and print the
-    exact environment change; they do not perform it. The toggle is the
-    documented env var so a reversal survives an empty database, and so the
-    cutover cannot be something the app did to itself.
+    Apply and rollback are two-phase operations. The request records intent and
+    prints the exact environment change; confirmation runs only after restart,
+    observes the effective transport state, and then records completion. A CLI
+    command must never print ``applied=true`` for an environment change it did
+    not make and has not observed.
     """
     from app.alerts.cutover import preflight, record_decision
     from app.config import get_settings
@@ -457,6 +469,8 @@ def cmd_cutover(args: argparse.Namespace) -> int:
             report = preflight(session)
         print(json.dumps({
             "effective_daily_sms_enabled": settings.effective_daily_sms_enabled,
+            "daily_sms_enabled_explicit": settings.daily_sms_enabled,
+            "daily_digest_transport": settings.daily_digest_transport,
             "alerts_mode": settings.alerts_mode,
             "preflight": report.as_dict(),
         }, indent=2, sort_keys=True))
@@ -476,24 +490,91 @@ def cmd_cutover(args: argparse.Namespace) -> int:
                                   "unsatisfied": report.unsatisfied},
                                  indent=2, sort_keys=True))
                 return 1
-            event_id = record_decision(session, action="cutover_apply",
+            event_id = record_decision(session, action="cutover_apply_requested",
                                        comment=args.comment)
         print(json.dumps({
-            "applied": True, "audit_event": event_id,
+            "requested": True, "applied": False, "audit_event": event_id,
             "next_step": "set DAILY_SMS_ENABLED=false in the deployment "
-                         "environment and restart; rollback is unsetting it",
+                         "environment, restart, then run cutover confirm "
+                         f"--request-event {event_id!s}",
         }, indent=2, sort_keys=True))
         return 0
 
-    # rollback: always recordable — an operator reversing a cutover must not
-    # be gated on the health checks that prompted the reversal
+    if args.cutover_cmd == "confirm":
+        with session_scope() as session:
+            from app.alerts.models import AlertEvent
+
+            request = session.get(AlertEvent, args.request_event)
+            if request is None or request.action != "cutover_apply_requested":
+                print(json.dumps({
+                    "applied": False,
+                    "reason": "request event is absent or is not an apply request",
+                }, indent=2, sort_keys=True))
+                return 1
+            report = preflight(session, require_legacy_on=False)
+            observed = settings.daily_sms_enabled is False \
+                and settings.daily_digest_transport == "none"
+            if not observed or not report.ready:
+                print(json.dumps({
+                    "applied": False,
+                    "observed_explicit_toggle": settings.daily_sms_enabled,
+                    "observed_transport": settings.daily_digest_transport,
+                    "unsatisfied": report.unsatisfied,
+                }, indent=2, sort_keys=True))
+                return 1
+            event_id = record_decision(
+                session, action="cutover_apply_confirmed",
+                comment=f"request={args.request_event}; {args.comment}")
+        print(json.dumps({
+            "requested": True, "applied": True,
+            "request_event": args.request_event,
+            "confirmation_event": event_id,
+            "observed_transport": "none",
+        }, indent=2, sort_keys=True))
+        return 0
+
+    if args.cutover_cmd == "rollback":
+        # Always requestable — an operator reversing a cutover must not be
+        # gated on the health checks that prompted the reversal.
+        with session_scope() as session:
+            event_id = record_decision(
+                session, action="cutover_rollback_requested",
+                comment=args.comment)
+        print(json.dumps({
+            "requested": True, "rolled_back": False, "audit_event": event_id,
+            "next_step": "unset DAILY_SMS_ENABLED (or set it true), restart, "
+                         "then run cutover confirm-rollback "
+                         f"--request-event {event_id!s}",
+        }, indent=2, sort_keys=True))
+        return 0
+
+    # confirm-rollback: unlike the request, this is true only after the
+    # restarted process observes a configured legacy transport again.
     with session_scope() as session:
-        event_id = record_decision(session, action="cutover_rollback",
-                                   comment=args.comment)
+        from app.alerts.models import AlertEvent
+
+        request = session.get(AlertEvent, args.request_event)
+        if request is None or request.action != "cutover_rollback_requested":
+            print(json.dumps({
+                "rolled_back": False,
+                "reason": "request event is absent or is not a rollback request",
+            }, indent=2, sort_keys=True))
+            return 1
+        if settings.daily_digest_transport == "none":
+            print(json.dumps({
+                "rolled_back": False,
+                "observed_transport": "none",
+                "reason": "no configured legacy daily-digest transport is active",
+            }, indent=2, sort_keys=True))
+            return 1
+        event_id = record_decision(
+            session, action="cutover_rollback_confirmed",
+            comment=f"request={args.request_event}; {args.comment}")
     print(json.dumps({
-        "rolled_back": True, "audit_event": event_id,
-        "next_step": "unset DAILY_SMS_ENABLED (or set it true) and restart; "
-                     "the legacy schedule resumes with no data migration",
+        "requested": True, "rolled_back": True,
+        "request_event": args.request_event,
+        "confirmation_event": event_id,
+        "observed_transport": settings.daily_digest_transport,
     }, indent=2, sort_keys=True))
     return 0
 

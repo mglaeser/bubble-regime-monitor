@@ -53,8 +53,9 @@ from app.alerts.models import (
     AlertRuleState,
 )
 from app.alerts.planner import DeliveryIntent, DigestIntent, PlanResult
+from app.alerts.quiet_hours import release_time_for
 from app.alerts.repository import load_active_silences, utc_ms
-from app.alerts.silences import matches_silence
+from app.alerts.silences import ActiveSilences, matches_silence
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -286,6 +287,27 @@ def release_due_holds(
         if due_at is None or due_at > now:
             continue
 
+        if hold == PlanningState.HELD_QUIET:
+            # ``not_before`` records the next allowed boundary as observed at
+            # planning time; it is not a permanent permit to send at any later
+            # hour. A stopped worker can miss the whole daytime window and
+            # wake during a new quiet period. Re-evaluate against *now* before
+            # releasing, otherwise yesterday's 07:00 timestamp authorises a
+            # 23:00 provider call.
+            next_release = release_time_for(int(delivery.priority), now)
+            if next_release > now:
+                delivery.not_before = next_release
+                delivery.updated_at = now
+                _event(
+                    session,
+                    now,
+                    action="delivery_quiet_hold_advanced",
+                    delivery_id=delivery.delivery_id,
+                    detail=(f"missed allowed window; next release "
+                            f"{next_release.isoformat()}"),
+                )
+                continue
+
         delivery.planning_state = PlanningState.READY
         delivery.hold_reason_code = None
         delivery.budget_recheck_at = None
@@ -470,6 +492,92 @@ def revalidate_members(session: Session, delivery: AlertDelivery, *,
             continue
         live.append(member)
     return live
+
+
+def apply_silences_to_unsent(
+    session: Session,
+    active_silences: ActiveSilences,
+    *,
+    now: datetime,
+) -> dict[str, int]:
+    """Apply a newly-active silence to work already parked in the outbox.
+
+    Dispatch still revalidates every member. This eager sweep closes the much
+    longer timing gap for quiet/budget holds: an operator creating a silence
+    should not leave matching rows looking sendable until some future worker
+    happens to wake. A provider attempt already admitted as ``SENDING`` is
+    reported as in flight and is never rewritten as though the silence had
+    preceded it.
+    """
+    deliveries = session.execute(
+        select(AlertDelivery).where(
+            AlertDelivery.transport_status.in_([
+                TransportStatus.PENDING,
+                TransportStatus.RETRY_DUE,
+                TransportStatus.LEASED,
+                TransportStatus.SENDING,
+            ])
+        )
+    ).scalars().all()
+    result = {"members_dropped": 0, "deliveries_cancelled": 0, "in_flight": 0}
+
+    for delivery in deliveries:
+        members = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == delivery.delivery_id,
+                AlertDeliveryMember.dropped_at.is_(None),
+            )
+        ).scalars().all()
+        matched: list[AlertDeliveryMember] = []
+        for member in members:
+            origin_state = session.get(AlertRuleState, (
+                delivery.mode,
+                delivery.live_profile,
+                member.origin_rules_sha256,
+                member.instance_fingerprint,
+            ))
+            if matches_silence(
+                active_silences,
+                instance_fingerprint=member.instance_fingerprint,
+                rule_id=member.rule_id,
+                bucket=origin_state.bucket if origin_state is not None else None,
+            ):
+                matched.append(member)
+
+        if not matched:
+            continue
+        if delivery.transport_status == TransportStatus.SENDING \
+                or delivery.request_started_at is not None:
+            # The attempt was admitted before this silence transaction won the
+            # single-writer reservation. It may already be on the wire; do not
+            # falsify member-delivery evidence by retroactively dropping it.
+            result["in_flight"] += 1
+            continue
+
+        for member in matched:
+            member.dropped_at = now
+            member.drop_reason = "SILENCED_BEFORE_SEND"
+            result["members_dropped"] += 1
+            _event(
+                session,
+                now,
+                action="delivery_member_silenced_before_send",
+                delivery_id=delivery.delivery_id,
+                detail=f"episode_id={member.episode_id}; applied at silence creation",
+            )
+
+        remaining = session.execute(
+            select(func.count()).select_from(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == delivery.delivery_id,
+                AlertDeliveryMember.dropped_at.is_(None),
+            )
+        ).scalar_one()
+        if remaining == 0 and delivery.delivery_kind not in (
+                DeliveryKind.DIGEST, DeliveryKind.TEST):
+            cancel(session, delivery, now=now, reason="ALL_MEMBERS_SILENCED")
+            result["deliveries_cancelled"] += 1
+
+    return result
 
 
 def _budget_usage(

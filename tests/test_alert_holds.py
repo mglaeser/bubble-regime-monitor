@@ -75,6 +75,39 @@ def test_quiet_hold_releases_at_berlin_boundary():
         assert "delivery_hold_released" in actions
 
 
+def test_missed_quiet_release_is_advanced_instead_of_sending_at_night():
+    """A stale 07:00 release timestamp is not a permanent send permit.
+
+    If the worker was down through the daytime window and wakes after 22:00
+    Berlin, the delivery must remain held until the *next* allowed window.
+    Releasing solely because yesterday's ``not_before`` is in the past turns a
+    durable quiet-hours control into a one-shot timer.
+    """
+    from app.alerts.outbox import release_due_holds
+
+    delivery_id = _held_market_delivery(PlanningState.HELD_QUIET)
+    after_close = datetime(2026, 8, 24, 21, 0, tzinfo=UTC)  # 23:00 Berlin
+
+    with session_scope() as session:
+        released = release_due_holds(
+            session, mode="shadow", live_profile="default", now=after_close)
+        delivery = session.get(AlertDelivery, delivery_id)
+        actions = session.execute(
+            select(AlertEvent.action).where(AlertEvent.delivery_id == delivery_id)
+        ).scalars().all()
+
+        assert released == {"quiet": 0, "budget": 0}
+        assert delivery is not None
+        assert delivery.planning_state == PlanningState.HELD_QUIET
+        assert delivery.hold_reason_code == "quiet_hours"
+        release_at = delivery.not_before
+        assert release_at is not None
+        if release_at.tzinfo is None:
+            release_at = release_at.replace(tzinfo=UTC)
+        assert release_at == datetime(2026, 8, 25, 5, 0, tzinfo=UTC)
+        assert "delivery_quiet_hold_advanced" in actions
+
+
 def test_new_budget_hold_persists_a_bounded_next_check():
     from app.alerts.outbox import _insert_delivery
     from app.alerts.planner import DeliveryIntent

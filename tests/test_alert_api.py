@@ -708,6 +708,141 @@ def test_a_review_cannot_attribute_another_deliverys_verdict(client):
     assert "no member row" in response.json()["detail"]
 
 
+def test_actionability_refuses_a_message_that_was_never_confirmed_sent(client):
+    """A queued render has no human actionability outcome yet."""
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertDelivery, AlertEpisode
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_delivery_for_episode
+
+    episode_id = seed_delivery_for_episode()
+    with session_scope() as session:
+        delivery_id = session.execute(
+            select(AlertDelivery.delivery_id)).scalar_one()
+        assert session.get(AlertEpisode, episode_id) is not None
+
+    response = client.post(
+        "/api/v1/admin/alerts/actionability",
+        headers={"X-API-Key": TEST_ADMIN_KEY},
+        json={"episode_id": episode_id, "delivery_id": delivery_id,
+              "actionable": "YES"},
+    )
+    assert response.status_code == 409
+    assert "SENT" in response.json()["detail"]
+
+
+def test_actionability_refuses_a_member_dropped_before_send(client):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.alerts.enums import PlanningState, TransportStatus
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_delivery_for_episode
+
+    episode_id = seed_delivery_for_episode()
+    with session_scope() as session:
+        delivery = session.execute(select(AlertDelivery)).scalars().one()
+        member = session.get(AlertDeliveryMember, (delivery.delivery_id, episode_id))
+        assert member is not None
+        now = datetime.now(UTC)
+        delivery.transport_status = TransportStatus.SENT
+        delivery.planning_state = PlanningState.NONE
+        delivery.sent_at = now
+        member.dropped_at = now
+        member.drop_reason = "SILENCED_BEFORE_SEND"
+        delivery_id = delivery.delivery_id
+
+    response = client.post(
+        "/api/v1/admin/alerts/actionability",
+        headers={"X-API-Key": TEST_ADMIN_KEY},
+        json={"episode_id": episode_id, "delivery_id": delivery_id,
+              "actionable": "NO"},
+    )
+    assert response.status_code == 409
+    assert "delivered member" in response.json()["detail"]
+
+
+def test_a_bundle_delivery_accepts_only_one_actionability_label(client):
+    """One provider message is one human-labelled alert, even when bundled."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.alerts.enums import DeliveryKind, EpisodeStatus, PlanningState, TransportStatus
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEpisode
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_delivery_for_episode
+
+    first_episode_id = seed_delivery_for_episode()
+    with session_scope() as session:
+        first = session.get(AlertEpisode, first_episode_id)
+        delivery = session.execute(select(AlertDelivery)).scalars().one()
+        first_member = session.get(
+            AlertDeliveryMember, (delivery.delivery_id, first_episode_id))
+        assert first is not None and first_member is not None
+        second_episode_id = "episode-actionability-bundle"
+        second = AlertEpisode(
+            episode_id=second_episode_id,
+            mode=first.mode,
+            live_profile=first.live_profile,
+            origin_rules_sha256=first.origin_rules_sha256,
+            instance_fingerprint="a" * 64,
+            rule_id="tripwire.rf4_first",
+            labels={},
+            priority=first.priority,
+            episode_status=EpisodeStatus.FIRING,
+            is_open=True,
+            suppression_reasons=[],
+            opened_at=first.opened_at,
+            activated_at=first.activated_at,
+            trigger_input_identity=first.trigger_input_identity,
+            created_evaluation_id=first.created_evaluation_id,
+            last_evaluation_id=first.last_evaluation_id,
+        )
+        session.add(second)
+        session.flush()
+        session.add(AlertDeliveryMember(
+            delivery_id=delivery.delivery_id,
+            episode_id=second_episode_id,
+            rule_id=second.rule_id,
+            instance_fingerprint=second.instance_fingerprint,
+            member_role="BUNDLED",
+            notification_generation=1,
+            origin_rules_sha256=second.origin_rules_sha256,
+            origin_phrase_set_version=first_member.origin_phrase_set_version,
+            origin_phrase_set_sha256=first_member.origin_phrase_set_sha256,
+            included_at=first_member.included_at,
+            delivered=True,
+        ))
+        now = datetime.now(UTC)
+        delivery.delivery_kind = DeliveryKind.BUNDLE
+        delivery.transport_status = TransportStatus.SENT
+        delivery.planning_state = PlanningState.NONE
+        delivery.sent_at = now
+        first_member.delivered = True
+        delivery_id = delivery.delivery_id
+
+    first_response = client.post(
+        "/api/v1/admin/alerts/actionability",
+        headers={"X-API-Key": TEST_ADMIN_KEY},
+        json={"episode_id": first_episode_id, "delivery_id": delivery_id,
+              "actionable": "YES"},
+    )
+    second_response = client.post(
+        "/api/v1/admin/alerts/actionability",
+        headers={"X-API-Key": TEST_ADMIN_KEY},
+        json={"episode_id": second_episode_id, "delivery_id": delivery_id,
+              "actionable": "NO"},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 409
+    assert second_response.json()["review_id"] == first_response.json()["review_id"]
+
+
 def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
     from datetime import UTC, datetime
 

@@ -27,6 +27,15 @@ pytestmark = pytest.mark.usefixtures("isolated_db")
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
 
+def _last_json_object(output: str):
+    """Parse the CLI payload after any configured stdout log records."""
+    import json
+
+    marker = output.rfind("\n{")
+    start = marker + 1 if marker >= 0 else output.find("{")
+    return json.loads(output[start:])
+
+
 def test_a_fresh_deployment_fails_every_observational_gate():
     """Nothing observed means nothing to cut over to — and each miss is named."""
     with session_scope() as session:
@@ -86,7 +95,8 @@ def test_ready_requires_an_empty_unsatisfied_list():
     assert report.ready is False
 
 
-def _live_sent(session, *, sent_at, status=None, kind=None):
+def _live_sent(session, *, sent_at, status=None, kind=None,
+               profile="default", window_key=None):
     from app.alerts.artifacts import load_active, register
     from app.alerts.canonical import new_ulid
     from app.alerts.enums import (
@@ -104,9 +114,10 @@ def _live_sent(session, *, sent_at, status=None, kind=None):
     session.add(AlertDelivery(
         delivery_id=delivery_id, dedupe_key=f"v1|CUT|{delivery_id}",
         dedupe_version=1, manual_retry_sequence=0, mode="live",
-        live_profile="default",
+        live_profile=profile,
         planning_rules_sha256=artifacts.ruleset.rules_sha256,
         delivery_kind=kind or DeliveryKind.INITIAL, priority=Priority.P2,
+        scheduled_window_key=window_key,
         transport_status=status or TransportStatus.SENT,
         planning_state=PlanningState.NONE, not_before=sent_at,
         created_at=sent_at, updated_at=sent_at, attempts=1,
@@ -125,6 +136,15 @@ def test_one_recent_delivery_is_not_two_stable_weeks():
 
     assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
         "a single delivery sent yesterday satisfied the two-week gate")
+
+
+def test_one_ancient_delivery_with_no_recent_market_activity_is_not_stable():
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(days=90))
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
+        "an ancient send plus two silent weeks was treated as observed stability")
 
 
 def test_a_terminal_failure_inside_the_window_breaks_stability():
@@ -151,6 +171,49 @@ def test_an_old_digest_does_not_satisfy_the_recent_digest_gate():
 
     assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
         "digests from months ago satisfied the gate for next Monday's channel")
+
+
+def test_digest_retries_count_once_per_closed_weekly_window():
+    from app.alerts.enums import DeliveryKind
+
+    with session_scope() as session:
+        for hours in (1, 2):
+            _live_sent(
+                session,
+                sent_at=NOW - timedelta(days=1, hours=hours),
+                kind=DeliveryKind.DIGEST,
+                window_key="2026-W34",
+            )
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
+        "two delivery rows for one weekly window were counted as two digests")
+
+
+def test_only_the_two_immediately_closed_digest_windows_satisfy_cutover():
+    from app.alerts.enums import DeliveryKind
+
+    with session_scope() as session:
+        # Both are recent enough for the old rolling lookback, but W32 is not
+        # one of the two consecutive windows immediately preceding NOW.
+        for window, days in (("2026-W32", 15), ("2026-W34", 1)):
+            _live_sent(session, sent_at=NOW - timedelta(days=days),
+                       kind=DeliveryKind.DIGEST, window_key=window)
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("weekly_digests") for u in report.unsatisfied)
+
+
+def test_exact_two_closed_digest_windows_are_accounted_once_each():
+    from app.alerts.enums import DeliveryKind
+
+    with session_scope() as session:
+        for window, days in (("2026-W33", 8), ("2026-W34", 1)):
+            _live_sent(session, sent_at=NOW - timedelta(days=days),
+                       kind=DeliveryKind.DIGEST, window_key=window)
+        report = preflight(session, now=NOW)
+
+    assert any(s.startswith("weekly_digests") for s in report.satisfied)
 
 
 def test_a_future_heartbeat_is_a_clock_fault_not_health():
@@ -198,6 +261,36 @@ def test_a_fresh_unknown_blocks_cutover_whatever_its_age():
         "an hour-old UNKNOWN passed the gate that exists for exactly it")
 
 
+def test_unknown_from_another_profile_or_test_probe_does_not_poison_live_gate():
+    from app.alerts.enums import DeliveryKind, TransportStatus
+
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(hours=1),
+                   status=TransportStatus.UNKNOWN, profile="canary")
+        _live_sent(session, sent_at=NOW - timedelta(hours=1),
+                   status=TransportStatus.UNKNOWN, kind=DeliveryKind.TEST)
+        report = preflight(session, now=NOW)
+
+    assert any(s.startswith("unknowns_reconciled") for s in report.satisfied)
+
+
+def test_heartbeat_must_belong_to_the_live_namespace_and_be_healthy():
+    from app.alerts.models import AlertComponentHeartbeat
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="dispatcher",
+            last_heartbeat_at=NOW - timedelta(minutes=5),
+            status="critical",
+            detail_json={"mode": "shadow", "live_profile": "default"},
+        ))
+        report = preflight(session, now=NOW)
+
+    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_dispatcher")]
+    assert faults
+    assert "namespace" in faults[0] or "critical" in faults[0]
+
+
 def test_the_audit_comment_is_sanitized_before_persistence():
     from sqlalchemy import select
 
@@ -216,3 +309,84 @@ def test_the_audit_comment_is_sanitized_before_persistence():
 
     assert "hunter2" not in row.detail_redacted
     assert "abc123def456ghi" not in row.detail_redacted
+
+
+def test_cutover_apply_is_a_request_until_restarted_state_is_observed(
+        monkeypatch, capsys):
+    """The CLI must not claim it changed a deployment environment."""
+    import argparse
+    from sqlalchemy import select
+
+    import app.alerts.cutover as cutover_module
+    from app.alerts.cli import cmd_cutover
+    from app.alerts.models import AlertEvent
+    from app.config import get_settings
+
+    monkeypatch.setattr(
+        cutover_module,
+        "preflight",
+        lambda _session, **_kwargs: CutoverPreflight(
+            satisfied=["all_observed: test fixture"], unsatisfied=[]),
+    )
+
+    requested = cmd_cutover(argparse.Namespace(
+        cutover_cmd="apply", comment="observed soak complete"))
+    output = capsys.readouterr().out
+    request_body = _last_json_object(output)
+    assert requested == 0
+    assert request_body["requested"] is True
+    assert request_body["applied"] is False
+    request_event = request_body["audit_event"]
+
+    # Same process before restart: the documented toggle is not yet observed.
+    refused = cmd_cutover(argparse.Namespace(
+        cutover_cmd="confirm", request_event=request_event,
+        comment="premature confirmation"))
+    output = capsys.readouterr().out
+    refused_body = _last_json_object(output)
+    assert refused == 1 and refused_body["applied"] is False
+
+    # Simulate the operator's deployment edit + restart, then confirmation can
+    # truthfully close the request.
+    monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+    get_settings.cache_clear()
+    confirmed = cmd_cutover(argparse.Namespace(
+        cutover_cmd="confirm", request_event=request_event,
+        comment="restarted service reports no legacy transport"))
+    output = capsys.readouterr().out
+    confirmation_body = _last_json_object(output)
+    assert confirmed == 0
+    assert confirmation_body["applied"] is True
+    assert confirmation_body["observed_transport"] == "none"
+
+    with session_scope() as session:
+        actions = session.execute(
+            select(AlertEvent.action).where(
+                AlertEvent.action.like("cutover_apply_%"))
+            .order_by(AlertEvent.occurred_at)
+        ).scalars().all()
+    assert actions == ["cutover_apply_requested", "cutover_apply_confirmed"]
+    get_settings.cache_clear()
+
+
+def test_cutover_rollback_is_also_two_phase(monkeypatch, capsys):
+    import argparse
+    from app.alerts.cli import cmd_cutover
+    from app.config import get_settings
+
+    monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+    get_settings.cache_clear()
+    assert cmd_cutover(argparse.Namespace(
+        cutover_cmd="rollback", comment="delivery health regressed")) == 0
+    output = capsys.readouterr().out
+    request = _last_json_object(output)
+    assert request["requested"] is True
+    assert request["rolled_back"] is False
+
+    assert cmd_cutover(argparse.Namespace(
+        cutover_cmd="confirm-rollback", request_event=request["audit_event"],
+        comment="not restarted yet")) == 1
+    output = capsys.readouterr().out
+    refused = _last_json_object(output)
+    assert refused["rolled_back"] is False
+    get_settings.cache_clear()

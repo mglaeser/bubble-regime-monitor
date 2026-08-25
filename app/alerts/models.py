@@ -758,10 +758,15 @@ class AlertActionabilityReview(Base):
         # duplicate check is a race, and the race's loser must become a
         # constraint violation, not a second label. Two partial indexes
         # because SQLite treats NULLs as distinct in a plain unique index.
-        Index("uq_alert_actionability_episode_delivery", "episode_id", "delivery_id",
+        Index("uq_alert_actionability_delivery", "delivery_id",
               unique=True, sqlite_where=text("delivery_id IS NOT NULL")),
         Index("uq_alert_actionability_episode_memberless", "episode_id",
               unique=True, sqlite_where=text("delivery_id IS NULL")),
+        # Stage-7 aggregates slice by decision and review time. Without these,
+        # the evidence query becomes a full 800-day metadata scan precisely
+        # when the operator is deciding whether the model path is beneficial.
+        Index("ix_alert_actionability_reviewed_at", "reviewed_at"),
+        Index("ix_alert_actionability_value_reviewed_at", "actionable", "reviewed_at"),
         CheckConstraint("actionable IN ('YES','NO','AMBIGUOUS')",
                         name="ck_alert_actionability_value"),
     )

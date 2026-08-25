@@ -251,6 +251,72 @@ def test_bundle_silence_drops_only_matching_member():
         assert second_member is not None and second_member.dropped_at is None
 
 
+def test_active_silence_eagerly_cancels_a_parked_delivery():
+    """Creating a silence updates durable holds immediately.
+
+    The dispatch-time check remains the final backstop, but an indefinitely
+    parked quiet/budget row must not continue to advertise itself as future
+    sendable work after the operator has silenced it.
+    """
+    from app.alerts.outbox import apply_silences_to_unsent
+    from app.alerts.silences import ActiveSilences
+
+    delivery_id, episode_id = _queued_delivery()
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        delivery.priority = 2
+        delivery.planning_state = PlanningState.HELD_QUIET
+        delivery.hold_reason_code = "quiet_hours"
+        delivery.not_before = NOW + timedelta(hours=12)
+
+        effect = apply_silences_to_unsent(
+            session,
+            ActiveSilences.from_matchers([
+                (SilenceMatcherKind.RULE_ID, RULE_ID),
+            ]),
+            now=NOW,
+        )
+
+        member = session.get(AlertDeliveryMember, (delivery_id, episode_id))
+        assert effect == {
+            "members_dropped": 1,
+            "deliveries_cancelled": 1,
+            "in_flight": 0,
+        }
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "ALL_MEMBERS_SILENCED"
+        assert member is not None
+        assert member.drop_reason == "SILENCED_BEFORE_SEND"
+
+
+def test_silence_sweep_reports_but_does_not_rewrite_in_flight_evidence():
+    from app.alerts.outbox import apply_silences_to_unsent
+    from app.alerts.silences import ActiveSilences
+
+    delivery_id, episode_id = _queued_delivery()
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        delivery.transport_status = TransportStatus.SENDING
+        delivery.request_started_at = NOW
+
+        effect = apply_silences_to_unsent(
+            session,
+            ActiveSilences.from_matchers([(SilenceMatcherKind.ALL, "*")]),
+            now=NOW,
+        )
+
+        member = session.get(AlertDeliveryMember, (delivery_id, episode_id))
+        assert effect == {
+            "members_dropped": 0,
+            "deliveries_cancelled": 0,
+            "in_flight": 1,
+        }
+        assert member is not None and member.dropped_at is None
+        assert delivery.transport_status == TransportStatus.SENDING
+
+
 def test_silence_does_not_resolve_condition_or_episode():
     _delivery_id, episode_id = _queued_delivery()
     _persist_silence(SilenceMatcherKind.ALL, "*")

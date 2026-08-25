@@ -488,7 +488,7 @@ def dispatch_once(
                 "live delivery withheld: the ruleset's active stage is not "
                 "backed by its gate evidence")
             log.error("alert_live_admission_refused", blockers=blockers)
-            _heartbeat(report)
+            _heartbeat(report, mode=mode, live_profile=live_profile)
             return report
 
     if sender is None:
@@ -541,7 +541,7 @@ def dispatch_once(
                  live_profile=live_profile, sender=sender, now=now, settings=settings,
                  report=report)
 
-    _heartbeat(report)
+    _heartbeat(report, mode=mode, live_profile=live_profile)
     return report
 
 
@@ -780,10 +780,17 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             report.failed += 1
 
 
-def _heartbeat(report: DispatchReport) -> None:
+def _heartbeat(report: DispatchReport, *, mode: str,
+               live_profile: str) -> None:
     try:
         from app.jobs.alert_recovery import heartbeat
 
-        heartbeat(COMPONENT, "critical" if report.unknown else "ok", report.as_dict())
+        heartbeat(
+            COMPONENT,
+            "critical" if report.unknown else "ok",
+            report.as_dict(),
+            mode=mode,
+            live_profile=live_profile,
+        )
     except Exception as exc:
         log.warning("alert_dispatcher_heartbeat_failed", error=sanitize(exc))
