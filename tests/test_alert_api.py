@@ -1404,13 +1404,22 @@ def test_manual_retry_refuses_bytes_after_a_new_silence(client):
     from app.alerts.models import AlertDelivery, AlertDeliveryMember
     from app.db import session_scope
 
-    original_id, fingerprint = _unknown_member_delivery()
+    original_id, _fingerprint = _unknown_member_delivery()
+    with session_scope() as session:
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == original_id
+            )
+        ).scalar_one()
+        rule_id = member.rule_id
+        assert member.dropped_at is None
+
     created = client.post(
         "/api/v1/alerts/silences",
         headers={"X-API-Key": WRITE_KEY},
         json={
-            "matcher_kind": "INSTANCE_FINGERPRINT",
-            "matcher_value": fingerprint,
+            "matcher_kind": "RULE_ID",
+            "matcher_value": rule_id,
             "duration_seconds": 3600,
             "comment": "withdraw this ambiguous member before retry",
         },
