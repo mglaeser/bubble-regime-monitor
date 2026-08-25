@@ -154,6 +154,85 @@ def test_fresh_db_migrates_and_stamps(tmp_path):
     c.close()
 
 
+def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
+    """The database guard matches the runtime and mandate 21.3 exactly."""
+    from app.db_migrate import upgrade_to_head
+
+    db = str(tmp_path / "member-guard.db")
+    _run_with_db(db, upgrade_to_head)
+    connection = sqlite3.connect(db)
+    timestamp = "2026-08-25 00:00:00+00:00"
+
+    def add_delivery(delivery_id: str, kind: str) -> None:
+        connection.execute(
+            """
+            INSERT INTO alert_delivery (
+                delivery_id, dedupe_key, dedupe_version,
+                manual_retry_sequence, mode, live_profile,
+                planning_rules_sha256, delivery_kind, priority,
+                transport_status, planning_state, created_at, updated_at,
+                attempts, blocks_replanning, duplicate_risk_acknowledged,
+                recipient_ref
+            ) VALUES (?, ?, 1, 0, 'shadow', 'default', ?, ?, 3,
+                      'PENDING', 'READY', ?, ?, 0, 0, 0, 'default')
+            """,
+            (delivery_id, delivery_id, "r" * 64, kind, timestamp, timestamp),
+        )
+
+    add_delivery("01M0MEMBERGUARDTEST0000000", "TEST")
+    connection.execute(
+        "UPDATE alert_delivery SET transport_status='SENDING' WHERE delivery_id=?",
+        ("01M0MEMBERGUARDTEST0000000",),
+    )
+
+    add_delivery("01M0MEMBERGUARDEMPTY000000", "DIGEST")
+    with pytest.raises(sqlite3.IntegrityError, match="represented member"):
+        connection.execute(
+            "UPDATE alert_delivery SET transport_status='SENDING' WHERE delivery_id=?",
+            ("01M0MEMBERGUARDEMPTY000000",),
+        )
+
+    represented = "01M0MEMBERGUARDRESOLVED000"
+    add_delivery(represented, "DIGEST")
+    connection.execute(
+        """
+        INSERT INTO alert_delivery_member (
+            delivery_id, episode_id, rule_id, instance_fingerprint,
+            member_role, notification_generation, origin_rules_sha256,
+            origin_phrase_set_version, origin_phrase_set_sha256,
+            included_at, dropped_at, drop_reason, delivered
+        ) VALUES (?, 'episode-resolved', 'rule', ?, 'SUMMARY', 1, ?,
+                  'v3.4', ?, ?, ?, 'RESOLVED_BEFORE_SEND', 0)
+        """,
+        (represented, "f" * 64, "r" * 64, "p" * 64, timestamp, timestamp),
+    )
+    connection.execute(
+        "UPDATE alert_delivery SET transport_status='SENDING' WHERE delivery_id=?",
+        (represented,),
+    )
+
+    silenced = "01M0MEMBERGUARDSILENCED000"
+    add_delivery(silenced, "DIGEST")
+    connection.execute(
+        """
+        INSERT INTO alert_delivery_member (
+            delivery_id, episode_id, rule_id, instance_fingerprint,
+            member_role, notification_generation, origin_rules_sha256,
+            origin_phrase_set_version, origin_phrase_set_sha256,
+            included_at, dropped_at, drop_reason, delivered
+        ) VALUES (?, 'episode-silenced', 'rule', ?, 'SUMMARY', 1, ?,
+                  'v3.4', ?, ?, ?, 'SILENCED_BEFORE_SEND', 0)
+        """,
+        (silenced, "e" * 64, "r" * 64, "p" * 64, timestamp, timestamp),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="represented member"):
+        connection.execute(
+            "UPDATE alert_delivery SET transport_status='SENDING' WHERE delivery_id=?",
+            (silenced,),
+        )
+    connection.close()
+
+
 def test_migrations_match_models(tmp_path):
     # Alembic upgrade head must reproduce create_all's schema exactly, so
     # Alembic can be the single source of truth for boot + deploy.
@@ -258,6 +337,8 @@ def test_alert_admin_atomicity_indexes_exist_in_create_all_and_alembic(tmp_path)
             "alert_actionability_review", ("reviewed_at",), 0, 0),
         "ix_alert_actionability_value_reviewed_at": (
             "alert_actionability_review", ("actionable", "reviewed_at"), 0, 0),
+        "uq_alert_render_delivery": (
+            "alert_render", ("delivery_id",), 1, 0),
     }
     for path in (migrated, created):
         schema = _schema(path)["indexes"]
@@ -309,7 +390,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     _run_with_db(db, _cycle)
     connection = sqlite3.connect(db)
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0015",)
+        "select version_num from alembic_version").fetchone() == ("0016",)
     connection.close()
 
 
@@ -445,6 +526,68 @@ def test_actionability_migration_refuses_duplicate_delivery_evidence(tmp_path):
             "select version_num from alembic_version").fetchone() == ("0014",)
         assert connection.execute(
             "select count(*) from alert_actionability_review").fetchone() == (2,)
+        connection.close()
+
+    _run_with_db(db, _seed_and_refuse)
+
+
+def test_render_integrity_migration_refuses_competing_final_renders(tmp_path):
+    """Append-only render evidence is never resolved by timestamp ordering."""
+    db = str(tmp_path / "render-duplicates.db")
+
+    def _seed_and_refuse():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0015")
+        connection = sqlite3.connect(db)
+        delivery_id = "01M0RENDERDELIVERY000000000"
+        timestamp = "2026-08-25 00:00:00+00:00"
+        connection.execute(
+            """
+            INSERT INTO alert_delivery (
+                delivery_id, dedupe_key, dedupe_version,
+                manual_retry_sequence, mode, live_profile,
+                planning_rules_sha256, delivery_kind, priority,
+                transport_status, planning_state, created_at, updated_at,
+                attempts, blocks_replanning, duplicate_risk_acknowledged,
+                recipient_ref
+            ) VALUES (?, ?, 1, 0, 'shadow', 'default', ?, 'TEST', 2,
+                      'PENDING', 'READY', ?, ?, 0, 0, 0, 'default')
+            """,
+            (delivery_id, "r" * 64, "p" * 64, timestamp, timestamp),
+        )
+        connection.executemany(
+            """
+            INSERT INTO alert_render (
+                render_id, delivery_id, render_source,
+                planning_phrase_set_version, planning_phrase_set_sha256,
+                render_context_hash, fact_catalog_hash,
+                selected_fact_ids, selected_phrase_codes, validation_results,
+                final_message, gsm7_septets, created_at
+            ) VALUES (?, ?, 'template_full', 'v3.4', ?, ?, ?, '[]', '[]', '{}',
+                      ?, 10, ?)
+            """,
+            [
+                ("01M0RENDERFIRST00000000000", delivery_id, "a" * 64,
+                 "b" * 64, "c" * 64, "first body", timestamp),
+                ("01M0RENDERSECOND0000000000", delivery_id, "a" * 64,
+                 "d" * 64, "e" * 64, "second body", timestamp),
+            ],
+        )
+        connection.commit()
+        connection.close()
+
+        with pytest.raises(RuntimeError, match="reconcile them explicitly"):
+            command.upgrade(cfg, "0016")
+
+        connection = sqlite3.connect(db)
+        assert connection.execute(
+            "select version_num from alembic_version").fetchone() == ("0015",)
+        assert connection.execute(
+            "select count(*) from alert_render").fetchone() == (2,)
         connection.close()
 
     _run_with_db(db, _seed_and_refuse)

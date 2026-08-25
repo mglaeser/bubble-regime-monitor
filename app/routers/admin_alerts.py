@@ -470,6 +470,7 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
     from app.alerts.enums import (
         DeliveryKind,
         DigestItemStatus,
+        EpisodeStatus,
         PlanningState,
         TransportStatus,
     )
@@ -477,11 +478,15 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
         AlertDelivery,
         AlertDeliveryMember,
         AlertDigestItem,
+        AlertEpisode,
         AlertEvent,
         AlertRender,
+        AlertRuleState,
     )
     from app.alerts.outbox import reconcile_unknown_for_manual_retry
     from app.alerts.planner import MemberIntent, dedupe_key
+    from app.alerts.repository import load_active_silences
+    from app.alerts.silences import matches_silence
 
     _no_store(response)
     if not idempotency_key:
@@ -521,11 +526,20 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
                         f"{original.transport_status}. Definite failures are "
                         "retried automatically and successes need nothing.")
 
-                source_render = session.execute(
+                source_renders = session.execute(
                     sa_select(AlertRender).where(
                         AlertRender.delivery_id == original.delivery_id,
-                    ).order_by(AlertRender.created_at.desc()).limit(1)
-                ).scalars().first()
+                    ).limit(2)
+                ).scalars().all()
+                if len(source_renders) > 1:
+                    return problem(
+                        409,
+                        "Competing final renders",
+                        "the UNKNOWN delivery has more than one immutable "
+                        "render; reconcile that integrity fault explicitly "
+                        "rather than choosing retry bytes by timestamp",
+                    )
+                source_render = source_renders[0] if source_renders else None
                 if (source_render is None or source_render.body_redacted_at is not None
                         or not source_render.final_message):
                     return problem(
@@ -559,12 +573,87 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
                     )
                 next_sequence = highest + 1
 
-                rows = session.execute(
+                all_rows = session.execute(
                     sa_select(AlertDeliveryMember).where(
                         AlertDeliveryMember.delivery_id == original.delivery_id,
-                        AlertDeliveryMember.dropped_at.is_(None),
                     ).order_by(AlertDeliveryMember.included_at)
                 ).scalars().all()
+                if original.delivery_kind == DeliveryKind.DIGEST:
+                    persisted_candidates = [
+                        member for member in all_rows
+                        if member.drop_reason != "SILENCED_BEFORE_SEND"
+                    ]
+                else:
+                    persisted_candidates = [
+                        member for member in all_rows
+                        if member.dropped_at is None
+                    ]
+
+                # UNKNOWN rows are historical wire evidence and are not
+                # rewritten by the eager silence sweep.  Authorization must
+                # therefore read current episode/silence state without
+                # mutating that history; comparing only persisted dropped_at
+                # markers would briefly authorize stale bytes and leave the
+                # child dispatcher to cancel them after the ancestor's blocker
+                # had already been reconciled.
+                active_silences = load_active_silences(session, now=now)
+                rows = []
+                for member in persisted_candidates:
+                    episode = session.get(AlertEpisode, member.episode_id)
+                    if episode is None:
+                        continue
+                    if original.delivery_kind != DeliveryKind.DIGEST and (
+                        not episode.is_open
+                        or episode.episode_status == EpisodeStatus.RESOLVED
+                    ):
+                        continue
+                    origin_state = session.get(AlertRuleState, (
+                        original.mode,
+                        original.live_profile,
+                        member.origin_rules_sha256,
+                        member.instance_fingerprint,
+                    ))
+                    if matches_silence(
+                        active_silences,
+                        instance_fingerprint=member.instance_fingerprint,
+                        rule_id=member.rule_id,
+                        bucket=(origin_state.bucket
+                                if origin_state is not None else None),
+                    ):
+                        continue
+                    rows.append(member)
+
+                # Exact-byte retry and wire-time membership revalidation must
+                # agree.  If a represented member was resolved/silenced after
+                # the UNKNOWN attempt, dropping it while cloning the old body
+                # would send stale prose (or a stale digest count); retaining
+                # it would bypass the withdrawal.  There is no safe automatic
+                # choice, so leave the UNKNOWN blocker in place for explicit
+                # reconciliation rather than authorising a child that can only
+                # be cancelled later.
+                if original.delivery_kind != DeliveryKind.TEST:
+                    raw_represented = (
+                        source_render.validation_results or {}
+                    ).get("represented_member_ids")
+                    surviving = {member.episode_id for member in rows}
+                    represented_values = [
+                        value for value in raw_represented
+                        if isinstance(value, str)
+                    ] if isinstance(raw_represented, list) else []
+                    represented = set(represented_values)
+                    malformed_represented = not isinstance(
+                        raw_represented, list
+                    ) or len(represented_values) != len(raw_represented) \
+                        or len(represented) != len(represented_values)
+                    if malformed_represented or represented != surviving:
+                        return problem(
+                            409,
+                            "Rendered membership changed",
+                            "the exact UNKNOWN render no longer represents "
+                            "the members eligible for retry; stale prose may "
+                            "not be sent and the immutable render may not be "
+                            "replaced",
+                        )
                 members = [MemberIntent(
                     episode_id=member.episode_id,
                     rule_id=member.rule_id,

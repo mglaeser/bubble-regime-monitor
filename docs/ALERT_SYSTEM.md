@@ -433,7 +433,8 @@ refuses to use it in production.
 | 6 | EWMA / CUSUM | intentionally absent until immutable calibration and out-of-sample evidence exist |
 | 7 | P3 enrichment and LLM A/B review | P3 inventory, code-only selector and actionability evidence trail are implemented; the selector is not invoked by the production dispatcher and retention depends on future A/B evidence |
 
-The weekly digest is a real scheduler job, including quiet-week proof-of-life,
+The weekly digest is a real scheduler job, with quiet-week liveness recorded by
+its durable component heartbeat,
 missed-window recovery and digest-item outcome reconciliation. Actionability is
 a real append-only admin workflow, and Stage-5 bundling is exercised by the
 planner, renderer and concurrency tests. Watchdog, dispatcher, digest,
@@ -605,25 +606,21 @@ never the one in progress. One delivery per window, identified by the window
 key itself, so a retried job, a restarted scheduler and a manual run all
 converge on the same single message rather than three.
 
-**A quiet week still sends.** This is the part that is easy to get wrong. If
-the digest only went out when something had happened, then after cutover an
-operator receiving nothing could not distinguish
-
-  * a genuinely quiet week, from
-  * a scheduler that died on Tuesday.
-
-The daily message used to make that distinction for free, by accident. The
-digest has to make it on purpose, so a week with no events sends
-`Wochenrueckblick: keine Ereignisse.` — the proof-of-life the old cadence
-provided without anyone designing it.
+**A quiet week records a heartbeat, not a provider intent.** The scheduler must
+still distinguish a genuinely quiet week from a digest job that died, but the
+mandate also makes `TEST` the only delivery kind allowed zero members. The
+durable `digest` component heartbeat is therefore the proof-of-life and health
+turns a stale/missing heartbeat critical. No empty `DIGEST` row is fabricated,
+and an event arriving late can still use that window because no dedupe key was
+burned. The reviewed `DIGEST_QUIET` template remains deterministically
+validated, but it is not authority to bypass the member invariant.
 
 Two consequences worth knowing:
 
-* A memberless digest is the one legitimate memberless market delivery. Both
-  the dispatcher and the `alert_delivery_requires_member` trigger (migration
-  0010) exempt `DIGEST` for exactly this reason; every other kind with no live
-  members is still aborted at the database rather than sent as an empty
-  message.
+* Every digest that reaches the provider has at least one represented episode
+  member. A resolved episode remains valid retrospective evidence; a silenced
+  member does not. The dispatcher and the `alert_delivery_requires_member`
+  trigger independently enforce this, while only `TEST` may carry zero rows.
 * The digest reports a **count**, not a sample. One SMS is 160 septets and a
   week of events does not fit; a message quietly containing the first three of
   twelve would be lying about the other nine. The episodes are on record as
@@ -660,8 +657,11 @@ The HTTP operator actions are admin-scoped and `no-store`:
   retry automatically, successes need nothing. Authorization keeps the
   ancestor's immutable transport status `UNKNOWN` but retires its open-blocker
   fields and notification-memory pointer in the same transaction. The pending
-  child reserves that exact generation; if it also becomes UNKNOWN, it becomes
-  the sole unresolved chain tip.
+   child reserves that exact generation; if it also becomes UNKNOWN, it becomes
+   the sole unresolved chain tip. Authorization also revalidates current
+   episode and silence eligibility without rewriting the historical UNKNOWN
+   row; if the frozen bytes no longer represent exactly what may be sent, it
+   returns 409 and leaves the original blocker intact.
 * **`POST /api/v1/admin/alerts/actionability`** — one human label per confirmed-SENT
   provider message (or per episode when no delivery is supplied), the Stage 7
   evidence. Dropped/undelivered members, TEST and DIGEST messages are refused;

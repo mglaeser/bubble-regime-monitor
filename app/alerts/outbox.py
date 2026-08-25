@@ -938,14 +938,14 @@ def validated_represented_member_ids(
 ) -> frozenset[str]:
     """The member ids immutable render evidence actually represents.
 
-    Never trust ids that are absent from the delivery, and never infer bundle
-    representation from transport success.  DIGEST is the one count-based
-    format whose reviewed body represents every surviving item by definition;
-    ordinary market bundles must carry the renderer's explicit ledger.
+    Never trust ids that are absent from the delivery, and never infer member
+    representation from transport success.  A DIGEST is count-based, but the
+    frozen count still needs an explicit member ledger or membership changes
+    cannot be detected on retry.
     """
     existing = frozenset(str(value) for value in member_ids)
-    if str(delivery_kind) == DeliveryKind.DIGEST:
-        return existing
+    if str(delivery_kind) == DeliveryKind.TEST and not existing:
+        return frozenset()
     raw = (validation or {}).get("represented_member_ids")
     if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
         return frozenset()
@@ -957,12 +957,19 @@ def _represented_for_sent(
     delivery: AlertDelivery,
     members: Collection[AlertDeliveryMember],
 ) -> frozenset[str]:
-    render = session.execute(
+    renders = session.execute(
         select(AlertRender)
         .where(AlertRender.delivery_id == delivery.delivery_id)
-        .order_by(AlertRender.created_at.desc(), AlertRender.render_id.desc())
-        .limit(1)
-    ).scalars().first()
+        .limit(2)
+    ).scalars().all()
+    if len(renders) > 1:
+        log.error(
+            "alert_competing_final_renders",
+            delivery_id=delivery.delivery_id,
+            render_count=len(renders),
+        )
+        return frozenset()
+    render = renders[0] if renders else None
     return validated_represented_member_ids(
         delivery_kind=delivery.delivery_kind,
         member_ids=[member.episode_id for member in members],
@@ -1180,6 +1187,19 @@ def mark_render_failed(session: Session, delivery: AlertDelivery, *, now: dateti
 
 def cancel(session: Session, delivery: AlertDelivery, *, now: datetime,
            reason: str) -> None:
+    # A cancelled digest provider intent definitely did not complete.  Keep a
+    # silenced item's more specific CANCELLED evidence, but move every
+    # unaffected PLANNED survivor to FAILED so plan_digest can carry it into a
+    # later window.  Leaving those rows PLANNED and attached to a terminal
+    # delivery strands them forever: neither the old intent nor the candidate
+    # query can advance them.
+    _set_digest_item_outcome(
+        session,
+        delivery,
+        status=DigestItemStatus.FAILED,
+        now=now,
+        error_code=reason,
+    )
     delivery.transport_status = TransportStatus.CANCELLED
     delivery.planning_state = PlanningState.NONE
     delivery.cancel_reason = reason

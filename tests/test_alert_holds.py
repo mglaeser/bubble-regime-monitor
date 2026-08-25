@@ -10,7 +10,12 @@ from sqlalchemy import select
 from app.alerts.budgets import BudgetLimits, BudgetUsage, check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
-from app.alerts.models import AlertDelivery, AlertEvent, AlertRender
+from app.alerts.models import (
+    AlertDelivery,
+    AlertDeliveryMember,
+    AlertEvent,
+    AlertRender,
+)
 from app.alerts.repository import utc_ms
 from app.alerts.sender import NullSender
 from app.db import session_scope
@@ -28,6 +33,7 @@ def _held_market_delivery(state: PlanningState, *, due: bool = True) -> str:
     )
     with session_scope() as session:
         delivery = session.execute(select(AlertDelivery)).scalars().one()
+        member = session.execute(select(AlertDeliveryMember)).scalars().one()
         delivery.priority = 2
         # This helper carries a pre-existing immutable render: model it as a
         # real automatic retry, not as a legacy pre-wire stale-render row.
@@ -54,7 +60,11 @@ def _held_market_delivery(state: PlanningState, *, due: bool = True) -> str:
             fact_catalog_hash="f" * 64,
             selected_fact_ids=[],
             selected_phrase_codes=[],
-            validation_results={"gsm7": True, "fits_single_sms": True},
+            validation_results={
+                "gsm7": True,
+                "fits_single_sms": True,
+                "represented_member_ids": [member.episode_id],
+            },
             final_message="Regime: de-risk. Naechste Pruefung nach Neuberechnung.",
             gsm7_septets=58,
             created_at=NOW - timedelta(minutes=1),
@@ -252,9 +262,36 @@ def _budget_check_must_not_run(*args, **kwargs):
 
 def test_digest_bypasses_non_p1_market_cap(monkeypatch):
     import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.digest import plan_digest
     from app.alerts.dispatcher import dispatch_once
+    from tests.test_alert_digest import (
+        WINDOW,
+        _pending_item,
+        _provenance,
+        _registered,
+    )
 
-    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.DIGEST)
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        delivery_id = plan.delivery_id
+        from app.alerts.artifacts import load_active
+
+        phrase_set = load_active(session).phrase_set
     monkeypatch.setattr(dispatcher_module, "check_budget", _budget_check_must_not_run)
     sender = NullSender()
     report = dispatch_once(
@@ -490,8 +527,8 @@ def _persist_test_render(delivery_id: str, phrase_set, body: str) -> None:
         ))
 
 
-def test_preexisting_unattempted_render_is_replaced_before_send():
-    """Repair rows committed by the old render-before-admission ordering."""
+def test_preexisting_unattempted_final_render_is_authoritative():
+    """Attempt count cannot turn one final render into two competing rows."""
     from app.alerts.dispatcher import dispatch_once
 
     delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
@@ -504,14 +541,61 @@ def test_preexisting_unattempted_render_is_replaced_before_send():
     )
 
     assert report.sent == 1
-    assert sender.sent[0][1] == phrase_set.headlines["TEST_MESSAGE"].text
+    assert sender.sent[0][1] == "Stale pre-admission body."
     with session_scope() as session:
         renders = session.execute(
             select(AlertRender).where(AlertRender.delivery_id == delivery_id)
-            .order_by(AlertRender.created_at)
         ).scalars().all()
-        assert len(renders) == 2
-        assert renders[-1].final_message == phrase_set.headlines["TEST_MESSAGE"].text
+        assert len(renders) == 1
+        assert renders[0].final_message == "Stale pre-admission body."
+
+
+def test_competing_legacy_renders_fail_closed_without_ordering_them():
+    """A pre-0016 integrity fault cannot become a timestamp-selected send."""
+    from sqlalchemy import text
+
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.gsm7 import septets
+    from app.alerts.render_context import RenderContext
+
+    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    _persist_test_render(delivery_id, phrase_set, "First immutable body.")
+    context = RenderContext(members=[])
+    with session_scope() as session:
+        # Reproduce the only database shape migration 0016 explicitly refuses.
+        session.execute(text("DROP INDEX uq_alert_render_delivery"))
+        session.add(AlertRender(
+            render_id=new_ulid(utc_ms(NOW) + 1),
+            delivery_id=delivery_id,
+            render_source="template_full",
+            planning_phrase_set_version=phrase_set.version,
+            planning_phrase_set_sha256=phrase_set.sha256,
+            render_context_hash=context.context_hash(),
+            fact_catalog_hash=context.fact_catalog_hash(),
+            selected_fact_ids=[],
+            selected_phrase_codes=["TEST_MESSAGE"],
+            validation_results={"represented_member_ids": []},
+            final_message="Second immutable body.",
+            gsm7_septets=septets("Second immutable body."),
+            created_at=NOW,
+        ))
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert report.render_failed == 1
+    assert sender.sent == []
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery.transport_status == TransportStatus.RENDER_FAILED
+        assert "competing final renders" in delivery.last_error_message_redacted
 
 
 def test_real_automatic_retry_reuses_its_original_render():

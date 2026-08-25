@@ -12,10 +12,11 @@ obvious implementation gets it wrong:
    replanned for the same window without an operator, because the message may
    already have arrived.
 
-2. A quiet week still sends. Silence is what a broken system produces too, and
-   after cutover this is the only scheduled message the operator receives — so
-   "nothing fired this week" is the proof-of-life that the daily digest used to
-   provide by accident.
+2. TEST is the sole memberless delivery kind.  A quiet run records the digest
+   heartbeat but creates no provider intent; otherwise an empty DIGEST would
+   violate the same member guard that protects every market delivery.  The
+   reviewed quiet template remains available, but liveness evidence is not a
+   fabricated episode.
 
 3. The digest is reported in user load but does NOT count against the non-P1
    budget (mandate 9.2). It is a scheduled summary, not an interruption.
@@ -49,6 +50,7 @@ from app.alerts.models import (
     AlertDeliveryMember,
     AlertDigestItem,
     AlertEpisode,
+    AlertRender,
     AlertRulesetRegistry,
 )
 from app.alerts.phrase_registry import JOIN
@@ -89,9 +91,23 @@ def digest_dedupe_key(*, mode: str, live_profile: str, window_key: str) -> str:
 
 
 
-#: Transport states in which a digest has definitely not reached the wire, so
-#: its contents may still change.
-_UNSENT = (TransportStatus.PENDING, TransportStatus.RETRY_DUE)
+def _may_absorb_late_items(session: Session, delivery: AlertDelivery) -> bool:
+    """Whether membership is still mutable for this provider intent.
+
+    A final render freezes the exact represented members even before the first
+    provider attempt.  A definite provider rejection permits an automatic
+    retry of those same bytes; it does not reopen membership.  Only a pristine
+    pending row with no attempt and no render can safely absorb late evidence.
+    """
+    if delivery.transport_status != TransportStatus.PENDING \
+            or delivery.attempts != 0:
+        return False
+    render_exists = session.execute(
+        select(AlertRender.render_id).where(
+            AlertRender.delivery_id == delivery.delivery_id
+        ).limit(1)
+    ).scalar_one_or_none()
+    return render_exists is None
 
 
 def _pending_items(session: Session, *, mode: str, live_profile: str,
@@ -217,7 +233,7 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         # While the digest is still UNSENT it can simply take them, which is
         # both correct and what the operator expects: the message has not gone
         # anywhere, and it is supposed to describe the whole week.
-        if existing.transport_status in _UNSENT:
+        if _may_absorb_late_items(session, existing):
             plan.item_ids = _absorb(session, existing, mode=mode,
                                     live_profile=live_profile, window=window,
                                     now=now)
@@ -225,12 +241,17 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
                 f"already planned; absorbed {len(plan.item_ids)} late item(s)"
                 if plan.item_ids else "already planned for this window")
             return plan
-        # Already on the wire or past it. Absorbing now would claim the message
-        # said something it did not, so the items stay PENDING and are counted
-        # as stranded rather than quietly folded in.
+        # A render or provider attempt freezes this intent. Absorbing now would
+        # either mutate immutable prose or claim the message represented an
+        # item it did not. Keep the item PENDING so a later window can carry it,
+        # and make the deferral explicit rather than silently folding it in.
         plan.stranded = _count_pending(session, mode=mode,
                                        live_profile=live_profile, window=window)
-        plan.skipped_reason = "already sent for this window"
+        plan.skipped_reason = (
+            "already sent for this window"
+            if existing.transport_status == TransportStatus.SENT
+            else "existing digest intent is frozen for this window"
+        )
         if plan.stranded:
             log.warning("alert_digest_items_stranded", window=window,
                         count=plan.stranded)
@@ -289,6 +310,18 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         log.info("alert_digest_carried_forward", window=window,
                  count=len(carried),
                  from_windows=sorted({i.digest_window_key for i in carried}))
+
+    # Mandate 21.3 is structural: TEST is the ONLY delivery kind permitted to
+    # have zero alert_delivery_member rows.  The digest heartbeat is the
+    # durable proof that this scheduled job ran; a quiet provider intent would
+    # invent a memberless market delivery and could falsely satisfy cutover's
+    # successful-digest evidence gate.  Do not burn the window key: if a late
+    # item arrives, a later run can still create the real memberful digest.
+    if not items:
+        plan.quiet = True
+        plan.skipped_reason = "no digest items for this window"
+        log.info("alert_digest_quiet", window=window)
+        return plan
 
     # CHECK-THEN-INSERT is a race. Two runs of the job — a scheduler restart
     # overlapping a manual trigger, two workers — can both find no delivery for
@@ -360,9 +393,6 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         item.still_active_summary = episode.is_open
         plan.item_ids.append(item.digest_item_id)
 
-    # A QUIET WEEK STILL SENDS. After Stage 4 this is the only scheduled
-    # message the operator gets, so "nothing fired" is the proof that the
-    # machinery is alive — the job the daily digest was doing by accident.
     try:
         session.flush()
         savepoint.commit()
@@ -381,10 +411,7 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         plan.skipped_reason = "another run planned this window first"
         return plan
 
-    # A digest with no members is the one legitimate memberless market
-    # delivery, and it is marked so the dispatcher does not cancel it as
-    # "all members resolved".
-    plan.quiet = not items
+    plan.quiet = False
     plan.delivery_id = delivery_id
     log.info("alert_digest_planned", window=window, items=len(items),
              quiet=plan.quiet, delivery_id=delivery_id)

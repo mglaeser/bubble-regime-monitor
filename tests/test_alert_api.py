@@ -113,11 +113,12 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert str(payload["sqlite"]["journal_mode"]).lower() == "wal"
     assert payload["sqlite"]["returning"]["insert"] is True
     assert payload["sqlite"]["returning"]["update"] is True
-    assert payload["schema"]["revision"] == "0015"
+    assert payload["schema"]["revision"] == "0016"
     assert payload["schema"]["quick_check"] == "ok"
     assert payload["schema"]["foreign_key_violations"] == 0
     assert payload["schema"]["missing_required_triggers"] == []
     assert payload["schema"]["missing_required_partial_indexes"] == []
+    assert payload["schema"]["missing_required_unique_indexes"] == []
     assert payload["schema"]["alert_schema_integrity"] == "ok"
     assert payload["inputs"]["missing_sidecars"] == 0
     assert "latest_duration_ms" in payload["evaluations"]
@@ -177,6 +178,22 @@ def test_health_fails_closed_when_a_required_partial_index_is_missing(client):
     assert payload["schema"]["alert_schema_integrity"] == "critical"
     assert "uq_alert_episode_open" in \
         payload["schema"]["missing_required_partial_indexes"]
+
+
+def test_health_fails_closed_when_render_authority_is_missing(client):
+    from sqlalchemy import text
+
+    from app.db import session_scope
+
+    with session_scope() as session:
+        session.execute(text("DROP INDEX uq_alert_render_delivery"))
+
+    payload = client.get(
+        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    assert payload["status"] == "critical"
+    assert payload["schema"]["alert_schema_integrity"] == "critical"
+    assert payload["schema"]["missing_required_unique_indexes"] \
+        == ["uq_alert_render_delivery"]
 
 
 def test_health_computes_p1_enqueue_to_attempt_latency(client):
@@ -1340,6 +1357,95 @@ def _unknown_member_delivery() -> tuple[str, str]:
         return delivery.delivery_id, member.instance_fingerprint
 
 
+def test_manual_retry_refuses_bytes_after_the_member_resolves(client):
+    """Authorization revalidates current truth without rewriting UNKNOWN."""
+    from sqlalchemy import func, select
+
+    from app.alerts.enums import EpisodeStatus, TransportStatus
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEpisode
+    from app.db import session_scope
+
+    original_id, _fingerprint = _unknown_member_delivery()
+    with session_scope() as session:
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == original_id
+            )
+        ).scalar_one()
+        episode = session.get(AlertEpisode, member.episode_id)
+        assert episode is not None
+        episode.is_open = False
+        episode.episode_status = EpisodeStatus.RESOLVED
+
+    response = client.post(
+        f"/api/v1/admin/alerts/deliveries/{original_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY,
+                 "Idempotency-Key": "retry-after-resolution"},
+        json={"comment": "do not send stale resolved prose",
+              "acknowledge_duplicate_risk": True},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["title"] == "Rendered membership changed"
+
+    with session_scope() as session:
+        original = session.get(AlertDelivery, original_id)
+        assert original.transport_status == TransportStatus.UNKNOWN
+        assert original.blocks_replanning is True
+        assert session.execute(
+            select(func.count()).select_from(AlertDelivery)
+        ).scalar_one() == 1
+
+
+def test_manual_retry_refuses_bytes_after_a_new_silence(client):
+    """UNKNOWN members are not eagerly mutated, so retry must check silence."""
+    from sqlalchemy import func, select
+
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember
+    from app.db import session_scope
+
+    original_id, fingerprint = _unknown_member_delivery()
+    created = client.post(
+        "/api/v1/alerts/silences",
+        headers={"X-API-Key": WRITE_KEY},
+        json={
+            "matcher_kind": "INSTANCE_FINGERPRINT",
+            "matcher_value": fingerprint,
+            "duration_seconds": 3600,
+            "comment": "withdraw this ambiguous member before retry",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    # The UNKNOWN record remains exact historical evidence; the silence route
+    # does not retroactively mark its member as though it preceded the attempt.
+    with session_scope() as session:
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == original_id
+            )
+        ).scalar_one()
+        assert member.dropped_at is None
+
+    response = client.post(
+        f"/api/v1/admin/alerts/deliveries/{original_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY,
+                 "Idempotency-Key": "retry-after-silence"},
+        json={"comment": "do not bypass the new silence",
+              "acknowledge_duplicate_risk": True},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["title"] == "Rendered membership changed"
+
+    with session_scope() as session:
+        original = session.get(AlertDelivery, original_id)
+        assert original.transport_status == TransportStatus.UNKNOWN
+        assert original.blocks_replanning is True
+        assert session.execute(
+            select(func.count()).select_from(AlertDelivery)
+        ).scalar_one() == 1
+
+
 def test_manual_retry_reconciles_only_its_unknown_ancestor(client):
     """Operator action retires history; the child protects the generation."""
     from sqlalchemy import func, select
@@ -1722,7 +1828,7 @@ def test_a_bundle_delivery_accepts_only_one_actionability_label(client):
     assert second_response.json()["review_id"] == first_response.json()["review_id"]
 
 
-def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
+def test_manual_retry_refuses_frozen_digest_after_membership_changes(client):
     from datetime import UTC, datetime
 
     from sqlalchemy import select
@@ -1735,7 +1841,6 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
         AlertDigestItem,
         AlertRender,
     )
-    from app.alerts.planner import MemberIntent, dedupe_key
     from app.db import session_scope
     from tests.test_alert_digest import (
         WINDOW,
@@ -1765,6 +1870,7 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
         original = session.get(AlertDelivery, original_id)
         original.transport_status = TransportStatus.UNKNOWN
         original.attempts = 1
+        original.blocks_replanning = True
         source_members = session.execute(
             select(AlertDeliveryMember).where(
                 AlertDeliveryMember.delivery_id == original_id)
@@ -1773,9 +1879,8 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
         assert len(source_members) == 2
         source_members[0].dropped_at = now
         source_members[0].drop_reason = "SILENCED_BEFORE_SEND"
-        survivor = source_members[1]
         dropped_episode_id = source_members[0].episode_id
-        survivor_episode_id = survivor.episode_id
+        survivor_episode_id = source_members[1].episode_id
         digest_items = session.execute(
             select(AlertDigestItem).where(
                 AlertDigestItem.delivery_id == original_id)
@@ -1783,25 +1888,15 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
         by_episode = {item.episode_id: item for item in digest_items}
         by_episode[source_members[0].episode_id].status = DigestItemStatus.CANCELLED
         by_episode[source_members[0].episode_id].last_error_code = "SILENCED"
-        by_episode[survivor.episode_id].status = DigestItemStatus.UNKNOWN
-        by_episode[survivor.episode_id].last_error_code = "AMBIGUOUS"
-        expected_key = dedupe_key(
-            delivery_kind=original.delivery_kind,
-            members=[MemberIntent(
-                episode_id=survivor.episode_id,
-                rule_id=survivor.rule_id,
-                instance_fingerprint=survivor.instance_fingerprint,
-                member_role=survivor.member_role,
-                notification_generation=survivor.notification_generation,
-                origin_rules_sha256=survivor.origin_rules_sha256,
-                origin_phrase_set_version=survivor.origin_phrase_set_version,
-                origin_phrase_set_sha256=survivor.origin_phrase_set_sha256,
-                priority=original.priority,
-            )],
-            scheduled_window_key=WINDOW,
-            manual_retry_sequence=1,
-        )
-        _seed_render(session, original_id, body="Exact digest bytes.")
+        by_episode[survivor_episode_id].status = DigestItemStatus.UNKNOWN
+        by_episode[survivor_episode_id].last_error_code = "AMBIGUOUS"
+        render_id = _seed_render(session, original_id, body="Exact digest bytes.")
+        source_render = session.get(AlertRender, render_id)
+        source_render.validation_results = {
+            "represented_member_ids": [
+                member.episode_id for member in source_members
+            ],
+        }
 
     response = client.post(
         f"/api/v1/admin/alerts/deliveries/{original_id}/retry",
@@ -1810,23 +1905,16 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
         json={"comment": "retry only what may have been sent",
               "acknowledge_duplicate_risk": True},
     )
-    assert response.status_code == 200, response.text
-    retry_id = response.json()["delivery_id"]
+    assert response.status_code == 409, response.text
+    assert response.json()["title"] == "Rendered membership changed"
 
     with session_scope() as session:
-        retry = session.get(AlertDelivery, retry_id)
-        copied = session.execute(select(AlertDeliveryMember).where(
-            AlertDeliveryMember.delivery_id == retry_id)
-        ).scalars().all()
-        copied_render = session.execute(select(AlertRender).where(
-            AlertRender.delivery_id == retry_id)
-        ).scalar_one()
-        assert retry.dedupe_key == expected_key
-        assert retry.scheduled_window_key == WINDOW
-        assert [member.episode_id for member in copied] == [survivor_episode_id]
-        assert copied[0].dropped_at is None
-        assert copied_render.final_message == "Exact digest bytes."
-        moved_item = session.execute(
+        deliveries = session.execute(select(AlertDelivery)).scalars().all()
+        assert [delivery.delivery_id for delivery in deliveries] == [original_id]
+        original = session.get(AlertDelivery, original_id)
+        assert original.transport_status == TransportStatus.UNKNOWN
+        assert original.blocks_replanning is True
+        survivor_item = session.execute(
             select(AlertDigestItem).where(
                 AlertDigestItem.episode_id == survivor_episode_id)
         ).scalar_one()
@@ -1834,9 +1922,9 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
             select(AlertDigestItem).where(
                 AlertDigestItem.episode_id == dropped_episode_id)
         ).scalar_one()
-        assert moved_item.delivery_id == retry_id
-        assert moved_item.status == DigestItemStatus.PLANNED
-        assert moved_item.last_error_code is None
+        assert survivor_item.delivery_id == original_id
+        assert survivor_item.status == DigestItemStatus.UNKNOWN
+        assert survivor_item.last_error_code == "AMBIGUOUS"
         assert cancelled_item.delivery_id == original_id
         assert cancelled_item.status == DigestItemStatus.CANCELLED
 

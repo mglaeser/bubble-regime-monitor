@@ -516,13 +516,16 @@ _DIGEST_MAX_SILENCE_S = 8 * 24 * 60 * 60
 #: is called a fault rather than noise.
 _CLOCK_SKEW_TOLERANCE_S = 60
 
-_ALERT_SCHEMA_REVISION = "0015"
+_ALERT_SCHEMA_REVISION = "0016"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
     "uq_alert_delivery_manual_retry_root_sequence",
     "uq_alert_actionability_delivery",
     "uq_alert_actionability_episode_memberless",
+})
+_REQUIRED_UNIQUE_INDEXES = frozenset({
+    "uq_alert_render_delivery",
 })
 
 
@@ -642,9 +645,18 @@ def health_projection(
         and isinstance(row["sql"], str)
         and " WHERE " in str(row["sql"]).upper()
     }
+    unique_index_names = {
+        str(row["name"])
+        for row in schema_objects
+        if row["type"] == "index"
+        and isinstance(row["sql"], str)
+        and str(row["sql"]).upper().startswith("CREATE UNIQUE INDEX")
+    }
     missing_required_triggers = sorted(required_triggers - trigger_names)
     missing_required_partial_indexes = sorted(
         _REQUIRED_PARTIAL_INDEXES - partial_index_names)
+    missing_required_unique_indexes = sorted(
+        _REQUIRED_UNIQUE_INDEXES - unique_index_names)
 
     from app.alerts.models import AlertComponentHeartbeat, AlertDigestItem
 
@@ -883,6 +895,10 @@ def health_projection(
         schema_faults.append(
             "missing required partial index(es): "
             + ", ".join(missing_required_partial_indexes))
+    if missing_required_unique_indexes:
+        schema_faults.append(
+            "missing required unique index(es): "
+            + ", ".join(missing_required_unique_indexes))
     schema_fault = bool(schema_faults)
     conditions.extend(f"database: {fault}" for fault in schema_faults)
     if missing_sidecars:
@@ -1085,6 +1101,8 @@ def health_projection(
             "missing_required_triggers": missing_required_triggers,
             "required_partial_indexes": sorted(_REQUIRED_PARTIAL_INDEXES),
             "missing_required_partial_indexes": missing_required_partial_indexes,
+            "required_unique_indexes": sorted(_REQUIRED_UNIQUE_INDEXES),
+            "missing_required_unique_indexes": missing_required_unique_indexes,
             "alert_schema_integrity": "critical" if schema_fault else "ok",
         },
         "llm": {

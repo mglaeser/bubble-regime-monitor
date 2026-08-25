@@ -2,9 +2,9 @@
 
 Scheduled, not triggered by a recompute. The digest summarises a WINDOW, so it
 has to run when the window closes rather than when something happens — and
-after Stage 4 it is the only scheduled message the operator receives, which is
-why it also carries a heartbeat: a digest job that stops running must show up
-as a dead component rather than as a quiet week.
+after Stage 4 its heartbeat is the scheduled proof that the operator must be
+able to distinguish from a quiet market.  A quiet run emits that durable
+heartbeat but no memberless provider intent; TEST is the sole zero-member kind.
 """
 
 from __future__ import annotations
@@ -47,9 +47,9 @@ def run_once(*, now: datetime | None = None,
     # window would summarise a few hours and then never mention the rest.
     # CATCH UP, do not just do today. The scheduler's misfire grace is finite,
     # so a host down across Monday morning drops the trigger entirely — and the
-    # week it would have summarised is gone with no trace, which for the one
-    # message that always goes out is the failure mode this whole feature
-    # exists to remove.
+    # week it would have summarised is gone with no trace.  The heartbeat makes
+    # a quiet current run visible; actual items make missed historical windows
+    # recoverable.
     #
     # Planning is idempotent through the window key, so re-offering windows
     # that already have a delivery costs one query each and changes nothing.
@@ -79,9 +79,9 @@ def run_once(*, now: datetime | None = None,
             # was arbitrary: four weeks stranded anything older, and any number
             # I picked would have been a guess about how long an outage lasts.
             #
-            # The just-closed window is always included even with no items,
-            # because a quiet week still sends: after Stage 4 that message is
-            # the proof the scheduler is alive.
+            # The just-closed window is always evaluated even with no items so
+            # the heartbeat records an explicit quiet decision. plan_digest
+            # creates no delivery in that case: TEST alone may be memberless.
             # NAMESPACED, like the digest itself. `AlertDigestItem` carries no
             # mode or profile — those live on the episode — so an unqualified
             # DISTINCT lets a shadow job discover windows that only ever had
@@ -112,12 +112,11 @@ def run_once(*, now: datetime | None = None,
             # fills and trains the operator to ignore the one channel Stage 4
             # leaves them.
             #
-            # The proof-of-life argument is about the CURRENT run, not about
-            # history. This run sends the just-closed window's digest, which is
-            # itself the proof the scheduler is alive again, and every window
-            # that actually held events is recovered with its contents. A week
-            # in which nothing happened, reported three weeks late, carries no
-            # information that the resumed cadence does not already carry.
+            # Liveness is about the CURRENT heartbeat, not historical empty
+            # provider intents. Every window that actually held events is
+            # recovered with its contents; a week in which nothing happened,
+            # reported three weeks late, carries no information that the
+            # resumed heartbeat does not already carry.
 
         for target in targets:
             plans.append(plan_digest(

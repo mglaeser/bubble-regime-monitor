@@ -310,7 +310,6 @@ def test_digest_reported_in_user_load_but_not_market_cap():
             status=TransportStatus.SENT,
             planning_state=PlanningState.NONE,
             kind=DeliveryKind.DIGEST,
-            memberless=True,
             sent_at=NOW - timedelta(hours=1),
         )
         session.flush()

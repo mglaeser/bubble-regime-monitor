@@ -653,7 +653,7 @@ class AlertRender(Base):
 
     render_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
     delivery_id: Mapped[str] = mapped_column(
-        ForeignKey("alert_delivery.delivery_id"), nullable=False, index=True)
+        ForeignKey("alert_delivery.delivery_id"), nullable=False)
     render_source: Mapped[str] = mapped_column(String(24), nullable=False)
     fallback_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -677,6 +677,11 @@ class AlertRender(Base):
 
     __table_args__ = (
         CheckConstraint("gsm7_septets BETWEEN 0 AND 160", name="ck_alert_render_septets"),
+        # A delivery row is one provider intent. Automatic attempts reuse its
+        # one final render; a manual retry is a new delivery and therefore gets
+        # its own row. Database authority removes timestamp/ULID ordering as a
+        # hidden supersession mechanism.
+        Index("uq_alert_render_delivery", "delivery_id", unique=True),
     )
 
 
@@ -853,22 +858,28 @@ END
 """,
     ),
     (
-        # A market/watchdog/bundle delivery that reaches the wire with no
-        # member would be an SMS about nothing. TEST and DIGEST are the
-        # exemptions: a quiet week's digest is a message ABOUT the absence,
-        # and after Stage 4 it is the only proof the scheduler still runs.
+        # TEST is the sole zero-member kind (mandate 21.3). A retrospective
+        # DIGEST may represent a resolved episode, so its row can be dropped
+        # from the live set while remaining part of the weekly count; a
+        # silenced member is never representation authority.
         "alert_delivery_requires_member",
         """
 CREATE TRIGGER IF NOT EXISTS alert_delivery_requires_member
 BEFORE UPDATE OF transport_status ON alert_delivery
 WHEN NEW.transport_status = 'SENDING'
-  AND NEW.delivery_kind NOT IN ('TEST', 'DIGEST')
+  AND NEW.delivery_kind <> 'TEST'
   AND NOT EXISTS (
       SELECT 1 FROM alert_delivery_member m
-      WHERE m.delivery_id = NEW.delivery_id AND m.dropped_at IS NULL
+      WHERE m.delivery_id = NEW.delivery_id
+        AND (
+          (NEW.delivery_kind = 'DIGEST'
+           AND COALESCE(m.drop_reason, '') <> 'SILENCED_BEFORE_SEND')
+          OR
+          (NEW.delivery_kind <> 'DIGEST' AND m.dropped_at IS NULL)
+        )
   )
 BEGIN
-    SELECT RAISE(ABORT, 'a non-TEST delivery must carry at least one live member');
+    SELECT RAISE(ABORT, 'a non-TEST delivery must carry a represented member');
 END
 """,
     ),

@@ -145,9 +145,9 @@ def start() -> BackgroundScheduler:
         # The WEEKLY digest, Monday morning Berlin, summarising the window that
         # closed on Sunday. Inside quiet hours [07:00, 22:00) deliberately: it
         # is a scheduled summary and must not arrive at 03:00 just because the
-        # scheduler was free. Its own heartbeat, because after Stage 4 this is
-        # the only scheduled message the operator gets — a digest job that
-        # stopped running must read as a dead component, not as a quiet week.
+        # scheduler was free. Its own heartbeat is the proof of a quiet run:
+        # a digest job that stopped running must read as a dead component, not
+        # as permission to create a memberless provider intent.
         _scheduler.add_job(_alert_digest_job,
                            CronTrigger(day_of_week="mon", hour=8, minute=30,
                                        timezone="Europe/Berlin"),

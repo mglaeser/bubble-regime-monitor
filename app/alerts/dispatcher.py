@@ -39,7 +39,6 @@ from app.alerts.enums import (
     DeliveryKind,
     Priority,
     RenderSource,
-    TransportStatus,
 )
 from app.alerts.errors import RenderRejected, sanitize
 from app.alerts.models import (
@@ -128,10 +127,15 @@ def _owner() -> str:
 
 
 def _existing_render(session: Session, delivery_id: str) -> AlertRender | None:
-    return session.execute(
+    rows = session.execute(
         select(AlertRender).where(AlertRender.delivery_id == delivery_id)
-        .order_by(AlertRender.created_at.desc(), AlertRender.render_id.desc()).limit(1)
-    ).scalars().first()
+        .limit(2)
+    ).scalars().all()
+    if len(rows) > 1:
+        raise RenderRejected(
+            "delivery has competing final renders; no ordering rule may "
+            "silently choose transport bytes")
+    return rows[0] if rows else None
 
 
 def _origin_rule(
@@ -440,77 +444,67 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
     return validate_phrase_set(registered.canonical_json)
 
 
-def _digest_may_rerender(delivery: AlertDelivery) -> bool:
-    """Whether a digest's body may still change.
+def _digest_represented_member_ids(
+    session: Session,
+    delivery_id: str,
+) -> list[str]:
+    """Episode ids represented by a digest count, in stable order.
 
-    Render reuse exists so a retry does not alter the text of a message that
-    may already have arrived. `attempts == 0` was too strict a reading of that:
-    an attempt ending in a DEFINITE non-acceptance delivered nothing, so the
-    text is still free to change — and it should, because the count is computed
-    from suppression state that moves between passes. A silence landing after
-    the first render would otherwise be disclosed by a stale number on every
-    subsequent retry.
-
-    Only an AMBIGUOUS outcome — the bytes may have reached the proxy — freezes
-    the wording, and it freezes it for good: at that point a differently worded
-    duplicate is worse than a stale one.
+    Resolved episodes remain part of a retrospective.  A silence is different:
+    even reporting the aggregate count discloses suppressed activity, so those
+    members are excluded.
     """
-    if delivery.transport_status == TransportStatus.UNKNOWN:
-        return False
-    return delivery.prior_unknown_delivery_id is None \
-        and not delivery.duplicate_risk_acknowledged
+    return list(session.execute(
+        select(AlertDeliveryMember.episode_id).where(
+            AlertDeliveryMember.delivery_id == delivery_id,
+            func.coalesce(AlertDeliveryMember.drop_reason, "")
+            != "SILENCED_BEFORE_SEND",
+        ).order_by(AlertDeliveryMember.episode_id)
+    ).scalars().all())
 
 
-def _unattempted_render_may_rerender(delivery: AlertDelivery) -> bool:
-    """Whether an old pre-wire render is known not to have reached a sender.
-
-    Older dispatcher revisions committed a render before their final admission
-    check.  Those rows have ``attempts == 0`` and can be replaced by a newly
-    built final render.  Manual retry ancestry is excluded even at zero
-    attempts because its body is the exact wording an UNKNOWN predecessor may
-    already have delivered.
-    """
-    return delivery.attempts == 0 \
-        and delivery.prior_unknown_delivery_id is None \
-        and not delivery.duplicate_risk_acknowledged
-
-
-def _frozen_render_names_withdrawn_member(
+def _frozen_render_membership_changed(
     session: Session,
     delivery: AlertDelivery,
     render: AlertRender,
 ) -> bool:
-    """Whether immutable retry prose represents a member now withheld.
+    """Whether immutable prose no longer matches this provider intent.
 
-    Revalidation runs on every attempt.  Once a provider attempt has started,
-    however, the render must not change.  If a bundle member resolves or is
-    silenced between attempts, those two rules can only both hold by refusing
-    the old provider intent; sending prose that still represents the withdrawn
-    member would be false, while re-rendering would violate retry immutability.
+    Revalidation runs on every attempt, but a final render never changes.  If a
+    member is added, resolved, or silenced afterwards, those rules can only
+    both hold by refusing the old provider intent.  The represented-member
+    ledger is therefore exact, not advisory; missing or malformed evidence
+    fails closed for every non-TEST delivery.
 
     A digest deliberately counts resolved events retrospectively, so only a
-    silence invalidates its frozen count.  Missing representation metadata on
-    a historical render fails closed whenever a relevant member was dropped.
+    silence removes one from its expected set.
     """
-    dropped = session.execute(
+    if delivery.delivery_kind == DeliveryKind.TEST:
+        return False
+
+    members = session.execute(
         select(AlertDeliveryMember).where(
             AlertDeliveryMember.delivery_id == delivery.delivery_id,
-            AlertDeliveryMember.dropped_at.is_not(None),
         )
     ).scalars().all()
     if delivery.delivery_kind == DeliveryKind.DIGEST:
-        dropped = [
-            member for member in dropped
-            if member.drop_reason == "SILENCED_BEFORE_SEND"
-        ]
-    if not dropped:
-        return False
+        expected = {
+            member.episode_id
+            for member in members
+            if member.drop_reason != "SILENCED_BEFORE_SEND"
+        }
+    else:
+        expected = {
+            member.episode_id
+            for member in members
+            if member.dropped_at is None
+        }
 
     raw = (render.validation_results or {}).get("represented_member_ids")
     if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
         return True
-    represented = frozenset(raw)
-    return any(member.episode_id in represented for member in dropped)
+    represented = set(raw)
+    return len(represented) != len(raw) or represented != expected
 
 
 def _utc_clock_value(clock: Callable[[], datetime]) -> datetime:
@@ -638,15 +632,23 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # -- 2: revalidate ------------------------------------------------
         members = revalidate_members(session, delivery, now=now)
         rendered_member_ids = frozenset(member.episode_id for member in members)
-        # A DIGEST with no members is the one legitimate memberless market
-        # delivery: a quiet week still sends, because after cutover this is the
-        # only scheduled message the operator gets and silence is also what a
-        # dead scheduler produces.
-        if not members and delivery.delivery_kind not in (DeliveryKind.TEST,
-                                                          DeliveryKind.DIGEST):
-            cancel(session, delivery, now=now, reason="ALL_MEMBERS_RESOLVED")
-            report.cancelled += 1
-            return
+        # Mandate 21.3: TEST is the ONLY memberless delivery kind.  This check
+        # also retires invalid DIGEST rows queued before the database trigger
+        # was corrected; no legacy provider intent bypasses the runtime guard.
+        if not members and delivery.delivery_kind != DeliveryKind.TEST:
+            # A retrospective DIGEST may legitimately contain only episodes
+            # that resolved after firing; those persisted rows still represent
+            # real weekly events.  This is not a zero-member exemption: an
+            # empty digest, or one whose every item was silenced, still fails.
+            represented_digest_members = (
+                _digest_represented_member_ids(session, delivery_id)
+                if delivery.delivery_kind == DeliveryKind.DIGEST
+                else []
+            )
+            if not represented_digest_members:
+                cancel(session, delivery, now=now, reason="ALL_MEMBERS_RESOLVED")
+                report.cancelled += 1
+                return
 
         # -- 3: authoritative budget recheck -------------------------------
         if (delivery.priority != Priority.P1
@@ -666,20 +668,18 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 return
 
         # -- 4: render (reuse on retry) ------------------------------------
-        existing = _existing_render(session, delivery_id)
-        # Reuse exists so a retry does not change the text of a message that
-        # may already have arrived. That reasoning only holds once something
-        # has been transmitted. A DIGEST that has never been sent must be
-        # re-rendered, because its count is computed from suppression state
-        # that can move between passes: an episode silenced after the first
-        # render would otherwise be disclosed by a stale number.
-        may_rerender = (
-            _digest_may_rerender(delivery)
-            if delivery.delivery_kind == DeliveryKind.DIGEST
-            else _unattempted_render_may_rerender(delivery)
-        )
-        if existing is not None and not may_rerender:
-            if _frozen_render_names_withdrawn_member(session, delivery, existing):
+        try:
+            existing = _existing_render(session, delivery_id)
+        except RenderRejected as exc:
+            mark_render_failed(session, delivery, now=now, reason=exc.redacted())
+            report.render_failed += 1
+            return
+        # One provider intent has exactly one final render. A definite failure
+        # authorises another provider attempt with the SAME bytes, never a new
+        # body. If membership changed, cancel the stale intent; replacing its
+        # render would leave timestamp ordering to decide which text was final.
+        if existing is not None:
+            if _frozen_render_membership_changed(session, delivery, existing):
                 cancel(
                     session,
                     delivery,
@@ -740,15 +740,11 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 # exactly what the silence was for.
                 #
                 # So: everything planned, less what was deliberately suppressed.
-                planned = session.execute(
-                    select(func.count()).select_from(AlertDeliveryMember)
-                    .where(AlertDeliveryMember.delivery_id == delivery_id,
-                           func.coalesce(AlertDeliveryMember.drop_reason, "")
-                           != "SILENCED_BEFORE_SEND")
-                ).scalar_one()
+                represented_member_ids = _digest_represented_member_ids(
+                    session, delivery_id)
                 try:
                     result = render_digest_body(render_phrases,
-                                                item_count=int(planned))
+                                                item_count=len(represented_member_ids))
                 except RenderRejected as exc:
                     mark_render_failed(session, delivery, now=now,
                                        reason=exc.redacted())
@@ -788,6 +784,16 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                                        reason=exc.redacted())
                     report.render_failed += 1
                     return
+            validation_results = dict(result.validation)
+            if delivery.delivery_kind == DeliveryKind.DIGEST:
+                # A count-based body still needs an exact membership ledger.
+                # Without it a retry cannot prove that late items or silences
+                # did not change what the frozen number represents.
+                validation_results.update({
+                    "all_members_represented": True,
+                    "represented_member_ids": represented_member_ids,
+                    "digest_item_count": len(represented_member_ids),
+                })
             pending_render = AlertRender(
                 render_id=new_ulid(utc_ms(now)),
                 delivery_id=delivery_id,
@@ -800,7 +806,7 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 fact_catalog_hash=context.fact_catalog_hash(),
                 selected_fact_ids=result.selected_fact_ids,
                 selected_phrase_codes=result.selected_phrase_codes,
-                validation_results=result.validation,
+                validation_results=validation_results,
                 final_message=result.body,
                 gsm7_septets=result.septet_count,
                 created_at=now,
@@ -856,8 +862,8 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 return
 
             newly_added = wire_member_ids - rendered_member_ids
-            if existing is not None and not may_rerender:
-                if newly_added or _frozen_render_names_withdrawn_member(
+            if existing is not None:
+                if newly_added or _frozen_render_membership_changed(
                     session, delivery, existing
                 ):
                     cancel(
