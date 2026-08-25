@@ -225,10 +225,22 @@ def _safe_diag(value: object, limit: int | None = 300) -> str:
     """Bound an untrusted diagnostic and remove credential/endpoint echoes."""
     text = str(value)
     # Delete rather than substitute a fixed marker: an operator credential can
-    # itself equal (or be contained in) a marker such as ``<redacted>``.  One
-    # longest-first literal set also handles a key that overlaps the endpoint.
-    for literal in _protected_literals():
-        text = re.sub(re.escape(literal), "", text, flags=re.IGNORECASE)
+    # itself equal (or be contained in) a marker such as ``<redacted>``.  A
+    # SINGLE deletion sweep is not sufficient: removing ``secret-key`` from
+    # ``secret-secret-keykey`` joins the surviving ends into ``secret-key``.
+    # Repeat the entire longest-first sweep to a fixed point.  Every changing
+    # sweep removes at least one non-empty literal, so this always terminates.
+    protected = _protected_literals()
+    while True:
+        previous = text
+        for literal in protected:
+            text = re.sub(re.escape(literal), "", text, flags=re.IGNORECASE)
+        if text == previous:
+            break
+    # Defense in depth: future edits to the sanitizer must fail closed rather
+    # than publish a diagnostic if they ever violate the fixed-point property.
+    if _contains_protected_text(text):
+        return ""
     return text if limit is None else text[:limit]
 
 

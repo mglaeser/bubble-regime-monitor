@@ -591,6 +591,27 @@ class TestVerifierDiagnosticsAreSecretSafe:
         assert iv._contains_protected_text(rendered) is True
         assert credential not in iv._safe_diag(rendered, limit=None)
 
+    def test_transport_redaction_cannot_reconstruct_the_key(self, monkeypatch):
+        credential = "secret-key"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        # Each one-pass sanitizer removes one literal match and joins the
+        # surviving ends into the next layer, so the second outward-facing
+        # sanitizer would reconstruct the credential in a published reason.
+        peer_diagnostic = f"secret-secret-{credential}keykey"
+
+        def rejected(_req, timeout=None):
+            raise OSError(peer_diagnostic)
+
+        monkeypatch.setattr(iv, "_urlopen", rejected)
+        model_ids, model_reason = iv.fetch_model_ids()
+        attempt = iv.attempt_once("model", "system", "user")
+        rendered = repr((model_reason, attempt))
+
+        assert model_ids is None
+        assert attempt["ok"] is False
+        assert credential.casefold() not in rendered.casefold()
+
     def test_peer_error_bodies_cannot_echo_key_or_endpoint(self, monkeypatch):
         credential = "peer-echo-verifier-credential"  # pragma: allowlist secret
         monkeypatch.setattr(iv, "KEY", credential)
