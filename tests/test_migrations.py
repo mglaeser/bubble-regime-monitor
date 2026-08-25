@@ -192,6 +192,16 @@ def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
             ("01M0MEMBERGUARDEMPTY000000",),
         )
 
+    # SENT is the durable provider-success boundary.  Guarding only SENDING
+    # leaves both an imported row and a direct PENDING -> SENT update able to
+    # fabricate delivery evidence without the episode it claims to represent.
+    add_delivery("01M0MEMBERGUARDSENT0000000", "INITIAL")
+    with pytest.raises(sqlite3.IntegrityError, match="represented member"):
+        connection.execute(
+            "UPDATE alert_delivery SET transport_status='SENT' WHERE delivery_id=?",
+            ("01M0MEMBERGUARDSENT0000000",),
+        )
+
     # The UPDATE trigger is not enough: imported/corrupt data can insert a row
     # already in SENDING and skip the transition entirely.  In a foreign-keyed
     # database no non-TEST member can exist before its parent delivery, so such
@@ -209,6 +219,24 @@ def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
             ) VALUES ('01M0MEMBERGUARDINSERT00000',
                       '01M0MEMBERGUARDINSERT00000', 1, 0, 'shadow', 'default',
                       ?, 'INITIAL', 2, 'SENDING', 'READY', ?, ?, 0, 0, 0,
+                      'default')
+            """,
+            ("r" * 64, timestamp, timestamp),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="represented member"):
+        connection.execute(
+            """
+            INSERT INTO alert_delivery (
+                delivery_id, dedupe_key, dedupe_version,
+                manual_retry_sequence, mode, live_profile,
+                planning_rules_sha256, delivery_kind, priority,
+                transport_status, planning_state, created_at, updated_at,
+                attempts, blocks_replanning, duplicate_risk_acknowledged,
+                recipient_ref
+            ) VALUES ('01M0MEMBERGUARDINSENT00000',
+                      '01M0MEMBERGUARDINSENT00000', 1, 0, 'shadow', 'default',
+                      ?, 'INITIAL', 2, 'SENT', 'NONE', ?, ?, 1, 0, 0,
                       'default')
             """,
             ("r" * 64, timestamp, timestamp),

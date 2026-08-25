@@ -96,39 +96,181 @@ def test_ready_requires_an_empty_unsatisfied_list():
 
 
 def _live_sent(session, *, sent_at, status=None, kind=None,
-               profile="default", window_key=None, created_at=None):
+               profile="default", window_key=None, created_at=None,
+               memberless=False):
+    import hashlib
+
     from app.alerts.artifacts import load_active, register
     from app.alerts.canonical import new_ulid
     from app.alerts.enums import (
         DeliveryKind,
+        DigestItemStatus,
+        EpisodeStatus,
+        MemberRole,
         PlanningState,
         Priority,
         TransportStatus,
     )
-    from app.alerts.models import AlertDelivery
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertDigestItem,
+        AlertEpisode,
+        AlertEvaluation,
+        AlertInputSnapshot,
+    )
     from app.alerts.repository import utc_ms
 
     artifacts = load_active(session)
     register(session, artifacts)
     created_at = created_at or sent_at
     delivery_id = new_ulid(utc_ms(sent_at))
-    session.add(AlertDelivery(
+    delivery_kind = kind or DeliveryKind.INITIAL
+    final_status = status or TransportStatus.SENT
+    delivery = AlertDelivery(
         delivery_id=delivery_id, dedupe_key=f"v1|CUT|{delivery_id}",
         dedupe_version=1, manual_retry_sequence=0, mode="live",
         live_profile=profile,
         planning_rules_sha256=artifacts.ruleset.rules_sha256,
-        delivery_kind=kind or DeliveryKind.INITIAL, priority=Priority.P2,
+        delivery_kind=delivery_kind, priority=Priority.P2,
         scheduled_window_key=window_key,
-        transport_status=status or TransportStatus.SENT,
-        planning_state=PlanningState.NONE, not_before=created_at,
-        created_at=created_at, updated_at=sent_at, attempts=1,
-        sent_at=sent_at if (status or TransportStatus.SENT)
-        == TransportStatus.SENT else None,
-        blocks_replanning=(status == TransportStatus.UNKNOWN),
-        blocks_up_to_priority=(Priority.P2
-                               if status == TransportStatus.UNKNOWN else None),
-        duplicate_risk_acknowledged=False, recipient_ref="default"))
+        # Non-TEST provider evidence has to be assembled parent -> member ->
+        # boundary transition because SQLite cannot defer the cross-table
+        # member check.  This fixture follows the same order as production.
+        transport_status=(final_status if delivery_kind == DeliveryKind.TEST
+                          else TransportStatus.PENDING),
+        planning_state=(PlanningState.NONE
+                        if delivery_kind == DeliveryKind.TEST
+                        else PlanningState.READY),
+        not_before=created_at,
+        created_at=created_at, updated_at=created_at, attempts=0,
+        sent_at=(sent_at if delivery_kind == DeliveryKind.TEST
+                 and final_status == TransportStatus.SENT else None),
+        blocks_replanning=False,
+        duplicate_risk_acknowledged=False, recipient_ref="default")
+    session.add(delivery)
     session.flush()
+
+    if delivery_kind != DeliveryKind.TEST and not memberless:
+        identity = hashlib.sha256(
+            f"cutover-input|{delivery_id}".encode()
+        ).hexdigest()
+        evaluation_id = new_ulid(utc_ms(created_at) + 1)
+        episode_id = new_ulid(utc_ms(created_at) + 2)
+        session.add(AlertInputSnapshot(
+            input_identity=identity,
+            snapshot_id=None,
+            origin="MANUAL",
+            built_at=created_at,
+            computed_at=created_at,
+            alert_input_schema_version=1,
+            methodology_version="test",
+            methodology_sha256="m" * 64,
+            reconstructed=False,
+            evaluation_eligibility="EVALUABLE",
+            ineligibility_reasons=[],
+            payload="{}",
+            payload_sha256=hashlib.sha256(delivery_id.encode()).hexdigest(),
+        ))
+        session.flush()
+        session.add(AlertEvaluation(
+            evaluation_id=evaluation_id,
+            idempotency_key=f"cutover-evaluation-{delivery_id}",
+            input_identity=identity,
+            mode="live",
+            live_profile=profile,
+            current_rules_sha256=artifacts.ruleset.rules_sha256,
+            evaluation_set_sha256=hashlib.sha256(
+                f"cutover-set|{delivery_id}".encode()
+            ).hexdigest(),
+            evaluated_ruleset_hashes=[artifacts.ruleset.rules_sha256],
+            evaluator_version="test",
+            status="COMMITTED",
+            attempt_count=1,
+            started_at=created_at,
+            finished_at=created_at,
+            plan_applied=True,
+        ))
+        session.flush()
+        instance = hashlib.sha256(
+            f"cutover-instance|{delivery_id}".encode()
+        ).hexdigest()
+        session.add(AlertEpisode(
+            episode_id=episode_id,
+            mode="live",
+            live_profile=profile,
+            origin_rules_sha256=artifacts.ruleset.rules_sha256,
+            instance_fingerprint=instance,
+            rule_id=("structure.cape_record_near"
+                     if delivery_kind == DeliveryKind.DIGEST
+                     else "regime.band_hold_to_trim"),
+            labels={},
+            priority=(Priority.P3 if delivery_kind == DeliveryKind.DIGEST
+                      else Priority.P2),
+            episode_status=EpisodeStatus.FIRING,
+            is_open=True,
+            suppression_reasons=[],
+            opened_at=created_at,
+            activated_at=created_at,
+            trigger_input_identity=identity,
+            created_evaluation_id=evaluation_id,
+            last_evaluation_id=evaluation_id,
+        ))
+        session.flush()
+        session.add(AlertDeliveryMember(
+            delivery_id=delivery_id,
+            episode_id=episode_id,
+            rule_id=("structure.cape_record_near"
+                     if delivery_kind == DeliveryKind.DIGEST
+                     else "regime.band_hold_to_trim"),
+            instance_fingerprint=instance,
+            member_role=(MemberRole.SUMMARY
+                         if delivery_kind == DeliveryKind.DIGEST
+                         else MemberRole.PRIMARY),
+            notification_generation=1,
+            origin_rules_sha256=artifacts.ruleset.rules_sha256,
+            origin_phrase_set_version=artifacts.phrase_set.version,
+            origin_phrase_set_sha256=artifacts.phrase_set.sha256,
+            included_at=created_at,
+            delivered=final_status == TransportStatus.SENT,
+        ))
+        if delivery_kind == DeliveryKind.DIGEST:
+            session.add(AlertDigestItem(
+                digest_item_id=new_ulid(utc_ms(created_at) + 3),
+                episode_id=episode_id,
+                digest_window_key=window_key or "2026-W00",
+                status=(DigestItemStatus.DELIVERED
+                        if final_status == TransportStatus.SENT
+                        else DigestItemStatus.PLANNED),
+                delivery_id=delivery_id,
+                pending_at=created_at,
+                planned_at=created_at,
+                delivered_at=(sent_at
+                              if final_status == TransportStatus.SENT else None),
+                still_active_summary=False,
+            ))
+        session.flush()
+
+    if delivery_kind != DeliveryKind.TEST:
+        if memberless:
+            # Simulate a legacy/imported row from before the terminal guard.
+            # The cutover query must defend itself even when schema authority
+            # was absent when historical evidence was written.
+            session.connection().exec_driver_sql(
+                "DROP TRIGGER IF EXISTS alert_delivery_requires_member"
+            )
+        delivery.transport_status = final_status
+        delivery.planning_state = PlanningState.NONE
+        delivery.updated_at = sent_at
+        delivery.attempts = 1
+        delivery.sent_at = (
+            sent_at if final_status == TransportStatus.SENT else None
+        )
+        delivery.blocks_replanning = final_status == TransportStatus.UNKNOWN
+        delivery.blocks_up_to_priority = (
+            Priority.P2 if final_status == TransportStatus.UNKNOWN else None
+        )
+        session.flush()
     return delivery_id
 
 
@@ -660,6 +802,142 @@ def test_exact_two_closed_digest_windows_are_accounted_once_each():
         report = preflight(session, now=NOW)
 
     assert any(s.startswith("weekly_digests") for s in report.satisfied)
+
+
+def test_resolved_digest_member_remains_valid_stage4_evidence():
+    """A retrospective may truthfully report an episode that already closed."""
+    from sqlalchemy import select
+
+    from app.alerts.cutover import required_digest_windows
+    from app.alerts.enums import DeliveryKind
+    from app.alerts.models import AlertDeliveryMember
+
+    with session_scope() as session:
+        delivery_ids = [
+            _live_sent(
+                session,
+                sent_at=NOW - elapsed,
+                kind=DeliveryKind.DIGEST,
+                window_key=window,
+            )
+            for window, elapsed in zip(
+                required_digest_windows(NOW),
+                (timedelta(days=7), timedelta(hours=1)),
+                strict=True,
+            )
+        ]
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == delivery_ids[0]
+            )
+        ).scalars().one()
+        member.drop_reason = "RESOLVED_BEFORE_SEND"
+        member.dropped_at = NOW - timedelta(days=7, minutes=1)
+        member.delivered = False
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    assert any(s.startswith("weekly_digests") for s in report.satisfied)
+
+
+def test_memberless_sent_digests_are_not_stage4_delivery_evidence():
+    """A terminal status cannot replace the represented-member ledger.
+
+    Older/imported databases can contain rows from before the terminal member
+    trigger existed.  Cutover therefore has to validate its historical
+    evidence rather than assuming every SENT row crossed today's guard.
+    """
+    from app.alerts.cutover import required_digest_windows
+    from app.alerts.enums import DeliveryKind
+
+    with session_scope() as session:
+        for window, elapsed in zip(
+            required_digest_windows(NOW),
+            (timedelta(days=7), timedelta(hours=1)),
+            strict=True,
+        ):
+            _live_sent(
+                session,
+                sent_at=NOW - elapsed,
+                kind=DeliveryKind.DIGEST,
+                window_key=window,
+                memberless=True,
+            )
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
+        "memberless terminal rows counterfeited two observed weekly digests"
+    )
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "missing_item",
+        "wrong_window",
+        "wrong_status",
+        "wrong_time",
+        "undelivered_member",
+        "silenced_only",
+    ],
+)
+def test_stage4_rejects_malformed_sent_digest_evidence(malformation):
+    """Stage-4 consumes the exact terminal lifecycle graph, not a loose join."""
+    from sqlalchemy import select
+
+    from app.alerts.cutover import required_digest_windows
+    from app.alerts.enums import DeliveryKind, DigestItemStatus
+    from app.alerts.models import AlertDeliveryMember, AlertDigestItem
+
+    with session_scope() as session:
+        delivery_ids = []
+        for window, elapsed in zip(
+            required_digest_windows(NOW),
+            (timedelta(days=7), timedelta(hours=1)),
+            strict=True,
+        ):
+            delivery_ids.append(_live_sent(
+                session,
+                sent_at=NOW - elapsed,
+                kind=DeliveryKind.DIGEST,
+                window_key=window,
+            ))
+
+        delivery_id = delivery_ids[0]
+        item = session.execute(
+            select(AlertDigestItem).where(
+                AlertDigestItem.delivery_id == delivery_id
+            )
+        ).scalars().one()
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == delivery_id
+            )
+        ).scalars().one()
+        if malformation == "missing_item":
+            session.delete(item)
+        elif malformation == "wrong_window":
+            item.digest_window_key = "2026-W01"
+        elif malformation == "wrong_status":
+            item.status = DigestItemStatus.PLANNED
+            item.delivered_at = None
+        elif malformation == "wrong_time":
+            assert item.delivered_at is not None
+            item.delivered_at = item.delivered_at - timedelta(seconds=1)
+        elif malformation == "undelivered_member":
+            member.delivered = False
+        else:
+            member.drop_reason = "SILENCED_BEFORE_SEND"
+            member.dropped_at = NOW - timedelta(days=7)
+            member.delivered = False
+            item.status = DigestItemStatus.CANCELLED
+            item.delivered_at = None
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
+        f"{malformation} digest evidence satisfied the cutover gate"
+    )
 
 
 def test_a_future_heartbeat_is_a_clock_fault_not_health():

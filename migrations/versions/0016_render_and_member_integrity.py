@@ -12,7 +12,7 @@ closed and asks the operator to reconcile it instead.
 The member trigger also returns to the mandate's structural rule: TEST is the
 only zero-member delivery kind.  A digest may count a resolved historical
 member, but a truly empty digest (or one containing only silenced members) may
-not reach SENDING.
+not reach SENDING or be stamped directly as SENT.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ depends_on = None
 _TEST_ONLY_MEMBER_GUARD = """
 CREATE TRIGGER IF NOT EXISTS alert_delivery_requires_member
 BEFORE UPDATE OF transport_status ON alert_delivery
-WHEN NEW.transport_status = 'SENDING'
+WHEN NEW.transport_status IN ('SENDING', 'SENT')
   AND NEW.delivery_kind <> 'TEST'
   AND NOT EXISTS (
       SELECT 1 FROM alert_delivery_member m

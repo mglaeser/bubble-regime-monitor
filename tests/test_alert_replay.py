@@ -480,6 +480,21 @@ def test_the_committed_gate_artifact_is_current():
         "`python -m scripts.export_alert_stage1_gate` and review the diff")
 
 
+def test_the_gate_artifact_declares_what_byte_identical_means():
+    """Deterministic does not mean frozen across reviewed behaviour changes."""
+    payload = json.loads(
+        Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8")
+    )
+    generation = payload["generation"]
+    assert generation["generator"] == "scripts/export_alert_stage1_gate.py"
+    assert generation["command"] == "python -m scripts.export_alert_stage1_gate"
+    assert "fixed code and committed inputs" in generation["determinism_contract"]
+    assert "must change" in generation["determinism_contract"]
+    assert "frozen_methodology.json" in generation["scoring_scope"]
+    assert "MC_SEED" in generation["scoring_scope"]
+    assert "score golden fixture" in generation["scoring_scope"]
+
+
 def test_the_gate_artifact_exercises_more_than_the_committed_stage():
     """A stage-1-only artifact would be nearly blind: three ops rules run there."""
     payload = json.loads(Path("docs/alert-stage1-gate.json").read_text(encoding="utf-8"))

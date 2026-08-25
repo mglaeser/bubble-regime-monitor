@@ -8,6 +8,12 @@
     "rules_sha256_grouped": "e143a98b-1b4feeb5-a4b6f05b-3d52d23d-023f5cbd-e55066f5-ec5bf426-fc461dcd"
   },
   "gate": "deterministic replay; no PII; no scoring regression",
+  "generation": {
+    "command": "python -m scripts.export_alert_stage1_gate",
+    "determinism_contract": "byte-identical for fixed code and committed inputs; reviewed behaviour or bound-artifact changes must change and regenerate this file",
+    "generator": "scripts/export_alert_stage1_gate.py",
+    "scoring_scope": "alert replay only; frozen_methodology.json, MC_SEED, and the score golden fixture are not inputs and remain separately gated"
+  },
   "history": {
     "arc_schema_version": 2,
     "inputs": 20,

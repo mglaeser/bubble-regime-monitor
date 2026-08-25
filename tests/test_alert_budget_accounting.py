@@ -59,13 +59,14 @@ def _add_delivery(
         priority=2,
         transport_status=(
             TransportStatus.PENDING
-            if status == TransportStatus.SENDING else status
+            if status in {TransportStatus.SENDING, TransportStatus.SENT}
+            else status
         ),
         planning_state=planning_state,
         not_before=NOW,
         created_at=created_at or NOW - timedelta(minutes=5),
         updated_at=NOW,
-        sent_at=sent_at,
+        sent_at=(None if status == TransportStatus.SENT else sent_at),
         recipient_ref="default",
     )
     session.add(delivery)
@@ -86,9 +87,11 @@ def _add_delivery(
             drop_reason="TEST_DROP" if dropped else None,
             delivered=status == TransportStatus.SENT,
         ))
-        if status == TransportStatus.SENDING:
+        if status in {TransportStatus.SENDING, TransportStatus.SENT}:
             session.flush()
-            delivery.transport_status = TransportStatus.SENDING
+            delivery.transport_status = status
+            if status == TransportStatus.SENT:
+                delivery.sent_at = sent_at
     return delivery_id
 
 

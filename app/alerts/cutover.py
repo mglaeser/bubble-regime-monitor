@@ -29,6 +29,7 @@ from app.alerts.calendars import last_closed_digest_window
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import (
     DeliveryKind,
+    DigestItemStatus,
     PlanningState,
     Priority,
     TransportStatus,
@@ -37,6 +38,8 @@ from app.alerts.errors import AlertingUnavailable
 from app.alerts.models import (
     AlertComponentHeartbeat,
     AlertDelivery,
+    AlertDeliveryMember,
+    AlertDigestItem,
     AlertEpisode,
     AlertEvent,
 )
@@ -53,6 +56,87 @@ STABLE_DAYS = 14
 REQUIRED_DIGESTS = 2
 HEARTBEAT_FRESH_HOURS = 2
 UNKNOWN_STALE_HOURS = 24
+
+
+def _sent_digest_evidence_is_complete(
+    session: Session,
+    delivery: AlertDelivery,
+) -> bool:
+    """Validate the historical graph behind one successful weekly digest.
+
+    Current dispatch rejects a malformed graph before the wire and the database
+    rejects memberless provider-boundary transitions. Stage 4 must still
+    distrust imported or legacy rows that predate those controls: a terminal
+    scalar is not evidence that an episode was represented. A qualifying SENT
+    digest has an exact one-to-one member/item ledger, at least one
+    non-silenced member, and member/item lifecycle plus timestamp evidence
+    consistent with the provider success it claims.
+    """
+    if (
+        delivery.delivery_kind != DeliveryKind.DIGEST
+        or delivery.transport_status != TransportStatus.SENT
+        or delivery.sent_at is None
+        or delivery.scheduled_window_key is None
+    ):
+        return False
+
+    members = session.execute(
+        select(AlertDeliveryMember).where(
+            AlertDeliveryMember.delivery_id == delivery.delivery_id
+        )
+    ).scalars().all()
+    items = session.execute(
+        select(AlertDigestItem).where(
+            AlertDigestItem.delivery_id == delivery.delivery_id
+        )
+    ).scalars().all()
+    if not members or len(items) != len(members):
+        return False
+
+    items_by_episode: dict[str, list[AlertDigestItem]] = {}
+    for item in items:
+        items_by_episode.setdefault(item.episode_id, []).append(item)
+    if set(items_by_episode) != {member.episode_id for member in members}:
+        return False
+
+    sent_at = _aware(delivery.sent_at)
+    represented = 0
+    for member in members:
+        bound = items_by_episode.get(member.episode_id, [])
+        if len(bound) != 1:
+            return False
+        item = bound[0]
+        if item.digest_window_key != delivery.scheduled_window_key:
+            return False
+        if member.drop_reason == "SILENCED_BEFORE_SEND":
+            if (
+                member.dropped_at is None
+                or member.delivered
+                or item.status != DigestItemStatus.CANCELLED
+                or item.delivered_at is not None
+            ):
+                return False
+            continue
+        if member.drop_reason == "RESOLVED_BEFORE_SEND":
+            # Resolution remains valid retrospective representation.  The
+            # member itself was dropped before the wire, while its bound item
+            # records that the digest successfully reported the episode.
+            if member.dropped_at is None or member.delivered:
+                return False
+        elif (
+            member.drop_reason is not None
+            or member.dropped_at is not None
+            or not member.delivered
+        ):
+            return False
+        represented += 1
+        if (
+            item.status != DigestItemStatus.DELIVERED
+            or item.delivered_at is None
+            or _aware(item.delivered_at) != sent_at
+        ):
+            return False
+    return represented > 0
 
 
 def required_digest_windows(now: datetime) -> tuple[str, ...]:
@@ -329,8 +413,8 @@ def preflight(
         evidence_start = datetime.combine(
             window_monday + timedelta(days=7), datetime.min.time(), tzinfo=UTC)
         evidence_end = evidence_start + timedelta(days=7)
-        qualifying = session.execute(
-            select(func.count()).select_from(AlertDelivery).where(
+        candidates = session.execute(
+            select(AlertDelivery).where(
                 AlertDelivery.mode == "live",
                 AlertDelivery.live_profile == live_profile,
                 AlertDelivery.delivery_kind == DeliveryKind.DIGEST,
@@ -343,8 +427,11 @@ def preflight(
                 AlertDelivery.sent_at < evidence_end,
                 AlertDelivery.sent_at <= now,
             )
-        ).scalar_one()
-        if qualifying > 0:
+        ).scalars().all()
+        if any(
+            _sent_digest_evidence_is_complete(session, delivery)
+            for delivery in candidates
+        ):
             observed_windows.add(window)
     missing_windows = [window for window in wanted_windows
                        if window not in observed_windows]

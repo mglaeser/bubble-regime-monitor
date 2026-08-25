@@ -97,6 +97,19 @@ def build_evidence() -> dict:
     return {
         "artifact": "alert-stage1-gate",
         "gate": "deterministic replay; no PII; no scoring regression",
+        "generation": {
+            "generator": "scripts/export_alert_stage1_gate.py",
+            "command": "python -m scripts.export_alert_stage1_gate",
+            "determinism_contract": (
+                "byte-identical for fixed code and committed inputs; reviewed "
+                "behaviour or bound-artifact changes must change and regenerate "
+                "this file"
+            ),
+            "scoring_scope": (
+                "alert replay only; frozen_methodology.json, MC_SEED, and the "
+                "score golden fixture are not inputs and remain separately gated"
+            ),
+        },
         "artifacts": {
             "rules_sha256_grouped": group_digest(artifacts.ruleset.rules_sha256),
             "phrase_set_sha256_grouped": group_digest(

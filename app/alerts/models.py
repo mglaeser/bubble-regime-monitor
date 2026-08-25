@@ -866,7 +866,7 @@ END
         """
 CREATE TRIGGER IF NOT EXISTS alert_delivery_requires_member
 BEFORE UPDATE OF transport_status ON alert_delivery
-WHEN NEW.transport_status = 'SENDING'
+WHEN NEW.transport_status IN ('SENDING', 'SENT')
   AND NEW.delivery_kind <> 'TEST'
   AND NOT EXISTS (
       SELECT 1 FROM alert_delivery_member m
@@ -887,12 +887,13 @@ END
         # A foreign-keyed non-TEST delivery cannot have members before its
         # parent exists.  It must therefore be inserted in a pre-wire state,
         # gain represented members, and cross the UPDATE guard above.  Without
-        # this companion trigger a direct INSERT at SENDING skips that gate.
+        # this companion trigger a direct INSERT at SENDING or SENT skips that
+        # gate and can fabricate provider evidence.
         "alert_delivery_insert_requires_member",
         """
 CREATE TRIGGER IF NOT EXISTS alert_delivery_insert_requires_member
 BEFORE INSERT ON alert_delivery
-WHEN NEW.transport_status = 'SENDING'
+WHEN NEW.transport_status IN ('SENDING', 'SENT')
   AND NEW.delivery_kind <> 'TEST'
 BEGIN
     SELECT RAISE(ABORT, 'a non-TEST delivery must carry a represented member');
