@@ -24,6 +24,7 @@ mandatory-event catalogue.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -33,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "docs" / "alert-stage1-gate.json"
 HISTORY = ROOT / "tests" / "fixtures" / "alert_replay_history.json"
 RULES = ROOT / "config" / "alert_rules.v3.2.yaml"
-PHRASES = ROOT / "config" / "alert_phrases.v3.3.json"
+PHRASES = ROOT / "config" / "alert_phrases.v3.4.json"
 EVENTS = ROOT / "config" / "alert_mandatory_events.v3.2.json"
 
 #: Replayed at the committed stage AND at the delivery stages. Stage 3 is what
@@ -79,6 +80,8 @@ def build_evidence() -> dict:
     artifacts = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
                                    service_version="3.8.0")
     inputs = history.load()
+    event_bytes = EVENTS.read_bytes()
+    event_document = json.loads(event_bytes)
 
     runs: dict[str, dict] = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +100,19 @@ def build_evidence() -> dict:
     return {
         "artifact": "alert-stage1-gate",
         "gate": "deterministic replay; no PII; no scoring regression",
+        "generation": {
+            "generator": "scripts/export_alert_stage1_gate.py",
+            "command": "python -m scripts.export_alert_stage1_gate",
+            "determinism_contract": (
+                "byte-identical for fixed code and committed inputs; reviewed "
+                "behaviour or bound-artifact changes must change and regenerate "
+                "this file"
+            ),
+            "scoring_scope": (
+                "alert replay only; frozen_methodology.json, MC_SEED, and the "
+                "score golden fixture are not inputs and remain separately gated"
+            ),
+        },
         "artifacts": {
             "rules_sha256_grouped": group_digest(artifacts.ruleset.rules_sha256),
             "phrase_set_sha256_grouped": group_digest(
@@ -115,6 +131,16 @@ def build_evidence() -> dict:
             "synthetic": True,
             "arc_schema_version": document["schema_version"],
             "inputs": len(inputs),
+        },
+        "mandatory_event_catalogue": {
+            "source": str(EVENTS.relative_to(ROOT)),
+            "sha256_grouped": group_digest(
+                hashlib.sha256(event_bytes).hexdigest()
+            ),
+            "catalogue_version": event_document.get("catalogue_version"),
+            "schema_version": event_document.get("schema_version"),
+            "frozen": event_document.get("frozen"),
+            "event_count": len(event_document.get("events", [])),
         },
         "runs": runs,
     }

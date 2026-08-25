@@ -20,6 +20,7 @@ from app.db import session_scope
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
+COMPONENT = "dispatcher"
 
 
 def run_once() -> dict[str, Any]:
@@ -47,8 +48,18 @@ def job() -> None:
     """Scheduler entry point. Never raises."""
     try:
         result = run_once()
-        if result.get("status") != "skipped":
+        if result.get("status") == "skipped":
+            from app.jobs.alert_recovery import heartbeat
+
+            heartbeat(COMPONENT, "ok", {**result, "skipped": True})
+        else:
             log.info("alert_dispatch_job", **result)
     except Exception as exc:
         log.error("alert_dispatch_job_failed", error_class=type(exc).__name__,
                   error=str(exc)[:300])
+        try:
+            from app.jobs.alert_recovery import heartbeat
+
+            heartbeat(COMPONENT, "critical", {"error": type(exc).__name__})
+        except Exception:  # noqa: S110 - heartbeat failure cannot escape the job
+            pass

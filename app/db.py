@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -58,6 +58,37 @@ def session_scope() -> Iterator[Session]:
     assert _session_factory is not None
     session = _session_factory()
     try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@contextmanager
+def immediate_session_scope() -> Iterator[Session]:
+    """A short write transaction whose decision starts before its reads.
+
+    SQLite's default transaction is deferred: two admin requests can both
+    read "no idempotency record" / the same MAX(sequence), then race at
+    commit.  ``BEGIN IMMEDIATE`` takes the single-writer reservation before
+    either request makes that decision.  ``busy_timeout`` makes the loser wait
+    for the winner and then observe its committed row.
+
+    Keep this boundary for short database-only commands.  Never hold it across
+    provider I/O; the dispatcher deliberately sends outside transactions.
+    Other database engines retain their ordinary transaction semantics and
+    rely on the same unique constraints as a backstop.
+    """
+    get_engine()
+    assert _session_factory is not None
+    session = _session_factory()
+    try:
+        if session.bind is not None and session.bind.dialect.name == "sqlite":
+            # This MUST be the first statement on the session.
+            session.execute(text("BEGIN IMMEDIATE"))
         yield session
         session.commit()
     except Exception:

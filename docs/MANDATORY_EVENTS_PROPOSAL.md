@@ -1,6 +1,15 @@
-# Mandatory-event catalogue — candidates for approval
+# Archived mandatory-event catalogue proposal — candidates for approval
 
-**Status: PROPOSAL. Not frozen, not wired into the gate.**
+> **Historical proposal, not current runtime documentation.** No mandatory
+> event has been approved or frozen. The strict replay loader is now wired to
+> `config/alert_mandatory_events.v3.2.json` by default, but that catalogue
+> remains deliberately empty and recall therefore remains UNMEASURED. See
+> [ALERT_SYSTEM.md](ALERT_SYSTEM.md#12-replay-the-stage-1-gate) for the executable
+> schema and current behavior.
+
+The discussion below predates the strict, window-and-priority-aware catalogue
+implementation. It is retained as the candidate-selection record, not as an
+instruction to copy its draft JSON shape into the current gate.
 
 Per the standing decision, I derive the candidates and the operator approves
 before anything is frozen. Nothing here is loaded by `run_replay` yet:

@@ -22,7 +22,7 @@ from app.alerts.registry import instance_fingerprint, unresolved_pins, validate_
 from tests.conftest import register_promoted
 
 RULES_PATH = "config/alert_rules.v3.2.yaml"
-PHRASES_PATH = "config/alert_phrases.v3.3.json"
+PHRASES_PATH = "config/alert_phrases.v3.4.json"
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +42,7 @@ def ruleset(phrase_set):
         raw = fh.read()
     return validate_ruleset(
         raw,
+        phrase_set=phrase_set,
         phrase_set_version=phrase_set.version,
         phrase_set_sha256=phrase_set.sha256,
         methodology_version=_M.get_path("_meta", "methodology_version"),
@@ -153,10 +154,11 @@ def test_credit_hy_watch_is_not_rf3(ruleset):
     assert "DISPLAY_ONLY" in rule.required_caveat_codes
 
 
-def test_rules_hash_is_stable(ruleset):
+def test_rules_hash_is_stable(ruleset, phrase_set):
     with open(RULES_PATH, encoding="utf-8") as fh:
         again = validate_ruleset(
             fh.read(),
+            phrase_set=phrase_set,
             phrase_set_version=ruleset.phrase_set_version,
             phrase_set_sha256=ruleset.phrase_set_sha256,
             methodology_version=_M.get_path("_meta", "methodology_version"),
@@ -179,6 +181,7 @@ def _mutate(raw: str, old: str, new: str) -> str:
 def _validate(raw: str, phrase_set):
     return validate_ruleset(
         raw,
+        phrase_set=phrase_set,
         phrase_set_version=phrase_set.version,
         phrase_set_sha256=phrase_set.sha256,
         methodology_version=_M.get_path("_meta", "methodology_version"),
@@ -207,6 +210,30 @@ def test_loader_rejects_unknown_source(raw_rules, phrase_set):
         _validate(broken, phrase_set)
 
 
+def test_revision_sensitive_confirmation_requires_and_accepts_explicit_justification(
+    raw_rules, phrase_set,
+):
+    """A vendor restatement may count only when the artifact says that it may."""
+    revision_basis = _mutate(
+        raw_rules,
+        "confirmation: {count: 1, basis: authoritative_transition}",
+        "confirmation: {count: 1, basis: distinct_source_revision}",
+    )
+    with pytest.raises(RulesetInvalid, match="revision_sensitive"):
+        _validate(revision_basis, phrase_set)
+
+    justified = _mutate(
+        revision_basis,
+        '    title: "Effective action state enters de-risk"',
+        '    title: "Effective action state enters de-risk"\n'
+        '    note: "revision_sensitive: reviewed vendor restatements are distinct evidence"',
+    )
+    accepted = _validate(justified, phrase_set)
+    rule = accepted.rule("regime.band_to_derisk")
+    assert rule is not None
+    assert rule.confirmation.basis == "distinct_source_revision"
+
+
 def test_loader_rejects_authoritative_hysteresis(raw_rules, phrase_set):
     """A numeric off-level on a persisted DECISION is a second band edge."""
     broken = _mutate(
@@ -220,13 +247,11 @@ def test_loader_rejects_authoritative_hysteresis(raw_rules, phrase_set):
 
 
 def test_loader_rejects_p1_that_is_not_exempt(raw_rules, phrase_set):
-    broken = _mutate(raw_rules,
-                     "    quiet_hours_exempt: true\n    budget_exempt: true\n"
-                     "    phrase_set: \"v3.3\"\n    required_caveat_codes: []\n\n"
-                     "  - rule_id: regime.band_hold_to_trim",
-                     "    quiet_hours_exempt: false\n    budget_exempt: true\n"
-                     "    phrase_set: \"v3.3\"\n    required_caveat_codes: []\n\n"
-                     "  - rule_id: regime.band_hold_to_trim")
+    broken = _mutate(
+        raw_rules,
+        "    quiet_hours_exempt: true\n    budget_exempt: true\n",
+        "    quiet_hours_exempt: false\n    budget_exempt: true\n",
+    )
     with pytest.raises(RulesetInvalid):
         _validate(broken, phrase_set)
 
@@ -242,6 +267,7 @@ def test_loader_rejects_methodology_mismatch(raw_rules, phrase_set):
     with pytest.raises(RulesetInvalid, match="methodology"):
         validate_ruleset(
             raw_rules,
+            phrase_set=phrase_set,
             phrase_set_version=phrase_set.version,
             phrase_set_sha256=phrase_set.sha256,
             methodology_version="v4-something-else",
@@ -254,6 +280,7 @@ def test_loader_rejects_service_version_outside_range(raw_rules, phrase_set):
     with pytest.raises(RulesetInvalid, match="service version"):
         validate_ruleset(
             raw_rules,
+            phrase_set=phrase_set,
             phrase_set_version=phrase_set.version,
             phrase_set_sha256=phrase_set.sha256,
             methodology_version=_M.get_path("_meta", "methodology_version"),
@@ -656,7 +683,7 @@ def test_the_ruleset_can_disable_capture(isolated_db, monkeypatch, tmp_path):
     off.write_text(raw.replace("capture:\n  enabled: true",
                                "capture:\n  enabled: false", 1), encoding="utf-8")
     monkeypatch.setenv("ALERTS_RULES_PATH", str(off))
-    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.3.json")
+    monkeypatch.setenv("ALERTS_PHRASE_PATH", "config/alert_phrases.v3.4.json")
     get_settings.cache_clear()
 
     snap_id = _persist_snapshot(isolated_db)

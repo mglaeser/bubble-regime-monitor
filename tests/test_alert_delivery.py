@@ -41,7 +41,7 @@ NIGHT = datetime(2026, 8, 15, 23, 30, tzinfo=UTC)       # 01:30 Berlin — quiet
 
 @pytest.fixture(scope="module")
 def phrase_set():
-    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
         return validate_phrase_set(fh.read())
 
 
@@ -243,6 +243,17 @@ def test_p2_is_held_by_budget_during_the_day():
     assert delivery.hold_reason_code == "cap_24h"
 
 
+def test_one_plan_reserves_each_p2_group_before_planning_the_next():
+    first = _p2(rule_id="p2.first", group="a")
+    second = _p2(rule_id="p2.second", group="b")
+    result = plan(_inputs(
+        [first, second], budget_usage=BudgetUsage(2, 2, 0, 0)))
+    assert [delivery.planning_state for delivery in result.deliveries] == [
+        PlanningState.READY,
+        PlanningState.HELD_BUDGET,
+    ]
+
+
 def test_p2_bundles_by_group_key():
     rules = [_p2("p2.a", "regime"), _p2("p2.b", "regime"), _p2("p2.c", "credit")]
     result = plan(_inputs(rules))
@@ -265,8 +276,11 @@ def test_p4_produces_neither():
 
 
 def test_a_silenced_rule_is_suppressed_not_delivered():
+    from app.alerts.silences import ActiveSilences
+
     rule = _p2()
-    result = plan(_inputs([rule], silenced_rule_ids=frozenset({rule.rule_id})))
+    result = plan(_inputs(
+        [rule], active_silences=ActiveSilences(rule_ids=frozenset({rule.rule_id}))))
     assert result.deliveries == []
     assert SuppressionReason.SILENCED in result.suppressions[f"EP-{rule.rule_id}"]
 
@@ -285,6 +299,54 @@ def test_flapping_suppresses_the_notification_not_the_condition():
                           flapping_fingerprints=frozenset({f"fp-{rule.rule_id}"})))
     assert result.deliveries == []
     assert SuppressionReason.FLAPPING in result.suppressions[f"EP-{rule.rule_id}"]
+
+
+def test_due_reminder_is_planned_from_an_open_firing_episode():
+    rule = _rule(
+        rule_id="p1.reminder", priority=1,
+        quiet_hours_exempt=True, budget_exempt=True,
+        reminder_policy={"enabled": True, "after_seconds": 172800,
+                         "max_reminders": 1},
+    )
+    fingerprint = f"fp-{rule.rule_id}"
+    memory = NotificationMemory(
+        last_sent_at=NOW - timedelta(days=3),
+        next_notification_generation=2,
+    )
+    inputs = _inputs([rule], memories={fingerprint: memory})
+    inputs.decisions[0].activate_episode = False
+
+    result = plan(inputs)
+
+    assert len(result.deliveries) == 1
+    reminder = result.deliveries[0]
+    assert reminder.delivery_kind == DeliveryKind.REMINDER
+    assert reminder.members[0].notification_generation == 2
+    assert reminder.planning_state == PlanningState.READY
+
+
+def test_an_open_reminder_generation_is_not_planned_twice():
+    rule = _rule(
+        rule_id="p1.reminder", priority=1,
+        quiet_hours_exempt=True, budget_exempt=True,
+        reminder_policy={"enabled": True, "after_seconds": 172800,
+                         "max_reminders": 1},
+    )
+    fingerprint = f"fp-{rule.rule_id}"
+    memory = NotificationMemory(
+        last_sent_at=NOW - timedelta(days=3),
+        next_notification_generation=2,
+    )
+    inputs = _inputs(
+        [rule], memories={fingerprint: memory},
+        open_generations=frozenset({(fingerprint, 2)}),
+    )
+    inputs.decisions[0].activate_episode = False
+
+    result = plan(inputs)
+
+    assert result.deliveries == []
+    assert SuppressionReason.COOLDOWN in result.suppressions[f"EP-{rule.rule_id}"]
 
 
 def test_same_generation_unknown_blocks_replanning():
@@ -338,16 +400,24 @@ def test_dominance_suppresses_the_loser_in_the_plan():
 
 def _context(phrase_set, *, codes=("BAND_TO_DERISK",), caveats=(), members=1):
     trigger = make_input(identity="i1", effective="de-risk", median=61.0, point=59.0)
+    fact_ids = frozenset(
+        slot
+        for code in (*codes, *caveats)
+        if (fragment := phrase_set.fragment(code)) is not None
+        for slot in fragment.slots
+    )
     built = [
         build_member_context(
             episode_id=f"EP{i}", rule_id=f"rule.{i}", priority=2,
             trigger=trigger, current=trigger,
-            authorized_phrase_codes=frozenset(codes),
+            authorized_fact_ids=fact_ids,
+            authorized_phrase_codes=frozenset((*codes, *caveats)),
             required_caveat_codes=tuple(caveats),
             condition_status="STILL_FIRING",
             origin_phrase_set_version=phrase_set.version,
             origin_phrase_set_sha256=phrase_set.sha256,
             origin_rules_sha256="rules-hash",
+            headline_code=codes[0],
         )
         for i in range(members)
     ]
@@ -410,7 +480,8 @@ def test_required_caveat_is_always_present(phrase_set):
     member = build_member_context(
         episode_id="EP1", rule_id="ops.coverage_risk_masking", priority=2,
         trigger=trigger, current=trigger,
-        authorized_phrase_codes=frozenset({"COVERAGE_RISK_MASKING"}),
+        authorized_fact_ids=frozenset({"F_BAND_BASE"}),
+        authorized_phrase_codes=frozenset({"COVERAGE_RISK_MASKING", "DATA_DEGRADED"}),
         required_caveat_codes=("DATA_DEGRADED",), condition_status="STILL_FIRING",
         origin_phrase_set_version=phrase_set.version,
         origin_phrase_set_sha256=phrase_set.sha256, origin_rules_sha256="r")
@@ -418,13 +489,14 @@ def test_required_caveat_is_always_present(phrase_set):
     result = render(context=RenderContext(members=[member]), phrase_set=phrase_set,
                     headline_code="COVERAGE_RISK_MASKING", phrase_codes=[],
                     next_check_code=None, caveat_codes=[])
-    assert "Datenlage eingeschraenkt" in result.body
+    assert "Daten lueckenhaft" in result.body
 
 
 def test_degraded_data_adds_a_caveat_without_being_asked(phrase_set):
     trigger = make_input(identity="i1", effective="de-risk", degraded=True)
     member = build_member_context(
         episode_id="EP1", rule_id="r", priority=2, trigger=trigger, current=trigger,
+        authorized_fact_ids=frozenset(),
         authorized_phrase_codes=frozenset(), required_caveat_codes=(),
         condition_status="STILL_FIRING", origin_phrase_set_version=phrase_set.version,
         origin_phrase_set_sha256=phrase_set.sha256, origin_rules_sha256="r")
@@ -437,6 +509,7 @@ def test_incompatible_current_input_falls_back_to_trigger_values(phrase_set):
     object.__setattr__(current, "methodology_sha256", "a-different-methodology")
     member = build_member_context(
         episode_id="EP1", rule_id="r", priority=2, trigger=trigger, current=current,
+        authorized_fact_ids=frozenset({"F_HEADLINE_MEDIAN"}),
         authorized_phrase_codes=frozenset(), required_caveat_codes=(),
         condition_status="MATERIALLY_CHANGED_BUT_ACTIVE",
         origin_phrase_set_version=phrase_set.version,
@@ -449,6 +522,7 @@ def test_median_and_point_score_are_separate_facts(phrase_set):
     trigger = make_input(identity="i1", median=61.0, point=59.0)
     member = build_member_context(
         episode_id="EP1", rule_id="r", priority=2, trigger=trigger, current=trigger,
+        authorized_fact_ids=frozenset({"F_HEADLINE_MEDIAN", "F_POINT_SCORE"}),
         authorized_phrase_codes=frozenset(), required_caveat_codes=(),
         condition_status="STILL_FIRING", origin_phrase_set_version=phrase_set.version,
         origin_phrase_set_sha256=phrase_set.sha256, origin_rules_sha256="r")
@@ -837,6 +911,56 @@ def test_an_unauthorized_code_from_the_model_is_rejected(phrase_set):
                             "fact_ids": [], "caveat_codes": []}, context, phrase_set)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("next_check_code", "NEXT_RECOMPUTE"),
+        ("caveat_codes", ["DATA_DEGRADED"]),
+    ],
+)
+def test_model_cannot_select_an_unauthorized_next_check_or_caveat(
+        phrase_set, field, value):
+    import json
+
+    from app.alerts.llm_selector import build_prompt, validate_selection
+
+    context = _context(phrase_set, codes=("BAND_TO_DERISK",))
+    raw = {"headline_code": "BAND_TO_DERISK", "phrase_codes": [],
+           "fact_ids": [], "caveat_codes": []}
+    raw[field] = value
+    with pytest.raises(ValueError, match="not authorized"):
+        validate_selection(raw, context, phrase_set)
+
+    prompt = json.loads(build_prompt(context, phrase_set))
+    assert "NEXT_RECOMPUTE" not in prompt["allowed_next_check_codes"]
+    assert "DATA_DEGRADED" not in prompt["allowed_caveat_codes"]
+
+
+def test_budget_skip_rows_do_not_keep_the_llm_cap_exhausted_forever(
+        isolated_db):
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import LlmAttemptStatus
+    from app.alerts.llm_selector import _budget_used
+    from app.alerts.models import AlertLlmAttempt
+    from app.alerts.repository import utc_ms
+    from app.db import session_scope
+
+    _seed_delivery()
+    with session_scope() as session:
+        for offset in range(12):
+            session.add(AlertLlmAttempt(
+                attempt_id=new_ulid(utc_ms(NOW) + offset),
+                delivery_id="D1",
+                attempted_at=NOW,
+                model="test-model",
+                status=LlmAttemptStatus.BUDGET_SKIPPED,
+                duration_ms=0,
+                context_hash="c" * 64,
+            ))
+    with session_scope() as session:
+        assert _budget_used(session, now=NOW, hours=24) == 0
+
+
 def test_a_foreign_fact_id_from_the_model_is_rejected(phrase_set):
     from app.alerts.llm_selector import validate_selection
 
@@ -861,3 +985,450 @@ def test_the_model_prompt_contains_only_codes_numbers_and_enums(phrase_set):
     }
     for value in payload["facts"].values():
         assert isinstance(value, str) and len(value) <= 12
+
+
+# ---------------------------------------------------------------------------
+# named mandate properties (§27.8 / §21.3)
+# ---------------------------------------------------------------------------
+
+
+def test_stale_sending_becomes_unknown(isolated_db):
+    """A crash mid-send may have reached the provider; only UNKNOWN is honest."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.canonical import new_ulid
+    from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.outbox import recover_leases
+    from app.alerts.repository import utc_ms
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts)
+        delivery_id = new_ulid(utc_ms(now))
+        session.add(AlertDelivery(
+            delivery_id=delivery_id, dedupe_key=f"v1|X|{delivery_id}",
+            dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=artifacts.ruleset.rules_sha256,
+            delivery_kind=DeliveryKind.TEST, priority=2,
+            transport_status=TransportStatus.SENDING,
+            planning_state=PlanningState.NONE,
+            not_before=now - timedelta(minutes=30),
+            created_at=now - timedelta(minutes=30),
+            updated_at=now - timedelta(minutes=30), attempts=1,
+            lease_owner="dead-worker",
+            lease_until=now - timedelta(minutes=10),
+            request_started_at=now - timedelta(minutes=11),
+            duplicate_risk_acknowledged=False, recipient_ref="default"))
+        session.flush()
+        recover_leases(session, now=now)
+        assert session.get(AlertDelivery, delivery_id).transport_status \
+            == TransportStatus.UNKNOWN
+
+
+def test_automatic_retry_preserves_append_only_attempt_timestamps(isolated_db):
+    """Retry scheduling cannot erase proof of the provider attempt it follows."""
+    from sqlalchemy import select
+
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery, AlertEvent
+    from app.alerts.outbox import (
+        claim,
+        mark_sending,
+        mark_transient,
+        recover_leases,
+    )
+    from app.db import session_scope
+
+    delivery_id = _seed_delivery("D-retry-audit")
+    first_start = NOW + timedelta(seconds=1)
+    first_finish = NOW + timedelta(seconds=2)
+    retry_claimed = NOW + timedelta(minutes=1)
+
+    with session_scope() as session:
+        assert claim(
+            session,
+            delivery_id,
+            owner="worker-1",
+            now=NOW,
+            lease_seconds=30,
+        )
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        mark_sending(session, delivery, now=first_start)
+        mark_transient(
+            session,
+            delivery,
+            now=first_finish,
+            error_code="TEMPORARY",
+            message="definitely not accepted",
+            http_status=503,
+        )
+        assert delivery.transport_status == TransportStatus.RETRY_DUE
+        assert delivery.request_started_at == first_start
+
+    with session_scope() as session:
+        assert claim(
+            session,
+            delivery_id,
+            owner="worker-2",
+            now=retry_claimed,
+            lease_seconds=30,
+        )
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.request_started_at is None
+        delivery.lease_until = retry_claimed - timedelta(seconds=1)
+        recovered = recover_leases(
+            session,
+            now=retry_claimed + timedelta(seconds=1),
+        )
+        assert recovered == {"retry_due": 1, "unknown": 0}
+
+        events = session.execute(
+            select(AlertEvent).where(AlertEvent.delivery_id == delivery_id)
+            .order_by(AlertEvent.occurred_at, AlertEvent.event_id)
+        ).scalars().all()
+        assert [event.action for event in events] == [
+            "delivery_attempt_started",
+            "delivery_retry_due",
+            "delivery_lease_recovered",
+        ]
+        assert events[0].occurred_at == first_start.replace(tzinfo=None)
+        assert "attempt=1" in (events[0].detail_redacted or "")
+
+
+@pytest.mark.parametrize("use_returning", [True, False])
+def test_returning_and_fallback_claim(isolated_db, monkeypatch, use_returning):
+    """Both SQLite claim routes are one conditional UPDATE, never select-then-set."""
+    from sqlalchemy import event
+
+    from app.alerts.outbox import claim
+    from app.db import get_engine, session_scope
+
+    delivery_id = f"D-claim-{'returning' if use_returning else 'fallback'}"
+    _seed_delivery(delivery_id)
+    engine = get_engine()
+    dialect = engine.dialect
+    monkeypatch.setattr(dialect, "update_returning", use_returning)
+    statements: list[str] = []
+
+    def capture_update(_conn, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith("UPDATE ALERT_DELIVERY"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture_update)
+    try:
+        with session_scope() as session:
+            assert claim(
+                session,
+                delivery_id,
+                owner="worker-a",
+                now=NOW,
+                lease_seconds=30,
+            )
+        with session_scope() as session:
+            assert not claim(
+                session,
+                delivery_id,
+                owner="worker-b",
+                now=NOW,
+                lease_seconds=30,
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_update)
+
+    assert statements
+    assert (" RETURNING " in f" {statements[0].upper()} ") is use_returning
+
+
+def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):
+    """send-test proves the REAL pipeline: claim, render, classify.
+
+    The body is the reviewed TEST_MESSAGE fragment — text typed into a request
+    would bypass the one gate every phone-bound word goes through.
+    """
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active, register, validate_phrase_set
+    from app.alerts.canonical import new_ulid
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+    from app.alerts.sender import NullSender
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts)
+        delivery_id = new_ulid(utc_ms(now))
+        session.add(AlertDelivery(
+            delivery_id=delivery_id, dedupe_key=f"v1|TEST|{delivery_id}",
+            dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=artifacts.ruleset.rules_sha256,
+            delivery_kind=DeliveryKind.TEST, priority=4,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY, not_before=now,
+            created_at=now, updated_at=now, attempts=0,
+            duplicate_risk_acknowledged=False, recipient_ref="default"))
+
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+        phrase_set = validate_phrase_set(fh.read())
+    sender = NullSender()
+    render_finished = now + timedelta(seconds=1)
+    request_started = now + timedelta(seconds=2)
+    provider_finished = now + timedelta(seconds=4)
+    clock_values = iter((render_finished, request_started, provider_finished))
+    dispatch_once(session_scope, phrase_set=phrase_set, mode="shadow",
+                  live_profile="default", sender=sender, now=now,
+                  clock=lambda: next(clock_values))
+
+    assert sender.sent, "the TEST delivery was not dispatched"
+    assert sender.sent[0][1] == phrase_set.headlines["TEST_MESSAGE"].text
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery.transport_status == TransportStatus.SENT
+        assert delivery.request_started_at.replace(tzinfo=UTC) == request_started
+        assert delivery.sent_at.replace(tzinfo=UTC) == provider_finished
+        assert delivery.updated_at.replace(tzinfo=UTC) == provider_finished
+
+
+def test_dispatcher_executes_a_nonzero_headline_member_index(
+        isolated_db, phrase_set, monkeypatch):
+    """Executable evidence for the dispatcher/RenderContext interface.
+
+    A panel previously claimed ``headline_member_index`` did not exist even
+    though it was present at the reviewed SHA.  Drive the exact dispatcher
+    access with index 1 so both existence and indexing semantics are covered.
+    """
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.enums import RenderSource
+    from app.alerts.renderer import RenderResult
+    from app.alerts.sender import NullSender
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_delivery_for_episode
+    from tests.test_alert_evaluation import _artifacts
+
+    episode_id = seed_delivery_for_episode()
+    artifacts = _artifacts(stage=3)
+    first = artifacts.ruleset.rule("regime.band_to_derisk")
+    headline = artifacts.ruleset.rule("legs.faber_spy_out_standard")
+    assert first is not None and first.render is not None
+    assert headline is not None and headline.render is not None
+
+    context = _context(phrase_set, members=2)
+    context.headline_member_index = 1
+    observed: list[str] = []
+
+    monkeypatch.setattr(
+        dispatcher_module,
+        "planning_phrase_set",
+        lambda *args, **kwargs: phrase_set,
+    )
+    monkeypatch.setattr(
+        dispatcher_module,
+        "_build_context",
+        lambda *args, **kwargs: (context, [first, headline]),
+    )
+
+    def render_from_selected_headline(**kwargs):
+        observed.append(kwargs["headline_code"])
+        body = "Dispatcher headline index contract."
+        return RenderResult(
+            body=body,
+            septet_count=len(body),
+            render_source=RenderSource.TEMPLATE_FULL,
+            represented_member_ids=[episode_id],
+            validation={
+                "gsm7": True,
+                "fits_single_sms": True,
+                "represented_member_ids": [episode_id],
+            },
+        )
+
+    monkeypatch.setattr(
+        dispatcher_module, "render_with_cascade", render_from_selected_headline)
+    sender = NullSender()
+    report = dispatcher_module.dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert observed == [headline.render.headline_code]
+    assert report.sent == 1
+    assert sender.sent[0][1] == "Dispatcher headline index contract."
+
+
+def test_wrong_member_phrase_hash_is_refused_before_render_or_send(
+        isolated_db, phrase_set):
+    """A matching phrase version cannot substitute for the recorded digest."""
+    from sqlalchemy import select
+
+    from app.alerts.dispatcher import dispatch_once, planning_phrase_set
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertRulesetRegistry,
+    )
+    from app.alerts.sender import NullSender
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_delivery_for_episode
+
+    seed_delivery_for_episode()
+    with session_scope() as session:
+        delivery = session.execute(select(AlertDelivery)).scalars().one()
+        member = session.execute(select(AlertDeliveryMember)).scalars().one()
+        origin = session.get(AlertRulesetRegistry, member.origin_rules_sha256)
+        assert origin is not None
+        member.origin_phrase_set_version = origin.phrase_set_version
+        member.origin_phrase_set_sha256 = origin.phrase_set_sha256
+        session.flush()
+        assert planning_phrase_set(session, delivery, phrase_set) is not None
+
+        member.origin_phrase_set_sha256 = "9" * 64
+        delivery_id = delivery.delivery_id
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert report.render_failed == 1
+    assert sender.sent == []
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.RENDER_FAILED
+        assert delivery.attempts == 0
+
+
+def test_frozen_bundle_retry_is_cancelled_when_a_rendered_member_resolves(
+        isolated_db, phrase_set):
+    """Never choose stale prose over the same-render retry invariant."""
+    from sqlalchemy import select
+
+    from app.alerts.canonical import new_ulid
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import (
+        DeliveryKind,
+        EpisodeStatus,
+        PlanningState,
+        TransportStatus,
+    )
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertEpisode,
+        AlertRender,
+    )
+    from app.alerts.repository import utc_ms
+    from app.alerts.sender import NullSender
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_delivery_for_episode
+
+    first_episode_id = seed_delivery_for_episode()
+    with session_scope() as session:
+        delivery = session.execute(select(AlertDelivery)).scalars().one()
+        first = session.get(AlertEpisode, first_episode_id)
+        first_member = session.get(
+            AlertDeliveryMember, (delivery.delivery_id, first_episode_id))
+        assert first is not None and first_member is not None
+
+        delivery.delivery_kind = DeliveryKind.BUNDLE
+        delivery.priority = 1
+        delivery.attempts = 1
+        delivery.transport_status = TransportStatus.RETRY_DUE
+        delivery.planning_state = PlanningState.READY
+
+        second_episode_id = new_ulid(utc_ms(NOW) + 1)
+        second = AlertEpisode(
+            episode_id=second_episode_id,
+            mode=first.mode,
+            live_profile=first.live_profile,
+            origin_rules_sha256=first.origin_rules_sha256,
+            instance_fingerprint="b" * 64,
+            rule_id=first.rule_id,
+            labels=dict(first.labels),
+            priority=first.priority,
+            episode_status=EpisodeStatus.FIRING,
+            is_open=True,
+            suppression_reasons=[],
+            opened_at=NOW,
+            activated_at=NOW,
+            trigger_input_identity=first.trigger_input_identity,
+            predecessor_input_identity=first.predecessor_input_identity,
+            created_evaluation_id=first.created_evaluation_id,
+            last_evaluation_id=first.last_evaluation_id,
+        )
+        session.add(second)
+        session.flush()
+        session.add(AlertDeliveryMember(
+            delivery_id=delivery.delivery_id,
+            episode_id=second_episode_id,
+            rule_id=second.rule_id,
+            instance_fingerprint=second.instance_fingerprint,
+            member_role="BUNDLED",
+            notification_generation=1,
+            origin_rules_sha256=first_member.origin_rules_sha256,
+            origin_phrase_set_version=first_member.origin_phrase_set_version,
+            origin_phrase_set_sha256=first_member.origin_phrase_set_sha256,
+            included_at=NOW,
+            delivered=False,
+        ))
+        frozen_body = "Two represented bundle members."
+        session.add(AlertRender(
+            render_id=new_ulid(utc_ms(NOW) + 2),
+            delivery_id=delivery.delivery_id,
+            render_source="template_full",
+            planning_phrase_set_version=phrase_set.version,
+            planning_phrase_set_sha256=phrase_set.sha256,
+            render_context_hash="c" * 64,
+            fact_catalog_hash="f" * 64,
+            selected_fact_ids=[],
+            selected_phrase_codes=[],
+            validation_results={
+                "represented_member_ids": [first_episode_id, second_episode_id],
+            },
+            final_message=frozen_body,
+            gsm7_septets=len(frozen_body),
+            created_at=NOW - timedelta(minutes=1),
+        ))
+        first.is_open = False
+        first.episode_status = EpisodeStatus.RESOLVED
+        delivery_id = delivery.delivery_id
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert sender.sent == []
+    assert report.cancelled == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "RENDERED_MEMBER_WITHDRAWN"

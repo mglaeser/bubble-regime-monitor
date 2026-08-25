@@ -45,7 +45,8 @@ jobs:
           pip install fastapi "uvicorn[standard]" "pydantic>=2.7" pydantic-settings \
             SQLAlchemy alembic httpx tenacity "APScheduler<4" structlog slowapi \
             "numpy<2.3" "pandas<3.0" openpyxl xlrd beautifulsoup4 lxml anthropic PyYAML \
-            pytest ruff mypy pip-audit detect-secrets
+            pytest ruff mypy pip-audit detect-secrets \
+            "openapi-spec-validator==0.9.0" "jsonschema==4.26.0"
       - name: Install optional LPPLS engine (best-effort; suite skips it if absent)
         run: pip install "lppls==0.6.24" || echo "::warning::lppls unavailable — LPPLS paths self-skip (hermetic suite, A-02)"
       - name: Lint (ruff, BLOCKING — E,F,I,W,UP,B,S)
@@ -57,15 +58,19 @@ jobs:
         env:
           # 217 -> 212: annotating the four frozen s4 policy constants as float
           # cleared the whole no-any-return class in app/indicators/s4_gsadf.py.
+          # 211 -> 205: the typed render-carriage path narrows persisted inputs,
+          # origin contracts, validation mappings, and member collections.
+          # 205 -> 172: the completed alert path types repository rows, source
+          # normalization, admission/recovery state, and API response contracts.
           # Lowered in the SAME commit that lowered the count, which is what the
           # comment below has always asked for and what the ::notice:: advises.
-          MYPY_CEILING: "211"
+          MYPY_CEILING: "172"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:
           # flipping `strict = true` to false in pyproject.toml drops 217 errors
           # to 84 with the file count unchanged at 113 and this floor satisfied.
-          # 113 files today; the floor sits below that so ordinary file movement
+          # 122 files today; the floor sits below that so ordinary file movement
           # does not trip it.
           MYPY_MIN_FILES: "100"
           # DEPTH is pinned separately, because the ratchet only ever blocks a
@@ -142,7 +147,7 @@ jobs:
       - name: Alert artifacts — validate the shipped ruleset + phrase set (BLOCKING)
         # The rule inventory is DATA. A ruleset that no longer validates is a
         # silently-dark alert system, so this gates the same as a test failure.
-        run: python -m app.alerts.cli validate --rules config/alert_rules.v3.2.yaml --phrases config/alert_phrases.v3.3.json
+        run: python -m app.alerts.cli validate --rules config/alert_rules.v3.2.yaml --phrases config/alert_phrases.v3.4.json
         env:
           TESTING: "true"
       - name: Alert OpenAPI artifact — no drift (BLOCKING)

@@ -26,21 +26,67 @@ from app.logging_conf import get_logger
 log = get_logger(__name__)
 
 COMPONENT = "recovery"
+SIDECAR_COMPONENT = "sidecar_reconciliation"
 
 
-def heartbeat(component: str, status: str, detail: dict[str, Any] | None = None) -> None:
-    """Record liveness. A watchdog nobody watches is not a watchdog."""
+def heartbeat(
+    component: str,
+    status: str,
+    detail: dict[str, Any] | None = None,
+    *,
+    mode: str | None = None,
+    live_profile: str | None = None,
+) -> None:
+    """Record liveness with the namespace whose work was actually checked.
+
+    A fresh shadow heartbeat is not evidence that the live profile is healthy.
+    Stamping the namespace at the shared write boundary keeps every component
+    from inventing its own partially-compatible heartbeat shape.
+    """
     now = datetime.now(UTC)
+    settings = get_settings()
+    current_mode = mode or settings.alerts_mode
+    current_profile = live_profile or settings.alerts_live_profile
     with session_scope() as session:
         row = session.get(AlertComponentHeartbeat, component)
         if row is None:
+            payload = {
+                **(detail or {}),
+                "mode": current_mode,
+                "live_profile": current_profile,
+                "run_count": 1,
+                "first_heartbeat_at": now.isoformat(),
+                "previous_heartbeat_at": None,
+                "previous_status": None,
+                "previous_mode": None,
+                "previous_live_profile": None,
+                "consecutive_non_ok": 0 if status == "ok" else 1,
+            }
             session.add(AlertComponentHeartbeat(
                 component=component, last_heartbeat_at=now, status=status,
-                detail_json=detail or {}))
+                detail_json=payload))
         else:
+            previous = dict(row.detail_json or {})
+            first_seen = previous.get("first_heartbeat_at") \
+                or row.last_heartbeat_at.isoformat()
+            payload = {
+                **(detail or {}),
+                "mode": current_mode,
+                "live_profile": current_profile,
+                "run_count": int(previous.get("run_count", 1)) + 1,
+                "first_heartbeat_at": first_seen,
+                "previous_heartbeat_at": row.last_heartbeat_at.isoformat(),
+                "previous_status": row.status,
+                "previous_mode": previous.get("mode"),
+                "previous_live_profile": previous.get("live_profile"),
+                "consecutive_non_ok": (
+                    0 if status == "ok"
+                    else int(previous.get("consecutive_non_ok", 0)) + 1
+                ),
+            }
             row.last_heartbeat_at = now
             row.status = status
-            row.detail_json = detail or {}
+            row.detail_json = payload
 
 
 #: Ordered by how much a mode is permitted to do. `live` is the only one that
@@ -108,7 +154,12 @@ def _retryable_inputs(session: Any, abandoned: list[str], *, limit: int,
 def run_once() -> dict[str, Any]:
     settings = get_settings()
     if not settings.alert_input_capture and settings.alerts_mode == "disabled":
-        return {"status": "skipped", "reason": "capture and alerting both disabled"}
+        detail = {"status": "skipped",
+                  "reason": "capture and alerting both disabled",
+                  "skipped": True}
+        heartbeat(COMPONENT, "ok", detail)
+        heartbeat(SIDECAR_COMPONENT, "ok", {**detail, "sidecar_gaps": 0})
+        return detail
 
     with session_scope() as session:
         report = recover_evaluations(session)
@@ -195,6 +246,11 @@ def run_once() -> dict[str, Any]:
         "retries_budget_exhausted": len(exhausted),
     }
     heartbeat(COMPONENT, status, detail)
+    heartbeat(
+        SIDECAR_COMPONENT,
+        "degraded" if gaps else "ok",
+        {"sidecar_gaps": len(gaps)},
+    )
     return {"status": status, **detail}
 
 
@@ -206,3 +262,8 @@ def job() -> None:
     except Exception as exc:
         log.error("alert_recovery_job_failed", error_class=type(exc).__name__,
                   error=str(exc)[:300])
+        for component in (COMPONENT, SIDECAR_COMPONENT):
+            try:
+                heartbeat(component, "critical", {"error": type(exc).__name__})
+            except Exception:  # noqa: S110 - preserve the original job failure
+                pass

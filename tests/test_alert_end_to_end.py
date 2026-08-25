@@ -23,6 +23,7 @@ from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
     AlertEpisode,
+    AlertInstanceNotificationState,
     AlertRender,
 )
 from app.db import session_scope
@@ -178,6 +179,192 @@ def test_a_band_transition_reaches_a_sent_delivery(tmp_path, monkeypatch):
             f"body must fit one GSM-7 message, got {render.gsm7_septets} septets")
         assert "vorher" in render.final_message, (
             f"the transition phrase needs the predecessor: {render.final_message!r}")
+
+
+def test_a_reminder_is_persisted_once_and_advances_only_after_confirmed_send(
+        tmp_path, monkeypatch):
+    """Exercise reminder generation through the real engine and outbox.
+
+    Planning generation 2 must not advance durable notification memory.  A
+    later evaluation while that row is still open must discover the persisted
+    generation and refrain from branching another intent.  Only a confirmed
+    sender outcome advances the next generation and reminder count.
+    """
+    import yaml
+
+    source = yaml.safe_load(
+        pathlib.Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8"))
+    source["meta"]["active_stage"] = 3
+    staged = tmp_path / "alert_rules.stage3-reminder.yaml"
+    staged.write_text(
+        yaml.safe_dump(source, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(staged))
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.sender import NullSender
+    from app.config import get_settings
+    from app.services.alert_integration import capture_alert_input, evaluate_input
+
+    get_settings.cache_clear()
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+
+    with session_scope() as session:
+        before_id = _snapshot(
+            session, computed_at=base, effective="trim", prev_id=None).id
+    before_input = capture_alert_input(before_id, now=base)
+    with session_scope() as session:
+        trigger_id = _snapshot(
+            session, computed_at=base + timedelta(hours=4),
+            effective="de-risk", prev_id=before_id).id
+    trigger_input = capture_alert_input(trigger_id, now=base + timedelta(hours=4))
+    evaluate_input(before_input, now=base)
+    evaluate_input(trigger_input, now=base + timedelta(hours=4))
+
+    with session_scope() as session:
+        phrase_set = load_active(session).phrase_set
+    initial_send_at = base + timedelta(hours=5)
+    initial = dispatch_once(
+        session_scope, phrase_set=phrase_set, mode="shadow",
+        live_profile="default", sender=NullSender(), now=initial_send_at,
+    )
+    assert initial.sent == 1
+
+    with session_scope() as session:
+        episode = session.query(AlertEpisode).filter_by(
+            rule_id="regime.band_to_derisk", is_open=True).one()
+        fingerprint = episode.instance_fingerprint
+        memory = session.get(
+            AlertInstanceNotificationState,
+            ("shadow", "default", fingerprint),
+        )
+        assert memory.next_notification_generation == 2
+        assert memory.reminder_count == 0
+
+    # More than 48 hours later the authoritative target state still holds.
+    due_at = base + timedelta(days=3)
+    with session_scope() as session:
+        due_id = _snapshot(
+            session, computed_at=due_at, effective="de-risk",
+            prev_id=trigger_id).id
+    due_input = capture_alert_input(due_id, now=due_at)
+    evaluate_input(due_input, now=due_at)
+
+    with session_scope() as session:
+        reminders = session.query(AlertDelivery).filter_by(
+            delivery_kind="REMINDER").all()
+        assert len(reminders) == 1
+        reminder = reminders[0]
+        member = session.query(AlertDeliveryMember).filter_by(
+            delivery_id=reminder.delivery_id).one()
+        assert member.notification_generation == 2
+        memory = session.get(
+            AlertInstanceNotificationState,
+            ("shadow", "default", fingerprint),
+        )
+        assert memory.next_notification_generation == 2
+        assert memory.reminder_count == 0
+
+    # A fresh evaluation sees generation 2 in the database and must not create
+    # a second reminder while the first is queued.
+    again_at = due_at + timedelta(hours=4)
+    with session_scope() as session:
+        again_id = _snapshot(
+            session, computed_at=again_at, effective="de-risk",
+            prev_id=due_id).id
+    again_input = capture_alert_input(again_id, now=again_at)
+    evaluate_input(again_input, now=again_at)
+    with session_scope() as session:
+        assert session.query(AlertDelivery).filter_by(
+            delivery_kind="REMINDER").count() == 1
+
+    reminder_send_at = again_at + timedelta(hours=1)
+    sent = dispatch_once(
+        session_scope, phrase_set=phrase_set, mode="shadow",
+        live_profile="default", sender=NullSender(), now=reminder_send_at,
+    )
+    assert sent.sent == 1
+    with session_scope() as session:
+        memory = session.get(
+            AlertInstanceNotificationState,
+            ("shadow", "default", fingerprint),
+        )
+        assert memory.next_notification_generation == 3
+        assert memory.reminder_count == 1
+        assert memory.last_reminder_at is not None
+        member = session.query(AlertDeliveryMember).filter_by(
+            delivery_id=reminder.delivery_id).one()
+        assert member.delivered is True
+
+    get_settings.cache_clear()
+
+
+def test_persisted_flapping_suppresses_only_the_new_notification(
+        tmp_path, monkeypatch):
+    """The engine persists chatter history and the planner consumes it.
+
+    Resolved predecessor deliveries deliberately remain queued in this test.
+    They belong to different episodes and therefore cannot masquerade as the
+    current episode's open generation.  On the third activation, the bounded
+    persisted state history crosses the flap threshold and suppresses only the
+    notification; the real condition and episode remain FIRING and visible.
+    """
+    import yaml
+
+    source = yaml.safe_load(
+        pathlib.Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8"))
+    source["meta"]["active_stage"] = 3
+    staged = tmp_path / "alert_rules.stage3-flapping.yaml"
+    staged.write_text(
+        yaml.safe_dump(source, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(staged))
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+
+    from app.alerts.models import AlertRuleState
+    from app.config import get_settings
+    from app.services.alert_integration import capture_alert_input, evaluate_input
+
+    get_settings.cache_clear()
+    base = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)
+    states = ["trim", "de-risk", "trim", "de-risk", "trim", "de-risk"]
+    predecessor_id = None
+    for index, state in enumerate(states):
+        observed_at = base + timedelta(hours=4 * index)
+        with session_scope() as session:
+            snapshot_id = _snapshot(
+                session, computed_at=observed_at, effective=state,
+                prev_id=predecessor_id).id
+        identity = capture_alert_input(snapshot_id, now=observed_at)
+        assert identity is not None
+        evaluate_input(identity, now=observed_at)
+        predecessor_id = snapshot_id
+
+    with session_scope() as session:
+        episodes = session.query(AlertEpisode).filter_by(
+            rule_id="regime.band_to_derisk").order_by(
+                AlertEpisode.opened_at.asc()).all()
+        deliveries = session.query(AlertDelivery).filter_by(
+            delivery_kind="INITIAL").all()
+        state = session.query(AlertRuleState).filter_by(
+            rule_id="regime.band_to_derisk").one()
+
+    assert len(episodes) == 3
+    assert [episode.is_open for episode in episodes] == [False, False, True]
+    assert len(deliveries) == 2, (
+        "the first two episodes should plan, while the third is flap-suppressed")
+    assert "FLAPPING" in episodes[-1].suppression_reasons
+    assert state.flap_projection["flapping"] is True
+    assert state.condition_state == "FIRING"
+    assert state.current_episode_id == episodes[-1].episode_id
+
+    get_settings.cache_clear()
 
 
 def test_the_predecessor_comes_from_lineage_not_from_the_clock(isolated_db):
@@ -351,3 +538,121 @@ def test_the_delivery_carries_the_runs_profile_not_the_ambient_one(monkeypatch):
 
     assert _recipient_ref("house") == "house"
     assert _recipient_ref("") == "default"
+
+
+def test_render_time_status_covers_all_four_outcomes(isolated_db):
+    """Mandate 17.5 — the two hard outcomes, not only the two easy ones.
+
+    UNKNOWN at render must carry its data-quality caveat and claim no
+    resolution; a resolved member is dropped; a materially changed member
+    renders trigger AND current rather than presenting stale numbers as now.
+    """
+    from app.alerts.render_context import render_time_status
+
+    assert render_time_status(condition_state="FIRING", resolved=True,
+                              materially_changed=False) == "RESOLVED_BEFORE_SEND"
+    assert render_time_status(condition_state="UNKNOWN", resolved=False,
+                              materially_changed=True) == "UNKNOWN_AT_RENDER"
+    assert render_time_status(condition_state="FIRING", resolved=False,
+                              materially_changed=True) \
+        == "MATERIALLY_CHANGED_BUT_ACTIVE"
+    assert render_time_status(condition_state="FIRING", resolved=False,
+                              materially_changed=False) == "STILL_FIRING"
+
+    # and the dispatcher actually consults it now — U-02 recorded this helper
+    # as having no callers, which meant 17.5 was implemented and unenforced
+    import inspect
+
+    from app.alerts import dispatcher
+
+    assert "render_time_status(" in inspect.getsource(dispatcher._build_context)
+
+
+def test_an_unknown_condition_renders_with_its_caveat(isolated_db):
+    """The message may go out; it may not pretend the condition is readable."""
+    from app.alerts.phrase_registry import validate_phrase_set
+    from app.alerts.render_context import build_member_context
+    from app.alerts.renderer import render_with_cascade
+
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+        phrase_set = validate_phrase_set(fh.read())
+
+    from tests.test_alert_evaluation import make_input
+
+    trigger = make_input(identity="u1", computed_at="2026-08-24T06:00:00+00:00",
+                         effective="de-risk", base="de-risk")
+    previous = make_input(identity="u0", computed_at="2026-08-24T02:00:00+00:00",
+                          effective="hold", base="hold")
+    context_member = build_member_context(
+        episode_id="01M0UNKNOWNRENDER00000000A", rule_id="regime.band_to_derisk",
+        priority=1, trigger=trigger, current=trigger, previous=previous,
+        authorized_fact_ids=frozenset(phrase_set.facts),
+        authorized_phrase_codes=frozenset(phrase_set.all_codes()),
+        required_caveat_codes=(), condition_status="UNKNOWN_AT_RENDER",
+        origin_phrase_set_version=phrase_set.version,
+        origin_phrase_set_sha256=phrase_set.sha256,
+        origin_rules_sha256="r" * 64)
+
+    from app.alerts.render_context import RenderContext
+
+    result = render_with_cascade(
+        context=RenderContext(members=[context_member]), phrase_set=phrase_set,
+        headline_code="BAND_TO_DERISK", phrase_codes=[],
+        next_check_code="NEXT_RECOMPUTE", caveat_codes=[])
+
+    caveat = phrase_set.caveats["UNKNOWN_AT_RENDER"].text
+    assert caveat in result.body, (
+        f"an UNKNOWN condition rendered without its caveat: {result.body!r}")
+
+
+def test_newer_incompatible_sidecar_does_not_masquerade_as_old_current_context(
+        isolated_db):
+    """Mandate 17.4: the newest reading wins or makes context explicitly stale.
+
+    Filtering compatibility in SQL used to return an older compatible row when
+    a newer methodology was already present.  That made the trigger look like
+    a current measurement and suppressed the required stale disclosure.
+    """
+    import json
+
+    from app.alerts.models import AlertInputSnapshot
+    from app.alerts.repository import load_latest_compatible_input
+    from app.db import session_scope
+    from tests.test_alert_evaluation import make_input
+
+    trigger = make_input(
+        identity="t" * 64,
+        computed_at="2026-08-24T08:00:00+00:00",
+        effective="de-risk",
+        base="de-risk",
+    ).model_copy(update={"methodology_sha256": "m" * 64})
+    incompatible = trigger.model_copy(update={
+        "input_identity": "x" * 64,
+        "computed_at": "2026-08-24T12:00:00+00:00",
+        "built_at": "2026-08-24T12:00:00+00:00",
+        "methodology_sha256": "n" * 64,
+        "headline_median": 70.0,
+    })
+
+    def row(inp):
+        moment = datetime.fromisoformat(inp.computed_at)
+        return AlertInputSnapshot(
+            input_identity=inp.input_identity,
+            snapshot_id=None,
+            origin="RECOMPUTE",
+            built_at=moment,
+            computed_at=moment,
+            alert_input_schema_version=inp.schema_version,
+            methodology_version=inp.methodology_version,
+            methodology_sha256=inp.methodology_sha256,
+            reconstructed=False,
+            evaluation_eligibility="EVALUABLE",
+            ineligibility_reasons=[],
+            payload=json.dumps(inp.model_dump(mode="json"), sort_keys=True),
+            payload_sha256="p" * 64,
+        )
+
+    with session_scope() as session:
+        session.add_all([row(trigger), row(incompatible)])
+    with session_scope() as session:
+        assert load_latest_compatible_input(session, like=trigger) is None

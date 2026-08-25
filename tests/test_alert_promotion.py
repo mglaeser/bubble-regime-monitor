@@ -79,12 +79,86 @@ def test_a_low_stage_still_needs_evidence():
                                      "failures": []}}}
     assert promotion_blockers(target_stage=1, artifact=artifact) == []
 
+
+def test_stage_two_requires_full_recall_bound_to_exact_frozen_catalogue(tmp_path):
+    """Unmeasured or drifted recall evidence can never authorize Stage 2+."""
+    from app.alerts.promotion import (
+        group_digest,
+        mandatory_event_catalogue_sha256,
+    )
+
+    catalogue_path = tmp_path / "mandatory-events.json"
+    catalogue = {
+        "catalogue_version": "test-1",
+        "schema_version": 1,
+        "frozen": True,
+        "events": [{
+            "event_id": "band-entry",
+            "description": "Frozen synthetic promotion fixture",
+            "window_start": "2026-08-15T02:00:00+00:00",
+            "window_end": "2026-08-15T10:00:00+00:00",
+            "rule_id": "regime.band_to_derisk",
+            "expected_priority": "P1",
+            "max_detection_slots": 1,
+            "source": "synthetic test fixture",
+        }],
+    }
+    catalogue_path.write_text(json.dumps(catalogue), encoding="utf-8")
+    digest = mandatory_event_catalogue_sha256(catalogue_path)
+    assert digest is not None
+    artifact = {
+        "mandatory_event_catalogue": {
+            "source": "config/alert_mandatory_events.v3.2.json",
+            "sha256_grouped": group_digest(digest),
+            "catalogue_version": "test-1",
+            "schema_version": 1,
+            "frozen": True,
+            "event_count": 1,
+        },
+        "runs": {"stage_2": {
+            "evaluated_at_stage": 2,
+            "passed": True,
+            "failures": [],
+            "mandatory_event_total": 1,
+            "mandatory_event_detected": 1,
+            "mandatory_event_not_evaluable": 0,
+        }},
+    }
+    assert promotion_blockers(
+        target_stage=2,
+        artifact=artifact,
+        mandatory_events_path=catalogue_path,
+    ) == []
+
+    catalogue["events"][0]["description"] = "Changed after replay"
+    catalogue_path.write_text(json.dumps(catalogue), encoding="utf-8")
+    drifted = promotion_blockers(
+        target_stage=2,
+        artifact=artifact,
+        mandatory_events_path=catalogue_path,
+    )
+    assert any("replay used mandatory-event catalogue" in item
+               for item in drifted)
+
+    catalogue["events"][0]["description"] = \
+        "Frozen synthetic promotion fixture"
+    catalogue_path.write_text(json.dumps(catalogue), encoding="utf-8")
+    artifact["runs"]["stage_2"]["mandatory_event_detected"] = 0
+    missed = promotion_blockers(
+        target_stage=2,
+        artifact=artifact,
+        mandatory_events_path=catalogue_path,
+    )
+    assert any("requires 100%" in item for item in missed)
+
 def test_a_failing_replay_blocks_and_quotes_its_own_reasons():
     artifact = {"runs": {"stage_3": {
         "evaluated_at_stage": 3, "passed": False,
         "failures": ["non-P1 volume breached the 24h cap: 5 > 3"]}}}
     blockers = promotion_blockers(target_stage=3, artifact=artifact)
-    assert blockers == ["stage 3: non-P1 volume breached the 24h cap: 5 > 3"]
+    assert "stage 3: non-P1 volume breached the 24h cap: 5 > 3" in blockers
+    assert any("no mandatory-event catalogue provenance" in item
+               for item in blockers)
 
 
 def test_the_committed_stage_is_backed_by_the_committed_evidence():
@@ -99,7 +173,7 @@ def test_the_committed_stage_is_backed_by_the_committed_evidence():
 
     ruleset = validate_from_disk(
         rules_path=Path("config/alert_rules.v3.2.yaml"),
-        phrase_path=Path("config/alert_phrases.v3.3.json"),
+        phrase_path=Path("config/alert_phrases.v3.4.json"),
         service_version="3.8.0").ruleset
     committed = ruleset.document.meta.active_stage
     blockers = promotion_blockers(
@@ -212,13 +286,13 @@ def test_the_runtime_gate_binds_the_phrase_set_as_well_as_the_rules():
     """The rules decide whether to alert; the phrase set decides what it says."""
     artifact = {
         "artifacts": {"rule_version": "v3.2.0", "phrase_set_version": "v3.2"},
-        "runs": {"stage_3": {"evaluated_at_stage": 3, "passed": True,
+        "runs": {"stage_1": {"evaluated_at_stage": 1, "passed": True,
                              "failures": []}},
     }
-    assert promotion_blockers(target_stage=3, artifact=artifact,
+    assert promotion_blockers(target_stage=1, artifact=artifact,
                               rule_version="v3.2.0",
                               phrase_set_version="v3.2") == []
-    drifted = promotion_blockers(target_stage=3, artifact=artifact,
+    drifted = promotion_blockers(target_stage=1, artifact=artifact,
                                  rule_version="v3.2.0",
                                  phrase_set_version="v9.9")
     assert any("phrase set" in b for b in drifted)
@@ -362,18 +436,18 @@ def test_evidence_produced_on_other_bytes_does_not_certify_these():
             "rules_sha256_grouped": group_digest("a" * 64),
             "phrase_set_sha256_grouped": group_digest("b" * 64),
         },
-        "runs": {"stage_3": {"evaluated_at_stage": 3, "passed": True,
+        "runs": {"stage_1": {"evaluated_at_stage": 1, "passed": True,
                              "failures": []}},
     }
     # same declared versions, different bytes
-    blockers = promotion_blockers(target_stage=3, artifact=artifact,
+    blockers = promotion_blockers(target_stage=1, artifact=artifact,
                                   rule_version="v3.2.0", phrase_set_version="v3.2",
                                   rules_sha256="c" * 64,
                                   phrase_set_sha256="b" * 64)
     assert any("was produced on rules" in b for b in blockers)
 
     # and matching bytes clear it
-    assert promotion_blockers(target_stage=3, artifact=artifact,
+    assert promotion_blockers(target_stage=1, artifact=artifact,
                               rule_version="v3.2.0", phrase_set_version="v3.2",
                               rules_sha256="a" * 64,
                               phrase_set_sha256="b" * 64) == []
@@ -893,6 +967,53 @@ def test_stage_one_is_never_admitted_for_live_delivery(promote):
 
 
 @pytest.mark.usefixtures("isolated_db")
+def test_live_health_consumes_the_same_stage_floor_as_dispatch(monkeypatch):
+    """Health cannot say ``ok`` while the dispatcher refuses to build a sender."""
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.health import health_projection
+    from app.alerts.promotion import live_admission_blockers
+    from app.config import get_settings
+    from app.db import session_scope
+    from tests.conftest import register_promoted
+
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    monkeypatch.setenv("ALERTS_LIVE_PROFILE", "default")
+    get_settings.cache_clear()
+    now = datetime(2026, 8, 25, 7, 0, tzinfo=UTC)
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        # Remove artifact-promotion mismatch as an alternative explanation.
+        # Even exact promotion cannot lift the Stage-3 delivery floor.
+        register_promoted(session, artifacts)
+        session.flush()
+        expected = live_admission_blockers(session)
+        payload = health_projection(
+            session,
+            settings=get_settings(),
+            ruleset=artifacts.ruleset,
+            artifact_source=artifacts.source,
+            fallback_reason=None,
+            now=now,
+        )
+
+    assert any("not admitted before Stage" in blocker for blocker in expected)
+    assert payload["status"] == "critical"
+    assert payload["live_admission"] == {
+        "evaluated": True,
+        "permitted": False,
+        "blockers": expected,
+    }
+    assert any(
+        condition.startswith("live admission:")
+        for condition in payload["conditions"]
+    )
+    get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("isolated_db")
 def test_the_stage_floor_does_not_hide_missing_evidence():
     """Both answers, not the first one only.
 
@@ -984,7 +1105,7 @@ def test_cli_refuses_promotion_when_exact_evidence_fails(monkeypatch, capsys):
     monkeypatch.setattr(promotion_service, "load_evidence", lambda path=None: None)
     code = alert_cli.main(["validate",
                            "--rules", "config/alert_rules.v3.2.yaml",
-                           "--phrases", "config/alert_phrases.v3.3.json",
+                           "--phrases", "config/alert_phrases.v3.4.json",
                            "--promote"])
     out = capsys.readouterr().out
     assert code == 1
@@ -1124,7 +1245,8 @@ def test_changed_caps_invalidate_the_evidence_that_never_saw_them(monkeypatch):
             "budget_limits": {"cap_24h": 3, "cap_168h": 6, "target_168h": 2},
         }},
     }
-    assert promotion_blockers(target_stage=3, artifact=artifact) == []
+    initial = promotion_blockers(target_stage=3, artifact=artifact)
+    assert not any("changed caps need new evidence" in item for item in initial)
 
     monkeypatch.setenv("ALERTS_NON_P1_CAP_24H", "30")
     from app.config import get_settings

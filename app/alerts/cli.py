@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -262,7 +263,11 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
     """
     from app.alerts.artifacts import validate_from_disk
     from app.alerts.errors import AlertError
-    from app.alerts.replay import ReplayConfig, run_replay
+    from app.alerts.replay import (
+        MandatoryEventCatalogueInvalid,
+        ReplayConfig,
+        run_replay,
+    )
     from app.config import get_settings
 
     try:
@@ -286,6 +291,10 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
     try:
         summary = run_replay(config=config, ruleset=artifacts.ruleset,
                              phrase_set=artifacts.phrase_set)
+    except MandatoryEventCatalogueInvalid as exc:
+        _print({"error_code": "MANDATORY_EVENT_CATALOGUE_INVALID",
+                "detail": str(exc)})
+        return 1
     except OperationalError:
         # Overwhelmingly: the source database is not where the settings say, or
         # capture has never run so the file does not exist yet. The URL is not
@@ -357,6 +366,84 @@ def cmd_recover(_args: argparse.Namespace) -> int:
     return 1 if report.needs_operator else 0
 
 
+def cmd_recover_leases(_args: argparse.Namespace) -> int:
+    """Sweep delivery leases once; ambiguous wire crossings become UNKNOWN."""
+    from datetime import UTC, datetime
+
+    from app.alerts.outbox import recover_leases
+    from app.db import session_scope
+
+    with session_scope() as session:
+        report = recover_leases(session, now=datetime.now(UTC))
+    _print(report)
+    return 0
+
+
+_ISO_WEEK = re.compile(r"^(\d{4})-W(\d{2})$")
+
+
+def _closed_week(value: str) -> str:
+    """Argparse type for a real ISO week key."""
+    from datetime import datetime
+
+    match = _ISO_WEEK.fullmatch(value)
+    if match is None:
+        raise argparse.ArgumentTypeError("window must look like YYYY-Www")
+    year, week = (int(part) for part in match.groups())
+    try:
+        datetime.fromisocalendar(year, week, 1)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("window is not a valid ISO week") from exc
+    return value
+
+
+def cmd_digest(args: argparse.Namespace) -> int:
+    """Plan one weekly digest, optionally under a guaranteed rollback."""
+    if not args.dry_run:
+        from app.jobs.alert_digest import run_once
+
+        result = run_once(window_key=args.window)
+        _print(result)
+        return 1 if result.get("status") == "refused" else 0
+
+    from datetime import UTC, datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.digest import plan_digest
+    from app.config import get_settings
+    from app.db import get_engine
+
+    settings = get_settings()
+    session = Session(get_engine(), expire_on_commit=False)
+    try:
+        artifacts = load_active(session)
+        register(session, artifacts, registered_by="digest-dry-run")
+        plan = plan_digest(
+            session,
+            mode=settings.alerts_mode,
+            live_profile=settings.alerts_live_profile,
+            planning_rules_sha256=artifacts.ruleset.rules_sha256,
+            phrase_set_version=artifacts.phrase_set.version,
+            phrase_set_sha256=artifacts.phrase_set.sha256,
+            window_key=args.window,
+            recipient_ref=settings.alerts_live_profile,
+            now=datetime.now(UTC),
+        )
+        session.flush()
+        payload = plan.as_dict()
+    finally:
+        # Includes artifact registration, quiet-window audit events, digest
+        # items, members, deliveries, and any implicit transaction state.
+        session.rollback()
+        session.close()
+    _print({"dry_run": True, "committed": False, **payload})
+    return 1 if str(payload.get("skipped_reason") or "").endswith(
+        "leave the rest of it unreported"
+    ) else 0
+
+
 def cmd_reconcile(_args: argparse.Namespace) -> int:
     from app.alerts.recovery import reconcile_sidecars
     from app.db import session_scope
@@ -381,6 +468,26 @@ def build_parser() -> argparse.ArgumentParser:
     validate.set_defaults(func=cmd_validate)
 
     sub.add_parser("preflight", help="pre-stage checks").set_defaults(func=cmd_preflight)
+    cutover = sub.add_parser("cutover", help="Stage 4 cutover gate and audit")
+    cutover_sub = cutover.add_subparsers(dest="cutover_cmd", required=True)
+    cutover_sub.add_parser("status", help="toggle state plus full preflight")
+    cutover_sub.add_parser("preflight", help="every gate condition; exit 1 if unmet")
+    for name in ("apply", "rollback"):
+        c = cutover_sub.add_parser(
+            name, help=f"request an audited {name}; never claims the env changed")
+        c.add_argument("--comment", required=True,
+                       help="why; stored on the audit event")
+    for name, request_action in (
+        ("confirm", "cutover_apply_requested"),
+        ("confirm-rollback", "cutover_rollback_requested"),
+    ):
+        c = cutover_sub.add_parser(
+            name, help="confirm the requested deployment change after restart")
+        c.add_argument("--request-event", required=True,
+                       help=f"audit event id whose action is {request_action}")
+        c.add_argument("--comment", required=True,
+                       help="what deployment observation confirmed the change")
+    cutover.set_defaults(func=cmd_cutover)
     watchdog = sub.add_parser("watchdog", help="check for missed recompute slots")
     watchdog.add_argument("--once", action="store_true", default=True)
     watchdog.set_defaults(func=cmd_watchdog)
@@ -425,7 +532,150 @@ def build_parser() -> argparse.ArgumentParser:
     recover = sub.add_parser("recover-evaluations", help="sweep stale evaluation leases")
     recover.add_argument("--once", action="store_true", default=True)
     recover.set_defaults(func=cmd_recover)
+    recover_delivery = sub.add_parser(
+        "recover-leases", help="sweep stale delivery leases"
+    )
+    recover_delivery.add_argument("--once", action="store_true", default=True)
+    recover_delivery.set_defaults(func=cmd_recover_leases)
+    digest = sub.add_parser("digest", help="plan one closed weekly digest")
+    digest.add_argument("--window", required=True, type=_closed_week)
+    digest.add_argument(
+        "--dry-run", action="store_true",
+        help="run registration and planning, then roll back every mutation",
+    )
+    digest.set_defaults(func=cmd_digest)
     return parser
+
+
+
+
+def cmd_cutover(args: argparse.Namespace) -> int:
+    """Stage 4 cutover operations: status, preflight, apply, rollback.
+
+    Apply and rollback are two-phase operations. The request records intent and
+    prints the exact environment change; confirmation runs only after restart,
+    observes the effective transport state, and then records completion. A CLI
+    command must never print ``applied=true`` for an environment change it did
+    not make and has not observed.
+    """
+    from app.alerts.cutover import preflight, record_decision
+    from app.config import get_settings
+    from app.db import session_scope
+
+    settings = get_settings()
+    if args.cutover_cmd == "status":
+        with session_scope() as session:
+            report = preflight(session)
+        print(json.dumps({
+            "effective_daily_sms_enabled": settings.effective_daily_sms_enabled,
+            "daily_sms_enabled_explicit": settings.daily_sms_enabled,
+            "daily_digest_transport": settings.daily_digest_transport,
+            "alerts_mode": settings.alerts_mode,
+            "preflight": report.as_dict(),
+        }, indent=2, sort_keys=True))
+        return 0
+
+    if args.cutover_cmd == "preflight":
+        with session_scope() as session:
+            report = preflight(session)
+        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+        return 0 if report.ready else 1
+
+    if args.cutover_cmd == "apply":
+        with session_scope() as session:
+            report = preflight(session)
+            if not report.ready:
+                print(json.dumps({"applied": False,
+                                  "unsatisfied": report.unsatisfied},
+                                 indent=2, sort_keys=True))
+                return 1
+            event_id = record_decision(session, action="cutover_apply_requested",
+                                       comment=args.comment)
+        print(json.dumps({
+            "requested": True, "applied": False, "audit_event": event_id,
+            "next_step": "set DAILY_SMS_ENABLED=false in the deployment "
+                         "environment, restart, then run cutover confirm "
+                         f"--request-event {event_id!s}",
+        }, indent=2, sort_keys=True))
+        return 0
+
+    if args.cutover_cmd == "confirm":
+        with session_scope() as session:
+            from app.alerts.models import AlertEvent
+
+            request = session.get(AlertEvent, args.request_event)
+            if request is None or request.action != "cutover_apply_requested":
+                print(json.dumps({
+                    "applied": False,
+                    "reason": "request event is absent or is not an apply request",
+                }, indent=2, sort_keys=True))
+                return 1
+            report = preflight(session, require_legacy_on=False)
+            observed = settings.daily_sms_enabled is False \
+                and settings.daily_digest_transport == "none"
+            if not observed or not report.ready:
+                print(json.dumps({
+                    "applied": False,
+                    "observed_explicit_toggle": settings.daily_sms_enabled,
+                    "observed_transport": settings.daily_digest_transport,
+                    "unsatisfied": report.unsatisfied,
+                }, indent=2, sort_keys=True))
+                return 1
+            event_id = record_decision(
+                session, action="cutover_apply_confirmed",
+                comment=f"request={args.request_event}; {args.comment}")
+        print(json.dumps({
+            "requested": True, "applied": True,
+            "request_event": args.request_event,
+            "confirmation_event": event_id,
+            "observed_transport": "none",
+        }, indent=2, sort_keys=True))
+        return 0
+
+    if args.cutover_cmd == "rollback":
+        # Always requestable — an operator reversing a cutover must not be
+        # gated on the health checks that prompted the reversal.
+        with session_scope() as session:
+            event_id = record_decision(
+                session, action="cutover_rollback_requested",
+                comment=args.comment)
+        print(json.dumps({
+            "requested": True, "rolled_back": False, "audit_event": event_id,
+            "next_step": "unset DAILY_SMS_ENABLED (or set it true), restart, "
+                         "then run cutover confirm-rollback "
+                         f"--request-event {event_id!s}",
+        }, indent=2, sort_keys=True))
+        return 0
+
+    # confirm-rollback: unlike the request, this is true only after the
+    # restarted process observes a configured legacy transport again.
+    with session_scope() as session:
+        from app.alerts.models import AlertEvent
+
+        request = session.get(AlertEvent, args.request_event)
+        if request is None or request.action != "cutover_rollback_requested":
+            print(json.dumps({
+                "rolled_back": False,
+                "reason": "request event is absent or is not a rollback request",
+            }, indent=2, sort_keys=True))
+            return 1
+        if settings.daily_digest_transport == "none":
+            print(json.dumps({
+                "rolled_back": False,
+                "observed_transport": "none",
+                "reason": "no configured legacy daily-digest transport is active",
+            }, indent=2, sort_keys=True))
+            return 1
+        event_id = record_decision(
+            session, action="cutover_rollback_confirmed",
+            comment=f"request={args.request_event}; {args.comment}")
+    print(json.dumps({
+        "requested": True, "rolled_back": True,
+        "request_event": args.request_event,
+        "confirmation_event": event_id,
+        "observed_transport": settings.daily_digest_transport,
+    }, indent=2, sort_keys=True))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

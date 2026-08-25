@@ -4,23 +4,23 @@ Read scope only. Every response is redacted: no recipient, no raw provider
 error, no raw model output, no secret-shaped configuration. Errors use RFC 9457
 `application/problem+json`.
 
-Endpoints whose backing feature is not built yet (deliveries, renders) are
-present and return their real, currently-empty tables rather than being absent
-— an operator checking "did anything go out?" gets an answer either way.
+Delivery and render endpoints project their real namespace-scoped tables even
+when the committed Stage-1 rollout leaves them empty. An operator checking
+"did anything go out?" gets an evidence-backed answer either way.
 """
 
 from __future__ import annotations
 
 import base64
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import and_, exists, or_, select
 
-from app.alerts.artifacts import load_active
+from app.alerts.artifacts import LoadedArtifacts, load_active
 from app.alerts.canonical import sha256_hex
 from app.alerts.errors import AlertingUnavailable
 from app.alerts.health import (
@@ -33,6 +33,7 @@ from app.alerts.health import (
 from app.alerts.models import (
     AlertDelivery,
     AlertEpisode,
+    AlertEvaluation,
     AlertEvent,
     AlertRender,
     AlertSilence,
@@ -50,11 +51,23 @@ from app.security import (
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
 MAX_PAGE = 500
-CURSOR_VERSION = "v1"
+CURSOR_VERSION = "v2"
+CURSOR_TTL = timedelta(hours=24)
+
+
+class CursorError(ValueError):
+    """A sanitized cursor refusal that an endpoint renders as RFC 9457."""
+
+    def __init__(self, status: int, title: str, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.title = title
+        self.detail = detail
 
 
 def problem(status: int, title: str, detail: str, *, type_: str = "about:blank",
-            extra: dict[str, object] | None = None) -> JSONResponse:
+            extra: dict[str, object] | None = None,
+            headers: dict[str, str] | None = None) -> JSONResponse:
     """RFC 9457 problem details, with a sanitized detail string.
 
     `extra` carries machine-readable members alongside the prose. A refusal an
@@ -66,44 +79,158 @@ def problem(status: int, title: str, detail: str, *, type_: str = "about:blank",
     }
     if extra:
         content.update(extra)
+    response_headers = {
+        "Cache-Control": "no-store",
+        "Vary": "X-API-Key",
+    }
+    if headers:
+        response_headers.update(headers)
     return JSONResponse(
         status_code=status,
         media_type="application/problem+json",
         content=content,
+        headers=response_headers,
     )
 
 
 def _encode_cursor(payload: dict[str, Any]) -> str:
-    raw = json.dumps({"v": CURSOR_VERSION, **payload}, sort_keys=True).encode()
+    document = dict(payload)
+    document["v"] = CURSOR_VERSION
+    document["issued_at"] = datetime.now(UTC).isoformat()
+    raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def _decode_cursor(cursor: str) -> dict[str, Any]:
+def _cursor_datetime(value: object, *, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise CursorError(422, "Malformed cursor", f"cursor {field} must be a timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CursorError(
+            422, "Malformed cursor", f"cursor {field} is not an RFC 3339 timestamp"
+        ) from exc
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _decode_cursor(
+    cursor: str,
+    *,
+    resource: str,
+    mode: str,
+    live_profile: str,
+    filters: dict[str, object] | None = None,
+) -> dict[str, Any]:
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
-        payload = json.loads(base64.urlsafe_b64decode(padded))
+        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
+        payload = json.loads(raw)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail="malformed cursor") from exc
+        raise CursorError(
+            422, "Malformed cursor", "cursor is not valid opaque pagination data"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise CursorError(422, "Malformed cursor", "cursor payload must be an object")
     if payload.get("v") != CURSOR_VERSION:
-        # An old cursor is GONE, not silently reinterpreted against a schema
-        # that has moved on.
-        raise HTTPException(status_code=410, detail="cursor version is no longer supported")
+        raise CursorError(
+            410, "Cursor expired", "cursor version is no longer supported")
+    issued_at = _cursor_datetime(payload.get("issued_at"), field="issued_at")
+    now = datetime.now(UTC)
+    if issued_at > now + timedelta(minutes=5):
+        raise CursorError(422, "Malformed cursor", "cursor issue time is in the future")
+    if now - issued_at > CURSOR_TTL:
+        raise CursorError(410, "Cursor expired", "cursor is older than 24 hours")
+    if payload.get("resource") != resource:
+        raise CursorError(422, "Cursor query mismatch", "cursor belongs to another resource")
+    if (payload.get("mode"), payload.get("live_profile")) != (mode, live_profile):
+        raise CursorError(
+            422, "Cursor namespace mismatch",
+            "cursor belongs to another alert mode or live profile",
+        )
+    for key, value in (filters or {}).items():
+        if payload.get(key) != value:
+            raise CursorError(
+                422, "Cursor query mismatch",
+                f"cursor was issued for a different {key} filter",
+            )
+    if not isinstance(payload.get("sort_id"), str) or not payload["sort_id"]:
+        raise CursorError(422, "Malformed cursor", "cursor sort_id is missing")
+    payload["sort_at_parsed"] = _cursor_datetime(
+        payload.get("sort_at"), field="sort_at")
     return payload
 
 
-def _etag(response: Response, payload: Any, *, max_age: int) -> None:
-    response.headers["ETag"] = '"' + sha256_hex(json.dumps(payload, sort_keys=True,
-                                                           default=str))[:32] + '"'
-    response.headers["Cache-Control"] = f"public, max-age={max_age}"
+def _etag(
+    request: Request,
+    response: Response,
+    payload: Any,
+    *,
+    max_age: int,
+) -> Response | None:
+    etag_payload = payload
+    if isinstance(payload, dict) and "next_cursor" in payload:
+        # Cursor issuance carries a real-time TTL timestamp. It is transport
+        # metadata, not resource state: hashing the opaque bytes makes an
+        # otherwise unchanged full page produce a new ETag on every request,
+        # so conditional GET can never return 304. Presence still participates
+        # in the hash because gaining or losing a next page is a real change.
+        has_next = payload["next_cursor"] is not None
+        etag_payload = {
+            **payload,
+            "next_cursor": {
+                "present": has_next,
+                # Force a periodic 200 so a client that conditionally refreshes
+                # forever receives a fresh 24-hour cursor before its previous
+                # one expires. Within the hour, issue-time microseconds do not
+                # defeat 304 responses.
+                "refresh_hour": (
+                    datetime.now(UTC).strftime("%Y-%m-%dT%H") if has_next else None
+                ),
+            },
+        }
+    tag = '"' + sha256_hex(json.dumps(
+        etag_payload, sort_keys=True, default=str))[:32] + '"'
+    headers = {
+        "ETag": tag,
+        "Cache-Control": f"private, max-age={max_age}",
+        "Vary": "X-API-Key",
+    }
+    response.headers.update(headers)
+    candidates = {
+        item.strip().removeprefix("W/")
+        for item in request.headers.get("if-none-match", "").split(",")
+        if item.strip()
+    }
+    if "*" in candidates or tag in candidates:
+        return Response(status_code=304, headers=headers)
+    return None
+
+
+def _no_store(response: Response) -> None:
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "X-API-Key"
+
+
+def _cursor_problem(exc: CursorError) -> JSONResponse:
+    return problem(exc.status, exc.title, exc.detail)
+
+
+def _before_cursor(timestamp_column: Any, id_column: Any, payload: dict[str, Any]) -> Any:
+    return or_(
+        timestamp_column < payload["sort_at_parsed"],
+        and_(
+            timestamp_column == payload["sort_at_parsed"],
+            id_column < payload["sort_id"],
+        ),
+    )
 
 
 def _mode() -> tuple[str, str]:
     settings = get_settings()
-    mode = settings.alerts_mode if settings.alerts_mode != "disabled" else "shadow"
-    return mode, settings.alerts_live_profile
+    return settings.alerts_mode, settings.alerts_live_profile
 
 
-def _load():
+def _load() -> LoadedArtifacts | None:
     """Active artifacts, or None when nothing valid is available."""
     with session_scope() as session:
         try:
@@ -115,7 +242,7 @@ def _load():
 @router.get("/health", summary="Alert-system health")
 @limiter.limit(READ_RATE_LIMIT)
 def get_health(request: Request, response: Response,
-               _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+               _: None = Depends(require_alerts_read)) -> Any:
     settings = get_settings()
     artifacts = _load()
     with session_scope() as session:
@@ -127,14 +254,16 @@ def get_health(request: Request, response: Response,
             fallback_reason=artifacts.fallback_reason if artifacts else
             "no valid ruleset is loadable",
         )
-    _etag(response, payload, max_age=30)
+    not_modified = _etag(request, response, payload, max_age=30)
+    if not_modified is not None:
+        return not_modified
     return payload
 
 
 @router.get("/overview", summary="One-screen alert overview")
 @limiter.limit(READ_RATE_LIMIT)
 def get_overview(request: Request, response: Response,
-                 _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+                 _: None = Depends(require_alerts_read)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable",
@@ -167,7 +296,9 @@ def get_overview(request: Request, response: Response,
         "latest": pointers,
         "unresolved_pins": unresolved_pins(artifacts.ruleset),
     }
-    _etag(response, payload, max_age=30)
+    not_modified = _etag(request, response, payload, max_age=30)
+    if not_modified is not None:
+        return not_modified
     return payload
 
 
@@ -175,7 +306,7 @@ def get_overview(request: Request, response: Response,
 @limiter.limit(READ_RATE_LIMIT)
 def get_mechanisms(request: Request, response: Response,
                    bucket: str | None = Query(default=None),
-                   _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+                   _: None = Depends(require_alerts_read)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
@@ -186,14 +317,16 @@ def get_mechanisms(request: Request, response: Response,
     if bucket:
         items = [i for i in items if i["bucket"] == bucket]
     payload = {"items": items[:MAX_PAGE], "total": len(items)}
-    _etag(response, payload, max_age=60)
+    not_modified = _etag(request, response, payload, max_age=60)
+    if not_modified is not None:
+        return not_modified
     return payload
 
 
 @router.get("/mechanisms/{instance_fingerprint}", summary="One mechanism in detail")
 @limiter.limit(READ_RATE_LIMIT)
-def get_mechanism(request: Request, instance_fingerprint: str,
-                  _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+def get_mechanism(request: Request, instance_fingerprint: str, response: Response,
+                  _: None = Depends(require_alerts_read)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
@@ -203,6 +336,9 @@ def get_mechanism(request: Request, instance_fingerprint: str,
                                      live_profile=profile)
     for item in items:
         if item["instance_fingerprint"] == instance_fingerprint:
+            not_modified = _etag(request, response, item, max_age=60)
+            if not_modified is not None:
+                return not_modified
             return item
     return problem(404, "Unknown mechanism",
                    "no rule instance with that fingerprint in the active ruleset")
@@ -210,8 +346,8 @@ def get_mechanism(request: Request, instance_fingerprint: str,
 
 @router.get("/rules/{rule_id}/instances", summary="Instances of one rule")
 @limiter.limit(READ_RATE_LIMIT)
-def get_rule_instances(request: Request, rule_id: str,
-                       _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+def get_rule_instances(request: Request, rule_id: str, response: Response,
+                       _: None = Depends(require_alerts_read)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
@@ -221,22 +357,33 @@ def get_rule_instances(request: Request, rule_id: str,
                                      live_profile=profile, rule_ids={rule_id})
     if not items:
         return problem(404, "Unknown rule", f"no rule {rule_id!r} in the active ruleset")
-    return {"rule_id": rule_id, "items": items}
+    payload = {"rule_id": rule_id, "items": items}
+    not_modified = _etag(request, response, payload, max_age=60)
+    if not_modified is not None:
+        return not_modified
+    return payload
 
 
 @router.get("/episodes", summary="Episodes, newest first")
 @limiter.limit(READ_RATE_LIMIT)
-def get_episodes(request: Request, open_only: bool = Query(default=False),
+def get_episodes(request: Request, response: Response,
+                 open_only: bool = Query(default=False),
                  limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                  cursor: str | None = Query(default=None),
-                 _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+                 _: None = Depends(require_alerts_read)) -> Any:
     mode, profile = _mode()
     conditions = [AlertEpisode.mode == mode, AlertEpisode.live_profile == profile]
     if open_only:
         conditions.append(AlertEpisode.is_open.is_(True))
     if cursor:
-        payload = _decode_cursor(cursor)
-        conditions.append(AlertEpisode.episode_id < payload["episode_id"])
+        try:
+            cursor_payload = _decode_cursor(
+                cursor, resource="episodes", mode=mode, live_profile=profile,
+                filters={"open_only": open_only})
+        except CursorError as exc:
+            return _cursor_problem(exc)
+        conditions.append(_before_cursor(
+            AlertEpisode.opened_at, AlertEpisode.episode_id, cursor_payload))
     with session_scope() as session:
         rows = session.execute(
             select(AlertEpisode).where(*conditions)
@@ -244,19 +391,34 @@ def get_episodes(request: Request, open_only: bool = Query(default=False),
             .limit(limit)
         ).scalars().all()
     items = [episode_projection(row) for row in rows]
-    return {
+    payload = {
         "items": items,
-        "next_cursor": _encode_cursor({"episode_id": rows[-1].episode_id})
+        "next_cursor": _encode_cursor({
+            "resource": "episodes", "mode": mode, "live_profile": profile,
+            "open_only": open_only, "sort_at": iso(rows[-1].opened_at),
+            "sort_id": rows[-1].episode_id,
+        })
         if len(rows) == limit else None,
     }
+    not_modified = _etag(request, response, payload, max_age=30)
+    if not_modified is not None:
+        return not_modified
+    return payload
 
 
 @router.get("/episodes/{episode_id}", summary="One episode")
 @limiter.limit(READ_RATE_LIMIT)
-def get_episode(request: Request, episode_id: str,
-                _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+def get_episode(request: Request, episode_id: str, response: Response,
+                _: None = Depends(require_alerts_read)) -> Any:
+    mode, profile = _mode()
     with session_scope() as session:
-        row = session.get(AlertEpisode, episode_id)
+        row = session.execute(
+            select(AlertEpisode).where(
+                AlertEpisode.episode_id == episode_id,
+                AlertEpisode.mode == mode,
+                AlertEpisode.live_profile == profile,
+            )
+        ).scalars().first()
         if row is None:
             return problem(404, "Unknown episode", "no episode with that id")
         events = session.execute(
@@ -265,6 +427,9 @@ def get_episode(request: Request, episode_id: str,
         ).scalars().all()
         payload = episode_projection(row)
         payload["events"] = [_event_projection(e) for e in events]
+    not_modified = _etag(request, response, payload, max_age=30)
+    if not_modified is not None:
+        return not_modified
     return payload
 
 
@@ -287,48 +452,122 @@ def _event_projection(event: AlertEvent) -> dict[str, Any]:
     }
 
 
+def _event_namespace(mode: str, live_profile: str) -> Any:
+    """Every non-null link must belong to this namespace.
+
+    Events may carry more than one causation link.  Treating the links as
+    alternatives leaks a malformed cross-namespace event into *both* views;
+    null links are neutral, while each populated link is an independent scope
+    assertion.  With all links null the expression remains true, preserving
+    genuinely global audit events.
+    """
+    episode_link = exists(select(1).where(
+        AlertEpisode.episode_id == AlertEvent.episode_id,
+        AlertEpisode.mode == mode,
+        AlertEpisode.live_profile == live_profile,
+    ))
+    delivery_link = exists(select(1).where(
+        AlertDelivery.delivery_id == AlertEvent.delivery_id,
+        AlertDelivery.mode == mode,
+        AlertDelivery.live_profile == live_profile,
+    ))
+    evaluation_link = exists(select(1).where(
+        AlertEvaluation.evaluation_id == AlertEvent.evaluation_id,
+        AlertEvaluation.mode == mode,
+        AlertEvaluation.live_profile == live_profile,
+    ))
+    return and_(
+        or_(AlertEvent.episode_id.is_(None), episode_link),
+        or_(AlertEvent.delivery_id.is_(None), delivery_link),
+        or_(AlertEvent.evaluation_id.is_(None), evaluation_link),
+    )
+
+
 @router.get("/events", summary="Audit events, newest first")
 @limiter.limit(READ_RATE_LIMIT)
-def get_events(request: Request, limit: int = Query(default=100, ge=1, le=MAX_PAGE),
+def get_events(request: Request, response: Response,
+               limit: int = Query(default=100, ge=1, le=MAX_PAGE),
                cursor: str | None = Query(default=None),
-               _: None = Depends(require_alerts_read)) -> dict[str, Any]:
-    conditions = []
+               _: None = Depends(require_alerts_read)) -> Any:
+    mode, profile = _mode()
+    conditions = [_event_namespace(mode, profile)]
     if cursor:
-        payload = _decode_cursor(cursor)
-        conditions.append(AlertEvent.event_id < payload["event_id"])
+        try:
+            cursor_payload = _decode_cursor(
+                cursor, resource="events", mode=mode, live_profile=profile)
+        except CursorError as exc:
+            return _cursor_problem(exc)
+        conditions.append(_before_cursor(
+            AlertEvent.occurred_at, AlertEvent.event_id, cursor_payload))
     with session_scope() as session:
         rows = session.execute(
             select(AlertEvent).where(*conditions)
             .order_by(AlertEvent.occurred_at.desc(), AlertEvent.event_id.desc())
             .limit(limit)
         ).scalars().all()
-    return {
+    payload = {
         "items": [_event_projection(row) for row in rows],
-        "next_cursor": _encode_cursor({"event_id": rows[-1].event_id})
+        "next_cursor": _encode_cursor({
+            "resource": "events", "mode": mode, "live_profile": profile,
+            "sort_at": iso(rows[-1].occurred_at), "sort_id": rows[-1].event_id,
+        })
         if len(rows) == limit else None,
     }
+    not_modified = _etag(request, response, payload, max_age=30)
+    if not_modified is not None:
+        return not_modified
+    return payload
 
 
 @router.get("/latest", summary="Latest pointers — fired and sent kept apart")
 @limiter.limit(READ_RATE_LIMIT)
 def get_latest(request: Request, response: Response,
-               _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+               _: None = Depends(require_alerts_read)) -> Any:
     mode, profile = _mode()
     with session_scope() as session:
         payload = latest_pointers(session, mode=mode, live_profile=profile)
-    _etag(response, payload, max_age=30)
+    not_modified = _etag(request, response, payload, max_age=30)
+    if not_modified is not None:
+        return not_modified
     return payload
 
 
 @router.get("/deliveries", summary="Delivery intents (redacted)")
 @limiter.limit(READ_RATE_LIMIT)
-def get_deliveries(request: Request, limit: int = Query(default=100, ge=1, le=MAX_PAGE),
-                   _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+def get_deliveries(request: Request, response: Response,
+                   limit: int = Query(default=100, ge=1, le=MAX_PAGE),
+                   cursor: str | None = Query(default=None),
+                   _: None = Depends(require_alerts_read)) -> Any:
+    mode, profile = _mode()
+    conditions = [
+        AlertDelivery.mode == mode,
+        AlertDelivery.live_profile == profile,
+    ]
+    if cursor:
+        try:
+            cursor_payload = _decode_cursor(
+                cursor, resource="deliveries", mode=mode, live_profile=profile)
+        except CursorError as exc:
+            return _cursor_problem(exc)
+        conditions.append(_before_cursor(
+            AlertDelivery.created_at, AlertDelivery.delivery_id, cursor_payload))
     with session_scope() as session:
         rows = session.execute(
-            select(AlertDelivery).order_by(AlertDelivery.created_at.desc()).limit(limit)
+            select(AlertDelivery).where(*conditions).order_by(
+                AlertDelivery.created_at.desc(), AlertDelivery.delivery_id.desc()
+            ).limit(limit)
         ).scalars().all()
-        return {"items": [_delivery_projection(r) for r in rows]}
+    payload = {
+        "items": [_delivery_projection(r) for r in rows],
+        "next_cursor": _encode_cursor({
+            "resource": "deliveries", "mode": mode, "live_profile": profile,
+            "sort_at": iso(rows[-1].created_at), "sort_id": rows[-1].delivery_id,
+        }) if len(rows) == limit else None,
+    }
+    not_modified = _etag(request, response, payload, max_age=30)
+    if not_modified is not None:
+        return not_modified
+    return payload
 
 
 def _delivery_projection(row: AlertDelivery,
@@ -344,12 +583,18 @@ def _delivery_projection(row: AlertDelivery,
     """
     payload = {
         "delivery_id": row.delivery_id,
+        "mode": row.mode,
+        "live_profile": row.live_profile,
         "delivery_kind": row.delivery_kind,
         "priority": row.priority,
         "transport_status": row.transport_status,
         "planning_state": row.planning_state,
         "planning_rules_sha256": row.planning_rules_sha256,
         "hold_reason_code": row.hold_reason_code,
+        "budget_recheck_at": iso(row.budget_recheck_at),
+        "planning_budget_snapshot": row.planning_budget_snapshot,
+        "dispatch_budget_snapshot": row.dispatch_budget_snapshot,
+        "dispatch_budget_checked_at": iso(row.dispatch_budget_checked_at),
         "not_before": iso(row.not_before),
         "attempts": row.attempts,
         "created_at": iso(row.created_at),
@@ -377,10 +622,17 @@ def _delivery_projection(row: AlertDelivery,
 
 @router.get("/deliveries/{delivery_id}", summary="One delivery (redacted)")
 @limiter.limit(READ_RATE_LIMIT)
-def get_delivery(request: Request, delivery_id: str,
-                 _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+def get_delivery(request: Request, delivery_id: str, response: Response,
+                 _: None = Depends(require_alerts_read)) -> Any:
+    mode, profile = _mode()
     with session_scope() as session:
-        row = session.get(AlertDelivery, delivery_id)
+        row = session.execute(
+            select(AlertDelivery).where(
+                AlertDelivery.delivery_id == delivery_id,
+                AlertDelivery.mode == mode,
+                AlertDelivery.live_profile == profile,
+            )
+        ).scalars().first()
         if row is None:
             return problem(404, "Unknown delivery", "no delivery with that id")
         from app.alerts.models import AlertDeliveryMember
@@ -390,15 +642,19 @@ def get_delivery(request: Request, delivery_id: str,
             .where(AlertDeliveryMember.delivery_id == delivery_id)
             .order_by(AlertDeliveryMember.included_at.asc())
         ).scalars().all()
-        return _delivery_projection(row, members=list(members))
+        payload = _delivery_projection(row, members=list(members))
+    not_modified = _etag(request, response, payload, max_age=30)
+    if not_modified is not None:
+        return not_modified
+    return payload
 
 
 @router.get("/renders/{render_id}", summary="One render (redacted)")
 @limiter.limit(READ_RATE_LIMIT)
-def get_render(request: Request, render_id: str,
+def get_render(request: Request, render_id: str, response: Response,
                _: None = Depends(require_alerts_read),
                may_read_text: bool = Depends(alerts_message_text_permitted),
-               ) -> dict[str, Any]:
+               ) -> Any:
     """Render provenance for any read scope; the SENTENCE only for write/admin.
 
     The frontend architecture is a browser-visible scoped token (H-05), so the
@@ -407,8 +663,18 @@ def get_render(request: Request, render_id: str,
     reviewed phrase set, how long the message was, whether it fell back — is
     all here regardless.
     """
+    mode, profile = _mode()
     with session_scope() as session:
-        row = session.get(AlertRender, render_id)
+        row = session.execute(
+            select(AlertRender).join(
+                AlertDelivery,
+                AlertDelivery.delivery_id == AlertRender.delivery_id,
+            ).where(
+                AlertRender.render_id == render_id,
+                AlertDelivery.mode == mode,
+                AlertDelivery.live_profile == profile,
+            )
+        ).scalars().first()
         if row is None:
             return problem(404, "Unknown render", "no render with that id")
         payload = {
@@ -432,34 +698,37 @@ def get_render(request: Request, render_id: str,
                 "the alert read token is a browser-visible public capability "
                 "and does not grant message text; use "
                 "GET /api/v1/admin/alerts/renders/{render_id}")
-        return payload
+    _no_store(response)
+    return payload
 
 
 @router.get("/ruleset", summary="The active ruleset summary")
 @limiter.limit(READ_RATE_LIMIT)
 def get_ruleset(request: Request, response: Response,
-                _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+                _: None = Depends(require_alerts_read)) -> Any:
     artifacts = _load()
     if artifacts is None:
         return problem(503, "Alerting unavailable", "no valid ruleset is loadable")
     payload = ruleset_summary(artifacts.ruleset)
     payload["source"] = artifacts.source
     payload["fallback_reason"] = artifacts.fallback_reason
-    _etag(response, payload, max_age=60)
+    not_modified = _etag(request, response, payload, max_age=60)
+    if not_modified is not None:
+        return not_modified
     return payload
 
 
 @router.get("/silences", summary="Active and scheduled silences")
 @limiter.limit(READ_RATE_LIMIT)
-def get_silences(request: Request,
-                 _: None = Depends(require_alerts_read)) -> dict[str, Any]:
+def get_silences(request: Request, response: Response,
+                 _: None = Depends(require_alerts_read)) -> Any:
     now = datetime.now(UTC)
     with session_scope() as session:
         rows = session.execute(
             select(AlertSilence).where(AlertSilence.ends_at > now)
             .order_by(AlertSilence.starts_at.asc())
         ).scalars().all()
-        return {"items": [{
+        payload = {"items": [{
             "silence_id": row.silence_id,
             "matcher_kind": row.matcher_kind,
             "matcher_value": row.matcher_value,
@@ -469,3 +738,7 @@ def get_silences(request: Request,
             "active": row.starts_at.replace(tzinfo=UTC) <= now
             if row.starts_at.tzinfo is None else row.starts_at <= now,
         } for row in rows]}
+    not_modified = _etag(request, response, payload, max_age=30)
+    if not_modified is not None:
+        return not_modified
+    return payload

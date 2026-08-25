@@ -76,6 +76,20 @@ class SuppressionReason(StrEnum):
     RULESET_REPLACED = "RULESET_REPLACED"
 
 
+class SilenceMatcherKind(StrEnum):
+    """The four persisted silence identities (mandate 9.3/16.3).
+
+    These values deliberately match the database and API vocabulary. Keeping
+    them typed prevents a second, lowercase key vocabulary from drifting away
+    from the rows operators actually create.
+    """
+
+    RULE_ID = "RULE_ID"
+    INSTANCE_FINGERPRINT = "INSTANCE_FINGERPRINT"
+    BUCKET = "BUCKET"
+    ALL = "ALL"
+
+
 class PlanningState(StrEnum):
     """Where a notification sits before transport (mandate 7.5).
 

@@ -1,6 +1,76 @@
 {
   "components": {
     "schemas": {
+      "ActionabilityRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action_type": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Type"
+          },
+          "actionable": {
+            "pattern": "^(YES|NO|AMBIGUOUS)$",
+            "title": "Actionable",
+            "type": "string"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "delivery_id": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery Id"
+          },
+          "episode_id": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Episode Id",
+            "type": "string"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          }
+        },
+        "required": [
+          "episode_id",
+          "actionable"
+        ],
+        "title": "ActionabilityRequest",
+        "type": "object"
+      },
       "EvaluateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -33,6 +103,27 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ManualRetryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledge_duplicate_risk": {
+            "title": "Acknowledge Duplicate Risk",
+            "type": "boolean"
+          },
+          "comment": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Comment",
+            "type": "string"
+          }
+        },
+        "required": [
+          "comment",
+          "acknowledge_duplicate_risk"
+        ],
+        "title": "ManualRetryRequest",
         "type": "object"
       },
       "SilenceRequest": {
@@ -127,6 +218,151 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/admin/alerts/actionability": {
+      "post": {
+        "description": "One human label per alert, for the question the metrics cannot answer.\n\nEverything else in this system measures whether a message went out;\nnothing measures whether it was worth receiving. Stage 7 retains the LLM\nselector only if these labels show a material improvement, and AMBIGUOUS\nexists so an unsure reviewer does not inflate the KPI either way.",
+        "operationId": "record_actionability_api_v1_admin_alerts_actionability_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActionabilityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Record Actionability Api V1 Admin Alerts Actionability Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Record whether an alert was actionable",
+        "tags": [
+          "alerts-admin"
+        ]
+      }
+    },
+    "/api/v1/admin/alerts/deliveries/{delivery_id}/retry": {
+      "post": {
+        "description": "A NEW delivery that admits it may duplicate the old one.\n\nAn UNKNOWN outcome means the bytes may have reached the phone, so nothing\nretries it automatically \u2014 that is the four-outcome contract's whole point.\nWhen a human decides the silence is worse than a possible duplicate, that\ndecision is recorded, not smuggled: the retry requires an Idempotency-Key,\nan operator comment, and an explicit duplicate-risk acknowledgement, and it\ncreates a NEW delivery row with `manual_retry_sequence` incremented \u2014 same\nmembers, same notification generation \u2014 linked to the original through\n`prior_unknown_delivery_id`. The dedupe key differs BECAUSE the sequence is\nin its material; the audit trail survives because nothing is overwritten.",
+        "operationId": "manual_retry_api_v1_admin_alerts_deliveries__delivery_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "delivery_id",
+            "required": true,
+            "schema": {
+              "title": "Delivery Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualRetryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Manual Retry Api V1 Admin Alerts Deliveries  Delivery Id  Retry Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manually retry an UNKNOWN delivery",
+        "tags": [
+          "alerts-admin"
+        ]
+      }
+    },
     "/api/v1/admin/alerts/evaluate": {
       "post": {
         "description": "Run P0b/P1/P2 for a single sidecar without waiting for a recompute.\n\n`shadow=true` (the default) evaluates into the shadow namespace, which is\nhow a promoted ruleset is exercised before anything is allowed to send.",
@@ -286,6 +522,56 @@
         ]
       }
     },
+    "/api/v1/admin/alerts/render": {
+      "post": {
+        "description": "Validate the exact TEST body without persisting or sending anything.\n\nThis is a phrase-set/rendering probe, not a transport probe.  It resolves\nthe active reviewed ``TEST_MESSAGE`` and runs the same renderer used by an\naudited TEST delivery, but creates no delivery, render or provider call.",
+        "operationId": "admin_preview_render_api_v1_admin_alerts_render_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Admin Preview Render Api V1 Admin Alerts Render Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview the reviewed TEST render",
+        "tags": [
+          "alerts-admin"
+        ]
+      }
+    },
     "/api/v1/admin/alerts/renders/{render_id}": {
       "get": {
         "description": "The operator path to a rendered message body.\n\nThe read surface withholds `final_message` because the frontend uses a\nbrowser-visible scoped token (H-05), and the alert scopes deliberately do\nnot nest \u2014 there is no stronger key a caller could present to\n`/api/v1/alerts/renders/{id}`. So the text lives here, behind admin, and\n`no-store` keeps it out of any intermediary cache.",
@@ -345,6 +631,58 @@
         ]
       }
     },
+    "/api/v1/admin/alerts/send-test": {
+      "post": {
+        "description": "Create a TEST delivery for the dispatcher to send.\n\nTEST is the one delivery kind allowed zero members: it is about the\nTRANSPORT, not about any market condition, and inventing an episode to\nhang it on would put a fake market event in the audit trail. It is also\noutside `BUDGETED_KINDS`, so proving the wire works never spends the\noperator's non-P1 budget \u2014 and its body is a reviewed phrase-set fragment\nlike every other message, not prose typed into a request.\n\nThe actual send happens through the ordinary dispatcher: same claim, same\nadmission, same classification. A test that bypassed the pipeline would\nprove something other than the thing the operator needs proven.",
+        "operationId": "send_test_api_v1_admin_alerts_send_test_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Send Test Api V1 Admin Alerts Send Test Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Queue an audited TEST delivery",
+        "tags": [
+          "alerts-admin"
+        ]
+      }
+    },
     "/api/v1/alerts/deliveries": {
       "get": {
         "operationId": "get_deliveries_api_v1_alerts_deliveries_get",
@@ -359,6 +697,22 @@
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
             }
           },
           {
@@ -383,9 +737,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Deliveries Api V1 Alerts Deliveries Get",
-                  "type": "object"
+                  "title": "Response Get Deliveries Api V1 Alerts Deliveries Get"
                 }
               }
             },
@@ -443,9 +795,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Delivery Api V1 Alerts Deliveries  Delivery Id  Get",
-                  "type": "object"
+                  "title": "Response Get Delivery Api V1 Alerts Deliveries  Delivery Id  Get"
                 }
               }
             },
@@ -532,9 +882,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Episodes Api V1 Alerts Episodes Get",
-                  "type": "object"
+                  "title": "Response Get Episodes Api V1 Alerts Episodes Get"
                 }
               }
             },
@@ -592,9 +940,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Episode Api V1 Alerts Episodes  Episode Id  Get",
-                  "type": "object"
+                  "title": "Response Get Episode Api V1 Alerts Episodes  Episode Id  Get"
                 }
               }
             },
@@ -671,9 +1017,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Events Api V1 Alerts Events Get",
-                  "type": "object"
+                  "title": "Response Get Events Api V1 Alerts Events Get"
                 }
               }
             },
@@ -722,9 +1066,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Health Api V1 Alerts Health Get",
-                  "type": "object"
+                  "title": "Response Get Health Api V1 Alerts Health Get"
                 }
               }
             },
@@ -773,9 +1115,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Latest Api V1 Alerts Latest Get",
-                  "type": "object"
+                  "title": "Response Get Latest Api V1 Alerts Latest Get"
                 }
               }
             },
@@ -840,9 +1180,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Mechanisms Api V1 Alerts Mechanisms Get",
-                  "type": "object"
+                  "title": "Response Get Mechanisms Api V1 Alerts Mechanisms Get"
                 }
               }
             },
@@ -900,9 +1238,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Mechanism Api V1 Alerts Mechanisms  Instance Fingerprint  Get",
-                  "type": "object"
+                  "title": "Response Get Mechanism Api V1 Alerts Mechanisms  Instance Fingerprint  Get"
                 }
               }
             },
@@ -951,9 +1287,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Overview Api V1 Alerts Overview Get",
-                  "type": "object"
+                  "title": "Response Get Overview Api V1 Alerts Overview Get"
                 }
               }
             },
@@ -1012,9 +1346,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Render Api V1 Alerts Renders  Render Id  Get",
-                  "type": "object"
+                  "title": "Response Get Render Api V1 Alerts Renders  Render Id  Get"
                 }
               }
             },
@@ -1072,9 +1404,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Rule Instances Api V1 Alerts Rules  Rule Id  Instances Get",
-                  "type": "object"
+                  "title": "Response Get Rule Instances Api V1 Alerts Rules  Rule Id  Instances Get"
                 }
               }
             },
@@ -1123,9 +1453,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Ruleset Api V1 Alerts Ruleset Get",
-                  "type": "object"
+                  "title": "Response Get Ruleset Api V1 Alerts Ruleset Get"
                 }
               }
             },
@@ -1174,9 +1502,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Silences Api V1 Alerts Silences Get",
-                  "type": "object"
+                  "title": "Response Get Silences Api V1 Alerts Silences Get"
                 }
               }
             },

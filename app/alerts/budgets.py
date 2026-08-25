@@ -4,9 +4,11 @@ Two counts, deliberately different:
 
   * the PLANNER uses an advisory count that includes work already queued or
     reserved, so it does not plan five messages it knows it cannot send;
-  * the DISPATCHER re-checks immediately before submission using only
-    CONFIRMED SENT deliveries plus in-flight reservations, because that is the
-    only count that is true at the moment of sending.
+  * the DISPATCHER re-checks immediately before submission using CONFIRMED
+    SENT deliveries, every in-flight reservation, and READY queued work that
+    ranks before the current delivery.  The ordered queue reservation prevents
+    concurrent workers from spending the same final slot without making every
+    queued row wait on every other queued row.
 
 The weekly digest is reported in user load but does not consume the caps — it
 is one scheduled message the user opted into, not an interruption.
@@ -31,9 +33,21 @@ BUDGETED_KINDS: frozenset[str] = frozenset({
     DeliveryKind.WATCHDOG,
 })
 
-#: Statuses that count as a reservation the dispatcher must not double-spend.
-RESERVED_STATUSES: frozenset[str] = frozenset({
+#: Every credible future market send reserves planner headroom.
+PLANNER_RESERVED_STATUSES: frozenset[str] = frozenset({
+    TransportStatus.PENDING, TransportStatus.RETRY_DUE,
     TransportStatus.LEASED, TransportStatus.SENDING,
+})
+
+#: Other workers already at the wire always reserve dispatch headroom.
+DISPATCH_IN_FLIGHT_STATUSES: frozenset[str] = frozenset({
+    TransportStatus.LEASED, TransportStatus.SENDING,
+})
+
+#: Eligible READY rows reserve dispatch headroom only when their deterministic
+#: queue rank precedes the current lease. Durable quiet/budget holds do not.
+DISPATCH_ORDERED_READY_STATUSES: frozenset[str] = frozenset({
+    TransportStatus.PENDING, TransportStatus.RETRY_DUE,
 })
 
 

@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
+COMPONENT = "retention"
 
 
 def run_once(*, dry_run: bool = False) -> dict[str, Any]:
@@ -31,7 +32,17 @@ def run_once(*, dry_run: bool = False) -> dict[str, Any]:
 def job() -> None:
     """Scheduler entry point. Never raises."""
     try:
-        log.info("alert_retention_job", **run_once())
+        from app.jobs.alert_recovery import heartbeat
+
+        result = run_once()
+        heartbeat(COMPONENT, "ok", result)
+        log.info("alert_retention_job", **result)
     except Exception as exc:
         log.error("alert_retention_job_failed", error_class=type(exc).__name__,
                   error=str(exc)[:300])
+        try:
+            from app.jobs.alert_recovery import heartbeat
+
+            heartbeat(COMPONENT, "critical", {"error": type(exc).__name__})
+        except Exception:  # noqa: S110 - heartbeat failure cannot escape the job
+            pass

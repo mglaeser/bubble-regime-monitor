@@ -24,7 +24,7 @@ Every change must pass `.github/workflows/ci.yml`, which is **blocking**:
 - `detect-secrets` (no new secrets)
 - `pytest` (must be green; the suite is hermetic — LPPLS/R paths self-skip when the engine is absent)
 
-Type-checking (`mypy app`) is **blocking**, as a ratchet: CI fails if the error count rises above `MYPY_CEILING` in `.github/workflows/ci.yml` (**217** today, audit A-13). Lower the ceiling in the same commit that lowers the count; never raise it. The step also refuses if mypy exits >= 2 or checks fewer than `MYPY_MIN_FILES` source files, because a count of error lines is not a measure of work done. Driving the count to zero is a tracked task. A change is not done until CI is green.
+Type-checking (`mypy app`) is **blocking**, as a ratchet: CI fails if the error count rises above `MYPY_CEILING` in `.github/workflows/ci.yml` (**172** today, audit A-13). Lower the ceiling in the same commit that lowers the count; never raise it. The step also refuses if mypy exits >= 2 or checks fewer than `MYPY_MIN_FILES` source files, because a count of error lines is not a measure of work done. Driving the count to zero is a tracked task. A change is not done until CI is green.
 
 ### Verification tier by change class (audit A-14/C-33)
 

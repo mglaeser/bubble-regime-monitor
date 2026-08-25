@@ -46,8 +46,6 @@ def _alert_recovery_job() -> None:
 
 
 def _alert_digest_job() -> None:
-    if get_settings().alerts_mode == "disabled":
-        return
     from app.jobs.alert_digest import job
     job()
 
@@ -57,6 +55,21 @@ def _alert_dispatch_job() -> None:
     # live; in shadow it runs the whole path against the NullSender, so nothing
     # leaves the host.
     from app.jobs.alert_dispatch import job
+
+    job()   # never raises
+
+
+def _alert_watchdog_job() -> None:
+    # In-process BACKUP for the independent host timer. It must still be
+    # scheduled: a missing host timer then degrades coverage rather than
+    # leaving the running service blind to stopped recomputes.
+    from app.jobs.alert_watchdog import job
+
+    job()   # never raises
+
+
+def _alert_retention_job() -> None:
+    from app.jobs.alert_retention import job
 
     job()   # never raises
 
@@ -123,12 +136,18 @@ def start() -> BackgroundScheduler:
                            CronTrigger(minute="15,45", timezone="UTC"),
                            id="alert_recovery", replace_existing=True,
                            coalesce=True, misfire_grace_time=1800, max_instances=1)
+        # Backup watchdog uses the same stateful alert path as the independent
+        # host timer, but runs at a different offset from recompute/recovery.
+        _scheduler.add_job(_alert_watchdog_job,
+                           CronTrigger(minute="10,40", timezone="UTC"),
+                           id="alert_watchdog", replace_existing=True,
+                           coalesce=True, misfire_grace_time=1800, max_instances=1)
         # The WEEKLY digest, Monday morning Berlin, summarising the window that
         # closed on Sunday. Inside quiet hours [07:00, 22:00) deliberately: it
         # is a scheduled summary and must not arrive at 03:00 just because the
-        # scheduler was free. Its own heartbeat, because after Stage 4 this is
-        # the only scheduled message the operator gets — a digest job that
-        # stopped running must read as a dead component, not as a quiet week.
+        # scheduler was free. Its own heartbeat is the proof of a quiet run:
+        # a digest job that stopped running must read as a dead component, not
+        # as permission to create a memberless provider intent.
         _scheduler.add_job(_alert_digest_job,
                            CronTrigger(day_of_week="mon", hour=8, minute=30,
                                        timezone="Europe/Berlin"),
@@ -143,13 +162,19 @@ def start() -> BackgroundScheduler:
                            CronTrigger(minute="5,35", timezone="UTC"),
                            id="stuck_watchdog", replace_existing=True,
                            coalesce=True, misfire_grace_time=1800, max_instances=1)
+        # Metadata is retained for at least 800 days and message bodies for the
+        # shorter configured horizon. Daily is frequent enough to bound disk
+        # growth without making deletion part of a delivery transaction.
+        _scheduler.add_job(_alert_retention_job,
+                           CronTrigger(hour=3, minute=25, timezone="UTC"),
+                           id="alert_retention", replace_existing=True,
+                           coalesce=True, misfire_grace_time=21600, max_instances=1)
         digest_schedule = "disabled"
-        # Gated on the TRANSPORT, not on effective_daily_sms_enabled: an
-        # operator who sets SMS_ENABLED=false and IMESSAGE_ENABLED=true means
-        # "send my digest over iMessage", and gating on the SMS switch alone
-        # would silently unschedule the job they just reconfigured.
-        # DAILY_SMS_ENABLED remains the migration-friendly alias for the
-        # sipgate path; turning the alert system on still never disables this.
+        # Gated on the selected TRANSPORT. With DAILY_SMS_ENABLED unset, a
+        # legacy SMS_ENABLED=false plus IMESSAGE_ENABLED=true still selects
+        # iMessage. Explicit DAILY_SMS_ENABLED=false is different: it is the
+        # documented Stage-4 master cutover and selects no legacy transport at
+        # all. Turning the alert system on still never changes that switch.
         digest_transport = settings.daily_digest_transport
         if settings.imessage_enabled_but_unconfigured:
             # Loud at boot, whatever the digest ends up doing: the switch is on
@@ -184,6 +209,8 @@ def start() -> BackgroundScheduler:
         log.info("scheduler_started", recompute="every 4h (02/06/10/14/18/22 UTC)",
                  breadth_refresh="01:00/13:00 UTC", daily_digest=digest_schedule,
                  alert_recovery="every 30min (:15/:45)",
+                 alert_watchdog="every 30min (:10/:40), plus host timer",
+                 alert_retention="daily 03:25 UTC",
                  stuck_watchdog="every 30min (:05/:35)",
                  alert_dispatch=f"every {max(20, settings.alerts_dispatch_poll_s)}s "
                                f"(mode={settings.alerts_mode})")

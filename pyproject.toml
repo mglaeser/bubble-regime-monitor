@@ -36,6 +36,9 @@ dependencies = [
     "lppls==0.6.24",
 ]
 
+[project.scripts]
+bubblegauge = "app.cli:main"
+
 [project.optional-dependencies]
 # pyarrow is optional: pandas imports it eagerly when installed, and its
 # Arrow C++ wheels require SSE4.2 — SIGILL on older CPUs. Without it, the
@@ -55,6 +58,9 @@ dev = [
     "pytest>=8.2",
     "ruff>=0.4",
     "mypy>=1.10",
+    # Blocking OpenAPI 3.1 structure and JSON Schema 2020-12 example gates.
+    "openapi-spec-validator==0.9.0",
+    "jsonschema==4.26.0",
 ]
 
 [tool.setuptools.packages.find]

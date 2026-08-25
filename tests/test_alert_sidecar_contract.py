@@ -11,7 +11,7 @@ These tests start from a persisted Snapshot and assert on the built sidecar.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from app.alerts import observation as obs
@@ -415,9 +415,14 @@ def test_no_domain_still_claims_a_percentile_that_is_never_computed():
     comparison this change removes.
     """
     from app.alerts import observation as o
+    from app.alerts.sources import SOURCE_REGISTRY
 
     assert not hasattr(o, "DOMAIN_S5_PERCENTILE"), "the untrue domain must be gone"
     assert o.DOMAIN_S5_CREDIT_LEVEL == "indicator.s5.credit_level"
+    description = SOURCE_REGISTRY["s5_credit_level"].description.lower()
+    assert "percentile" not in description
+    assert "percentage points" in description
+    assert "basis points" in description
 
 
 def test_a_row_without_the_typed_tier_is_missing_not_a_number(isolated_db):
@@ -555,7 +560,7 @@ def test_the_faber_leg_publishes_the_month_end_state_not_the_live_preview(isolat
     system can send fires on a month that has not ended.
     """
     evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_FABER)
-    assert evidence.value == "IN", "must be the completed month's state, not the preview"
+    assert evidence.value == "in", "must be the completed month's state, not the preview"
 
 
 def test_the_faber_leg_is_dated_by_its_month_not_by_the_recompute(isolated_db):
@@ -648,7 +653,7 @@ def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
     """
     undated = {"SPY": {"faber_10mo": "OUT", "sma200": "IN", "sma200_state": "IN"}}
     sma = _leg(_snapshot_with_legs(undated), obs.DOMAIN_LEG_SPY_SMA200)
-    assert sma.value == "IN", "the state was computed; do not hide it"
+    assert sma.value == "above", "the state was computed; do not hide it"
     assert sma.data_state == DataState.UNKNOWN_AGE
     assert sma.period_end is None, "but it must not claim a date it does not have"
 
@@ -931,3 +936,179 @@ def test_a_same_period_re_transition_is_not_suppressed(isolated_db):
 
     # cold start is not a transition; the reversion is not; the RE-entry is.
     assert activations == [False, False, True]
+
+
+# ---------------------------------------------------------------------------
+# H-04: real compute -> persistence -> immutable sidecar -> source registry
+# ---------------------------------------------------------------------------
+
+
+def _weekday_prices(start: date, end: date, *, initial: float) -> list[tuple[str, float]]:
+    """A deterministic, contiguous daily series with completed month ends."""
+    prices: list[tuple[str, float]] = []
+    day = start
+    while day <= end:
+        if day.weekday() < 5:
+            prices.append((day.isoformat(), initial + len(prices) * 0.2))
+        day += timedelta(days=1)
+    return prices
+
+
+def test_real_compute_output_survives_the_full_sidecar_source_boundary(
+    isolated_db, monkeypatch,
+):
+    """Pin the integration boundary that synthetic AlertInputs cannot prove.
+
+    Every value below starts in ``RawInputs``, passes through the real scoring
+    pipeline and persisted ``Snapshot``, is captured as immutable JSON, then is
+    resolved by the same closed source registry the evaluator uses.  This is
+    the regression proof for audit H-04 and the d2/d3/s5/leg defects it exposed.
+    """
+    from app.alerts.dto import AlertInput
+    from app.alerts.models import AlertInputSnapshot
+    from app.alerts.sources import read_source
+    from app.db import session_scope
+    from app.engine.judgment import JudgmentCall
+    from app.models import FalsificationOutcome
+    from app.services import compute
+    from app.services.alert_integration import capture_alert_input
+    from tests.conftest import make_golden_raw_inputs
+
+    monkeypatch.setattr(
+        compute.judgment,
+        "generate",
+        lambda *_args, **_kwargs: JudgmentCall(
+            text="Deterministic integration-test judgment.", stale=False
+        ),
+    )
+
+    raw = make_golden_raw_inputs()
+    prices = _weekday_prices(date(2024, 1, 2), date(2026, 7, 31), initial=400.0)
+    raw.spy_daily = prices
+    raw.spy_daily_closes = [close for _stamp, close in prices]
+    raw.qqq_daily = [(stamp, close * 1.1) for stamp, close in prices]
+    raw.qqq_daily_closes = [close for _stamp, close in raw.qqq_daily]
+
+    # Exercise the preferred S5 tier so the real boundary proves that EBP is a
+    # percentage-point level, not the nonexistent "credit percentile".
+    raw.ebp_history = [-0.80 + i * 0.03 for i in range(72)]
+    raw.ebp_as_of = "2026-07-31"
+    raw.hyperscaler_as_of = "2026-06-30"
+
+    data = compute.compute_snapshot(
+        raw,
+        mc_samples=1_000,
+        mc_seed=20260711,
+        gsadf_contested=True,
+        as_of_date="2026-08-03",
+    )
+    snapshot_id = compute.persist_snapshot(data, raw)
+
+    with session_scope() as session:
+        session.add(FalsificationOutcome(
+            criterion="H-04 integration fixture",
+            tripped_at=datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
+            detail="typed event carried into the alert sidecar",
+        ))
+
+    identity = capture_alert_input(
+        snapshot_id, now=datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    )
+    assert identity is not None
+    with session_scope() as session:
+        row = session.get(AlertInputSnapshot, identity)
+        assert row is not None
+        alert_input = AlertInput.model_validate_json(row.payload)
+
+    # These are the source families used by the enabled market rules through
+    # Stage 3.  A missing or semantically mislabeled persisted field must fail
+    # here before an idealised evaluator fixture can hide it.
+    expected_available = {
+        "effective_action_state",
+        "base_action_band",
+        "score_action_band",
+        "band_suppressed_by_coverage",
+        "data_degraded",
+        "headline_median",
+        "point_score",
+        "iqr_lo",
+        "iqr_hi",
+        "override_fired",
+        "override_active_fireable_count",
+        "override_required_count",
+        "override_fireable_universe_count",
+        "rf2_active",
+        "rf3_active",
+        "rf4_active",
+        "breadth_pct",
+        "d2_multiplier",
+        "d3_gate",
+        "d4_confidence",
+        "cape",
+        "top10_pct",
+        "semi_runup_pp",
+        "s5_credit_level",
+        "spy_faber_state",
+        "qqq_faber_state",
+        "spy_sma200_state",
+        "qqq_sma200_state",
+        "v_state",
+        "falsification_outcome_count",
+    }
+    resolved = {source_id: read_source(source_id, alert_input)
+                for source_id in expected_available}
+    unavailable = {
+        source_id: value.unavailable_reason
+        for source_id, value in resolved.items()
+        if not value.available
+    }
+    assert unavailable == {}
+
+    assert resolved["headline_median"].value != resolved["point_score"].value
+    assert resolved["band_suppressed_by_coverage"].value is False
+    assert resolved["data_degraded"].value is False
+    assert resolved["d2_multiplier"].value in {0.6, 1.0}
+    assert isinstance(resolved["d3_gate"].value, bool)
+    assert resolved["rf2_active"].value is False
+    assert resolved["rf3_active"].value is False
+    assert resolved["rf4_active"].value is False
+    assert resolved["falsification_outcome_count"].value == 1
+
+    s5 = alert_input.evidence_for(obs.DOMAIN_S5_CREDIT_LEVEL)
+    assert s5 is not None
+    assert s5.unit == "pp"
+    assert s5.metadata["s5_input_tier"] == "fed_ebp"
+    assert s5.metadata["s5_percentile_available"] is False
+    assert resolved["s5_credit_level"].value == s5.value
+
+    for asset in ("spy", "qqq"):
+        faber = resolved[f"{asset}_faber_state"]
+        sma200 = resolved[f"{asset}_sma200_state"]
+        assert faber.period_end == "2026-07"
+        assert sma200.period_end == "2026-07-31"
+        assert faber.economic_observation_key
+        assert sma200.economic_observation_key
+
+    assert resolved["v_state"].value == "contango"
+    assert alert_input.coverage["degraded"] is False
+    assert alert_input.band5 is not None and alert_input.band95 is not None
+    assert all(value.computation_fingerprint for value in resolved.values()
+               if value.source_id not in {
+                   "effective_action_state",
+                   "base_action_band",
+                   "score_action_band",
+                   "band_suppressed_by_coverage",
+                   "data_degraded",
+                   "headline_median",
+                   "point_score",
+                   "iqr_lo",
+                   "iqr_hi",
+                   "override_fired",
+                   "override_active_fireable_count",
+                   "override_required_count",
+                   "override_fireable_universe_count",
+                   "rf2_active",
+                   "rf3_active",
+                   "rf4_active",
+                   "falsification_outcome_count",
+               })

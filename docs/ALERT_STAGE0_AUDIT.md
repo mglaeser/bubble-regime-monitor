@@ -1,13 +1,21 @@
-# Alert system — Stage 0 audit and typed snapshot contract
+# Archived alert-system Stage 0 audit and typed snapshot contract
 
-Audit of `mglaeser/bubble-regime-monitor` @ `main` (`8d2c3a9`), service version
-**3.8.0**, against the *bubblegauge Alert & SMS System — Final Integrated
-Implementation Mandate (v3.2-FINAL)*. This is the Stage 0 gate artifact: what
-the repository actually looks like, where the mandate's assumptions hold, where
-they drifted, and what Stage 0 changed.
+> **Historical evidence, not current status.** This document is permanently
+> pinned to `main` commit `8d2c3a9` and service version 3.8.0. For the current
+> implementation, rollout state, controls, and operator procedures, read
+> [ALERT_SYSTEM.md](ALERT_SYSTEM.md).
 
-Nothing in Stage 0 sends anything. No alert table, router, job or rule engine
-exists yet — Stage 0 only makes the scoring layer *legible* to one.
+This is the archived Stage 0 gate artifact from the audit of
+`mglaeser/bubble-regime-monitor` at `8d2c3a9`, against the *bubblegauge Alert &
+SMS System — Final Integrated Implementation Mandate (v3.2-FINAL)*. It records
+what that baseline looked like, where the mandate's assumptions held or
+drifted, and what Stage 0 added. Statements in this document use the historical
+present and apply only to that pinned baseline unless an addendum says
+otherwise.
+
+At that baseline, Stage 0 sent nothing and no alert table, router, job, or rule
+engine existed. Stage 0 only made the scoring layer legible to the alert system
+that was implemented later.
 
 ---
 
@@ -20,25 +28,6 @@ exists yet — Stage 0 only makes the scoring layer *legible* to one.
 | Snapshots carry `methodology_sha256` / `methodology_version` | ✅ | `app/models.py:46-47`, written from the loader at `app/services/compute.py` |
 | `action_band` is a display string with degraded variants | ✅ | `app/services/compute.py` writes `"suppressed (block degraded)"` / `"de-risk (data degraded)"` |
 | `red_flag_detail` holds booleans only | ✅ | `RedFlags.as_dict()` → `dict[str, bool]` (`app/engine/aggregate.py:160`) |
-Leave line 23 exactly as it stands. Append at the end of §1, after the drift list:
-
-### Addendum — post-Stage-0 drift in the legacy path (daily digest over iMessage)
-
-*Recorded after the fact; the table above is pinned to `8d2c3a9` / 3.8.0 and is deliberately not rewritten.*
-
-The legacy digest gained a second delivery transport. The five components listed
-above are all still present and still the SMS path; the inventory is now
-incomplete rather than wrong. Added: `app/notify/imessage.py` (POST to an
-imessage-proxy instance), `Settings.daily_digest_transport` as the scheduler's
-gate in place of `effective_daily_sms_enabled`, and `IMESSAGE_*` settings.
-`POST /api/v1/admin/send-sms` keeps its path and now dispatches over whichever
-transport is configured, naming it in the response.
-
-This does **not** touch Stage 4. The alert system's own delivery path — planner,
-outbox, renderer, typed sipgate sender, dispatcher — is unchanged and still
-unreachable behind `ALERTS_MODE`. What moved is the legacy digest, underneath a
-cutover gate that has not moved, which is worth stating explicitly: the two are
-easy to conflate and only one of them changed.
 | SQLite pragmas: WAL, foreign_keys, synchronous=NORMAL, recursive_triggers | ✅ | `app/db.py:37-45` |
 | `busy_timeout` **not** configured | ✅ (drift confirmed) | absent from `_set_sqlite_pragmas`; must be added before concurrent alert writes |
 | Alembic authoritative, `create_all` as boot fallback | ✅ | `app/db_migrate.py:75-86` |
@@ -71,6 +60,21 @@ easy to conflate and only one of them changed.
    (`0006_replay_evidence`), so the Stage 0 revision is `0007`, not the
    assumed-free `0007` — coincidentally the same, but verified rather than
    assumed. Later stages must re-check head before numbering.
+
+### Historical addendum — later legacy-digest transport change
+
+Recorded after Stage 0; the baseline table above remains pinned to `8d2c3a9`.
+
+The legacy digest later gained a second delivery transport:
+`app/notify/imessage.py`, `Settings.daily_digest_transport`, and `IMESSAGE_*`
+settings. `POST /api/v1/admin/send-sms` retained its path and began dispatching
+over the configured legacy transport while naming that transport in its
+response.
+
+That legacy-digest change was distinct from the new alert system's planner,
+outbox, renderer, typed sender, dispatcher, and staged cutover. Consult
+[ALERT_SYSTEM.md](ALERT_SYSTEM.md) for their current relationship and status;
+this addendum does not attempt to keep the archived audit current.
 
 ---
 
@@ -200,9 +204,11 @@ bootstrap paths enforce the same constraint — which
 
 ---
 
-## 4. Blockers and open `[PIN]`s carried into Stage 1
+## 4. Blockers and open `[PIN]`s carried into Stage 1 at the baseline
 
-These are recorded, not guessed at. Every one keeps its rule **disabled**.
+These were recorded, not guessed at. Every one kept its rule **disabled** at
+the pinned baseline. Later resolution or continued deferral is documented in
+[ALERT_SYSTEM.md](ALERT_SYSTEM.md) and the versioned rule artifacts.
 
 | Item | Rules blocked | Why it cannot be resolved in code |
 |---|---|---|
@@ -217,14 +223,15 @@ These are recorded, not guessed at. Every one keeps its rule **disabled**.
 | `falsification_tracking_since` | falsification-clock reporting | already `<PIN>` in `frozen_methodology.json` `_meta`; must not be backdated |
 | EWMA / CUSUM (Stage 6) | all statistical monitors | no immutable calibration artifact exists |
 
-Additionally: **`busy_timeout` is unset** (`app/db.py`). Stage 1 must set it
-before any concurrent alert writer exists, and `GET /api/v1/alerts/health` must
-report the effective value.
+At the pinned baseline, **`busy_timeout` was unset** (`app/db.py`). The Stage 1
+requirement was to set it before any concurrent alert writer existed and report
+the effective value through `GET /api/v1/alerts/health`.
 
 ---
 
-## 5. Explicitly *not* done in Stage 0
+## 5. Explicitly *not* done by the archived Stage 0 change
 
-No alert tables, no rules file, no evaluator, no delivery path, no LLM change,
-no scheduler job, no API surface, no change to the legacy daily digest. Live
-feature flags do not exist yet; when they arrive they default off.
+The Stage 0 change at `8d2c3a9` added no alert tables, rules file, evaluator,
+delivery path, LLM change, scheduler job, API surface, or legacy-digest change.
+Live alert feature flags did not exist at that commit. These are historical
+scope statements, not claims about the repository today.

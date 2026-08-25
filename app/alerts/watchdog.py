@@ -29,10 +29,10 @@ from app.alerts.dto import ALERT_INPUT_SCHEMA_VERSION, watchdog_input_identity
 from app.alerts.enums import Evaluability, InputOrigin
 from app.alerts.errors import sanitize
 from app.alerts.input_builder import build_watchdog_input, serialize
-from app.alerts.models import AlertInputSnapshot
+from app.alerts.models import AlertEpisode, AlertInputSnapshot
 from app.config import get_settings
 from app.db import session_scope
-from app.engine.recompute_slots import slot_key, slots_between
+from app.engine.recompute_slots import slot_at_or_before, slot_key, slots_between
 from app.logging_conf import get_logger
 from app.models import Snapshot
 
@@ -127,16 +127,39 @@ def run_once(*, now: datetime | None = None) -> dict[str, object]:
         verdict = evaluate_outage(
             last_snapshot_at=last.computed_at if last else None, now=now)
 
+        open_outage = session.execute(
+            select(AlertEpisode.episode_id).where(
+                AlertEpisode.mode == settings.alerts_mode,
+                AlertEpisode.live_profile == settings.alerts_live_profile,
+                AlertEpisode.rule_id == "ops.recompute_outage",
+                AlertEpisode.is_open.is_(True),
+            ).limit(1)
+        ).scalar()
+
         captured: str | None = None
-        if verdict.firing and verdict.expected_slot_key:
+        recovery_observation = False
+        capture_slot = verdict.expected_slot_key if verdict.firing else None
+        capture_missed = verdict.missed_slots
+        if not verdict.firing and open_outage is not None and last is not None:
+            # A FALSE observation is what resolves the open outage. Stopping
+            # after the firing capture leaves the episode open forever once a
+            # healthy recompute arrives, because the ordinary snapshot sidecar
+            # carries no missed_recompute_slots source. Prefix the recovered
+            # slot so it cannot collide with the firing input for that slot.
+            recovered_slot = slot_key(slot_at_or_before(last.computed_at))
+            capture_slot = f"recovery:{recovered_slot}"
+            capture_missed = 0
+            recovery_observation = True
+
+        if capture_slot is not None:
             alert_input = build_watchdog_input(
-                expected_slot_key=verdict.expected_slot_key,
-                missed_slots=verdict.missed_slots,
+                expected_slot_key=capture_slot,
+                missed_slots=capture_missed,
                 built_at=now,
                 service_version=settings.service_version,
                 last_snapshot=last,
             )
-            identity = watchdog_input_identity(verdict.expected_slot_key)
+            identity = watchdog_input_identity(capture_slot)
             if session.get(AlertInputSnapshot, identity) is None:
                 payload, digest = serialize(alert_input)
                 session.add(AlertInputSnapshot(
@@ -186,6 +209,7 @@ def run_once(*, now: datetime | None = None) -> dict[str, object]:
     # The evaluation's outcome has to reach the heartbeat — see
     # `heartbeat_status`.
     result = {**verdict.as_dict(), "input_identity": captured,
+              "recovery_observation": recovery_observation,
               "evaluation_status": evaluated}
     heartbeat(COMPONENT, heartbeat_status(verdict.firing, evaluated), result)
     log.info("alert_watchdog", **result)

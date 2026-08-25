@@ -25,13 +25,14 @@ from app.alerts.dto import (
     recompute_input_identity,
     watchdog_input_identity,
 )
+from app.alerts.enum_contract import canonical_execution_leg_state
 from app.alerts.enums import DataState, Evaluability, InputOrigin
 from app.alerts.observation import build_evidence
 from app.models import Snapshot
 
 #: Bumped when the BUILDER changes what it extracts from a snapshot, so a
 #: fingerprint reflects the code that produced the value.
-BUILDER_CODE_REVISION = "1"
+BUILDER_CODE_REVISION = "2"
 
 
 def _iso(moment: datetime | None) -> str | None:
@@ -324,11 +325,13 @@ def build_alert_input(snapshot: Snapshot, *, built_at: datetime,
         asset_state = trend.get(asset) or {}
         for domain, leg in ((faber_domain, "faber"), (sma_domain, "sma200")):
             if leg == "faber":
-                leg_state: str | None = asset_state.get("faber_month_end_state")
+                leg_state = canonical_execution_leg_state(
+                    "faber", asset_state.get("faber_month_end_state"))
                 leg_period: str | None = asset_state.get("faber_month_end_period")
                 absent_reason = "typed_month_end_absent"
             else:
-                leg_state = _leg_state(trend, asset, "sma200")
+                leg_state = canonical_execution_leg_state(
+                    "sma200", _leg_state(trend, asset, "sma200"))
                 leg_period = asset_state.get("sma200_as_of")
                 absent_reason = "typed_trading_date_absent"
             known = leg_state not in (None, "unknown")
