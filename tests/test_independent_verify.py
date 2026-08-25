@@ -264,6 +264,44 @@ class TestEmptyEnvVarsAreAbsent:
             None, None, 302, "Found", {}, "https://wrong.example/v1"
         ) is None
 
+    def test_production_opener_suppresses_ambient_https_proxy_at_import(self):
+        script = Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py"
+        proxy_url = "http://proxy.invalid:3128"
+        probe = (
+            "import importlib.util\n"
+            "import sys\n"
+            "import urllib.request\n"
+            "ambient = urllib.request.build_opener()\n"
+            "ambient_https = [handler for handler in ambient.handlers "
+            "if isinstance(handler, urllib.request.ProxyHandler) "
+            "and handler.proxies.get('https') == sys.argv[2]]\n"
+            "if not ambient_https:\n"
+            "    raise SystemExit('ambient HTTPS proxy precondition was not established')\n"
+            "spec = importlib.util.spec_from_file_location('verifier_proxy_probe', sys.argv[1])\n"
+            "if spec is None or spec.loader is None:\n"
+            "    raise SystemExit('could not load production verifier')\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(module)\n"
+            "retained = [handler for handler in module._NO_REDIRECT_OPENER.handlers "
+            "if isinstance(handler, urllib.request.ProxyHandler) and handler.proxies]\n"
+            "if retained:\n"
+            "    raise SystemExit('production verifier retained an ambient proxy handler')\n"
+        )
+        env = {
+            "HTTPS_PROXY": proxy_url,
+            "PATH": os.environ.get("PATH", ""),
+        }
+
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(script), proxy_url],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
 
 class TestTrustedWorkflowEndpointPreflight:
     @staticmethod
