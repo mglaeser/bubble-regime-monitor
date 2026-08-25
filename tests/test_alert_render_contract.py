@@ -21,7 +21,11 @@ from app.alerts.observation import build_evidence
 from app.alerts.outbox import validated_represented_member_ids
 from app.alerts.phrase_registry import validate_phrase_set
 from app.alerts.registry import instance_fingerprint, validate_ruleset
-from app.alerts.render_context import RenderContext, build_member_context
+from app.alerts.render_context import (
+    RenderContext,
+    build_member_context,
+    material_fact_deltas,
+)
 from app.alerts.renderer import MAX_NAMED_MEMBERS, render
 
 RULES_PATH = Path("config/alert_rules.v3.2.yaml")
@@ -227,6 +231,150 @@ def test_render_contract_labels_match_the_declared_schema(ruleset):
 def test_renderability_report_is_bound_to_exact_phrase_bytes(ruleset, phrase_set):
     assert ruleset.phrase_set_sha256 == phrase_set.sha256
     assert ruleset.renderability_report
+
+
+def _with_breadth(trigger: AlertInput, *, identity: str, breadth: float,
+                  next_check: str = "2026-08-24T20:00:00+00:00") -> AlertInput:
+    """A compatible later input whose only market change is breadth."""
+    indicators = [
+        item.model_copy(update={"value": breadth})
+        if item.observation_domain_id == obs.DOMAIN_BREADTH else item
+        for item in trigger.indicators
+    ]
+    return trigger.model_copy(update={
+        "input_identity": identity,
+        "computed_at": "2026-08-24T16:00:00+00:00",
+        "built_at": "2026-08-24T16:00:00+00:00",
+        "expected_recompute_slot": next_check,
+        "indicators": indicators,
+    })
+
+
+def test_material_change_keeps_trigger_current_and_delta_separate(phrase_set):
+    """Mandate 17.3/17.5: same state can still carry changed market facts."""
+    trigger = _input()
+    current = _with_breadth(trigger, identity="c" * 64, breadth=44.0)
+    deltas = material_fact_deltas(
+        trigger=trigger,
+        current=current,
+        previous=None,
+        labels=None,
+        authorized_fact_ids=frozenset({"F_BREADTH"}),
+    )
+    assert trigger.effective_action_state == current.effective_action_state
+    assert deltas == {
+        "F_BREADTH": {"trigger": "47.5", "current": "44.0", "delta": "-3.5"}
+    }
+
+    member = build_member_context(
+        episode_id="01K00000000000000000000000",
+        rule_id="tripwire.rf4_first",
+        priority=2,
+        trigger=trigger,
+        current=current,
+        authorized_fact_ids=frozenset({"F_BREADTH"}),
+        authorized_phrase_codes=frozenset({"RF4_FIRST", "MATERIAL_CHANGE"}),
+        required_caveat_codes=(),
+        condition_status="MATERIALLY_CHANGED_BUT_ACTIVE",
+        origin_phrase_set_version=phrase_set.version,
+        origin_phrase_set_sha256=phrase_set.sha256,
+        origin_rules_sha256="r" * 64,
+        headline_code="RF4_FIRST",
+        material_change_supported=True,
+    )
+    assert member.trigger_facts == {"F_BREADTH": "47.5"}
+    assert member.current_facts == {"F_BREADTH": "44.0"}
+    assert member.fact_deltas == deltas
+    assert member.material_change_fact_id == "F_BREADTH"
+    assert {"F_TRIGGER_VALUE", "F_CURRENT_VALUE"} <= member.authorized_fact_ids
+    assert "MATERIAL_CHANGE" in member.required_caveat_codes
+
+    result = render(
+        context=RenderContext(members=[member]),
+        phrase_set=phrase_set,
+        headline_code="RF4_FIRST",
+        phrase_codes=[],
+        next_check_code=None,
+        caveat_codes=[],
+    )
+    assert "Ausloeser 47.5, jetzt 44.0." in result.body
+
+
+def test_scheduling_metadata_alone_is_not_a_material_market_change():
+    trigger = _input()
+    current = trigger.model_copy(update={
+        "input_identity": "n" * 64,
+        "expected_recompute_slot": "2026-08-25T00:00:00+00:00",
+    })
+    assert material_fact_deltas(
+        trigger=trigger,
+        current=current,
+        previous=None,
+        labels=None,
+        authorized_fact_ids=frozenset({"F_NEXT_CHECK"}),
+    ) == {}
+
+
+def test_archived_phrase_set_uses_trigger_facts_and_stale_caveat():
+    """A queued v3.3 delivery remains renderable after runtime gains v3.4."""
+    archived = validate_phrase_set(
+        Path("config/alert_phrases.v3.3.json").read_text(encoding="utf-8"))
+    assert "MATERIAL_CHANGE" not in archived.caveats
+    trigger = _input()
+    current = _with_breadth(trigger, identity="a" * 64, breadth=44.0)
+    member = build_member_context(
+        episode_id="01K00000000000000000000000",
+        rule_id="tripwire.rf4_first",
+        priority=2,
+        trigger=trigger,
+        current=current,
+        authorized_fact_ids=frozenset({"F_BREADTH"}),
+        authorized_phrase_codes=frozenset({"RF4_FIRST", "CONTEXT_STALE"}),
+        required_caveat_codes=(),
+        condition_status="MATERIALLY_CHANGED_BUT_ACTIVE",
+        origin_phrase_set_version=archived.version,
+        origin_phrase_set_sha256=archived.sha256,
+        origin_rules_sha256="r" * 64,
+        headline_code="RF4_FIRST",
+        material_change_supported=False,
+    )
+    assert member.facts == {"F_BREADTH": "47.5"}
+    assert member.current_facts == {"F_BREADTH": "44.0"}
+    assert member.fact_deltas["F_BREADTH"]["delta"] == "-3.5"
+    assert "CONTEXT_STALE" in member.required_caveat_codes
+    assert "MATERIAL_CHANGE" not in member.required_caveat_codes
+
+
+def test_context_hash_binds_trigger_current_and_delta_views(phrase_set):
+    trigger = _input()
+
+    def context_at(value: float) -> RenderContext:
+        current = _with_breadth(trigger, identity=f"{int(value):064d}", breadth=value)
+        member = build_member_context(
+            episode_id="01K00000000000000000000000",
+            rule_id="tripwire.rf4_first",
+            priority=2,
+            trigger=trigger,
+            current=current,
+            authorized_fact_ids=frozenset({"F_BREADTH"}),
+            authorized_phrase_codes=frozenset({"RF4_FIRST", "MATERIAL_CHANGE"}),
+            required_caveat_codes=(),
+            condition_status="MATERIALLY_CHANGED_BUT_ACTIVE",
+            origin_phrase_set_version=phrase_set.version,
+            origin_phrase_set_sha256=phrase_set.sha256,
+            origin_rules_sha256="r" * 64,
+            headline_code="RF4_FIRST",
+            material_change_supported=True,
+        )
+        return RenderContext(members=[member])
+
+    assert context_at(44.0).context_hash() != context_at(43.0).context_hash()
+
+
+def test_v34_exact_phrase_set_declares_the_material_change_capability(phrase_set):
+    caveat = phrase_set.caveats["MATERIAL_CHANGE"]
+    assert caveat.slots == ("F_TRIGGER_VALUE", "F_CURRENT_VALUE")
+    assert {"F_TRIGGER_VALUE", "F_CURRENT_VALUE"} <= set(phrase_set.facts)
 
 
 def _asset_member(phrase_set, *, episode_id: str, asset: str, headline: str):

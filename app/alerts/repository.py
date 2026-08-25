@@ -563,21 +563,21 @@ def resolve_predecessor(session: Session, alert_input: AlertInput) -> AlertInput
 
 def load_latest_compatible_input(session: Session, *, like: AlertInput,
                                  ) -> AlertInput | None:
-    """The newest EVALUABLE sidecar compatible with `like` (mandate 17.4).
+    """The newest EVALUABLE sidecar, only if compatible with `like` (17.4).
 
     Current facts may join a render only when the schema version and the
     methodology are the ones the trigger was evaluated under — otherwise the
     message would mix numbers computed two different ways and present them as
-    one comparison. Incompatible or absent means the caller renders from
+    one comparison.  Deliberately inspect the newest row *before* applying the
+    compatibility check: selecting the newest compatible historical row would
+    silently return the trigger when a newer methodology exists, making stale
+    context look current. Incompatible or absent means the caller renders from
     trigger facts alone, with CONTEXT_STALE.
     """
     row = session.execute(
         select(AlertInputSnapshot)
         .where(
             AlertInputSnapshot.evaluation_eligibility == "EVALUABLE",
-            AlertInputSnapshot.alert_input_schema_version
-            == like.schema_version,
-            AlertInputSnapshot.methodology_sha256 == like.methodology_sha256,
         )
         .order_by(func.coalesce(AlertInputSnapshot.computed_at,
                                 AlertInputSnapshot.built_at).desc())
@@ -585,4 +585,8 @@ def load_latest_compatible_input(session: Session, *, like: AlertInput,
     ).scalars().first()
     if row is None:
         return None
-    return AlertInput.model_validate(json.loads(row.payload))
+    candidate = AlertInput.model_validate(json.loads(row.payload))
+    if candidate.schema_version != like.schema_version \
+            or candidate.methodology_sha256 != like.methodology_sha256:
+        return None
+    return candidate

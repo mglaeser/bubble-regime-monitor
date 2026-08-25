@@ -210,6 +210,30 @@ def test_loader_rejects_unknown_source(raw_rules, phrase_set):
         _validate(broken, phrase_set)
 
 
+def test_revision_sensitive_confirmation_requires_and_accepts_explicit_justification(
+    raw_rules, phrase_set,
+):
+    """A vendor restatement may count only when the artifact says that it may."""
+    revision_basis = _mutate(
+        raw_rules,
+        "confirmation: {count: 1, basis: authoritative_transition}",
+        "confirmation: {count: 1, basis: distinct_source_revision}",
+    )
+    with pytest.raises(RulesetInvalid, match="revision_sensitive"):
+        _validate(revision_basis, phrase_set)
+
+    justified = _mutate(
+        revision_basis,
+        '    title: "Effective action state enters de-risk"',
+        '    title: "Effective action state enters de-risk"\n'
+        '    note: "revision_sensitive: reviewed vendor restatements are distinct evidence"',
+    )
+    accepted = _validate(justified, phrase_set)
+    rule = accepted.rule("regime.band_to_derisk")
+    assert rule is not None
+    assert rule.confirmation.basis == "distinct_source_revision"
+
+
 def test_loader_rejects_authoritative_hysteresis(raw_rules, phrase_set):
     """A numeric off-level on a persisted DECISION is a second band edge."""
     broken = _mutate(

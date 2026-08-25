@@ -79,6 +79,7 @@ from app.alerts.quiet_hours import would_be_held
 from app.alerts.render_context import (
     RenderContext,
     build_member_context,
+    material_fact_deltas,
     render_time_status,
 )
 from app.alerts.renderer import render_test_message, render_with_cascade
@@ -87,7 +88,11 @@ from app.alerts.repository import (
     load_latest_compatible_input,
     utc_ms,
 )
-from app.alerts.rulespec import RuleSpec
+from app.alerts.rulespec import (
+    OPTIONAL_RUNTIME_CAVEAT_CODES,
+    OPTIONAL_RUNTIME_FACT_IDS,
+    RuleSpec,
+)
 from app.alerts.sender import Sender, default_sender
 from app.logging_conf import get_logger
 
@@ -228,13 +233,22 @@ def _build_context(
                 member.origin_rules_sha256, member.instance_fingerprint))
             if state_row is not None:
                 condition_state = str(state_row.condition_state)
+        allowed_fact_ids = frozenset(contract.allowed_fact_ids)
+        deltas = material_fact_deltas(
+            trigger=trigger,
+            current=current,
+            previous=previous,
+            labels=labels,
+            authorized_fact_ids=allowed_fact_ids,
+        )
+        material_change_supported = (
+            OPTIONAL_RUNTIME_CAVEAT_CODES <= set(phrase_set.caveats)
+            and OPTIONAL_RUNTIME_FACT_IDS <= set(phrase_set.facts)
+        )
         status = render_time_status(
             condition_state=condition_state,
             resolved=bool(episode is not None and not episode.is_open),
-            materially_changed=bool(
-                current is not trigger
-                and current.effective_action_state
-                != trigger.effective_action_state),
+            materially_changed=bool(deltas),
         )
         if status == "RESOLVED_BEFORE_SEND":
             # revalidation caught most of these; a resolution landing between
@@ -248,8 +262,12 @@ def _build_context(
             current=current,
             previous=previous,
             labels=labels,
-            authorized_fact_ids=frozenset(contract.allowed_fact_ids),
-            authorized_phrase_codes=contract.authorized_codes(rule),
+            authorized_fact_ids=allowed_fact_ids,
+            authorized_phrase_codes=(
+                contract.authorized_codes(rule)
+                | (OPTIONAL_RUNTIME_CAVEAT_CODES
+                   if material_change_supported else frozenset())
+            ),
             headline_code=contract.headline_code,
             phrase_codes=tuple(contract.allowed_phrase_codes),
             next_check_code=contract.next_check_code,
@@ -261,6 +279,7 @@ def _build_context(
             origin_phrase_set_version=member.origin_phrase_set_version,
             origin_phrase_set_sha256=member.origin_phrase_set_sha256,
             origin_rules_sha256=member.origin_rules_sha256,
+            material_change_supported=material_change_supported,
         ))
         origin_rules.append(rule)
     return RenderContext(members=contexts), origin_rules
@@ -387,12 +406,12 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
         .order_by(AlertDeliveryMember.included_at)
     ).all()
     if not rows:
-        # No members at all — a quiet digest. It still has a planned text: the
-        # RULESET it was planned under names a phrase set, and that is what its
-        # wording was reviewed against. Falling back to the running set meant a
-        # digest queued before a deploy could go out worded from phrases nobody
-        # planned it against, which is the same substitution the member path
-        # refuses.
+        # TEST is the sole memberless provider intent; quiet digest runs retain
+        # heartbeat/event evidence and create no delivery.  A TEST still has
+        # planned text: the RULESET it was planned under names the exact phrase
+        # set whose reviewed bytes must be used. Falling back to the running set
+        # would permit a transport probe queued before a deploy to be silently
+        # reworded afterwards, the same substitution the member path refuses.
         return _phrase_set_of_ruleset(session, delivery.planning_rules_sha256,
                                       fallback)
 

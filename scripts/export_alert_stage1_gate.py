@@ -24,6 +24,7 @@ mandatory-event catalogue.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -79,6 +80,8 @@ def build_evidence() -> dict:
     artifacts = validate_from_disk(rules_path=RULES, phrase_path=PHRASES,
                                    service_version="3.8.0")
     inputs = history.load()
+    event_bytes = EVENTS.read_bytes()
+    event_document = json.loads(event_bytes)
 
     runs: dict[str, dict] = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -128,6 +131,16 @@ def build_evidence() -> dict:
             "synthetic": True,
             "arc_schema_version": document["schema_version"],
             "inputs": len(inputs),
+        },
+        "mandatory_event_catalogue": {
+            "source": str(EVENTS.relative_to(ROOT)),
+            "sha256_grouped": group_digest(
+                hashlib.sha256(event_bytes).hexdigest()
+            ),
+            "catalogue_version": event_document.get("catalogue_version"),
+            "schema_version": event_document.get("schema_version"),
+            "frozen": event_document.get("frozen"),
+            "event_count": len(event_document.get("events", [])),
         },
         "runs": runs,
     }

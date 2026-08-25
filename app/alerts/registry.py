@@ -29,6 +29,8 @@ from app.alerts.phrase_registry import FragmentSpec, ValidatedPhraseSet
 from app.alerts.render_context import MEMBER_FACT_BUILDERS
 from app.alerts.rulespec import (
     AUTHORITATIVE_SAFE_KINDS,
+    OPTIONAL_RUNTIME_CAVEAT_CODES,
+    OPTIONAL_RUNTIME_FACT_IDS,
     RUNTIME_CAVEAT_CODES,
     RulesetDocument,
     RuleSpec,
@@ -306,9 +308,13 @@ def _check_render_contracts(
             else:
                 fragments.append(fragment)
 
+        optional_runtime_codes = (
+            OPTIONAL_RUNTIME_CAVEAT_CODES & set(phrase_set.caveats)
+        )
         caveat_codes = tuple(dict.fromkeys([
             *rule.required_caveat_codes,
             *sorted(RUNTIME_CAVEAT_CODES),
+            *sorted(optional_runtime_codes),
         ]))
         caveats: list[FragmentSpec] = []
         for code in caveat_codes:
@@ -319,6 +325,8 @@ def _check_render_contracts(
                 caveats.append(fragment)
 
         allowed_facts = set(contract.allowed_fact_ids)
+        if optional_runtime_codes:
+            allowed_facts.update(OPTIONAL_RUNTIME_FACT_IDS)
         unauthorized_slots = sorted({
             slot for fragment in [*fragments, *caveats]
             for slot in fragment.slots if slot not in allowed_facts
@@ -329,9 +337,27 @@ def _check_render_contracts(
 
         worst_case = 0
         if not local and fragments:
-            texts = [_worst_fragment(fragment, phrase_set)
-                     for fragment in [*fragments, *caveats]]
-            worst_case = septets(" ".join(texts))
+            # UNKNOWN/stale and material-change are mutually exclusive render
+            # outcomes.  Prove every *reachable* simultaneous caveat set rather
+            # than summing an impossible message; DATA_DEGRADED and KNOWN_ISSUE
+            # remain in both sets because they can coexist with either outcome.
+            fixed = [
+                caveat for caveat in caveats
+                if caveat.code not in {
+                    "CONTEXT_STALE", "UNKNOWN_AT_RENDER", "MATERIAL_CHANGE"
+                }
+            ]
+            status_sets = [
+                [caveat for caveat in caveats
+                 if caveat.code in {"CONTEXT_STALE", "UNKNOWN_AT_RENDER"}],
+                [caveat for caveat in caveats if caveat.code == "MATERIAL_CHANGE"],
+            ]
+            candidates = []
+            for status_caveats in status_sets:
+                texts = [_worst_fragment(fragment, phrase_set)
+                         for fragment in [*fragments, *fixed, *status_caveats]]
+                candidates.append(septets(" ".join(texts)))
+            worst_case = max(candidates, default=0)
             if worst_case > SINGLE_SMS_SEPTETS:
                 local.append(
                     f"worst-case deterministic assembly is {worst_case} septets, "

@@ -18,8 +18,10 @@ from app.alerts.artifacts import validate_from_disk
 from app.alerts.enums import Evaluability, Mode
 from app.alerts.replay import (
     REPLAY_SCHEMA_VERSION,
+    MandatoryEventCatalogueInvalid,
     ReplayConfig,
     ReplaySummary,
+    _load_mandatory_events,
     load_source_inputs,
     ruleset_at_stage,
     run_replay,
@@ -65,6 +67,32 @@ def _run(tmp_path, artifacts, *, name="replay.db", stage=3, inputs=None,
     return run_replay(config=config, ruleset=artifacts.ruleset,
                       phrase_set=artifacts.phrase_set,
                       inputs=inputs if inputs is not None else _history())
+
+
+def _mandatory_event(**overrides):
+    event = {
+        "event_id": "band-entry",
+        "description": "Synthetic de-risk entry used only to test recall mechanics",
+        "window_start": "2026-08-15T02:00:00+00:00",
+        "window_end": "2026-08-15T10:00:00+00:00",
+        "rule_id": "regime.band_to_derisk",
+        "expected_priority": "P1",
+        "max_detection_slots": 1,
+        "source": "synthetic test fixture",
+    }
+    event.update(overrides)
+    return event
+
+
+def _catalogue(tmp_path, events, *, frozen=True, name="events.json"):
+    path = tmp_path / name
+    path.write_text(json.dumps({
+        "catalogue_version": "test-1",
+        "schema_version": 1,
+        "frozen": frozen,
+        "events": events,
+    }), encoding="utf-8")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +386,144 @@ def test_an_empty_mandatory_catalogue_reports_zero_not_full_recall(tmp_path, art
     assert summary.mandatory_event_detected == 0
     assert any("recall" in note or "recall" in item
                for note in summary.notes for item in summary.not_measured)
+    assert any("Stage 2+ requires" in item for item in summary.failures)
+
+    stage1 = _run(
+        tmp_path,
+        artifacts,
+        name="empty-stage1.db",
+        stage=1,
+        events=catalogue,
+    )
+    assert not any("mandatory-event recall" in item
+                   for item in stage1.failures)
+
+
+def test_mandatory_event_recall_requires_timely_rule_and_priority_match(
+        tmp_path, artifacts):
+    catalogue = _catalogue(tmp_path, [_mandatory_event()])
+    summary = _run(tmp_path, artifacts, events=catalogue)
+
+    assert summary.mandatory_event_total == 1
+    assert summary.mandatory_event_detected == 1
+    assert summary.mandatory_event_not_evaluable == 0
+    assert summary.detection_times_slots == {"band-entry": 1}
+    assert not any("mandatory-event recall missed" in item
+                   for item in summary.failures)
+
+
+def test_mandatory_event_detected_after_slot_limit_is_a_miss(tmp_path, artifacts):
+    catalogue = _catalogue(
+        tmp_path, [_mandatory_event(max_detection_slots=0)], name="late.json")
+    summary = _run(tmp_path, artifacts, name="late.db", events=catalogue)
+
+    assert summary.detection_times_slots == {"band-entry": 1}
+    assert summary.mandatory_event_detected == 0
+    assert any("missed 1 of 1" in item for item in summary.failures)
+    assert summary.passed is False
+
+
+@pytest.mark.parametrize("overrides", [
+    {
+        "window_start": "2026-08-15T10:00:00+00:00",
+        "window_end": "2026-08-15T14:00:00+00:00",
+    },
+    {"expected_priority": "P2"},
+])
+def test_mandatory_event_outside_window_or_at_wrong_priority_is_a_miss(
+        tmp_path, artifacts, overrides):
+    event = _mandatory_event(**overrides)
+    catalogue = _catalogue(
+        tmp_path, [event], name=f"miss-{event['expected_priority']}.json")
+    summary = _run(
+        tmp_path, artifacts, name=f"miss-{event['expected_priority']}.db",
+        events=catalogue)
+
+    assert summary.mandatory_event_detected == 0
+    assert summary.detection_times_slots == {}
+    assert any("missed 1 of 1" in item for item in summary.failures)
+
+
+def test_not_evaluable_is_scoped_to_each_mandatory_event_window(tmp_path, artifacts):
+    history = _history()
+    history[-1] = history[-1].model_copy(update={
+        "evaluation_eligibility": Evaluability.NOT_EVALUABLE,
+        "ineligibility_reasons": ["synthetic_blind_slot"],
+    })
+    blind = _mandatory_event(
+        event_id="blind-window",
+        window_start="2026-08-15T14:00:00+00:00",
+        window_end="2026-08-15T14:00:00+00:00",
+        rule_id="ops.recompute_outage",
+        expected_priority="P2",
+        max_detection_slots=0,
+    )
+    catalogue = _catalogue(tmp_path, [_mandatory_event(), blind], name="local.json")
+    summary = _run(
+        tmp_path, artifacts, name="local.db", inputs=history, events=catalogue)
+
+    assert summary.mandatory_event_total == 2
+    assert summary.mandatory_event_not_evaluable == 1
+    assert summary.mandatory_event_detected == 1
+    assert not any("mandatory-event recall missed" in item
+                   for item in summary.failures)
+
+
+def test_all_mandatory_events_not_evaluable_reports_recall_unmeasured(
+        tmp_path, artifacts):
+    history = _history()
+    history[-1] = history[-1].model_copy(update={
+        "evaluation_eligibility": Evaluability.NOT_EVALUABLE,
+        "ineligibility_reasons": ["synthetic_blind_slot"],
+    })
+    event = _mandatory_event(
+        event_id="all-blind",
+        window_start="2026-08-15T14:00:00+00:00",
+        window_end="2026-08-15T14:00:00+00:00",
+    )
+    catalogue = _catalogue(tmp_path, [event], name="all-blind.json")
+    summary = _run(
+        tmp_path, artifacts, name="all-blind.db", inputs=history,
+        events=catalogue)
+
+    assert summary.mandatory_event_not_evaluable == 1
+    assert not any("mandatory-event recall missed" in item
+                   for item in summary.failures)
+    assert any("every catalogue event is NOT_EVALUABLE" in item
+               for item in summary.not_measured)
+    assert any("recall is unmeasured" in item for item in summary.failures)
+
+
+@pytest.mark.parametrize("payload", [
+    [],
+    {"catalogue_version": "x", "schema_version": 1, "frozen": False,
+     "events": [_mandatory_event()]},
+    {"catalogue_version": "x", "schema_version": 2, "frozen": True,
+     "events": [_mandatory_event()]},
+    {"catalogue_version": "x", "schema_version": 1, "frozen": True,
+     "events": [_mandatory_event(), _mandatory_event()]},
+    {"catalogue_version": "x", "schema_version": 1, "frozen": True,
+     "events": [_mandatory_event(window_start="2026-08-15T02:00:00")]},
+    {"catalogue_version": "x", "schema_version": 1, "frozen": True,
+     "events": [_mandatory_event(
+         window_start="2026-08-16T02:00:00+00:00")]},
+    {"catalogue_version": "x", "schema_version": 1, "frozen": True,
+     "events": [_mandatory_event(rule_id="made.up.rule")]},
+    {"catalogue_version": "x", "schema_version": 1, "frozen": True,
+     "events": [_mandatory_event(expected_priority="P5")]},
+    {"catalogue_version": "x", "schema_version": 1, "frozen": True,
+     "events": [_mandatory_event(max_detection_slots=-1)]},
+    {"catalogue_version": "x", "schema_version": 1, "frozen": True,
+     "events": [{**_mandatory_event(), "typo": True}]},
+])
+def test_malformed_mandatory_catalogue_is_refused(tmp_path, payload):
+    path = tmp_path / "malformed.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(MandatoryEventCatalogueInvalid):
+        _load_mandatory_events(
+            path,
+            known_rule_ids=frozenset({"regime.band_to_derisk"}),
+        )
 
 
 def test_a_replay_reports_the_stage_it_actually_evaluated(tmp_path, artifacts):
@@ -522,6 +688,8 @@ def test_the_gate_artifact_exercises_more_than_the_committed_stage():
     assert stage3["failures"] == [
         "non-P1 volume breached the 24h cap: 5 > 3",
         "non-P1 volume breached the 168h cap: 8 > 6",
+        "mandatory-event recall is unmeasured: Stage 2+ requires a "
+        "non-empty operator-frozen catalogue",
     ], (
         "stage-3 failures changed. If the breach was FIXED, empty this list. "
         f"If a NEW failure appeared, it needs its own decision: {stage3['failures']}"

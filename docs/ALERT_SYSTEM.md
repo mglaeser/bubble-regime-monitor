@@ -108,7 +108,7 @@ Full derivation and backfill policy: **`docs/ALERT_STAGE0_AUDIT.md`**.
 ## 4. Rules are data
 
 `config/alert_rules.v3.2.yaml` is the complete inventory: 90 rules and
-constellations, 30 enabled, the rest disabled with a recorded reason. No rule
+constellations, 29 enabled, the rest disabled with a recorded reason. No rule
 may exist only in Python.
 
 A condition is one of a small closed set of shapes — `transition`,
@@ -310,20 +310,43 @@ evidence, promotion and per-delivery admission checks remain authoritative.
 ## 9. Operating it
 
 ```bash
-python -m app.alerts.cli validate [--rules PATH] [--phrases PATH] [--promote]
-python -m app.alerts.cli preflight            # pre-stage checks
-python -m app.alerts.cli ruleset              # active ruleset summary
-python -m app.alerts.cli health
-python -m app.alerts.cli pending              # open episodes
-python -m app.alerts.cli evaluate --input-identity ID [--shadow]
-python -m app.alerts.cli explain --evaluation-id ID
-python -m app.alerts.cli recover-evaluations --once
-python -m app.alerts.cli reconcile-sidecars
-python -m app.alerts.cli watchdog --once       # exit 2 = outage detected
-python -m app.alerts.cli dispatch --once       # one outbox pass
+bubblegauge alerts validate [--rules PATH] [--phrases PATH] [--promote]
+bubblegauge alerts preflight                  # pre-stage checks
+bubblegauge alerts ruleset                    # active ruleset summary
+bubblegauge alerts health
+bubblegauge alerts pending                    # open episodes
+bubblegauge alerts evaluate --input-identity ID [--shadow]
+bubblegauge alerts explain --evaluation-id ID
+bubblegauge alerts recover-evaluations --once
+bubblegauge alerts recover-leases --once
+bubblegauge alerts reconcile-sidecars
+bubblegauge alerts watchdog --once             # exit 2 = outage detected
+bubblegauge alerts dispatch --once             # one outbox pass
+bubblegauge alerts digest --window 2026-W33 --dry-run
+
+bubblegauge export snapshots --all --format parquet --out snapshots.parquet
+bubblegauge stats deltas --economic-observations --out deltas.json
+bubblegauge stats transitions --out transitions.json
 ```
 
 `explain` returns facts and decisions — never private reasoning.
+
+The export and statistics commands are point-in-time, read-only reports over
+persisted sidecars and alert metadata. They do not import a provider, query
+current market state, or recompute a score. The delta report keeps economic
+observations, provider revisions, computation fingerprints, evidence
+occurrences, and recompute inputs separate. The transition report covers
+entries into de-risk by origin, one-snapshot reversals, base/effective
+divergence, rf3/rf4 and Faber transitions, non-fresh evidence, sidecar gaps,
+evaluation conflicts/timeouts, and UNKNOWN deliveries. Parquet export needs
+the optional `bubblegauge[parquet]` dependency; on unsupported hosts it refuses
+rather than silently writing another format.
+
+`digest --dry-run` exercises artifact registration and the real digest planner
+inside one explicit transaction, then rolls back **all** registry, event,
+item, member, and delivery mutations. It never constructs a sender. Omitting
+`--dry-run` is an operator action against the configured alert namespace; an
+open ISO week is refused before its dedupe key can be consumed.
 
 `--promote` is the only way to promote from the CLI, and
 `POST /api/v1/admin/alerts/promote` the only way over HTTP. Nothing promotes as
@@ -337,6 +360,12 @@ change `ALERTS_MODE`**.
 | lease live | in progress | leave it alone |
 | lease expired, `plan_applied=0` | died before applying anything | `ABANDONED`; safe to retry under the same logical identity |
 | lease expired, `plan_applied=1` | applied a plan but never recorded finishing | **never auto-repaired** — needs a human |
+
+`recover-leases --once` is the separate delivery-lease sweep. An expired
+`LEASED` row with no `request_started_at` is definitely pre-wire and returns to
+`RETRY_DUE`; an expired `SENDING` row, or any row whose request had started,
+becomes `UNKNOWN` because the provider may have accepted it. The latter is
+never auto-retried under the same generation.
 
 `reconcile-sidecars` lists committed snapshots with no sidecar. A gap is
 reported, never quietly filled: a sidecar reconstructed after the fact is
@@ -587,8 +616,10 @@ measure.
 Until this is decided, Stage 3 cannot be promoted. That refusal is executable,
 not advisory:
 
-* the evidence carries the complete rules and phrase-set digests as stable
-  grouped values and promotion checks them against the candidate bytes;
+* the evidence carries the complete rules, phrase-set, and mandatory-event
+  catalogue digests as stable grouped values; promotion checks the rule and
+  phrase bytes at every stage and, from Stage 2 onward, checks the exact frozen
+  catalogue plus its version/schema/count against the replay results;
 * the promotion service refuses every recorded replay failure;
 * runtime live admission rechecks the active stage, evidence and currently
   promoted bytes before constructing a sender; and
@@ -730,10 +761,20 @@ consults all four rather than the two easy ones: `STILL_FIRING` renders;
 that has cleared is worse than silence); `UNKNOWN_AT_RENDER` renders WITH the
 data-quality caveat and claims no resolution; `MATERIALLY_CHANGED_BUT_ACTIVE`
 renders trigger and current values rather than presenting stale numbers as
-now. Current facts join a render only when their schema and methodology match
-the trigger's (17.4) — otherwise the member renders from trigger facts with
+now. Phrase set v3.4 provides the reviewed `MATERIAL_CHANGE` clause and its
+runtime-only `F_TRIGGER_VALUE` / `F_CURRENT_VALUE` slots. Both values are built
+from one rule-authorized typed fact at the same reviewed display precision;
+the complete trigger view, compatible current view, and every visible delta
+remain separate in the render-context hash. Scheduling metadata such as
+`F_NEXT_CHECK` cannot manufacture a material market change.
+
+Current facts join a render only when their schema and methodology match the
+trigger's (17.4) — otherwise the member renders from trigger facts with
 `CONTEXT_STALE`, because mixing numbers computed two different ways into one
-comparison is worse than admitting staleness.
+comparison is worse than admitting staleness. An archived phrase set that
+predates the reviewed two-value clause remains recoverable: it keeps the
+trigger facts and adds `CONTEXT_STALE`; runtime code never mutates or
+retroactively extends its phrase bytes.
 
 ## 12. Replay (the Stage 1 gate)
 
@@ -773,8 +814,8 @@ stage.
 
 ### The committed evidence
 
-`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1
-and 3. CI regenerates it and fails on any difference:
+`docs/alert-stage1-gate.json` is a replay of a synthetic history at stages 1,
+3, and 4. CI regenerates it and fails on any difference:
 
 ```bash
 python -m scripts.export_alert_stage1_gate           # write
@@ -790,15 +831,23 @@ delta is the evidence under review, not a contradiction of determinism. The
 artifact carries this contract, its generator and its exact command in the
 machine-generated `generation` block.
 
-The current regeneration has three declared deltas from the prior evidence:
-the bound rule/phrase hashes move to rules `v3.2.1` plus phrase set `v3.4`;
-`held_budget` is `0 -> 3` at Stages 3/4 because queued and held work now reserves
-the budget it can consume; and `DATA_QUALITY_GUARD` is `1 -> 5` because replay
-now preserves suppression evidence for every affected open episode. The Stage
-3/4 verdict remains failing on the same two non-P1 cap breaches. None of these
-is a scoring input: `frozen_methodology.json`, `MC_SEED=20260711`, and the score
-golden fixture are outside this alert-only artifact and remain separately
-gated and unchanged by the alert implementation.
+The earlier reviewed regeneration moved the bound hashes to rules `v3.2.1`
+plus phrase set `v3.4`, changed `held_budget` from `0 -> 3` at Stages 3/4 when
+queued and held work began reserving the budget it can consume, and changed
+`DATA_QUALITY_GUARD` from `1 -> 5` when replay began preserving suppression
+evidence for every affected open episode. This completion changes the bound
+phrase digest from
+`e1300895-3fdbb27d-1377bef3-09bc4507-dc5b01a8-91d9cc22-8fa82837-69dece50`
+to
+`96d915f5-1a8fb496-aded9c1d-907abe76-b5d9be96-e23b8fc1-fab525fc-567d3196`
+for the reviewed trigger/current clause, and bumps replay-summary schema
+`1 -> 2` for strict per-window mandatory-event results. No existing behavioral
+metric moved. Stage 3/4 retain the same two non-P1 cap breaches and now also
+refuse explicitly because the deliberately empty catalogue leaves mandatory
+recall unmeasured; Stage 1 remains green. None of these is a scoring input:
+`frozen_methodology.json`, `MC_SEED=20260711`, and the score golden fixture are
+outside this alert-only artifact and remain separately gated and unchanged by
+the alert implementation.
 
 `tests/fixtures/alert_replay_history.json` declares the **arc** — twenty
 recompute slots through hold → trim → de-risk → recovery, with two blind slots
@@ -820,6 +869,21 @@ The history establishes regression coverage, **not** recall. Recall is a Stage
 2 question and needs `config/alert_mandatory_events.v3.2.json`, which ships
 empty on purpose: inventing historical windows would manufacture a recall
 number nothing measured, the same failure mode as inventing a `[PIN]`.
+
+Supplying a catalogue is an evidence-bearing action, so replay fails closed on
+a missing file, invalid JSON, malformed envelope, duplicate or unsafe event
+id, unknown rule, invalid priority, naive/reversed time window, negative slot
+limit, missing field, or extra event field. A non-empty catalogue must declare
+`frozen: true`. Recall then requires an activation of the exact rule at the
+expected priority, inside that event's own UTC window, and no later than its
+declared recompute-slot allowance. `NOT_EVALUABLE` is decided per event window,
+not copied from a run-wide missing-input count. If every event window is blind,
+or the deliberately empty shipped catalogue is used, recall remains explicitly
+UNMEASURED. Stage 1 reports that honestly and remains eligible; a Stage 2+
+replay fails, and promotion independently refuses unless the exact shipped
+catalogue is non-empty, frozen, byte-bound, and detected at 100% across its
+evaluable events. These checks validate operator-frozen evidence; they do not
+create the real events, dates, or sources that Stage 2 still requires.
 
 ---
 

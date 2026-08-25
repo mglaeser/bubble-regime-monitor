@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -262,7 +263,11 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
     """
     from app.alerts.artifacts import validate_from_disk
     from app.alerts.errors import AlertError
-    from app.alerts.replay import ReplayConfig, run_replay
+    from app.alerts.replay import (
+        MandatoryEventCatalogueInvalid,
+        ReplayConfig,
+        run_replay,
+    )
     from app.config import get_settings
 
     try:
@@ -286,6 +291,10 @@ def cmd_dryrun(args: argparse.Namespace) -> int:
     try:
         summary = run_replay(config=config, ruleset=artifacts.ruleset,
                              phrase_set=artifacts.phrase_set)
+    except MandatoryEventCatalogueInvalid as exc:
+        _print({"error_code": "MANDATORY_EVENT_CATALOGUE_INVALID",
+                "detail": str(exc)})
+        return 1
     except OperationalError:
         # Overwhelmingly: the source database is not where the settings say, or
         # capture has never run so the file does not exist yet. The URL is not
@@ -355,6 +364,84 @@ def cmd_recover(_args: argparse.Namespace) -> int:
     _print({"abandoned": report.abandoned, "inconsistent": report.inconsistent,
             "in_progress": report.in_progress, "needs_operator": report.needs_operator})
     return 1 if report.needs_operator else 0
+
+
+def cmd_recover_leases(_args: argparse.Namespace) -> int:
+    """Sweep delivery leases once; ambiguous wire crossings become UNKNOWN."""
+    from datetime import UTC, datetime
+
+    from app.alerts.outbox import recover_leases
+    from app.db import session_scope
+
+    with session_scope() as session:
+        report = recover_leases(session, now=datetime.now(UTC))
+    _print(report)
+    return 0
+
+
+_ISO_WEEK = re.compile(r"^(\d{4})-W(\d{2})$")
+
+
+def _closed_week(value: str) -> str:
+    """Argparse type for a real ISO week key."""
+    from datetime import datetime
+
+    match = _ISO_WEEK.fullmatch(value)
+    if match is None:
+        raise argparse.ArgumentTypeError("window must look like YYYY-Www")
+    year, week = (int(part) for part in match.groups())
+    try:
+        datetime.fromisocalendar(year, week, 1)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("window is not a valid ISO week") from exc
+    return value
+
+
+def cmd_digest(args: argparse.Namespace) -> int:
+    """Plan one weekly digest, optionally under a guaranteed rollback."""
+    if not args.dry_run:
+        from app.jobs.alert_digest import run_once
+
+        result = run_once(window_key=args.window)
+        _print(result)
+        return 1 if result.get("status") == "refused" else 0
+
+    from datetime import UTC, datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.digest import plan_digest
+    from app.config import get_settings
+    from app.db import get_engine
+
+    settings = get_settings()
+    session = Session(get_engine(), expire_on_commit=False)
+    try:
+        artifacts = load_active(session)
+        register(session, artifacts, registered_by="digest-dry-run")
+        plan = plan_digest(
+            session,
+            mode=settings.alerts_mode,
+            live_profile=settings.alerts_live_profile,
+            planning_rules_sha256=artifacts.ruleset.rules_sha256,
+            phrase_set_version=artifacts.phrase_set.version,
+            phrase_set_sha256=artifacts.phrase_set.sha256,
+            window_key=args.window,
+            recipient_ref=settings.alerts_live_profile,
+            now=datetime.now(UTC),
+        )
+        session.flush()
+        payload = plan.as_dict()
+    finally:
+        # Includes artifact registration, quiet-window audit events, digest
+        # items, members, deliveries, and any implicit transaction state.
+        session.rollback()
+        session.close()
+    _print({"dry_run": True, "committed": False, **payload})
+    return 1 if str(payload.get("skipped_reason") or "").endswith(
+        "leave the rest of it unreported"
+    ) else 0
 
 
 def cmd_reconcile(_args: argparse.Namespace) -> int:
@@ -445,6 +532,18 @@ def build_parser() -> argparse.ArgumentParser:
     recover = sub.add_parser("recover-evaluations", help="sweep stale evaluation leases")
     recover.add_argument("--once", action="store_true", default=True)
     recover.set_defaults(func=cmd_recover)
+    recover_delivery = sub.add_parser(
+        "recover-leases", help="sweep stale delivery leases"
+    )
+    recover_delivery.add_argument("--once", action="store_true", default=True)
+    recover_delivery.set_defaults(func=cmd_recover_leases)
+    digest = sub.add_parser("digest", help="plan one closed weekly digest")
+    digest.add_argument("--window", required=True, type=_closed_week)
+    digest.add_argument(
+        "--dry-run", action="store_true",
+        help="run registration and planning, then roll back every mutation",
+    )
+    digest.set_defaults(func=cmd_digest)
     return parser
 
 

@@ -373,7 +373,9 @@ _SPECS: tuple[SourceSpec, ...] = (
           description="Semiconductor 2-yr net-of-market run-up, percentage points.",
           read=_evidence_reader("semi_runup_pp", obs.DOMAIN_SEMIS)),
     _spec("s5_credit_level", "number", obs.DOMAIN_S5_CREDIT_LEVEL, authoritative=False,
-          description="Credit percentile behind the s5 sub-score.",
+          description=("Raw credit level behind the s5 sub-score: EBP in percentage "
+                       "points, or BAA/HY spread in basis points, as identified by "
+                       "the evidence tier and unit."),
           read=_evidence_reader("s5_credit_level", obs.DOMAIN_S5_CREDIT_LEVEL)),
     # --- credit sidecar (display only; rf3 is the authority) -------------
     _spec("hy_oas_bps", "number", obs.DOMAIN_HY_OAS, authoritative=False,

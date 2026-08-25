@@ -1103,6 +1103,50 @@ def test_automatic_retry_preserves_append_only_attempt_timestamps(isolated_db):
         assert "attempt=1" in (events[0].detail_redacted or "")
 
 
+@pytest.mark.parametrize("use_returning", [True, False])
+def test_returning_and_fallback_claim(isolated_db, monkeypatch, use_returning):
+    """Both SQLite claim routes are one conditional UPDATE, never select-then-set."""
+    from sqlalchemy import event
+
+    from app.alerts.outbox import claim
+    from app.db import get_engine, session_scope
+
+    delivery_id = f"D-claim-{'returning' if use_returning else 'fallback'}"
+    _seed_delivery(delivery_id)
+    engine = get_engine()
+    dialect = engine.dialect
+    monkeypatch.setattr(dialect, "update_returning", use_returning)
+    statements: list[str] = []
+
+    def capture_update(_conn, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().upper().startswith("UPDATE ALERT_DELIVERY"):
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture_update)
+    try:
+        with session_scope() as session:
+            assert claim(
+                session,
+                delivery_id,
+                owner="worker-a",
+                now=NOW,
+                lease_seconds=30,
+            )
+        with session_scope() as session:
+            assert not claim(
+                session,
+                delivery_id,
+                owner="worker-b",
+                now=NOW,
+                lease_seconds=30,
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_update)
+
+    assert statements
+    assert (" RETURNING " in f" {statements[0].upper()} ") is use_returning
+
+
 def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):
     """send-test proves the REAL pipeline: claim, render, classify.
 
@@ -1225,6 +1269,55 @@ def test_dispatcher_executes_a_nonzero_headline_member_index(
     assert observed == [headline.render.headline_code]
     assert report.sent == 1
     assert sender.sent[0][1] == "Dispatcher headline index contract."
+
+
+def test_wrong_member_phrase_hash_is_refused_before_render_or_send(
+        isolated_db, phrase_set):
+    """A matching phrase version cannot substitute for the recorded digest."""
+    from sqlalchemy import select
+
+    from app.alerts.dispatcher import dispatch_once, planning_phrase_set
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertRulesetRegistry,
+    )
+    from app.alerts.sender import NullSender
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_delivery_for_episode
+
+    seed_delivery_for_episode()
+    with session_scope() as session:
+        delivery = session.execute(select(AlertDelivery)).scalars().one()
+        member = session.execute(select(AlertDeliveryMember)).scalars().one()
+        origin = session.get(AlertRulesetRegistry, member.origin_rules_sha256)
+        assert origin is not None
+        member.origin_phrase_set_version = origin.phrase_set_version
+        member.origin_phrase_set_sha256 = origin.phrase_set_sha256
+        session.flush()
+        assert planning_phrase_set(session, delivery, phrase_set) is not None
+
+        member.origin_phrase_set_sha256 = "9" * 64
+        delivery_id = delivery.delivery_id
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert report.render_failed == 1
+    assert sender.sent == []
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.RENDER_FAILED
+        assert delivery.attempts == 0
 
 
 def test_frozen_bundle_retry_is_cancelled_when_a_rendered_member_resolves(

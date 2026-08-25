@@ -335,6 +335,78 @@ def test_recovery_from_unknown_resumes_the_candidate_it_never_opens_a_second():
     assert decision.activate_episode is True
 
 
+def test_explicit_revision_sensitive_confirmation_counts_two_same_period_revisions():
+    """The exceptional basis counts revision keys, not economic-period keys."""
+    rule = _rule(
+        rule_id="test.revision-sensitive",
+        note="revision_sensitive: reviewed vendor restatements are distinct evidence",
+        source_fields=["data_degraded", "breadth_pct"],
+        condition={
+            "kind": "all_of",
+            "terms": [
+                {"kind": "boolean_state", "source": "data_degraded", "equals": True},
+                {"kind": "freshness", "source": "breadth_pct", "require": "fresh"},
+            ],
+        },
+        confirmation={"count": 2, "basis": "distinct_source_revision"},
+        confirmation_sources=["breadth_pct"],
+        candidate_ttl={"calendar": "US_TRADING", "intervals": 10, "grace_seconds": 0},
+    )
+
+    def revised_input(identity: str, vintage: str) -> tuple[AlertInput, str, str]:
+        evidence = build_evidence(
+            obs.DOMAIN_BREADTH,
+            42.0,
+            observed_at="2026-08-15T10:00:00+00:00",
+            source_id="d1",
+            provider_id="provider-a",
+            provider_vintage=vintage,
+            source_payload_sha256=vintage,
+            period_start="2026-08-14",
+            period_end="2026-08-14",
+        )
+        inp = make_input(identity=identity, degraded=True).model_copy(
+            update={"indicators": [EvidenceModel(**evidence.as_dict())]}
+        )
+        return inp, evidence.economic_observation_key, evidence.source_revision_key
+
+    first, first_economic, first_revision = revised_input("revision-a", "v1")
+    second, second_economic, second_revision = revised_input("revision-b", "v2")
+    assert first_economic == second_economic
+    assert first_revision != second_revision
+
+    opened = evaluate_state(
+        rule=rule,
+        instance_fingerprint="revision-fp",
+        memory=InstanceMemory(),
+        outcome=evaluate_rule(rule, _ctx(first)),
+        ctx=_ctx(first),
+        now=NOW,
+    )
+    assert opened.condition_state == ConditionState.PENDING
+    assert opened.confirmations[0].economic_observation_key == first_revision
+
+    memory = InstanceMemory(
+        state_version=1,
+        condition_state=ConditionState.PENDING,
+        candidate_started_input=opened.candidate_started_input,
+        candidate_expires_at=opened.candidate_expires_at,
+        current_episode_id="EP-REVISION",
+        confirmed_keys={"breadth_pct": frozenset({first_revision})},
+    )
+    confirmed = evaluate_state(
+        rule=rule,
+        instance_fingerprint="revision-fp",
+        memory=memory,
+        outcome=evaluate_rule(rule, _ctx(second, first)),
+        ctx=_ctx(second, first),
+        now=NOW + timedelta(minutes=1),
+    )
+    assert confirmed.confirmation_progress == {"breadth_pct": 2}
+    assert confirmed.condition_state == ConditionState.FIRING
+    assert confirmed.activate_episode is True
+
+
 def test_a_candidate_is_never_latched_over_an_open_episode():
     """The general form of the same invariant, independent of UNKNOWN."""
     rule = _rule(

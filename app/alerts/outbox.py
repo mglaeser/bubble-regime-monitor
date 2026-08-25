@@ -415,7 +415,7 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
     The `transport_status IN (PENDING, RETRY_DUE)` predicate is what makes this
     exclusive: a second worker's UPDATE matches zero rows.
     """
-    result = session.execute(
+    statement = (
         update(AlertDelivery)
         .where(
             AlertDelivery.delivery_id == delivery_id,
@@ -432,6 +432,16 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
                 request_started_at=None,
                 updated_at=now)
     )
+    dialect = session.get_bind().dialect
+    if bool(getattr(dialect, "update_returning", False)):
+        # Prefer the row identity returned by the same conditional UPDATE.  It
+        # is stronger than trusting driver rowcount semantics and is available
+        # on the SQLite version required by the service.  The fallback below
+        # remains for older/alternate dialects and is exercised separately.
+        result = session.execute(statement.returning(AlertDelivery.delivery_id))
+        return result.scalar_one_or_none() == delivery_id
+
+    result = session.execute(statement)
     rowcount = getattr(result, "rowcount", None)
     return isinstance(rowcount, int) and rowcount == 1
 

@@ -3,7 +3,7 @@
     "phrase_set_version": "v3.4",
     "language": "de",
     "validator_version": "1",
-    "note": "Reviewed German fragments. The model SELECTS codes from this file; it never writes prose and never writes a number. Every {SLOT} is a fact id the renderer fills from typed, persisted values. No probability language, no advice, no certainty. max_width values are REVIEWED bounds used by the worst-case fit test, not measurements of current values. v3.4 adds rule-bound operations headlines and compact caveats so every simultaneous fail-closed caveat still fits one GSM-7 SMS. v3.3 is left byte-identical because phrase versions are immutable registry identities."
+    "note": "Reviewed German fragments. The model SELECTS codes from this file; it never writes prose and never writes a number. Every {SLOT} is a fact id the renderer fills from typed, persisted values. No probability language, no advice, no certainty. max_width values are REVIEWED bounds used by the worst-case fit test, not measurements of current values. v3.4 adds rule-bound operations headlines, compact caveats, and the bounded trigger/current disclosure required when an active condition materially changes before send. v3.3 is left byte-identical because phrase versions are immutable registry identities."
   },
   "facts": {
     "F_HEADLINE_MEDIAN": {
@@ -173,6 +173,18 @@
       "unit": "",
       "max_width": 3,
       "description": "Anzahl der Ereignisse im abgeschlossenen Wochenfenster. Reine Zaehlung, keine Bewertung."
+    },
+    "F_TRIGGER_VALUE": {
+      "label": "Ausloesewert",
+      "unit": "",
+      "max_width": 10,
+      "description": "Der bereits formatierte, regelautorisierte Wert am Ausloesezeitpunkt. Nur fuer MATERIAL_CHANGE."
+    },
+    "F_CURRENT_VALUE": {
+      "label": "aktueller Wert",
+      "unit": "",
+      "max_width": 10,
+      "description": "Der kompatible, bereits formatierte Wert am Sendezeitpunkt. Nur fuer MATERIAL_CHANGE."
     }
   },
   "headlines": {
@@ -510,6 +522,14 @@
       "text": "Kontext veraltet.",
       "slots": [],
       "priority": 10
+    },
+    "MATERIAL_CHANGE": {
+      "text": "Ausloeser {F_TRIGGER_VALUE}, jetzt {F_CURRENT_VALUE}.",
+      "slots": [
+        "F_TRIGGER_VALUE",
+        "F_CURRENT_VALUE"
+      ],
+      "priority": 5
     },
     "UNKNOWN_AT_RENDER": {
       "text": "Zustand unklar.",

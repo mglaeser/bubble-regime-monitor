@@ -1100,9 +1100,76 @@ def test_admin_evaluate_rejects_a_missing_input(client):
 
 
 def test_generated_openapi_is_31_and_has_no_nullable_keyword(client):
+    from openapi_spec_validator import validate
+
     schema = client.app.openapi()
-    assert schema["openapi"].startswith("3.1")
+    assert schema["openapi"] == "3.1.0"
     assert "nullable" not in json.dumps(schema)
+    # This traverses paths, operations, parameters, responses, components and
+    # references under the OpenAPI 3.1 meta-schema.  A version string alone is
+    # not validation and previously let malformed documents pass this gate.
+    validate(schema)
+
+
+def test_all_openapi_examples_validate_against_their_31_schemas(client):
+    """Every declared example is executable JSON-Schema evidence, not decoration."""
+    from jsonschema import Draft202012Validator
+
+    document = client.app.openapi()
+
+    def validate_example(schema, example):
+        # A validator constructed directly from a Media Type or Parameter
+        # subschema would resolve ``#/components/...`` against that fragment,
+        # not the OpenAPI document.  Embed it below the document's components
+        # so local references retain their real root without relying on the
+        # deprecated RefResolver API.
+        rooted_schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "components": document.get("components", {}),
+            "allOf": [schema],
+        }
+        Draft202012Validator(rooted_schema).validate(example)
+
+    checked: list[str] = []
+
+    def validate_examples(node, path=()):
+        if isinstance(node, list):
+            for index, value in enumerate(node):
+                validate_examples(value, (*path, str(index)))
+            return
+        if not isinstance(node, dict):
+            return
+
+        declared_schema = node.get("schema")
+        if isinstance(declared_schema, dict):
+            examples = []
+            if "example" in node:
+                examples.append(("example", node["example"]))
+            named = node.get("examples")
+            if isinstance(named, dict):
+                for name, example_object in named.items():
+                    if isinstance(example_object, dict) and "value" in example_object:
+                        examples.append((f"examples/{name}", example_object["value"]))
+            for suffix, example in examples:
+                validate_example(declared_schema, example)
+                checked.append("/".join((*path, suffix)))
+
+        # JSON Schema itself permits an `examples` array on a component schema.
+        schema_examples = node.get("examples")
+        if (
+            not isinstance(declared_schema, dict)
+            and isinstance(schema_examples, list)
+            and any(key in node for key in ("type", "properties", "$ref", "allOf", "anyOf"))
+        ):
+            for index, example in enumerate(schema_examples):
+                validate_example(node, example)
+                checked.append("/".join((*path, "examples", str(index))))
+
+        for key, value in node.items():
+            validate_examples(value, (*path, str(key)))
+
+    validate_examples(document)
+    assert checked, "the OpenAPI document declares no executable examples"
 
 
 def test_openapi_artifact_has_no_drift(client):

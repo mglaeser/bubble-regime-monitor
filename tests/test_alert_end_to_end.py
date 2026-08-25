@@ -603,3 +603,56 @@ def test_an_unknown_condition_renders_with_its_caveat(isolated_db):
     caveat = phrase_set.caveats["UNKNOWN_AT_RENDER"].text
     assert caveat in result.body, (
         f"an UNKNOWN condition rendered without its caveat: {result.body!r}")
+
+
+def test_newer_incompatible_sidecar_does_not_masquerade_as_old_current_context(
+        isolated_db):
+    """Mandate 17.4: the newest reading wins or makes context explicitly stale.
+
+    Filtering compatibility in SQL used to return an older compatible row when
+    a newer methodology was already present.  That made the trigger look like
+    a current measurement and suppressed the required stale disclosure.
+    """
+    import json
+
+    from app.alerts.models import AlertInputSnapshot
+    from app.alerts.repository import load_latest_compatible_input
+    from app.db import session_scope
+    from tests.test_alert_evaluation import make_input
+
+    trigger = make_input(
+        identity="t" * 64,
+        computed_at="2026-08-24T08:00:00+00:00",
+        effective="de-risk",
+        base="de-risk",
+    ).model_copy(update={"methodology_sha256": "m" * 64})
+    incompatible = trigger.model_copy(update={
+        "input_identity": "x" * 64,
+        "computed_at": "2026-08-24T12:00:00+00:00",
+        "built_at": "2026-08-24T12:00:00+00:00",
+        "methodology_sha256": "n" * 64,
+        "headline_median": 70.0,
+    })
+
+    def row(inp):
+        moment = datetime.fromisoformat(inp.computed_at)
+        return AlertInputSnapshot(
+            input_identity=inp.input_identity,
+            snapshot_id=None,
+            origin="RECOMPUTE",
+            built_at=moment,
+            computed_at=moment,
+            alert_input_schema_version=inp.schema_version,
+            methodology_version=inp.methodology_version,
+            methodology_sha256=inp.methodology_sha256,
+            reconstructed=False,
+            evaluation_eligibility="EVALUABLE",
+            ineligibility_reasons=[],
+            payload=json.dumps(inp.model_dump(mode="json"), sort_keys=True),
+            payload_sha256="p" * 64,
+        )
+
+    with session_scope() as session:
+        session.add_all([row(trigger), row(incompatible)])
+    with session_scope() as session:
+        assert load_latest_compatible_input(session, like=trigger) is None

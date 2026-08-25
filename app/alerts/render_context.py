@@ -22,6 +22,7 @@ from typing import Any
 from app.alerts.canonical import sha256_of
 from app.alerts.dto import AlertInput
 from app.alerts.enums import ConditionState
+from app.alerts.rulespec import OPTIONAL_RUNTIME_FACT_IDS
 
 #: Numbers the renderer knows how to produce. `F_SCORE` deliberately does not
 #: exist: the median and the point score are different numbers implying
@@ -75,6 +76,17 @@ class MemberContext:
     origin_phrase_set_version: str
     origin_phrase_set_sha256: str
     origin_rules_sha256: str
+    #: The facts as they were at episode activation.  Kept separately even
+    #: when ``facts`` renders current values, so the audit fingerprint proves
+    #: both sides of a render-time comparison (mandate 17.3/17.5).
+    trigger_facts: dict[str, str] = field(default_factory=dict)
+    #: Same-schema, same-methodology values at render time.  Empty means there
+    #: was no compatible current measurement; it never means "unchanged".
+    current_facts: dict[str, str] = field(default_factory=dict)
+    #: fact id -> {trigger, current, delta}.  ``delta`` is populated only when
+    #: both rendered values are numeric; enum changes retain the two values.
+    fact_deltas: dict[str, dict[str, str | None]] = field(default_factory=dict)
+    material_change_fact_id: str | None = None
     escalation_of: str | None = None
     notes: tuple[str, ...] = ()
     labels: dict[str, str] = field(default_factory=dict)
@@ -111,6 +123,13 @@ class RenderContext:
                     "priority": m.priority,
                     "labels": dict(sorted(m.labels.items())),
                     "facts": dict(sorted(m.facts.items())),
+                    "trigger_facts": dict(sorted(m.trigger_facts.items())),
+                    "current_facts": dict(sorted(m.current_facts.items())),
+                    "fact_deltas": {
+                        fact_id: dict(sorted(delta.items()))
+                        for fact_id, delta in sorted(m.fact_deltas.items())
+                    },
+                    "material_change_fact_id": m.material_change_fact_id,
                     "authorized_facts": sorted(m.authorized_fact_ids),
                     "authorized_codes": sorted(m.authorized_phrase_codes),
                     "headline_code": m.headline_code,
@@ -186,19 +205,19 @@ def _label(name: str) -> FactBuilder:
 def _active_fireable_red_flags(trigger: AlertInput, _source: AlertInput,
                                _previous: AlertInput | None,
                                _labels: dict[str, str]) -> int:
-    return sum(1 for flag in trigger.red_flags if flag.active and flag.fireable)
+    return sum(1 for flag in _source.red_flags if flag.active and flag.fireable)
 
 
 def _required_red_flags(trigger: AlertInput, _source: AlertInput,
                         _previous: AlertInput | None,
                         _labels: dict[str, str]) -> int | None:
-    return trigger.override_required_count
+    return _source.override_required_count
 
 
 def _rf3_distance(trigger: AlertInput, _source: AlertInput,
                   _previous: AlertInput | None,
                   _labels: dict[str, str]) -> float | None:
-    flag = trigger.red_flag("rf3")
+    flag = _source.red_flag("rf3")
     return flag.distance_to_threshold if flag is not None else None
 
 
@@ -239,6 +258,98 @@ MEMBER_FACT_BUILDERS: dict[str, FactBuilder] = {
     "F_NEXT_CHECK": _next_check,
 }
 
+# These are provenance, labels, or scheduling metadata rather than a market
+# measurement that can make an active condition materially different.  In
+# particular F_NEXT_CHECK changes on every recompute and previously would have
+# made every queued message look materially changed forever.
+NON_MATERIAL_FACT_IDS: frozenset[str] = frozenset({
+    "F_ASSET",
+    "F_BAND_PREVIOUS",
+    "F_NEXT_CHECK",
+})
+
+
+def _build_facts(
+    *,
+    trigger: AlertInput,
+    source: AlertInput,
+    previous: AlertInput | None,
+    labels: dict[str, str],
+    authorized_fact_ids: frozenset[str],
+    notes: list[str] | None = None,
+) -> dict[str, str]:
+    """Build one point-in-time fact view from persisted input bytes."""
+    facts: dict[str, str] = {}
+    for fact_id in sorted(authorized_fact_ids - OPTIONAL_RUNTIME_FACT_IDS):
+        builder = MEMBER_FACT_BUILDERS.get(fact_id)
+        if builder is None:
+            if notes is not None:
+                notes.append(f"no typed builder for authorized fact {fact_id}")
+            continue
+        value = builder(trigger, source, previous, labels)
+        if value is not None and value != "":
+            facts[fact_id] = _format(value)
+    return facts
+
+
+def _numeric_delta(trigger_value: str, current_value: str) -> str | None:
+    try:
+        delta = float(current_value) - float(trigger_value)
+    except ValueError:
+        return None
+    rendered = _format(delta)
+    return f"+{rendered}" if delta > 0 else rendered
+
+
+def material_fact_deltas(
+    *,
+    trigger: AlertInput,
+    current: AlertInput | None,
+    previous: AlertInput | None,
+    labels: dict[str, str] | None,
+    authorized_fact_ids: frozenset[str],
+) -> dict[str, dict[str, str | None]]:
+    """Visible, rule-authorized trigger/current differences.
+
+    Materiality is deliberately tied to the reviewed render precision: a
+    change too small to alter the formatted fact is not disclosed as a
+    different value, while any visible persisted measurement change is.  No
+    threshold is invented in the alert layer.
+    """
+    if not compatible(trigger, current) or current is None:
+        return {}
+    clean_labels = {
+        str(key): str(value) for key, value in sorted((labels or {}).items())
+    }
+    trigger_facts = _build_facts(
+        trigger=trigger,
+        source=trigger,
+        previous=previous,
+        labels=clean_labels,
+        authorized_fact_ids=authorized_fact_ids,
+    )
+    current_facts = _build_facts(
+        trigger=trigger,
+        source=current,
+        previous=previous,
+        labels=clean_labels,
+        authorized_fact_ids=authorized_fact_ids,
+    )
+    comparable = (
+        (set(trigger_facts) & set(current_facts))
+        - NON_MATERIAL_FACT_IDS
+        - OPTIONAL_RUNTIME_FACT_IDS
+    )
+    return {
+        fact_id: {
+            "trigger": trigger_facts[fact_id],
+            "current": current_facts[fact_id],
+            "delta": _numeric_delta(trigger_facts[fact_id], current_facts[fact_id]),
+        }
+        for fact_id in sorted(comparable)
+        if trigger_facts[fact_id] != current_facts[fact_id]
+    }
+
 
 def build_member_context(
     *,
@@ -263,6 +374,7 @@ def build_member_context(
     headline_code: str | None = None,
     phrase_codes: tuple[str, ...] = (),
     next_check_code: str | None = None,
+    material_change_supported: bool = False,
 ) -> MemberContext:
     """Build one member's isolated fact set.
 
@@ -281,15 +393,41 @@ def build_member_context(
         caveats.append("CONTEXT_STALE")
         notes.append("current input is not schema/methodology compatible with the trigger")
 
-    facts: dict[str, str] = {}
-    for fact_id in sorted(authorized_fact_ids):
-        builder = MEMBER_FACT_BUILDERS.get(fact_id)
-        if builder is None:
-            notes.append(f"no typed builder for authorized fact {fact_id}")
-            continue
-        value = builder(trigger, source, previous, labels)
-        if value is not None and value != "":
-            facts[fact_id] = _format(value)
+    trigger_facts = _build_facts(
+        trigger=trigger, source=trigger, previous=previous, labels=labels,
+        authorized_fact_ids=authorized_fact_ids, notes=notes,
+    )
+    current_facts = (
+        _build_facts(
+            trigger=trigger, source=current, previous=previous, labels=labels,
+            authorized_fact_ids=authorized_fact_ids, notes=notes,
+        )
+        if current is not None and use_current else {}
+    )
+    deltas = material_fact_deltas(
+        trigger=trigger, current=current, previous=previous, labels=labels,
+        authorized_fact_ids=authorized_fact_ids,
+    )
+    facts = dict(current_facts if current_facts else trigger_facts)
+    material_fact_id: str | None = None
+    if condition_status == "MATERIALLY_CHANGED_BUT_ACTIVE" and deltas:
+        if material_change_supported:
+            material_fact_id = next(iter(deltas))
+            selected = deltas[material_fact_id]
+            facts["F_TRIGGER_VALUE"] = str(selected["trigger"])
+            facts["F_CURRENT_VALUE"] = str(selected["current"])
+            authorized_fact_ids = authorized_fact_ids | OPTIONAL_RUNTIME_FACT_IDS
+            caveats.append("MATERIAL_CHANGE")
+        else:
+            # Archived phrase registries predate the reviewed two-value clause.
+            # Keep their bytes usable, but never present a changed current value
+            # as though the old headline had always described it.
+            facts = dict(trigger_facts)
+            caveats.append("CONTEXT_STALE")
+            notes.append(
+                "origin phrase set cannot render trigger/current values; "
+                "trigger facts retained"
+            )
 
     if source.data_degraded and "DATA_DEGRADED" not in caveats:
         caveats.append("DATA_DEGRADED")
@@ -311,6 +449,10 @@ def build_member_context(
         origin_phrase_set_version=origin_phrase_set_version,
         origin_phrase_set_sha256=origin_phrase_set_sha256,
         origin_rules_sha256=origin_rules_sha256,
+        trigger_facts=trigger_facts,
+        current_facts=current_facts,
+        fact_deltas=deltas,
+        material_change_fact_id=material_fact_id,
         escalation_of=escalation_of,
         notes=tuple(notes),
         labels=labels,

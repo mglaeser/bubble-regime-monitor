@@ -7,6 +7,7 @@ promotion, and a candidate whose originating rules have been archived.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -346,6 +347,193 @@ def test_cooldown_memory_survives_a_promotion(isolated_db, tmp_path):
         pk_columns = {c.name for c in
                       AlertInstanceNotificationState.__table__.primary_key.columns}
     assert pk_columns == {"mode", "live_profile", "instance_fingerprint"}
+
+
+def test_unknown_notification_block_survives_a_promotion(isolated_db, tmp_path):
+    """A new rules hash must not make an ambiguous provider attempt retryable."""
+    from app.alerts.engine import run_evaluation
+    from app.alerts.models import AlertInstanceNotificationState
+    from app.alerts.repository import load_notification_memories
+
+    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
+    new = _artifacts(stage=4, tmp_path=tmp_path / "new")
+    assert old.ruleset.rules_sha256 != new.ruleset.rules_sha256
+
+    before = make_input(identity="promotion-before", effective="trim")
+    after = make_input(
+        identity="promotion-after",
+        effective="trim",
+        computed_at="2026-08-15T14:00:00+00:00",
+    )
+    _store_input(before, NOW)
+    _store_input(after, NOW + timedelta(hours=4))
+
+    with session_scope() as session:
+        register_promoted(session, old, now=NOW)
+    run_evaluation(
+        session_scope,
+        alert_input=before,
+        current=old.ruleset,
+        mode="shadow",
+        now=NOW,
+    )
+
+    unknown_delivery_id = "01K00000000000000000000000"
+    with session_scope() as session:
+        state = session.execute(
+            select(AlertInstanceNotificationState).where(
+                AlertInstanceNotificationState.rule_id == "regime.band_to_derisk"
+            )
+        ).scalars().one()
+        fingerprint = state.instance_fingerprint
+        state.open_unknown_delivery_id = unknown_delivery_id
+        state.open_unknown_priority = 1
+        state.next_notification_generation = 4
+        register_promoted(session, new, now=NOW + timedelta(hours=1))
+
+    run_evaluation(
+        session_scope,
+        alert_input=after,
+        current=new.ruleset,
+        mode="shadow",
+        now=NOW + timedelta(hours=4),
+    )
+
+    with session_scope() as session:
+        memories = load_notification_memories(
+            session,
+            mode="shadow",
+            live_profile="default",
+            fingerprints={fingerprint},
+        )
+        rows = session.execute(
+            select(AlertInstanceNotificationState).where(
+                AlertInstanceNotificationState.instance_fingerprint == fingerprint
+            )
+        ).scalars().all()
+
+    assert len(rows) == 1
+    memory = memories[fingerprint]
+    assert memory.open_unknown_delivery_id == unknown_delivery_id
+    assert memory.open_unknown_priority == 1
+    assert memory.next_notification_generation == 4
+
+
+def test_removed_rule_closes_under_its_origin_and_cancels_unsent_delivery(
+        isolated_db, tmp_path):
+    """Removing a rule cannot orphan the episode or send its stale queued work."""
+    import yaml
+
+    from app.alerts.artifacts import validate_from_disk
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.engine import run_evaluation
+    from app.alerts.enums import EpisodeStatus, TransportStatus
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertEpisode
+    from app.alerts.sender import NullSender
+
+    old = _artifacts(stage=3, tmp_path=tmp_path / "old")
+    raw = yaml.safe_load(old.ruleset.canonical_yaml)
+    removed_id = "tripwire.rf4_persistent"
+    raw["rules"] = [rule for rule in raw["rules"] if rule["rule_id"] != removed_id]
+    assert len(raw["rules"]) + 1 == len(old.ruleset.document.rules)
+
+    new_dir = tmp_path / "new"
+    new_dir.mkdir()
+    new_rules = new_dir / "rules.yaml"
+    new_rules.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    new = validate_from_disk(
+        rules_path=new_rules,
+        phrase_path=Path("config/alert_phrases.v3.4.json"),
+        service_version="3.8.0",
+    )
+    assert new.ruleset.rule(removed_id) is None
+
+    first = make_input(
+        identity="removed-first",
+        rf4=True,
+        rf4_period="2026-08-14",
+        breadth_period="2026-08-14",
+        computed_at="2026-08-14T20:00:00+00:00",
+    )
+    second = make_input(
+        identity="removed-second",
+        rf4=True,
+        rf4_period="2026-08-15",
+        breadth_period="2026-08-15",
+        computed_at="2026-08-15T20:00:00+00:00",
+    )
+    cleared = make_input(
+        identity="removed-cleared",
+        rf4=False,
+        rf4_period="2026-08-16",
+        breadth_period="2026-08-16",
+        computed_at="2026-08-16T20:00:00+00:00",
+    )
+    _store_input(first, datetime(2026, 8, 14, 20, 0, tzinfo=UTC))
+    _store_input(second, datetime(2026, 8, 15, 20, 0, tzinfo=UTC))
+    _store_input(cleared, datetime(2026, 8, 16, 20, 0, tzinfo=UTC))
+
+    with session_scope() as session:
+        register_promoted(session, old, now=NOW)
+    run_evaluation(
+        session_scope, alert_input=first, current=old.ruleset,
+        mode="shadow", now=NOW,
+    )
+    run_evaluation(
+        session_scope, alert_input=second, current=old.ruleset,
+        mode="shadow", now=NOW + timedelta(minutes=1),
+    )
+
+    with session_scope() as session:
+        episode = session.execute(
+            select(AlertEpisode).where(
+                AlertEpisode.rule_id == removed_id,
+                AlertEpisode.is_open.is_(True),
+            )
+        ).scalars().one()
+        delivery = session.execute(
+            select(AlertDelivery)
+            .join(AlertDeliveryMember)
+            .where(AlertDeliveryMember.episode_id == episode.episode_id)
+        ).scalars().one()
+        assert delivery.transport_status == TransportStatus.PENDING
+        episode_id = episode.episode_id
+        delivery_id = delivery.delivery_id
+        register_promoted(session, new, now=NOW + timedelta(minutes=2))
+
+    outcome = run_evaluation(
+        session_scope,
+        alert_input=cleared,
+        current=new.ruleset,
+        archived={old.ruleset.rules_sha256: old.ruleset},
+        mode="shadow",
+        now=NOW + timedelta(minutes=3),
+    )
+    assert outcome.status == EvaluationRunStatus.COMMITTED
+
+    with session_scope() as session:
+        episode = session.get(AlertEpisode, episode_id)
+        assert episode is not None
+        assert episode.is_open is False
+        assert episode.episode_status == EpisodeStatus.RESOLVED
+        assert episode.origin_rules_sha256 == old.ruleset.rules_sha256
+
+    report = dispatch_once(
+        session_scope,
+        phrase_set=new.phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=NullSender(),
+        now=NOW + timedelta(minutes=4),
+    )
+    assert report.cancelled >= 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        member = session.get(AlertDeliveryMember, (delivery_id, episode_id))
+        assert delivery is not None and member is not None
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "ALL_MEMBERS_RESOLVED"
+        assert member.drop_reason == "RESOLVED_BEFORE_SEND"
 
 
 def test_lkg_fallback_never_escalates_the_mode(isolated_db, tmp_path, monkeypatch):

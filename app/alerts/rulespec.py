@@ -336,6 +336,24 @@ RUNTIME_CAVEAT_CODES: frozenset[str] = frozenset({
     "UNKNOWN_AT_RENDER",
 })
 
+# Runtime capabilities added after the first released phrase registries are
+# optional by exact archived phrase bytes.  Treating them like the original
+# closed set above would make a v3.2 queued delivery unloadable merely because
+# the running code learned a new reviewed caveat.  The dispatcher authorizes
+# one of these only when the delivery's OWN phrase set contains it.
+OPTIONAL_RUNTIME_CAVEAT_CODES: frozenset[str] = frozenset({
+    "MATERIAL_CHANGE",
+})
+
+# Filled by the deterministic renderer, never by a rule or an LLM.  They are
+# deliberately not required in every rule's render contract: the originating
+# fact remains rule-authorized, while these two slots disclose its trigger and
+# current render-time values when the archived phrase set supports the feature.
+OPTIONAL_RUNTIME_FACT_IDS: frozenset[str] = frozenset({
+    "F_TRIGGER_VALUE",
+    "F_CURRENT_VALUE",
+})
+
 
 class RenderContractSpec(BaseModel):
     """The exact reviewed rendering authority for one rule instance.
