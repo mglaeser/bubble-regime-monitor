@@ -99,22 +99,29 @@ class RenderContext:
         return self.members[self.headline_member_index]
 
     def context_hash(self) -> str:
-        return sha256_of([
-            {
-                "episode_id": m.episode_id,
-                "rule_id": m.rule_id,
-                "labels": dict(sorted(m.labels.items())),
-                "facts": dict(sorted(m.facts.items())),
-                "authorized_facts": sorted(m.authorized_fact_ids),
-                "authorized_codes": sorted(m.authorized_phrase_codes),
-                "headline_code": m.headline_code,
-                "phrase_codes": list(m.phrase_codes),
-                "next_check_code": m.next_check_code,
-                "status": m.condition_status,
-                "caveats": list(m.required_caveat_codes),
-            }
-            for m in self.members
-        ])
+        # The primary-member index and priority both affect the model prompt
+        # and rendered body.  Omitting them made materially different contexts
+        # share one audit fingerprint.
+        return sha256_of({
+            "headline_member_index": self.headline_member_index,
+            "members": [
+                {
+                    "episode_id": m.episode_id,
+                    "rule_id": m.rule_id,
+                    "priority": m.priority,
+                    "labels": dict(sorted(m.labels.items())),
+                    "facts": dict(sorted(m.facts.items())),
+                    "authorized_facts": sorted(m.authorized_fact_ids),
+                    "authorized_codes": sorted(m.authorized_phrase_codes),
+                    "headline_code": m.headline_code,
+                    "phrase_codes": list(m.phrase_codes),
+                    "next_check_code": m.next_check_code,
+                    "status": m.condition_status,
+                    "caveats": list(m.required_caveat_codes),
+                }
+                for m in self.members
+            ],
+        })
 
     def fact_catalog_hash(self) -> str:
         return sha256_of(sorted({fid for m in self.members for fid in m.authorized_fact_ids}))

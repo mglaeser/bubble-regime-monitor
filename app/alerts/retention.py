@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from app.alerts.models import (
     AlertDelivery,
     AlertEpisode,
+    AlertEvaluation,
     AlertEvent,
     AlertRender,
 )
@@ -78,6 +79,25 @@ def redact_message_bodies(session: Session, *, older_than: datetime,
     touched: a body that a retry might still reuse is not expired, whatever
     its age.
     """
+    # UNKNOWN remains the immutable transport verdict even after an operator
+    # authorises an exact-byte child retry.  In that reconciled state the old
+    # body should still obey the 400-day privacy horizon, but only after the
+    # child owns a durable, non-redacted clone.  ``blocks_replanning = false``
+    # alone is not enough: it is the model default and cannot prove that the
+    # bytes needed for a retry survived elsewhere.
+    cloned_unknown_parents = set(session.execute(
+        select(AlertDelivery.prior_unknown_delivery_id)
+        .join(AlertRender, AlertRender.delivery_id == AlertDelivery.delivery_id)
+        .where(
+            AlertDelivery.prior_unknown_delivery_id.is_not(None),
+            AlertDelivery.manual_retry_root_delivery_id.is_not(None),
+            AlertDelivery.manual_retry_sequence > 0,
+            AlertDelivery.duplicate_risk_acknowledged.is_(True),
+            AlertRender.body_redacted_at.is_(None),
+            AlertRender.final_message != "",
+        )
+    ).scalars().all())
+
     rows = session.execute(
         select(AlertRender, AlertDelivery)
         .join(AlertDelivery, AlertDelivery.delivery_id == AlertRender.delivery_id)
@@ -90,7 +110,13 @@ def redact_message_bodies(session: Session, *, older_than: datetime,
     for render, delivery in rows:
         from app.alerts.enums import TransportStatus
 
-        if not TransportStatus(delivery.transport_status).is_terminal:
+        status = TransportStatus(delivery.transport_status)
+        reconciled_unknown = (
+            status == TransportStatus.UNKNOWN
+            and not delivery.blocks_replanning
+            and delivery.delivery_id in cloned_unknown_parents
+        )
+        if not status.is_terminal and not reconciled_unknown:
             continue
         render.final_message = ""
         render.body_redacted_at = now
@@ -99,24 +125,52 @@ def redact_message_bodies(session: Session, *, older_than: datetime,
 
 
 def sweep_settled_events(session: Session, *, older_than: datetime) -> int:
-    """Delete events past the LONG horizon whose episode is closed.
+    """Delete only long-expired events whose linked work is fully settled.
 
     An event belonging to an open episode is never removed regardless of age —
     the trail that explains a still-firing mechanism is the trail an operator
-    is most likely to need.
+    is most likely to need.  The same protection applies to unresolved
+    deliveries and replay evidence.  Delivery audit events commonly have no
+    episode link, so checking episodes alone silently deleted the exact UNKNOWN
+    trail an operator still had to reconcile.
     """
+    from app.alerts.enums import TransportStatus
+
     open_ids = {
         row for row in session.execute(
             select(AlertEpisode.episode_id).where(AlertEpisode.is_open.is_(True))
         ).scalars().all()
     }
+    unresolved_statuses = [
+        status for status in TransportStatus if not status.is_terminal
+    ]
+    unresolved_delivery_ids = set(session.execute(
+        select(AlertDelivery.delivery_id).where(
+            AlertDelivery.transport_status.in_(unresolved_statuses))
+    ).scalars().all())
+    replay_episode_ids = set(session.execute(
+        select(AlertEpisode.episode_id).where(AlertEpisode.mode == "replay")
+    ).scalars().all())
+    replay_delivery_ids = set(session.execute(
+        select(AlertDelivery.delivery_id).where(AlertDelivery.mode == "replay")
+    ).scalars().all())
+    replay_evaluation_ids = set(session.execute(
+        select(AlertEvaluation.evaluation_id).where(
+            AlertEvaluation.mode == "replay")
+    ).scalars().all())
     rows = session.execute(
         select(AlertEvent).where(AlertEvent.occurred_at < older_than)
     ).scalars().all()
 
     deleted = 0
     for event in rows:
-        if event.episode_id and event.episode_id in open_ids:
+        if event.episode_id and event.episode_id in (
+                open_ids | replay_episode_ids):
+            continue
+        if event.delivery_id and event.delivery_id in (
+                unresolved_delivery_ids | replay_delivery_ids):
+            continue
+        if event.evaluation_id and event.evaluation_id in replay_evaluation_ids:
             continue
         session.delete(event)
         deleted += 1

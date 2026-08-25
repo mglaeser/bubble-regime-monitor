@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 # The two bootstraps do NOT agree today, and the divergence is real rather than
 # cosmetic: every column below is NOT NULL under create_all and NULLABLE under
 # Alembic. Production boots from Alembic, so a production database permits nulls
@@ -360,3 +362,89 @@ def test_admin_atomicity_migration_backfills_retry_chain_and_window(tmp_path):
         ("01M0ATOMICSECOND0000000000", root, root),
     ]
     connection.close()
+
+
+def test_actionability_migration_preserves_rows_through_both_directions(tmp_path):
+    """The index rewrite is governance DDL, not permission to lose evidence."""
+    db = str(tmp_path / "actionability-data-cycle.db")
+
+    def _cycle():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0014")
+        connection = sqlite3.connect(db)
+        connection.execute(
+            """
+            INSERT INTO alert_actionability_review (
+                review_id, episode_id, delivery_id, actionable, reviewed_at
+            ) VALUES (?, ?, ?, 'YES', ?)
+            """,
+            ("01M0REVIEWPRESERVED0000000", "episode-preserved",
+             "delivery-preserved", "2026-08-25 00:00:00+00:00"),
+        )
+        connection.commit()
+        connection.close()
+
+        command.upgrade(cfg, "0015")
+        connection = sqlite3.connect(db)
+        assert connection.execute(
+            "select actionable from alert_actionability_review where review_id=?",
+            ("01M0REVIEWPRESERVED0000000",),
+        ).fetchone() == ("YES",)
+        connection.close()
+
+        command.downgrade(cfg, "0014")
+        connection = sqlite3.connect(db)
+        assert connection.execute(
+            "select actionable from alert_actionability_review where review_id=?",
+            ("01M0REVIEWPRESERVED0000000",),
+        ).fetchone() == ("YES",)
+        connection.close()
+
+        command.upgrade(cfg, "head")
+
+    _run_with_db(db, _cycle)
+
+
+def test_actionability_migration_refuses_duplicate_delivery_evidence(tmp_path):
+    """Append-only conflicting labels require reconciliation, never deletion."""
+    db = str(tmp_path / "actionability-duplicates.db")
+
+    def _seed_and_refuse():
+        from alembic import command
+
+        from app.db_migrate import _alembic_config
+
+        cfg = _alembic_config()
+        command.upgrade(cfg, "0014")
+        connection = sqlite3.connect(db)
+        connection.executemany(
+            """
+            INSERT INTO alert_actionability_review (
+                review_id, episode_id, delivery_id, actionable, reviewed_at
+            ) VALUES (?, ?, 'delivery-conflict', ?, ?)
+            """,
+            [
+                ("01M0REVIEWCONFLICT00000001", "episode-a", "YES",
+                 "2026-08-25 00:00:00+00:00"),
+                ("01M0REVIEWCONFLICT00000002", "episode-b", "NO",
+                 "2026-08-25 00:01:00+00:00"),
+            ],
+        )
+        connection.commit()
+        connection.close()
+
+        with pytest.raises(RuntimeError, match="reconcile them explicitly"):
+            command.upgrade(cfg, "0015")
+
+        connection = sqlite3.connect(db)
+        assert connection.execute(
+            "select version_num from alembic_version").fetchone() == ("0014",)
+        assert connection.execute(
+            "select count(*) from alert_actionability_review").fetchone() == (2,)
+        connection.close()
+
+    _run_with_db(db, _seed_and_refuse)

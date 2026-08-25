@@ -23,6 +23,7 @@ from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
     AlertEpisode,
+    AlertInstanceNotificationState,
     AlertRender,
 )
 from app.db import session_scope
@@ -178,6 +179,192 @@ def test_a_band_transition_reaches_a_sent_delivery(tmp_path, monkeypatch):
             f"body must fit one GSM-7 message, got {render.gsm7_septets} septets")
         assert "vorher" in render.final_message, (
             f"the transition phrase needs the predecessor: {render.final_message!r}")
+
+
+def test_a_reminder_is_persisted_once_and_advances_only_after_confirmed_send(
+        tmp_path, monkeypatch):
+    """Exercise reminder generation through the real engine and outbox.
+
+    Planning generation 2 must not advance durable notification memory.  A
+    later evaluation while that row is still open must discover the persisted
+    generation and refrain from branching another intent.  Only a confirmed
+    sender outcome advances the next generation and reminder count.
+    """
+    import yaml
+
+    source = yaml.safe_load(
+        pathlib.Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8"))
+    source["meta"]["active_stage"] = 3
+    staged = tmp_path / "alert_rules.stage3-reminder.yaml"
+    staged.write_text(
+        yaml.safe_dump(source, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(staged))
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.sender import NullSender
+    from app.config import get_settings
+    from app.services.alert_integration import capture_alert_input, evaluate_input
+
+    get_settings.cache_clear()
+    base = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
+
+    with session_scope() as session:
+        before_id = _snapshot(
+            session, computed_at=base, effective="trim", prev_id=None).id
+    before_input = capture_alert_input(before_id, now=base)
+    with session_scope() as session:
+        trigger_id = _snapshot(
+            session, computed_at=base + timedelta(hours=4),
+            effective="de-risk", prev_id=before_id).id
+    trigger_input = capture_alert_input(trigger_id, now=base + timedelta(hours=4))
+    evaluate_input(before_input, now=base)
+    evaluate_input(trigger_input, now=base + timedelta(hours=4))
+
+    with session_scope() as session:
+        phrase_set = load_active(session).phrase_set
+    initial_send_at = base + timedelta(hours=5)
+    initial = dispatch_once(
+        session_scope, phrase_set=phrase_set, mode="shadow",
+        live_profile="default", sender=NullSender(), now=initial_send_at,
+    )
+    assert initial.sent == 1
+
+    with session_scope() as session:
+        episode = session.query(AlertEpisode).filter_by(
+            rule_id="regime.band_to_derisk", is_open=True).one()
+        fingerprint = episode.instance_fingerprint
+        memory = session.get(
+            AlertInstanceNotificationState,
+            ("shadow", "default", fingerprint),
+        )
+        assert memory.next_notification_generation == 2
+        assert memory.reminder_count == 0
+
+    # More than 48 hours later the authoritative target state still holds.
+    due_at = base + timedelta(days=3)
+    with session_scope() as session:
+        due_id = _snapshot(
+            session, computed_at=due_at, effective="de-risk",
+            prev_id=trigger_id).id
+    due_input = capture_alert_input(due_id, now=due_at)
+    evaluate_input(due_input, now=due_at)
+
+    with session_scope() as session:
+        reminders = session.query(AlertDelivery).filter_by(
+            delivery_kind="REMINDER").all()
+        assert len(reminders) == 1
+        reminder = reminders[0]
+        member = session.query(AlertDeliveryMember).filter_by(
+            delivery_id=reminder.delivery_id).one()
+        assert member.notification_generation == 2
+        memory = session.get(
+            AlertInstanceNotificationState,
+            ("shadow", "default", fingerprint),
+        )
+        assert memory.next_notification_generation == 2
+        assert memory.reminder_count == 0
+
+    # A fresh evaluation sees generation 2 in the database and must not create
+    # a second reminder while the first is queued.
+    again_at = due_at + timedelta(hours=4)
+    with session_scope() as session:
+        again_id = _snapshot(
+            session, computed_at=again_at, effective="de-risk",
+            prev_id=due_id).id
+    again_input = capture_alert_input(again_id, now=again_at)
+    evaluate_input(again_input, now=again_at)
+    with session_scope() as session:
+        assert session.query(AlertDelivery).filter_by(
+            delivery_kind="REMINDER").count() == 1
+
+    reminder_send_at = again_at + timedelta(hours=1)
+    sent = dispatch_once(
+        session_scope, phrase_set=phrase_set, mode="shadow",
+        live_profile="default", sender=NullSender(), now=reminder_send_at,
+    )
+    assert sent.sent == 1
+    with session_scope() as session:
+        memory = session.get(
+            AlertInstanceNotificationState,
+            ("shadow", "default", fingerprint),
+        )
+        assert memory.next_notification_generation == 3
+        assert memory.reminder_count == 1
+        assert memory.last_reminder_at is not None
+        member = session.query(AlertDeliveryMember).filter_by(
+            delivery_id=reminder.delivery_id).one()
+        assert member.delivered is True
+
+    get_settings.cache_clear()
+
+
+def test_persisted_flapping_suppresses_only_the_new_notification(
+        tmp_path, monkeypatch):
+    """The engine persists chatter history and the planner consumes it.
+
+    Resolved predecessor deliveries deliberately remain queued in this test.
+    They belong to different episodes and therefore cannot masquerade as the
+    current episode's open generation.  On the third activation, the bounded
+    persisted state history crosses the flap threshold and suppresses only the
+    notification; the real condition and episode remain FIRING and visible.
+    """
+    import yaml
+
+    source = yaml.safe_load(
+        pathlib.Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8"))
+    source["meta"]["active_stage"] = 3
+    staged = tmp_path / "alert_rules.stage3-flapping.yaml"
+    staged.write_text(
+        yaml.safe_dump(source, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALERTS_RULES_PATH", str(staged))
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    monkeypatch.setenv("ALERT_INPUT_CAPTURE", "true")
+
+    from app.alerts.models import AlertRuleState
+    from app.config import get_settings
+    from app.services.alert_integration import capture_alert_input, evaluate_input
+
+    get_settings.cache_clear()
+    base = datetime(2026, 8, 20, 2, 0, tzinfo=UTC)
+    states = ["trim", "de-risk", "trim", "de-risk", "trim", "de-risk"]
+    predecessor_id = None
+    for index, state in enumerate(states):
+        observed_at = base + timedelta(hours=4 * index)
+        with session_scope() as session:
+            snapshot_id = _snapshot(
+                session, computed_at=observed_at, effective=state,
+                prev_id=predecessor_id).id
+        identity = capture_alert_input(snapshot_id, now=observed_at)
+        assert identity is not None
+        evaluate_input(identity, now=observed_at)
+        predecessor_id = snapshot_id
+
+    with session_scope() as session:
+        episodes = session.query(AlertEpisode).filter_by(
+            rule_id="regime.band_to_derisk").order_by(
+                AlertEpisode.opened_at.asc()).all()
+        deliveries = session.query(AlertDelivery).filter_by(
+            delivery_kind="INITIAL").all()
+        state = session.query(AlertRuleState).filter_by(
+            rule_id="regime.band_to_derisk").one()
+
+    assert len(episodes) == 3
+    assert [episode.is_open for episode in episodes] == [False, False, True]
+    assert len(deliveries) == 2, (
+        "the first two episodes should plan, while the third is flap-suppressed")
+    assert "FLAPPING" in episodes[-1].suppression_reasons
+    assert state.flap_projection["flapping"] is True
+    assert state.condition_state == "FIRING"
+    assert state.current_episode_id == episodes[-1].episode_id
+
+    get_settings.cache_clear()
 
 
 def test_the_predecessor_comes_from_lineage_not_from_the_clock(isolated_db):

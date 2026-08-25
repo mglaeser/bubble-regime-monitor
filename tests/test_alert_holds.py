@@ -29,6 +29,9 @@ def _held_market_delivery(state: PlanningState, *, due: bool = True) -> str:
     with session_scope() as session:
         delivery = session.execute(select(AlertDelivery)).scalars().one()
         delivery.priority = 2
+        # This helper carries a pre-existing immutable render: model it as a
+        # real automatic retry, not as a legacy pre-wire stale-render row.
+        delivery.attempts = 1
         delivery.planning_state = state
         delivery.hold_reason_code = (
             "quiet_hours" if state == PlanningState.HELD_QUIET else "cap_24h"
@@ -289,6 +292,199 @@ def test_send_test_bypasses_non_p1_market_cap(monkeypatch):
             == TransportStatus.SENT
 
 
+def test_wire_time_quiet_boundary_reholds_without_persisting_a_render():
+    """A pass admitted at 21:59 Berlin cannot cross 22:00 onto the wire."""
+    from app.alerts.dispatcher import dispatch_once
+
+    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    start = datetime(2026, 8, 24, 19, 59, 59, tzinfo=UTC)   # 21:59:59 Berlin
+    boundary = datetime(2026, 8, 24, 20, 0, 0, tzinfo=UTC)  # exactly 22:00
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        delivery.priority = 2
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=start,
+        clock=lambda: boundary,
+    )
+
+    assert sender.sent == []
+    assert report.held == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        renders = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == delivery_id)
+        ).scalars().all()
+        actions = session.execute(
+            select(AlertEvent.action).where(AlertEvent.delivery_id == delivery_id)
+        ).scalars().all()
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.PENDING
+        assert delivery.planning_state == PlanningState.HELD_QUIET
+        assert delivery.hold_reason_code == "quiet_hours"
+        release_at = delivery.not_before
+        assert release_at is not None
+        if release_at.tzinfo is None:
+            release_at = release_at.replace(tzinfo=UTC)
+        assert release_at == datetime(2026, 8, 25, 5, 0, tzinfo=UTC)
+        assert renders == [], "a body is final only after every pre-wire gate passes"
+        assert "delivery_held_quiet" in actions
+
+
+def test_wire_clock_regression_cannot_precede_the_dispatch_pass():
+    """Persisted attempt/completion time remains ordered across clock rollback."""
+    from app.alerts.dispatcher import dispatch_once
+
+    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    clock_values = iter((NOW - timedelta(seconds=5), NOW - timedelta(seconds=4)))
+    sender = NullSender()
+
+    report = dispatch_once(
+        session_scope,
+        phrase_set=phrase_set,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+        clock=lambda: next(clock_values),
+    )
+
+    assert report.sent == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        request_started_at = delivery.request_started_at
+        sent_at = delivery.sent_at
+        assert request_started_at is not None and sent_at is not None
+        if request_started_at.tzinfo is None:
+            request_started_at = request_started_at.replace(tzinfo=UTC)
+        if sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=UTC)
+        assert request_started_at == NOW
+        assert sent_at == NOW
+
+
+def _persist_test_render(delivery_id: str, phrase_set, body: str) -> None:
+    from app.alerts.gsm7 import septets
+    from app.alerts.render_context import RenderContext
+
+    context = RenderContext(members=[])
+    with session_scope() as session:
+        session.add(AlertRender(
+            render_id=new_ulid(utc_ms(NOW)),
+            delivery_id=delivery_id,
+            render_source="template_full",
+            planning_phrase_set_version=phrase_set.version,
+            planning_phrase_set_sha256=phrase_set.sha256,
+            render_context_hash=context.context_hash(),
+            fact_catalog_hash=context.fact_catalog_hash(),
+            selected_fact_ids=[],
+            selected_phrase_codes=["TEST_MESSAGE"],
+            validation_results={"gsm7": True, "fits_single_sms": True},
+            final_message=body,
+            gsm7_septets=septets(body),
+            created_at=NOW - timedelta(minutes=1),
+        ))
+
+
+def test_preexisting_unattempted_render_is_replaced_before_send():
+    """Repair rows committed by the old render-before-admission ordering."""
+    from app.alerts.dispatcher import dispatch_once
+
+    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    _persist_test_render(delivery_id, phrase_set, "Stale pre-admission body.")
+    sender = NullSender()
+
+    report = dispatch_once(
+        session_scope, phrase_set=phrase_set, mode="shadow",
+        live_profile="default", sender=sender, now=NOW,
+    )
+
+    assert report.sent == 1
+    assert sender.sent[0][1] == phrase_set.headlines["TEST_MESSAGE"].text
+    with session_scope() as session:
+        renders = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == delivery_id)
+            .order_by(AlertRender.created_at)
+        ).scalars().all()
+        assert len(renders) == 2
+        assert renders[-1].final_message == phrase_set.headlines["TEST_MESSAGE"].text
+
+
+def test_real_automatic_retry_reuses_its_original_render():
+    """Once a provider attempt began, retry wording is immutable."""
+    from app.alerts.dispatcher import dispatch_once
+
+    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    frozen = "Exact body from the first provider attempt."
+    _persist_test_render(delivery_id, phrase_set, frozen)
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        delivery.transport_status = TransportStatus.RETRY_DUE
+        delivery.attempts = 1
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope, phrase_set=phrase_set, mode="shadow",
+        live_profile="default", sender=sender, now=NOW,
+    )
+
+    assert report.sent == 1
+    assert sender.sent[0][1] == frozen
+    with session_scope() as session:
+        renders = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == delivery_id)
+        ).scalars().all()
+        assert len(renders) == 1
+
+
+def test_withdrawn_admission_after_render_leaves_no_final_render(monkeypatch):
+    """Rendered-in-memory is not final evidence until live admission holds."""
+    import app.alerts.dispatcher as dispatcher_module
+
+    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        delivery.mode = "live"
+
+    calls = 0
+
+    def deployment_gate(_session):
+        nonlocal calls
+        calls += 1
+        return [] if calls == 1 else ["deployment admission withdrawn"]
+
+    monkeypatch.setattr(dispatcher_module, "live_admission_blockers", deployment_gate)
+    monkeypatch.setattr(
+        dispatcher_module, "delivery_admission_blockers", lambda *args: [])
+    sender = NullSender()
+    report = dispatcher_module.dispatch_once(
+        session_scope, phrase_set=phrase_set, mode="live",
+        live_profile="default", sender=sender, now=NOW,
+    )
+
+    assert calls == 2, "the deployment gate must be checked again after rendering"
+    assert sender.sent == []
+    assert report.held == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        renders = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == delivery_id)
+        ).scalars().all()
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.PENDING
+        assert renders == []
+
+
 def test_p1_is_never_transitioned_to_a_hold():
     from app.alerts.outbox import hold_for_budget
 
@@ -334,4 +530,6 @@ def test_overdue_hold_is_observable_and_health_is_not_ok(monkeypatch):
 
     assert payload["outbox"]["overdue_held_quiet"] == 1
     assert payload["status"] != "ok"
+    assert payload["schema"]["revision"] is None
+    assert payload["schema"]["alert_schema_integrity"] == "critical"
     assert any("overdue hold" in reason for reason in payload["conditions"])

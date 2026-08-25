@@ -31,7 +31,10 @@ class ActiveSilences:
             kind: set() for kind in SilenceMatcherKind
         }
         for raw_kind, value in matchers:
-            grouped[SilenceMatcherKind(raw_kind)].add(value)
+            kind = SilenceMatcherKind(raw_kind)
+            canonical = value.lower() if kind == SilenceMatcherKind.INSTANCE_FINGERPRINT \
+                else value
+            grouped[kind].add(canonical)
         return cls(
             rule_ids=frozenset(grouped[SilenceMatcherKind.RULE_ID]),
             instance_fingerprints=frozenset(
@@ -53,7 +56,7 @@ def matches_silence(
 
     return (
         active.all
-        or instance_fingerprint in active.instance_fingerprints
+        or instance_fingerprint.lower() in active.instance_fingerprints
         or rule_id in active.rule_ids
         or (bucket is not None and bucket in active.buckets)
     )

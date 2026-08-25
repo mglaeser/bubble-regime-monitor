@@ -194,24 +194,25 @@ def preflight(
           f"observed={sorted(observed_windows)}; required={list(wanted_windows)}; "
           f"missing={missing_windows} (retries count once by scheduled window)")
 
-    # 5: no UNKNOWN delivery at all. The earlier version only counted
-    # UNKNOWNs older than 24h, so a delivery that went ambiguous an hour
-    # before the cutover passed the gate — but an UNKNOWN is by definition
-    # unresolved, and cutting over the fallback channel while one is open is
-    # exactly the moment its ambiguity stops being recoverable. Age only
-    # softens the wording, never the verdict.
+    # 5: no UNRECONCILED UNKNOWN delivery at all.  UNKNOWN remains the
+    # immutable transport history even after an operator authorises an exact-
+    # byte retry, so status alone cannot distinguish an open ambiguity from a
+    # reconciled ancestor.  ``blocks_replanning`` is that explicit lifecycle
+    # bit.  Age softens the wording, never the verdict: every open blocker
+    # prevents cutover, including one created an hour ago.
     load_bearing_kinds = [*market_kinds, DeliveryKind.DIGEST]
     open_unknown = session.execute(
         select(func.count()).select_from(AlertDelivery).where(
             AlertDelivery.mode == "live",
             AlertDelivery.live_profile == live_profile,
             AlertDelivery.delivery_kind.in_(load_bearing_kinds),
-            AlertDelivery.transport_status == TransportStatus.UNKNOWN,
+            AlertDelivery.blocks_replanning.is_(True),
         )
     ).scalar_one()
     check("unknowns_reconciled", open_unknown == 0,
-          f"{open_unknown} UNKNOWN delivery/deliveries awaiting operator "
-          "reconciliation (any open UNKNOWN blocks cutover, whatever its age)")
+          f"{open_unknown} unresolved UNKNOWN delivery/deliveries awaiting "
+          "operator reconciliation (any open blocker prevents cutover, "
+          "whatever its age)")
 
     # 6: the components that replace the daily message are alive
     for component in ("dispatcher", "watchdog", "digest"):

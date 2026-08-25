@@ -522,6 +522,56 @@
         ]
       }
     },
+    "/api/v1/admin/alerts/render": {
+      "post": {
+        "description": "Validate the exact TEST body without persisting or sending anything.\n\nThis is a phrase-set/rendering probe, not a transport probe.  It resolves\nthe active reviewed ``TEST_MESSAGE`` and runs the same renderer used by an\naudited TEST delivery, but creates no delivery, render or provider call.",
+        "operationId": "admin_preview_render_api_v1_admin_alerts_render_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Admin Preview Render Api V1 Admin Alerts Render Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview the reviewed TEST render",
+        "tags": [
+          "alerts-admin"
+        ]
+      }
+    },
     "/api/v1/admin/alerts/renders/{render_id}": {
       "get": {
         "description": "The operator path to a rendered message body.\n\nThe read surface withholds `final_message` because the frontend uses a\nbrowser-visible scoped token (H-05), and the alert scopes deliberately do\nnot nest \u2014 there is no stronger key a caller could present to\n`/api/v1/alerts/renders/{id}`. So the text lives here, behind admin, and\n`no-store` keeps it out of any intermediary cache.",
@@ -650,6 +700,22 @@
             }
           },
           {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
             "in": "header",
             "name": "x-api-key",
             "required": false,
@@ -671,9 +737,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Deliveries Api V1 Alerts Deliveries Get",
-                  "type": "object"
+                  "title": "Response Get Deliveries Api V1 Alerts Deliveries Get"
                 }
               }
             },
@@ -731,9 +795,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Delivery Api V1 Alerts Deliveries  Delivery Id  Get",
-                  "type": "object"
+                  "title": "Response Get Delivery Api V1 Alerts Deliveries  Delivery Id  Get"
                 }
               }
             },
@@ -820,9 +882,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Episodes Api V1 Alerts Episodes Get",
-                  "type": "object"
+                  "title": "Response Get Episodes Api V1 Alerts Episodes Get"
                 }
               }
             },
@@ -880,9 +940,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Episode Api V1 Alerts Episodes  Episode Id  Get",
-                  "type": "object"
+                  "title": "Response Get Episode Api V1 Alerts Episodes  Episode Id  Get"
                 }
               }
             },
@@ -959,9 +1017,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Events Api V1 Alerts Events Get",
-                  "type": "object"
+                  "title": "Response Get Events Api V1 Alerts Events Get"
                 }
               }
             },
@@ -1010,9 +1066,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Health Api V1 Alerts Health Get",
-                  "type": "object"
+                  "title": "Response Get Health Api V1 Alerts Health Get"
                 }
               }
             },
@@ -1061,9 +1115,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Latest Api V1 Alerts Latest Get",
-                  "type": "object"
+                  "title": "Response Get Latest Api V1 Alerts Latest Get"
                 }
               }
             },
@@ -1128,9 +1180,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Mechanisms Api V1 Alerts Mechanisms Get",
-                  "type": "object"
+                  "title": "Response Get Mechanisms Api V1 Alerts Mechanisms Get"
                 }
               }
             },
@@ -1188,9 +1238,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Mechanism Api V1 Alerts Mechanisms  Instance Fingerprint  Get",
-                  "type": "object"
+                  "title": "Response Get Mechanism Api V1 Alerts Mechanisms  Instance Fingerprint  Get"
                 }
               }
             },
@@ -1239,9 +1287,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Overview Api V1 Alerts Overview Get",
-                  "type": "object"
+                  "title": "Response Get Overview Api V1 Alerts Overview Get"
                 }
               }
             },
@@ -1300,9 +1346,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Render Api V1 Alerts Renders  Render Id  Get",
-                  "type": "object"
+                  "title": "Response Get Render Api V1 Alerts Renders  Render Id  Get"
                 }
               }
             },
@@ -1360,9 +1404,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Rule Instances Api V1 Alerts Rules  Rule Id  Instances Get",
-                  "type": "object"
+                  "title": "Response Get Rule Instances Api V1 Alerts Rules  Rule Id  Instances Get"
                 }
               }
             },
@@ -1411,9 +1453,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Ruleset Api V1 Alerts Ruleset Get",
-                  "type": "object"
+                  "title": "Response Get Ruleset Api V1 Alerts Ruleset Get"
                 }
               }
             },
@@ -1462,9 +1502,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Silences Api V1 Alerts Silences Get",
-                  "type": "object"
+                  "title": "Response Get Silences Api V1 Alerts Silences Get"
                 }
               }
             },

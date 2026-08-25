@@ -58,6 +58,7 @@ class InstanceMemory:
     candidate_expires_at: datetime | None = None
     candidate_ttl_policy: str | None = None
     current_episode_id: str | None = None
+    inherited_open_episode_id: str | None = None
     #: economic observation keys already counted toward the OPEN candidate,
     #: keyed by confirmation source id.
     confirmed_keys: dict[str, frozenset[str]] = field(default_factory=dict)
@@ -96,6 +97,7 @@ class StateDecision:
     resolve_episode: bool = False
     cancel_episode: str | None = None            # CANCELLED_* reason
     episode_id: str | None = None
+    inherited_open_episode_id: str | None = None
 
     consecutive_true: int = 0
     candidate_started_input: str | None = None
@@ -231,6 +233,7 @@ def evaluate_state(
         candidate_expires_at=memory.candidate_expires_at,
         candidate_ttl_policy=memory.candidate_ttl_policy,
         episode_id=memory.current_episode_id,
+        inherited_open_episode_id=memory.inherited_open_episode_id,
         reasons=list(outcome.reasons),
         evidence=dict(outcome.evidence),
     )
@@ -416,7 +419,8 @@ def flapping_projection(recent_states: list[str], *, window: int = 6,
     # perfectly stable alert "flapping" — and flapping suppresses delivery, so
     # the failure direction was a swallowed alert during exactly the degraded
     # period the operator most needs to hear about.
-    window_states = [s for s in recent_states[-window:] if s != ConditionState.UNKNOWN]
+    known_states = [s for s in recent_states if s != ConditionState.UNKNOWN]
+    window_states = known_states[-window:]
     transitions = sum(
         1 for a, b in zip(window_states, window_states[1:], strict=False) if a != b
     )
@@ -425,4 +429,8 @@ def flapping_projection(recent_states: list[str], *, window: int = 6,
         "observed": len(window_states),
         "transitions": transitions,
         "flapping": transitions >= flips,
+        # Bounded state history makes the next projection computable without
+        # inventing a second history table. UNKNOWN values are masks and were
+        # removed above; retaining only the fixed window keeps the JSON small.
+        "states": window_states,
     }

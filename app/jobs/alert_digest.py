@@ -37,7 +37,10 @@ def run_once(*, now: datetime | None = None,
     now = now or datetime.now(UTC)
     settings = get_settings()
     if settings.alerts_mode == "disabled":
-        return {"status": "skipped", "reason": "alerting disabled"}
+        detail = {"status": "skipped", "reason": "alerting disabled",
+                  "skipped": True}
+        heartbeat(COMPONENT, "ok", detail)
+        return detail
 
     # The window that just CLOSED, not the one we are in. Running on Monday for
     # the week that ended on Sunday is the whole point; digesting the current

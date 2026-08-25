@@ -63,9 +63,16 @@ class SelectionResult:
 
 
 def _budget_used(session: Session, *, now: datetime, hours: int) -> int:
+    # A budget refusal creates an audit row but makes no provider call. Counting
+    # those refusal rows against the next window creates a self-sustaining
+    # outage: enough fallback traffic keeps the cap exhausted forever even
+    # after every real call has aged out.
     return int(session.execute(
         select(func.count()).select_from(AlertLlmAttempt)
-        .where(AlertLlmAttempt.attempted_at >= now - timedelta(hours=hours))
+        .where(
+            AlertLlmAttempt.attempted_at >= now - timedelta(hours=hours),
+            AlertLlmAttempt.status != LlmAttemptStatus.BUDGET_SKIPPED,
+        )
     ).scalar_one())
 
 
@@ -94,8 +101,10 @@ def build_prompt(context: RenderContext, phrase_set: ValidatedPhraseSet) -> str:
             member.authorized_phrase_codes & set(phrase_set.headlines)),
         "allowed_phrase_codes": sorted(
             member.authorized_phrase_codes & set(phrase_set.phrases)),
-        "allowed_next_check_codes": sorted(phrase_set.next_checks),
-        "allowed_caveat_codes": sorted(phrase_set.caveats),
+        "allowed_next_check_codes": sorted(
+            member.authorized_phrase_codes & set(phrase_set.next_checks)),
+        "allowed_caveat_codes": sorted(
+            member.authorized_phrase_codes & set(phrase_set.caveats)),
         "required_caveat_codes": list(member.required_caveat_codes),
         "available_fact_ids": sorted(member.authorized_fact_ids),
         "facts": dict(sorted(member.facts.items())),
@@ -119,11 +128,14 @@ def validate_selection(raw: dict, context: RenderContext,
     for code in selection.phrase_codes:
         if code not in allowed_codes or code not in phrase_set.phrases:
             raise ValueError(f"phrase code {code!r} is not authorized")
-    if selection.next_check_code and selection.next_check_code not in phrase_set.next_checks:
-        raise ValueError(f"next_check_code {selection.next_check_code!r} is unknown")
+    if selection.next_check_code and (
+            selection.next_check_code not in allowed_codes
+            or selection.next_check_code not in phrase_set.next_checks):
+        raise ValueError(
+            f"next_check_code {selection.next_check_code!r} is not authorized")
     for code in selection.caveat_codes:
-        if code not in phrase_set.caveats:
-            raise ValueError(f"caveat code {code!r} is unknown")
+        if code not in allowed_codes or code not in phrase_set.caveats:
+            raise ValueError(f"caveat code {code!r} is not authorized")
     for fact_id in selection.fact_ids:
         if fact_id not in member.authorized_fact_ids:
             raise ValueError(f"fact {fact_id!r} is not authorized for this member")

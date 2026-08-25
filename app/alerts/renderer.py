@@ -106,7 +106,16 @@ def render(
     """Assemble and validate. Raises `RenderRejected` rather than sending doubt."""
     if not context.members:
         raise RenderRejected("a market render requires at least one member")
+    if not 0 <= context.headline_member_index < len(context.members):
+        raise RenderRejected(
+            f"headline member index {context.headline_member_index} is outside "
+            f"the {len(context.members)}-member render context")
     primary = context.primary
+    ordered_members = [
+        primary,
+        *(member for index, member in enumerate(context.members)
+          if index != context.headline_member_index),
+    ]
     if primary.headline_code is not None and primary.headline_code != headline_code:
         raise RenderRejected(
             f"headline {headline_code!r} does not match the origin contract for "
@@ -119,7 +128,7 @@ def render(
     named: list[tuple[MemberContext, str, FragmentSpec, str]] = [
         (primary, headline_code, headline, _fill(headline, primary))
     ]
-    for member in context.members[1:MAX_NAMED_MEMBERS]:
+    for member in ordered_members[1:MAX_NAMED_MEMBERS]:
         code = member.headline_code
         if not code:
             raise RenderRejected(
@@ -141,7 +150,7 @@ def render(
     # member's caveat.
     caveat_parts: list[tuple[MemberContext, str, FragmentSpec, str]] = []
     seen_caveats: set[tuple[str, str]] = set()
-    for member in context.members:
+    for member in ordered_members:
         required = list(member.required_caveat_codes)
         if member is primary:
             required.extend(caveat_codes)
@@ -228,7 +237,7 @@ def render(
             used_facts.extend(selected_fragment.slots)
 
     body = JOIN.join([*prefix_parts, *selected_optional, *tail_parts])
-    represented = [member.episode_id for member in context.members]
+    represented = [member.episode_id for member in ordered_members]
     named_ids = [item[0].episode_id for item in named[:chosen_named]]
     return _validate(
         body, used_codes, used_facts, dropped, render_source, fallback_reason,
@@ -281,6 +290,40 @@ def _validate(body: str, codes: list[str], facts: list[str], dropped: list[str],
             "overflow_count": overflow_count,
         },
     )
+
+
+def render_test_message(phrase_set: ValidatedPhraseSet) -> RenderResult:
+    """Validate and return the reviewed, memberless transport-probe body.
+
+    Both the non-sending admin preview and an audited ``TEST`` delivery use
+    this function.  Keeping one path prevents the preview from claiming bytes
+    or validation that the dispatcher would not actually put on the wire.
+    ``TEST_MESSAGE`` deliberately has no facts: a transport probe must not
+    invent a market context merely to fill a slot.
+    """
+    fragment = _lookup(phrase_set, "TEST_MESSAGE", "headline")
+    if fragment.slots:
+        raise RenderRejected(
+            "TEST_MESSAGE must not declare facts; a transport probe has no "
+            "market member context"
+        )
+    result = _validate(
+        fragment.text,
+        [fragment.code],
+        [],
+        [],
+        RenderSource.TEMPLATE_FULL,
+        None,
+        represented_member_ids=[],
+        named_member_ids=[],
+        overflow_count=0,
+    )
+    # The persisted render contract historically named this physical check
+    # ``fits_single_sms``.  Retain it alongside the renderer's newer
+    # ``within_limit`` spelling so a preview and an actual TEST render expose
+    # the same positive proof.
+    result.validation["fits_single_sms"] = True
+    return result
 
 
 def render_minimal(*, context: RenderContext, phrase_set: ValidatedPhraseSet,

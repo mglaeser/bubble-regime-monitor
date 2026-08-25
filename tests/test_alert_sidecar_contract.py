@@ -555,7 +555,7 @@ def test_the_faber_leg_publishes_the_month_end_state_not_the_live_preview(isolat
     system can send fires on a month that has not ended.
     """
     evidence = _leg(_snapshot_with_legs(_FULL_SPY), obs.DOMAIN_LEG_SPY_FABER)
-    assert evidence.value == "IN", "must be the completed month's state, not the preview"
+    assert evidence.value == "in", "must be the completed month's state, not the preview"
 
 
 def test_the_faber_leg_is_dated_by_its_month_not_by_the_recompute(isolated_db):
@@ -648,7 +648,7 @@ def test_an_undated_leg_state_is_unknown_age_not_withheld(isolated_db):
     """
     undated = {"SPY": {"faber_10mo": "OUT", "sma200": "IN", "sma200_state": "IN"}}
     sma = _leg(_snapshot_with_legs(undated), obs.DOMAIN_LEG_SPY_SMA200)
-    assert sma.value == "IN", "the state was computed; do not hide it"
+    assert sma.value == "above", "the state was computed; do not hide it"
     assert sma.data_state == DataState.UNKNOWN_AGE
     assert sma.period_end is None, "but it must not claim a date it does not have"
 

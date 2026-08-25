@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from app.alerts.budgets import PLANNER_RESERVED_STATUSES
 from app.alerts.canonical import new_ulid
 from app.alerts.dto import AlertInput
 from app.alerts.enums import (
@@ -28,6 +29,8 @@ from app.alerts.enums import (
 from app.alerts.errors import EvaluationConflict
 from app.alerts.models import (
     AlertConfirmationObservation,
+    AlertDelivery,
+    AlertDeliveryMember,
     AlertEpisode,
     AlertEvent,
     AlertInputSnapshot,
@@ -36,7 +39,7 @@ from app.alerts.models import (
     AlertSilence,
 )
 from app.alerts.silences import ActiveSilences
-from app.alerts.state_machine import InstanceMemory, StateDecision
+from app.alerts.state_machine import InstanceMemory, StateDecision, flapping_projection
 
 
 def utc_ms(moment: datetime) -> int:
@@ -142,6 +145,7 @@ def load_memories(
                 candidate_expires_at=_aware(row.candidate_expires_at),
                 candidate_ttl_policy=row.candidate_ttl_policy,
                 current_episode_id=row.current_episode_id,
+                inherited_open_episode_id=row.inherited_open_episode_id,
                 confirmed_keys=confirmed,
             ),
         )
@@ -162,7 +166,8 @@ def _cas_update(session: Session, *, mode: str, live_profile: str, rules_sha256:
         )
         .values(**values, state_version=expected_version + 1)
     )
-    if result.rowcount != 1:
+    rowcount = getattr(result, "rowcount", None)
+    if not isinstance(rowcount, int) or rowcount != 1:
         raise EvaluationConflict(
             f"state for {fingerprint[:12]} moved from version {expected_version} "
             "while the plan was being computed"
@@ -282,6 +287,7 @@ def apply_decision(
         ),
         "last_known_input_identity": alert_input.input_identity,
         "current_episode_id": episode_id,
+        "inherited_open_episode_id": decision.inherited_open_episode_id,
         "consecutive_true": decision.consecutive_true,
         "candidate_from_state": decision.candidate_from_state,
         "candidate_target_state": decision.candidate_target_state,
@@ -289,6 +295,11 @@ def apply_decision(
         "candidate_expires_at": decision.candidate_expires_at,
         "candidate_ttl_policy": decision.candidate_ttl_policy,
         "candidate_ttl_basis": decision.candidate_ttl_basis,
+        "flap_projection": flapping_projection([
+            *(list((existing.flap_projection or {}).get("states", []))
+              if existing is not None else []),
+            decision.condition_state,
+        ]),
         "updated_at": now,
     }
     if decision.activate_episode:
@@ -298,7 +309,7 @@ def apply_decision(
         session.add(AlertRuleState(
             mode=mode, live_profile=live_profile, rules_sha256=rules_sha256,
             instance_fingerprint=decision.instance_fingerprint,
-            state_version=1, flap_projection={}, **values,
+            state_version=1, **values,
         ))
     else:
         _cas_update(session, mode=mode, live_profile=live_profile, rules_sha256=rules_sha256,
@@ -420,6 +431,69 @@ def load_notification_memories(
         )
         for row in rows
     }
+
+
+def load_open_generations(
+    session: Session,
+    *,
+    mode: str,
+    live_profile: str,
+    fingerprints: set[str],
+) -> frozenset[tuple[str, int]]:
+    """Semantic generations already queued, leased, or at the provider wire."""
+    if not fingerprints:
+        return frozenset()
+    rows = session.execute(
+        select(
+            AlertDeliveryMember.instance_fingerprint,
+            AlertDeliveryMember.notification_generation,
+        ).join(
+            AlertDelivery,
+            AlertDelivery.delivery_id == AlertDeliveryMember.delivery_id,
+        ).join(
+            AlertEpisode,
+            AlertEpisode.episode_id == AlertDeliveryMember.episode_id,
+        ).where(
+            AlertDelivery.mode == mode,
+            AlertDelivery.live_profile == live_profile,
+            AlertDelivery.transport_status.in_(PLANNER_RESERVED_STATUSES),
+            AlertDeliveryMember.instance_fingerprint.in_(fingerprints),
+            AlertDeliveryMember.dropped_at.is_(None),
+            # Generation identity includes the EPISODE.  A queued member for a
+            # resolved predecessor must not suppress a new P1 episode that
+            # happens to reuse the hash-independent next generation before the
+            # dispatcher has swept and dropped the stale member.
+            AlertEpisode.is_open.is_(True),
+        ).distinct()
+    ).all()
+    return frozenset((str(fingerprint), int(generation))
+                     for fingerprint, generation in rows)
+
+
+def load_flapping_fingerprints(
+    session: Session,
+    *,
+    mode: str,
+    live_profile: str,
+    rules_sha256: str,
+    fingerprints: set[str],
+) -> frozenset[str]:
+    """Instances whose bounded persisted projection currently says flapping."""
+    if not fingerprints:
+        return frozenset()
+    rows = session.execute(
+        select(AlertRuleState).where(
+            AlertRuleState.mode == mode,
+            AlertRuleState.live_profile == live_profile,
+            AlertRuleState.rules_sha256 == rules_sha256,
+            AlertRuleState.instance_fingerprint.in_(fingerprints),
+        )
+    ).scalars().all()
+    return frozenset(
+        row.instance_fingerprint
+        for row in rows
+        if bool((row.flap_projection or {}).get("flapping"))
+    )
 
 
 def load_active_silences(session: Session, *, now: datetime) -> ActiveSilences:

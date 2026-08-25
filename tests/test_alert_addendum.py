@@ -922,6 +922,7 @@ def test_the_browser_token_does_not_grant_message_text(isolated_db, monkeypatch)
     monkeypatch.setenv("ALERTS_READ_API_KEY", READ_KEY)
     monkeypatch.setenv("ALERTS_WRITE_API_KEY", WRITE_KEY)
     monkeypatch.setenv("ALERTS_PUBLIC_READ", "false")
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
     get_settings.cache_clear()
 
     message_body = "Regime: de-risk. Median 63."
@@ -966,6 +967,7 @@ def test_a_trusted_proxy_posture_restores_message_text(isolated_db, monkeypatch)
     monkeypatch.setenv("ALERTS_READ_API_KEY", READ_KEY)
     monkeypatch.setenv("ALERTS_PUBLIC_READ", "false")
     monkeypatch.setenv("ALERTS_READ_TOKEN_IS_PUBLIC", "false")
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
     get_settings.cache_clear()
 
     render_id = seed_render(created_at=NOW, transport=TransportStatus.SENT)
@@ -1181,6 +1183,74 @@ def test_retention_never_expires_a_body_a_retry_could_still_reuse(isolated_db):
         assert session.get(AlertRender, render_id).final_message
 
 
+def test_retention_redacts_reconciled_unknown_after_exact_body_is_cloned(isolated_db):
+    """UNKNOWN history stays honest without retaining old message text forever."""
+    from sqlalchemy import select
+
+    from app.alerts.canonical import new_ulid
+    from app.alerts.models import AlertDelivery, AlertRender
+    from app.alerts.retention import run_retention
+    from app.config import get_settings
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_render
+
+    original_render_id = seed_render(
+        created_at=NOW - timedelta(days=500),
+        transport=TransportStatus.UNKNOWN,
+    )
+    with session_scope() as session:
+        original = session.execute(select(AlertDelivery)).scalars().one()
+        original_render = session.get(AlertRender, original_render_id)
+        original.blocks_replanning = False
+        child_id = new_ulid(1)
+        child_render_id = new_ulid(2)
+        session.add(AlertDelivery(
+            delivery_id=child_id,
+            dedupe_key=f"dedupe-{child_id}",
+            dedupe_version=1,
+            manual_retry_sequence=1,
+            manual_retry_root_delivery_id=original.delivery_id,
+            mode=original.mode,
+            live_profile=original.live_profile,
+            planning_rules_sha256=original.planning_rules_sha256,
+            delivery_kind=original.delivery_kind,
+            priority=original.priority,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY,
+            not_before=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+            duplicate_risk_acknowledged=True,
+            prior_unknown_delivery_id=original.delivery_id,
+            recipient_ref=original.recipient_ref,
+        ))
+        session.flush()
+        session.add(AlertRender(
+            render_id=child_render_id,
+            delivery_id=child_id,
+            render_source=original_render.render_source,
+            planning_phrase_set_version=(
+                original_render.planning_phrase_set_version),
+            planning_phrase_set_sha256=(
+                original_render.planning_phrase_set_sha256),
+            render_context_hash=original_render.render_context_hash,
+            fact_catalog_hash=original_render.fact_catalog_hash,
+            selected_fact_ids=list(original_render.selected_fact_ids),
+            selected_phrase_codes=list(original_render.selected_phrase_codes),
+            validation_results=dict(original_render.validation_results),
+            final_message=original_render.final_message,
+            gsm7_septets=original_render.gsm7_septets,
+            created_at=NOW,
+        ))
+
+    with session_scope() as session:
+        report = run_retention(session, settings=get_settings(), now=NOW)
+    assert report.message_bodies_redacted == 1
+    with session_scope() as session:
+        assert session.get(AlertRender, original_render_id).final_message == ""
+        assert session.get(AlertRender, child_render_id).final_message
+
+
 def test_a_render_still_cannot_be_rewritten(isolated_db):
     """Redaction is ONE permitted transition; immutability otherwise holds."""
     from sqlalchemy.exc import DatabaseError
@@ -1228,3 +1298,33 @@ def test_retention_preserves_events_of_open_episodes(isolated_db):
 
     assert "episode transitions" in METADATA_PRESERVED
     assert "rule and ruleset provenance" in METADATA_PRESERVED
+
+
+def test_retention_preserves_old_events_for_an_unresolved_delivery(isolated_db):
+    """Delivery events usually have no episode link; UNKNOWN still needs its trail."""
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertDelivery, AlertEvent
+    from app.alerts.retention import run_retention
+    from app.config import get_settings
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_render, write_event
+
+    seed_render(
+        created_at=NOW - timedelta(days=900),
+        transport=TransportStatus.UNKNOWN,
+    )
+    with session_scope() as session:
+        delivery_id = session.execute(select(AlertDelivery.delivery_id)).scalar_one()
+    event = write_event(
+        causation_type="DELIVERY",
+        actor_type="SYSTEM",
+        action="delivery_unknown",
+        delivery_id=delivery_id,
+    )
+    with session_scope() as session:
+        session.get(AlertEvent, event.event_id).occurred_at = NOW - timedelta(days=900)
+    with session_scope() as session:
+        run_retention(session, settings=get_settings(), now=NOW)
+    with session_scope() as session:
+        assert session.get(AlertEvent, event.event_id) is not None

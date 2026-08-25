@@ -21,7 +21,7 @@ from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
 from app.alerts.budgets import (
@@ -40,6 +40,7 @@ from app.alerts.enums import (
     DeliveryKind,
     DigestItemStatus,
     EpisodeStatus,
+    MemberRole,
     PlanningState,
     TransportStatus,
 )
@@ -389,7 +390,8 @@ def claim(session: Session, delivery_id: str, *, owner: str, now: datetime,
         .values(transport_status=TransportStatus.LEASED, lease_owner=owner,
                 lease_until=now + timedelta(seconds=lease_seconds), updated_at=now)
     )
-    return result.rowcount == 1
+    rowcount = getattr(result, "rowcount", None)
+    return isinstance(rowcount, int) and rowcount == 1
 
 
 def release(session: Session, delivery: AlertDelivery, *, now: datetime) -> None:
@@ -456,6 +458,15 @@ def revalidate_members(session: Session, delivery: AlertDelivery, *,
         select(AlertDeliveryMember).where(
             AlertDeliveryMember.delivery_id == delivery.delivery_id,
             AlertDeliveryMember.dropped_at.is_(None))
+        # Rendering order is evidence.  All members of one plan normally share
+        # ``included_at``; relying on an unordered SELECT made the primary
+        # headline database-plan dependent.  Keep the declared PRIMARY first,
+        # then use immutable tie-breakers for the rest.
+        .order_by(
+            case((AlertDeliveryMember.member_role == MemberRole.PRIMARY, 0), else_=1),
+            AlertDeliveryMember.included_at.asc(),
+            AlertDeliveryMember.episode_id.asc(),
+        )
     ).scalars().all()
     active_silences = load_active_silences(session, now=now)
     live: list[AlertDeliveryMember] = []
@@ -731,6 +742,31 @@ def hold_for_budget(session: Session, delivery: AlertDelivery, reason: str,
            detail=reason)
 
 
+def hold_for_quiet(session: Session, delivery: AlertDelivery, *, now: datetime) -> None:
+    """Return a claimed non-P1 delivery to a durable quiet-hours hold."""
+    if delivery.priority == 1:
+        raise ValueError("a P1 is never held by quiet hours")
+    next_release = release_time_for(int(delivery.priority), now)
+    if next_release <= now:
+        raise ValueError("quiet hold requested during the allowed interval")
+    delivery.transport_status = TransportStatus.PENDING
+    delivery.planning_state = PlanningState.HELD_QUIET
+    delivery.hold_reason_code = "quiet_hours"
+    delivery.not_before = next_release
+    delivery.budget_recheck_at = None
+    delivery.lease_owner = None
+    delivery.lease_until = None
+    delivery.request_started_at = None
+    delivery.updated_at = now
+    _event(
+        session,
+        now,
+        action="delivery_held_quiet",
+        delivery_id=delivery.delivery_id,
+        detail=f"wire-time boundary; next release {next_release.isoformat()}",
+    )
+
+
 def record_dispatch_budget_decision(
     session: Session,
     delivery: AlertDelivery,
@@ -791,7 +827,7 @@ def _represented_for_sent(
     render = session.execute(
         select(AlertRender)
         .where(AlertRender.delivery_id == delivery.delivery_id)
-        .order_by(AlertRender.created_at.desc())
+        .order_by(AlertRender.created_at.desc(), AlertRender.render_id.desc())
         .limit(1)
     ).scalars().first()
     return validated_represented_member_ids(
@@ -929,6 +965,54 @@ def mark_unknown(session: Session, delivery: AlertDelivery, *, now: datetime,
             state.updated_at = now
     _event(session, now, action="delivery_unknown", delivery_id=delivery.delivery_id,
            detail=reason)
+
+
+def reconcile_unknown_for_manual_retry(
+    session: Session,
+    delivery: AlertDelivery,
+    *,
+    now: datetime,
+) -> None:
+    """Retire one UNKNOWN as an open blocker after explicit operator action.
+
+    The wire outcome remains UNKNOWN forever: exact bytes may have arrived and
+    rewriting that history would be dishonest.  The operator-authorised child
+    is nevertheless the new tip of the linear retry chain, so the ancestor is
+    no longer *unreconciled*.  While the child is pending its member generation
+    is protected by ``load_open_generations``; if the child itself becomes
+    UNKNOWN, ``mark_unknown`` installs it as the sole new blocking tip.
+
+    Notification memory is cleared conditionally.  That preserves a newer
+    ambiguity if this helper is ever called against stale state despite the
+    endpoint's transaction and linear-chain checks.
+    """
+    if delivery.transport_status != TransportStatus.UNKNOWN:
+        raise ValueError("manual retry reconciliation requires UNKNOWN")
+
+    delivery.blocks_replanning = False
+    delivery.blocks_up_to_priority = None
+    delivery.updated_at = now
+
+    states = session.execute(
+        select(AlertInstanceNotificationState).where(
+            AlertInstanceNotificationState.mode == delivery.mode,
+            AlertInstanceNotificationState.live_profile == delivery.live_profile,
+            AlertInstanceNotificationState.open_unknown_delivery_id
+            == delivery.delivery_id,
+        )
+    ).scalars().all()
+    for state in states:
+        state.open_unknown_delivery_id = None
+        state.open_unknown_priority = None
+        state.updated_at = now
+
+    _event(
+        session,
+        now,
+        action="delivery_unknown_reconciled",
+        delivery_id=delivery.delivery_id,
+        detail="operator authorised an exact-byte manual retry",
+    )
 
 
 def mark_render_failed(session: Session, delivery: AlertDelivery, *, now: datetime,

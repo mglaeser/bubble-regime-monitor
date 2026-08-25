@@ -47,8 +47,10 @@ from app.alerts.registry import ValidatedRuleset, instance_fingerprint
 from app.alerts.repository import (
     apply_decision,
     load_active_silences,
+    load_flapping_fingerprints,
     load_memories,
     load_notification_memories,
+    load_open_generations,
     load_recent_inputs,
     open_episodes,
     origin_rulesets_with_open_episodes,
@@ -255,6 +257,60 @@ def evaluate_ruleset(
     return results
 
 
+def _current_projection_with_inherited_episode(
+    decision: StateDecision,
+    episode_id: str,
+) -> StateDecision:
+    """Make a current-ruleset decision observational, not lifecycle-owning.
+
+    An archived ruleset is the sole authority for an episode it opened.  The
+    current ruleset still reports whether its own condition is normal, pending,
+    firing, or unknown, but it cannot open, activate, resolve, cancel, confirm,
+    or notify for the same mechanism while that origin episode is open.
+    """
+    decision.open_episode = False
+    decision.activate_episode = False
+    decision.resolve_episode = False
+    decision.cancel_episode = None
+    decision.episode_id = None
+    decision.inherited_open_episode_id = episode_id
+    decision.candidate_started_input = None
+    decision.candidate_from_state = None
+    decision.candidate_target_state = None
+    decision.candidate_expires_at = None
+    decision.candidate_ttl_policy = None
+    decision.candidate_ttl_basis = None
+    decision.confirmations = []
+    decision.confirmation_progress = {}
+    decision.reasons.append(f"inherited_open_episode:{episode_id}")
+    return decision
+
+
+def _reset_closed_inheritance(
+    memories: dict[str, tuple[Any, InstanceMemory]],
+    active_inherited: dict[str, str],
+) -> dict[str, tuple[Any, InstanceMemory]]:
+    """Start current-rule lifecycle memory afresh after its origin closes.
+
+    While an origin episode is open the current projection is deliberately
+    observational.  Its condition/candidate counters therefore cannot become
+    the predecessor for a later current-owned lifecycle.  Once the inherited
+    episode is absent, reset those counters but retain the row version so the
+    ordinary CAS still protects the update.
+    """
+    normalized: dict[str, tuple[Any, InstanceMemory]] = {}
+    for fingerprint, (row, memory) in memories.items():
+        if (memory.inherited_open_episode_id is not None
+                and fingerprint not in active_inherited):
+            memory = InstanceMemory(
+                state_version=memory.state_version,
+                condition_state=ConditionState.NORMAL,
+                last_known_condition_state=ConditionState.NORMAL,
+            )
+        normalized[fingerprint] = (row, memory)
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # the full run
 # ---------------------------------------------------------------------------
@@ -343,9 +399,18 @@ def run_evaluation(
                 for rules_sha in [current.rules_sha256, *archived]
             }
             open_by_hash: dict[str, set[str]] = {}
+            inherited_by_fingerprint: dict[str, str] = {}
             for episode in open_episodes(session, mode=mode, live_profile=live_profile):
                 open_by_hash.setdefault(episode.origin_rules_sha256, set()).add(
                     episode.instance_fingerprint)
+                if episode.origin_rules_sha256 != current.rules_sha256:
+                    inherited_by_fingerprint[
+                        episode.instance_fingerprint] = episode.episode_id
+
+            memories_by_hash[current.rules_sha256] = _reset_closed_inheritance(
+                memories_by_hash.get(current.rules_sha256, {}),
+                inherited_by_fingerprint,
+            )
 
         # THE SAME PREDECESSOR THE RENDERER WILL DESCRIBE.
         #
@@ -383,6 +448,12 @@ def run_evaluation(
                 open_fingerprints=frozenset(open_by_hash.get(rules_sha, set())),
                 now=now, deadline=deadline,
             ):
+                if role == RulesetRole.CURRENT:
+                    inherited_id = inherited_by_fingerprint.get(
+                        decision.instance_fingerprint)
+                    if inherited_id is not None:
+                        decision = _current_projection_with_inherited_episode(
+                            decision, inherited_id)
                 planned.append((rules_sha, rule, decision))
     except EvaluationDeadlineExceeded as exc:
         _finish(session_factory, evaluation_id, EvaluationRunStatus.TIMED_OUT, now,
@@ -400,11 +471,10 @@ def run_evaluation(
                                          rules_sha256=rules_sha)
                 for rules_sha in [current.rules_sha256, *archived]
             }
-            # Keyed by (ruleset, fingerprint). One instance can hold an open
-            # episode under an ARCHIVED ruleset and a new one under the current
-            # ruleset at the same time — that is what continuation means — so a
-            # map keyed by fingerprint alone collides and a delivery can be
-            # attached to the wrong episode.
+            # Keyed by (ruleset, fingerprint).  The current projection points
+            # to an archived open episode through inherited_open_episode_id and
+            # never opens a second one; keeping the maps ruleset-scoped still
+            # ensures the continuation member is planned from its exact origin.
             episode_ids_by_hash: dict[str, dict[str, str]] = {}
             # Keyed by RULESET, then rule_id. Two rulesets in one batch can
             # define the same rule_id with different specs — that is the whole
@@ -460,6 +530,7 @@ def run_evaluation(
 
             for rules_sha, decisions in by_ruleset.items():
                 artifacts = archived.get(rules_sha, current)
+                fingerprints = set(episode_ids_by_hash.get(rules_sha, {}))
                 # RE-READ between passes. Each `persist_plan` adds deliveries
                 # that count against the budget and bumps notification
                 # generations, so a snapshot taken once before the loop lets the
@@ -472,14 +543,20 @@ def run_evaluation(
                     episode_ids=episode_ids_by_hash.get(rules_sha, {}),
                     memories=load_notification_memories(
                         session, mode=mode, live_profile=live_profile,
-                        fingerprints=set(episode_ids_by_hash.get(rules_sha, {}))),
+                        fingerprints=fingerprints),
                     active_silences=active_silences,
+                    open_generations=load_open_generations(
+                        session, mode=mode, live_profile=live_profile,
+                        fingerprints=fingerprints),
                     origin_rules_sha256=rules_sha,
                     phrase_set_version=artifacts.phrase_set_version,
                     phrase_set_sha256=artifacts.phrase_set_sha256,
                     budget_usage=planner_budget_usage(
                         session, mode=mode, live_profile=live_profile, now=now),
                     budget_limits=limits,
+                    flapping_fingerprints=load_flapping_fingerprints(
+                        session, mode=mode, live_profile=live_profile,
+                        rules_sha256=rules_sha, fingerprints=fingerprints),
                 ))
                 persist_plan(
                     session, plan_result, mode=mode, live_profile=live_profile,

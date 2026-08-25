@@ -59,15 +59,17 @@ jobs:
           # cleared the whole no-any-return class in app/indicators/s4_gsadf.py.
           # 211 -> 205: the typed render-carriage path narrows persisted inputs,
           # origin contracts, validation mappings, and member collections.
+          # 205 -> 172: the completed alert path types repository rows, source
+          # normalization, admission/recovery state, and API response contracts.
           # Lowered in the SAME commit that lowered the count, which is what the
           # comment below has always asked for and what the ::notice:: advises.
-          MYPY_CEILING: "205"
+          MYPY_CEILING: "172"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:
           # flipping `strict = true` to false in pyproject.toml drops 217 errors
           # to 84 with the file count unchanged at 113 and this floor satisfied.
-          # 113 files today; the floor sits below that so ordinary file movement
+          # 122 files today; the floor sits below that so ordinary file movement
           # does not trip it.
           MYPY_MIN_FILES: "100"
           # DEPTH is pinned separately, because the ratchet only ever blocks a

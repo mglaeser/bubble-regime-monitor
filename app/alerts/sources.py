@@ -26,11 +26,12 @@ Pure module.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from app.alerts import observation as obs
 from app.alerts.dto import AlertInput
+from app.alerts.enum_contract import canonical_source_enum
 from app.alerts.enums import DataState
 
 SourceKind = Literal["enum", "boolean", "number", "count"]
@@ -146,7 +147,11 @@ def _from_evidence(source_id: str, domain: str, inp: AlertInput) -> SourceValue:
     )
 
 
-def _red_flag_reader(flag_id: str, domain: str, source_id: str):
+def _red_flag_reader(
+    flag_id: str,
+    domain: str,
+    source_id: str,
+) -> Callable[[AlertInput], SourceValue]:
     def read(inp: AlertInput) -> SourceValue:
         flag = inp.red_flag(flag_id)
         if flag is None:
@@ -184,14 +189,23 @@ def _red_flag_reader(flag_id: str, domain: str, source_id: str):
     return read
 
 
-def _snapshot_reader(source_id: str, domain: str, attribute: str, *, reason: str):
+def _snapshot_reader(
+    source_id: str,
+    domain: str,
+    attribute: str,
+    *,
+    reason: str,
+) -> Callable[[AlertInput], SourceValue]:
     def read(inp: AlertInput) -> SourceValue:
         return _snapshot_value(source_id, domain, getattr(inp, attribute), inp, reason=reason)
 
     return read
 
 
-def _evidence_reader(source_id: str, domain: str):
+def _evidence_reader(
+    source_id: str,
+    domain: str,
+) -> Callable[[AlertInput], SourceValue]:
     def read(inp: AlertInput) -> SourceValue:
         return _from_evidence(source_id, domain, inp)
 
@@ -437,4 +451,21 @@ def read_source(source_id: str, inp: AlertInput) -> SourceValue:
     spec = SOURCE_REGISTRY.get(source_id)
     if spec is None:
         raise KeyError(f"unknown alert source {source_id!r}")
-    return spec.read(inp)
+    resolved = spec.read(inp)
+    if spec.kind != "enum" or not resolved.available:
+        return resolved
+
+    canonical = canonical_source_enum(source_id, resolved.value)
+    if canonical is None or canonical == "unknown" \
+            or canonical not in spec.allowed_values:
+        return replace(
+            resolved,
+            value=None,
+            available=False,
+            data_state=DataState.MISSING,
+            unavailable_reason=(
+                f"unrecognised {source_id} enum value; expected one of "
+                f"{sorted(value for value in spec.allowed_values if value != 'unknown')}"
+            ),
+        )
+    return replace(resolved, value=canonical)

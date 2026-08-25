@@ -53,6 +53,7 @@ class SilenceRequest(BaseModel):
             if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
                 raise ValueError(
                     "INSTANCE_FINGERPRINT must be exactly 64 hexadecimal characters")
+            self.matcher_value = value
         return self
 
 
@@ -305,6 +306,50 @@ def admin_get_render(response: Response, render_id: str,
 
 
 # ---------------------------------------------------------------------------
+# render preview — validate reviewed bytes without creating a send intent
+# ---------------------------------------------------------------------------
+
+
+@router.post("/admin/alerts/render", summary="Preview the reviewed TEST render")
+def admin_preview_render(response: Response,
+                         _: None = Depends(require_admin_key)) -> Any:
+    """Validate the exact TEST body without persisting or sending anything.
+
+    This is a phrase-set/rendering probe, not a transport probe.  It resolves
+    the active reviewed ``TEST_MESSAGE`` and runs the same renderer used by an
+    audited TEST delivery, but creates no delivery, render or provider call.
+    """
+    from app.alerts.artifacts import load_active
+    from app.alerts.errors import AlertError, AlertingUnavailable
+    from app.alerts.renderer import render_test_message
+
+    _no_store(response)
+    try:
+        with session_scope() as session:
+            phrase_set = load_active(session).phrase_set
+            result = render_test_message(phrase_set)
+    except AlertingUnavailable as exc:
+        return problem(503, "Alert rendering unavailable", exc.redacted())
+    except AlertError as exc:
+        return problem(422, "Alert render rejected", exc.redacted())
+
+    return {
+        "render_source": result.render_source,
+        "fallback_reason": result.fallback_reason,
+        "phrase_set_version": phrase_set.version,
+        "phrase_set_sha256": phrase_set.sha256,
+        "selected_phrase_codes": result.selected_phrase_codes,
+        "selected_fact_ids": result.selected_fact_ids,
+        "dropped_codes": result.dropped_codes,
+        "gsm7_septets": result.septet_count,
+        "final_message": result.body,
+        "validation": result.validation,
+        "persisted": False,
+        "sent": False,
+    }
+
+
+# ---------------------------------------------------------------------------
 # send-test — the audited way to prove the transport works (mandate 21.3)
 # ---------------------------------------------------------------------------
 
@@ -419,7 +464,6 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
     `prior_unknown_delivery_id`. The dedupe key differs BECAUSE the sequence is
     in its material; the audit trail survives because nothing is overwritten.
     """
-    from sqlalchemy import func as sa_func
     from sqlalchemy import select as sa_select
     from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -436,6 +480,7 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
         AlertEvent,
         AlertRender,
     )
+    from app.alerts.outbox import reconcile_unknown_for_manual_retry
     from app.alerts.planner import MemberIntent, dedupe_key
 
     _no_store(response)
@@ -491,12 +536,28 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
 
                 root_id = (original.manual_retry_root_delivery_id
                            or original.delivery_id)
-                highest = session.execute(
-                    sa_select(sa_func.max(
-                        AlertDelivery.manual_retry_sequence)).where(
-                            AlertDelivery.manual_retry_root_delivery_id == root_id)
-                ).scalar() or 0
-                next_sequence = int(highest) + 1
+                latest = session.execute(
+                    sa_select(
+                        AlertDelivery.delivery_id,
+                        AlertDelivery.manual_retry_sequence,
+                    ).where(
+                        AlertDelivery.manual_retry_root_delivery_id == root_id
+                    ).order_by(
+                        AlertDelivery.manual_retry_sequence.desc()
+                    ).limit(1)
+                ).first()
+                highest = int(latest.manual_retry_sequence) if latest else 0
+                if latest is not None \
+                        and highest > int(original.manual_retry_sequence):
+                    return problem(
+                        409,
+                        "Stale retry ancestor",
+                        "a later delivery already exists in this duplicate-risk "
+                        "chain; reconcile and retry only its latest UNKNOWN "
+                        "outcome",
+                        extra={"latest_delivery_id": latest.delivery_id},
+                    )
+                next_sequence = highest + 1
 
                 rows = session.execute(
                     sa_select(AlertDeliveryMember).where(
@@ -617,6 +678,13 @@ def manual_retry(delivery_id: str, body: ManualRetryRequest, response: Response,
                     created_at=now,
                     body_redacted_at=None,
                 ))
+                # Preserve UNKNOWN as the historical wire outcome while
+                # recording that explicit operator action has reconciled this
+                # chain tip.  The new pending child now reserves the same
+                # semantic generation; a child that becomes UNKNOWN installs
+                # itself as the sole new blocker.
+                reconcile_unknown_for_manual_retry(
+                    session, original, now=now)
                 session.add(AlertEvent(
                     event_id=new_ulid(utc_ms(now)), occurred_at=now,
                     causation_type="OPERATOR", causation_id=new_id,

@@ -111,7 +111,147 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert payload["sqlite"]["busy_timeout"] > 0
     assert payload["sqlite"]["foreign_keys"] == 1
     assert str(payload["sqlite"]["journal_mode"]).lower() == "wal"
+    assert payload["sqlite"]["returning"]["insert"] is True
+    assert payload["sqlite"]["returning"]["update"] is True
+    assert payload["schema"]["revision"] == "0015"
+    assert payload["schema"]["quick_check"] == "ok"
+    assert payload["schema"]["foreign_key_violations"] == 0
+    assert payload["schema"]["missing_required_triggers"] == []
+    assert payload["schema"]["missing_required_partial_indexes"] == []
+    assert payload["schema"]["alert_schema_integrity"] == "ok"
+    assert payload["inputs"]["missing_sidecars"] == 0
+    assert "latest_duration_ms" in payload["evaluations"]
+    assert "p95_duration_ms" in payload["evaluations"]
+    assert "p1_enqueue_to_attempt_p95_ms" in payload["outbox"]
+    assert payload["llm"]["cap_24h"] >= 0
+    assert payload["llm"]["attempts_24h"] == 0
+    assert payload["llm"]["provider_calls_24h"] == 0
+    assert payload["llm"]["fallbacks_24h"] == {}
     assert payload["legacy_daily_digest_enabled"] is False
+
+
+def test_health_fails_closed_when_a_required_partial_index_is_missing(client):
+    from sqlalchemy import text
+
+    from app.db import session_scope
+
+    with session_scope() as session:
+        session.execute(text("DROP INDEX uq_alert_episode_open"))
+
+    payload = client.get(
+        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    assert payload["status"] == "critical"
+    assert payload["schema"]["alert_schema_integrity"] == "critical"
+    assert "uq_alert_episode_open" in \
+        payload["schema"]["missing_required_partial_indexes"]
+
+
+def test_health_computes_p1_enqueue_to_attempt_latency(client):
+    from datetime import timedelta
+
+    from app.alerts.enums import Priority, TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.db import session_scope
+
+    with session_scope() as session:
+        delivery_id = _unknown_delivery(session)
+        delivery = session.get(AlertDelivery, delivery_id)
+        delivery.mode = "disabled"
+        delivery.priority = Priority.P1
+        delivery.transport_status = TransportStatus.SENT
+        delivery.blocks_replanning = False
+        delivery.blocks_up_to_priority = None
+        delivery.request_started_at = delivery.created_at + timedelta(milliseconds=1250)
+        delivery.sent_at = delivery.request_started_at
+
+    payload = client.get(
+        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    assert payload["outbox"]["p1_enqueue_to_attempt_p95_ms"] == 1250
+
+
+def test_health_counts_and_heartbeats_are_scoped_to_the_active_namespace(client):
+    """Fresh shadow activity is not evidence that disabled/live is healthy."""
+    from datetime import UTC, datetime
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+
+    now = datetime.now(UTC)
+    with session_scope() as session:
+        _unknown_delivery(session)  # shadow/default; the client projects disabled/default
+        session.add_all([
+            AlertComponentHeartbeat(
+                component=component,
+                last_heartbeat_at=now,
+                status="ok",
+                detail_json={"mode": "shadow", "live_profile": "default"},
+            )
+            for component in ("watchdog", "dispatcher")
+        ])
+
+    payload = client.get(
+        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    assert payload["alerts_mode"] == "disabled"
+    assert payload["outbox"]["unknown"] == 0
+    for component in ("watchdog", "dispatcher"):
+        projection = payload["components"][component]
+        assert projection["healthy"] is False
+        assert "namespace" in projection["reason"]
+
+
+def test_health_scores_every_mandated_component(client):
+    """Raw heartbeat rows are not enough; every scheduled path is evaluated."""
+    payload = client.get(
+        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+
+    expected = {
+        "dispatcher",
+        "watchdog",
+        "digest",
+        "recovery",
+        "sidecar_reconciliation",
+        "retention",
+    }
+    assert expected <= payload["components"].keys()
+    for component in expected:
+        assert "present" in payload["components"][component]
+        assert "healthy" in payload["components"][component]
+        assert "reason" in payload["components"][component]
+
+
+def test_health_cannot_be_ok_with_an_unreconciled_unknown(client):
+    from datetime import UTC, datetime
+
+    from app.alerts.models import AlertComponentHeartbeat, AlertDelivery
+    from app.db import session_scope
+
+    now = datetime.now(UTC)
+    components = (
+        "dispatcher",
+        "watchdog",
+        "digest",
+        "recovery",
+        "sidecar_reconciliation",
+        "retention",
+    )
+    with session_scope() as session:
+        delivery_id = _unknown_delivery(session)
+        session.get(AlertDelivery, delivery_id).mode = "disabled"
+        session.add_all([
+            AlertComponentHeartbeat(
+                component=component,
+                last_heartbeat_at=now,
+                status="ok",
+                detail_json={"mode": "disabled", "live_profile": "default"},
+            )
+            for component in components
+        ])
+
+    payload = client.get(
+        "/api/v1/alerts/health", headers={"X-API-Key": READ_KEY}).json()
+    assert payload["status"] == "degraded"
+    assert payload["outbox"]["blocking_replanning"] == 1
+    assert any("UNKNOWN" in condition for condition in payload["conditions"])
 
 
 def test_mechanism_list_shows_dark_rules_and_why(client):
@@ -133,6 +273,127 @@ def test_mechanism_list_shows_dark_rules_and_why(client):
     assert threshold["unresolved_reason"]
     assert "PIN" not in json.dumps(threshold["value"] or "")
     assert jump["unresolved_pins"] == ["delta_pp"]
+
+
+def test_mechanism_projection_exposes_typed_evidence_and_source_progress(client):
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.enums import ConditionState, EvaluationStatus
+    from app.alerts.models import (
+        AlertConfirmationObservation,
+        AlertInputSnapshot,
+        AlertRuleState,
+    )
+    from app.alerts.registry import instance_fingerprint
+    from app.db import session_scope
+    from tests.test_alert_evaluation import make_input
+
+    now = datetime(2026, 8, 25, 10, 0, tzinfo=UTC)
+    alert_input = make_input(
+        identity="projection-input", effective="trim").model_copy(
+            update={"snapshot_id": None})
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts, now=now)
+        rule = artifacts.ruleset.rule("regime.band_to_derisk")
+        assert rule is not None
+        fingerprint = instance_fingerprint(
+            rule.rule_id, rule.identity_version, rule.labels)
+        session.add(AlertInputSnapshot(
+            input_identity=alert_input.input_identity,
+            snapshot_id=None,
+            origin=alert_input.origin,
+            built_at=now,
+            computed_at=now,
+            alert_input_schema_version=alert_input.schema_version,
+            methodology_version=alert_input.methodology_version,
+            methodology_sha256=alert_input.methodology_sha256,
+            reconstructed=False,
+            evaluation_eligibility=alert_input.evaluation_eligibility,
+            ineligibility_reasons=[],
+            payload=alert_input.model_dump_json(),
+            payload_sha256="p" * 64,
+        ))
+        session.add(AlertRuleState(
+            mode="disabled", live_profile="default",
+            rules_sha256=artifacts.ruleset.rules_sha256,
+            instance_fingerprint=fingerprint,
+            rule_id=rule.rule_id, bucket=rule.bucket, priority=rule.priority,
+            state_version=1, policy_status=rule.policy_status,
+            runtime_readiness=rule.runtime_readiness,
+            activation_status="ACTIVE", evaluation_status=EvaluationStatus.OK,
+            condition_state=ConditionState.PENDING,
+            last_known_condition_state=ConditionState.PENDING,
+            last_known_input_identity=alert_input.input_identity,
+            consecutive_true=1,
+            candidate_started_input=alert_input.input_identity,
+            flap_projection={}, updated_at=now,
+        ))
+        session.add(AlertConfirmationObservation(
+            mode="disabled", live_profile="default",
+            rules_sha256=artifacts.ruleset.rules_sha256,
+            instance_fingerprint=fingerprint,
+            candidate_started_input=alert_input.input_identity,
+            source_id="effective_action_state",
+            economic_observation_key="o" * 64,
+            source_revision_key="r" * 64,
+            computation_fingerprint="c" * 64,
+            observed_at=now,
+            confirmation_role="CONFIRMATION",
+            fresh_at_evaluation=True,
+        ))
+
+    payload = client.get(
+        "/api/v1/alerts/mechanisms", headers={"X-API-Key": READ_KEY}).json()
+    projected = next(
+        item for item in payload["items"]
+        if item["instance_fingerprint"] == fingerprint)
+    assert projected["confirmation"]["per_source_progress"] == {
+        "effective_action_state": 1,
+    }
+    evidence = projected["evidence"]
+    assert [item["source_id"] for item in evidence] == ["effective_action_state"]
+    assert evidence[0]["available"] is True
+    assert evidence[0]["value"] == "trim"
+
+
+def test_notification_disposition_reports_transport_outcome_not_eligibility(
+        isolated_db):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from app.alerts.enums import TransportStatus
+    from app.alerts.health import _disposition, _planning_state_for
+    from app.alerts.models import AlertDelivery, AlertDeliveryMember
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import seed_delivery_for_episode
+
+    episode_id = seed_delivery_for_episode(transport=TransportStatus.SENT)
+    state = SimpleNamespace(
+        current_episode_id=episode_id,
+        inherited_open_episode_id=None,
+    )
+    with session_scope() as session:
+        member = session.execute(select(AlertDeliveryMember)).scalars().one()
+        member.delivered = True
+        assert _disposition(session, state) == "SENT"
+
+    with session_scope() as session:
+        delivery = session.execute(select(AlertDelivery)).scalars().one()
+        member = session.execute(select(AlertDeliveryMember)).scalars().one()
+        delivery.transport_status = TransportStatus.UNKNOWN
+        member.delivered = False
+        assert _disposition(session, state) == "UNKNOWN"
+
+    with session_scope() as session:
+        member = session.execute(select(AlertDeliveryMember)).scalars().one()
+        member.dropped_at = datetime(2026, 8, 25, 11, 0, tzinfo=UTC)
+        member.drop_reason = "SILENCED_BEFORE_SEND"
+        assert _disposition(session, state) == "DROPPED:SILENCED_BEFORE_SEND"
+        assert _planning_state_for(session, episode_id) == "NONE"
 
 
 def test_mechanism_detail_uses_fingerprint(client):
@@ -157,6 +418,52 @@ def test_latest_separates_fired_and_sent(client):
                     "last_notification_eligible_episode", "last_attempted_delivery",
                     "last_sent_delivery"):
         assert pointer in payload
+
+
+def test_latest_delivery_pointers_sort_by_attempt_and_send_time(client):
+    """A late attempt of old queued work is newer than a newer-created row."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.canonical import new_ulid
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+    from app.db import session_scope
+
+    base = datetime(2026, 8, 25, 10, 0, tzinfo=UTC)
+    with session_scope() as session:
+        artifacts = load_active(session)
+        rules_sha = register(session, artifacts, now=base)
+        older_id = new_ulid(utc_ms(base))
+        newer_id = new_ulid(utc_ms(base + timedelta(seconds=1)))
+        session.add_all([
+            AlertDelivery(
+                delivery_id=older_id, dedupe_key="latest-old-created",
+                mode="disabled", live_profile="default",
+                planning_rules_sha256=rules_sha, delivery_kind="TEST", priority=4,
+                transport_status="SENT", planning_state="NONE",
+                created_at=base, updated_at=base + timedelta(hours=4),
+                request_started_at=base + timedelta(hours=4),
+                sent_at=base + timedelta(hours=4), attempts=1,
+                recipient_ref="default",
+            ),
+            AlertDelivery(
+                delivery_id=newer_id, dedupe_key="latest-new-created",
+                mode="disabled", live_profile="default",
+                planning_rules_sha256=rules_sha, delivery_kind="TEST", priority=4,
+                transport_status="SENT", planning_state="NONE",
+                created_at=base + timedelta(hours=1),
+                updated_at=base + timedelta(hours=2),
+                request_started_at=base + timedelta(hours=2),
+                sent_at=base + timedelta(hours=2), attempts=1,
+                recipient_ref="default",
+            ),
+        ])
+
+    payload = client.get(
+        "/api/v1/alerts/latest", headers={"X-API-Key": READ_KEY}).json()
+    assert payload["last_attempted_delivery"]["delivery_id"] == older_id
+    assert payload["last_sent_delivery"]["delivery_id"] == older_id
 
 
 def test_redacted_projection_omits_sensitive_fields(client):
@@ -190,12 +497,289 @@ def test_expired_cursor_version_is_410(client):
     response = client.get(f"/api/v1/alerts/events?cursor={stale}",
                           headers={"X-API-Key": READ_KEY})
     assert response.status_code == 410
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["status"] == 410
+
+
+def test_malformed_cursor_is_rfc9457_problem(client):
+    response = client.get(
+        "/api/v1/alerts/events?cursor=not-valid-base64!",
+        headers={"X-API-Key": READ_KEY},
+    )
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert {"type", "title", "status", "detail"} <= set(response.json())
+
+
+def test_cursor_expires_after_24_hours_not_only_after_a_version_change(client):
+    import base64
+    from datetime import UTC, datetime, timedelta
+
+    payload = {
+        "v": "v2",
+        "issued_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
+        "resource": "events",
+        "mode": "disabled",
+        "live_profile": "default",
+        "sort_at": datetime.now(UTC).isoformat(),
+        "sort_id": "event-old",
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    response = client.get(
+        f"/api/v1/alerts/events?cursor={cursor}",
+        headers={"X-API-Key": READ_KEY},
+    )
+    assert response.status_code == 410
+    assert response.json()["title"] == "Cursor expired"
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "title"),
+    [
+        (
+            "/api/v1/alerts/episodes",
+            {"resource": "events", "mode": "disabled",
+             "live_profile": "default"},
+            "Cursor query mismatch",
+        ),
+        (
+            "/api/v1/alerts/events",
+            {"resource": "events", "mode": "shadow",
+             "live_profile": "default"},
+            "Cursor namespace mismatch",
+        ),
+        (
+            "/api/v1/alerts/episodes?open_only=true",
+            {"resource": "episodes", "mode": "disabled",
+             "live_profile": "default", "open_only": False},
+            "Cursor query mismatch",
+        ),
+    ],
+)
+def test_cursor_is_bound_to_its_resource_namespace_and_filters(
+        client, path, payload, title):
+    from datetime import UTC, datetime
+
+    from app.routers.alerts import _encode_cursor
+
+    cursor = _encode_cursor({
+        **payload,
+        "sort_at": datetime.now(UTC).isoformat(),
+        "sort_id": "cursor-boundary",
+    })
+    separator = "&" if "?" in path else "?"
+    response = client.get(
+        f"{path}{separator}cursor={cursor}",
+        headers={"X-API-Key": READ_KEY},
+    )
+    assert response.status_code == 422
+    assert response.json()["title"] == title
+    assert response.headers["content-type"].startswith("application/problem+json")
 
 
 def test_read_responses_carry_an_etag(client):
     response = client.get("/api/v1/alerts/health", headers={"X-API-Key": READ_KEY})
     assert response.headers["ETag"]
     assert "max-age=30" in response.headers["Cache-Control"]
+    assert "private" in response.headers["Cache-Control"]
+    assert "public" not in response.headers["Cache-Control"]
+
+    unchanged = client.get(
+        "/api/v1/alerts/health",
+        headers={"X-API-Key": READ_KEY,
+                 "If-None-Match": response.headers["ETag"]},
+    )
+    assert unchanged.status_code == 304
+    assert unchanged.content == b""
+    assert unchanged.headers["ETag"] == response.headers["ETag"]
+
+
+def test_event_cursor_uses_timestamp_and_id_together(client):
+    """An older high ID must follow a newer low ID on the next page."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.alerts.models import AlertEvent
+    from app.db import session_scope
+
+    newer = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    with session_scope() as session:
+        session.add_all([
+            AlertEvent(
+                event_id="A-newer", occurred_at=newer,
+                causation_type="SCHEDULER", causation_id=None,
+                actor_type="SYSTEM", action="newer", suppression_reasons=[]),
+            AlertEvent(
+                event_id="Z-older", occurred_at=newer - timedelta(minutes=1),
+                causation_type="SCHEDULER", causation_id=None,
+                actor_type="SYSTEM", action="older", suppression_reasons=[]),
+        ])
+
+    first = client.get(
+        "/api/v1/alerts/events?limit=1", headers={"X-API-Key": READ_KEY})
+    assert first.status_code == 200, first.text
+    assert [item["event_id"] for item in first.json()["items"]] == ["A-newer"]
+    cursor = first.json()["next_cursor"]
+    second = client.get(
+        f"/api/v1/alerts/events?limit=1&cursor={cursor}",
+        headers={"X-API-Key": READ_KEY},
+    )
+    assert second.status_code == 200, second.text
+    assert [item["event_id"] for item in second.json()["items"]] == ["Z-older"]
+
+
+def test_paginated_etag_ignores_the_cursor_issue_instant(client):
+    """An opaque cursor's TTL timestamp must not defeat conditional GET."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.alerts.models import AlertEvent
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    with session_scope() as session:
+        session.add_all([
+            AlertEvent(
+                event_id="etag-page-new", occurred_at=now,
+                causation_type="SCHEDULER", causation_id=None,
+                actor_type="SYSTEM", action="new", suppression_reasons=[]),
+            AlertEvent(
+                event_id="etag-page-old", occurred_at=now - timedelta(minutes=1),
+                causation_type="SCHEDULER", causation_id=None,
+                actor_type="SYSTEM", action="old", suppression_reasons=[]),
+        ])
+
+    first = client.get(
+        "/api/v1/alerts/events?limit=1", headers={"X-API-Key": READ_KEY})
+    assert first.status_code == 200
+    assert first.json()["next_cursor"] is not None
+    repeated = client.get(
+        "/api/v1/alerts/events?limit=1",
+        headers={
+            "X-API-Key": READ_KEY,
+            "If-None-Match": first.headers["ETag"],
+        },
+    )
+    assert repeated.status_code == 304
+    assert repeated.headers["ETag"] == first.headers["ETag"]
+
+
+def test_disabled_mode_never_projects_shadow_state(client):
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.enums import ConditionState, EvaluationStatus
+    from app.alerts.models import AlertRuleState
+    from app.alerts.registry import instance_fingerprint
+    from app.db import session_scope
+
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts)
+        rule = artifacts.ruleset.document.rules[0]
+        fingerprint = instance_fingerprint(
+            rule.rule_id, rule.identity_version, rule.labels)
+        session.add(AlertRuleState(
+            mode="shadow", live_profile="default",
+            rules_sha256=artifacts.ruleset.rules_sha256,
+            instance_fingerprint=fingerprint, rule_id=rule.rule_id,
+            bucket=rule.bucket, priority=rule.priority, state_version=7,
+            policy_status=rule.policy_status,
+            runtime_readiness=rule.runtime_readiness,
+            activation_status="ACTIVE", evaluation_status=EvaluationStatus.OK,
+            condition_state=ConditionState.FIRING,
+            last_known_condition_state=ConditionState.FIRING,
+            consecutive_true=3, flap_projection={},
+            updated_at=datetime.now(UTC),
+        ))
+
+    payload = client.get(
+        "/api/v1/alerts/mechanisms", headers={"X-API-Key": READ_KEY}).json()
+    projected = next(
+        item for item in payload["items"]
+        if item["instance_fingerprint"] == fingerprint)
+    assert projected["condition_state"] == ConditionState.NORMAL
+    assert projected["state_version"] == 0
+
+
+def test_delivery_reads_are_scoped_to_the_active_mode_and_profile(client):
+    from app.db import session_scope
+
+    with session_scope() as session:
+        shadow_delivery_id = _unknown_delivery(session)
+
+    listing = client.get(
+        "/api/v1/alerts/deliveries", headers={"X-API-Key": READ_KEY})
+    assert listing.status_code == 200
+    assert listing.json()["items"] == []
+    detail = client.get(
+        f"/api/v1/alerts/deliveries/{shadow_delivery_id}",
+        headers={"X-API-Key": READ_KEY},
+    )
+    assert detail.status_code == 404
+
+
+def test_every_populated_event_link_must_match_the_read_namespace(
+        client, monkeypatch):
+    """One matching link cannot launder another namespace's delivery event."""
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.models import AlertEvaluation, AlertEvent, AlertInputSnapshot
+    from app.config import get_settings
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    with session_scope() as session:
+        shadow_delivery_id = _unknown_delivery(session)
+        artifacts = load_active(session)
+        register(session, artifacts)
+        input_identity = "event-namespace-input".ljust(64, "0")
+        session.add(AlertInputSnapshot(
+            input_identity=input_identity, snapshot_id=None, origin="MANUAL",
+            built_at=now, computed_at=now, alert_input_schema_version=1,
+            methodology_version="test", methodology_sha256="m" * 64,
+            reconstructed=False, evaluation_eligibility="EVALUABLE",
+            ineligibility_reasons=[], payload="{}", payload_sha256="p" * 64,
+        ))
+        session.flush()
+        evaluation_id = "01M0EVENTNAMESPACEEVAL0000"
+        session.add(AlertEvaluation(
+            evaluation_id=evaluation_id,
+            idempotency_key="event-namespace-evaluation",
+            input_identity=input_identity, mode="live", live_profile="default",
+            current_rules_sha256=artifacts.ruleset.rules_sha256,
+            evaluation_set_sha256="s" * 64,
+            evaluated_ruleset_hashes=[artifacts.ruleset.rules_sha256],
+            evaluator_version="1", status="COMMITTED", attempt_count=1,
+            started_at=now, finished_at=now, plan_applied=True,
+        ))
+        session.add_all([
+            AlertEvent(
+                event_id="event-cross-linked", occurred_at=now,
+                causation_type="DELIVERY", causation_id=shadow_delivery_id,
+                actor_type="SYSTEM", evaluation_id=evaluation_id,
+                delivery_id=shadow_delivery_id, action="must_not_leak",
+                suppression_reasons=[],
+            ),
+            AlertEvent(
+                event_id="event-global", occurred_at=now,
+                causation_type="SCHEDULER", causation_id=None,
+                actor_type="SYSTEM", action="global_visible",
+                suppression_reasons=[],
+            ),
+        ])
+
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    get_settings.cache_clear()
+    response = client.get(
+        "/api/v1/alerts/events", headers={"X-API-Key": READ_KEY})
+    assert response.status_code == 200, response.text
+    event_ids = {item["event_id"] for item in response.json()["items"]}
+    assert "event-global" in event_ids
+    assert "event-cross-linked" not in event_ids
+    get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +802,32 @@ def test_silence_create_list_and_end(client):
     ended = client.delete(f"/api/v1/alerts/silences/{silence_id}",
                           headers={"X-API-Key": WRITE_KEY})
     assert ended.status_code == 200
+
+
+def test_instance_silence_is_persisted_in_canonical_lowercase(client):
+    """Fingerprint comparison is byte-exact, so storage must be canonical."""
+    from sqlalchemy import select
+
+    from app.alerts.models import AlertSilence
+    from app.db import session_scope
+
+    uppercase = ("A1" * 32)
+    body = {
+        "matcher_kind": "INSTANCE_FINGERPRINT",
+        "matcher_value": uppercase,
+        "duration_seconds": 3600,
+        "comment": "canonicalisation regression",
+    }
+    created = client.post(
+        "/api/v1/alerts/silences",
+        json=body,
+        headers={"X-API-Key": WRITE_KEY},
+    )
+    assert created.status_code == 201, created.text
+
+    with session_scope() as session:
+        row = session.execute(select(AlertSilence)).scalars().one()
+        assert row.matcher_value == uppercase.lower()
 
 
 def test_idempotency_conflict_returns_409(client):
@@ -348,6 +958,48 @@ def test_health_does_not_let_a_future_heartbeat_mask_silence(client, monkeypatch
 # ---------------------------------------------------------------------------
 # the audited admin surface (mandate 21.3)
 # ---------------------------------------------------------------------------
+
+
+def test_admin_test_render_previews_reviewed_bytes_without_queueing(client):
+    """The mandated render probe exercises validation but never reaches a wire."""
+    from sqlalchemy import func, select
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.models import AlertDelivery, AlertRender
+    from app.db import session_scope
+
+    with session_scope() as session:
+        phrase_set = load_active(session).phrase_set
+        expected = phrase_set.headlines["TEST_MESSAGE"].text
+
+    response = client.post(
+        "/api/v1/admin/alerts/render",
+        headers={"X-API-Key": TEST_ADMIN_KEY},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["final_message"] == expected
+    assert payload["phrase_set_version"] == phrase_set.version
+    assert payload["phrase_set_sha256"] == phrase_set.sha256
+    assert payload["selected_phrase_codes"] == ["TEST_MESSAGE"]
+    assert payload["selected_fact_ids"] == []
+    assert payload["validation"]["gsm7"] is True
+    assert payload["validation"]["honesty_lint"] is True
+    assert payload["validation"]["fits_single_sms"] is True
+    assert payload["gsm7_septets"] <= 160
+    assert payload["persisted"] is False
+    assert payload["sent"] is False
+    assert response.headers["Cache-Control"] == "no-store"
+
+    with session_scope() as session:
+        assert session.scalar(select(func.count()).select_from(AlertDelivery)) == 0
+        assert session.scalar(select(func.count()).select_from(AlertRender)) == 0
+
+    denied = client.post(
+        "/api/v1/admin/alerts/render",
+        headers={"X-API-Key": READ_KEY},
+    )
+    assert denied.status_code == 401
 
 
 def test_send_test_queues_an_audited_memberless_test_delivery(client):
@@ -481,6 +1133,7 @@ def _unknown_delivery(session) -> str:
         transport_status=TransportStatus.UNKNOWN,
         planning_state=PlanningState.NONE, not_before=now, created_at=now,
         updated_at=now, attempts=1, duplicate_risk_acknowledged=False,
+        blocks_replanning=True, blocks_up_to_priority=Priority.P2,
         recipient_ref="default"))
     session.flush()
     _seed_render(session, delivery_id)
@@ -541,6 +1194,8 @@ def test_manual_retry_creates_a_new_acknowledged_delivery(client):
         assert fresh.duplicate_risk_acknowledged is True
         assert fresh.dedupe_key != old.dedupe_key   # sequence is in the material
         assert old.transport_status == TransportStatus.UNKNOWN  # untouched
+        assert old.blocks_replanning is False
+        assert old.blocks_up_to_priority is None
         old_render = session.execute(
             select(AlertRender).where(AlertRender.delivery_id == original)
         ).scalar_one()
@@ -566,6 +1221,156 @@ def test_manual_retry_creates_a_new_acknowledged_delivery(client):
         headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "retry-1"},
         json={"comment": "different words", "acknowledge_duplicate_risk": True})
     assert conflict.status_code == 409
+
+
+def _unknown_member_delivery() -> tuple[str, str]:
+    """A production-shaped UNKNOWN with notification memory and exact bytes."""
+    from sqlalchemy import select
+
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertDeliveryMember,
+        AlertInstanceNotificationState,
+        AlertRender,
+    )
+    from app.alerts.outbox import mark_unknown
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import NOW, seed_delivery_for_episode
+
+    seed_delivery_for_episode()
+    with session_scope() as session:
+        delivery = session.execute(select(AlertDelivery)).scalars().one()
+        member = session.execute(select(AlertDeliveryMember)).scalars().one()
+        session.add(AlertInstanceNotificationState(
+            mode=delivery.mode,
+            live_profile=delivery.live_profile,
+            instance_fingerprint=member.instance_fingerprint,
+            rule_id=member.rule_id,
+            reminder_count=0,
+            next_notification_generation=member.notification_generation,
+            updated_at=NOW,
+        ))
+        render_id = _seed_render(session, delivery.delivery_id)
+        render = session.get(AlertRender, render_id)
+        render.validation_results = {
+            "gsm7": True,
+            "fits_single_sms": True,
+            "represented_member_ids": [member.episode_id],
+        }
+        mark_unknown(
+            session,
+            delivery,
+            now=NOW,
+            reason="provider accepted bytes but response was lost",
+        )
+        return delivery.delivery_id, member.instance_fingerprint
+
+
+def test_manual_retry_reconciles_only_its_unknown_ancestor(client):
+    """Operator action retires history; the child protects the generation."""
+    from sqlalchemy import func, select
+
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import (
+        AlertDelivery,
+        AlertInstanceNotificationState,
+    )
+    from app.alerts.outbox import mark_unknown
+    from app.alerts.repository import load_open_generations
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import NOW
+
+    original_id, fingerprint = _unknown_member_delivery()
+    response = client.post(
+        f"/api/v1/admin/alerts/deliveries/{original_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY,
+                 "Idempotency-Key": "retry-reconciles-ancestor"},
+        json={"comment": "authorise one exact-byte retry",
+              "acknowledge_duplicate_risk": True},
+    )
+    assert response.status_code == 200, response.text
+    child_id = response.json()["delivery_id"]
+
+    with session_scope() as session:
+        original = session.get(AlertDelivery, original_id)
+        child = session.get(AlertDelivery, child_id)
+        memory = session.get(
+            AlertInstanceNotificationState,
+            ("shadow", "default", fingerprint),
+        )
+        assert original.transport_status == TransportStatus.UNKNOWN
+        assert original.blocks_replanning is False
+        assert original.blocks_up_to_priority is None
+        assert memory.open_unknown_delivery_id is None
+        assert memory.open_unknown_priority is None
+        assert load_open_generations(
+            session,
+            mode="shadow",
+            live_profile="default",
+            fingerprints={fingerprint},
+        ) == frozenset({(fingerprint, 1)})
+
+        mark_unknown(
+            session,
+            child,
+            now=NOW,
+            reason="the authorised retry also became ambiguous",
+        )
+
+    with session_scope() as session:
+        original = session.get(AlertDelivery, original_id)
+        child = session.get(AlertDelivery, child_id)
+        memory = session.get(
+            AlertInstanceNotificationState,
+            ("shadow", "default", fingerprint),
+        )
+        blocker_count = session.execute(
+            select(func.count()).select_from(AlertDelivery).where(
+                AlertDelivery.blocks_replanning.is_(True)
+            )
+        ).scalar_one()
+        assert original.blocks_replanning is False
+        assert child.transport_status == TransportStatus.UNKNOWN
+        assert child.blocks_replanning is True
+        assert memory.open_unknown_delivery_id == child_id
+        assert blocker_count == 1
+
+
+def test_successful_manual_retry_leaves_no_open_unknown_blocker(client):
+    from sqlalchemy import func, select
+
+    from app.alerts.models import AlertDelivery, AlertInstanceNotificationState
+    from app.alerts.outbox import mark_sent
+    from app.db import session_scope
+    from tests.test_alert_addendum_support import NOW
+
+    original_id, fingerprint = _unknown_member_delivery()
+    response = client.post(
+        f"/api/v1/admin/alerts/deliveries/{original_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY,
+                 "Idempotency-Key": "retry-succeeds-after-unknown"},
+        json={"comment": "authorise one exact-byte retry",
+              "acknowledge_duplicate_risk": True},
+    )
+    assert response.status_code == 200, response.text
+
+    with session_scope() as session:
+        child = session.get(AlertDelivery, response.json()["delivery_id"])
+        mark_sent(session, child, now=NOW, http_status=202)
+
+    with session_scope() as session:
+        memory = session.get(
+            AlertInstanceNotificationState,
+            ("shadow", "default", fingerprint),
+        )
+        blocker_count = session.execute(
+            select(func.count()).select_from(AlertDelivery).where(
+                AlertDelivery.blocks_replanning.is_(True)
+            )
+        ).scalar_one()
+        assert blocker_count == 0
+        assert memory.open_unknown_delivery_id is None
+        assert memory.open_unknown_priority is None
 
 
 def test_manual_retry_refuses_anything_not_unknown(client):
@@ -962,14 +1767,8 @@ def test_manual_retry_uses_canonical_dedupe_and_skips_dropped_members(client):
         assert cancelled_item.status == DigestItemStatus.CANCELLED
 
 
-def test_concurrent_manual_retries_allocate_distinct_root_sequences(client):
-    """Each retry is its own duplicate-risk decision, and must not collide.
-
-    The original's counter never advances — it is the frozen record of the
-    ambiguous send — so deriving the next sequence from it made two operators
-    with different idempotency keys both compute original+1 and collide on
-    the dedupe key.
-    """
+def test_concurrent_manual_retries_allow_one_linear_success(client):
+    """Two decisions against one UNKNOWN ancestor cannot branch the chain."""
     from sqlalchemy import select
 
     from app.alerts.models import (
@@ -991,20 +1790,17 @@ def test_concurrent_manual_retries_allocate_distinct_root_sequences(client):
                   "acknowledge_duplicate_risk": True}}
         for key in ("retry-a", "retry-b")
     ])
-    assert [response.status_code for response in responses] == [200, 200]
-    ids = [response.json()["delivery_id"] for response in responses]
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    winner = next(response for response in responses if response.status_code == 200)
+    loser = next(response for response in responses if response.status_code == 409)
+    retry_id = winner.json()["delivery_id"]
+    assert loser.json()["title"] == "Stale retry ancestor"
 
-    assert len(set(ids)) == 2
     with session_scope() as session:
-        first = session.get(AlertDelivery, ids[0])
-        second = session.get(AlertDelivery, ids[1])
-        assert {first.manual_retry_sequence, second.manual_retry_sequence} \
-            == {1, 2}
-        assert first.dedupe_key != second.dedupe_key
-        assert first.prior_unknown_delivery_id == original
-        assert second.prior_unknown_delivery_id == original
-        assert first.manual_retry_root_delivery_id == original
-        assert second.manual_retry_root_delivery_id == original
+        retry = session.get(AlertDelivery, retry_id)
+        assert retry.manual_retry_sequence == 1
+        assert retry.prior_unknown_delivery_id == original
+        assert retry.manual_retry_root_delivery_id == original
         retries = session.execute(select(AlertDelivery).where(
             AlertDelivery.manual_retry_root_delivery_id == original)
         ).scalars().all()
@@ -1014,10 +1810,58 @@ def test_concurrent_manual_retries_allocate_distinct_root_sequences(client):
         ).scalars().all()
         events = session.execute(select(AlertEvent).where(
             AlertEvent.action == "manual_retry_authorised",
-            AlertEvent.delivery_id.in_(ids),
+            AlertEvent.delivery_id == retry_id,
         )).scalars().all()
-        assert len(retries) == len(idempotency) == len(events) == 2
-        assert {event.causation_id for event in events} == set(ids)
+        assert len(retries) == len(idempotency) == len(events) == 1
+        assert events[0].causation_id == retry_id
+
+
+def test_manual_retry_chain_refuses_a_stale_unknown_ancestor(client):
+    """Duplicate-risk authorisations form one linear chain, never branches."""
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.db import session_scope
+
+    with session_scope() as session:
+        root_id = _unknown_delivery(session)
+
+    body = {
+        "comment": "authorise the next exact-byte attempt",
+        "acknowledge_duplicate_risk": True,
+    }
+    first = client.post(
+        f"/api/v1/admin/alerts/deliveries/{root_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "linear-1"},
+        json=body,
+    )
+    assert first.status_code == 200, first.text
+    first_id = first.json()["delivery_id"]
+
+    with session_scope() as session:
+        first_retry = session.get(AlertDelivery, first_id)
+        first_retry.transport_status = TransportStatus.UNKNOWN
+
+    stale = client.post(
+        f"/api/v1/admin/alerts/deliveries/{root_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "linear-stale"},
+        json=body,
+    )
+    assert stale.status_code == 409
+    assert stale.json()["title"] == "Stale retry ancestor"
+
+    second = client.post(
+        f"/api/v1/admin/alerts/deliveries/{first_id}/retry",
+        headers={"X-API-Key": TEST_ADMIN_KEY, "Idempotency-Key": "linear-2"},
+        json=body,
+    )
+    assert second.status_code == 200, second.text
+    second_id = second.json()["delivery_id"]
+
+    with session_scope() as session:
+        second_retry = session.get(AlertDelivery, second_id)
+    assert second_retry.manual_retry_root_delivery_id == root_id
+    assert second_retry.manual_retry_sequence == 2
+    assert second_retry.prior_unknown_delivery_id == first_id
 
 
 def test_concurrent_manual_retry_same_key_same_body_replays_winner(client):

@@ -315,6 +315,8 @@ def plan(inputs: PlanInputs) -> PlanResult:
         # -- step 10: advisory budget --------------------------------------
         budget = check_budget(Priority.P2, advisory_usage, inputs.budget_limits)
 
+        state: str
+        hold: str | None
         if held_quiet:
             state, hold = PlanningState.HELD_QUIET, "quiet_hours"
         elif not budget.allowed:
@@ -348,6 +350,61 @@ def plan(inputs: PlanInputs) -> PlanResult:
             reserved=advisory_usage.reserved + 1,
             digest_168h=advisory_usage.digest_168h,
         )
+
+    # -- reminders for episodes that were already firing ------------------
+    # A reminder is not an activation, so the activation-only loop above can
+    # never discover one. It is a fresh semantic generation of the SAME open
+    # episode, and therefore runs through the same silence, ambiguity,
+    # flapping, open-generation, quiet-hour, and non-P1 budget controls.
+    for decision in inputs.decisions:
+        if decision.activate_episode or decision.condition_state != "FIRING":
+            continue
+        rule = inputs.rules.get(decision.rule_id)
+        episode_id = inputs.episode_ids.get(decision.instance_fingerprint)
+        if rule is None or episode_id is None or rule.priority not in (
+                Priority.P1, Priority.P2):
+            continue
+        memory = inputs.memories.get(
+            decision.instance_fingerprint, NotificationMemory())
+        reminder = reminder_intent(
+            rule=rule, episode_id=episode_id, memory=memory, inputs=inputs)
+        if reminder is None:
+            continue
+        generation = reminder.members[0].notification_generation
+
+        if (decision.instance_fingerprint, generation) in inputs.open_generations:
+            result.suppress(episode_id, SuppressionReason.COOLDOWN)
+            result.notes.append(
+                f"{rule.rule_id}: reminder generation {generation} already open")
+            continue
+        if memory.open_unknown_delivery_id is not None:
+            result.suppress(episode_id, SuppressionReason.UNKNOWN_BLOCK)
+            continue
+        if _is_silenced(rule, decision.instance_fingerprint, inputs):
+            result.suppress(episode_id, SuppressionReason.SILENCED)
+            continue
+        if decision.instance_fingerprint in inputs.flapping_fingerprints:
+            result.suppress(episode_id, SuppressionReason.FLAPPING)
+            continue
+        for reason in decision.suppression_reasons:
+            result.suppress(episode_id, reason)
+        if decision.suppression_reasons:
+            continue
+
+        budget = check_budget(rule.priority, advisory_usage, inputs.budget_limits)
+        reminder.budget = budget
+        if (rule.priority != Priority.P1 and not budget.allowed
+                and reminder.planning_state != PlanningState.HELD_QUIET):
+            reminder.planning_state = PlanningState.HELD_BUDGET
+            reminder.hold_reason_code = budget.reason
+        result.deliveries.append(reminder)
+        if rule.priority != Priority.P1:
+            advisory_usage = BudgetUsage(
+                sent_24h=advisory_usage.sent_24h,
+                sent_168h=advisory_usage.sent_168h,
+                reserved=advisory_usage.reserved + 1,
+                digest_168h=advisory_usage.digest_168h,
+            )
     return result
 
 
@@ -404,7 +461,7 @@ def reminder_intent(
         rule_id=rule.rule_id,
         instance_fingerprint=_fingerprint_for(rule, inputs),
         member_role=MemberRole.PRIMARY,
-        notification_generation=memory.next_notification_generation + 1,
+        notification_generation=memory.next_notification_generation,
         origin_rules_sha256=inputs.origin_rules_sha256,
         origin_phrase_set_version=inputs.phrase_set_version,
         origin_phrase_set_sha256=inputs.phrase_set_sha256,

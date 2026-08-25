@@ -168,7 +168,7 @@
       "passed": false,
       "schema_version": 1,
       "suppressions_by_reason": {
-        "DATA_QUALITY_GUARD": 1,
+        "DATA_QUALITY_GUARD": 5,
         "SUPERSEDED": 4
       },
       "transient_one_snapshot_band_p1": 1,
@@ -263,7 +263,7 @@
       "passed": false,
       "schema_version": 1,
       "suppressions_by_reason": {
-        "DATA_QUALITY_GUARD": 1,
+        "DATA_QUALITY_GUARD": 5,
         "SUPERSEDED": 4
       },
       "transient_one_snapshot_band_p1": 1,

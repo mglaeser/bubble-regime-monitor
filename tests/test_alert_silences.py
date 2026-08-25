@@ -105,6 +105,12 @@ def test_persisted_instance_silence_suppresses_new_plan():
         SilenceMatcherKind.INSTANCE_FINGERPRINT, FINGERPRINT)
 
 
+def test_historical_uppercase_instance_silence_still_matches_canonical_fingerprint():
+    """Rows written before API canonicalisation remain effective."""
+    _assert_persisted_silence_suppresses(
+        SilenceMatcherKind.INSTANCE_FINGERPRINT, FINGERPRINT.upper())
+
+
 def test_persisted_bucket_silence_suppresses_new_plan():
     _assert_persisted_silence_suppresses(SilenceMatcherKind.BUCKET, BUCKET)
 

@@ -16,7 +16,7 @@ import pytest
 from app import methodology as _M
 from app.alerts import observation as obs
 from app.alerts.dto import AlertInput, EvidenceModel, RedFlagFactModel
-from app.alerts.errors import RulesetInvalid
+from app.alerts.errors import RenderRejected, RulesetInvalid
 from app.alerts.observation import build_evidence
 from app.alerts.outbox import validated_represented_member_ids
 from app.alerts.phrase_registry import validate_phrase_set
@@ -269,6 +269,48 @@ def test_two_member_bundle_renders_each_members_own_authorized_clause(phrase_set
     assert "SPY Faber OUT" in result.body
     assert "QQQ Faber wieder IN" in result.body
     assert result.represented_member_ids == [spy.episode_id, qqq.episode_id]
+
+
+def test_nonzero_headline_member_is_reordered_once_and_hashed(phrase_set):
+    """The selected primary is first in prose, without duplication or hash aliasing."""
+    spy = _asset_member(
+        phrase_set, episode_id="01K00000000000000000000001",
+        asset="SPY", headline="FABER_OUT")
+    qqq = _asset_member(
+        phrase_set, episode_id="01K00000000000000000000002",
+        asset="QQQ", headline="FABER_BACK_IN")
+    ordinary = RenderContext(members=[spy, qqq], headline_member_index=0)
+    selected = RenderContext(members=[spy, qqq], headline_member_index=1)
+
+    result = render(
+        context=selected,
+        phrase_set=phrase_set,
+        headline_code="FABER_BACK_IN",
+        phrase_codes=[],
+        next_check_code=None,
+        caveat_codes=[],
+    )
+
+    assert result.body.startswith("QQQ Faber wieder IN")
+    assert result.body.count("QQQ") == 1
+    assert result.body.count("SPY") == 1
+    assert result.represented_member_ids == [qqq.episode_id, spy.episode_id]
+    assert ordinary.context_hash() != selected.context_hash()
+
+
+def test_out_of_range_headline_member_is_a_render_refusal(phrase_set):
+    member = _asset_member(
+        phrase_set, episode_id="01K00000000000000000000001",
+        asset="SPY", headline="FABER_OUT")
+    with pytest.raises(RenderRejected, match="outside"):
+        render(
+            context=RenderContext(members=[member], headline_member_index=1),
+            phrase_set=phrase_set,
+            headline_code="FABER_OUT",
+            phrase_codes=[],
+            next_check_code=None,
+            caveat_codes=[],
+        )
 
 
 def test_bundle_member_cannot_read_another_members_asset_fact(phrase_set):

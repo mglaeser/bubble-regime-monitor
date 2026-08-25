@@ -5,13 +5,17 @@ consumes committed scoring outcomes, exposes the complete alert state to a
 frontend, and — once an operator explicitly turns it on — sends deterministic
 SMS notifications. It never changes scoring.
 
-**Current state: Stages 0 and 1 are implemented and the delivery path is built
-but unreachable. Nothing sends anything.** Stage 1 means sidecar capture is on
-(`ALERT_INPUT_CAPTURE` defaults true — it records evidence and nothing else)
-while `ALERTS_MODE` defaults `disabled`. Under `shadow` the whole pipeline runs
-against a `NullSender`, and only an operator setting `ALERTS_MODE=live` can
-change that — which the Stage 2 and Stage 3 gates do not yet permit. See
-[What is not built](#what-is-not-built).
+**Current rollout: the governed deterministic delivery path and its operational
+controls are implemented, but the committed ruleset remains at Stage 1.**
+Sidecar capture is on (`ALERT_INPUT_CAPTURE`
+defaults true — it records evidence and nothing else) while `ALERTS_MODE`
+defaults `disabled`. Deterministic delivery, reminders, bundles, the weekly
+digest, watchdog/recovery, retention, cutover checks and actionability evidence
+are implemented and tested. They are not permission to send: live alert
+delivery is refused below Stage 3, and the committed Stage-3 replay currently
+fails its non-P1 volume gate. The separate legacy daily digest may still send
+through its configured transport until the observed Stage-4 cutover is
+completed. See [Rollout status and remaining evidence](#rollout-status-and-remaining-evidence).
 
 ---
 
@@ -293,8 +297,9 @@ legacy schedule regardless of whether its previous carrier was sipgate or
 iMessage. Turning the alert system on still never changes this value or
 implicitly disables the legacy digest.
 
-Volume, lease, retention and LLM settings: see `app/config.py` — every one has
-a safe default and none of them is read by anything that sends.
+Volume, lease, retention and LLM settings live in `app/config.py`; each has a
+safe default. Configuration alone never grants delivery permission: the stage,
+evidence, promotion and per-delivery admission checks remain authoritative.
 
 ---
 
@@ -359,6 +364,11 @@ DELETE /api/v1/alerts/silences/{id}
 POST /api/v1/admin/alerts/evaluate    one sidecar, shadow by default
 POST /api/v1/admin/alerts/promote
 POST /api/v1/admin/alerts/recover
+POST /api/v1/admin/alerts/render      validate reviewed TEST bytes; never persist/send
+GET  /api/v1/admin/alerts/renders/{id} operator-only message text
+POST /api/v1/admin/alerts/send-test   queue an audited TEST delivery
+POST /api/v1/admin/alerts/deliveries/{id}/retry
+POST /api/v1/admin/alerts/actionability
 ```
 
 A mechanism that has never fired is still in `/mechanisms`, with
@@ -406,46 +416,51 @@ cross-origin without a separate, deliberate security review.
 
 ---
 
-## 11. What is not built
+## 11. Rollout status and remaining evidence
 
-Present and honest about it, rather than half-built:
+Code completeness and rollout authority are intentionally separate. A feature
+can be present, tested and schedulable while the committed artifact still
+refuses to use it in production.
 
-| stage | scope | status |
+| stage | scope | current status |
 |---|---|---|
-| 0 | typed snapshot contract | **done** |
-| 1 | schema, sidecar capture, pure evaluation, CAS, read API, **replay** | **done — gate enforced in CI** |
-| 2 | `[PIN]` calibration, replay budgets, mandatory-event fixtures | not started — needs operator artifacts |
-| 3 | deterministic P1 delivery | planner, outbox, renderer, typed sender and dispatcher **built and off**; not gated |
-| 4 | legacy daily-digest cutover | not started |
-| 5 | constellations, bundled P2 | rules present, delivery not built |
-| 6 | EWMA / CUSUM | not started — needs immutable calibration artifacts |
-| 7 | P3 enrichment, LLM A/B review | not started |
+| 0 | typed snapshot contract | **implemented and regression-gated** |
+| 1 | schema, sidecar capture, pure evaluation, CAS, read API, replay | **implemented; this is the committed active stage** |
+| 2 | `[PIN]` calibration, replay budgets, mandatory-event fixtures | gate machinery is implemented; real calibration/mandatory-event artifacts remain operator evidence and are not invented |
+| 3 | deterministic P1/P2 delivery and weekly digest | planner, outbox, renderer, typed sender, dispatcher, reminders, digest and admission controls are implemented; promotion is blocked by the measured non-P1 volume failures below |
+| 4 | reversible legacy daily-digest cutover | preflight/apply/confirm/rollback workflow is implemented; completion awaits two observed live weeks, two exact-window digests, healthy live components and an explicit operator configuration change |
+| 5 | constellations and bundled P2 | evaluators, dominance and atomic multi-member bundling are implemented and stage-gated |
+| 6 | EWMA / CUSUM | intentionally absent until immutable calibration and out-of-sample evidence exist |
+| 7 | P3 enrichment and LLM A/B review | P3 inventory, code-only selector and actionability evidence trail are implemented; the selector is not invoked by the production dispatcher and retention depends on future A/B evidence |
 
-Concretely absent: the **weekly digest job** (digest ITEMS are created and
-tracked; the job that turns a window's items into one SMS is not written), the
-**statistical monitors**, and the **actionability review workflow**.
+The weekly digest is a real scheduler job, including quiet-week proof-of-life,
+missed-window recovery and digest-item outcome reconciliation. Actionability is
+a real append-only admin workflow, and Stage-5 bundling is exercised by the
+planner, renderer and concurrency tests. Watchdog, dispatcher, digest,
+recovery, sidecar reconciliation and retention each expose a scored component
+heartbeat with a cadence-appropriate freshness limit.
 
-The **replay harness** is built (§13). What it cannot yet report is the part
-that depends on artifacts nobody has frozen: non-P1 volume against the caps
-(the planner is a Stage 3 component and does not run in a replay, so every
-count is 0 by construction) and mandatory-event recall (the catalogue ships
-empty). Replay names both in `not_measured` rather than reporting them as
-satisfied — zero non-P1 messages arithmetically satisfies every cap, and
-saying so would turn "nothing ran" into "governance holds".
+The health projection also reports the latest and p95 evaluation duration, P1
+enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
+missing typed sidecars, overdue or malformed outbox holds, unresolved UNKNOWN
+blockers, SQLite WAL/foreign-key/busy-timeout/RETURNING capabilities, the
+Alembic revision, required partial indexes and immutability triggers, and live
+artifact/promotion agreement. Missing scheduler components or required schema
+objects are critical; sidecar gaps, overdue holds, unresolved ambiguities and
+P1 latency above 60 seconds are degraded rather than silently green.
 
-Built but deliberately unreachable: the planner, the outbox, the renderer, the
-LLM code selector, the typed sipgate sender and the dispatcher. They run end to
-end under `ALERTS_MODE=shadow` against the `NullSender` — claiming,
-revalidation, budget recheck, rendering and outcome classification all execute
-and persist — but no SMS can leave the host until an operator sets
-`ALERTS_MODE=live`, and the Stage 2 and Stage 3 gates (calibrated pins, replay
-budgets, mandatory-event recall) have not been met.
+None of that bypasses rollout. At committed Stage 1 the live-admission floor
+refuses before a sender is constructed. Shadow and dry-run paths exercise
+eligible work without a provider call, while forward-looking Stage-3 replay
+runs notification planning and records the actual resulting volume. Mandatory
+event recall remains unmeasured because the frozen catalogue is deliberately
+empty; filling it with invented events would be false evidence.
 
-`ops.*` rules that are raised by machinery rather than evaluated from the
-sidecar (`ops.rules_invalid`, `ops.delivery_unknown`,
-`ops.condition_unknown_persistent`, …) are in the inventory as `never`
-conditions with a recorded reason, so the mechanism is visible even though its
-producer is not built.
+Operational mechanisms use the strongest producer that actually exists. The
+recompute watchdog captures and evaluates its own typed input; recovery and the
+dispatcher persist their real outcomes. Inventory-only mechanisms whose typed
+producer or calibration is unavailable remain disabled with an explicit
+reason instead of pretending to evaluate.
 
 ---
 
@@ -504,7 +519,7 @@ They are enabled and they cannot send — both are P4, and the planner maps P4 t
 without checking what they produce turned a refusal into an evidence check, and
 a promoted Stage-1 artifact then cleared live admission.
 
-## 11b. Open Stage 2 blocker: the ruleset exceeds its own non-P1 budget
+## 11b. Open Stage 3 blocker: the ruleset exceeds its own non-P1 budget
 
 Wiring the planner into the atomic apply (audit B-01) turned every non-P1
 volume figure in the replay from "0 by construction" into a real count. On the
@@ -560,27 +575,21 @@ a gate pass: the budget exists precisely to catch a ruleset that talks too
 much, and it has just done its job on the first history it was ever able to
 measure.
 
-Until this is decided, Stage 3 must not be promoted. That is currently a
-statement, not a mechanism, and closing the gap is scheduled with audit
-finding **B-04** (live execution fail-closed on the promoted ruleset) because
-the two need the same missing piece.
+Until this is decided, Stage 3 cannot be promoted. That refusal is executable,
+not advisory:
 
-A promotion check has to bind the evidence to the *bytes* it certifies, and
-this artifact deliberately carries no digest: an entropy detector cannot tell a
-64-hex digest from a token, and `.secrets.baseline` is a byte-identical ratchet
-that may not grow to carry one (see `_DIGEST_FIELDS` in
-`scripts/export_alert_stage1_gate.py`). Binding on `rule_version` instead was
-tried and rejected in review, correctly — a version label is mutable, so an
-edited ruleset that failed to bump it would still be cleared by evidence
-describing different bytes.
+* the evidence carries the complete rules and phrase-set digests as stable
+  grouped values and promotion checks them against the candidate bytes;
+* the promotion service refuses every recorded replay failure;
+* runtime live admission rechecks the active stage, evidence and currently
+  promoted bytes before constructing a sender; and
+* wire-time delivery admission verifies that the exact planning ruleset was
+  deliberately promoted with evidence, was not revoked, and is not from a
+  stage above the current deployment.
 
-What does hold today: `tests/test_alert_replay.py` pins the two failures
-literally, so CI breaks if a new one appears **or** if the breach is fixed
-without updating the list, and the artifact-currency test regenerates the
-evidence on every run, so a ruleset edit that changed behaviour cannot reach
-`main` with stale numbers attached. The uncovered path is an edit made
-directly on the deployment host, which is exactly what B-04 exists to close —
-and the registry, unlike the committed artifact, does hold `rules_sha256`.
+`tests/test_alert_replay.py` pins both volume failures literally, and CI
+regenerates the gate artifact. A changed ruleset therefore needs changed,
+reviewable evidence; a version label alone cannot authorize different bytes.
 
 ---
 
@@ -625,25 +634,40 @@ the non-P1 budget: it is a scheduled summary, not an interruption.
 
 ## 11d. The audited admin surface
 
-Four operator actions, all admin-scoped, all `no-store`:
+The HTTP operator actions are admin-scoped and `no-store`:
 
-* **`POST /admin/alerts/send-test`** — queues a memberless TEST delivery. TEST
+* **`POST /api/v1/admin/alerts/evaluate`**, **`promote`** and **`recover`** —
+  exercise one captured input, perform evidence-gated artifact promotion, or
+  sweep stale evaluation leases respectively.
+* **`POST /api/v1/admin/alerts/render`** — resolves the active reviewed
+  `TEST_MESSAGE` and runs the exact TEST renderer, returning phrase-set
+  provenance and validation. It creates no delivery/render row and cannot call
+  a sender. **`GET /api/v1/admin/alerts/renders/{id}`** retrieves the immutable
+  body of a render that really was persisted.
+
+* **`POST /api/v1/admin/alerts/send-test`** — queues a memberless TEST delivery. TEST
   is the one kind allowed zero members (it is about the transport, not any
   market condition), it is outside the non-P1 budgets, and its body is the
   reviewed `TEST_MESSAGE` fragment. It goes through the ordinary dispatcher —
   same claim, same admission, same classification — because a test that
   bypassed the pipeline would prove the wrong thing.
-* **`POST /admin/alerts/deliveries/{id}/retry`** — the ONLY way past an
+* **`POST /api/v1/admin/alerts/deliveries/{id}/retry`** — the ONLY way past an
   UNKNOWN outcome. Requires an `Idempotency-Key`, an operator comment, and
   `acknowledge_duplicate_risk=true`; creates a NEW delivery with the same
   members and generation, `manual_retry_sequence` incremented (which changes
   the dedupe key), linked through `prior_unknown_delivery_id`. Same key with a
   different body is 409. Anything not UNKNOWN is refused: definite failures
-  retry automatically, successes need nothing.
-* **`POST /admin/alerts/actionability`** — one human label per confirmed-SENT
+  retry automatically, successes need nothing. Authorization keeps the
+  ancestor's immutable transport status `UNKNOWN` but retires its open-blocker
+  fields and notification-memory pointer in the same transaction. The pending
+  child reserves that exact generation; if it also becomes UNKNOWN, it becomes
+  the sole unresolved chain tip.
+* **`POST /api/v1/admin/alerts/actionability`** — one human label per confirmed-SENT
   provider message (or per episode when no delivery is supplied), the Stage 7
   evidence. Dropped/undelivered members, TEST and DIGEST messages are refused;
-  AMBIGUOUS is first-class so an unsure reviewer cannot inflate the KPI.
+  AMBIGUOUS is first-class so an unsure reviewer cannot inflate the KPI. A
+  delivery-less episode label is qualitative evidence only; because it cannot
+  identify a render source, it cannot enter a deterministic-vs-LLM A/B result.
 * **`bubblegauge alerts cutover status|preflight|apply|confirm|rollback|confirm-rollback`** — the Stage
   4 gate made checkable. Preflight evaluates every mandate condition from the
   database (a two-week live span with recent market activity, one successful
@@ -750,8 +774,9 @@ number nothing measured, the same failure mode as inventing a `[PIN]`.
 The headline is a structured 0–100 regime heuristic. It is **not a
 probability**, it is uncalibrated, and the reference class is far too small for
 honest probability calibration. Alert text never states crash odds, certainty,
-buy/sell instructions or guaranteed outcomes — the phrase-set validator checks
-for that vocabulary, and the model may only select reviewed codes.
+buy/sell instructions or guaranteed outcomes — phrase validation constrains
+the reviewed fragments and the final renderer applies the honesty lint before
+anything can reach a wire. A model may only select reviewed codes.
 
 Exactly-once SMS delivery is not promised. Ambiguous delivery outcomes are made
 visible and handled conservatively rather than retried into duplicates.

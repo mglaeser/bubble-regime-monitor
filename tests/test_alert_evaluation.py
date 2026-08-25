@@ -547,6 +547,42 @@ def test_constellation_requires_every_confirmation_source_to_advance():
     assert decision.activate_episode is False
 
 
+def test_auto_on_inverse_latches_a_transition_until_the_target_state_ends():
+    """A transition episode is active while its target state remains active.
+
+    Without this distinction, ``auto_on_inverse`` behaved exactly like
+    ``auto_on_condition_false``: the first steady observation after a real
+    transition resolved the episode merely because no *second* transition
+    occurred.  That also made every configured 48-hour reminder for transition
+    rules unreachable.
+    """
+    rule = _rule(resolution={"policy": "auto_on_inverse"})
+    previous = make_input(identity="before", effective="de-risk")
+    current = make_input(identity="steady", effective="de-risk")
+
+    held = evaluate_rule(
+        rule,
+        _ctx(current, previous),
+        currently_firing=True,
+    )
+    assert held.truth is True
+    assert "inverse_resolution_hold" in held.reasons
+
+    event_only = _rule(resolution={"policy": "auto_on_condition_false"})
+    assert evaluate_rule(
+        event_only,
+        _ctx(current, previous),
+        currently_firing=True,
+    ).truth is False
+
+    reversed_input = make_input(identity="reversed", effective="trim")
+    assert evaluate_rule(
+        rule,
+        _ctx(reversed_input, current),
+        currently_firing=True,
+    ).truth is False
+
+
 def test_provider_failover_mid_confirmation_does_not_confirm():
     """Same day, different vendor: the economic key collides, so it cannot count."""
     rule = _persistence_rule()
@@ -600,6 +636,42 @@ def test_median_and_point_score_are_never_conflated():
     # median below the gate, point score above it: must NOT fire.
     inp = make_input(identity="a", median=52.0, point=90.0)
     assert evaluate_rule(rule, _ctx(inp)).truth is False
+
+
+def test_real_faber_p1_accepts_engine_vocabulary_and_uses_the_exact_median_gate():
+    """Exercise the shipped P1, not a hand-written approximation of it.
+
+    The scoring engine persists IN/OUT.  The alert contract names in/out.  The
+    typed boundary must bridge those vocabularies for both new and historical
+    sidecars, while the gate remains the Monte Carlo median at exactly 55 and
+    refuses degraded data.
+    """
+    rule = _artifacts(stage=3).ruleset.rule("legs.faber_spy_out_high_risk")
+    assert rule is not None
+
+    before = make_input(identity="faber-before", faber="IN", median=55.0, point=99.0)
+    at_gate = make_input(identity="faber-at-gate", faber="OUT", median=55.0,
+                         point=1.0)
+    assert evaluate_rule(rule, _ctx(at_gate, before)).truth is True
+
+    below_gate = make_input(identity="faber-below", faber="OUT", median=54.999,
+                            point=99.0)
+    assert evaluate_rule(rule, _ctx(below_gate, before)).truth is not True
+
+    degraded = make_input(identity="faber-degraded", faber="OUT", median=90.0,
+                          point=99.0, degraded=True)
+    assert evaluate_rule(rule, _ctx(degraded, before)).truth is not True
+
+
+def test_unrecognised_execution_leg_enum_is_unknown_not_false():
+    from app.alerts.sources import read_source
+
+    value = read_source(
+        "spy_faber_state",
+        make_input(identity="faber-invalid", faber="SIDEWAYS"),
+    )
+    assert value.available is False
+    assert value.value is None
 
 
 def test_crossing_fires_once_not_on_every_evaluation():
@@ -1072,6 +1144,24 @@ def test_an_outage_is_not_a_flap():
 
     real = [ConditionState.FIRING, ConditionState.NORMAL] * 3
     assert flapping_projection(real)["flapping"] is True, "a real oscillation must still flap"
+
+
+def test_unknown_at_a_full_window_does_not_erase_known_flap_history():
+    """UNKNOWN is a mask, so it cannot consume one bounded history slot."""
+    known = [
+        ConditionState.NORMAL,
+        ConditionState.FIRING,
+        ConditionState.FIRING,
+        ConditionState.NORMAL,
+        ConditionState.FIRING,
+        ConditionState.NORMAL,
+    ]
+
+    before = flapping_projection(known)
+    after = flapping_projection([*known, ConditionState.UNKNOWN])
+
+    assert after["states"] == before["states"] == known
+    assert after["transitions"] == before["transitions"]
 
 
 def test_an_unloadable_origin_ruleset_fails_the_batch(isolated_db, monkeypatch):

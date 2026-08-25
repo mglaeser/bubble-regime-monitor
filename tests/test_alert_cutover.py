@@ -123,6 +123,9 @@ def _live_sent(session, *, sent_at, status=None, kind=None,
         created_at=sent_at, updated_at=sent_at, attempts=1,
         sent_at=sent_at if (status or TransportStatus.SENT)
         == TransportStatus.SENT else None,
+        blocks_replanning=(status == TransportStatus.UNKNOWN),
+        blocks_up_to_priority=(Priority.P2
+                               if status == TransportStatus.UNKNOWN else None),
         duplicate_risk_acknowledged=False, recipient_ref="default"))
     session.flush()
     return delivery_id
@@ -259,6 +262,25 @@ def test_a_fresh_unknown_blocks_cutover_whatever_its_age():
 
     assert any(u.startswith("unknowns_reconciled") for u in report.unsatisfied), (
         "an hour-old UNKNOWN passed the gate that exists for exactly it")
+
+
+def test_operator_reconciled_unknown_is_historical_not_open():
+    """UNKNOWN remains the wire truth after its blocker is reconciled."""
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertDelivery
+
+    with session_scope() as session:
+        delivery_id = _live_sent(
+            session,
+            sent_at=NOW - timedelta(hours=1),
+            status=TransportStatus.UNKNOWN,
+        )
+        delivery = session.get(AlertDelivery, delivery_id)
+        delivery.blocks_replanning = False
+        delivery.blocks_up_to_priority = None
+        report = preflight(session, now=NOW)
+
+    assert any(s.startswith("unknowns_reconciled") for s in report.satisfied)
 
 
 def test_unknown_from_another_profile_or_test_probe_does_not_poison_live_gate():

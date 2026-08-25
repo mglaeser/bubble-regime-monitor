@@ -23,11 +23,13 @@ attempt did not.
 from __future__ import annotations
 
 import socket
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from app.alerts.artifacts import load_by_hash
 from app.alerts.budgets import BUDGETED_KINDS, check_budget
@@ -40,7 +42,6 @@ from app.alerts.enums import (
     TransportStatus,
 )
 from app.alerts.errors import RenderRejected, sanitize
-from app.alerts.gsm7 import septets
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
@@ -55,6 +56,7 @@ from app.alerts.outbox import (
     default_limits,
     dispatch_budget_usage,
     hold_for_budget,
+    hold_for_quiet,
     mark_permanent,
     mark_render_failed,
     mark_sending,
@@ -73,12 +75,13 @@ from app.alerts.promotion import (
     delivery_admission_blockers,
     live_admission_blockers,
 )
+from app.alerts.quiet_hours import would_be_held
 from app.alerts.render_context import (
     RenderContext,
     build_member_context,
     render_time_status,
 )
-from app.alerts.renderer import RenderResult, render_with_cascade
+from app.alerts.renderer import render_test_message, render_with_cascade
 from app.alerts.repository import (
     load_input,
     load_latest_compatible_input,
@@ -124,15 +127,15 @@ def _owner() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
-def _existing_render(session, delivery_id: str) -> AlertRender | None:
+def _existing_render(session: Session, delivery_id: str) -> AlertRender | None:
     return session.execute(
         select(AlertRender).where(AlertRender.delivery_id == delivery_id)
-        .order_by(AlertRender.created_at.desc()).limit(1)
+        .order_by(AlertRender.created_at.desc(), AlertRender.render_id.desc()).limit(1)
     ).scalars().first()
 
 
 def _origin_rule(
-    session: Any,
+    session: Session,
     member: AlertDeliveryMember,
     phrase_set: ValidatedPhraseSet,
 ) -> RuleSpec:
@@ -159,9 +162,12 @@ def _origin_rule(
     return rule
 
 
-def _build_context(session, delivery: AlertDelivery, members,
-                   phrase_set: ValidatedPhraseSet
-                   ) -> tuple[RenderContext, list[RuleSpec]]:
+def _build_context(
+    session: Session,
+    delivery: AlertDelivery,
+    members: Sequence[AlertDeliveryMember],
+    phrase_set: ValidatedPhraseSet,
+) -> tuple[RenderContext, list[RuleSpec]]:
     """One isolated context per member, built from persisted sidecars only."""
     contexts = []
     origin_rules: list[RuleSpec] = []
@@ -455,6 +461,65 @@ def _digest_may_rerender(delivery: AlertDelivery) -> bool:
         and not delivery.duplicate_risk_acknowledged
 
 
+def _unattempted_render_may_rerender(delivery: AlertDelivery) -> bool:
+    """Whether an old pre-wire render is known not to have reached a sender.
+
+    Older dispatcher revisions committed a render before their final admission
+    check.  Those rows have ``attempts == 0`` and can be replaced by a newly
+    built final render.  Manual retry ancestry is excluded even at zero
+    attempts because its body is the exact wording an UNKNOWN predecessor may
+    already have delivered.
+    """
+    return delivery.attempts == 0 \
+        and delivery.prior_unknown_delivery_id is None \
+        and not delivery.duplicate_risk_acknowledged
+
+
+def _frozen_render_names_withdrawn_member(
+    session: Session,
+    delivery: AlertDelivery,
+    render: AlertRender,
+) -> bool:
+    """Whether immutable retry prose represents a member now withheld.
+
+    Revalidation runs on every attempt.  Once a provider attempt has started,
+    however, the render must not change.  If a bundle member resolves or is
+    silenced between attempts, those two rules can only both hold by refusing
+    the old provider intent; sending prose that still represents the withdrawn
+    member would be false, while re-rendering would violate retry immutability.
+
+    A digest deliberately counts resolved events retrospectively, so only a
+    silence invalidates its frozen count.  Missing representation metadata on
+    a historical render fails closed whenever a relevant member was dropped.
+    """
+    dropped = session.execute(
+        select(AlertDeliveryMember).where(
+            AlertDeliveryMember.delivery_id == delivery.delivery_id,
+            AlertDeliveryMember.dropped_at.is_not(None),
+        )
+    ).scalars().all()
+    if delivery.delivery_kind == DeliveryKind.DIGEST:
+        dropped = [
+            member for member in dropped
+            if member.drop_reason == "SILENCED_BEFORE_SEND"
+        ]
+    if not dropped:
+        return False
+
+    raw = (render.validation_results or {}).get("represented_member_ids")
+    if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
+        return True
+    represented = frozenset(raw)
+    return any(member.episode_id in represented for member in dropped)
+
+
+def _utc_clock_value(clock: Callable[[], datetime]) -> datetime:
+    moment = clock()
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
+
+
 def dispatch_once(
     session_factory: Any,
     *,
@@ -465,11 +530,18 @@ def dispatch_once(
     now: datetime | None = None,
     settings: Any = None,
     limit: int = 5,
+    clock: Callable[[], datetime] | None = None,
 ) -> DispatchReport:
     """One pass of the outbox. Never raises."""
     from app.config import get_settings
 
+    supplied_now = now is not None
     now = now or datetime.now(UTC)
+    # Tests that provide `now` keep a deterministic wire instant. Production
+    # does not provide it and therefore re-reads the real clock immediately
+    # before the provider boundary. An explicit clock exercises boundary
+    # crossings without sleeping.
+    wire_clock = clock or ((lambda: now) if supplied_now else lambda: datetime.now(UTC))
     settings = settings or get_settings()
     live = is_live(mode)
     owner = _owner()
@@ -545,7 +617,7 @@ def dispatch_once(
         report.claimed += 1
         _process(session_factory, delivery_id, phrase_set=phrase_set, mode=mode,
                  live_profile=live_profile, sender=sender, now=now, settings=settings,
-                 report=report)
+                 report=report, clock=wire_clock)
 
     _heartbeat(report, mode=mode, live_profile=live_profile)
     return report
@@ -553,8 +625,11 @@ def dispatch_once(
 
 def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhraseSet,
              mode: str, live_profile: str, sender: Sender, now: datetime,
-             settings: Any, report: DispatchReport) -> None:
+             settings: Any, report: DispatchReport,
+             clock: Callable[[], datetime]) -> None:
     body: str | None = None
+    pending_render: AlertRender | None = None
+    attempt_now = now
     with session_factory() as session:
         delivery = session.get(AlertDelivery, delivery_id)
         if delivery is None:
@@ -597,9 +672,25 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # re-rendered, because its count is computed from suppression state
         # that can move between passes: an episode silenced after the first
         # render would otherwise be disclosed by a stale number.
-        if existing is not None and not (
-                delivery.delivery_kind == DeliveryKind.DIGEST
-                and _digest_may_rerender(delivery)):
+        may_rerender = (
+            _digest_may_rerender(delivery)
+            if delivery.delivery_kind == DeliveryKind.DIGEST
+            else _unattempted_render_may_rerender(delivery)
+        )
+        if existing is not None and not may_rerender:
+            if _frozen_render_names_withdrawn_member(session, delivery, existing):
+                cancel(
+                    session,
+                    delivery,
+                    now=now,
+                    reason="RENDERED_MEMBER_WITHDRAWN",
+                )
+                report.cancelled += 1
+                report.notes.append(
+                    f"{delivery_id}: frozen retry render represents a member "
+                    "withdrawn before send"
+                )
+                return
             body = existing.final_message
         else:
             # EVERY kind renders from the phrase set its members were PLANNED
@@ -626,19 +717,14 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             # because a test that bypassed the pipeline would prove the wrong
             # thing.
             if delivery.delivery_kind == DeliveryKind.TEST:
-                fragment = render_phrases.headlines.get("TEST_MESSAGE")
-                if fragment is None:
+                try:
+                    result = render_test_message(render_phrases)
+                except RenderRejected as exc:
                     mark_render_failed(session, delivery, now=now,
-                                       reason="phrase set has no TEST_MESSAGE")
+                                       reason=exc.redacted())
                     report.render_failed += 1
                     return
                 context = RenderContext(members=[])
-                result = RenderResult(
-                    body=fragment.text, septet_count=septets(fragment.text),
-                    render_source=RenderSource.TEMPLATE_FULL,
-                    selected_phrase_codes=["TEST_MESSAGE"],
-                    validation={"gsm7": True, "fits_single_sms": True},
-                )
             elif delivery.delivery_kind == DeliveryKind.DIGEST:
                 context = RenderContext(members=[])
                 # NOT len(members), and not every planned member either.
@@ -701,7 +787,7 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                                        reason=exc.redacted())
                     report.render_failed += 1
                     return
-            session.add(AlertRender(
+            pending_render = AlertRender(
                 render_id=new_ulid(utc_ms(now)),
                 delivery_id=delivery_id,
                 render_source=result.render_source,
@@ -717,8 +803,24 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 final_message=result.body,
                 gsm7_septets=result.septet_count,
                 created_at=now,
-            ))
+            )
             body = result.body
+        # Rendering can cross an exact quiet-hours boundary. The planning-time
+        # hold and the pass-start release are advisory; this is the final
+        # wire-time decision. P1 remains exempt by construction.
+        # A wall-clock correction must not date the request before the pass
+        # that claimed it.  Besides corrupting latency evidence, an earlier
+        # request_started_at can make a fresh lease look stale.  Clamp to the
+        # pass instant while still re-reading the clock for real boundary
+        # crossings in the ordinary (forward-moving) case.
+        attempt_now = max(
+            _utc_clock_value(lambda: now),
+            _utc_clock_value(clock),
+        )
+        if would_be_held(int(delivery.priority), attempt_now):
+            hold_for_quiet(session, delivery, now=attempt_now)
+            report.held += 1
+            return
         # Re-check admission HERE, inside the transaction that marks the
         # delivery as sending. The pass-level check ran before any of this
         # delivery's work: a promotion, a demotion or a swapped ruleset between
@@ -736,10 +838,17 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 report.held += 1
                 log.error("alert_admission_withdrawn_before_send",
                           delivery_id=delivery_id, blockers=late)
-                release(session, delivery, now=now)
+                release(session, delivery, now=attempt_now)
                 return
 
-        mark_sending(session, delivery, now=now)
+        # A render becomes immutable FINAL evidence only after every gate that
+        # can still refuse the provider call has passed. This ordering also
+        # repairs the old stale-render path: a withdrawal or a quiet boundary
+        # leaves no newly committed body for a later pass to reuse.
+        if pending_render is not None:
+            pending_render.created_at = attempt_now
+            session.add(pending_render)
+        mark_sending(session, delivery, now=attempt_now)
         recipient_ref = delivery.recipient_ref
         # Read inside the transaction: the send happens outside it, and the
         # object is detached by then.
@@ -757,6 +866,13 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
     # -- 5: send. OUTSIDE any transaction: no external I/O holds a write lock.
     outcome = sender.send(body or "", recipient_ref=recipient_ref,
                           idempotency_key=idempotency_key)
+    # Terminal delivery evidence describes when the provider operation
+    # FINISHED, not when it began.  Reusing ``attempt_now`` here understated
+    # provider latency, dated SENT/UNKNOWN events before the response existed,
+    # and could make a transient retry immediately due after a slow request.
+    # Wall clocks can move backwards, so never persist completion before the
+    # already-committed request start.
+    completed_at = max(attempt_now, _utc_clock_value(clock))
 
     # -- 6: classify ---------------------------------------------------------
     with session_factory() as session:
@@ -767,20 +883,23 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         audit_withdrawn_admission(session, delivery, outcome=outcome, mode=mode,
                                   report=report)
         if outcome.is_success:
-            mark_sent(session, delivery, now=now, http_status=outcome.http_status)
+            mark_sent(session, delivery, now=completed_at,
+                      http_status=outcome.http_status)
             report.sent += 1
         elif outcome.is_ambiguous:
-            mark_unknown(session, delivery, now=now,
+            mark_unknown(session, delivery, now=completed_at,
                          reason=outcome.error_message_redacted or "ambiguous outcome",
                          error_code=outcome.error_code)
             report.unknown += 1
         elif outcome.may_retry_automatically:
-            mark_transient(session, delivery, now=now, error_code=outcome.error_code,
+            mark_transient(session, delivery, now=completed_at,
+                           error_code=outcome.error_code,
                            message=outcome.error_message_redacted,
                            http_status=outcome.http_status)
             report.failed += 1
         else:
-            mark_permanent(session, delivery, now=now, error_code=outcome.error_code,
+            mark_permanent(session, delivery, now=completed_at,
+                           error_code=outcome.error_code,
                            message=outcome.error_message_redacted,
                            http_status=outcome.http_status)
             report.failed += 1
