@@ -152,10 +152,10 @@ addressed:
 8. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
    `pull_request` runs, so the no-key exit-0 would have let a fork PR pass a
    *required* `cross-vendor` check with zero review. Fixed: the workflow sets
-   `VERIFIER_REQUIRE_KEY=true` exactly when the head repo differs from the
-   base repo, and the panel then **fails closed** without a key; same-repo
-   no-key runs keep the documented residual behavior. The reference repo
-   carries the same latent bypass.
+   `VERIFIER_REQUIRE_KEY=true` for fork-origin and Dependabot runs, and the
+   panel then **fails closed** without a key; ordinary same-repo no-key runs
+   keep the documented residual behavior. The reference repo carries the same
+   latent bypass.
 
 ## Verification
 

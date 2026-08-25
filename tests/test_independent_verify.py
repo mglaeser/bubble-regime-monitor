@@ -267,30 +267,61 @@ class TestEmptyEnvVarsAreAbsent:
 
 class TestTrustedWorkflowEndpointPreflight:
     @staticmethod
-    def _mask_step() -> str:
+    def _mask_step() -> dict:
         workflow = yaml.safe_load(
             (Path(__file__).resolve().parents[1]
              / ".github/workflows/independent-verify.yml").read_text()
         )
         steps = workflow["jobs"]["panel"]["steps"]
         return next(
-            step["run"] for step in steps
+            step for step in steps
             if step.get("name") == "Mask the verifier endpoint in the log"
         )
 
-    def test_blank_endpoint_refuses_before_the_credentialed_panel(self):
+    def _run_mask_step(self, *, base_url: str, key_configured: str) -> subprocess.CompletedProcess:
         env = os.environ.copy()
-        env["VERIFIER_BASE_URL"] = ""
+        env["VERIFIER_BASE_URL"] = base_url
+        env["VERIFIER_KEY_CONFIGURED"] = key_configured
         env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
-        result = subprocess.run(
-            ["bash", "-c", self._mask_step()],
+        return subprocess.run(
+            ["bash", "-c", self._mask_step()["run"]],
             capture_output=True,
             text=True,
             timeout=10,
             env=env,
         )
+
+    def test_workflow_derives_presence_without_giving_the_step_the_key(self):
+        mask_step = self._mask_step()
+        assert mask_step["env"]["VERIFIER_KEY_CONFIGURED"] == (
+            "${{ secrets.TRUSTED_VERIFIER_API_KEY != '' }}"
+        )
+        assert "SECOND_VENDOR_API_KEY" not in mask_step["env"]
+
+    def test_workflow_only_requires_a_key_for_untrusted_origins(self):
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[1]
+             / ".github/workflows/independent-verify.yml").read_text()
+        )
+        panel_step = next(
+            step for step in workflow["jobs"]["panel"]["steps"]
+            if step.get("name") == "Cross-vendor review panel"
+        )
+        assert panel_step["env"]["VERIFIER_REQUIRE_KEY"] == (
+            "${{ github.event.pull_request.head.repo.full_name != github.repository "
+            "|| startsWith(github.actor, 'dependabot') }}"
+        )
+
+    def test_blank_endpoint_refuses_before_the_credentialed_panel(self):
+        result = self._run_mask_step(base_url="", key_configured="true")
         assert result.returncode != 0
         assert "refus" in (result.stdout + result.stderr).casefold()
+
+    @pytest.mark.parametrize("base_url", ["", "not-an-endpoint"])
+    def test_endpoint_preflight_preserves_the_documented_no_key_mode(self, base_url):
+        result = self._run_mask_step(base_url=base_url, key_configured="false")
+        assert result.returncode == 0
+        assert "error" not in (result.stdout + result.stderr).casefold()
 
 
 class TestVerifierDiagnosticsAreSecretSafe:
@@ -539,7 +570,7 @@ class TestPanelFindingsOnItself:
         out = subprocess.run([sys.executable, script], capture_output=True, text=True,
                              timeout=60, env=env)
         assert out.returncode == 1
-        assert "fork-origin" in out.stderr
+        assert "fork or Dependabot" in out.stderr
 
     def test_round3_data_denylist_extended(self):
         for ext in ("csv", "tsv", "sql", "jsonl", "parquet", "sqlite", "dump", "bak"):
@@ -1129,7 +1160,7 @@ class TestMainFailsClosedOnAnUnreviewableDiff:
         monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
         monkeypatch.setenv("VERIFIER_REQUIRE_KEY", "true")
         assert iv.main() == 1
-        assert "fork-origin" in capsys.readouterr().err
+        assert "fork or Dependabot" in capsys.readouterr().err
 
     def test_a_same_repo_run_without_a_key_reports_the_residual(self, monkeypatch, capsys):
         monkeypatch.setattr(iv, "KEY", "")

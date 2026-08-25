@@ -1838,10 +1838,14 @@ def main() -> int:
         # on a fork PR is NOT the operator's documented residual state — it is
         # an untrusted origin that must FAIL CLOSED, or a required cross-vendor
         # check would pass with zero review. The workflow sets
-        # VERIFIER_REQUIRE_KEY=true exactly when head repo != base repo.
+        # VERIFIER_REQUIRE_KEY=true for a fork-origin or Dependabot run. The
+        # trusted workflow skips forks before this script and retains this
+        # check as defence in depth; Dependabot is same-repo but still has
+        # Actions secrets withheld.
         if (os.environ.get("VERIFIER_REQUIRE_KEY") or "").lower() == "true":
-            print("BLOCK fork-origin run without a vendor key: secrets are withheld "
-                  "from fork PRs, so the panel cannot review — fail-closed.", file=sys.stderr)
+            print("BLOCK untrusted no-key origin (fork or Dependabot): the verifier "
+                  "credential is unavailable, so the panel cannot review — fail-closed.",
+                  file=sys.stderr)
             return 1
         print("[independent-verify] RESIDUAL: no second-vendor key (SECOND_VENDOR_API_KEY or "
               "OPENAI_API_KEY) provisioned.\n"

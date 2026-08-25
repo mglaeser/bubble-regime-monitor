@@ -88,11 +88,22 @@ jobs:
       - name: Mask the verifier endpoint in the log
         env:
           VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
+          # The preflight only needs to know whether the credential exists; do
+          # not expand the credential's scope by handing its value to this step.
+          VERIFIER_KEY_CONFIGURED: ${{ secrets.TRUSTED_VERIFIER_API_KEY != '' }}
         run: |
           python - <<'PY'
           import os
           import sys
           from urllib.parse import urlsplit
+
+          # Preserve the panel's documented dormant mode. With no credential,
+          # the verifier exits green-but-loud before any endpoint or network I/O,
+          # so there is neither a credential boundary to enforce nor an endpoint
+          # diagnostic to redact here.
+          key_configured = os.environ.get("VERIFIER_KEY_CONFIGURED", "").casefold() == "true"
+          if not key_configured:
+              sys.exit(0)
 
           raw = os.environ.get("VERIFIER_BASE_URL", "").strip()
           if not raw:
@@ -212,9 +223,11 @@ jobs:
           # back empty, and the panel goes permanently fake-green.
           VERIFIER_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
           VERIFIER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # A missing key is the operator's documented residual on a same-repo
-          # PR, but never a silent pass when a credential was expected.
-          VERIFIER_REQUIRE_KEY: "true"
+          # Fork PRs are skipped above, while Dependabot PRs are same-repo but
+          # still have Actions secrets withheld. Both are untrusted no-key
+          # origins and must fail closed. An ordinary same-repo no-key run keeps
+          # the documented green-but-loud residual mode.
+          VERIFIER_REQUIRE_KEY: ${{ github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.actor, 'dependabot') }}
         run: python scripts/independent_verify.py
 
       - name: Publish the verdict onto the candidate head
