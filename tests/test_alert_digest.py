@@ -202,6 +202,85 @@ def test_a_quiet_week_does_not_fabricate_a_memberless_delivery():
         assert session.query(AlertDeliveryMember).all() == []
 
 
+def test_a_quiet_job_persists_window_proof_without_provider_intent(monkeypatch):
+    """Quiet is observable without weakening the member invariant.
+
+    A component heartbeat answers "is the digest job alive now?" while the
+    scheduler event preserves which closed window was actually inspected.
+    Neither is a provider intent, so a quiet week cannot counterfeit one of
+    the two successfully SENT weekly digests required for Stage 4 cutover.
+    """
+    from app.alerts.calendars import last_closed_digest_window
+    from app.alerts.health import health_projection
+    from app.alerts.models import AlertComponentHeartbeat, AlertEvent
+    from app.jobs import alert_digest
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    with session_scope() as session:
+        _registered(session)
+
+    result = alert_digest.run_once(now=NOW)
+    expected_window = last_closed_digest_window(NOW)
+
+    assert result == {
+        "status": "ok",
+        "window_key": expected_window,
+        "delivery_id": None,
+        "items": 0,
+        "quiet": True,
+        "stranded": 0,
+        "carried_forward": 0,
+        "skipped_reason": "no digest items for this window",
+        "windows_offered": 1,
+        "windows_planned": 0,
+        "recovered_windows": [],
+    }
+
+    with session_scope() as session:
+        assert session.query(AlertDelivery).all() == []
+        heartbeat = session.get(AlertComponentHeartbeat, "digest")
+        assert heartbeat is not None
+        assert heartbeat.status == "ok"
+        assert heartbeat.detail_json["window_key"] == expected_window
+        assert heartbeat.detail_json["quiet"] is True
+        assert heartbeat.detail_json["items"] == 0
+        assert heartbeat.detail_json["mode"] == "shadow"
+        assert heartbeat.detail_json["live_profile"] == "default"
+
+        event = session.execute(
+            select(AlertEvent).where(
+                AlertEvent.action == "digest_window_observed_quiet"
+            )
+        ).scalar_one()
+        assert event.causation_type == "SCHEDULER"
+        assert event.actor_type == "SCHEDULER"
+        assert event.causation_id is not None
+        assert len(event.causation_id) == 64
+        assert event.rules_sha256 is not None
+        assert expected_window in (event.detail_redacted or "")
+        assert "provider_intent=none" in (event.detail_redacted or "")
+
+        artifacts = load_active(session)
+        projection = health_projection(
+            session,
+            settings=get_settings(),
+            ruleset=artifacts.ruleset,
+            artifact_source=artifacts.source,
+            fallback_reason=artifacts.fallback_reason,
+            now=datetime.now(UTC),
+        )
+        assert projection["components"]["digest"]["healthy"] is True
+
+        from app.alerts.cutover import preflight
+        cutover = preflight(session, now=datetime.now(UTC))
+        assert any(
+            item.startswith("weekly_digests") for item in cutover.unsatisfied
+        ), "a quiet scheduler event counterfeited a successfully sent digest"
+
+
 def test_replanning_the_same_window_is_a_no_op():
     """A retried job, a restarted scheduler and a manual run must converge.
 

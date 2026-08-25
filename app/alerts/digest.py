@@ -13,10 +13,10 @@ obvious implementation gets it wrong:
    already have arrived.
 
 2. TEST is the sole memberless delivery kind.  A quiet run records the digest
-   heartbeat but creates no provider intent; otherwise an empty DIGEST would
-   violate the same member guard that protects every market delivery.  The
-   reviewed quiet template remains available, but liveness evidence is not a
-   fabricated episode.
+   heartbeat plus an append-only scheduler event, but creates no provider
+   intent; otherwise an empty DIGEST would violate the same member guard that
+   protects every market delivery.  The reviewed quiet template remains
+   available, but liveness evidence is not a fabricated episode.
 
 3. The digest is reported in user load but does NOT count against the non-P1
    budget (mandate 9.2). It is a scheduled summary, not an interruption.
@@ -33,8 +33,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.alerts.calendars import digest_window_key, last_closed_digest_window
-from app.alerts.canonical import new_ulid
+from app.alerts.canonical import identity_hash, new_ulid
 from app.alerts.enums import (
+    ActorType,
+    CausationType,
     DeliveryKind,
     DigestItemStatus,
     MemberRole,
@@ -43,13 +45,14 @@ from app.alerts.enums import (
     RenderSource,
     TransportStatus,
 )
-from app.alerts.errors import RenderRejected
+from app.alerts.errors import RenderRejected, sanitize
 from app.alerts.gsm7 import SINGLE_SMS_SEPTETS, first_non_gsm7, septets
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
     AlertDigestItem,
     AlertEpisode,
+    AlertEvent,
     AlertRender,
     AlertRulesetRegistry,
 )
@@ -136,6 +139,46 @@ def _origin_phrase_pair(session: Session, episode: AlertEpisode) -> tuple[str, s
         raise ValueError(
             f"origin ruleset {episode.origin_rules_sha256[:12]} is unavailable")
     return origin.phrase_set_version, origin.phrase_set_sha256
+
+
+def _record_quiet_window(
+    session: Session,
+    *,
+    mode: str,
+    live_profile: str,
+    window: str,
+    planning_rules_sha256: str,
+    now: datetime,
+) -> None:
+    """Preserve per-window proof without inventing a provider intent.
+
+    The component heartbeat written by the scheduler answers current liveness;
+    this append-only scheduler event answers the retrospective question "which
+    closed window did the job actually inspect?".  It deliberately is not an
+    ``AlertDelivery`` and therefore cannot counterfeit a successfully sent
+    digest in the Stage-4 cutover gate.
+
+    Repeated observations are retained rather than deduplicated: each is a
+    truthful scheduler execution, while the stable causation id groups every
+    observation of the same namespace/window for audit queries.
+    """
+    session.add(AlertEvent(
+        event_id=new_ulid(utc_ms(now)),
+        occurred_at=now,
+        causation_type=CausationType.SCHEDULER,
+        causation_id=identity_hash(
+            "DIGEST_WINDOW", mode, live_profile, window
+        ),
+        actor_type=ActorType.SCHEDULER,
+        actor_id_redacted="alert_digest",
+        action="digest_window_observed_quiet",
+        suppression_reasons=[],
+        detail_redacted=sanitize(
+            f"window={window}; mode={mode}; live_profile={live_profile}; "
+            "provider_intent=none; reason=no digest items"
+        ),
+        rules_sha256=planning_rules_sha256,
+    ))
 
 
 def _absorb(session: Session, delivery: AlertDelivery, *, mode: str,
@@ -320,6 +363,14 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
     if not items:
         plan.quiet = True
         plan.skipped_reason = "no digest items for this window"
+        _record_quiet_window(
+            session,
+            mode=mode,
+            live_profile=live_profile,
+            window=window,
+            planning_rules_sha256=planning_rules_sha256,
+            now=now,
+        )
         log.info("alert_digest_quiet", window=window)
         return plan
 

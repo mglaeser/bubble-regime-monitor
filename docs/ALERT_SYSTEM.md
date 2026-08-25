@@ -606,12 +606,15 @@ never the one in progress. One delivery per window, identified by the window
 key itself, so a retried job, a restarted scheduler and a manual run all
 converge on the same single message rather than three.
 
-**A quiet week records a heartbeat, not a provider intent.** The scheduler must
-still distinguish a genuinely quiet week from a digest job that died, but the
-mandate also makes `TEST` the only delivery kind allowed zero members. The
-durable `digest` component heartbeat is therefore the proof-of-life and health
-turns a stale/missing heartbeat critical. No empty `DIGEST` row is fabricated,
-and an event arriving late can still use that window because no dedupe key was
+**A quiet week records liveness evidence, not a provider intent.** The
+scheduler must still distinguish a genuinely quiet week from a digest job that
+died, but the mandate also makes `TEST` the only delivery kind allowed zero
+members. The `digest` component heartbeat is the current proof-of-life and
+health turns a stale/missing heartbeat critical; an append-only
+`digest_window_observed_quiet` scheduler event preserves the exact closed
+window in the audit trail. No empty `DIGEST` row is fabricated, no quiet event
+can count as one of Stage 4's successfully sent weekly digests, and an event
+arriving late can still use that window because no delivery dedupe key was
 burned. The reviewed `DIGEST_QUIET` template remains deterministically
 validated, but it is not authority to bypass the member invariant.
 
