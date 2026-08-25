@@ -236,6 +236,11 @@ def cancel_unsent_for_rules(session: Session, rule_ids: frozenset[str], *, mode:
         .where(
             AlertDelivery.mode == mode,
             AlertDelivery.live_profile == live_profile,
+            # Dominance is a real-time notification rule.  A DIGEST is a
+            # retrospective of events that already happened; matching its
+            # historical member by rule_id must not erase that event from the
+            # weekly record. TEST is transport-only and has no market member.
+            AlertDelivery.delivery_kind.in_(sorted(BUDGETED_KINDS)),
             AlertDelivery.transport_status.in_(
                 [TransportStatus.PENDING, TransportStatus.RETRY_DUE]),
             AlertDeliveryMember.rule_id.in_(sorted(rule_ids)),
@@ -490,16 +495,31 @@ def revalidate_members(
     now: datetime,
     recorded_at: datetime | None = None,
 ) -> list[AlertDeliveryMember]:
-    """Drop members whose episode resolved or was silenced while queued.
+    """Apply current resolution and silence state to queued members.
 
-    Telling somebody about a condition that has already cleared is worse than
-    saying nothing.
+    A real-time alert drops when its condition clears.  A DIGEST retains that
+    resolved event as retrospective evidence, but still revisits it for a
+    silence that may begin after resolution; aggregate disclosure is still
+    disclosure.
     """
     evidence_at = recorded_at or now
+    member_conditions = [
+        AlertDeliveryMember.delivery_id == delivery.delivery_id,
+    ]
+    if delivery.delivery_kind == DeliveryKind.DIGEST:
+        # A resolved digest member is still represented retrospectively, so it
+        # must continue to participate in silence checks on every pass.  The
+        # old live-only query stopped seeing it after RESOLVED_BEFORE_SEND; a
+        # silence beginning later could therefore leave its event disclosed in
+        # the aggregate count.  A member already silenced stays withdrawn.
+        member_conditions.append(
+            func.coalesce(AlertDeliveryMember.drop_reason, "")
+            != "SILENCED_BEFORE_SEND"
+        )
+    else:
+        member_conditions.append(AlertDeliveryMember.dropped_at.is_(None))
     members = session.execute(
-        select(AlertDeliveryMember).where(
-            AlertDeliveryMember.delivery_id == delivery.delivery_id,
-            AlertDeliveryMember.dropped_at.is_(None))
+        select(AlertDeliveryMember).where(*member_conditions)
         # Rendering order is evidence.  All members of one plan normally share
         # ``included_at``; relying on an unordered SELECT made the primary
         # headline database-plan dependent.  Keep the declared PRIMARY first,
@@ -514,11 +534,16 @@ def revalidate_members(
     live: list[AlertDeliveryMember] = []
     for member in members:
         episode = session.get(AlertEpisode, member.episode_id)
-        if episode is None or not episode.is_open:
-            member.dropped_at = evidence_at
-            member.drop_reason = "RESOLVED_BEFORE_SEND"
-            continue
-        if episode.episode_status == EpisodeStatus.RESOLVED:
+        resolved = (
+            episode is None
+            or not episode.is_open
+            or episode.episode_status == EpisodeStatus.RESOLVED
+        )
+        # Ordinary notifications stop at resolution immediately.  A DIGEST is
+        # different: resolution preserves retrospective representation, so a
+        # current silence must be evaluated first even when the episode has
+        # already closed.
+        if resolved and delivery.delivery_kind != DeliveryKind.DIGEST:
             member.dropped_at = evidence_at
             member.drop_reason = "RESOLVED_BEFORE_SEND"
             continue
@@ -542,6 +567,14 @@ def revalidate_members(
                 now=evidence_at,
                 detail=f"episode_id={member.episode_id}",
             )
+            continue
+        if resolved:
+            # Preserve the first observed resolution timestamp.  Digest rows
+            # are deliberately revisited for silence checks, not rewritten on
+            # every dispatcher pass.
+            if member.drop_reason != "RESOLVED_BEFORE_SEND":
+                member.dropped_at = evidence_at
+                member.drop_reason = "RESOLVED_BEFORE_SEND"
             continue
         live.append(member)
     return live
@@ -651,11 +684,20 @@ def apply_silences_to_unsent(
     result = {"members_dropped": 0, "deliveries_cancelled": 0, "in_flight": 0}
 
     for delivery in deliveries:
-        members = session.execute(
-            select(AlertDeliveryMember).where(
-                AlertDeliveryMember.delivery_id == delivery.delivery_id,
-                AlertDeliveryMember.dropped_at.is_(None),
+        member_conditions = [
+            AlertDeliveryMember.delivery_id == delivery.delivery_id,
+        ]
+        if delivery.delivery_kind == DeliveryKind.DIGEST:
+            # Resolved digest members remain represented and therefore remain
+            # silenceable until this provider intent is terminal.
+            member_conditions.append(
+                func.coalesce(AlertDeliveryMember.drop_reason, "")
+                != "SILENCED_BEFORE_SEND"
             )
+        else:
+            member_conditions.append(AlertDeliveryMember.dropped_at.is_(None))
+        members = session.execute(
+            select(AlertDeliveryMember).where(*member_conditions)
         ).scalars().all()
         matched: list[AlertDeliveryMember] = []
         for member in members:

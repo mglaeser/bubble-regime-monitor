@@ -134,6 +134,49 @@ def test_a_window_becomes_one_delivery_with_its_items_as_members():
                    for i in session.query(AlertDigestItem).all())
 
 
+def test_realtime_dominance_does_not_erase_a_retrospective_digest_item():
+    """A later dominant alert cannot rewrite an event that already occurred."""
+    from app.alerts.outbox import cancel_unsent_for_rules
+
+    rule_id = "legs.faber_spy_out_standard"
+    with session_scope() as session:
+        sha = _registered(session)
+        item_id = _pending_item(session, rules_sha=sha, rule_id=rule_id)
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        assert plan.delivery_id is not None
+
+        cancelled = cancel_unsent_for_rules(
+            session,
+            frozenset({rule_id}),
+            mode="shadow",
+            live_profile="default",
+            now=NOW + timedelta(minutes=1),
+        )
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == plan.delivery_id
+            )
+        ).scalar_one()
+        item = session.get(AlertDigestItem, item_id)
+
+        assert cancelled == 0
+        assert delivery.transport_status == "PENDING"
+        assert member.dropped_at is None
+        assert member.drop_reason is None
+        assert item.status == DigestItemStatus.PLANNED
+        assert item.delivery_id == plan.delivery_id
+
+
 def test_a_quiet_week_does_not_fabricate_a_memberless_delivery():
     """TEST is the only delivery kind allowed to have zero members.
 
@@ -510,6 +553,232 @@ def test_a_silenced_episode_is_not_disclosed_by_the_count():
         }
         assert by_rule[silenced_rule].status == DigestItemStatus.CANCELLED
         assert by_rule[resolved_rule].status == DigestItemStatus.DELIVERED
+
+
+def test_a_resolved_digest_member_still_honors_a_later_silence():
+    """Resolution preserves history; it must not exempt that history from silence."""
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import EpisodeStatus, TransportStatus
+    from app.alerts.sender import NullSender
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        episode = session.execute(select(AlertEpisode)).scalar_one()
+        episode.is_open = False
+        episode.episode_status = EpisodeStatus.RESOLVED
+        episode.resolved_at = NOW
+        _silence_rule(session, episode.rule_id)
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert sender.sent == []
+    assert report.cancelled == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+        item = session.get(AlertDigestItem, item_id)
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert member.drop_reason == "SILENCED_BEFORE_SEND"
+        assert item.status == DigestItemStatus.CANCELLED
+        assert item.last_error_code == "SILENCED"
+
+
+def test_eager_silence_sweep_revisits_a_resolved_digest_member():
+    """A prior resolution pass cannot make a pending digest invisible to silence."""
+    from app.alerts.enums import EpisodeStatus
+    from app.alerts.outbox import apply_silences_to_unsent, revalidate_members
+    from app.alerts.repository import load_active_silences
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        episode = session.execute(select(AlertEpisode)).scalar_one()
+        episode.is_open = False
+        episode.episode_status = EpisodeStatus.RESOLVED
+        episode.resolved_at = NOW
+        assert revalidate_members(session, delivery, now=NOW) == []
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+        assert member.drop_reason == "RESOLVED_BEFORE_SEND"
+
+        _silence_rule(session, episode.rule_id)
+        active = load_active_silences(session, now=NOW)
+        result = apply_silences_to_unsent(session, active, now=NOW)
+
+        item = session.get(AlertDigestItem, item_id)
+        assert result["members_dropped"] == 1
+        assert member.drop_reason == "SILENCED_BEFORE_SEND"
+        assert item.status == DigestItemStatus.CANCELLED
+
+
+def test_wire_time_silence_withdraws_an_already_resolved_digest_member():
+    """The represented set is rechecked at the wire clock, not frozen at pass start."""
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import EpisodeStatus, TransportStatus
+    from app.alerts.sender import NullSender
+
+    wire_now = NOW + timedelta(minutes=2)
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        episode = session.execute(select(AlertEpisode)).scalar_one()
+        episode.is_open = False
+        episode.episode_status = EpisodeStatus.RESOLVED
+        episode.resolved_at = NOW
+        session.add(AlertSilence(
+            silence_id=new_ulid(utc_ms(NOW)),
+            matcher_kind="RULE_ID",
+            matcher_value=episode.rule_id,
+            starts_at=NOW + timedelta(minutes=1),
+            ends_at=NOW + timedelta(hours=1),
+            comment="begins while the digest is rendering",
+            created_by_redacted="operator",
+            created_at=NOW,
+        ))
+
+    clock_values = iter([wire_now, wire_now])
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+        clock=lambda: next(clock_values),
+    )
+
+    assert sender.sent == []
+    assert report.cancelled == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+        item = session.get(AlertDigestItem, item_id)
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "ALL_MEMBERS_WITHDRAWN_AT_WIRE"
+        assert member.drop_reason == "SILENCED_BEFORE_SEND"
+        assert item.status == DigestItemStatus.CANCELLED
+
+
+def test_resolution_between_digest_render_and_wire_preserves_the_retrospective(
+        monkeypatch):
+    """The wire gate compares represented history, not only still-open episodes."""
+    from app.alerts import dispatcher as dispatcher_module
+    from app.alerts.enums import EpisodeStatus, TransportStatus
+    from app.alerts.sender import NullSender
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+
+    real_revalidate = dispatcher_module.revalidate_members
+    calls = 0
+
+    def resolve_on_wire(session, delivery, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            member = session.execute(
+                select(AlertDeliveryMember).where(
+                    AlertDeliveryMember.delivery_id == delivery.delivery_id
+                )
+            ).scalar_one()
+            episode = session.get(AlertEpisode, member.episode_id)
+            episode.is_open = False
+            episode.episode_status = EpisodeStatus.RESOLVED
+            episode.resolved_at = kwargs["now"]
+        return real_revalidate(session, delivery, **kwargs)
+
+    monkeypatch.setattr(
+        dispatcher_module,
+        "revalidate_members",
+        resolve_on_wire,
+    )
+    sender = NullSender()
+    report = dispatcher_module.dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert calls == 2
+    assert report.sent == 1
+    assert report.cancelled == 0
+    assert len(sender.sent) == 1
+    assert "1 Ereignisse" in sender.sent[0][1]
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        item = session.get(AlertDigestItem, item_id)
+        assert delivery.transport_status == TransportStatus.SENT
+        assert item.status == DigestItemStatus.DELIVERED
 
 
 def test_a_frozen_digest_is_cancelled_when_membership_changes():

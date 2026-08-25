@@ -619,8 +619,11 @@ Two consequences worth knowing:
 
 * Every digest that reaches the provider has at least one represented episode
   member. A resolved episode remains valid retrospective evidence; a silenced
-  member does not. The dispatcher and the `alert_delivery_requires_member`
-  trigger independently enforce this, while only `TEST` may carry zero rows.
+  member does not. Resolved members therefore remain eligible for silence
+  checks until the provider intent is terminal, and the wire-time gate compares
+  this exact represented set rather than only episodes still firing. The
+  dispatcher and the `alert_delivery_requires_member` trigger independently
+  enforce the member guard, while only `TEST` may carry zero rows.
 * The digest reports a **count**, not a sample. One SMS is 160 septets and a
   week of events does not fit; a message quietly containing the first three of
   twelve would be lying about the other nine. The episodes are on record as

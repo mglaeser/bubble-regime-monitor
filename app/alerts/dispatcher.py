@@ -8,7 +8,8 @@ the deployment beyond one worker remains a concurrency-review boundary.
 Order matters, and every step can still stop the send:
 
     1  claim (conditional UPDATE — exclusive without a table lock)
-    2  revalidate members: drop resolved or silenced ones, cancel if none remain
+    2  revalidate members: withdraw resolved live alerts and silenced members;
+       retain resolved digest members as retrospective evidence
     3  budget recheck: the AUTHORITATIVE count, immediately before sending
     4  render: reusing the existing render on a retry, never re-rendering
     5  revalidate at wire time; re-check quiet hours and live admission
@@ -470,14 +471,12 @@ def _frozen_render_membership_changed(
 ) -> bool:
     """Whether immutable prose no longer matches this provider intent.
 
-    Revalidation runs on every attempt, but a final render never changes.  If a
-    member is added, resolved, or silenced afterwards, those rules can only
-    both hold by refusing the old provider intent.  The represented-member
-    ledger is therefore exact, not advisory; missing or malformed evidence
-    fails closed for every non-TEST delivery.
-
-    A digest deliberately counts resolved events retrospectively, so only a
-    silence removes one from its expected set.
+    Revalidation runs on every attempt, but a final render never changes.  A
+    real-time member being added, resolved, or silenced changes its represented
+    set; for a retrospective DIGEST, addition or silence changes it while
+    resolution does not.  Either way the represented-member ledger is exact,
+    not advisory; missing or malformed evidence fails closed for every
+    non-TEST delivery.
     """
     if delivery.delivery_kind == DeliveryKind.TEST:
         return False
@@ -631,24 +630,23 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
 
         # -- 2: revalidate ------------------------------------------------
         members = revalidate_members(session, delivery, now=now)
-        rendered_member_ids = frozenset(member.episode_id for member in members)
+        represented_member_ids = (
+            _digest_represented_member_ids(session, delivery_id)
+            if delivery.delivery_kind == DeliveryKind.DIGEST
+            else []
+        )
+        rendered_member_ids = (
+            frozenset(represented_member_ids)
+            if delivery.delivery_kind == DeliveryKind.DIGEST
+            else frozenset(member.episode_id for member in members)
+        )
         # Mandate 21.3: TEST is the ONLY memberless delivery kind.  This check
         # also retires invalid DIGEST rows queued before the database trigger
         # was corrected; no legacy provider intent bypasses the runtime guard.
-        if not members and delivery.delivery_kind != DeliveryKind.TEST:
-            # A retrospective DIGEST may legitimately contain only episodes
-            # that resolved after firing; those persisted rows still represent
-            # real weekly events.  This is not a zero-member exemption: an
-            # empty digest, or one whose every item was silenced, still fails.
-            represented_digest_members = (
-                _digest_represented_member_ids(session, delivery_id)
-                if delivery.delivery_kind == DeliveryKind.DIGEST
-                else []
-            )
-            if not represented_digest_members:
-                cancel(session, delivery, now=now, reason="ALL_MEMBERS_RESOLVED")
-                report.cancelled += 1
-                return
+        if not rendered_member_ids and delivery.delivery_kind != DeliveryKind.TEST:
+            cancel(session, delivery, now=now, reason="ALL_MEMBERS_RESOLVED")
+            report.cancelled += 1
+            return
 
         # -- 3: authoritative budget recheck -------------------------------
         if (delivery.priority != Priority.P1
@@ -740,8 +738,6 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                 # exactly what the silence was for.
                 #
                 # So: everything planned, less what was deliberately suppressed.
-                represented_member_ids = _digest_represented_member_ids(
-                    session, delivery_id)
                 try:
                     result = render_digest_body(render_phrases,
                                                 item_count=len(represented_member_ids))
@@ -845,7 +841,11 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             now=membership_now,
             recorded_at=attempt_now,
         )
-        wire_member_ids = frozenset(member.episode_id for member in wire_members)
+        wire_member_ids = (
+            frozenset(_digest_represented_member_ids(session, delivery_id))
+            if delivery.delivery_kind == DeliveryKind.DIGEST
+            else frozenset(member.episode_id for member in wire_members)
+        )
         if wire_member_ids != rendered_member_ids:
             if rendered_member_ids and not wire_member_ids:
                 cancel(
