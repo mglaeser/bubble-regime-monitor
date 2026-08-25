@@ -165,8 +165,9 @@ def preflight(
     # are structurally forbidden by both application code and a DB CHECK.  It
     # therefore cannot prove that a P1 activation reached planning: silencing,
     # flapping, cooldown, dominance or a data-quality guard can suppress the
-    # notification before any delivery row exists.  Read the activated episode
-    # evidence as well, scoped to this live namespace and observation window.
+    # notification before any delivery row exists.  The episode snapshot is
+    # cumulative and cannot define a time window, so timestamped events define
+    # the window while the snapshot acts as a fail-closed completeness check.
     p1_held = session.execute(
         select(func.count()).select_from(AlertDelivery).where(
             AlertDelivery.mode == "live",
@@ -187,22 +188,83 @@ def preflight(
             AlertEpisode.episode_id,
             AlertEpisode.rule_id,
             AlertEpisode.suppression_reasons,
+            AlertEpisode.activated_at,
         ).where(
             AlertEpisode.mode == "live",
             AlertEpisode.live_profile == live_profile,
             AlertEpisode.priority == Priority.P1,
             AlertEpisode.activated_at.is_not(None),
-            AlertEpisode.activated_at >= window_start,
             AlertEpisode.activated_at <= now,
         )
     ).all()
-    suppressed_p1 = [row for row in p1_activations if row.suppression_reasons]
-    suppressed_rules = sorted({row.rule_id for row in suppressed_p1})
+    activation_by_episode = {
+        row.episode_id: _aware(row.activated_at)
+        for row in p1_activations
+        if row.activated_at is not None
+    }
+    suppression_events = (
+        session.execute(
+            select(
+                AlertEvent.episode_id,
+                AlertEvent.occurred_at,
+                AlertEvent.suppression_reasons,
+            ).where(
+                AlertEvent.episode_id.in_(sorted(activation_by_episode)),
+                AlertEvent.occurred_at <= now,
+            )
+        ).all()
+        if activation_by_episode
+        else []
+    )
+    attributed_reasons: dict[str, set[str]] = {
+        episode_id: set() for episode_id in activation_by_episode
+    }
+    recent_suppression_ids: set[str] = set()
+    for suppression_event in suppression_events:
+        if suppression_event.episode_id is None:
+            continue
+        occurred_at = _aware(suppression_event.occurred_at)
+        activated_at = activation_by_episode[suppression_event.episode_id]
+        reasons = {
+            str(reason)
+            for reason in (suppression_event.suppression_reasons or [])
+        }
+        if not reasons:
+            continue
+        # A pending candidate can carry a suppression reason before it becomes
+        # a genuine activation.  That timestamp attributes the cumulative
+        # snapshot reason, but it is not evidence that an activated P1 was
+        # suppressed.  Only post-activation events enter the Stage-4 window.
+        attributed_reasons[suppression_event.episode_id].update(reasons)
+        if occurred_at >= activated_at and occurred_at >= window_start:
+            recent_suppression_ids.add(suppression_event.episode_id)
+
+    rule_by_episode = {row.episode_id: row.rule_id for row in p1_activations}
+    unattributed: dict[str, set[str]] = {}
+    for activation_record in p1_activations:
+        snapshot_reasons = {
+            str(reason)
+            for reason in (activation_record.suppression_reasons or [])
+        }
+        missing = snapshot_reasons - attributed_reasons[
+            activation_record.episode_id
+        ]
+        if missing:
+            unattributed[activation_record.episode_id] = missing
+    suppressed_rules = sorted({
+        rule_by_episode[episode_id] for episode_id in recent_suppression_ids
+    })
+    unattributed_rules = sorted({
+        rule_by_episode[episode_id] for episode_id in unattributed
+    })
     check(
         "p1_never_suppressed",
-        not suppressed_p1,
-        f"{len(suppressed_p1)} activated P1 episode(s) carry notification "
-        f"suppression in the last {STABLE_DAYS}d; rules={suppressed_rules}",
+        not recent_suppression_ids and not unattributed,
+        f"{len(recent_suppression_ids)} activated P1 episode(s) have "
+        f"timestamped notification suppression in the last {STABLE_DAYS}d; "
+        f"rules={suppressed_rules}; {len(unattributed)} activated P1 "
+        f"episode(s) carry unattributed suppression snapshot reasons; "
+        f"rules={unattributed_rules}",
     )
 
     # 4: one confirmed digest for EACH of the two immediately closed weekly

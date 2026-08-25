@@ -130,6 +130,39 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert payload["legacy_daily_digest_enabled"] is False
 
 
+def test_health_projects_every_quick_check_error_without_crashing(
+    client, monkeypatch,
+):
+    """SQLite may return one row per integrity fault, not one scalar row."""
+    from sqlalchemy.orm import Session
+
+    faults = ["row 7 missing from index alpha", "wrong # of entries in index beta"]
+    original_execute = Session.execute
+
+    class MultiRowQuickCheck:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return faults
+
+    def execute_with_corruption(self, statement, *args, **kwargs):
+        if str(statement).strip().lower() == "pragma quick_check":
+            return MultiRowQuickCheck()
+        return original_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "execute", execute_with_corruption)
+    response = client.get(
+        "/api/v1/alerts/health",
+        headers={"X-API-Key": READ_KEY},
+    )
+
+    assert response.status_code == 200
+    schema = response.json()["schema"]
+    assert schema["quick_check"] == faults
+    assert schema["alert_schema_integrity"] == "critical"
+
+
 def test_health_fails_closed_when_a_required_partial_index_is_missing(client):
     from sqlalchemy import text
 

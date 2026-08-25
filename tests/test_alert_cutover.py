@@ -137,12 +137,24 @@ def _suppressed_p1_episode(
     activated_at=NOW - timedelta(days=1),
     mode="live",
     profile="default",
+    suppression_event_at=None,
 ):
     """Persist a real episode graph but deliberately create no delivery."""
     from app.alerts.artifacts import load_active, register
     from app.alerts.canonical import new_ulid
-    from app.alerts.enums import EpisodeStatus, Priority, SuppressionReason
-    from app.alerts.models import AlertEpisode, AlertEvaluation, AlertInputSnapshot
+    from app.alerts.enums import (
+        ActorType,
+        CausationType,
+        EpisodeStatus,
+        Priority,
+        SuppressionReason,
+    )
+    from app.alerts.models import (
+        AlertEpisode,
+        AlertEvaluation,
+        AlertEvent,
+        AlertInputSnapshot,
+    )
     from app.alerts.repository import utc_ms
 
     artifacts = load_active(session)
@@ -206,6 +218,22 @@ def _suppressed_p1_episode(
         created_evaluation_id=evaluation_id,
         last_evaluation_id=evaluation_id,
     ))
+    if suppression_event_at is not None:
+        session.add(AlertEvent(
+            event_id=new_ulid(utc_ms(suppression_event_at)),
+            occurred_at=suppression_event_at,
+            causation_type=CausationType.EVALUATION,
+            causation_id=evaluation_id,
+            actor_type=ActorType.SYSTEM,
+            evaluation_id=evaluation_id,
+            input_identity=identity,
+            episode_id=episode_id,
+            instance_fingerprint="suppressed-p1".ljust(64, "0"),
+            rule_id="regime.band_to_derisk",
+            action="notification_suppressed",
+            suppression_reasons=[SuppressionReason.SILENCED],
+            rules_sha256=artifacts.ruleset.rules_sha256,
+        ))
     session.flush()
     return episode_id
 
@@ -231,16 +259,21 @@ def test_suppressed_activated_p1_without_a_delivery_blocks_cutover():
 
 
 @pytest.mark.parametrize(
-    ("mode", "profile", "activated_at"),
+    ("mode", "profile", "activated_at", "suppression_event_at"),
     [
-        ("shadow", "default", NOW - timedelta(days=1)),
-        ("live", "another-profile", NOW - timedelta(days=1)),
-        ("live", "default", NOW - timedelta(days=STABLE_DAYS, seconds=1)),
-        ("live", "default", None),
+        ("shadow", "default", NOW - timedelta(days=1), None),
+        ("live", "another-profile", NOW - timedelta(days=1), None),
+        (
+            "live",
+            "default",
+            NOW - timedelta(days=STABLE_DAYS, seconds=1),
+            NOW - timedelta(days=STABLE_DAYS, milliseconds=500),
+        ),
+        ("live", "default", None, None),
     ],
 )
 def test_p1_suppression_gate_uses_the_exact_live_evidence_scope(
-    mode, profile, activated_at,
+    mode, profile, activated_at, suppression_event_at,
 ):
     """Only genuine activations in this live/profile/two-week window count."""
     with session_scope() as session:
@@ -249,6 +282,7 @@ def test_p1_suppression_gate_uses_the_exact_live_evidence_scope(
             mode=mode,
             profile=profile,
             activated_at=activated_at,
+            suppression_event_at=suppression_event_at,
         )
         report = preflight(session, now=NOW)
 
@@ -256,6 +290,79 @@ def test_p1_suppression_gate_uses_the_exact_live_evidence_scope(
         entry.startswith("p1_never_suppressed")
         for entry in report.satisfied
     )
+
+
+def test_old_p1_suppression_inside_the_evidence_window_blocks_cutover():
+    """Suppression time, not activation time, defines the Stage-4 window."""
+    with session_scope() as session:
+        _suppressed_p1_episode(
+            session,
+            activated_at=NOW - timedelta(days=30),
+            suppression_event_at=NOW - timedelta(days=1),
+        )
+        report = preflight(session, now=NOW)
+
+    assert any(
+        entry.startswith("p1_never_suppressed")
+        for entry in report.unsatisfied
+    )
+
+
+def test_unattributed_old_p1_suppression_snapshot_fails_closed():
+    """Legacy accumulated reasons cannot prove when suppression occurred."""
+    with session_scope() as session:
+        _suppressed_p1_episode(
+            session,
+            activated_at=NOW - timedelta(days=30),
+        )
+        report = preflight(session, now=NOW)
+
+    assert any(
+        entry.startswith("p1_never_suppressed")
+        and "unattributed" in entry
+        for entry in report.unsatisfied
+    )
+
+
+def test_persist_plan_records_timestamped_suppression_provenance():
+    """The production planner boundary writes the evidence Stage 4 consumes."""
+    from sqlalchemy import select
+
+    from app.alerts.enums import CausationType, SuppressionReason
+    from app.alerts.models import AlertEpisode, AlertEvent
+    from app.alerts.outbox import persist_plan
+    from app.alerts.planner import PlanResult
+
+    with session_scope() as session:
+        episode_id = _suppressed_p1_episode(session)
+        episode = session.get(AlertEpisode, episode_id)
+        assert episode is not None
+        persist_plan(
+            session,
+            PlanResult(suppressions={
+                episode_id: [SuppressionReason.SILENCED],
+            }),
+            mode="live",
+            live_profile="default",
+            planning_rules_sha256=episode.origin_rules_sha256,
+            recipient_ref="default",
+            now=NOW,
+        )
+        session.flush()
+        event = session.execute(
+            select(AlertEvent).where(
+                AlertEvent.episode_id == episode_id,
+                AlertEvent.action == "notification_suppressed",
+            )
+        ).scalars().one()
+
+        assert event.occurred_at == NOW.replace(tzinfo=None)
+        assert event.causation_type == CausationType.EVALUATION
+        assert event.evaluation_id == episode.last_evaluation_id
+        assert event.instance_fingerprint == episode.instance_fingerprint
+        assert event.rule_id == episode.rule_id
+        assert event.rules_sha256 == episode.origin_rules_sha256
+        assert event.suppression_reasons == [SuppressionReason.SILENCED]
 
 
 def test_one_recent_delivery_is_not_two_stable_weeks():

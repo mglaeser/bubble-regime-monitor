@@ -21,12 +21,13 @@ from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.alerts.budgets import (
     BUDGETED_KINDS,
-    DISPATCH_RESERVED_STATUSES,
+    DISPATCH_IN_FLIGHT_STATUSES,
+    DISPATCH_ORDERED_READY_STATUSES,
     PLANNER_RESERVED_STATUSES,
     BudgetDecision,
     BudgetLimits,
@@ -99,8 +100,31 @@ def persist_plan(
     for episode_id, reasons in result.suppressions.items():
         episode = session.get(AlertEpisode, episode_id)
         if episode is not None:
-            merged = set(episode.suppression_reasons or []) | set(reasons)
+            normalized_reasons = sorted({str(reason) for reason in reasons})
+            merged = set(episode.suppression_reasons or []) | set(normalized_reasons)
             episode.suppression_reasons = sorted(merged)
+            if normalized_reasons:
+                # The episode snapshot is intentionally cumulative, which
+                # makes it useful for diagnosis but unable to answer WHEN a
+                # suppression happened.  Stage-4 cutover needs an exact
+                # two-week observation window, so every planner suppression
+                # also receives immutable, timestamped provenance.
+                session.add(AlertEvent(
+                    event_id=new_ulid(utc_ms(now)),
+                    occurred_at=now,
+                    causation_type=CausationType.EVALUATION,
+                    causation_id=episode.last_evaluation_id,
+                    actor_type=ActorType.SYSTEM,
+                    evaluation_id=episode.last_evaluation_id,
+                    input_identity=episode.trigger_input_identity,
+                    episode_id=episode.episode_id,
+                    instance_fingerprint=episode.instance_fingerprint,
+                    rule_id=episode.rule_id,
+                    action="notification_suppressed",
+                    suppression_reasons=normalized_reasons,
+                    detail_redacted="planner notification suppression",
+                    rules_sha256=episode.origin_rules_sha256,
+                ))
 
     for intent in result.deliveries:
         existing = session.execute(
@@ -348,7 +372,11 @@ def claimable(session: Session, *, mode: str, live_profile: str, now: datetime,
             AlertDelivery.planning_rules_sha256.notin_(list(exclude_rules_sha256)))
     return list(session.execute(
         select(AlertDelivery).where(*conditions)
-        .order_by(AlertDelivery.priority.asc(), AlertDelivery.created_at.asc())
+        .order_by(
+            AlertDelivery.priority.asc(),
+            AlertDelivery.created_at.asc(),
+            AlertDelivery.delivery_id.asc(),
+        )
         .limit(limit)
     ).scalars().all())
 
@@ -447,13 +475,19 @@ def recover_leases(session: Session, *, now: datetime) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def revalidate_members(session: Session, delivery: AlertDelivery, *,
-                       now: datetime) -> list[AlertDeliveryMember]:
+def revalidate_members(
+    session: Session,
+    delivery: AlertDelivery,
+    *,
+    now: datetime,
+    recorded_at: datetime | None = None,
+) -> list[AlertDeliveryMember]:
     """Drop members whose episode resolved or was silenced while queued.
 
     Telling somebody about a condition that has already cleared is worse than
     saying nothing.
     """
+    evidence_at = recorded_at or now
     members = session.execute(
         select(AlertDeliveryMember).where(
             AlertDeliveryMember.delivery_id == delivery.delivery_id,
@@ -473,11 +507,11 @@ def revalidate_members(session: Session, delivery: AlertDelivery, *,
     for member in members:
         episode = session.get(AlertEpisode, member.episode_id)
         if episode is None or not episode.is_open:
-            member.dropped_at = now
+            member.dropped_at = evidence_at
             member.drop_reason = "RESOLVED_BEFORE_SEND"
             continue
         if episode.episode_status == EpisodeStatus.RESOLVED:
-            member.dropped_at = now
+            member.dropped_at = evidence_at
             member.drop_reason = "RESOLVED_BEFORE_SEND"
             continue
         origin_state = session.get(AlertRuleState, (
@@ -492,12 +526,12 @@ def revalidate_members(session: Session, delivery: AlertDelivery, *,
             rule_id=member.rule_id,
             bucket=origin_state.bucket if origin_state is not None else None,
         ):
-            member.dropped_at = now
+            member.dropped_at = evidence_at
             member.drop_reason = "SILENCED_BEFORE_SEND"
             _cancel_digest_item_for_member(session, delivery, member)
             _event(
                 session,
-                now,
+                evidence_at,
                 action="delivery_member_silenced_before_send",
                 delivery_id=delivery.delivery_id,
                 detail=f"episode_id={member.episode_id}",
@@ -715,14 +749,61 @@ def dispatch_budget_usage(
     now: datetime,
     current_delivery_id: str,
 ) -> BudgetUsage:
-    """Authoritative usage before send, excluding the current lease itself."""
-    return _budget_usage(
+    """Authoritative usage with deterministic queued-slot reservations.
+
+    Every other in-flight request reserves headroom.  READY queued work also
+    reserves it, but only when it ranks before this delivery in the exact
+    claim order.  Counting every queued row would deadlock the head of the
+    queue; counting none lets later workers double-spend its final slot.
+    """
+    usage = _budget_usage(
         session,
         mode=mode,
         live_profile=live_profile,
         now=now,
-        reserved_statuses=DISPATCH_RESERVED_STATUSES,
+        reserved_statuses=DISPATCH_IN_FLIGHT_STATUSES,
         exclude_delivery_id=current_delivery_id,
+    )
+    current = session.get(AlertDelivery, current_delivery_id)
+    if current is None:
+        raise ValueError(f"current delivery {current_delivery_id!r} does not exist")
+
+    live_member_exists = select(AlertDeliveryMember.delivery_id).where(
+        AlertDeliveryMember.delivery_id == AlertDelivery.delivery_id,
+        AlertDeliveryMember.dropped_at.is_(None),
+    ).exists()
+    ranks_before_current = or_(
+        AlertDelivery.priority < current.priority,
+        and_(
+            AlertDelivery.priority == current.priority,
+            AlertDelivery.created_at < current.created_at,
+        ),
+        and_(
+            AlertDelivery.priority == current.priority,
+            AlertDelivery.created_at == current.created_at,
+            AlertDelivery.delivery_id < current.delivery_id,
+        ),
+    )
+    earlier_ready = int(session.execute(
+        select(func.count()).select_from(AlertDelivery).where(
+            AlertDelivery.mode == mode,
+            AlertDelivery.live_profile == live_profile,
+            AlertDelivery.priority > 1,
+            AlertDelivery.delivery_kind.in_(sorted(BUDGETED_KINDS)),
+            AlertDelivery.transport_status.in_(
+                sorted(DISPATCH_ORDERED_READY_STATUSES)),
+            AlertDelivery.planning_state == PlanningState.READY,
+            (AlertDelivery.not_before.is_(None)) | (AlertDelivery.not_before <= now),
+            AlertDelivery.delivery_id != current_delivery_id,
+            live_member_exists,
+            ranks_before_current,
+        )
+    ).scalar_one())
+    return BudgetUsage(
+        sent_24h=usage.sent_24h,
+        sent_168h=usage.sent_168h,
+        reserved=usage.reserved + earlier_ready,
+        digest_168h=usage.digest_168h,
     )
 
 

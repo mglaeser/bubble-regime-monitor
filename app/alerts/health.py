@@ -609,7 +609,18 @@ def health_projection(
         if alembic_version_present
         else None
     )
-    quick_check = session.execute(_text("PRAGMA quick_check")).scalar_one()
+    quick_check_rows = [
+        str(value)
+        for value in session.execute(_text("PRAGMA quick_check")).scalars().all()
+    ]
+    # SQLite returns exactly one ``ok`` row when healthy, but one row PER
+    # integrity fault otherwise.  Preserve the established healthy API shape
+    # while exposing every fault instead of crashing on ``scalar_one``.
+    quick_check: str | list[str] = (
+        "ok"
+        if len(quick_check_rows) == 1 and quick_check_rows[0].lower() == "ok"
+        else quick_check_rows
+    )
     foreign_key_violations = len(
         session.execute(_text("PRAGMA foreign_key_check")).all()
     )
@@ -849,7 +860,7 @@ def health_projection(
     }
 
     schema_faults: list[str] = []
-    if str(quick_check).lower() != "ok":
+    if quick_check != "ok":
         schema_faults.append(f"quick_check returned {quick_check!s}")
     if foreign_key_violations:
         schema_faults.append(
@@ -1044,7 +1055,7 @@ def health_projection(
         "schema": {
             "revision": schema_revision,
             "expected_revision": _ALERT_SCHEMA_REVISION,
-            "quick_check": str(quick_check),
+            "quick_check": quick_check,
             "foreign_key_violations": foreign_key_violations,
             "required_triggers": sorted(required_triggers),
             "missing_required_triggers": missing_required_triggers,

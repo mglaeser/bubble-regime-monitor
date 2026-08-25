@@ -46,6 +46,7 @@ def _add_delivery(
     memberless: bool = False,
     dropped: bool = False,
     sent_at: datetime | None = None,
+    created_at: datetime | None = None,
 ) -> str:
     delivery_id = new_ulid(utc_ms(NOW))
     session.add(AlertDelivery(
@@ -59,7 +60,7 @@ def _add_delivery(
         transport_status=status,
         planning_state=planning_state,
         not_before=NOW,
-        created_at=NOW - timedelta(minutes=5),
+        created_at=created_at or NOW - timedelta(minutes=5),
         updated_at=NOW,
         sent_at=sent_at,
         recipient_ref="default",
@@ -204,6 +205,89 @@ def test_current_lease_is_not_double_counted():
             current_delivery_id=current,
         )
     assert usage.reserved == 0
+
+
+def test_dispatch_reserves_headroom_for_an_earlier_ready_delivery():
+    """A later worker cannot spend the queue head's remaining budget slot."""
+    from app.alerts.outbox import dispatch_budget_usage
+
+    episode_id = _prepare_graph()
+    with session_scope() as session:
+        episode = session.get(AlertEpisode, episode_id)
+        assert episode is not None
+        for offset in (timedelta(hours=1), timedelta(hours=2)):
+            _add_delivery(
+                session,
+                episode,
+                status=TransportStatus.SENT,
+                planning_state=PlanningState.NONE,
+                sent_at=NOW - offset,
+            )
+        _add_delivery(
+            session,
+            episode,
+            status=TransportStatus.PENDING,
+            created_at=NOW - timedelta(minutes=10),
+        )
+        current = _add_delivery(
+            session,
+            episode,
+            status=TransportStatus.LEASED,
+            created_at=NOW - timedelta(minutes=5),
+        )
+        session.flush()
+        usage = dispatch_budget_usage(
+            session,
+            mode="shadow",
+            live_profile="default",
+            now=NOW,
+            current_delivery_id=current,
+        )
+
+    assert (usage.sent_24h, usage.reserved) == (2, 1)
+    assert check_budget(2, usage, LIMITS).reason == "cap_24h"
+
+
+def test_dispatch_does_not_reserve_for_a_later_ready_delivery():
+    """Queue reservations are ordered, so the head can still make progress."""
+    from app.alerts.outbox import dispatch_budget_usage
+
+    episode_id = _prepare_graph()
+    with session_scope() as session:
+        episode = session.get(AlertEpisode, episode_id)
+        assert episode is not None
+        for offset in (timedelta(hours=1), timedelta(hours=2)):
+            _add_delivery(
+                session,
+                episode,
+                status=TransportStatus.SENT,
+                planning_state=PlanningState.NONE,
+                sent_at=NOW - offset,
+            )
+        same_created_at = NOW - timedelta(minutes=5)
+        current = _add_delivery(
+            session,
+            episode,
+            status=TransportStatus.LEASED,
+            created_at=same_created_at,
+        )
+        _add_delivery(
+            session,
+            episode,
+            status=TransportStatus.PENDING,
+            created_at=same_created_at,
+        )
+        session.flush()
+        usage = dispatch_budget_usage(
+            session,
+            mode="shadow",
+            live_profile="default",
+            now=NOW,
+            current_delivery_id=current,
+        )
+
+    assert (usage.sent_24h, usage.reserved) == (2, 0)
+    assert check_budget(2, usage, LIMITS).allowed is True
 
 
 def test_digest_reported_in_user_load_but_not_market_cap():

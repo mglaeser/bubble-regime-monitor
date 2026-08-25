@@ -29,6 +29,7 @@ from app.alerts.models import (
     AlertDeliveryMember,
     AlertEpisode,
     AlertEvent,
+    AlertRender,
     AlertRuleState,
     AlertSilence,
 )
@@ -49,17 +50,25 @@ RULE_ID = "regime.band_to_derisk"
 BUCKET = "regime"
 
 
-def _persist_silence(kind: SilenceMatcherKind, value: str) -> None:
+def _persist_silence(
+    kind: SilenceMatcherKind,
+    value: str,
+    *,
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
+) -> None:
+    starts_at = starts_at or NOW - timedelta(minutes=1)
+    ends_at = ends_at or NOW + timedelta(hours=1)
     with session_scope() as session:
         session.add(AlertSilence(
             silence_id=f"silence-{kind.value.lower()}",
             matcher_kind=kind,
             matcher_value=value,
-            starts_at=NOW - timedelta(minutes=1),
-            ends_at=NOW + timedelta(hours=1),
+            starts_at=starts_at,
+            ends_at=ends_at,
             comment="test",
             created_by_redacted="operator",
-            created_at=NOW - timedelta(minutes=1),
+            created_at=min(starts_at, NOW),
         ))
 
 
@@ -197,6 +206,65 @@ def test_silence_created_after_planning_drops_member_before_send(matcher_kind):
         assert episode is not None and episode.is_open
         assert episode.episode_status == EpisodeStatus.FIRING
         assert state.condition_state == ConditionState.FIRING
+
+
+def test_silence_starting_during_render_refuses_the_wire_call():
+    """The last silence decision uses wire time, after rendering completes."""
+    from app.alerts.canonical import new_ulid
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.repository import utc_ms
+
+    delivery_id, episode_id = _queued_delivery()
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery is not None
+        delivery.attempts = 1
+        frozen_body = "A previously attempted alert body."
+        session.add(AlertRender(
+            render_id=new_ulid(utc_ms(NOW - timedelta(minutes=1))),
+            delivery_id=delivery_id,
+            render_source="template_full",
+            fallback_reason=None,
+            planning_phrase_set_version="v3.3",
+            planning_phrase_set_sha256="p" * 64,
+            render_context_hash="c" * 64,
+            fact_catalog_hash="f" * 64,
+            selected_fact_ids=[],
+            selected_phrase_codes=[],
+            validation_results={"represented_member_ids": [episode_id]},
+            final_message=frozen_body,
+            gsm7_septets=len(frozen_body),
+            created_at=NOW - timedelta(minutes=1),
+        ))
+
+    wire_now = NOW + timedelta(seconds=1)
+    _persist_silence(
+        SilenceMatcherKind.ALL,
+        "*",
+        starts_at=NOW + timedelta(milliseconds=500),
+        ends_at=NOW + timedelta(hours=1),
+    )
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=None,
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+        clock=lambda: wire_now,
+    )
+
+    assert sender.sent == []
+    assert report.cancelled == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        member = session.get(AlertDeliveryMember, (delivery_id, episode_id))
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.request_started_at is None
+        assert member is not None
+        assert member.drop_reason == "SILENCED_BEFORE_SEND"
 
 
 def test_bundle_silence_drops_only_matching_member():

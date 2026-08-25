@@ -1,10 +1,9 @@
 """The single delivery worker: claim, revalidate, render, send, classify.
 
-One worker. On the Atom N2800 target this is a capacity decision as much as a
-correctness one, but it also means the budget recheck does not have to be
-distributed-safe. If a second worker is ever enabled, that recheck and the
-lease claim both need a fresh concurrency review — the code says so rather than
-leaving it implicit.
+One configured worker. On the Atom N2800 target this is a capacity decision as
+much as a correctness one. Conditional leases and deterministic queued budget
+reservations still fail closed if duplicate processes briefly overlap; scaling
+the deployment beyond one worker remains a concurrency-review boundary.
 
 Order matters, and every step can still stop the send:
 
@@ -12,8 +11,9 @@ Order matters, and every step can still stop the send:
     2  revalidate members: drop resolved or silenced ones, cancel if none remain
     3  budget recheck: the AUTHORITATIVE count, immediately before sending
     4  render: reusing the existing render on a retry, never re-rendering
-    5  send
-    6  classify the outcome into one of four typed states
+    5  revalidate at wire time; re-check quiet hours and live admission
+    6  send
+    7  classify the outcome into one of four typed states
 
 A retry of the same intent reuses the same delivery row, the same render and
 the same dedupe key. Re-rendering would let a retry say something the first
@@ -637,6 +637,7 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
 
         # -- 2: revalidate ------------------------------------------------
         members = revalidate_members(session, delivery, now=now)
+        rendered_member_ids = frozenset(member.episode_id for member in members)
         # A DIGEST with no members is the one legitimate memberless market
         # delivery: a quiet week still sends, because after cutover this is the
         # only scheduled message the operator gets and silence is also what a
@@ -824,6 +825,65 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             )
             report.held += 1
             return
+        # Rendering is not instantaneous.  A silence can begin after the
+        # pass-start revalidation yet before the provider boundary, so perform
+        # the same membership decision against the actual wire clock.  Persist
+        # evidence at the monotonic attempt time when the wall clock rolled
+        # backwards, but never use that clamp to decide whether a silence is
+        # active.
+        wire_members = revalidate_members(
+            session,
+            delivery,
+            now=wire_now,
+            recorded_at=attempt_now,
+        )
+        wire_member_ids = frozenset(member.episode_id for member in wire_members)
+        if wire_member_ids != rendered_member_ids:
+            if rendered_member_ids and not wire_member_ids:
+                cancel(
+                    session,
+                    delivery,
+                    now=attempt_now,
+                    reason="ALL_MEMBERS_WITHDRAWN_AT_WIRE",
+                )
+                report.cancelled += 1
+                report.notes.append(
+                    f"{delivery_id}: every rendered member was withdrawn "
+                    "before the wire"
+                )
+                return
+
+            newly_added = wire_member_ids - rendered_member_ids
+            if existing is not None and not may_rerender:
+                if newly_added or _frozen_render_names_withdrawn_member(
+                    session, delivery, existing
+                ):
+                    cancel(
+                        session,
+                        delivery,
+                        now=attempt_now,
+                        reason="RENDERED_MEMBER_WITHDRAWN",
+                    )
+                    report.cancelled += 1
+                    report.notes.append(
+                        f"{delivery_id}: frozen retry membership changed "
+                        "before the wire"
+                    )
+                    return
+                # A frozen digest still truthfully counts a member that
+                # resolved during rendering; only silence changes disclosure.
+            else:
+                # The render is not in the session yet.  Returning the lease to
+                # READY discards it and lets the next pass rebuild from the
+                # surviving membership.  No stale body becomes final evidence.
+                pending_render = None
+                release(session, delivery, now=attempt_now)
+                report.held += 1
+                report.notes.append(
+                    f"{delivery_id}: membership changed during rendering; "
+                    "released for a fresh render"
+                )
+                return
         # Persisted lifecycle timestamps remain monotonic even when the wall
         # clock moved backwards.  Besides corrupting latency evidence, an
         # earlier request_started_at can make a fresh lease look stale.
