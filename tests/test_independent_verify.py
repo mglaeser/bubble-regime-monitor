@@ -1066,6 +1066,27 @@ class TestAuthHeader:
         monkeypatch.setenv("VERIFIER_AUTH_HEADER", "authorization")
         assert "Authorization" in iv.auth_header()
 
+    def test_minimum_length_key_can_carry_an_ordinary_valid_vote(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", "12345678")  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": "reviewed the candidate and found no concrete defect",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-boundary"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is True
+        assert out["v"]["refuted"] is False
+
     @pytest.mark.parametrize("name", [
         "Host",
         "Content-Type",
@@ -1110,6 +1131,7 @@ class TestAuthHeader:
         assert credential not in captured.out + captured.err
 
     @pytest.mark.parametrize("credential", [
+        "short7",
         "copied-key\n",
         "copied-key\r",
         "copied key",

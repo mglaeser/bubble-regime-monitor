@@ -147,6 +147,20 @@ class TestConfiguration:
         with pytest.raises(GatewayConfigError):
             _config(**{field: ""})
 
+    @pytest.mark.parametrize("api_key", ["a", "1234567"])
+    def test_short_api_keys_are_rejected_before_io(self, api_key):
+        with pytest.raises(GatewayConfigError, match="at least 8"):
+            _config(api_key=api_key)
+
+    def test_minimum_length_api_key_does_not_collide_with_ordinary_output(self):
+        http = _FakeHttpClient(_ok_response("The market looks calm."))
+        completion = GatewayClient(
+            _config(api_key="12345678"), http_client=http
+        ).complete(user="hello")
+
+        assert completion.text == "The market looks calm."
+        assert len(http.calls) == 1
+
     def test_trailing_slash_is_normalized_once(self):
         http = _FakeHttpClient(_ok_response())
         GatewayClient(_config(base_url=BASE_URL + "/"), http_client=http).complete(user="hello")

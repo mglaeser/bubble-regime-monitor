@@ -41,6 +41,7 @@ MAX_SSE_LINES = 50_000
 MAX_SSE_EVENTS = 20_000
 MAX_OUTPUT_CHARS = 2_000_000
 RAW_CHUNK_BYTES = 65_536
+MIN_API_KEY_CHARS = 8
 
 # A timed-out OS resolver/socket call may outlive its caller even after close.
 # Bound that residual to one daemon worker: later calls wait only until their
@@ -129,9 +130,11 @@ class GatewayConfig:
             raise GatewayConfigError("LLM API base URL contains invalid characters")
 
         api_key = self.api_key
-        if (not api_key or api_key != api_key.strip()
+        if (len(api_key) < MIN_API_KEY_CHARS or api_key != api_key.strip()
                 or any(ord(char) < 32 for char in api_key)):
-            raise GatewayConfigError("LLM API key is missing or has surrounding whitespace")
+            raise GatewayConfigError(
+                "LLM API key must be at least 8 characters with no "
+                "surrounding whitespace")
 
         model = self.model.strip()
         if not _MODEL_ROUTE.fullmatch(model):

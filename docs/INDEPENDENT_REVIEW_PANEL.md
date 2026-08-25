@@ -83,9 +83,10 @@ gates that judge it.
    `TRUSTED_VERIFIER_API_KEY`. The workflow maps that one secret to the
    verifier process's `SECOND_VENDOR_API_KEY`; its endpoint preflight receives
    only a Boolean presence signal derived from the same secret, never the key.
-   The key must be a nonempty visible-ASCII value; whitespace/control or Unicode
-   forms are refused before diff or network I/O because transport diagnostics
-   can escape them into a different literal.
+   The key must be an 8–4096-character visible-ASCII value; shorter,
+   whitespace/control, or Unicode forms are refused before diff or network I/O.
+   The lower bound keeps exact-echo leak detection from treating ordinary text
+   as a credential match when an operator supplies a trivially short key.
 2. Store the endpoint as the `trusted-verifier` **environment secret**
    `VERIFIER_BASE_URL` — NOT as a variable. It is required even for direct
    OpenAI use (`https://api.openai.com/v1` must be explicit); there is no host

@@ -128,7 +128,7 @@ _AUTH_HEADER_ERROR = (
     "refusing the credentialed verifier request"
 )
 _KEY_ERROR = (
-    "verifier API key must be a nonempty visible-ASCII value; "
+    "verifier API key must be a visible-ASCII value between 8 and 4096 characters; "
     "refusing the credentialed verifier request"
 )
 
@@ -270,7 +270,7 @@ def auth_header() -> dict[str, str]:
     and answers Bearer with 401 "opencodex API key required" while accepting
     X-OpenCodex-API-Key. Actions injects an EMPTY STRING for an unset repo
     variable, so the empty form must retain the Authorization default."""
-    if (not isinstance(KEY, str) or not 1 <= len(KEY) <= 4096
+    if (not isinstance(KEY, str) or not 8 <= len(KEY) <= 4096
             or any(not 33 <= ord(char) <= 126 for char in KEY)):
         raise ProviderConfigError(_KEY_ERROR)
     name = (os.environ.get("VERIFIER_AUTH_HEADER") or "").strip()
