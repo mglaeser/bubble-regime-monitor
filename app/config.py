@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app import methodology as _M
@@ -24,10 +24,10 @@ class Settings(BaseSettings):
     # operator config: these defaults carry no deployment hostname, key, model
     # route, or auth-header value. Partial configuration is unavailable, never
     # inferred from a public default.
-    llm_api_base_url: str = ""
+    llm_api_base_url: str = Field(default="", repr=False)
     llm_api_key: SecretStr = SecretStr("")
-    llm_model: str = ""
-    llm_auth_header: str = ""
+    llm_model: str = Field(default="", repr=False)
+    llm_auth_header: str = Field(default="", repr=False)
     llm_max_tokens: int = 8000
 
     # FRED

@@ -44,6 +44,14 @@ log = get_logger(__name__)
 
 PROMPT_VERSION = "1"
 
+SELECTION_OUTPUT_KEYS = frozenset({
+    "headline_code",
+    "phrase_codes",
+    "fact_ids",
+    "next_check_code",
+    "caveat_codes",
+})
+
 SYSTEM_PROMPT = (
     "You select notification fragment CODES for a research alert. You do not "
     "write text and you do not write numbers. Reply with JSON only, using "
@@ -222,6 +230,7 @@ def _call_model(context: RenderContext, phrase_set: ValidatedPhraseSet,
         user=prompt,
         max_tokens=min(400, settings.llm_max_tokens),
         deadline_s=float(settings.alerts_llm_timeout_s),
+        json_output_keys=SELECTION_OUTPUT_KEYS,
         settings=settings,
     )
     return json.loads(response.text), response.request_id

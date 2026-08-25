@@ -237,18 +237,104 @@ def _contains_protected_text(value: str) -> bool:
     return any(literal.casefold() in folded for literal in _protected_literals())
 
 
-def _contains_protected_value(value: object) -> bool:
-    """Scan parsed peer output after JSON escapes have been materialized."""
-    if isinstance(value, str):
-        return _contains_protected_text(value)
-    if isinstance(value, dict):
-        return any(
-            _contains_protected_value(key) or _contains_protected_value(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_protected_value(item) for item in value)
-    return False
+def _raw_contains_unexempted_protected_text(
+    value: str,
+    allowed_root_keys: frozenset[str],
+) -> bool:
+    """Retain whole-wire checks except for possible public root-key syntax."""
+    folded = value.casefold()
+    allowed = tuple(key.casefold() for key in allowed_root_keys)
+    return any(
+        literal.casefold() in folded
+        and not any(literal.casefold() in key for key in allowed)
+        for literal in _protected_literals()
+    )
+
+
+_VERDICT_ROOT_KEYS = frozenset({"refuted", "confidence", "reason", "defects", "proof"})
+
+
+class _JsonObjectPairs(list[tuple[str, object]]):
+    """Lossless JSON object representation that retains duplicate members."""
+
+
+class _JsonNumber(str):
+    """A numeric JSON token retained exactly as it appeared on the wire."""
+
+
+def _decode_lossless_json(value: str) -> object:
+    return json.loads(
+        value,
+        object_pairs_hook=_JsonObjectPairs,
+        parse_int=_JsonNumber,
+        parse_float=_JsonNumber,
+        parse_constant=_JsonNumber,
+    )
+
+
+def _contains_protected_value(
+    value: object,
+    *,
+    allowed_root_keys: frozenset[str] = frozenset(),
+) -> bool:
+    """Scan losslessly decoded peer output after escapes are materialized.
+
+    An exact allowlisted top-level key is public protocol syntax.  Its value,
+    every nested key, and every unknown top-level key remain peer-controlled and
+    are scanned.  This keeps a credential such as ``confidence`` from making the
+    required verdict JSON impossible without exempting an actual value echo.
+    """
+    def visit(item: object, *, root: bool = False) -> bool:
+        if isinstance(item, str):
+            return _contains_protected_text(item)
+        if isinstance(item, _JsonObjectPairs):
+            return any(
+                (not (root and key in allowed_root_keys) and visit(key))
+                or visit(child)
+                for key, child in item
+            )
+        if isinstance(item, dict):
+            return any(
+                (not (root and isinstance(key, str) and key in allowed_root_keys)
+                 and visit(key))
+                or visit(child)
+                for key, child in item.items()
+            )
+        if isinstance(item, (list, tuple)):
+            return any(visit(child) for child in item)
+        return False
+
+    return visit(value, root=True)
+
+
+def _verdict_echoes_protected_text(raw: str) -> bool:
+    """Scan accepted JSON losslessly plus any prose surrounding that JSON."""
+    if _raw_contains_unexempted_protected_text(raw, _VERDICT_ROOT_KEYS):
+        return True
+    json_text = raw
+    try:
+        decoded = _decode_lossless_json(raw)
+    except RecursionError:
+        return True
+    except (TypeError, ValueError):
+        match = re.search(r"\{[\s\S]*\}", raw)
+        if match is None:
+            return _contains_protected_text(raw)
+        json_text = match.group(0)
+        try:
+            decoded = _decode_lossless_json(json_text)
+        except RecursionError:
+            return True
+        except (TypeError, ValueError):
+            return _contains_protected_text(raw)
+        if (_contains_protected_text(raw[:match.start()])
+                or _contains_protected_text(raw[match.end():])):
+            return True
+    try:
+        return _contains_protected_value(
+            decoded, allowed_root_keys=_VERDICT_ROOT_KEYS)
+    except RecursionError:
+        return True
 
 
 def _http_error_detail(exc: urllib.error.HTTPError) -> str:
@@ -1466,12 +1552,12 @@ def parse_verdict(content: str) -> Any:
         # a vote that cannot be parsed is discarded rather than counted -- the
         # same fail-closed route an unparsable reply already takes.
         return None
-    except ValueError:
+    except (ValueError, RecursionError):
         m = re.search(r"\{[\s\S]*\}", content)
         if m:
             try:
                 return decoder.decode(m.group(0))
-            except (ValueError, DuplicateKey):
+            except (ValueError, DuplicateKey, RecursionError):
                 return None
     return None
 
@@ -1696,11 +1782,8 @@ def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
         # accumulation is empty AND it actually carries output — it has been
         # observed to arrive empty even after text was streamed.
         candidate = text or _extract_responses_text(completed)
-        if _contains_protected_text(candidate):
-            return {"ok": False, "status": 400,
-                    "reason": "API response echoed protected verifier configuration"}
         v = parse_verdict(candidate)
-        if _contains_protected_value(v):
+        if _verdict_echoes_protected_text(candidate):
             return {"ok": False, "status": 400,
                     "reason": "API response echoed protected verifier configuration"}
         return {"ok": True, "v": v, "decision": decide(v)}
@@ -1717,11 +1800,8 @@ def attempt_once(model: str, sys_prompt: str, user_prompt: str) -> dict:
             if not isinstance(content, str):
                 return {"ok": False, "status": 400,
                         "reason": "API response carried invalid verifier content"}
-            if _contains_protected_text(content):
-                return {"ok": False, "status": 400,
-                        "reason": "API response echoed protected verifier configuration"}
             v = parse_verdict(content or "")
-            if _contains_protected_value(v):
+            if _verdict_echoes_protected_text(content):
                 return {"ok": False, "status": 400,
                         "reason": "API response echoed protected verifier configuration"}
             return {"ok": True, "v": v, "decision": decide(v), "wire": "chat"}

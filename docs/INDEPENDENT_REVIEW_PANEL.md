@@ -86,7 +86,12 @@ gates that judge it.
    The key must be an 8–4096-character visible-ASCII value; shorter,
    whitespace/control, or Unicode forms are refused before diff or network I/O.
    The lower bound keeps exact-echo leak detection from treating ordinary text
-   as a credential match when an operator supplies a trivially short key.
+   as a credential match when an operator supplies a trivially short key. For
+   the structured verdict, the five required top-level JSON field names are
+   public protocol syntax rather than peer-authored values: they are exempted
+   from the echo comparison only in that exact root-key position. Every value,
+   nested key, and unexpected root key remains covered, including JSON-escaped
+   echoes after decoding.
 2. Store the endpoint as the `trusted-verifier` **environment secret**
    `VERIFIER_BASE_URL` — NOT as a variable. It is required even for direct
    OpenAI use (`https://api.openai.com/v1` must be explicit); there is no host

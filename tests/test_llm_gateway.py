@@ -227,11 +227,22 @@ class TestConfiguration:
         from app.config import Settings
 
         secret = "settings-repr-must-hide-this"  # pragma: allowlist secret
+        base_url = "https://private-repr.example.test:8443/v1"
+        model = "private/model-route"
+        auth_header = "X-Private-Key"
+        monkeypatch.setenv("LLM_API_BASE_URL", base_url)
         monkeypatch.setenv("LLM_API_KEY", secret)
+        monkeypatch.setenv("LLM_MODEL", model)
+        monkeypatch.setenv("LLM_AUTH_HEADER", auth_header)
         settings = Settings(_env_file=None)
         assert settings.llm_api_key.get_secret_value() == secret
-        assert secret not in repr(settings)
-        assert secret not in repr(_config(api_key=secret))
+        settings_repr = repr(settings)
+        config_repr = repr(_config(
+            base_url=base_url, api_key=secret, model=model, auth_header=auth_header))
+        for protected in (secret, base_url, "private-repr.example.test:8443",
+                          "private-repr.example.test", model, auth_header):
+            assert protected not in settings_repr
+            assert protected not in config_repr
 
     def test_legacy_anthropic_variables_alone_do_not_arm_the_gateway(self, monkeypatch):
         from app.config import Settings
@@ -805,6 +816,191 @@ class TestFailureSafety:
             GatewayClient(_config(api_key=secret), http_client=http).complete(user="hello")
         assert secret not in str(caught.value)
 
+    def test_structured_output_keys_may_contain_key_without_exempting_peer_values(self):
+        secret = "headline"  # pragma: allowlist secret
+        output_keys = frozenset({
+            "headline_code", "phrase_codes", "fact_ids", "next_check_code", "caveat_codes",
+        })
+        valid = json.dumps({
+            "headline_code": "BAND_TO_DERISK",
+            "phrase_codes": [],
+            "fact_ids": [],
+            "next_check_code": None,
+            "caveat_codes": [],
+        })
+        completion = GatewayClient(
+            _config(api_key=secret), http_client=_FakeHttpClient(_ok_response(valid))
+        ).complete(user="hello", json_output_keys=output_keys)
+        assert json.loads(completion.text)["headline_code"] == "BAND_TO_DERISK"
+
+        for echoed in (
+            {**json.loads(valid), "headline_code": secret},
+            {**json.loads(valid), "headline": "unexpected"},
+        ):
+            with pytest.raises(GatewayProtocolError) as caught:
+                GatewayClient(
+                    _config(api_key=secret),
+                    http_client=_FakeHttpClient(_ok_response(json.dumps(echoed))),
+                ).complete(user="hello", json_output_keys=output_keys)
+            assert secret not in str(caught.value)
+
+    def test_plain_json_keeps_raw_scanning_while_structured_json_exempts_root_key(self):
+        secret = "headline_code"  # pragma: allowlist secret
+        text = '{"headline_code":"SAFE"}'
+
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(api_key=secret),
+                http_client=_FakeHttpClient(_ok_response(text)),
+            ).complete(user="hello")
+        assert secret not in str(caught.value)
+
+        completion = GatewayClient(
+            _config(api_key=secret),
+            http_client=_FakeHttpClient(_ok_response(text)),
+        ).complete(user="hello", json_output_keys=frozenset({"headline_code"}))
+        assert completion.text == text
+
+    def test_structured_output_retains_raw_cross_token_credential_scan(self):
+        secret = 'code":"SAFE'  # pragma: allowlist secret
+        text = '{"headline_code":"SAFE"}'
+
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(api_key=secret),
+                http_client=_FakeHttpClient(_ok_response(text)),
+            ).complete(user="hello", json_output_keys=frozenset({"headline_code"}))
+        assert secret not in str(caught.value)
+
+    def test_plain_output_keeps_case_sensitive_api_key_matching(self):
+        secret = "CaseSensitiveGatewayKey"  # pragma: allowlist secret
+        completion = GatewayClient(
+            _config(api_key=secret),
+            http_client=_FakeHttpClient(_ok_response(secret.casefold())),
+        ).complete(user="hello")
+        assert completion.text == secret.casefold()
+
+    def test_structured_output_fails_closed_when_json_exceeds_decoder_depth(self):
+        text = "[" * 1100 + '"SAFE"' + "]" * 1100
+        with pytest.raises(GatewayProtocolError):
+            GatewayClient(
+                _config(),
+                http_client=_FakeHttpClient(_ok_response(text)),
+            ).complete(user="hello", json_output_keys=frozenset({"headline_code"}))
+
+    @pytest.mark.parametrize("text", [
+        ('{"headline_code":"SAFE","usage":'
+         '"https://private-gateway.example.test:8443/v1"}'),
+        (r'{"headline_code":"SAFE","usage":'
+         r'"https:\/\/private-gateway.example.test:8443\/v1"}'),
+        (r'{"headline_code":"SAFE","usage":'
+         r'"private-gateway.example.\u0074est"}'),
+    ])
+    def test_structured_output_scans_direct_and_escaped_private_endpoint(self, text):
+        config = _config(base_url="https://private-gateway.example.test:8443/v1")
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                config,
+                http_client=_FakeHttpClient(_ok_response(text)),
+            ).complete(user="hello", json_output_keys=frozenset({"headline_code"}))
+        assert all(literal not in str(caught.value)
+                   for literal in config.protected_literals())
+
+    @pytest.mark.parametrize("text", [
+        r'{"headline_code":"SAFE","metadata":{"\u0068eadline_code":"SAFE"}}',
+        r'{"headline_code":"SAFE","\u0068eadline_code_extra":"SAFE"}',
+    ])
+    def test_structured_root_key_exemption_does_not_cover_nested_or_unknown_keys(
+            self, text):
+        secret = "headline_code"  # pragma: allowlist secret
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(api_key=secret),
+                http_client=_FakeHttpClient(_ok_response(text)),
+            ).complete(user="hello", json_output_keys=frozenset({"headline_code"}))
+        assert secret not in str(caught.value)
+
+    @pytest.mark.parametrize(("secret", "text"), [
+        ("12345678", '{"headline_code":12345678}'),
+        ("12345678", '{"headline_code":"SAFE","usage":12345678}'),
+        ("12345678", '{"headline_code":"SAFE","phrase_codes":[12345678]}'),
+        ("12345678", '{"headline_code":"SAFE","nested":{"value":12345678}}'),
+        ("12345.678", '{"headline_code":"SAFE","usage":12345.678}'),
+        ("1.2345e67", '{"headline_code":"SAFE","usage":1.2345e67}'),
+        ("Infinity", '{"headline_code":"SAFE","usage":Infinity}'),
+    ])
+    def test_structured_numeric_key_echoes_fail_closed(self, secret, text):
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(api_key=secret),
+                http_client=_FakeHttpClient(_ok_response(text)),
+            ).complete(user="hello", json_output_keys=frozenset({
+                "headline_code", "phrase_codes", "fact_ids",
+                "next_check_code", "caveat_codes",
+            }))
+        assert secret not in str(caught.value)
+
+    def test_structured_duplicate_key_cannot_hide_a_credential_echo(self):
+        secret = "headline_code"  # pragma: allowlist secret
+        text = '{"headline_code":"headline_code","headline_code":"SAFE"}'
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(api_key=secret),
+                http_client=_FakeHttpClient(_ok_response(text)),
+            ).complete(user="hello", json_output_keys=frozenset({"headline_code"}))
+        assert secret not in str(caught.value)
+
+    @pytest.mark.parametrize("literal", [
+        "https://private-gateway.example.test:8443/v1",
+        "private-gateway.example.test:8443",
+        "private-gateway.example.test",
+    ])
+    def test_completion_output_echoing_private_endpoint_fails_closed(self, literal):
+        base_url = "https://private-gateway.example.test:8443/v1"
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(base_url=base_url),
+                http_client=_FakeHttpClient(_ok_response(f"answer {literal}")),
+            ).complete(user="hello")
+        assert literal not in str(caught.value)
+
+    def test_protected_literal_set_includes_key_url_netloc_and_hostname(self):
+        base_url = "https://private-gateway.example.test:8443/v1"
+        secret = "gateway-key-shaped-12345"  # pragma: allowlist secret
+        config = _config(base_url=base_url, api_key=secret)
+
+        assert set(config.protected_literals()) == {
+            secret,
+            base_url,
+            "private-gateway.example.test:8443",
+            "private-gateway.example.test",
+        }
+
+    @pytest.mark.parametrize("source", ["body", "header"])
+    @pytest.mark.parametrize("literal", [
+        "https://private-gateway.example.test:8443/v1",
+        "private-gateway.example.test:8443",
+        "private-gateway.example.test",
+    ])
+    def test_request_id_echoing_private_endpoint_fails_closed(self, source, literal):
+        base_url = "https://private-gateway.example.test:8443/v1"
+        if source == "body":
+            response = _ok_response(response_id=literal)
+        else:
+            response = _Response(
+                lines=_responses_events(
+                    {"type": "response.output_text.delta", "delta": "answer"},
+                    {"type": "response.completed", "response": {}},
+                ),
+                headers={"x-request-id": literal},
+            )
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(base_url=base_url),
+                http_client=_FakeHttpClient(response),
+            ).complete(user="hello")
+        assert literal not in str(caught.value)
+
     def test_body_request_id_echoing_the_exact_key_fails_closed(self):
         secret = "gateway-key-shaped-12345"  # pragma: allowlist secret
         http = _FakeHttpClient(_ok_response(response_id=secret))
@@ -825,6 +1021,86 @@ class TestFailureSafety:
             GatewayClient(_config(api_key=secret), http_client=_FakeHttpClient(
                 response)).complete(user="hello")
         assert secret not in str(caught.value)
+
+    def test_protected_header_request_id_is_checked_even_with_safe_body_id(self):
+        secret = "gateway-key-shaped-12345"  # pragma: allowlist secret
+        response = _ok_response(response_id="safe-body-id")
+        response.headers["x-request-id"] = secret
+
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(api_key=secret),
+                http_client=_FakeHttpClient(response),
+            ).complete(user="hello")
+        assert secret not in str(caught.value)
+
+    @pytest.mark.parametrize("response_id", [
+        "unsafe gateway-key-shaped-12345",
+        "x" * 129 + "gateway-key-shaped-12345",
+    ])
+    def test_protected_body_request_id_is_checked_before_shape_sanitizing(
+            self, response_id):
+        secret = "gateway-key-shaped-12345"  # pragma: allowlist secret
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(api_key=secret),
+                http_client=_FakeHttpClient(_ok_response(response_id=response_id)),
+            ).complete(user="hello")
+        assert secret not in str(caught.value)
+
+    def test_duplicate_body_request_id_cannot_hide_a_protected_first_value(self):
+        secret = "gateway-key-shaped-12345"  # pragma: allowlist secret
+        response = _Response(lines=[
+            'data: {"type":"response.output_text.delta","delta":"answer"}',
+            "",
+            ('data: {"type":"response.completed","response":'
+             '{"id":"gateway-key-shaped-12345","id":"safe-id"}}'),
+            "",
+        ])
+
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(api_key=secret),
+                http_client=_FakeHttpClient(response),
+            ).complete(user="hello")
+        assert secret not in str(caught.value)
+
+    def test_duplicate_failed_status_cannot_be_overwritten_by_completed(self):
+        response = _Response(lines=[
+            'data: {"type":"response.output_text.delta","delta":"partial"}',
+            "",
+            ('data: {"type":"response.completed","response":'
+             '{"status":"failed","status":"completed","id":"safe-id"}}'),
+            "",
+        ])
+
+        with pytest.raises(GatewayProtocolError):
+            GatewayClient(
+                _config(),
+                http_client=_FakeHttpClient(response),
+            ).complete(user="hello")
+
+    def test_numeric_body_request_id_cannot_echo_a_numeric_credential(self):
+        secret = "12345678"  # pragma: allowlist secret
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(api_key=secret),
+                http_client=_FakeHttpClient(_ok_response(response_id=12345678)),
+            ).complete(user="hello")
+        assert secret not in str(caught.value)
+
+    @pytest.mark.parametrize("response_id", [
+        {"echo": "private-gateway.example.test"},
+        ["private-gateway.example.test"],
+    ])
+    def test_nested_body_request_id_cannot_echo_the_private_endpoint(self, response_id):
+        base_url = "https://private-gateway.example.test/v1"
+        with pytest.raises(GatewayProtocolError) as caught:
+            GatewayClient(
+                _config(base_url=base_url),
+                http_client=_FakeHttpClient(_ok_response(response_id=response_id)),
+            ).complete(user="hello")
+        assert "private-gateway.example.test" not in str(caught.value)
 
     def test_wall_deadline_survives_heartbeat_activity(self):
         class _Clock:

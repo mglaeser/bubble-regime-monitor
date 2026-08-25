@@ -99,11 +99,18 @@ class Completion:
 
 
 @dataclass(frozen=True)
+class _FoldedCompletion:
+    """Internal result retaining an untrusted ID until it has been scanned."""
+    text: str
+    raw_request_id: str | None = field(repr=False)
+
+
+@dataclass(frozen=True)
 class GatewayConfig:
-    base_url: str
+    base_url: str = field(repr=False)
     api_key: str = field(repr=False)
-    model: str
-    auth_header: str
+    model: str = field(repr=False)
+    auth_header: str = field(repr=False)
     max_tokens: int = 8000
 
     def __post_init__(self) -> None:
@@ -182,6 +189,26 @@ class GatewayConfig:
             "Content-Type": "application/json",
             self.auth_header: auth,
         }
+
+    def endpoint_literals(self) -> tuple[str, ...]:
+        """Private endpoint forms whose host spelling is case-insensitive."""
+        parsed = urlsplit(self.base_url)
+        values: set[str] = {self.base_url, parsed.netloc}
+        if parsed.hostname:
+            values.add(parsed.hostname)
+        return tuple(sorted(
+            values,
+            key=len,
+            reverse=True,
+        ))
+
+    def protected_literals(self) -> tuple[str, ...]:
+        """Configuration values that a peer response must never reproduce."""
+        return tuple(sorted(
+            {self.api_key, *self.endpoint_literals()},
+            key=len,
+            reverse=True,
+        ))
 
 
 class _StreamResponse(Protocol):
@@ -289,6 +316,155 @@ def _is_unicode_scalar_text(value: str) -> bool:
     return not any(0xD800 <= ord(char) <= 0xDFFF for char in value)
 
 
+class _JsonObjectPairs(list[tuple[str, object]]):
+    """Lossless JSON object representation that retains duplicate members."""
+
+
+class _JsonNumber(str):
+    """A numeric JSON token retained exactly as it appeared on the wire."""
+
+
+def _decode_lossless_json(value: str) -> object:
+    return json.loads(
+        value,
+        object_pairs_hook=_JsonObjectPairs,
+        parse_int=_JsonNumber,
+        parse_float=_JsonNumber,
+        parse_constant=_JsonNumber,
+    )
+
+
+_ProtectedSpec = tuple[str, bool]
+
+
+def _protected_specs(config: GatewayConfig) -> tuple[_ProtectedSpec, ...]:
+    # Preserve the original exact match for the case-sensitive API key.  URL
+    # hosts are case-insensitive, so endpoint forms are folded when compared.
+    return (
+        (config.api_key, True),
+        *((literal, False) for literal in config.endpoint_literals()),
+    )
+
+
+def _literal_occurs(value: str, literal: str, *, case_sensitive: bool) -> bool:
+    if case_sensitive:
+        return literal in value
+    return literal.casefold() in value.casefold()
+
+
+def _contains_protected_literal(
+    value: str,
+    protected_specs: tuple[_ProtectedSpec, ...],
+) -> bool:
+    return any(
+        _literal_occurs(value, literal, case_sensitive=case_sensitive)
+        for literal, case_sensitive in protected_specs
+    )
+
+
+def _raw_contains_unexempted_protected_literal(
+    value: str,
+    protected_specs: tuple[_ProtectedSpec, ...],
+    allowed_root_keys: frozenset[str],
+) -> bool:
+    """Retain whole-wire checks except for possible public root-key syntax."""
+    for literal, case_sensitive in protected_specs:
+        if not _literal_occurs(
+                value, literal, case_sensitive=case_sensitive):
+            continue
+        if any(_literal_occurs(
+                key, literal, case_sensitive=case_sensitive)
+                for key in allowed_root_keys):
+            continue
+        return True
+    return False
+
+
+def _json_output_echoes_protected_literal(
+    text: str,
+    protected_specs: tuple[_ProtectedSpec, ...],
+    allowed_root_keys: frozenset[str],
+) -> bool:
+    """Scan JSON losslessly while exempting only public root field names."""
+    if _raw_contains_unexempted_protected_literal(
+            text, protected_specs, allowed_root_keys):
+        return True
+    try:
+        value = _decode_lossless_json(text)
+    except RecursionError:
+        return True
+    except (TypeError, ValueError):
+        return _contains_protected_literal(text, protected_specs)
+
+    def visit(item: object, *, root: bool = False) -> bool:
+        if isinstance(item, str):
+            return _contains_protected_literal(item, protected_specs)
+        if isinstance(item, _JsonObjectPairs):
+            return any(
+                (not (root and key in allowed_root_keys)
+                 and _contains_protected_literal(key, protected_specs))
+                or visit(child)
+                for key, child in item
+            )
+        if isinstance(item, list):
+            return any(visit(child) for child in item)
+        return False
+
+    try:
+        return visit(value, root=True)
+    except RecursionError:
+        return True
+
+
+def _json_has_duplicate_object_keys(value: object) -> bool:
+    if isinstance(value, _JsonObjectPairs):
+        keys = [key for key, _child in value]
+        return len(keys) != len(set(keys)) or any(
+            _json_has_duplicate_object_keys(child) for _key, child in value)
+    if isinstance(value, list):
+        return any(_json_has_duplicate_object_keys(child) for child in value)
+    return False
+
+
+def _json_value_contains_protected_literal(
+    value: object,
+    protected_specs: tuple[_ProtectedSpec, ...],
+) -> bool:
+    if isinstance(value, str):
+        return _contains_protected_literal(value, protected_specs)
+    if isinstance(value, _JsonObjectPairs):
+        return any(
+            _contains_protected_literal(key, protected_specs)
+            or _json_value_contains_protected_literal(child, protected_specs)
+            for key, child in value
+        )
+    if isinstance(value, list):
+        return any(_json_value_contains_protected_literal(
+            child, protected_specs) for child in value)
+    return False
+
+
+def _completed_request_id_values(value: object) -> tuple[object, ...]:
+    """Return every ID value declared by a completed event."""
+    if not isinstance(value, _JsonObjectPairs):
+        return ()
+    if not any(
+            key == "type" and type(child) is str
+            and child == "response.completed"
+            for key, child in value):
+        return ()
+    request_ids: list[object] = []
+    for key, child in value:
+        if key != "response" or not isinstance(child, _JsonObjectPairs):
+            continue
+        request_ids.extend(
+            request_id
+            for response_key, request_id in child
+            if response_key == "id"
+        )
+    return tuple(request_ids)
+
+
 def _iter_sse_lines(
     chunks: Iterator[bytes],
     *,
@@ -371,7 +547,8 @@ def _fold_responses_stream(
     deadline: float,
     clock: Callable[[], float],
     output_limit: int,
-) -> Completion:
+    protected_specs: tuple[_ProtectedSpec, ...],
+) -> _FoldedCompletion:
     delta_parts: dict[tuple[int, int], list[str]] = {}
     done_parts: dict[tuple[int, int], str] = {}
     delta_chars = 0
@@ -434,6 +611,19 @@ def _fold_responses_stream(
             # instead of a colon comment.  Keep this allowlist exact; arbitrary
             # non-JSON data remains a protocol failure.
             return
+        try:
+            lossless_payload = _decode_lossless_json(raw)
+        except (TypeError, ValueError, RecursionError):
+            raise GatewayProtocolError(
+                "LLM gateway sent malformed SSE data") from None
+        if _json_has_duplicate_object_keys(lossless_payload):
+            raise GatewayProtocolError(
+                "LLM gateway sent duplicate SSE object members")
+        request_ids = _completed_request_id_values(lossless_payload)
+        if any(_json_value_contains_protected_literal(
+                request_id, protected_specs) for request_id in request_ids):
+            raise GatewayProtocolError(
+                "LLM gateway echoed protected configuration in request id")
         try:
             payload = json.loads(raw)
         except (TypeError, ValueError):
@@ -547,7 +737,8 @@ def _fold_responses_stream(
         raise GatewayProtocolError("LLM gateway completed with empty output")
 
     request_id = completed.get("id") if isinstance(completed, dict) else None
-    return Completion(text=text, request_id=_safe_request_id(request_id))
+    raw_request_id = request_id if isinstance(request_id, str) else None
+    return _FoldedCompletion(text=text, raw_request_id=raw_request_id)
 
 
 class GatewayClient:
@@ -581,6 +772,7 @@ class GatewayClient:
         token_limit: int,
         deadline: float,
         cancellation: _Cancellation,
+        json_output_keys: frozenset[str] | None,
     ) -> Completion:
         client: _StreamingClient | None = None
         try:
@@ -618,24 +810,37 @@ class GatewayClient:
                         clock=self._clock,
                         output_limit=min(
                             MAX_OUTPUT_CHARS, max(4096, token_limit * 16)),
+                        protected_specs=_protected_specs(self.config),
                     )
-                    if self.config.api_key in completion.text:
+                    protected_specs = _protected_specs(self.config)
+                    output_echoed_configuration = (
+                        _contains_protected_literal(
+                            completion.text, protected_specs)
+                        if json_output_keys is None
+                        else _json_output_echoes_protected_literal(
+                            completion.text, protected_specs, json_output_keys)
+                    )
+                    if output_echoed_configuration:
                         raise GatewayProtocolError(
-                            "LLM gateway echoed credential in completion output")
-                    response_id = completion.request_id
-                    if response_id is not None and self.config.api_key in response_id:
+                            "LLM gateway echoed protected configuration in completion output")
+                    response_id = completion.raw_request_id
+                    if (response_id is not None
+                            and _contains_protected_literal(
+                                response_id, protected_specs)):
                         raise GatewayProtocolError(
-                            "LLM gateway echoed credential in request id")
+                            "LLM gateway echoed protected configuration in request id")
                     header_id = response.headers.get("x-request-id")
                     if (isinstance(header_id, str)
-                            and self.config.api_key in header_id):
+                            and _contains_protected_literal(
+                                header_id, protected_specs)):
                         raise GatewayProtocolError(
-                            "LLM gateway echoed credential in request id")
-                    if completion.request_id is None:
+                            "LLM gateway echoed protected configuration in request id")
+                    safe_response_id = _safe_request_id(response_id)
+                    if safe_response_id is None:
                         safe_header_id = _safe_request_id(header_id)
                         if safe_header_id:
                             return Completion(completion.text, safe_header_id)
-                    return completion
+                    return Completion(completion.text, safe_response_id)
         except (GatewayConfigError, GatewayHTTPError, GatewayProtocolError, GatewayTimeout):
             raise
         except (httpx.TimeoutException, TimeoutError):
@@ -654,6 +859,7 @@ class GatewayClient:
         system: str | None = None,
         max_tokens: int | None = None,
         deadline_s: float | None = None,
+        json_output_keys: frozenset[str] | None = None,
     ) -> Completion:
         token_limit = self.config.max_tokens if max_tokens is None else max_tokens
         if type(token_limit) is not int or not 1 <= token_limit <= self.config.max_tokens:
@@ -690,6 +896,7 @@ class GatewayClient:
                     token_limit=token_limit,
                     deadline=deadline,
                     cancellation=cancellation,
+                    json_output_keys=json_output_keys,
                 ))
             except Exception as exc:
                 outcome.put(exc)
@@ -738,6 +945,7 @@ def complete(
     system: str | None = None,
     max_tokens: int | None = None,
     deadline_s: float | None = None,
+    json_output_keys: frozenset[str] | None = None,
     settings: Settings | None = None,
 ) -> Completion:
     """Complete once through the configured route; missing config raises safely."""
@@ -751,4 +959,5 @@ def complete(
         system=system,
         max_tokens=max_tokens,
         deadline_s=deadline_s,
+        json_output_keys=json_output_keys,
     )

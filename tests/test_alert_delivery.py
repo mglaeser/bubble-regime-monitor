@@ -841,7 +841,7 @@ def test_alert_selector_uses_gateway_with_its_own_cap_and_deadline(
     from sqlalchemy import select as sa_select
 
     import app.llm_gateway as gateway
-    from app.alerts.llm_selector import SYSTEM_PROMPT, select_codes
+    from app.alerts.llm_selector import SELECTION_OUTPUT_KEYS, SYSTEM_PROMPT, select_codes
     from app.alerts.models import AlertLlmAttempt
     from app.config import get_settings
     from app.db import session_scope
@@ -875,6 +875,7 @@ def test_alert_selector_uses_gateway_with_its_own_cap_and_deadline(
     assert captured["system"] == SYSTEM_PROMPT
     assert captured["max_tokens"] == 400
     assert captured["deadline_s"] == 6.0
+    assert captured["json_output_keys"] == SELECTION_OUTPUT_KEYS
     with session_scope() as session:
         row = session.execute(sa_select(AlertLlmAttempt)).scalars().one()
     assert row.model == "provider/model"

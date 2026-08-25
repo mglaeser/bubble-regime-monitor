@@ -651,6 +651,219 @@ class TestVerifierDiagnosticsAreSecretSafe:
         assert out["status"] == 400
         assert credential not in repr(out)
 
+    def test_required_verdict_key_may_equal_credential_without_making_json_impossible(
+            self, monkeypatch):
+        """Public JSON structure must not be mistaken for a peer secret echo."""
+        credential = "confidence"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": "reviewed the changed gateway boundaries",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-schema-key"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is True
+        assert out["v"]["confidence"] == "high"
+
+    def test_verdict_retains_raw_cross_token_credential_scan(self, monkeypatch):
+        credential = 'ence":"high'  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            '{"refuted":false,"confidence":"high",'
+            '"reason":"reviewed gateway boundaries","defects":[],'
+            '"proof":"challenge-1"}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-boundary"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_wrapped_verdict_scans_a_credential_across_the_json_boundary(
+            self, monkeypatch):
+        credential = 'wrap{"ref'  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            '{"refuted":false,"confidence":"high",'
+            '"reason":"reviewed gateway boundaries","defects":[],'
+            '"proof":"challenge-1"}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": "wrap" + verdict},
+            {"type": "response.completed", "response": {"id": "resp-boundary"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_verdict_scan_fails_closed_when_json_exceeds_decoder_depth(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", "depth-test-credential")
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        deeply_nested = "[" * 1100 + '"SAFE"' + "]" * 1100
+
+        assert iv._verdict_echoes_protected_text(deeply_nested) is True
+
+    def test_schema_key_collision_does_not_exempt_the_credential_in_a_value(
+            self, monkeypatch):
+        credential = "confidence"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": f"reviewed with {credential}",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-value-echo"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    @pytest.mark.parametrize("fragment", [
+        '"metadata":{"confidence":"safe"}',
+        r'"\u0063onfidence_extra":"safe"',
+    ])
+    def test_root_key_exemption_does_not_cover_nested_or_unknown_keys(
+            self, monkeypatch, fragment):
+        credential = "confidence"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            '{"refuted":false,"confidence":"high",'
+            '"reason":"reviewed gateway boundaries","defects":[],'
+            '"proof":"challenge-1",' + fragment + '}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-nested-key"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_duplicate_member_cannot_hide_an_escaped_credential_value(
+            self, monkeypatch):
+        credential = "secret-key-123"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            r'{"refuted":false,"confidence":"high",'
+            r'"reason":"secret-key-\u0031\u0032\u0033",'
+            r'"reason":"reviewed gateway boundaries","defects":[],'
+            r'"proof":"challenge-1"}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-duplicate"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_endpoint_literal_set_distinguishes_url_netloc_and_hostname(
+            self, monkeypatch):
+        base_url = "https://verifier.example.test:8443/v1"
+        monkeypatch.setattr(iv, "BASE", base_url)
+
+        assert set(iv._endpoint_literals()) == {
+            base_url,
+            "verifier.example.test:8443",
+            "verifier.example.test",
+        }
+
+    @pytest.mark.parametrize("placement", ["prefix", "suffix"])
+    @pytest.mark.parametrize("protected", [
+        "wrapped-verifier-credential",
+        TEST_BASE_URL,
+        "verifier.example.test",
+    ])
+    def test_wrapped_verdict_scans_protected_text_outside_json(
+            self, monkeypatch, placement, protected):
+        credential = "wrapped-verifier-credential"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": "reviewed the changed gateway boundaries",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wrapped = (f"{protected}\n{verdict}" if placement == "prefix"
+                   else f"{verdict}\n{protected}")
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": wrapped},
+            {"type": "response.completed", "response": {"id": "resp-wrapped"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert protected not in repr(out)
+
+    @pytest.mark.parametrize(("credential", "fragment"), [
+        ("12345678", '"confidence":12345678'),
+        ("12345678", '"usage":12345678'),
+        ("12345678", '"usage":[12345678]'),
+        ("12345678", '"usage":{"value":12345678}'),
+        ("12345.678", '"usage":12345.678'),
+        ("1.2345e67", '"usage":1.2345e67'),
+        ("Infinity", '"usage":Infinity'),
+    ])
+    def test_numeric_credential_echo_in_json_value_fails_closed(
+            self, monkeypatch, credential, fragment):
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            '{"refuted":false,' + fragment + ','
+            '"reason":"reviewed gateway boundaries","defects":[],'
+            '"proof":"challenge-1"}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-number"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
     def test_chat_fallback_that_echoes_the_key_is_rejected_not_rendered(
             self, monkeypatch):
         credential = "chat-echo-verifier-credential"  # pragma: allowlist secret
