@@ -487,14 +487,32 @@ class TestTrustedWorkflowEndpointPreflight:
         assert outputs == {"require_key": "true", "panel_dormant": "false"}
 
     @pytest.mark.parametrize(
-        ("outcome", "expected_returncode", "expected_description"),
+        ("is_fork", "panel_dormant", "outcome", "expected_returncode",
+         "expected_state", "expected_description"),
         [
-            ("success", 0, "panel dormant — deterministic CI only"),
-            ("failure", 1, "cross-vendor panel refused — see job log"),
+            ("false", "true", "success", 0, "success",
+             "panel dormant — deterministic CI only"),
+            ("false", "true", "failure", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("false", "true", "skipped", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("false", "false", "success", 0, "success",
+             "cross-vendor panel approved"),
+            ("false", "false", "failure", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("false", "false", "skipped", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("false", "", "skipped", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("true", "true", "success", 1, "failure",
+             "fork PR: panel not run — maintainer review required"),
         ],
     )
-    def test_publisher_names_dormancy_without_hiding_an_upstream_failure(
-            self, tmp_path, outcome, expected_returncode, expected_description):
+    def test_publisher_state_table_never_hides_a_skipped_or_failed_panel(
+            self, tmp_path, is_fork, panel_dormant, outcome,
+            expected_returncode, expected_state, expected_description):
+        publisher = self._publisher_step()
+        assert publisher["if"] == "always()"
         capture = tmp_path / "gh-args"
         fake_gh = tmp_path / "gh"
         fake_gh.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n")
@@ -504,22 +522,24 @@ class TestTrustedWorkflowEndpointPreflight:
             "CAPTURE": str(capture),
             "PATH": str(tmp_path) + os.pathsep + env.get("PATH", ""),
             "HEAD_SHA": "a" * 40,
-            "IS_FORK": "false",
+            "IS_FORK": is_fork,
             "OUTCOME": outcome,
-            "PANEL_DORMANT": "true",
+            "PANEL_DORMANT": panel_dormant,
             "GITHUB_REPOSITORY": "owner/repository",
             "GITHUB_RUN_ID": "123",
             "GITHUB_SERVER_URL": "https://example.test",
         })
         result = subprocess.run(
-            ["bash", "-c", self._publisher_step()["run"]],
+            ["bash", "-c", publisher["run"]],
             capture_output=True,
             text=True,
             timeout=10,
             env=env,
         )
         assert result.returncode == expected_returncode
-        assert f"description={expected_description}" in capture.read_text()
+        published = capture.read_text()
+        assert f"state={expected_state}" in published
+        assert f"description={expected_description}" in published
 
     @pytest.mark.parametrize("setting", ["", "false"])
     def test_blank_endpoint_refuses_before_the_credentialed_panel(
