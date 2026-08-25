@@ -28,8 +28,9 @@ iv = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(iv)
 TEST_BASE_URL = "https://verifier.example.test/v1"
 # Network-shape tests use a visibly inert, explicit endpoint.  Missing-config
-# tests below import a fresh module or override this value to exercise refusal.
+# tests below import a fresh module or override these values to exercise refusal.
 iv.BASE = TEST_BASE_URL
+iv.KEY = "test-verifier-key"  # pragma: allowlist secret
 
 MDL = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
 A = {"ok": True, "v": {"refuted": False, "reason": "reason long enough a"}}
@@ -182,8 +183,23 @@ class TestEmptyEnvVarsAreAbsent:
         assert "VERIFIER_BASE_URL" in captured.err
         assert credential not in captured.out + captured.err
 
-    def test_blank_endpoint_is_guarded_at_both_network_sinks(self, monkeypatch):
-        monkeypatch.setattr(iv, "BASE", "")
+    @pytest.mark.parametrize("base", [
+        "",
+        "https://münchen.example/v1",
+        "https://xn--mnchen-3ya.example/v1",
+        "https://secret.example./v1",
+        "https://[fe80::1%25eth0]/v1",
+        "https://[0:0:0:0:0:0:0:1]/v1",
+        "https://0177.0.0.1/v1",
+        "https://127.1/v1",
+        "https://0x7f000001/v1",
+        "https://2130706433/v1",
+        "https://127.0.0.0x1/v1",
+        "https://0x7f.0.0.0x1/v1",
+        "https://gateway/v1",
+    ])
+    def test_unsafe_endpoint_is_guarded_at_both_network_sinks(self, monkeypatch, base):
+        monkeypatch.setattr(iv, "BASE", base)
         opened = False
 
         def forbidden_urlopen(*args, **kwargs):
@@ -206,6 +222,18 @@ class TestEmptyEnvVarsAreAbsent:
         "https://verifier.example.test/v1?",
         "https://verifier.example.test/v1#fragment",
         "https://verifier.example.test/v1#",
+        "https://münchen.example/v1",
+        "https://xn--mnchen-3ya.example/v1",
+        "https://secret.example./v1",
+        "https://[fe80::1%25eth0]/v1",
+        "https://[0:0:0:0:0:0:0:1]/v1",
+        "https://0177.0.0.1/v1",
+        "https://127.1/v1",
+        "https://0x7f000001/v1",
+        "https://2130706433/v1",
+        "https://127.0.0.0x1/v1",
+        "https://0x7f.0.0.0x1/v1",
+        "https://gateway/v1",
         "https://verifier.example.test/not-v1",
         "https://verifier.example.test:not-a-port/v1",
     ])
@@ -271,6 +299,14 @@ class TestVerifierDiagnosticsAreSecretSafe:
         r'{"refuted":false,"confidence":"high","reason":"approved secret-key-\u0031\u0032\u0033",'
         r'"defects":[],"proof":"challenge-1"}'
     )
+
+    def test_redaction_marker_shaped_key_is_still_detected_and_removed(self, monkeypatch):
+        credential = "<redacted>"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        rendered = f"transport exposed {credential}"
+
+        assert iv._contains_protected_text(rendered) is True
+        assert credential not in iv._safe_diag(rendered, limit=None)
 
     def test_peer_error_bodies_cannot_echo_key_or_endpoint(self, monkeypatch):
         credential = "peer-echo-verifier-credential"  # pragma: allowlist secret
@@ -789,6 +825,10 @@ class TestAuthHeader:
     upstream forwarding: Bearer answers 401 "opencodex API key required" for
     every model, X-OpenCodex-API-Key answers 200. Verified live."""
 
+    @pytest.fixture(autouse=True)
+    def _valid_key(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", "test-verifier-key")  # pragma: allowlist secret
+
     def test_defaults_to_bearer(self, monkeypatch):
         monkeypatch.delenv("VERIFIER_AUTH_HEADER", raising=False)
         assert "Authorization" in iv.auth_header()
@@ -806,6 +846,89 @@ class TestAuthHeader:
     def test_authorization_by_name_is_the_default_form(self, monkeypatch):
         monkeypatch.setenv("VERIFIER_AUTH_HEADER", "authorization")
         assert "Authorization" in iv.auth_header()
+
+    @pytest.mark.parametrize("name", [
+        "Host",
+        "Content-Type",
+        "Proxy-Authorization",
+        "Cookie",
+        "Bad Header",
+        "X-Key\r\nInjected: yes",
+    ])
+    def test_unsafe_header_is_guarded_at_both_network_sinks(self, monkeypatch, name):
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", name)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        opened = False
+
+        def forbidden_urlopen(*args, **kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("verifier opened I/O with an unsafe credential header")
+
+        monkeypatch.setattr(iv, "_urlopen", forbidden_urlopen)
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_AUTH_HEADER"):
+            iv._http_json("/models")
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_AUTH_HEADER"):
+            iv._responses_attempt("model", "system", "user")
+
+        assert opened is False
+
+    def test_credentialed_main_refuses_unsafe_header_before_diff_io(
+            self, monkeypatch, capsys):
+        credential = "unsafe-header-key-must-not-leak"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "Host")
+        monkeypatch.setattr(
+            iv, "build_diff",
+            lambda: pytest.fail("verifier read the diff with an unsafe credential header"),
+        )
+        monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
+
+        assert iv.main() == 1
+        captured = capsys.readouterr()
+        assert "VERIFIER_AUTH_HEADER" in captured.err
+        assert credential not in captured.out + captured.err
+
+    @pytest.mark.parametrize("credential", [
+        "copied-key\n",
+        "copied-key\r",
+        "copied key",
+        "copied-kéy",
+    ])
+    def test_unsafe_key_is_guarded_at_main_and_both_network_sinks(
+            self, monkeypatch, capsys, credential):
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "X-OpenCodex-API-Key")
+        opened = False
+
+        def forbidden_urlopen(*args, **kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("verifier opened I/O with an unsafe credential")
+
+        monkeypatch.setattr(iv, "_urlopen", forbidden_urlopen)
+        for request in (
+            lambda: iv._http_json("/models"),
+            lambda: iv._responses_attempt("model", "system", "user"),
+        ):
+            with pytest.raises(iv.ProviderConfigError, match="API key") as caught:
+                request()
+            assert credential not in str(caught.value)
+            assert repr(credential)[1:-1] not in str(caught.value)
+
+        monkeypatch.setattr(
+            iv, "build_diff",
+            lambda: pytest.fail("verifier read the diff with an unsafe credential"),
+        )
+        monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
+        assert iv.main() == 1
+        captured = capsys.readouterr()
+        rendered = captured.out + captured.err
+        assert credential not in rendered
+        assert repr(credential)[1:-1] not in rendered
+        assert opened is False
 
 
 class TestReviewRange:

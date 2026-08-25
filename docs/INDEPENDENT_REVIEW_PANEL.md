@@ -74,19 +74,26 @@ gates that judge it.
 
 1. Create a key for the chosen OpenAI-compatible verifier endpoint and store it
    as the repo secret `SECOND_VENDOR_API_KEY` (or reuse an existing
-   `OPENAI_API_KEY` secret).
+   `OPENAI_API_KEY` secret). The key must be a nonempty visible-ASCII value;
+   whitespace/control or Unicode forms are refused before diff or network I/O
+   because transport diagnostics can escape them into a different literal.
 2. Store the endpoint as the `trusted-verifier` **environment secret**
    `VERIFIER_BASE_URL` — NOT as a variable. It is required even for direct
    OpenAI use (`https://api.openai.com/v1` must be explicit); there is no host
    fallback because the key belongs to the operator-selected endpoint. The
-   transport accepts HTTPS `/v1` endpoints only and refuses redirects and
-   ambient proxies so the credential cannot be forwarded to another host.
+   transport accepts HTTPS `/v1` endpoints on fully qualified ordinary ASCII
+   DNS hostnames only (no IP literal, single-label, IDN/punycode, trailing-dot,
+   or zone-qualified host), and refuses redirects and ambient proxies so the
+   credential cannot be forwarded to another host or exposed through a
+   resolver's alternate spelling.
    The runner prints every env block into the job log, and this log is public:
    it redacts secrets there and never variables, so a variable publishes the
    endpoint on every run.
 3. Optionally set repo **variables**: `VERIFIER_PANEL_MODELS`,
    `VERIFIER_MODEL` (single pin), `VERIFIER_REQUIRED_APPROVER`,
-   `VERIFIER_MIN_OTHER_APPROVERS`.
+   `VERIFIER_MIN_OTHER_APPROVERS`, and `VERIFIER_AUTH_HEADER`. The auth header
+   defaults to `Authorization`; a custom value must be an `X-*-Key` header so
+   the credential cannot replace routing, proxy, cookie, or content headers.
 4. Branch protection (the standing B-35 item, repo settings): mark
    `cross-vendor` (and `test`) as **required status checks**, and enable
    **Require review from Code Owners** so CODEOWNERS actually enforces.

@@ -121,7 +121,7 @@ class GatewayConfig:
             raise GatewayConfigError("LLM API base URL must be an HTTPS URL")
         if parsed.username is not None or parsed.password is not None:
             raise GatewayConfigError("LLM API base URL must not contain credentials")
-        if parsed.query or parsed.fragment:
+        if "?" in base_url or "#" in base_url or parsed.query or parsed.fragment:
             raise GatewayConfigError("LLM API base URL must not contain a query or fragment")
         if not parsed.path.rstrip("/").endswith("/v1") or "//" in parsed.path:
             raise GatewayConfigError("LLM API base URL must include its /v1 API path")
@@ -369,21 +369,50 @@ def _fold_responses_stream(
     clock: Callable[[], float],
     output_limit: int,
 ) -> Completion:
-    text_parts: list[str] = []
-    text_chars = 0
+    delta_parts: dict[tuple[int, int], list[str]] = {}
+    done_parts: dict[tuple[int, int], str] = {}
+    delta_chars = 0
+    done_chars = 0
     data_lines: list[str] = []
     event_name = ""
     event_chars = 0
     event_count = 0
     completed: object = None
     completed_seen = False
+    index_mode: str | None = None
 
     def check_deadline() -> None:
         if clock() >= deadline:
             raise GatewayTimeout("LLM gateway deadline exceeded")
 
+    def part_key(payload: dict[str, object]) -> tuple[int, int]:
+        nonlocal index_mode
+        has_output = "output_index" in payload
+        has_content = "content_index" in payload
+        if has_output != has_content:
+            raise GatewayProtocolError("LLM gateway sent ambiguous text part indexes")
+        event_mode = "indexed" if has_output else "unindexed"
+        if index_mode is None:
+            index_mode = event_mode
+        elif index_mode != event_mode:
+            raise GatewayProtocolError(
+                "LLM gateway mixed indexed and index-less text events")
+        if not has_output:
+            # The deployed gateway currently omits both indexes for its single
+            # output part.  Treat that observed shape as the canonical first
+            # part, while keeping indexed official Responses events distinct.
+            return (0, 0)
+        output_index = payload["output_index"]
+        content_index = payload["content_index"]
+        if (type(output_index) is not int or not 0 <= output_index < MAX_SSE_EVENTS
+                or type(content_index) is not int
+                or not 0 <= content_index < MAX_SSE_EVENTS):
+            raise GatewayProtocolError("LLM gateway sent invalid text part indexes")
+        return output_index, content_index
+
     def flush() -> None:
-        nonlocal completed, completed_seen, event_chars, event_count, event_name, text_chars
+        nonlocal completed, completed_seen, delta_chars, done_chars
+        nonlocal event_chars, event_count, event_name
         if not data_lines:
             event_name = ""
             event_chars = 0
@@ -414,13 +443,32 @@ def _fold_responses_stream(
 
         event_type = payload.get("type")
         if event_type == "response.output_text.delta":
+            key = part_key(payload)
+            if key in done_parts:
+                raise GatewayProtocolError(
+                    "LLM gateway sent a text delta after finalized text")
             delta = payload.get("delta")
             if not isinstance(delta, str):
                 raise GatewayProtocolError("LLM gateway sent an invalid text delta")
-            text_chars += len(delta)
-            if text_chars > output_limit:
+            delta_chars += len(delta)
+            if delta_chars > output_limit:
                 raise GatewayProtocolError("LLM gateway output is too large")
-            text_parts.append(delta)
+            delta_parts.setdefault(key, []).append(delta)
+        elif event_type == "response.output_text.done":
+            key = part_key(payload)
+            if key in done_parts:
+                raise GatewayProtocolError(
+                    "LLM gateway sent duplicate finalized text for one part")
+            text = payload.get("text")
+            if not isinstance(text, str):
+                raise GatewayProtocolError("LLM gateway sent invalid finalized text")
+            if not _is_unicode_scalar_text(text):
+                raise GatewayProtocolError(
+                    "LLM gateway finalized text contains invalid Unicode scalar values")
+            done_chars += len(text)
+            if done_chars > output_limit:
+                raise GatewayProtocolError("LLM gateway output is too large")
+            done_parts[key] = text
         elif event_type == "response.completed":
             if completed_seen:
                 raise GatewayProtocolError("LLM gateway sent duplicate completion events")
@@ -437,8 +485,8 @@ def _fold_responses_stream(
                   and event_type.endswith((".failed", ".incomplete", ".cancelled")))):
             raise GatewayProtocolError("LLM gateway stream reported failure")
         # Lifecycle, reasoning, usage, and tool-shaped output events are ignored.
-        # No tool schema is sent, and only output_text deltas are an authorized
-        # source for the human-facing completion.
+        # No tool schema is sent, and only output_text delta/done events are an
+        # authorized source for the human-facing completion.
 
     for line in lines:
         check_deadline()
@@ -462,18 +510,32 @@ def _fold_responses_stream(
     if not completed_seen:
         raise GatewayProtocolError("LLM gateway stream ended before completion")
 
-    delta_text = "".join(text_parts)
+    if done_parts and not set(delta_parts).issubset(done_parts):
+        raise GatewayProtocolError(
+            "LLM gateway ended a text part without finalized text")
+    for key, done_text in done_parts.items():
+        if key in delta_parts and "".join(delta_parts[key]) != done_text:
+            raise GatewayProtocolError(
+                "LLM gateway finalized text does not match streamed output")
+    part_keys = sorted(set(delta_parts) | set(done_parts))
+    streamed_text = "".join(
+        done_parts[key] if key in done_parts else "".join(delta_parts[key])
+        for key in part_keys
+    )
+    if len(streamed_text) > output_limit:
+        raise GatewayProtocolError("LLM gateway output is too large")
     terminal_text = _extract_completed_text(completed)
     if len(terminal_text) > output_limit:
         raise GatewayProtocolError("LLM gateway output is too large")
-    meaningful_delta = delta_text if delta_text.strip() else ""
-    if terminal_text and meaningful_delta and terminal_text != delta_text:
+    meaningful_stream = streamed_text if streamed_text.strip() else ""
+    if (terminal_text and (done_parts or meaningful_stream)
+            and terminal_text != streamed_text):
         raise GatewayProtocolError(
             "LLM gateway terminal output does not match streamed output")
     # Some gateway routes have an empty terminal output array even after valid
-    # deltas.  Use that observed shape only as a fallback; a non-empty terminal
-    # value is authoritative and must agree with the deltas above.
-    text = terminal_text or meaningful_delta
+    # deltas.  Use finalized done text (or, for the observed index-less gateway
+    # shape, its deltas) as the fallback; every available source must agree.
+    text = terminal_text or meaningful_stream
     if not _is_unicode_scalar_text(text):
         raise GatewayProtocolError(
             "LLM gateway output contains invalid Unicode scalar values")

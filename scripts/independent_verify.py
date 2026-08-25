@@ -102,9 +102,46 @@ BASE = normalize_base(os.environ.get("VERIFIER_BASE_URL"))
 
 _API_PATHS = frozenset({"/models", "/responses", "/chat/completions"})
 _BASE_ERROR = (
-    "VERIFIER_BASE_URL must be an explicit HTTPS endpoint ending in /v1; "
+    "VERIFIER_BASE_URL must be an explicit HTTPS endpoint on an ordinary "
+    "ASCII DNS hostname and ending in /v1; "
     "refusing the credentialed verifier request"
 )
+_DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+_HEADER_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
+_CUSTOM_KEY_HEADER = re.compile(
+    r"X-(?:[A-Za-z0-9]+-)*(?:API-)?Key\Z",
+    re.IGNORECASE,
+)
+_RESERVED_HEADERS = frozenset({
+    "connection",
+    "content-length",
+    "content-type",
+    "cookie",
+    "host",
+    "proxy-authorization",
+    "transfer-encoding",
+})
+_AUTH_HEADER_ERROR = (
+    "VERIFIER_AUTH_HEADER must be Authorization or an X-*-Key header; "
+    "refusing the credentialed verifier request"
+)
+_KEY_ERROR = (
+    "verifier API key must be a nonempty visible-ASCII value; "
+    "refusing the credentialed verifier request"
+)
+
+
+def _is_plain_dns_hostname(hostname: str) -> bool:
+    """Accept one stable spelling, not resolver-normalized IP/IDN aliases."""
+    if not hostname.isascii() or len(hostname) > 253:
+        return False
+    labels = hostname.split(".")
+    return (
+        len(labels) >= 2
+        and labels[-1].isalpha()
+        and all(_DNS_LABEL.fullmatch(label) for label in labels)
+        and not any(label.casefold().startswith("xn--") for label in labels)
+    )
 
 
 def _api_url(path: str) -> str:
@@ -122,6 +159,7 @@ def _api_url(path: str) -> str:
     if (
         parsed.scheme.casefold() != "https"
         or not hostname
+        or not _is_plain_dns_hostname(hostname)
         or parsed.username is not None
         or parsed.password is not None
         or "?" in BASE
@@ -174,18 +212,27 @@ def _endpoint_literals() -> tuple[str, ...]:
     return tuple(sorted(values, key=len, reverse=True))
 
 
+def _protected_literals() -> tuple[str, ...]:
+    values = set(_endpoint_literals())
+    if isinstance(KEY, str) and KEY:
+        values.add(KEY)
+    return tuple(sorted(values, key=len, reverse=True))
+
+
 def _safe_diag(value: object, limit: int | None = 300) -> str:
     """Bound an untrusted diagnostic and remove credential/endpoint echoes."""
     text = str(value)
-    if isinstance(KEY, str) and KEY:
-        text = text.replace(KEY, "<redacted>")
-    for literal in _endpoint_literals():
-        text = re.sub(re.escape(literal), "<redacted>", text, flags=re.IGNORECASE)
+    # Delete rather than substitute a fixed marker: an operator credential can
+    # itself equal (or be contained in) a marker such as ``<redacted>``.  One
+    # longest-first literal set also handles a key that overlaps the endpoint.
+    for literal in _protected_literals():
+        text = re.sub(re.escape(literal), "", text, flags=re.IGNORECASE)
     return text if limit is None else text[:limit]
 
 
 def _contains_protected_text(value: str) -> bool:
-    return _safe_diag(value, limit=None) != value
+    folded = value.casefold()
+    return any(literal.casefold() in folded for literal in _protected_literals())
 
 
 def _contains_protected_value(value: object) -> bool:
@@ -221,10 +268,18 @@ def auth_header() -> dict[str, str]:
     and answers Bearer with 401 "opencodex API key required" while accepting
     X-OpenCodex-API-Key. Actions injects an EMPTY STRING for an unset repo
     variable, so the empty form must retain the Authorization default."""
+    if (not isinstance(KEY, str) or not 1 <= len(KEY) <= 4096
+            or any(not 33 <= ord(char) <= 126 for char in KEY)):
+        raise ProviderConfigError(_KEY_ERROR)
     name = (os.environ.get("VERIFIER_AUTH_HEADER") or "").strip()
-    if name and name.lower() != "authorization":
-        return {name: KEY or ""}
-    return {"Authorization": f"Bearer {KEY}"}
+    lower_name = name.casefold()
+    if not name or lower_name == "authorization":
+        return {"Authorization": f"Bearer {KEY or ''}"}
+    if (not _HEADER_TOKEN.fullmatch(name)
+            or lower_name in _RESERVED_HEADERS
+            or not _CUSTOM_KEY_HEADER.fullmatch(name)):
+        raise ProviderConfigError(_AUTH_HEADER_ERROR)
+    return {name: KEY or ""}
 
 # MODEL_PREFERENCE and FALLBACK_MODEL used to live here. Both existed to choose
 # a SUBSTITUTE when a configured voice was not served by the account, and that
@@ -944,7 +999,7 @@ def build_system_prompt(challenge: str) -> str:
 
 
 def selftest() -> None:
-    global BASE
+    global BASE, KEY
 
     def expect(cond: bool, msg: str) -> None:
         if not cond:
@@ -1201,6 +1256,8 @@ def selftest() -> None:
 
     # auth_header() -- both branches
     _saved = os.environ.pop("VERIFIER_AUTH_HEADER", None)
+    _saved_key = KEY
+    KEY = "selftest-verifier-key"
     try:
         expect("Authorization" in auth_header(), "default must be Authorization: Bearer")
         os.environ["VERIFIER_AUTH_HEADER"] = "X-OpenCodex-API-Key"
@@ -1209,7 +1266,14 @@ def selftest() -> None:
         expect("Authorization" in auth_header(), "empty variable (unset Actions var) -> default")
         os.environ["VERIFIER_AUTH_HEADER"] = "authorization"
         expect("Authorization" in auth_header(), "case-insensitive 'authorization' -> default Bearer form")
+        os.environ["VERIFIER_AUTH_HEADER"] = "Host"
+        try:
+            auth_header()
+            expect(False, "a routing header must not carry the verifier credential")
+        except ProviderConfigError:
+            pass
     finally:
+        KEY = _saved_key
         os.environ.pop("VERIFIER_AUTH_HEADER", None)
         if _saved is not None:
             os.environ["VERIFIER_AUTH_HEADER"] = _saved
@@ -1243,6 +1307,12 @@ def selftest() -> None:
         try:
             _api_url("/models")
             expect(False, "a blank verifier endpoint must fail closed")
+        except ProviderConfigError:
+            pass
+        BASE = "https://127.0.0.0x1/v1"
+        try:
+            _api_url("/models")
+            expect(False, "a resolver-normalized numeric host must fail closed")
         except ProviderConfigError:
             pass
     finally:
@@ -1782,6 +1852,7 @@ def main() -> int:
 
     try:
         _api_url("/models")
+        auth_header()
     except ProviderConfigError as exc:
         print(f"BLOCK provider configuration — {exc}; fail-closed.", file=sys.stderr)
         return 1

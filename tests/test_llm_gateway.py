@@ -16,6 +16,7 @@ import pytest
 from app.llm_gateway import (
     DEFAULT_WALL_DEADLINE_S,
     MAX_SSE_EVENT_CHARS,
+    MAX_SSE_EVENTS,
     GatewayClient,
     GatewayConfig,
     GatewayConfigError,
@@ -119,7 +120,9 @@ class TestConfiguration:
         "http://gateway.example.test/v1",
         "https://user:password@gateway.example.test/v1",  # pragma: allowlist secret
         "https://gateway.example.test/v1?route=other",
+        "https://gateway.example.test/v1?",
         "https://gateway.example.test/v1#fragment",
+        "https://gateway.example.test/v1#",
         "https://gateway.example.test",
         "https://[not-an-ipv6/v1",
         "https://gateway.example.test:not-a-port/v1",
@@ -316,6 +319,117 @@ class TestResponsesStreaming:
         assert out.text == "first second"
         assert out.request_id == "r-empty"
 
+    def test_finalized_done_text_is_used_when_completed_output_is_empty(self):
+        http = _FakeHttpClient(_Response(lines=_responses_events(
+            {"type": "response.output_text.done", "output_index": 0,
+             "content_index": 0, "text": "finalized answer"},
+            {"type": "response.completed", "response": {
+                "id": "r-done", "status": "completed", "output": []}},
+        )))
+        out = GatewayClient(_config(), http_client=http).complete(user="hello")
+        assert out.text == "finalized answer"
+
+    def test_finalized_done_text_must_match_its_streamed_deltas(self):
+        http = _FakeHttpClient(_Response(lines=_responses_events(
+            {"type": "response.output_text.delta", "output_index": 0,
+             "content_index": 0, "delta": "trunc"},
+            {"type": "response.output_text.done", "output_index": 0,
+             "content_index": 0, "text": "truncated full answer"},
+            {"type": "response.completed", "response": {
+                "id": "r-mismatch", "status": "completed", "output": []}},
+        )))
+        with pytest.raises(GatewayProtocolError, match="does not match"):
+            GatewayClient(_config(), http_client=http).complete(user="hello")
+
+    def test_finalized_parts_are_ordered_by_response_indexes(self):
+        http = _FakeHttpClient(_Response(lines=_responses_events(
+            {"type": "response.output_text.done", "output_index": 1,
+             "content_index": 0, "text": "second"},
+            {"type": "response.output_text.done", "output_index": 0,
+             "content_index": 0, "text": "first "},
+            {"type": "response.completed", "response": {
+                "id": "r-parts", "status": "completed", "output": []}},
+        )))
+        assert GatewayClient(_config(), http_client=http).complete(
+            user="hello").text == "first second"
+
+    def test_duplicate_done_for_one_part_is_rejected(self):
+        events = [
+            {"type": "response.output_text.done", "output_index": 0,
+             "content_index": 0, "text": "answer"},
+            {"type": "response.output_text.done", "output_index": 0,
+             "content_index": 0, "text": "answer"},
+            {"type": "response.completed", "response": {"output": []}},
+        ]
+        with pytest.raises(GatewayProtocolError, match="duplicate finalized"):
+            GatewayClient(_config(), http_client=_FakeHttpClient(
+                _Response(lines=_responses_events(*events)))).complete(user="hello")
+
+    def test_delta_after_done_for_one_part_is_rejected(self):
+        events = [
+            {"type": "response.output_text.done", "output_index": 0,
+             "content_index": 0, "text": "answer"},
+            {"type": "response.output_text.delta", "output_index": 0,
+             "content_index": 0, "delta": "late"},
+            {"type": "response.completed", "response": {"output": []}},
+        ]
+        with pytest.raises(GatewayProtocolError, match="after finalized"):
+            GatewayClient(_config(), http_client=_FakeHttpClient(
+                _Response(lines=_responses_events(*events)))).complete(user="hello")
+
+    def test_done_mode_requires_every_delta_part_to_be_finalized(self):
+        events = [
+            {"type": "response.output_text.delta", "output_index": 0,
+             "content_index": 0, "delta": "first "},
+            {"type": "response.output_text.done", "output_index": 0,
+             "content_index": 0, "text": "first "},
+            {"type": "response.output_text.delta", "output_index": 1,
+             "content_index": 0, "delta": "trunc"},
+            {"type": "response.completed", "response": {"output": []}},
+        ]
+        with pytest.raises(GatewayProtocolError, match="without finalized"):
+            GatewayClient(_config(), http_client=_FakeHttpClient(
+                _Response(lines=_responses_events(*events)))).complete(user="hello")
+
+    def test_indexed_and_indexless_text_events_cannot_be_mixed(self):
+        events = [
+            {"type": "response.output_text.delta", "delta": "answer"},
+            {"type": "response.output_text.done", "output_index": 0,
+             "content_index": 0, "text": "answer"},
+            {"type": "response.completed", "response": {"output": []}},
+        ]
+        with pytest.raises(GatewayProtocolError, match="index"):
+            GatewayClient(_config(), http_client=_FakeHttpClient(
+                _Response(lines=_responses_events(*events)))).complete(user="hello")
+
+    @pytest.mark.parametrize("indexes", [
+        {"output_index": -1, "content_index": 0},
+        {"output_index": True, "content_index": 0},
+        {"output_index": MAX_SSE_EVENTS, "content_index": 0},
+        {"output_index": 10**100, "content_index": 0},
+        {"output_index": 0},
+    ])
+    def test_invalid_or_sparse_text_part_indexes_are_rejected(self, indexes):
+        event = {"type": "response.output_text.delta", "delta": "answer", **indexes}
+        with pytest.raises(GatewayProtocolError, match="index"):
+            GatewayClient(_config(), http_client=_FakeHttpClient(_Response(
+                lines=_responses_events(
+                    event,
+                    {"type": "response.completed", "response": {"output": []}},
+                )))).complete(user="hello")
+
+    def test_done_text_is_type_and_size_bounded(self):
+        for text, message in ((123, "invalid finalized"), ("x" * 4097, "too large")):
+            events = [
+                {"type": "response.output_text.done", "output_index": 0,
+                 "content_index": 0, "text": text},
+                {"type": "response.completed", "response": {"output": []}},
+            ]
+            with pytest.raises(GatewayProtocolError, match=message):
+                GatewayClient(_config(), http_client=_FakeHttpClient(
+                    _Response(lines=_responses_events(*events)))).complete(
+                        user="hello", max_tokens=1)
+
     def test_completed_object_is_only_the_fallback_text_source(self):
         response = {"id": "r-fallback", "output": [{"content": [
             {"type": "output_text", "text": "fallback text"},
@@ -401,7 +515,13 @@ class TestResponsesStreaming:
             r'data: {"type":"response.completed","response":{"id":"r-block","output":[{"content":[{"type":"output_text","text":"\ud800"}]}]}}',
             "",
         ],
-    ], ids=["delta-high", "terminal-low", "terminal-block-high"])
+        [
+            r'data: {"type":"response.output_text.done","output_index":0,"content_index":0,"text":"\ud800"}',
+            "",
+            r'data: {"type":"response.completed","response":{"id":"r-done","output":[]}}',
+            "",
+        ],
+    ], ids=["delta-high", "terminal-low", "terminal-block-high", "done-high"])
     def test_escaped_lone_surrogates_fail_at_completion_boundary(self, lines):
         """JSON escapes may not smuggle non-UTF-8 text past wire decoding."""
         http = _FakeHttpClient(_Response(lines=lines))
