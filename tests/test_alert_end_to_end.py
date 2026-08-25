@@ -387,7 +387,7 @@ def test_an_unknown_condition_renders_with_its_caveat(isolated_db):
     from app.alerts.render_context import build_member_context
     from app.alerts.renderer import render_with_cascade
 
-    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())
 
     from tests.test_alert_evaluation import make_input
@@ -399,6 +399,7 @@ def test_an_unknown_condition_renders_with_its_caveat(isolated_db):
     context_member = build_member_context(
         episode_id="01M0UNKNOWNRENDER00000000A", rule_id="regime.band_to_derisk",
         priority=1, trigger=trigger, current=trigger, previous=previous,
+        authorized_fact_ids=frozenset(phrase_set.facts),
         authorized_phrase_codes=frozenset(phrase_set.all_codes()),
         required_caveat_codes=(), condition_status="UNKNOWN_AT_RENDER",
         origin_phrase_set_version=phrase_set.version,

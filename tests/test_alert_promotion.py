@@ -99,7 +99,7 @@ def test_the_committed_stage_is_backed_by_the_committed_evidence():
 
     ruleset = validate_from_disk(
         rules_path=Path("config/alert_rules.v3.2.yaml"),
-        phrase_path=Path("config/alert_phrases.v3.3.json"),
+        phrase_path=Path("config/alert_phrases.v3.4.json"),
         service_version="3.8.0").ruleset
     committed = ruleset.document.meta.active_stage
     blockers = promotion_blockers(
@@ -984,7 +984,7 @@ def test_cli_refuses_promotion_when_exact_evidence_fails(monkeypatch, capsys):
     monkeypatch.setattr(promotion_service, "load_evidence", lambda path=None: None)
     code = alert_cli.main(["validate",
                            "--rules", "config/alert_rules.v3.2.yaml",
-                           "--phrases", "config/alert_phrases.v3.3.json",
+                           "--phrases", "config/alert_phrases.v3.4.json",
                            "--promote"])
     out = capsys.readouterr().out
     assert code == 1

@@ -139,7 +139,8 @@ def mechanism_projection(
     for rule in ruleset.rules():
         if rule_ids is not None and rule.rule_id not in rule_ids:
             continue
-        fingerprint = instance_fingerprint(rule.rule_id, rule.identity_version, {})
+        fingerprint = instance_fingerprint(
+            rule.rule_id, rule.identity_version, rule.labels)
         state = states.get(fingerprint)
         active = rule.enabled and stage in rule.enabled_in_stages
         disabled_reason = rule.disabled_reason
@@ -151,7 +152,7 @@ def mechanism_projection(
         out.append({
             "rule_id": rule.rule_id,
             "instance_fingerprint": fingerprint,
-            "labels": {},
+            "labels": dict(rule.labels),
             "bucket": rule.bucket,
             "priority": rule.priority,
             "policy_status": rule.policy_status,

@@ -200,7 +200,7 @@ def apply_decision(
             origin_rules_sha256=rules_sha256,
             instance_fingerprint=decision.instance_fingerprint,
             rule_id=decision.rule_id,
-            labels={},
+            labels=dict(decision.labels),
             priority=rule.priority,
             episode_status=(EpisodeStatus.FIRING if decision.activate_episode
                             else EpisodeStatus.PENDING),

@@ -57,9 +57,11 @@ jobs:
         env:
           # 217 -> 212: annotating the four frozen s4 policy constants as float
           # cleared the whole no-any-return class in app/indicators/s4_gsadf.py.
+          # 211 -> 205: the typed render-carriage path narrows persisted inputs,
+          # origin contracts, validation mappings, and member collections.
           # Lowered in the SAME commit that lowered the count, which is what the
           # comment below has always asked for and what the ::notice:: advises.
-          MYPY_CEILING: "211"
+          MYPY_CEILING: "205"
           # The floor constrains REACH, not DEPTH: it proves mypy READ the tree.
           # It does NOT make a low count mean "little is wrong" -- an earlier
           # version of this comment claimed that, and it is false. Measured:
@@ -142,7 +144,7 @@ jobs:
       - name: Alert artifacts — validate the shipped ruleset + phrase set (BLOCKING)
         # The rule inventory is DATA. A ruleset that no longer validates is a
         # silently-dark alert system, so this gates the same as a test failure.
-        run: python -m app.alerts.cli validate --rules config/alert_rules.v3.2.yaml --phrases config/alert_phrases.v3.3.json
+        run: python -m app.alerts.cli validate --rules config/alert_rules.v3.2.yaml --phrases config/alert_phrases.v3.4.json
         env:
           TESTING: "true"
       - name: Alert OpenAPI artifact — no drift (BLOCKING)

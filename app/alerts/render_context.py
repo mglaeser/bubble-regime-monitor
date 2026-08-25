@@ -15,6 +15,7 @@ Pure module.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,6 +77,10 @@ class MemberContext:
     origin_rules_sha256: str
     escalation_of: str | None = None
     notes: tuple[str, ...] = ()
+    labels: dict[str, str] = field(default_factory=dict)
+    headline_code: str | None = None
+    phrase_codes: tuple[str, ...] = ()
+    next_check_code: str | None = None
 
     def fact(self, fact_id: str) -> str | None:
         """A fact this member owns — or None. NEVER another member's."""
@@ -98,7 +103,13 @@ class RenderContext:
             {
                 "episode_id": m.episode_id,
                 "rule_id": m.rule_id,
+                "labels": dict(sorted(m.labels.items())),
                 "facts": dict(sorted(m.facts.items())),
+                "authorized_facts": sorted(m.authorized_fact_ids),
+                "authorized_codes": sorted(m.authorized_phrase_codes),
+                "headline_code": m.headline_code,
+                "phrase_codes": list(m.phrase_codes),
+                "next_check_code": m.next_check_code,
                 "status": m.condition_status,
                 "caveats": list(m.required_caveat_codes),
             }
@@ -138,6 +149,90 @@ def compatible(trigger: AlertInput, current: AlertInput | None) -> bool:
     )
 
 
+FactBuilder = Callable[
+    [AlertInput, AlertInput, AlertInput | None, dict[str, str]],
+    Any,
+]
+
+
+def _source_attr(attribute: str) -> FactBuilder:
+    return lambda _trigger, source, _previous, _labels: getattr(source, attribute, None)
+
+
+def _previous_attr(attribute: str) -> FactBuilder:
+    return lambda _trigger, _source, previous, _labels: (
+        getattr(previous, attribute, None) if previous is not None else None)
+
+
+def _evidence_value(domain: str, *, attribute: str = "value") -> FactBuilder:
+    def build(_trigger: AlertInput, source: AlertInput,
+              _previous: AlertInput | None, _labels: dict[str, str]) -> Any:
+        item = source.evidence_for(domain)
+        return getattr(item, attribute, None) if item is not None else None
+    return build
+
+
+def _label(name: str) -> FactBuilder:
+    return lambda _trigger, _source, _previous, labels: labels.get(name)
+
+
+def _active_fireable_red_flags(trigger: AlertInput, _source: AlertInput,
+                               _previous: AlertInput | None,
+                               _labels: dict[str, str]) -> int:
+    return sum(1 for flag in trigger.red_flags if flag.active and flag.fireable)
+
+
+def _required_red_flags(trigger: AlertInput, _source: AlertInput,
+                        _previous: AlertInput | None,
+                        _labels: dict[str, str]) -> int | None:
+    return trigger.override_required_count
+
+
+def _rf3_distance(trigger: AlertInput, _source: AlertInput,
+                  _previous: AlertInput | None,
+                  _labels: dict[str, str]) -> float | None:
+    flag = trigger.red_flag("rf3")
+    return flag.distance_to_threshold if flag is not None else None
+
+
+def _next_check(_trigger: AlertInput, source: AlertInput,
+                _previous: AlertInput | None,
+                _labels: dict[str, str]) -> str | None:
+    value = source.expected_recompute_slot
+    return value[11:16] if value and len(value) >= 16 else None
+
+
+#: Canonical typed member-fact registry.  Its keys are the validator's proof
+#: surface: a rule may not authorize a fact absent from this map.  Each builder
+#: reads only immutable AlertInput bytes, the persisted predecessor, or
+#: preapproved episode labels; none parses a rule id or queries a provider.
+MEMBER_FACT_BUILDERS: dict[str, FactBuilder] = {
+    "F_HEADLINE_MEDIAN": _source_attr("headline_median"),
+    "F_POINT_SCORE": _source_attr("point_score"),
+    "F_IQR_LO": _source_attr("iqr_lo"),
+    "F_IQR_HI": _source_attr("iqr_hi"),
+    "F_BAND_EFFECTIVE": _source_attr("effective_action_state"),
+    "F_BAND_BASE": _source_attr("base_action_band"),
+    "F_BAND_SCORE": _source_attr("score_action_band"),
+    "F_BAND_PREVIOUS": _previous_attr("effective_action_state"),
+    "F_ASSET": _label("asset"),
+    "F_RF_COUNT": _active_fireable_red_flags,
+    "F_RF_REQUIRED": _required_red_flags,
+    "F_RF3_DISTANCE": _rf3_distance,
+    "F_BREADTH": _evidence_value("indicator.d1.breadth"),
+    "F_CAPE": _evidence_value("indicator.s1.cape"),
+    "F_TOP10": _evidence_value("indicator.s2.top10_share"),
+    "F_S3": _evidence_value("indicator.s3.semi_runup"),
+    "F_D4": _evidence_value("indicator.d4.lppls_endpoint"),
+    "F_D2": _evidence_value("indicator.d2.finra_release"),
+    "F_HY_OAS": _evidence_value("credit.hy_oas.daily"),
+    "F_RF3_DISTANCE_EVIDENCE": _evidence_value(
+        "credit.hy_oas.daily", attribute="distance_to_threshold"),
+    "F_MISSED_SLOTS": _evidence_value("ops.recompute_slot"),
+    "F_NEXT_CHECK": _next_check,
+}
+
+
 def build_member_context(
     *,
     episode_id: str,
@@ -145,6 +240,7 @@ def build_member_context(
     priority: int,
     trigger: AlertInput,
     current: AlertInput | None,
+    authorized_fact_ids: frozenset[str],
     authorized_phrase_codes: frozenset[str],
     required_caveat_codes: tuple[str, ...],
     condition_status: str,
@@ -156,6 +252,10 @@ def build_member_context(
     # two required parameters it read like a syntax error to more than one
     # reviewer, and it costs nothing to put the optional ones together.
     previous: AlertInput | None = None,
+    labels: dict[str, str] | None = None,
+    headline_code: str | None = None,
+    phrase_codes: tuple[str, ...] = (),
+    next_check_code: str | None = None,
 ) -> MemberContext:
     """Build one member's isolated fact set.
 
@@ -166,28 +266,23 @@ def build_member_context(
     """
     notes: list[str] = []
     caveats = list(required_caveat_codes)
+    labels = {str(key): str(value) for key, value in sorted((labels or {}).items())}
 
     use_current = compatible(trigger, current)
-    source = current if use_current else trigger
+    source: AlertInput = current if current is not None and use_current else trigger
     if current is not None and not use_current:
         caveats.append("CONTEXT_STALE")
         notes.append("current input is not schema/methodology compatible with the trigger")
 
     facts: dict[str, str] = {}
-    # The predecessor is read for its OWN facts only, never mixed into the
-    # current ones: it answers "what did this move from", and nothing else.
-    for fact_id, attribute in PREVIOUS_FACT_SOURCES.items():
-        prior = getattr(previous, attribute, None) if previous is not None else None
-        if prior is not None:
-            facts[fact_id] = str(prior)
-    for fact_id, attribute in FACT_SOURCES.items():
-        value = getattr(source, attribute, None)
-        if value is not None:
+    for fact_id in sorted(authorized_fact_ids):
+        builder = MEMBER_FACT_BUILDERS.get(fact_id)
+        if builder is None:
+            notes.append(f"no typed builder for authorized fact {fact_id}")
+            continue
+        value = builder(trigger, source, previous, labels)
+        if value is not None and value != "":
             facts[fact_id] = _format(value)
-    for fact_id, (domain, _unit) in EVIDENCE_FACTS.items():
-        item = source.evidence_for(domain)
-        if item is not None and item.value is not None:
-            facts[fact_id] = _format(item.value)
 
     if source.data_degraded and "DATA_DEGRADED" not in caveats:
         caveats.append("DATA_DEGRADED")
@@ -197,15 +292,12 @@ def build_member_context(
     if condition_status == "UNKNOWN_AT_RENDER" and "UNKNOWN_AT_RENDER" not in caveats:
         caveats.append("UNKNOWN_AT_RENDER")
 
-    if source.expected_recompute_slot:
-        facts["F_NEXT_CHECK"] = source.expected_recompute_slot[11:16]
-
     return MemberContext(
         episode_id=episode_id,
         rule_id=rule_id,
         priority=priority,
         facts=facts,
-        authorized_fact_ids=frozenset(facts),
+        authorized_fact_ids=authorized_fact_ids,
         authorized_phrase_codes=authorized_phrase_codes,
         required_caveat_codes=tuple(dict.fromkeys(caveats)),
         condition_status=condition_status,
@@ -214,6 +306,10 @@ def build_member_context(
         origin_rules_sha256=origin_rules_sha256,
         escalation_of=escalation_of,
         notes=tuple(notes),
+        labels=labels,
+        headline_code=headline_code,
+        phrase_codes=phrase_codes,
+        next_check_code=next_check_code,
     )
 
 

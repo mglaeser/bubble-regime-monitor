@@ -215,7 +215,8 @@ def evaluate_ruleset(
 
     for rule in ruleset.active_rules(stage):
         deadline.check(f"rule:{rule.rule_id}")
-        fingerprint = instance_fingerprint(rule.rule_id, rule.identity_version, {})
+        fingerprint = instance_fingerprint(
+            rule.rule_id, rule.identity_version, rule.labels)
         if role == RulesetRole.ORIGIN_CONTINUATION and fingerprint not in open_fingerprints:
             continue
 
@@ -249,6 +250,7 @@ def evaluate_ruleset(
                 rule=rule, instance_fingerprint=fingerprint, memory=memory,
                 outcome=outcome, ctx=ctx, now=now,
             )
+        decision.labels = dict(rule.labels)
         results.append((rule, decision))
     return results
 

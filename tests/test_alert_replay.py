@@ -27,7 +27,7 @@ from app.alerts.replay import (
 from tests.test_alert_evaluation import make_input
 
 RULES = Path("config/alert_rules.v3.2.yaml")
-PHRASES = Path("config/alert_phrases.v3.3.json")
+PHRASES = Path("config/alert_phrases.v3.4.json")
 REPLAY_SOURCE = Path("app/alerts/replay.py")
 
 

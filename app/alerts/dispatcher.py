@@ -29,6 +29,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
+from app.alerts.artifacts import load_by_hash
 from app.alerts.budgets import BUDGETED_KINDS, check_budget
 from app.alerts.canonical import new_ulid
 from app.alerts.digest import render_digest_body
@@ -83,6 +84,7 @@ from app.alerts.repository import (
     load_latest_compatible_input,
     utc_ms,
 )
+from app.alerts.rulespec import RuleSpec
 from app.alerts.sender import Sender, default_sender
 from app.logging_conf import get_logger
 
@@ -129,15 +131,58 @@ def _existing_render(session, delivery_id: str) -> AlertRender | None:
     ).scalars().first()
 
 
+def _origin_rule(
+    session: Any,
+    member: AlertDeliveryMember,
+    phrase_set: ValidatedPhraseSet,
+) -> RuleSpec:
+    """Resolve and verify one member's exact archived rendering authority."""
+    artifacts = load_by_hash(session, member.origin_rules_sha256)
+    if artifacts is None:
+        raise RenderRejected(
+            f"origin ruleset {member.origin_rules_sha256[:12]} is unavailable")
+    if artifacts.phrase_set.version != member.origin_phrase_set_version \
+            or artifacts.phrase_set.sha256 != member.origin_phrase_set_sha256:
+        raise RenderRejected(
+            f"member {member.rule_id} phrase provenance does not match its origin ruleset")
+    if artifacts.phrase_set.version != phrase_set.version \
+            or artifacts.phrase_set.sha256 != phrase_set.sha256:
+        raise RenderRejected(
+            "delivery members do not share one exact phrase-set provenance")
+    rule = artifacts.ruleset.rule(member.rule_id)
+    if rule is None:
+        raise RenderRejected(
+            f"rule {member.rule_id!r} is absent from its origin ruleset")
+    if rule.render is None:
+        raise RenderRejected(
+            f"rule {member.rule_id!r} has no reviewed render contract")
+    return rule
+
+
 def _build_context(session, delivery: AlertDelivery, members,
-                   phrase_set: ValidatedPhraseSet) -> RenderContext:
+                   phrase_set: ValidatedPhraseSet
+                   ) -> tuple[RenderContext, list[RuleSpec]]:
     """One isolated context per member, built from persisted sidecars only."""
     contexts = []
+    origin_rules: list[RuleSpec] = []
     for member in members:
+        rule = _origin_rule(session, member, phrase_set)
+        contract = rule.render
+        if contract is None:  # guarded by _origin_rule; retained for type narrowing
+            raise RenderRejected(
+                f"rule {member.rule_id!r} has no reviewed render contract")
         episode = session.get(AlertEpisode, member.episode_id)
+        if episode is None:
+            raise RenderRejected(f"episode {member.episode_id} is unavailable")
+        labels = {str(key): str(value)
+                  for key, value in sorted((episode.labels or {}).items())}
+        if labels != rule.labels:
+            raise RenderRejected(
+                f"episode labels for {member.rule_id} do not match the origin RuleSpec")
         trigger = load_input(session, episode.trigger_input_identity) if episode else None
         if trigger is None:
-            continue
+            raise RenderRejected(
+                f"trigger input for episode {member.episode_id} is unavailable")
         # READ, never re-resolved. The evaluator recorded which input it
         # decided against; resolving again here would re-run a query whose
         # answer can change — a backfill inserting a sidecar between the
@@ -191,53 +236,23 @@ def _build_context(session, delivery: AlertDelivery, members,
             trigger=trigger,
             current=current,
             previous=previous,
-            authorized_phrase_codes=frozenset(phrase_set.all_codes()),
-            required_caveat_codes=(("CONTEXT_STALE",) if stale_context else ()),
+            labels=labels,
+            authorized_fact_ids=frozenset(contract.allowed_fact_ids),
+            authorized_phrase_codes=contract.authorized_codes(rule),
+            headline_code=contract.headline_code,
+            phrase_codes=tuple(contract.allowed_phrase_codes),
+            next_check_code=contract.next_check_code,
+            required_caveat_codes=tuple(dict.fromkeys([
+                *rule.required_caveat_codes,
+                *(("CONTEXT_STALE",) if stale_context else ()),
+            ])),
             condition_status=status,
             origin_phrase_set_version=member.origin_phrase_set_version,
             origin_phrase_set_sha256=member.origin_phrase_set_sha256,
             origin_rules_sha256=member.origin_rules_sha256,
         ))
-    return RenderContext(members=contexts)
-
-
-def _headline_for(rule_id: str, phrase_set: ValidatedPhraseSet) -> str:
-    """A deterministic headline per rule family, with a safe fallback.
-
-    A rule with no mapped headline gets the generic band headline rather than
-    no message at all — but the mapping is data in the phrase set, not prose
-    invented here.
-    """
-    mapping = {
-        "regime.band_to_derisk": "BAND_TO_DERISK",
-        "regime.band_hold_to_trim": "BAND_TO_TRIM",
-        "regime.band_trim_to_hold": "BAND_TO_HOLD",
-        "regime.base_band_moved_while_suppressed": "BASE_BAND_MOVED",
-        "override.fires": "OVERRIDE_FIRES",
-        "override.resolves": "OVERRIDE_RESOLVES",
-        "override.warning": "OVERRIDE_WARNING",
-        "tripwire.rf3_credit_stress": "RF3_CREDIT_STRESS",
-        "tripwire.rf4_first": "RF4_FIRST",
-        "tripwire.rf4_persistent": "RF4_PERSISTENT",
-        "tripwire.rf4_all_clear": "RF4_ALL_CLEAR",
-        "tripwire.margin_rollover": "MARGIN_ROLLOVER",
-        "legs.faber_spy_out_high_risk": "FABER_OUT_HIGH_RISK",
-        "legs.faber_spy_out_standard": "FABER_OUT",
-        "legs.faber_qqq_out": "FABER_OUT",
-        "legs.faber_spy_back_in": "FABER_BACK_IN",
-        "legs.faber_qqq_back_in": "FABER_BACK_IN",
-        "structure.s3_tier_100": "S3_TIER",
-        "structure.s3_tier_150": "S3_TIER",
-        "dynamics.d3_gate_fires": "D3_GATE_FIRES",
-        "vol.backwardation": "VOL_BACKWARDATION",
-        "ops.coverage_risk_masking": "COVERAGE_RISK_MASKING",
-        "ops.recompute_outage": "RECOMPUTE_OUTAGE",
-        "constellation.execution_armed": "EXECUTION_ARMED",
-        "constellation.falsification_event": "FALSIFICATION_EVENT",
-        "constellation.coverage_degradation_real": "COVERAGE_RISK_MASKING",
-    }
-    code = mapping.get(rule_id, "BAND_TO_TRIM")
-    return code if code in phrase_set.headlines else next(iter(phrase_set.headlines))
+        origin_rules.append(rule)
+    return RenderContext(members=contexts), origin_rules
 
 
 def is_live(mode: str) -> bool:
@@ -353,13 +368,14 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
     """
     from app.alerts.models import AlertPhraseSetRegistry
 
-    row = session.execute(
+    rows = session.execute(
         select(AlertDeliveryMember.origin_phrase_set_version,
-               AlertDeliveryMember.origin_phrase_set_sha256)
+               AlertDeliveryMember.origin_phrase_set_sha256,
+               AlertDeliveryMember.origin_rules_sha256)
         .where(AlertDeliveryMember.delivery_id == delivery.delivery_id)
-        .order_by(AlertDeliveryMember.included_at).limit(1)
-    ).first()
-    if row is None:
+        .order_by(AlertDeliveryMember.included_at)
+    ).all()
+    if not rows:
         # No members at all — a quiet digest. It still has a planned text: the
         # RULESET it was planned under names a phrase set, and that is what its
         # wording was reviewed against. Falling back to the running set meant a
@@ -369,7 +385,12 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
         return _phrase_set_of_ruleset(session, delivery.planning_rules_sha256,
                                       fallback)
 
-    version, digest = row
+    phrase_pairs = {(str(version), str(digest)) for version, digest, _rules in rows}
+    if len(phrase_pairs) != 1:
+        log.error("alert_mixed_phrase_provenance",
+                  delivery_id=delivery.delivery_id, pairs=sorted(phrase_pairs))
+        return None
+    version, digest = next(iter(phrase_pairs))
     if not version or not digest:
         # A member with no recorded text provenance cannot have its planned
         # wording reproduced or verified. Falling back would render it from
@@ -378,6 +399,19 @@ def planning_phrase_set(session: Any, delivery: AlertDelivery,
         log.error("alert_planning_phrase_set_unrecorded",
                   delivery_id=delivery.delivery_id)
         return None
+
+    # A member's phrase pair is not self-authorizing.  Verify it against the
+    # exact archived ruleset that produced that member, so a tampered member
+    # row cannot select unrelated reviewed bytes with a plausible version/hash.
+    for member_version, member_digest, rules_sha in rows:
+        origin = load_by_hash(session, rules_sha)
+        if origin is None \
+                or origin.phrase_set.version != member_version \
+                or origin.phrase_set.sha256 != member_digest:
+            log.error("alert_member_origin_phrase_mismatch",
+                      delivery_id=delivery.delivery_id,
+                      rules_sha256=str(rules_sha)[:12])
+            return None
     if version == fallback.version and digest == fallback.sha256:
         return fallback
 
@@ -628,19 +662,32 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
                     report.render_failed += 1
                     return
             else:
-                context = _build_context(session, delivery, members,
-                                         render_phrases)
+                try:
+                    context, origin_rules = _build_context(
+                        session, delivery, members, render_phrases)
+                except RenderRejected as exc:
+                    mark_render_failed(session, delivery, now=now,
+                                       reason=exc.redacted())
+                    report.render_failed += 1
+                    return
                 if not context.members:
                     mark_render_failed(session, delivery, now=now,
                                        reason="no renderable member context")
                     report.render_failed += 1
                     return
-                headline = _headline_for(members[0].rule_id, render_phrases)
+                primary_contract = origin_rules[context.headline_member_index].render
+                if primary_contract is None:  # guarded in _origin_rule; type narrowing
+                    mark_render_failed(session, delivery, now=now,
+                                       reason="origin rule has no render contract")
+                    report.render_failed += 1
+                    return
                 try:
                     result = render_with_cascade(
                         context=context, phrase_set=render_phrases,
-                        headline_code=headline, phrase_codes=[],
-                        next_check_code="NEXT_RECOMPUTE", caveat_codes=[],
+                        headline_code=primary_contract.headline_code,
+                        phrase_codes=list(primary_contract.allowed_phrase_codes),
+                        next_check_code=primary_contract.next_check_code,
+                        caveat_codes=[],
                         render_source=RenderSource.TEMPLATE_FULL,
                     )
                 except RenderRejected as exc:

@@ -41,7 +41,7 @@ NIGHT = datetime(2026, 8, 15, 23, 30, tzinfo=UTC)       # 01:30 Berlin — quiet
 
 @pytest.fixture(scope="module")
 def phrase_set():
-    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
         return validate_phrase_set(fh.read())
 
 
@@ -352,16 +352,24 @@ def test_dominance_suppresses_the_loser_in_the_plan():
 
 def _context(phrase_set, *, codes=("BAND_TO_DERISK",), caveats=(), members=1):
     trigger = make_input(identity="i1", effective="de-risk", median=61.0, point=59.0)
+    fact_ids = frozenset(
+        slot
+        for code in (*codes, *caveats)
+        if (fragment := phrase_set.fragment(code)) is not None
+        for slot in fragment.slots
+    )
     built = [
         build_member_context(
             episode_id=f"EP{i}", rule_id=f"rule.{i}", priority=2,
             trigger=trigger, current=trigger,
-            authorized_phrase_codes=frozenset(codes),
+            authorized_fact_ids=fact_ids,
+            authorized_phrase_codes=frozenset((*codes, *caveats)),
             required_caveat_codes=tuple(caveats),
             condition_status="STILL_FIRING",
             origin_phrase_set_version=phrase_set.version,
             origin_phrase_set_sha256=phrase_set.sha256,
             origin_rules_sha256="rules-hash",
+            headline_code=codes[0],
         )
         for i in range(members)
     ]
@@ -424,7 +432,8 @@ def test_required_caveat_is_always_present(phrase_set):
     member = build_member_context(
         episode_id="EP1", rule_id="ops.coverage_risk_masking", priority=2,
         trigger=trigger, current=trigger,
-        authorized_phrase_codes=frozenset({"COVERAGE_RISK_MASKING"}),
+        authorized_fact_ids=frozenset({"F_BAND_BASE"}),
+        authorized_phrase_codes=frozenset({"COVERAGE_RISK_MASKING", "DATA_DEGRADED"}),
         required_caveat_codes=("DATA_DEGRADED",), condition_status="STILL_FIRING",
         origin_phrase_set_version=phrase_set.version,
         origin_phrase_set_sha256=phrase_set.sha256, origin_rules_sha256="r")
@@ -432,13 +441,14 @@ def test_required_caveat_is_always_present(phrase_set):
     result = render(context=RenderContext(members=[member]), phrase_set=phrase_set,
                     headline_code="COVERAGE_RISK_MASKING", phrase_codes=[],
                     next_check_code=None, caveat_codes=[])
-    assert "Datenlage eingeschraenkt" in result.body
+    assert "Daten lueckenhaft" in result.body
 
 
 def test_degraded_data_adds_a_caveat_without_being_asked(phrase_set):
     trigger = make_input(identity="i1", effective="de-risk", degraded=True)
     member = build_member_context(
         episode_id="EP1", rule_id="r", priority=2, trigger=trigger, current=trigger,
+        authorized_fact_ids=frozenset(),
         authorized_phrase_codes=frozenset(), required_caveat_codes=(),
         condition_status="STILL_FIRING", origin_phrase_set_version=phrase_set.version,
         origin_phrase_set_sha256=phrase_set.sha256, origin_rules_sha256="r")
@@ -451,6 +461,7 @@ def test_incompatible_current_input_falls_back_to_trigger_values(phrase_set):
     object.__setattr__(current, "methodology_sha256", "a-different-methodology")
     member = build_member_context(
         episode_id="EP1", rule_id="r", priority=2, trigger=trigger, current=current,
+        authorized_fact_ids=frozenset({"F_HEADLINE_MEDIAN"}),
         authorized_phrase_codes=frozenset(), required_caveat_codes=(),
         condition_status="MATERIALLY_CHANGED_BUT_ACTIVE",
         origin_phrase_set_version=phrase_set.version,
@@ -463,6 +474,7 @@ def test_median_and_point_score_are_separate_facts(phrase_set):
     trigger = make_input(identity="i1", median=61.0, point=59.0)
     member = build_member_context(
         episode_id="EP1", rule_id="r", priority=2, trigger=trigger, current=trigger,
+        authorized_fact_ids=frozenset({"F_HEADLINE_MEDIAN", "F_POINT_SCORE"}),
         authorized_phrase_codes=frozenset(), required_caveat_codes=(),
         condition_status="STILL_FIRING", origin_phrase_set_version=phrase_set.version,
         origin_phrase_set_sha256=phrase_set.sha256, origin_rules_sha256="r")
@@ -953,7 +965,7 @@ def test_a_test_delivery_dispatches_its_reviewed_fragment(isolated_db):
             created_at=now, updated_at=now, attempts=0,
             duplicate_risk_acknowledged=False, recipient_ref="default"))
 
-    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
         phrase_set = validate_phrase_set(fh.read())
     sender = NullSender()
     dispatch_once(session_scope, phrase_set=phrase_set, mode="shadow",

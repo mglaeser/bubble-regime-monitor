@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -48,6 +49,7 @@ from app.alerts.models import (
     AlertEpisode,
     AlertEvent,
     AlertInstanceNotificationState,
+    AlertRender,
     AlertRuleState,
 )
 from app.alerts.planner import DeliveryIntent, DigestIntent, PlanResult
@@ -606,6 +608,46 @@ def record_dispatch_budget_decision(
 # ---------------------------------------------------------------------------
 
 
+def validated_represented_member_ids(
+    *,
+    delivery_kind: str,
+    member_ids: Collection[str],
+    validation: dict[str, Any] | None,
+) -> frozenset[str]:
+    """The member ids immutable render evidence actually represents.
+
+    Never trust ids that are absent from the delivery, and never infer bundle
+    representation from transport success.  DIGEST is the one count-based
+    format whose reviewed body represents every surviving item by definition;
+    ordinary market bundles must carry the renderer's explicit ledger.
+    """
+    existing = frozenset(str(value) for value in member_ids)
+    if str(delivery_kind) == DeliveryKind.DIGEST:
+        return existing
+    raw = (validation or {}).get("represented_member_ids")
+    if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
+        return frozenset()
+    return frozenset(raw) & existing
+
+
+def _represented_for_sent(
+    session: Session,
+    delivery: AlertDelivery,
+    members: Collection[AlertDeliveryMember],
+) -> frozenset[str]:
+    render = session.execute(
+        select(AlertRender)
+        .where(AlertRender.delivery_id == delivery.delivery_id)
+        .order_by(AlertRender.created_at.desc())
+        .limit(1)
+    ).scalars().first()
+    return validated_represented_member_ids(
+        delivery_kind=delivery.delivery_kind,
+        member_ids=[member.episode_id for member in members],
+        validation=render.validation_results if render is not None else None,
+    )
+
+
 def mark_sending(session: Session, delivery: AlertDelivery, *, now: datetime) -> None:
     delivery.transport_status = TransportStatus.SENDING
     delivery.request_started_at = now
@@ -615,7 +657,7 @@ def mark_sending(session: Session, delivery: AlertDelivery, *, now: datetime) ->
 
 def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
               http_status: int | None) -> None:
-    """Confirmed success. EVERY surviving member starts its own cooldown."""
+    """Confirmed success. Only render-proven members start a cooldown."""
     delivery.transport_status = TransportStatus.SENT
     delivery.planning_state = PlanningState.NONE
     delivery.sent_at = now
@@ -629,7 +671,10 @@ def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
             AlertDeliveryMember.delivery_id == delivery.delivery_id,
             AlertDeliveryMember.dropped_at.is_(None))
     ).scalars().all()
+    represented = _represented_for_sent(session, delivery, members)
     for member in members:
+        if member.episode_id not in represented:
+            continue
         member.delivered = True
         state = session.get(
             AlertInstanceNotificationState,
@@ -644,8 +689,22 @@ def mark_sent(session: Session, delivery: AlertDelivery, *, now: datetime,
             if delivery.delivery_kind == DeliveryKind.REMINDER:
                 state.last_reminder_at = now
                 state.reminder_count += 1
+    if len(represented) != len(members):
+        _event(
+            session,
+            now,
+            action="delivery_representation_incomplete",
+            delivery_id=delivery.delivery_id,
+            detail=f"represented={len(represented)} surviving={len(members)}",
+        )
+        log.error(
+            "alert_delivery_representation_incomplete",
+            delivery_id=delivery.delivery_id,
+            represented=len(represented),
+            surviving=len(members),
+        )
     _event(session, now, action="delivery_sent", delivery_id=delivery.delivery_id,
-           detail=f"members={len(members)}")
+           detail=f"members={len(members)} represented={len(represented)}")
 
 
 def mark_transient(session: Session, delivery: AlertDelivery, *, now: datetime,

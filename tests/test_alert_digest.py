@@ -285,7 +285,7 @@ def test_a_late_run_never_digests_the_week_it_is_standing_in(monkeypatch):
 
 def _phrase_set():
     from app.alerts.artifacts import validate_phrase_set
-    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
         return validate_phrase_set(fh.read())
 
 
@@ -820,15 +820,8 @@ def test_an_unreported_earlier_window_keeps_its_own_items():
         assert len(last.item_ids) == 1
 
 
-def test_every_kind_renders_from_the_phrase_set_it_was_planned_under():
-    """The registry stores the bytes precisely so this is possible.
-
-    A delivery queued before a deploy must render with the phrases it was
-    planned against. Building the body from whatever the process holds and then
-    stamping the member's version on the render row leaves a record that cannot
-    explain its own text — and resolving it for digests only left the market
-    path doing exactly that.
-    """
+def test_member_phrase_pair_must_match_its_exact_origin_ruleset():
+    """A member cannot self-authorize unrelated, otherwise valid phrase bytes."""
     from app.alerts.artifacts import register
     from app.alerts.dispatcher import planning_phrase_set
     from app.alerts.models import AlertPhraseSetRegistry
@@ -840,14 +833,17 @@ def test_every_kind_renders_from_the_phrase_set_it_was_planned_under():
     with session_scope() as session:
         rules_sha = _registered(session)
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
-        # planned against v3.2, recording the version AND the digest
+        # Deliberately stamp v3.2 even though the episode's exact origin
+        # ruleset is bound to v3.4.  Both phrase artifacts are valid; the pair
+        # is still false provenance and must fail closed.
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=rules_sha,
                            phrase_set_version=v32.version,
                            phrase_set_sha256=v32.sha256,
                            window_key=WINDOW, now=NOW)
 
-        # the registry holds v3.2's real bytes; the process is holding v3.3
+        # The registry holds v3.2's real bytes; mere registry presence does not
+        # let the member override what its origin ruleset authorized.
         register(session, load_active(session))
         session.add(AlertPhraseSetRegistry(
             phrase_set_version=v32.version, phrase_set_sha256=v32.sha256,
@@ -859,8 +855,7 @@ def test_every_kind_renders_from_the_phrase_set_it_was_planned_under():
         delivery = session.get(AlertDelivery, plan.delivery_id)
         resolved = planning_phrase_set(session, delivery, _phrase_set())
 
-    assert resolved.version == "v3.2", (
-        "the render would have used the running phrase set, not the planned one")
+    assert resolved is None
 
 
 def test_an_unregistered_planning_phrase_set_fails_the_render(monkeypatch):

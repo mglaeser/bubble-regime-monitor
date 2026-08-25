@@ -106,6 +106,7 @@ class StateDecision:
     candidate_ttl_basis: str | None = None
 
     confirmations: list[ConfirmationRecord] = field(default_factory=list)
+    labels: dict[str, str] = field(default_factory=dict)
     suppression_reasons: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     evidence: dict[str, SourceValue] = field(default_factory=dict)

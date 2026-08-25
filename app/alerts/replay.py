@@ -311,6 +311,7 @@ def ruleset_at_stage(ruleset: ValidatedRuleset, stage: int,
     document["meta"]["active_stage"] = int(stage)
     return validate_ruleset(
         yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+        phrase_set=phrase_set,
         phrase_set_version=phrase_set.version,
         phrase_set_sha256=phrase_set.sha256,
         methodology_version=_M.get_path("_meta", "methodology_version"),
