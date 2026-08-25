@@ -22,6 +22,7 @@ __all__ = [
     "sanitize",
     "AlertError",
     "AlertingUnavailable",
+    "DigestBindingError",
     "EvaluationConflict",
     "EvaluationDeadlineExceeded",
     "NotEvaluable",
@@ -73,6 +74,17 @@ class EvaluationConflict(AlertError):
     """A compare-and-set lost. The ENTIRE plan rolls back — never part of it."""
 
     code = "EVALUATION_CONFLICT"
+
+
+class DigestBindingError(AlertError):
+    """A DIGEST provider intent and its item ledger disagree.
+
+    The aggregate body reveals the represented member count, so an ambiguous
+    member/item graph is a transport-integrity failure, never a reason to pick
+    whichever rows happen to be queryable and continue.
+    """
+
+    code = "DIGEST_MEMBER_ITEM_UNBOUND"
 
 
 class RenderRejected(AlertError):

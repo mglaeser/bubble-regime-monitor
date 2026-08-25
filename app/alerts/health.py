@@ -512,11 +512,15 @@ _RETENTION_MAX_SILENCE_S = 36 * 60 * 60
 #: Digest is weekly. Its Stage-4 preflight has a stricter two-hour proof tied
 #: to the cutover run; ordinary health still needs to detect a missed week.
 _DIGEST_MAX_SILENCE_S = 8 * 24 * 60 * 60
+#: Recompute runs every four hours.  Ten hours permits two missed slots, the
+#: watchdog's 90-minute grace and ordinary timer jitter without allowing a
+#: dead evaluator to hide behind healthy dispatcher/watchdog heartbeats.
+_EVALUATOR_MAX_SILENCE_S = 10 * 60 * 60
 #: Tolerance for ordinary clock jitter before a future-dated heartbeat
 #: is called a fault rather than noise.
 _CLOCK_SKEW_TOLERANCE_S = 60
 
-_ALERT_SCHEMA_REVISION = "0016"
+_ALERT_SCHEMA_REVISION = "0017"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",
@@ -751,6 +755,84 @@ def health_projection(
         }
         if not healthy:
             conditions.append(components[name]["reason"])
+
+    # Heartbeats prove that supporting jobs wake up; they do not prove that
+    # the rule evaluator — the component that creates all alert decisions —
+    # has ever completed successfully.  Project its durable transaction record
+    # as a first-class component in the same active namespace.
+    latest_evaluation = session.execute(
+        select(AlertEvaluation).where(*evaluation_scope).order_by(
+            AlertEvaluation.started_at.desc(),
+            AlertEvaluation.evaluation_id.desc(),
+        ).limit(1)
+    ).scalars().first()
+    evaluator_required = mode in {"shadow", "live"}
+    evaluator_faults: list[str] = []
+    evaluator_age: float | None = None
+    if evaluator_required:
+        if latest_evaluation is None:
+            evaluator_faults.append(
+                "evaluator has never committed in the active namespace")
+        else:
+            if latest_evaluation.status != EvaluationRunStatus.COMMITTED:
+                evaluator_faults.append(
+                    f"latest evaluator run reported {latest_evaluation.status}")
+            if not latest_evaluation.plan_applied:
+                evaluator_faults.append(
+                    "latest evaluator run did not atomically apply its plan")
+            if latest_evaluation.finished_at is None:
+                evaluator_faults.append(
+                    "latest evaluator run has no completion timestamp")
+            else:
+                finished_at = _aware(latest_evaluation.finished_at)
+                evaluator_age = (health_now - finished_at).total_seconds()
+                if evaluator_age < -_CLOCK_SKEW_TOLERANCE_S:
+                    evaluator_faults.append(
+                        "latest evaluator completion is dated "
+                        f"{int(abs(evaluator_age))}s in the FUTURE — clock "
+                        "skew or a bad write")
+                elif evaluator_age > _EVALUATOR_MAX_SILENCE_S:
+                    evaluator_faults.append(
+                        "latest evaluator committed "
+                        f"{int(evaluator_age)}s ago, over the "
+                        f"{_EVALUATOR_MAX_SILENCE_S}s limit")
+                if finished_at < _aware(latest_evaluation.started_at):
+                    evaluator_faults.append(
+                        "latest evaluator completion precedes its start")
+
+    evaluator_healthy = not evaluator_faults
+    components["evaluator"] = {
+        "required": evaluator_required,
+        "present": latest_evaluation is not None,
+        "healthy": evaluator_healthy,
+        "status": (
+            str(latest_evaluation.status)
+            if latest_evaluation is not None else None
+        ),
+        "plan_applied": (
+            bool(latest_evaluation.plan_applied)
+            if latest_evaluation is not None else None
+        ),
+        "last_started_at": (
+            iso(latest_evaluation.started_at)
+            if latest_evaluation is not None else None
+        ),
+        "last_completed_at": (
+            iso(latest_evaluation.finished_at)
+            if latest_evaluation is not None else None
+        ),
+        "max_silence_seconds": _EVALUATOR_MAX_SILENCE_S,
+        "age_seconds": (
+            int(evaluator_age) if evaluator_age is not None else None
+        ),
+        "reason": (
+            "; ".join(evaluator_faults)
+            if evaluator_required
+            else "evaluator is not required while alerting is disabled"
+        ),
+    }
+    if evaluator_faults:
+        conditions.append(f"evaluator: {'; '.join(evaluator_faults)}")
 
     hold_scope = (
         AlertDelivery.mode == mode,

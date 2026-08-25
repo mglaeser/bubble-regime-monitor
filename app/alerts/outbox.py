@@ -46,6 +46,7 @@ from app.alerts.enums import (
     SuppressionReason,
     TransportStatus,
 )
+from app.alerts.errors import DigestBindingError
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
@@ -488,6 +489,65 @@ def recover_leases(session: Session, *, now: datetime) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
+def validate_digest_binding(
+    session: Session,
+    delivery: AlertDelivery,
+) -> None:
+    """Require one exact item-ledger row for every queued DIGEST member.
+
+    A digest body exposes an aggregate member count while ``AlertDigestItem``
+    owns the corresponding lifecycle.  Selecting from only one side when the
+    graph is malformed can therefore send a number its durable evidence does
+    not support.  Fail closed before revalidation mutates either side.
+    """
+    if delivery.delivery_kind != DeliveryKind.DIGEST or (
+        delivery.transport_status not in {
+            TransportStatus.PENDING,
+            TransportStatus.RETRY_DUE,
+            TransportStatus.LEASED,
+        }
+    ):
+        return
+
+    members = session.execute(
+        select(AlertDeliveryMember).where(
+            AlertDeliveryMember.delivery_id == delivery.delivery_id
+        )
+    ).scalars().all()
+    items = session.execute(
+        select(AlertDigestItem).where(
+            AlertDigestItem.delivery_id == delivery.delivery_id
+        )
+    ).scalars().all()
+
+    members_by_episode = {member.episode_id: member for member in members}
+    if len(members_by_episode) != len(members):
+        raise DigestBindingError(
+            "digest contains duplicate member evidence for one episode")
+
+    items_by_episode: dict[str, list[AlertDigestItem]] = {}
+    for item in items:
+        items_by_episode.setdefault(item.episode_id, []).append(item)
+
+    for member in members:
+        bound = items_by_episode.get(member.episode_id, [])
+        expected_status = (
+            DigestItemStatus.CANCELLED
+            if member.drop_reason == "SILENCED_BEFORE_SEND"
+            else DigestItemStatus.PLANNED
+        )
+        if len(bound) != 1 or bound[0].status != expected_status:
+            raise DigestBindingError(
+                "digest member/item binding is missing, duplicated, or has "
+                f"the wrong lifecycle state for episode {member.episode_id}")
+
+    unattached_members = sorted(set(items_by_episode) - set(members_by_episode))
+    if unattached_members:
+        raise DigestBindingError(
+            "digest item is attached to a delivery without a corresponding "
+            f"member for episode {unattached_members[0]}")
+
+
 def revalidate_members(
     session: Session,
     delivery: AlertDelivery,
@@ -502,6 +562,7 @@ def revalidate_members(
     silence that may begin after resolution; aggregate disclosure is still
     disclosure.
     """
+    validate_digest_binding(session, delivery)
     evidence_at = recorded_at or now
     member_conditions = [
         AlertDeliveryMember.delivery_id == delivery.delivery_id,
@@ -587,16 +648,20 @@ def _cancel_digest_item_for_member(
 ) -> None:
     if delivery.delivery_kind != DeliveryKind.DIGEST:
         return
-    item = session.execute(
+    items = session.execute(
         select(AlertDigestItem).where(
             AlertDigestItem.delivery_id == delivery.delivery_id,
             AlertDigestItem.episode_id == member.episode_id,
             AlertDigestItem.status == DigestItemStatus.PLANNED,
         )
-    ).scalars().first()
-    if item is not None:
-        item.status = DigestItemStatus.CANCELLED
-        item.last_error_code = "SILENCED"
+    ).scalars().all()
+    if len(items) != 1:
+        raise DigestBindingError(
+            "silenced digest member has no unique PLANNED item binding for "
+            f"episode {member.episode_id}")
+    item = items[0]
+    item.status = DigestItemStatus.CANCELLED
+    item.last_error_code = "SILENCED"
 
 
 def _record_member_silenced(
@@ -609,9 +674,12 @@ def _record_member_silenced(
     episode: AlertEpisode | None = None,
 ) -> None:
     """Persist both delivery withdrawal and Stage-4 suppression evidence."""
+    # Change the item first: a malformed binding must not leave the member
+    # looking successfully silenced if its lifecycle row could not be moved in
+    # lockstep.
+    _cancel_digest_item_for_member(session, delivery, member)
     member.dropped_at = now
     member.drop_reason = "SILENCED_BEFORE_SEND"
-    _cancel_digest_item_for_member(session, delivery, member)
     episode = episode or session.get(AlertEpisode, member.episode_id)
     if episode is not None:
         reasons = set(episode.suppression_reasons or [])
@@ -726,6 +794,19 @@ def apply_silences_to_unsent(
             # falsify member-delivery evidence by retroactively dropping it.
             result["in_flight"] += 1
             continue
+
+        if delivery.delivery_kind == DeliveryKind.DIGEST:
+            try:
+                validate_digest_binding(session, delivery)
+            except DigestBindingError:
+                cancel(
+                    session,
+                    delivery,
+                    now=now,
+                    reason=DigestBindingError.code,
+                )
+                result["deliveries_cancelled"] += 1
+                continue
 
         for member in matched:
             _record_member_silenced(

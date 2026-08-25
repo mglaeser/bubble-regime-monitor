@@ -179,6 +179,8 @@ def preflight(
             AlertDelivery.live_profile == live_profile,
             AlertDelivery.transport_status == TransportStatus.SENT,
             AlertDelivery.delivery_kind.in_(market_kinds),
+            AlertDelivery.created_at >= window_start,
+            AlertDelivery.created_at <= AlertDelivery.sent_at,
             AlertDelivery.sent_at >= window_start,
             AlertDelivery.sent_at <= now,
         )
@@ -314,17 +316,36 @@ def preflight(
     # windows. Delivery-row count is not window count: a manually-authorised
     # retry for W34 remains evidence for W34, not a second successful week.
     wanted_windows = required_digest_windows(now)
-    digest_rows = session.execute(
-        select(AlertDelivery.scheduled_window_key).where(
-            AlertDelivery.mode == "live",
-            AlertDelivery.live_profile == live_profile,
-            AlertDelivery.delivery_kind == DeliveryKind.DIGEST,
-            AlertDelivery.transport_status == TransportStatus.SENT,
-            AlertDelivery.scheduled_window_key.in_(wanted_windows),
-            AlertDelivery.sent_at <= now,
-        )
-    ).scalars().all()
-    observed_windows = {str(window) for window in digest_rows if window is not None}
+    observed_windows: set[str] = set()
+    for window in wanted_windows:
+        iso_year, iso_week = window.split("-W", 1)
+        window_monday = date.fromisocalendar(
+            int(iso_year), int(iso_week), 1)
+        # A digest labels the week it RETROSPECTIVELY represents.  It cannot
+        # be operational evidence before that week has closed, and draining a
+        # backlog in a later week cannot turn several historical labels into
+        # several weeks of observed delivery cadence.  Bind each label to the
+        # one UTC week immediately following its close.
+        evidence_start = datetime.combine(
+            window_monday + timedelta(days=7), datetime.min.time(), tzinfo=UTC)
+        evidence_end = evidence_start + timedelta(days=7)
+        qualifying = session.execute(
+            select(func.count()).select_from(AlertDelivery).where(
+                AlertDelivery.mode == "live",
+                AlertDelivery.live_profile == live_profile,
+                AlertDelivery.delivery_kind == DeliveryKind.DIGEST,
+                AlertDelivery.transport_status == TransportStatus.SENT,
+                AlertDelivery.scheduled_window_key == window,
+                AlertDelivery.created_at >= evidence_start,
+                AlertDelivery.created_at < evidence_end,
+                AlertDelivery.created_at <= AlertDelivery.sent_at,
+                AlertDelivery.sent_at >= evidence_start,
+                AlertDelivery.sent_at < evidence_end,
+                AlertDelivery.sent_at <= now,
+            )
+        ).scalar_one()
+        if qualifying > 0:
+            observed_windows.add(window)
     missing_windows = [window for window in wanted_windows
                        if window not in observed_windows]
     check("weekly_digests", not missing_windows,

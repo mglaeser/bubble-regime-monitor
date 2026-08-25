@@ -41,7 +41,7 @@ from app.alerts.enums import (
     Priority,
     RenderSource,
 )
-from app.alerts.errors import RenderRejected, sanitize
+from app.alerts.errors import DigestBindingError, RenderRejected, sanitize
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
@@ -629,7 +629,17 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
             return
 
         # -- 2: revalidate ------------------------------------------------
-        members = revalidate_members(session, delivery, now=now)
+        try:
+            members = revalidate_members(session, delivery, now=now)
+        except DigestBindingError:
+            cancel(
+                session,
+                delivery,
+                now=now,
+                reason=DigestBindingError.code,
+            )
+            report.cancelled += 1
+            return
         represented_member_ids = (
             _digest_represented_member_ids(session, delivery_id)
             if delivery.delivery_kind == DeliveryKind.DIGEST
@@ -835,12 +845,22 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # active.
         membership_now = _utc_clock_value(clock)
         attempt_now = max(attempt_now, membership_now)
-        wire_members = revalidate_members(
-            session,
-            delivery,
-            now=membership_now,
-            recorded_at=attempt_now,
-        )
+        try:
+            wire_members = revalidate_members(
+                session,
+                delivery,
+                now=membership_now,
+                recorded_at=attempt_now,
+            )
+        except DigestBindingError:
+            cancel(
+                session,
+                delivery,
+                now=attempt_now,
+                reason=DigestBindingError.code,
+            )
+            report.cancelled += 1
+            return
         wire_member_ids = (
             frozenset(_digest_represented_member_ids(session, delivery_id))
             if delivery.delivery_kind == DeliveryKind.DIGEST

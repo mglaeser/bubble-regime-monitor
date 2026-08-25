@@ -110,12 +110,18 @@ def seed_delivery_for_episode(*, planning_state: str = PlanningState.READY,
         episode = session.execute(select(AlertEpisode)).scalars().first()
         episode_id = episode.episode_id
         delivery_id = new_ulid(0)
-        session.add(AlertDelivery(
+        delivery = AlertDelivery(
             delivery_id=delivery_id, dedupe_key=f"dedupe-{delivery_id}",
             mode="shadow", live_profile="default",
             planning_rules_sha256=rules_sha, delivery_kind=DeliveryKind.INITIAL,
-            priority=1, transport_status=transport, planning_state=planning_state,
-            created_at=NOW, updated_at=NOW, recipient_ref="default"))
+            priority=1,
+            transport_status=(
+                TransportStatus.PENDING
+                if transport == TransportStatus.SENDING else transport
+            ),
+            planning_state=planning_state,
+            created_at=NOW, updated_at=NOW, recipient_ref="default")
+        session.add(delivery)
         session.flush()
         session.add(AlertDeliveryMember(
             delivery_id=delivery_id, episode_id=episode_id,
@@ -123,6 +129,11 @@ def seed_delivery_for_episode(*, planning_state: str = PlanningState.READY,
             member_role="PRIMARY", notification_generation=1,
             origin_rules_sha256=rules_sha, origin_phrase_set_version="v3.2",
             origin_phrase_set_sha256="p" * 64, included_at=NOW, delivered=False))
+        if transport == TransportStatus.SENDING:
+            # Non-TEST rows enter pre-wire, gain representation, then cross
+            # the database's transition guard just like production.
+            session.flush()
+            delivery.transport_status = TransportStatus.SENDING
     return episode_id
 
 

@@ -232,8 +232,12 @@ Three things are enforced by the database rather than by application code:
 - **immutable artifacts** — triggers reject a change to phrase-set bytes under
   an existing version, ruleset bytes under an existing hash, any update to an
   input sidecar, or a rewrite of a final render;
-- **a non-TEST delivery always carries a live member** — a trigger, since
-  SQLite has no deferred cross-table constraint.
+- **a non-TEST delivery always carries a represented member at the provider
+  boundary** — one trigger rejects a memberless transition to `SENDING`, and a
+  companion insert trigger rejects a non-TEST row created directly in
+  `SENDING`. SQLite has no deferred cross-table constraint, so legitimate
+  intents are inserted pre-wire, gain their members, and then cross the guarded
+  transition.
 
 The Alembic migration installs them as frozen literal DDL, and the ORM installs
 the same triggers on the `create_all` path. The guarantee must not depend on
@@ -439,7 +443,11 @@ missed-window recovery and digest-item outcome reconciliation. Actionability is
 a real append-only admin workflow, and Stage-5 bundling is exercised by the
 planner, renderer and concurrency tests. Watchdog, dispatcher, digest,
 recovery, sidecar reconciliation and retention each expose a scored component
-heartbeat with a cadence-appropriate freshness limit.
+heartbeat with a cadence-appropriate freshness limit. The evaluator is scored
+separately from its durable evaluation rows: in shadow or live mode the latest
+run must be `COMMITTED`, have atomically applied its plan, and have a sane
+completion timestamp no more than ten hours old. Disabled mode explicitly
+reports the evaluator as not required.
 
 The health projection also reports the latest and p95 evaluation duration, P1
 enqueue-to-provider-attempt p95, rolling LLM cap/call/fallback evidence,
@@ -626,7 +634,16 @@ Two consequences worth knowing:
   checks until the provider intent is terminal, and the wire-time gate compares
   this exact represented set rather than only episodes still firing. The
   dispatcher and the `alert_delivery_requires_member` trigger independently
-  enforce the member guard, while only `TEST` may carry zero rows.
+  enforce the transition-time member guard; the
+  `alert_delivery_insert_requires_member` trigger closes the direct-insert
+  bypass, while only `TEST` may carry zero rows.
+* A pending DIGEST's represented member set and its attached digest-item ledger
+  are one-to-one. Every represented or resolved member has exactly one
+  `PLANNED` item; every silenced member has exactly one `CANCELLED` item; and no
+  attached item may lack a member. Revalidation checks the complete graph
+  before mutating it. Any missing, duplicate or mismatched binding cancels the
+  provider intent as `DIGEST_MEMBER_ITEM_UNBOUND`, before rendering or sending,
+  rather than deriving a count from whichever side still happens to exist.
 * The digest reports a **count**, not a sample. One SMS is 160 septets and a
   week of events does not fit; a message quietly containing the first three of
   twelve would be lying about the other nine. The episodes are on record as
@@ -676,8 +693,9 @@ The HTTP operator actions are admin-scoped and `no-store`:
   identify a render source, it cannot enter a deterministic-vs-LLM A/B result.
 * **`bubblegauge alerts cutover status|preflight|apply|confirm|rollback|confirm-rollback`** — the Stage
   4 gate made checkable. Preflight evaluates every mandate condition from the
-  database (a two-week live span with recent market activity, one successful
-  digest in each of the exact two closed weekly windows, zero suppressed P1
+  database (a two-week live span with recently created-and-sent market
+  activity, one successful digest in each of the exact two closed weekly
+  windows, zero suppressed P1
   activations and zero P1 holds, fresh healthy live-namespace heartbeats,
   reconciled live UNKNOWNs) and names each unmet one. `apply` records a request
   and prints the exact deployment change;
@@ -686,6 +704,14 @@ The HTTP operator actions are admin-scoped and `no-store`:
   explicit toggle and effective transport are off, then records completion.
   Rollback uses the same request/observation split, but requesting a rollback
   is never gated on the health that prompted it.
+
+  Temporal evidence is bound to the intent, not just its provider timestamp or
+  label. A market intent created before the 14-day window cannot become recent
+  operation merely because an old queue is drained now. Likewise, ISO week
+  `W` qualifies only when its digest was both created and sent after `W` closed
+  at the following Monday 00:00 UTC and before the next Monday (and never after
+  the preflight clock). Draining two historical windows together is recovery,
+  not two weeks of observed digest cadence.
 
 ## 11e. Render-time truth (mandate 17.5)
 

@@ -113,7 +113,7 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
     assert str(payload["sqlite"]["journal_mode"]).lower() == "wal"
     assert payload["sqlite"]["returning"]["insert"] is True
     assert payload["sqlite"]["returning"]["update"] is True
-    assert payload["schema"]["revision"] == "0016"
+    assert payload["schema"]["revision"] == "0017"
     assert payload["schema"]["quick_check"] == "ok"
     assert payload["schema"]["foreign_key_violations"] == 0
     assert payload["schema"]["missing_required_triggers"] == []
@@ -261,12 +261,186 @@ def test_health_scores_every_mandated_component(client):
         "recovery",
         "sidecar_reconciliation",
         "retention",
+        "evaluator",
     }
     assert expected <= payload["components"].keys()
     for component in expected:
         assert "present" in payload["components"][component]
         assert "healthy" in payload["components"][component]
         assert "reason" in payload["components"][component]
+
+
+def test_health_fails_closed_when_an_active_evaluator_has_never_committed(
+    isolated_db, monkeypatch,
+):
+    """Healthy workers cannot substitute for the rule evaluator itself."""
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active
+    from app.alerts.health import health_projection
+    from app.config import get_settings
+    from app.db import session_scope
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    get_settings.cache_clear()
+    settings = get_settings()
+    with session_scope() as session:
+        artifacts = load_active(session)
+        payload = health_projection(
+            session,
+            settings=settings,
+            ruleset=artifacts.ruleset,
+            artifact_source=artifacts.source,
+            fallback_reason=artifacts.fallback_reason,
+            now=datetime.now(UTC),
+        )
+
+    evaluator = payload["components"]["evaluator"]
+    assert evaluator["present"] is False
+    assert evaluator["healthy"] is False
+    assert "never" in evaluator["reason"].lower()
+    assert payload["status"] == "critical"
+    get_settings.cache_clear()
+
+
+def _record_health_evaluation(session, *, now, status="COMMITTED",
+                              plan_applied=True, finished_at=None):
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.models import AlertEvaluation, AlertInputSnapshot
+
+    artifacts = load_active(session)
+    register(session, artifacts)
+    input_identity = "health-evaluator-input".ljust(64, "0")
+    session.add(AlertInputSnapshot(
+        input_identity=input_identity,
+        snapshot_id=None,
+        origin="MANUAL",
+        built_at=now,
+        computed_at=now,
+        alert_input_schema_version=1,
+        methodology_version="test",
+        methodology_sha256="m" * 64,
+        reconstructed=False,
+        evaluation_eligibility="EVALUABLE",
+        ineligibility_reasons=[],
+        payload="{}",
+        payload_sha256="p" * 64,
+    ))
+    session.flush()
+    session.add(AlertEvaluation(
+        evaluation_id="01M0HEALTHEVALUATOR0000000",
+        idempotency_key="health-evaluator-run",
+        input_identity=input_identity,
+        mode="shadow",
+        live_profile="default",
+        current_rules_sha256=artifacts.ruleset.rules_sha256,
+        evaluation_set_sha256="e" * 64,
+        evaluated_ruleset_hashes=[artifacts.ruleset.rules_sha256],
+        evaluator_version="test",
+        status=status,
+        attempt_count=1,
+        started_at=now,
+        finished_at=finished_at if finished_at is not None else now,
+        plan_applied=plan_applied,
+    ))
+
+
+def _project_health(session, *, now):
+    from app.alerts.artifacts import load_active
+    from app.alerts.health import health_projection
+    from app.config import get_settings
+
+    artifacts = load_active(session)
+    return health_projection(
+        session,
+        settings=get_settings(),
+        ruleset=artifacts.ruleset,
+        artifact_source=artifacts.source,
+        fallback_reason=artifacts.fallback_reason,
+        now=now,
+    )
+
+
+def test_health_accepts_a_fresh_committed_evaluator(isolated_db, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from app.config import get_settings
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    get_settings.cache_clear()
+    with session_scope() as session:
+        _record_health_evaluation(
+            session, now=now - timedelta(minutes=1), finished_at=now)
+        session.flush()
+        evaluator = _project_health(session, now=now)["components"]["evaluator"]
+
+    assert evaluator["required"] is True
+    assert evaluator["present"] is True
+    assert evaluator["healthy"] is True
+    assert evaluator["status"] == "COMMITTED"
+    assert evaluator["plan_applied"] is True
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("status", "plan_applied", "age", "fault"),
+    [
+        ("FAILED", False, 0, "reported FAILED"),
+        ("COMMITTED", True, 11, "over the"),
+    ],
+)
+def test_health_rejects_a_failed_or_stale_latest_evaluator(
+    isolated_db, monkeypatch, status, plan_applied, age, fault,
+):
+    from datetime import UTC, datetime, timedelta
+
+    from app.config import get_settings
+    from app.db import session_scope
+
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    completed = now - timedelta(hours=age)
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    get_settings.cache_clear()
+    with session_scope() as session:
+        _record_health_evaluation(
+            session,
+            now=completed - timedelta(minutes=1),
+            finished_at=completed,
+            status=status,
+            plan_applied=plan_applied,
+        )
+        session.flush()
+        payload = _project_health(session, now=now)
+
+    evaluator = payload["components"]["evaluator"]
+    assert evaluator["healthy"] is False
+    assert fault in evaluator["reason"]
+    assert payload["status"] == "critical"
+    assert any(item.startswith("evaluator:") for item in payload["conditions"])
+    get_settings.cache_clear()
+
+
+def test_health_does_not_require_the_evaluator_while_disabled(
+    isolated_db, monkeypatch,
+):
+    from datetime import UTC, datetime
+
+    from app.config import get_settings
+    from app.db import session_scope
+
+    monkeypatch.setenv("ALERTS_MODE", "disabled")
+    get_settings.cache_clear()
+    with session_scope() as session:
+        payload = _project_health(session, now=datetime.now(UTC))
+
+    evaluator = payload["components"]["evaluator"]
+    assert evaluator["required"] is False
+    assert evaluator["present"] is False
+    assert evaluator["healthy"] is True
+    assert "not required" in evaluator["reason"]
+    get_settings.cache_clear()
 
 
 def test_health_cannot_be_ok_with_an_unreconciled_unknown(client):

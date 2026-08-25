@@ -192,6 +192,28 @@ def test_only_test_may_reach_sending_without_a_represented_member(tmp_path):
             ("01M0MEMBERGUARDEMPTY000000",),
         )
 
+    # The UPDATE trigger is not enough: imported/corrupt data can insert a row
+    # already in SENDING and skip the transition entirely.  In a foreign-keyed
+    # database no non-TEST member can exist before its parent delivery, so such
+    # an insert must always be refused and forced through PENDING + member rows.
+    with pytest.raises(sqlite3.IntegrityError, match="represented member"):
+        connection.execute(
+            """
+            INSERT INTO alert_delivery (
+                delivery_id, dedupe_key, dedupe_version,
+                manual_retry_sequence, mode, live_profile,
+                planning_rules_sha256, delivery_kind, priority,
+                transport_status, planning_state, created_at, updated_at,
+                attempts, blocks_replanning, duplicate_risk_acknowledged,
+                recipient_ref
+            ) VALUES ('01M0MEMBERGUARDINSERT00000',
+                      '01M0MEMBERGUARDINSERT00000', 1, 0, 'shadow', 'default',
+                      ?, 'INITIAL', 2, 'SENDING', 'READY', ?, ?, 0, 0, 0,
+                      'default')
+            """,
+            ("r" * 64, timestamp, timestamp),
+        )
+
     represented = "01M0MEMBERGUARDRESOLVED000"
     add_delivery(represented, "DIGEST")
     connection.execute(
@@ -390,7 +412,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     _run_with_db(db, _cycle)
     connection = sqlite3.connect(db)
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0016",)
+        "select version_num from alembic_version").fetchone() == ("0017",)
     connection.close()
 
 

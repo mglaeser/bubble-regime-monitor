@@ -457,9 +457,9 @@ def test_the_digest_is_never_assembled_from_invented_text():
 def test_a_legacy_memberless_digest_is_cancelled_before_render_or_send():
     """The dispatcher independently enforces TEST as the sole exemption.
 
-    Migration 0016 prevents new non-TEST rows from reaching SENDING without a
-    member, but a queued row may predate that migration.  Runtime must fail
-    closed too, before either a final render or provider call exists.
+    Migrations 0016-0017 prevent new non-TEST rows from reaching SENDING
+    without a member, but a queued row may predate those migrations. Runtime
+    must fail closed too, before either a final render or provider call exists.
     """
     from app.alerts.dispatcher import dispatch_once
     from app.alerts.enums import PlanningState, TransportStatus
@@ -502,6 +502,167 @@ def test_a_legacy_memberless_digest_is_cancelled_before_render_or_send():
         assert delivery.transport_status == TransportStatus.CANCELLED
         assert delivery.cancel_reason == "ALL_MEMBERS_RESOLVED"
         assert session.execute(select(AlertRender)).scalars().all() == []
+
+
+def test_a_digest_member_without_its_item_binding_never_reaches_the_wire():
+    """The count and the digest-item lifecycle must describe the same set."""
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import TransportStatus
+    from app.alerts.sender import NullSender
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        item = session.get(AlertDigestItem, item_id)
+        assert item is not None
+        item.delivery_id = None
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert sender.sent == []
+    assert report.cancelled == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "DIGEST_MEMBER_ITEM_UNBOUND"
+
+
+def test_eager_silence_fails_closed_on_an_unbound_digest_item():
+    """Silence must not hide a malformed member/item graph and carry on."""
+    from app.alerts.enums import TransportStatus
+    from app.alerts.outbox import apply_silences_to_unsent
+    from app.alerts.repository import load_active_silences
+
+    rule_id = "regime.band_to_derisk"
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(session, rules_sha=rules_sha, rule_id=rule_id)
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        item = session.get(AlertDigestItem, item_id)
+        assert item is not None
+        item.delivery_id = None
+        _silence_rule(session, rule_id)
+        active = load_active_silences(session, now=NOW)
+
+        effect = apply_silences_to_unsent(session, active, now=NOW)
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+
+        assert effect["deliveries_cancelled"] == 1
+        assert effect["members_dropped"] == 0
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "DIGEST_MEMBER_ITEM_UNBOUND"
+        assert member.drop_reason is None
+
+
+@pytest.mark.parametrize("malformation", ["wrong_state", "orphan_item"])
+def test_digest_binding_rejects_a_mismatched_or_orphaned_item(malformation):
+    """Neither side of the count ledger may be selected independently."""
+    from app.alerts.errors import DigestBindingError
+    from app.alerts.outbox import revalidate_members
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        item = session.get(AlertDigestItem, item_id)
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+        assert delivery is not None and item is not None
+        if malformation == "wrong_state":
+            item.status = DigestItemStatus.CANCELLED
+        else:
+            session.delete(member)
+        session.flush()
+
+        with pytest.raises(DigestBindingError):
+            revalidate_members(session, delivery, now=NOW)
+
+
+def test_digest_binding_rejects_duplicate_items_for_one_member():
+    from app.alerts.errors import DigestBindingError
+    from app.alerts.outbox import revalidate_members
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        item = session.get(AlertDigestItem, item_id)
+        assert delivery is not None and item is not None
+        session.add(AlertDigestItem(
+            digest_item_id=new_ulid(utc_ms(NOW) + 1),
+            episode_id=item.episode_id,
+            digest_window_key=item.digest_window_key,
+            status=DigestItemStatus.PLANNED,
+            delivery_id=delivery.delivery_id,
+            pending_at=NOW,
+            planned_at=NOW,
+            still_active_summary=not item.still_active_summary,
+        ))
+        session.flush()
+
+        with pytest.raises(DigestBindingError):
+            revalidate_members(session, delivery, now=NOW)
 
 
 # --- what the panel caught -------------------------------------------------

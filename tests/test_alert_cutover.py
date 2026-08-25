@@ -96,7 +96,7 @@ def test_ready_requires_an_empty_unsatisfied_list():
 
 
 def _live_sent(session, *, sent_at, status=None, kind=None,
-               profile="default", window_key=None):
+               profile="default", window_key=None, created_at=None):
     from app.alerts.artifacts import load_active, register
     from app.alerts.canonical import new_ulid
     from app.alerts.enums import (
@@ -110,6 +110,7 @@ def _live_sent(session, *, sent_at, status=None, kind=None,
 
     artifacts = load_active(session)
     register(session, artifacts)
+    created_at = created_at or sent_at
     delivery_id = new_ulid(utc_ms(sent_at))
     session.add(AlertDelivery(
         delivery_id=delivery_id, dedupe_key=f"v1|CUT|{delivery_id}",
@@ -119,8 +120,8 @@ def _live_sent(session, *, sent_at, status=None, kind=None,
         delivery_kind=kind or DeliveryKind.INITIAL, priority=Priority.P2,
         scheduled_window_key=window_key,
         transport_status=status or TransportStatus.SENT,
-        planning_state=PlanningState.NONE, not_before=sent_at,
-        created_at=sent_at, updated_at=sent_at, attempts=1,
+        planning_state=PlanningState.NONE, not_before=created_at,
+        created_at=created_at, updated_at=sent_at, attempts=1,
         sent_at=sent_at if (status or TransportStatus.SENT)
         == TransportStatus.SENT else None,
         blocks_replanning=(status == TransportStatus.UNKNOWN),
@@ -517,6 +518,27 @@ def test_one_ancient_delivery_with_no_recent_market_activity_is_not_stable():
         "an ancient send plus two silent weeks was treated as observed stability")
 
 
+def test_draining_an_old_market_intent_is_not_recent_stable_operation():
+    """Provider time alone cannot turn old queued work into a live soak.
+
+    An old successful send establishes that the channel existed before the
+    evidence window.  The recent endpoint must come from a provider intent
+    created during that window; otherwise restarting a stopped dispatcher and
+    draining one ancient row makes fourteen days of outage read as stability.
+    """
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(days=20))
+        _live_sent(
+            session,
+            created_at=NOW - timedelta(days=30),
+            sent_at=NOW - timedelta(hours=1),
+        )
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
+        "draining a pre-window provider intent counterfeited recent operation")
+
+
 def test_a_terminal_failure_inside_the_window_breaks_stability():
     from app.alerts.enums import TransportStatus
 
@@ -560,6 +582,55 @@ def test_digest_retries_count_once_per_closed_weekly_window():
         "two delivery rows for one weekly window were counted as two digests")
 
 
+def test_two_digest_windows_drained_together_are_not_two_weekly_successes():
+    """Window labels alone do not prove weekly delivery cadence.
+
+    Recovery may legitimately send an old digest, but draining both required
+    windows in one Monday pass is one successful recovery event, not two weeks
+    of observed weekly operation and therefore cannot retire the fallback.
+    """
+    from app.alerts.cutover import required_digest_windows
+    from app.alerts.enums import DeliveryKind
+
+    with session_scope() as session:
+        for window in required_digest_windows(NOW):
+            _live_sent(
+                session,
+                created_at=NOW - timedelta(days=30),
+                sent_at=NOW - timedelta(hours=1),
+                kind=DeliveryKind.DIGEST,
+                window_key=window,
+            )
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
+        "a same-day backlog drain counterfeited two weekly digest successes")
+
+
+def test_a_digest_sent_after_its_evidence_week_does_not_count_for_that_week():
+    """A valid label cannot turn late recovery into observed weekly cadence."""
+    from app.alerts.enums import DeliveryKind
+
+    with session_scope() as session:
+        _live_sent(
+            session,
+            sent_at=NOW - timedelta(hours=1),
+            kind=DeliveryKind.DIGEST,
+            window_key="2026-W33",
+        )
+        _live_sent(
+            session,
+            sent_at=NOW - timedelta(minutes=30),
+            kind=DeliveryKind.DIGEST,
+            window_key="2026-W34",
+        )
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
+        "a W33 digest sent during W34's evidence interval counted as W33 "
+        "operational cadence")
+
+
 def test_only_the_two_immediately_closed_digest_windows_satisfy_cutover():
     from app.alerts.enums import DeliveryKind
 
@@ -578,8 +649,13 @@ def test_exact_two_closed_digest_windows_are_accounted_once_each():
     from app.alerts.enums import DeliveryKind
 
     with session_scope() as session:
-        for window, days in (("2026-W33", 8), ("2026-W34", 1)):
-            _live_sent(session, sent_at=NOW - timedelta(days=days),
+        # Each retrospective is created and sent after its represented week
+        # closes, during the immediately following UTC observation week.
+        for window, elapsed in (
+            ("2026-W33", timedelta(days=7)),
+            ("2026-W34", timedelta(hours=1)),
+        ):
+            _live_sent(session, sent_at=NOW - elapsed,
                        kind=DeliveryKind.DIGEST, window_key=window)
         report = preflight(session, now=NOW)
 

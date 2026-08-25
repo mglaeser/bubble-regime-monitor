@@ -422,9 +422,9 @@ def test_mark_sent_cools_exactly_the_render_represented_members(isolated_db):
             delivery_id=delivery_id, dedupe_key="render-carriage-delivery",
             mode="shadow", live_profile="default",
             planning_rules_sha256=rules_sha, delivery_kind=DeliveryKind.INITIAL,
-            priority=1, transport_status=TransportStatus.SENDING,
-            planning_state=PlanningState.NONE, created_at=now, updated_at=now,
-            attempts=1, request_started_at=now, recipient_ref="default",
+            priority=1, transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY, created_at=now, updated_at=now,
+            attempts=0, recipient_ref="default",
         ))
         session.flush()
         for index, (episode_id, fingerprint) in enumerate(
@@ -454,8 +454,13 @@ def test_mark_sent_cools_exactly_the_render_represented_members(isolated_db):
         ))
         session.flush()
 
-        mark_sent(session, session.get(AlertDelivery, delivery_id),
-                  now=now, http_status=204)
+        delivery = session.get(AlertDelivery, delivery_id)
+        delivery.transport_status = TransportStatus.SENDING
+        delivery.planning_state = PlanningState.NONE
+        delivery.attempts = 1
+        delivery.request_started_at = now
+        session.flush()
+        mark_sent(session, delivery, now=now, http_status=204)
 
     with session_scope() as session:
         members = session.execute(

@@ -883,6 +883,22 @@ BEGIN
 END
 """,
     ),
+    (
+        # A foreign-keyed non-TEST delivery cannot have members before its
+        # parent exists.  It must therefore be inserted in a pre-wire state,
+        # gain represented members, and cross the UPDATE guard above.  Without
+        # this companion trigger a direct INSERT at SENDING skips that gate.
+        "alert_delivery_insert_requires_member",
+        """
+CREATE TRIGGER IF NOT EXISTS alert_delivery_insert_requires_member
+BEFORE INSERT ON alert_delivery
+WHEN NEW.transport_status = 'SENDING'
+  AND NEW.delivery_kind <> 'TEST'
+BEGIN
+    SELECT RAISE(ABORT, 'a non-TEST delivery must carry a represented member');
+END
+""",
+    ),
 )
 
 

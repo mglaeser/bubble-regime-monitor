@@ -49,7 +49,7 @@ def _add_delivery(
     created_at: datetime | None = None,
 ) -> str:
     delivery_id = new_ulid(utc_ms(NOW))
-    session.add(AlertDelivery(
+    delivery = AlertDelivery(
         delivery_id=delivery_id,
         dedupe_key=f"budget-{delivery_id}",
         mode=episode.mode,
@@ -57,14 +57,18 @@ def _add_delivery(
         planning_rules_sha256=episode.origin_rules_sha256,
         delivery_kind=kind,
         priority=2,
-        transport_status=status,
+        transport_status=(
+            TransportStatus.PENDING
+            if status == TransportStatus.SENDING else status
+        ),
         planning_state=planning_state,
         not_before=NOW,
         created_at=created_at or NOW - timedelta(minutes=5),
         updated_at=NOW,
         sent_at=sent_at,
         recipient_ref="default",
-    ))
+    )
+    session.add(delivery)
     if not memberless:
         session.flush()
         session.add(AlertDeliveryMember(
@@ -82,6 +86,9 @@ def _add_delivery(
             drop_reason="TEST_DROP" if dropped else None,
             delivered=status == TransportStatus.SENT,
         ))
+        if status == TransportStatus.SENDING:
+            session.flush()
+            delivery.transport_status = TransportStatus.SENDING
     return delivery_id
 
 
