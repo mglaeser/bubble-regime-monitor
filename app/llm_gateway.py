@@ -281,6 +281,11 @@ def _safe_request_id(value: object) -> str | None:
     return value if isinstance(value, str) and _REQUEST_ID.fullmatch(value) else None
 
 
+def _is_unicode_scalar_text(value: str) -> bool:
+    """Return false for lone surrogates materialized from JSON ``\\u`` escapes."""
+    return not any(0xD800 <= ord(char) <= 0xDFFF for char in value)
+
+
 def _iter_sse_lines(
     chunks: Iterator[bytes],
     *,
@@ -469,6 +474,9 @@ def _fold_responses_stream(
     # deltas.  Use that observed shape only as a fallback; a non-empty terminal
     # value is authoritative and must agree with the deltas above.
     text = terminal_text or meaningful_delta
+    if not _is_unicode_scalar_text(text):
+        raise GatewayProtocolError(
+            "LLM gateway output contains invalid Unicode scalar values")
     text = text.strip()
     if not text:
         raise GatewayProtocolError("LLM gateway completed with empty output")

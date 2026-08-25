@@ -386,6 +386,39 @@ class TestResponsesStreaming:
             _Response(chunks=chunks))).complete(user="hello")
         assert out.text == "grüße"
 
+    @pytest.mark.parametrize("lines", [
+        [
+            r'data: {"type":"response.output_text.delta","delta":"\ud800"}',
+            "",
+            r'data: {"type":"response.completed","response":{"id":"r-high","output":[]}}',
+            "",
+        ],
+        [
+            r'data: {"type":"response.completed","response":{"id":"r-low","output_text":"\udfff"}}',
+            "",
+        ],
+        [
+            r'data: {"type":"response.completed","response":{"id":"r-block","output":[{"content":[{"type":"output_text","text":"\ud800"}]}]}}',
+            "",
+        ],
+    ], ids=["delta-high", "terminal-low", "terminal-block-high"])
+    def test_escaped_lone_surrogates_fail_at_completion_boundary(self, lines):
+        """JSON escapes may not smuggle non-UTF-8 text past wire decoding."""
+        http = _FakeHttpClient(_Response(lines=lines))
+        with pytest.raises(GatewayProtocolError, match="Unicode"):
+            GatewayClient(_config(), http_client=http).complete(user="hello")
+
+    def test_valid_escaped_surrogate_pair_decodes_to_a_unicode_scalar(self):
+        lines = [
+            r'data: {"type":"response.output_text.delta","delta":"\ud83d\ude00"}',
+            "",
+            r'data: {"type":"response.completed","response":{"id":"r-emoji","output":[]}}',
+            "",
+        ]
+        out = GatewayClient(_config(), http_client=_FakeHttpClient(
+            _Response(lines=lines))).complete(user="hello")
+        assert out.text == "😀"
+
     def test_one_leading_utf8_bom_is_discarded_even_when_split_across_chunks(self):
         payload = "\n".join(_responses_events(
             {"type": "response.output_text.delta", "delta": "answer"},
