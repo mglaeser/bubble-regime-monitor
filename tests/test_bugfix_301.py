@@ -142,7 +142,7 @@ class TestRenormalizationRegression:
 
 class TestJudgmentDegradation:
     def test_no_prior_failure_is_machine_detectable(self, isolated_db):
-        """anthropic is not installed in this venv, so generate() exercises
+        """The gateway is deliberately unconfigured, so generate() exercises
         the real failure path: text must be None (not a placeholder) with an
         error_class set."""
         from app.engine.judgment import generate

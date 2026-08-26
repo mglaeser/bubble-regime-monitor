@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app import methodology as _M
@@ -19,11 +20,15 @@ def _frozen_mc(key: str) -> int:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Anthropic (judgment-call generator)
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-opus-4-8"
-    anthropic_effort: str = "max"
-    anthropic_max_tokens: int = 8000
+    # Hosted OpenAI-compatible gateway. All application routing details are
+    # operator config: these defaults carry no deployment hostname, key, model
+    # route, or auth-header value. Partial configuration is unavailable, never
+    # inferred from a public default.
+    llm_api_base_url: str = Field(default="", repr=False)
+    llm_api_key: SecretStr = SecretStr("")
+    llm_model: str = Field(default="", repr=False)
+    llm_auth_header: str = Field(default="", repr=False)
+    llm_max_tokens: int = 8000
 
     # FRED
     fred_api_key: str = ""
@@ -209,8 +214,10 @@ class Settings(BaseSettings):
     alerts_message_retention_days: int = 400
     alerts_busy_timeout_ms: int = 5000
 
-    # The model SELECTS reviewed codes; it never writes prose and never writes
-    # a number. P1 skips it entirely.
+    # Reserved for the dormant future Stage-7/A-B selector. The dispatcher does
+    # not import or call it today, so changing these flags cannot activate alert
+    # phrasing. If later wired, the model may SELECT reviewed codes only; it may
+    # never write prose or a number, and P1 must skip it entirely.
     alerts_llm_enabled: bool = True
     alerts_llm_timeout_s: int = 6
     alerts_llm_render_cap_24h: int = 12
@@ -261,6 +268,21 @@ class Settings(BaseSettings):
     gsadf_timeout_s: int = 1800
 
     service_version: str = "3.9.0"
+
+    @property
+    def llm_configured(self) -> bool:
+        """All values needed to open the gateway connection are present.
+
+        Shape and transport-safety validation happens in ``GatewayConfig`` at
+        the use site; this property only distinguishes deliberately unavailable
+        from an attempted call whose configuration is invalid.
+        """
+        return bool(
+            self.llm_api_base_url
+            and self.llm_api_key.get_secret_value()
+            and self.llm_model
+            and self.llm_auth_header
+        )
 
     @property
     def sms_configured(self) -> bool:
@@ -331,13 +353,24 @@ class Settings(BaseSettings):
         return "none"
 
 
-#: Settings whose absence disables a transport silently. `extra="ignore"`
+#: Settings whose absence disables a transport or inference silently. `extra="ignore"`
 #: (model_config, above) means pydantic drops an unrecognised environment key
 #: without a word, so `IMESSAG_ENABLED=true` — one character short — reads as
 #: "iMessage off". Paired with SMS_ENABLED=false that yields a service which
-#: sends nothing and says nothing about why.
-_TYPO_PRONE = ("IMESSAGE_ENABLED", "IMESSAGE_API_BASE_URL", "IMESSAGE_API_KEY",
-               "IMESSAGE_RECIPIENT", "SMS_ENABLED")
+#: sends nothing and says nothing about why. The LLM settings have the same
+#: failure mode: one dropped character leaves the deterministic/stale fallback
+#: working, which can conceal that inference was never armed.
+_TYPO_PRONE = (
+    "IMESSAGE_ENABLED",
+    "IMESSAGE_API_BASE_URL",
+    "IMESSAGE_API_KEY",
+    "IMESSAGE_RECIPIENT",
+    "SMS_ENABLED",
+    "LLM_API_BASE_URL",
+    "LLM_API_KEY",
+    "LLM_MODEL",
+    "LLM_AUTH_HEADER",
+)
 
 
 def near_miss_env_keys(environ: Mapping[str, str]) -> list[tuple[str, str]]:

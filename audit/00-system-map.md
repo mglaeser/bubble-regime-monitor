@@ -23,7 +23,7 @@
 |---|---|
 | Host | bare-metal **Intel Atom N2800** (x86-64-v1, no AVX/SSE4.2 — drives the `numpy<2.3`, no-`pyarrow` pins), hostname referred to as `greenbox` |
 | Container | **rootless Podman**, `container_name: bubblegauge`, Python 3.12-slim base (`Containerfile`) |
-| Reverse proxy | **Nginx Proxy Manager**, public origin `bubblegauge.klee.me`; a dashboard origin `crash.klee.me` is the sole CORS allow-origin (`app/main.py:101`) |
+| Reverse proxy | **Nginx Proxy Manager**, public origin `bubblegauge.klee.me`; browser dashboards at `ai-bubble.fyi` and `crash.klee.me` are the CORS allow-origins (`app/main.py`) |
 | Process model | uvicorn (single instance) + **APScheduler** in-process: recompute every 4h (02/06/10/14/18/22 UTC), optional daily digest carried by **exactly one** transport — iMessage (imessage-proxy) or sipgate SMS — selected by `Settings.daily_digest_transport`. iMessage wins when both switches are on, and there is deliberately no fallback: a silent downgrade would hide the proxy being down. |
 | Scaling / rollout | single instance; **no canary, no progressive delivery — blast radius of any change is 100%** |
 | Heavy compute | R **`exuber` 1.1.0** subprocess for GSADF (`r/gsadf.R`); Python **`lppls==0.6.24`** subprocess for LPPLS (`app/indicators/d4_lppls.py`) — both subprocess-isolated with timeouts (SIGILL/hang protection) |
@@ -32,15 +32,15 @@
 
 | Property | Value | Evidence |
 |---|---|---|
-| Provider | **Anthropic hosted API only** (`anthropic>=0.116`) | `pyproject.toml:32`, `app/engine/judgment.py` |
-| Model (primary) | alias **`claude-opus-4-8`** (config default, `app/config.py:15`) | — |
-| Fallback chain | `claude-sonnet-5` → `claude-sonnet-4-6` → plain retry on primary | `app/engine/judgment.py:88` |
-| Inference config | `effort=max`, `thinking={"type":"adaptive"}`, `max_tokens=8000` | `judgment.py` |
-| **What the model does** | Generates a **≤300-char plain-language "judgment call"** and a **≤160-char daily digest**, *from computed numeric readings only*. The 160-char ASCII cap is transport-independent and now self-imposed: it is a physical GSM-7 limit only on the sipgate path, and a deliberate carry-over on the iMessage path (the proxy accepts 4000 code points). | `judgment.py:PROMPT_TEMPLATE`, `sms_report.py` |
-| **Tools the model can call** | **NONE.** No function-calling, no tool schema, no agent loop. Output is a text string consumed by the JSON API and the digest body — which is POSTed either to sipgate or to an imessage-proxy instance. Both sinks are code-driven: `app/services/digest.py` picks the transport from config and `app/notify/imessage.py` pins the recipient, the host and `"service": "imessage"`; nothing in the completion selects any of the three. | full read of `judgment.py`, `sms_report.py`, `notify/imessage.py`, `services/digest.py` |
-| Fine-tuning / custom model | **None.** All inference is against the hosted API. | — |
+| Provider | **Operator-configured OpenAI-compatible hosted gateway** over the existing `httpx` dependency; endpoint/key/route are host-only settings. | `app/llm_gateway.py`, `app/config.py` |
+| Model route | `LLM_MODEL`, blank by default and set only on the deploy host. The requested route is sent to the gateway, but it is **not proof of the underlying serving model**. | `app/config.py`, `app/llm_gateway.py` |
+| Fallback | Exactly one configured route and one streamed Responses request. There is **no app-side model substitution or retry list**; any provider/model failover is gateway-controlled and opaque here. | `app/llm_gateway.py`, `app/engine/judgment.py` |
+| Inference config | Responses API, `stream=true`, configurable `max_output_tokens` (default ceiling 8000); no tools, temperature, effort, or provider-specific thinking fields. | `app/llm_gateway.py` |
+| **What the model does** | At runtime, generates a **≤300-char plain-language "judgment call"** and a **≤160-char daily digest** from computed readings. A dormant future Stage-7/A-B component can select preapproved fragment codes for non-P1 alerts, but the dispatcher does not invoke it. The 160-char ASCII cap is transport-independent and self-imposed: it is a physical GSM-7 limit only on the sipgate path, and a deliberate carry-over on the iMessage path. | `judgment.py:PROMPT_TEMPLATE`, `sms_report.py`, `alerts/llm_selector.py`, `alerts/dispatcher.py` |
+| **Tools the model can call** | **NONE.** No function-calling, tool schema, or agent loop. The request payload structurally omits tool fields. Digest sinks remain code-driven. If the dormant alert selector is later wired, it can return only authorized codes that deterministic code validates before rendering. | `llm_gateway.py`, `judgment.py`, `alerts/llm_selector.py`, `services/digest.py` |
+| Fine-tuning / custom model | **None in this repository.** The opaque gateway route may change its underlying provider/model without this app observing it. | — |
 | Embeddings / vector store / RAG | **None.** No retrieval corpus, no vector DB, no memory store. | repo-wide search |
-| Prompt provenance | Prompt is a fixed template interpolated with **numbers and enum strings** (`median`, `iqr`, `band`, per-indicator floats, trend states `in`/`out`). **No free-text from any external source reaches the prompt.** | `judgment.py:139` |
+| Prompt provenance | Judgment interpolates **numbers/enums**. The digest also receives a bounded prior LLM judgment; the dormant alert-selector template permits preapproved codes. **No user, scraped, or other external free text reaches a model prompt.** | `judgment.py`, `sms_report.py`, `alerts/llm_selector.py` |
 
 > **This is the single most consequential fact for the catalogue.** The mandate is written for agentic, tool-using, RAG-backed, multi-tenant, fine-tuned systems. This system is a **numbers-in / short-text-out hosted-API call with no tools and no untrusted free-text input**. That collapses most of the agentic (C-06, C-12, C-16–C-19), retrieval (A-21, C-22, C-32, B-33), fine-tuning (C-21, C-35), and multi-tenant (C-01 IDOR, C-32 tenant isolation) surface to NOT-APPLICABLE — **argued per-check in `audit/03`, never assumed.**
 
@@ -57,17 +57,19 @@ No personal data of third parties is stored. The PII in the system is **two of t
 
 ## External egress paths (all outbound HTTPS)
 
-Anthropic · FRED (`fredgraph.csv` + api) · Tiingo · Twelve Data · Alpha Vantage · **Polygon/Massive** (grouped-daily breadth) · **SSGA** (SPDR holdings XLSX → S&P 500 constituents) · SEC EDGAR · FINRA (margin debt) · multpl / GuruFocus / shillerdata (CAPE) · CBOE (VIX) · Stooq (disabled by default) · **sipgate** (SMS) · **imessage-proxy** (`POST {IMESSAGE_API_BASE_URL}/api/messages`, Bearer `IMESSAGE_API_KEY`).
+Hosted LLM gateway (HTTPS endpoint from `LLM_API_BASE_URL`) · FRED (`fredgraph.csv` + api) · Tiingo · Twelve Data · Alpha Vantage · **Polygon/Massive** (grouped-daily breadth) · **SSGA** (SPDR holdings XLSX → S&P 500 constituents) · SEC EDGAR · FINRA (margin debt) · multpl / GuruFocus / shillerdata (CAPE) · CBOE (VIX) · Stooq (disabled by default) · **sipgate** (SMS) · **imessage-proxy** (`POST {IMESSAGE_API_BASE_URL}/api/messages`, Bearer `IMESSAGE_API_KEY`).
 
-**Egress is not allowlisted at the platform** (no egress firewall / no network policy on the container). Control is app-level, and for the first time it is no longer uniform: every `app/sources/*.py` targets a host that is a literal in code, but the digest's iMessage destination is operator DATA — `app/notify/imessage.py:_base_url()` takes `IMESSAGE_API_BASE_URL` verbatim and only strips a trailing slash, with no scheme check and no host pin. The section heading's "all outbound HTTPS" therefore holds by operator discipline on that one path, not by construction: an `http://` typo would put the Bearer key and the digest on the wire in cleartext. See A-11, B-22, C-08, and the new B7 row in `audit/threat-model.md`.
+**Egress is not allowlisted at the platform** (no egress firewall / network policy). Two destinations come from operator configuration: iMessage and the LLM gateway. Both now enforce HTTPS before opening a socket. The LLM client additionally rejects credentials/query/fragment in the base, validates the auth-header name, disables environment proxies and redirects, and bounds streamed input/output. A wrong but valid HTTPS host remains an operator-controlled disclosure risk; an egress allowlist is still the defence-in-depth gap (A-11/B-22).
 
 ## Identities and credentials
 
 All credentials are **long-lived static API keys/tokens** held in the host `.env` (gitignored — confirmed never committed to any git object, see B-06 evidence). There is **no vault, no rotation, no short-lived workload identity**:
 
-`ANTHROPIC_API_KEY` · `FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN` · `IMESSAGE_API_KEY` (scoped `messages:send`, `imp_` prefix — the only credential here that **expires**, 90 days by default, surfacing as a 401 indistinguishable from a wrong key).
+`LLM_API_KEY` · `FRED_API_KEY` · `TIINGO_API_KEY` · `TWELVE_DATA_API_KEY` · `ALPHAVANTAGE_API_KEY` · `POLYGON_API_KEY` · `ADMIN_API_KEY` · `SIPGATE_TOKEN_ID` + `SIPGATE_TOKEN` · `IMESSAGE_API_KEY` (scoped `messages:send`, `imp_` prefix — the only credential here that **expires**, 90 days by default, surfacing as a 401 indistinguishable from a wrong key).
 
-> **Exposure (B-06, STOP-SHIP):** the **nine** credentials listed above other than `IMESSAGE_API_KEY` were **pasted into the development chat channel** during this project's construction. The git repository is clean, but a secret disclosed to a third-party channel is **published**. All nine must be **rotated** (revoke + reissue), not merely kept out of git. This was flagged repeatedly during development and is restated here as a formal finding. `IMESSAGE_API_KEY` post-dates that disclosure and is **not** on the rotation list — but it sits in the same un-vaulted `.env` under the same absence of rotation machinery, and it is the one credential that will expire on its own and take the digest down silently when it does.
+> **Exposure (B-06, STOP-SHIP, historical):** the retired `ANTHROPIC_API_KEY` and the original data/admin/SMS credentials were pasted into a development chat channel and must be revoked/rotated. The active `LLM_API_KEY` post-dates that evidence; nothing here asserts its value was disclosed. All active credentials remain long-lived host `.env` values without vault/rotation automation.
+
+> **Container exposure (deploy prerequisite):** historical builds used `COPY . .` without a Docker/Podman ignore policy, so existing host images or build cache may contain `.env` and runtime `data/`. The synchronized ignore policies prevent recurrence only. Deploy the fixed build, purge old bubblegauge images/cache, and rotate every credential that may have entered a historical build.
 
 ## The merge / deploy gate — *the artifact this operating model lives or dies on*
 

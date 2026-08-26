@@ -940,7 +940,15 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
         # never clamped into an allowed instant.
         quiet_now = _utc_clock_value(clock)
         attempt_now = max(attempt_now, quiet_now)
-        if would_be_held(int(delivery.priority), quiet_now):
+        # TEST is exempt from the quiet hold. Quiet hours protect the operator
+        # from being woken by non-urgent MARKET alerts; a TEST delivery exists
+        # only because that same operator just pressed the button, and parking
+        # their transport probe until 07:00 defeats the one thing it is for —
+        # very likely at night, mid-debugging, when they most need the wire
+        # proven. This also removes a real time-of-day flake: the send-test
+        # integration test was red every evening after 22:00 Berlin.
+        if delivery.delivery_kind != DeliveryKind.TEST \
+                and would_be_held(int(delivery.priority), quiet_now):
             hold_for_quiet(
                 session,
                 delivery,

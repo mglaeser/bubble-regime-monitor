@@ -854,7 +854,10 @@ def test_llm_budget_exhaustion_falls_back_without_delaying(isolated_db, phrase_s
     from app.alerts.llm_selector import select_codes
     from app.db import session_scope
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_API_BASE_URL", "https://gateway.example.test/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_MODEL", "provider/model")
+    monkeypatch.setenv("LLM_AUTH_HEADER", "X-Gateway-Key")
     monkeypatch.setenv("ALERTS_LLM_RENDER_CAP_24H", "0")
     from app.config import get_settings
 
@@ -875,7 +878,10 @@ def test_every_llm_attempt_is_recorded_including_failures(isolated_db, phrase_se
     from app.alerts.llm_selector import select_codes
     from app.db import session_scope
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_API_BASE_URL", "https://gateway.example.test/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_MODEL", "provider/model")
+    monkeypatch.setenv("LLM_AUTH_HEADER", "X-Gateway-Key")
     from app.config import get_settings
 
     get_settings.cache_clear()
@@ -899,6 +905,55 @@ def test_every_llm_attempt_is_recorded_including_failures(isolated_db, phrase_se
         row = session.execute(sa_select(AlertLlmAttempt)).scalars().one()
     assert row.status == "TIMEOUT"
     assert row.error_code == "TimeoutError"
+    get_settings.cache_clear()
+
+
+def test_alert_selector_uses_gateway_with_its_own_cap_and_deadline(
+        isolated_db, phrase_set, monkeypatch):
+    import json
+
+    from sqlalchemy import select as sa_select
+
+    import app.llm_gateway as gateway
+    from app.alerts.llm_selector import SELECTION_OUTPUT_KEYS, SYSTEM_PROMPT, select_codes
+    from app.alerts.models import AlertLlmAttempt
+    from app.config import get_settings
+    from app.db import session_scope
+    from app.llm_gateway import Completion
+
+    monkeypatch.setenv("LLM_API_BASE_URL", "https://gateway.example.test/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")   # pragma: allowlist secret
+    monkeypatch.setenv("LLM_MODEL", "provider/model")
+    monkeypatch.setenv("LLM_AUTH_HEADER", "X-Gateway-Key")
+    get_settings.cache_clear()
+    captured = {}
+
+    def fake_complete(**kwargs):
+        captured.update(kwargs)
+        return Completion(text=json.dumps({
+            "headline_code": "BAND_TO_DERISK",
+            "phrase_codes": [],
+            "fact_ids": [],
+            "next_check_code": None,
+            "caveat_codes": [],
+        }), request_id="gateway-request")
+
+    monkeypatch.setattr(gateway, "complete", fake_complete)
+    _seed_delivery()
+    context = _context(phrase_set)
+    with session_scope() as session:
+        result = select_codes(session, delivery_id="D1", priority=2, context=context,
+                              phrase_set=phrase_set, now=NOW)
+
+    assert result.status == "SUCCESS"
+    assert captured["system"] == SYSTEM_PROMPT
+    assert captured["max_tokens"] == 400
+    assert captured["deadline_s"] == 6.0
+    assert captured["json_output_keys"] == SELECTION_OUTPUT_KEYS
+    with session_scope() as session:
+        row = session.execute(sa_select(AlertLlmAttempt)).scalars().one()
+    assert row.model == "provider/model"
+    assert row.request_id == "gateway-request"
     get_settings.cache_clear()
 
 
@@ -1432,3 +1487,54 @@ def test_frozen_bundle_retry_is_cancelled_when_a_rendered_member_resolves(
         assert delivery is not None
         assert delivery.transport_status == TransportStatus.CANCELLED
         assert delivery.cancel_reason == "RENDERED_MEMBER_WITHDRAWN"
+
+
+def test_a_test_probe_is_not_parked_by_quiet_hours(isolated_db):
+    """Quiet hours protect the operator from market alerts, not from the
+    button they just pressed.
+
+    A TEST delivery exists because the operator is probing the transport —
+    very likely at night, mid-debugging. Holding it until 07:00 defeats the
+    one thing it is for, and made the send-test integration test red every
+    evening after 22:00 Berlin.
+    """
+    from datetime import UTC, datetime
+
+    from app.alerts.artifacts import load_active, register, validate_phrase_set
+    from app.alerts.canonical import new_ulid
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import DeliveryKind, PlanningState, TransportStatus
+    from app.alerts.models import AlertDelivery
+    from app.alerts.repository import utc_ms
+    from app.alerts.sender import NullSender
+    from app.db import session_scope
+
+    # deep inside Berlin quiet hours: 23:30 local == 21:30 UTC in summer
+    night = datetime(2026, 8, 24, 21, 30, tzinfo=UTC)
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts)
+        delivery_id = new_ulid(utc_ms(night))
+        session.add(AlertDelivery(
+            delivery_id=delivery_id, dedupe_key=f"v1|TEST|{delivery_id}",
+            dedupe_version=1, manual_retry_sequence=0, mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=artifacts.ruleset.rules_sha256,
+            delivery_kind=DeliveryKind.TEST, priority=4,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY, not_before=night,
+            created_at=night, updated_at=night, attempts=0,
+            duplicate_risk_acknowledged=False, recipient_ref="default"))
+
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
+        phrase_set = validate_phrase_set(fh.read())
+    sender = NullSender()
+    report = dispatch_once(session_scope, phrase_set=phrase_set, mode="shadow",
+                           live_profile="default", sender=sender, now=night,
+                           clock=lambda: night)
+
+    assert report.held == 0, "the operator's own probe was parked until morning"
+    assert report.sent == 1
+    with session_scope() as session:
+        assert session.get(AlertDelivery, delivery_id).transport_status \
+            == TransportStatus.SENT

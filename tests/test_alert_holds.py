@@ -229,6 +229,92 @@ def test_budget_hold_rechecks_and_reholds_when_cap_remains_full(monkeypatch):
         ]
 
 
+def _ready_market_delivery() -> tuple[str, object]:
+    """A READY P2 INITIAL delivery with one RENDERABLE member.
+
+    The quiet-boundary tests used a memberless TEST vehicle for convenience.
+    TEST is now quiet-exempt by design (the operator's own transport probe is
+    not parked until morning) and a memberless DIGEST is retired at
+    revalidation — so the machinery under test needs the vehicle quiet hours
+    actually govern: an ordinary market delivery whose member can actually
+    reach the render stage, predecessor and all.
+    """
+    import json as _json
+
+    from app.alerts.artifacts import load_active, register
+    from app.alerts.models import (
+        AlertDeliveryMember,
+        AlertEpisode,
+        AlertEvaluation,
+        AlertInputSnapshot,
+    )
+    from tests.test_alert_evaluation import make_input
+
+    trigger = make_input(identity="hold-trigger",
+                         computed_at="2026-08-24T18:00:00+00:00",
+                         effective="de-risk", base="de-risk")
+    previous = make_input(identity="hold-previous",
+                          computed_at="2026-08-24T14:00:00+00:00",
+                          effective="hold", base="hold")
+    with session_scope() as session:
+        artifacts = load_active(session)
+        register(session, artifacts, now=NOW)
+        session.flush()
+        rules_sha = artifacts.ruleset.rules_sha256
+        for alert_input in (previous, trigger):
+            payload = _json.dumps(alert_input.model_dump(mode="json"),
+                                  sort_keys=True)
+            session.add(AlertInputSnapshot(
+                input_identity=alert_input.input_identity, snapshot_id=None,
+                origin="RECOMPUTE", built_at=NOW, computed_at=NOW,
+                alert_input_schema_version=alert_input.schema_version,
+                methodology_version=alert_input.methodology_version,
+                methodology_sha256=alert_input.methodology_sha256,
+                reconstructed=False, evaluation_eligibility="EVALUABLE",
+                ineligibility_reasons=[], payload=payload,
+                payload_sha256="0" * 64))
+        session.flush()
+        evaluation_id = new_ulid(utc_ms(NOW))
+        session.add(AlertEvaluation(
+            evaluation_id=evaluation_id, idempotency_key=f"idem-{evaluation_id}",
+            input_identity=trigger.input_identity,
+            current_rules_sha256=rules_sha, evaluation_set_sha256="e" * 64,
+            evaluated_ruleset_hashes=[rules_sha], mode="shadow",
+            live_profile="default", evaluator_version="1", status="COMMITTED",
+            attempt_count=1, started_at=NOW))
+        session.flush()
+        episode_id = new_ulid(utc_ms(NOW))
+        session.add(AlertEpisode(
+            episode_id=episode_id, mode="shadow", live_profile="default",
+            origin_rules_sha256=rules_sha, instance_fingerprint="fp-holds",
+            rule_id="regime.band_to_derisk", labels={}, priority=2,
+            episode_status="FIRING", is_open=True, suppression_reasons=[],
+            opened_at=NOW, activated_at=NOW,
+            trigger_input_identity=trigger.input_identity,
+            predecessor_input_identity=previous.input_identity,
+            created_evaluation_id=evaluation_id,
+            last_evaluation_id=evaluation_id))
+        session.flush()
+        delivery_id = new_ulid(utc_ms(NOW))
+        session.add(AlertDelivery(
+            delivery_id=delivery_id, dedupe_key=f"dedupe-{delivery_id}",
+            mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            delivery_kind=DeliveryKind.INITIAL, priority=2,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY, not_before=NOW,
+            created_at=NOW, updated_at=NOW, recipient_ref="default"))
+        session.add(AlertDeliveryMember(
+            delivery_id=delivery_id, episode_id=episode_id,
+            rule_id="regime.band_to_derisk", instance_fingerprint="fp-holds",
+            member_role="PRIMARY", notification_generation=1,
+            origin_rules_sha256=rules_sha,
+            origin_phrase_set_version=artifacts.phrase_set.version,
+            origin_phrase_set_sha256=artifacts.phrase_set.sha256,
+            included_at=NOW))
+        return delivery_id, artifacts.phrase_set
+
+
 def _memberless_delivery(kind: DeliveryKind) -> tuple[str, object]:
     from app.alerts.artifacts import load_active, register
 
@@ -333,13 +419,9 @@ def test_wire_time_quiet_boundary_reholds_without_persisting_a_render():
     """A pass admitted at 21:59 Berlin cannot cross 22:00 onto the wire."""
     from app.alerts.dispatcher import dispatch_once
 
-    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    delivery_id, phrase_set = _ready_market_delivery()
     start = datetime(2026, 8, 24, 19, 59, 59, tzinfo=UTC)   # 21:59:59 Berlin
     boundary = datetime(2026, 8, 24, 20, 0, 0, tzinfo=UTC)  # exactly 22:00
-    with session_scope() as session:
-        delivery = session.get(AlertDelivery, delivery_id)
-        assert delivery is not None
-        delivery.priority = 2
 
     sender = NullSender()
     report = dispatch_once(
@@ -379,14 +461,10 @@ def test_quiet_boundary_crossed_during_final_revalidation_still_reholds():
     """Quiet admission is sampled after the last database-side wire gate."""
     from app.alerts.dispatcher import dispatch_once
 
-    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    delivery_id, phrase_set = _ready_market_delivery()
     pass_start = datetime(2026, 8, 24, 19, 59, 58, tzinfo=UTC)
     before_boundary = datetime(2026, 8, 24, 19, 59, 59, tzinfo=UTC)
     boundary = datetime(2026, 8, 24, 20, 0, 0, tzinfo=UTC)
-    with session_scope() as session:
-        delivery = session.get(AlertDelivery, delivery_id)
-        assert delivery is not None
-        delivery.priority = 2
 
     clock_values = iter((before_boundary, boundary))
     sender = NullSender()
@@ -424,13 +502,9 @@ def test_wire_clock_rollback_into_quiet_hours_reholds_without_sending():
     """
     from app.alerts.dispatcher import dispatch_once
 
-    delivery_id, phrase_set = _memberless_delivery(DeliveryKind.TEST)
+    delivery_id, phrase_set = _ready_market_delivery()
     pass_start = datetime(2026, 8, 25, 5, 0, 1, tzinfo=UTC)  # 07:00:01 Berlin
     wire_now = datetime(2026, 8, 25, 4, 59, 59, tzinfo=UTC)  # 06:59:59 Berlin
-    with session_scope() as session:
-        delivery = session.get(AlertDelivery, delivery_id)
-        assert delivery is not None
-        delivery.priority = 2
 
     sender = NullSender()
     report = dispatch_once(

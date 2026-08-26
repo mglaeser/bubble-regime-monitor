@@ -51,9 +51,15 @@ On every `pull_request` (workflow `Independent-Verify`, job `cross-vendor`):
      endpoint could mirror the challenge. That is the documented cross-vendor
      trust assumption, compensated by the deterministic CI gate remaining the
      sole merge authority.
-5. **No-key mode:** without `SECOND_VENDOR_API_KEY` / `OPENAI_API_KEY` the job
-   prints the documented **residual** and exits 0 — visibly inactive, never
-   fake-green, never fake-blocking.
+5. **No-key mode is explicit:** the standalone script can print the documented
+   **residual** and exit 0 without `SECOND_VENDOR_API_KEY` / `OPENAI_API_KEY`.
+   The hosted required workflow defaults `VERIFIER_REQUIRE_KEY` to true, so a
+   missing secret fails closed instead of publishing a green status with zero
+   votes. Only an exact operator-set repo variable value of `false` selects the
+   visibly inactive residual mode for an ordinary same-repo pull request; forks
+   and Dependabot remain fail-closed. The candidate status says
+   `panel dormant — deterministic CI only`; it never calls that path a panel
+   approval, and an upstream workflow failure still publishes failure.
 6. **Privacy:** only code leaves the origin — images (raster and SVG), fonts,
    binaries, PDFs, GeoJSON, DB/RDS/XLSX files and `data/**` are excluded from
    both the overview and the body (one git pathspec per extension; `:(glob)`
@@ -70,18 +76,42 @@ frozen-methodology governance surfaces (`frozen_methodology.json`,
 operator role — the identity writing gated code must not silently modify the
 gates that judge it.
 
-## Activation (operator actions — the panel ships dormant-but-visible)
+## Activation and explicit dormant mode
 
-1. Create an **OpenAI API key** and store it as the repo secret
-   `SECOND_VENDOR_API_KEY` (or reuse an existing `OPENAI_API_KEY` secret).
-2. Optionally set repo **variables**: `VERIFIER_PANEL_MODELS`,
+1. Create a key for the chosen OpenAI-compatible verifier endpoint and store it
+   as the `trusted-verifier` **environment secret**
+   `TRUSTED_VERIFIER_API_KEY`. The workflow maps that one secret to the
+   verifier process's `SECOND_VENDOR_API_KEY`; its endpoint preflight receives
+   only a Boolean presence signal derived from the same secret, never the key.
+   The key must be an 8–4096-character visible-ASCII value; shorter,
+   whitespace/control, or Unicode forms are refused before diff or network I/O.
+   The lower bound keeps exact-echo leak detection from treating ordinary text
+   as a credential match when an operator supplies a trivially short key. For
+   the structured verdict, the five required top-level JSON field names are
+   public protocol syntax rather than peer-authored values: they are exempted
+   from the echo comparison only in that exact root-key position. Every value,
+   nested key, and unexpected root key remains covered, including JSON-escaped
+   echoes after decoding.
+2. Store the endpoint as the `trusted-verifier` **environment secret**
+   `VERIFIER_BASE_URL` — NOT as a variable. It is required even for direct
+   OpenAI use (`https://api.openai.com/v1` must be explicit); there is no host
+   fallback because the key belongs to the operator-selected endpoint. The
+   transport accepts HTTPS `/v1` endpoints on fully qualified ordinary ASCII
+   DNS hostnames only (no IP literal, single-label, IDN/punycode, trailing-dot,
+   or zone-qualified host), and refuses redirects and ambient proxies so the
+   credential cannot be forwarded to another host or exposed through a
+   resolver's alternate spelling.
+   The runner prints every env block into the job log, and this log is public:
+   it redacts secrets there and never variables, so a variable publishes the
+   endpoint on every run.
+3. Optionally set repo **variables**: `VERIFIER_PANEL_MODELS`,
    `VERIFIER_MODEL` (single pin), `VERIFIER_REQUIRED_APPROVER`,
-   `VERIFIER_MIN_OTHER_APPROVERS`.
-3. If the panel votes through a gateway rather than the vendor directly, store
-   that endpoint as the `trusted-verifier` **environment secret**
-   `VERIFIER_BASE_URL` — NOT as a variable. The runner prints every env block
-   into the job log, and this log is public: it redacts secrets there and
-   never variables, so a variable publishes the endpoint on every run.
+   `VERIFIER_MIN_OTHER_APPROVERS`, and `VERIFIER_AUTH_HEADER`. Set
+   `VERIFIER_REQUIRE_KEY=false` only to deliberately make ordinary same-repo
+   runs dormant; an absent, blank, or other value remains fail-closed, and fork
+   or Dependabot runs cannot opt out. The auth header defaults to
+   `Authorization`; a custom value must be an `X-*-Key` header so the credential
+   cannot replace routing, proxy, cookie, or content headers.
 4. Branch protection (the standing B-35 item, repo settings): mark
    `cross-vendor` (and `test`) as **required status checks**, and enable
    **Require review from Code Owners** so CODEOWNERS actually enforces.
@@ -140,10 +170,10 @@ addressed:
 8. **(Round 2) Fork-PR bypass:** GitHub withholds secrets from fork-originated
    `pull_request` runs, so the no-key exit-0 would have let a fork PR pass a
    *required* `cross-vendor` check with zero review. Fixed: the workflow sets
-   `VERIFIER_REQUIRE_KEY=true` exactly when the head repo differs from the
-   base repo, and the panel then **fails closed** without a key; same-repo
-   no-key runs keep the documented residual behavior. The reference repo
-   carries the same latent bypass.
+   `VERIFIER_REQUIRE_KEY=true` by default and always for fork-origin and
+   Dependabot runs, and the panel then **fails closed** without a key. Only an
+   explicit operator-set false enables the documented residual behavior for an
+   ordinary same-repo run. The reference repo carries the same latent bypass.
 
 ## Verification
 

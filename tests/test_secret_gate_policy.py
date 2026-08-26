@@ -264,3 +264,63 @@ class TestPublicArtifactsCarryNoFreeText:
                 "does_not_prove", "fallback_position", "resolution_method",
                 "fallback_policy", "money_unit",
             ), f"unexpected long string at {where}"
+
+
+class TestImageContextExcludesCredentials:
+    """A backup of a credential file is the credential file.
+
+    `.env.*` caught `cp .env .env.bak` and missed `cp .env prod.env` and an
+    editor's `.env~` — the shapes an operator actually produces while editing
+    credentials on the deploy host. Both ignore files must exclude the whole
+    family, and must re-include the secretless template LAST, because in
+    ignore files the last match wins.
+    """
+
+    CASES = [
+        (".env", True),
+        (".env.bak", True),
+        (".env.backup", True),
+        (".env~", True),
+        ("prod.env", True),
+        ("production.env.old", True),
+        ("deploy/nested/.env", True),
+        ("deploy/nested/.env~", True),
+        ("deploy/nested/staging.env", True),
+        (".env.example", False),          # the template ships, by design
+        ("app/config.py", False),
+    ]
+
+    @staticmethod
+    def _excluded(rules: list[str], path: str) -> bool:
+        """Docker/Podman ignore semantics: last matching pattern wins."""
+        import fnmatch
+
+        verdict = False
+        for raw in rules:
+            pattern = raw.strip()
+            if not pattern or pattern.startswith("#"):
+                continue
+            negated = pattern.startswith("!")
+            if negated:
+                pattern = pattern[1:]
+            candidates = [pattern]
+            if pattern.startswith("**/"):
+                candidates.append(pattern[3:])
+            if any(fnmatch.fnmatch(path, c) for c in candidates):
+                verdict = not negated
+        return verdict
+
+    @pytest.mark.parametrize("ignore_file", [".dockerignore", ".containerignore"])
+    def test_env_backup_family_never_enters_the_build_context(self, ignore_file):
+        rules = Path(ignore_file).read_text(encoding="utf-8").splitlines()
+        for path, should_exclude in self.CASES:
+            assert self._excluded(rules, path) is should_exclude, (
+                f"{ignore_file}: {path!r} "
+                f"{'entered' if should_exclude else 'was wrongly kept out of'} "
+                "the build context")
+
+    def test_the_two_ignore_files_cannot_drift(self):
+        assert Path(".dockerignore").read_text() \
+            == Path(".containerignore").read_text(), (
+            "Docker and Podman read different files; a rule added to one and "
+            "not the other silently unprotects one build path")

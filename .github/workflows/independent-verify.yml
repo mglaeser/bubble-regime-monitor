@@ -86,19 +86,63 @@ jobs:
       # hand-rolled split -- and getting one wrong silently republishes the
       # endpoint that this step is the only thing hiding.
       - name: Mask the verifier endpoint in the log
+        id: verifier_config
         env:
           VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
+          # The preflight only needs the credential's presence, not its value.
+          # This expression and the panel's SECOND_VENDOR_API_KEY below name the
+          # same secret; a test pins that binding so the two cannot drift.
+          SECOND_VENDOR_API_KEY_CONFIGURED: ${{ secrets.TRUSTED_VERIFIER_API_KEY != '' }}
+          # Feed raw policy inputs to trusted Python. GitHub expression string
+          # comparisons are case-insensitive, so they cannot enforce the exact
+          # lowercase "false" opt-out. PR author identity is stable when a
+          # maintainer retriggers a Dependabot-authored PR; github.actor is not.
+          VERIFIER_REQUIRE_KEY_SETTING: ${{ vars.VERIFIER_REQUIRE_KEY }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          IS_DEPENDABOT_PR: ${{ startsWith(github.event.pull_request.user.login, 'dependabot') }}
         run: |
           python - <<'PY'
           import os
           import sys
           from urllib.parse import urlsplit
 
+          key_configured = os.environ.get(
+              "SECOND_VENDOR_API_KEY_CONFIGURED", ""
+          ).casefold() == "true"
+          untrusted_origin = any(
+              os.environ.get(name, "").casefold() == "true"
+              for name in ("IS_FORK", "IS_DEPENDABOT_PR")
+          )
+          operator_dormant = (
+              os.environ.get("VERIFIER_REQUIRE_KEY_SETTING", "") == "false"
+          )
+          require_key = untrusted_origin or not operator_dormant
+          panel_dormant = not require_key and not key_configured
+
+          try:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  output.write(f"require_key={'true' if require_key else 'false'}\n")
+                  output.write(f"panel_dormant={'true' if panel_dormant else 'false'}\n")
+          except (KeyError, OSError):
+              print("::error::could not publish trusted verifier configuration")
+              sys.exit(1)
+
+          if not key_configured:
+              if require_key:
+                  print("::error::verifier credential is missing; refusing to run the required panel")
+                  sys.exit(1)
+              # Explicit operator-selected dormant mode. With no credential,
+              # the verifier exits green-but-loud before endpoint/network I/O,
+              # so no endpoint diagnostic needs masking here.
+              sys.exit(0)
+
           raw = os.environ.get("VERIFIER_BASE_URL", "").strip()
           if not raw:
-              # No gateway configured. The script falls back to the vendor
-              # default and there is nothing endpoint-shaped to hide.
-              sys.exit(0)
+              # This credential belongs to one configured gateway. Falling
+              # back while the key remains present would send that key to the
+              # wrong host, so a missing/mis-scoped endpoint is a refusal.
+              print("::error::VERIFIER_BASE_URL is missing; refusing to run the credentialed panel without its pinned endpoint")
+              sys.exit(1)
 
           try:
               parts = urlsplit(raw)
@@ -159,6 +203,10 @@ jobs:
         if: success() && github.event.pull_request.head.repo.full_name == github.repository
         env:
           SECOND_VENDOR_API_KEY: ${{ secrets.TRUSTED_VERIFIER_API_KEY }}
+          # The standalone script accepts this legacy fallback, but the hosted
+          # workflow has exactly one credential source. Clear any ambient value
+          # so the Boolean preflight and the runtime cannot disagree.
+          OPENAI_API_KEY: ""
           # A SECRET, not a `vars.` entry, and the difference is the whole point:
           # the runner echoes every env block into the log, redacting secrets
           # there and never variables. As a variable this published the gateway
@@ -173,7 +221,7 @@ jobs:
           # starve every open PR's panel including the one carrying the fix.
           VERIFIER_BASE_URL: ${{ secrets.VERIFIER_BASE_URL }}
           # Gateways that reserve Authorization for upstream forwarding need a
-          # different header; inference.klee.me answers Bearer with 401.
+          # different header; the configured gateway answers Bearer with 401.
           VERIFIER_AUTH_HEADER: ${{ vars.VERIFIER_AUTH_HEADER }}
           VERIFIER_PANEL_MODELS: ${{ vars.VERIFIER_PANEL_MODELS }}
           VERIFIER_REQUIRED_APPROVER: ${{ vars.VERIFIER_REQUIRED_APPROVER }}
@@ -210,9 +258,9 @@ jobs:
           # back empty, and the panel goes permanently fake-green.
           VERIFIER_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
           VERIFIER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # A missing key is the operator's documented residual on a same-repo
-          # PR, but never a silent pass when a credential was expected.
-          VERIFIER_REQUIRE_KEY: "true"
+          # Derived once above from raw policy inputs, with exact-case handling
+          # and stable PR-author classification.
+          VERIFIER_REQUIRE_KEY: ${{ steps.verifier_config.outputs.require_key }}
         run: python scripts/independent_verify.py
 
       - name: Publish the verdict onto the candidate head
@@ -222,10 +270,21 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           OUTCOME: ${{ steps.panel.outcome }}
           IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          # Consume the same trusted decision as the panel; do not reinterpret
+          # repository settings or event identity in another expression.
+          PANEL_DORMANT: ${{ steps.verifier_config.outputs.panel_dormant }}
         run: |
           if [ "$IS_FORK" = "true" ]; then
             state=failure
             desc="fork PR: panel not run — maintainer review required"
+          elif [ "$PANEL_DORMANT" = "true" ] && [ "$OUTCOME" = "success" ]; then
+            # Dormancy pauses MERGING, not reviewing. This context is a
+            # REQUIRED check: publishing success here would let a repo-variable
+            # flip plus a deleted secret turn the mandatory cross-vendor review
+            # into automatic green — zero votes, green gate. The operator may
+            # idle the panel; while it is idle, nothing merges over it.
+            state=failure
+            desc="panel dormant — no review performed; re-enable the verifier to merge"
           elif [ "$OUTCOME" = "success" ]; then
             state=success
             desc="cross-vendor panel approved"

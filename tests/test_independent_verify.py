@@ -20,17 +20,49 @@ import urllib.error
 from pathlib import Path
 
 import pytest
+import yaml
 
 _SPEC = importlib.util.spec_from_file_location(
     "independent_verify", Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
 iv = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(iv)
+TEST_BASE_URL = "https://verifier.example.test/v1"
+# Network-shape tests use a visibly inert, explicit endpoint.  Missing-config
+# tests below import a fresh module or override these values to exercise refusal.
+iv.BASE = TEST_BASE_URL
+iv.KEY = "test-verifier-key"  # pragma: allowlist secret
 
 MDL = ["gpt-5.3-codex", "gpt-5.6-sol", "gpt-4.1-mini"]
 A = {"ok": True, "v": {"refuted": False, "reason": "reason long enough a"}}
 A2 = {"ok": True, "v": {"refuted": False, "reason": "reason long enough b"}}
 RF = {"ok": True, "v": {"refuted": True, "confidence": "high", "reason": "real bug"}}
 ERR = {"ok": False, "reason": "API 500"}
+
+_VERIFIER_ENV = (
+    "GITHUB_BASE_REF",
+    "GITHUB_STEP_SUMMARY",
+    "OPENAI_API_KEY",
+    "SECOND_VENDOR_API_KEY",
+    "VERIFIER_AUTH_HEADER",
+    "VERIFIER_BASE_BRANCH",
+    "VERIFIER_BASE_URL",
+    "VERIFIER_HEAD_SHA",
+    "VERIFIER_MIN_OTHER_APPROVERS",
+    "VERIFIER_MODEL",
+    "VERIFIER_PANEL",
+    "VERIFIER_PANEL_MODELS",
+    "VERIFIER_REQUIRED_APPROVER",
+    "VERIFIER_REQUIRE_DEFECT_LIST",
+    "VERIFIER_REQUIRE_KEY",
+    "VERIFIER_STRICT_ANY_REFUTATION",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_verifier_environment(monkeypatch):
+    """Unit verdicts must not inherit an operator's live panel settings."""
+    for name in _VERIFIER_ENV:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _sse_events(events: list[dict]) -> list[bytes]:
@@ -150,17 +182,779 @@ class TestNoKeyResidualMode:
 
 
 class TestEmptyEnvVarsAreAbsent:
-    def test_empty_base_url_falls_back_to_default(self, monkeypatch):
-        # GitHub Actions injects EMPTY strings for unset repo variables; an
-        # empty VERIFIER_BASE_URL must behave like an absent one (observed
-        # live: BASE="" crashed every request with "unknown url type").
+    def test_suite_ignores_a_hostile_ambient_auth_header(self):
+        target = (
+            f"{Path(__file__).resolve()}::TestVerifierDiagnosticsAreSecretSafe"
+            "::test_peer_error_bodies_cannot_echo_key_or_endpoint"
+        )
+        env = os.environ.copy()
+        env["VERIFIER_AUTH_HEADER"] = "Bad Header"
+
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", target],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_empty_base_url_has_no_implicit_host(self, monkeypatch):
+        # This key belongs to one operator-pinned endpoint.  An empty Actions
+        # secret must never select a different host on the key's behalf.
         monkeypatch.setenv("VERIFIER_BASE_URL", "")
         spec = importlib.util.spec_from_file_location(
             "independent_verify_emptyenv",
             Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        assert mod.BASE == "https://api.openai.com/v1"
+        assert mod.BASE == ""
+
+    def test_credentialed_main_refuses_a_blank_endpoint_before_diff_io(
+            self, monkeypatch, capsys):
+        credential = "verifier-credential-must-not-leak"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", "")
+        monkeypatch.setattr(
+            iv, "build_diff",
+            lambda: pytest.fail("credentialed verifier read the diff without an endpoint"),
+        )
+        monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
+
+        assert iv.main() == 1
+        captured = capsys.readouterr()
+        assert "VERIFIER_BASE_URL" in captured.err
+        assert credential not in captured.out + captured.err
+
+    @pytest.mark.parametrize("base", [
+        "",
+        "https://münchen.example/v1",
+        "https://xn--mnchen-3ya.example/v1",
+        "https://secret.example./v1",
+        "https://[fe80::1%25eth0]/v1",
+        "https://[0:0:0:0:0:0:0:1]/v1",
+        "https://0177.0.0.1/v1",
+        "https://127.1/v1",
+        "https://0x7f000001/v1",
+        "https://2130706433/v1",
+        "https://127.0.0.0x1/v1",
+        "https://0x7f.0.0.0x1/v1",
+        "https://gateway/v1",
+    ])
+    def test_unsafe_endpoint_is_guarded_at_both_network_sinks(self, monkeypatch, base):
+        monkeypatch.setattr(iv, "BASE", base)
+        opened = False
+
+        def forbidden_urlopen(*args, **kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("verifier opened a network sink without its endpoint")
+
+        monkeypatch.setattr(iv, "_urlopen", forbidden_urlopen)
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_BASE_URL"):
+            iv._http_json("/models")
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_BASE_URL"):
+            iv._responses_attempt("model", "system", "user")
+
+        assert opened is False
+
+    @pytest.mark.parametrize("base", [
+        "http://verifier.example.test/v1",
+        "https://user:password@verifier.example.test/v1",  # pragma: allowlist secret
+        "https://verifier.example.test/v1?route=other",
+        "https://verifier.example.test/v1?",
+        "https://verifier.example.test/v1#fragment",
+        "https://verifier.example.test/v1#",
+        "https://münchen.example/v1",
+        "https://xn--mnchen-3ya.example/v1",
+        "https://secret.example./v1",
+        "https://[fe80::1%25eth0]/v1",
+        "https://[0:0:0:0:0:0:0:1]/v1",
+        "https://0177.0.0.1/v1",
+        "https://127.1/v1",
+        "https://0x7f000001/v1",
+        "https://2130706433/v1",
+        "https://127.0.0.0x1/v1",
+        "https://0x7f.0.0.0x1/v1",
+        "https://gateway/v1",
+        "https://verifier.example.test/not-v1",
+        "https://verifier.example.test:not-a-port/v1",
+    ])
+    def test_unsafe_endpoint_shapes_are_rejected(self, monkeypatch, base):
+        monkeypatch.setattr(iv, "BASE", base)
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_BASE_URL"):
+            iv._api_url("/responses")
+
+    def test_endpoint_builder_accepts_only_internal_relative_paths(self, monkeypatch):
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        assert iv._api_url("/responses") == TEST_BASE_URL + "/responses"
+        with pytest.raises(ValueError):
+            iv._api_url("https://wrong.example/v1/responses")
+
+    def test_verifier_transport_disables_redirects_and_ambient_proxies(self):
+        assert any(
+            isinstance(handler, iv._NoRedirectHandler)
+            for handler in iv._NO_REDIRECT_OPENER.handlers
+        )
+        # Supplying ProxyHandler({}) suppresses build_opener's ambient default;
+        # the empty handler itself has no protocol methods and is not retained.
+        assert not any(
+            isinstance(handler, iv.urllib.request.ProxyHandler)
+            for handler in iv._NO_REDIRECT_OPENER.handlers
+        )
+        redirect = iv._NoRedirectHandler()
+        assert redirect.redirect_request(
+            None, None, 302, "Found", {}, "https://wrong.example/v1"
+        ) is None
+
+    def test_production_opener_suppresses_ambient_https_proxy_at_import(self):
+        script = Path(__file__).resolve().parents[1] / "scripts" / "independent_verify.py"
+        proxy_url = "http://proxy.invalid:3128"
+        probe = (
+            "import importlib.util\n"
+            "import sys\n"
+            "import urllib.request\n"
+            "ambient = urllib.request.build_opener()\n"
+            "ambient_https = [handler for handler in ambient.handlers "
+            "if isinstance(handler, urllib.request.ProxyHandler) "
+            "and handler.proxies.get('https') == sys.argv[2]]\n"
+            "if not ambient_https:\n"
+            "    raise SystemExit('ambient HTTPS proxy precondition was not established')\n"
+            "spec = importlib.util.spec_from_file_location('verifier_proxy_probe', sys.argv[1])\n"
+            "if spec is None or spec.loader is None:\n"
+            "    raise SystemExit('could not load production verifier')\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(module)\n"
+            "retained = [handler for handler in module._NO_REDIRECT_OPENER.handlers "
+            "if isinstance(handler, urllib.request.ProxyHandler) and handler.proxies]\n"
+            "if retained:\n"
+            "    raise SystemExit('production verifier retained an ambient proxy handler')\n"
+        )
+        env = {
+            "HTTPS_PROXY": proxy_url,
+            "PATH": os.environ.get("PATH", ""),
+        }
+
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(script), proxy_url],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestTrustedWorkflowEndpointPreflight:
+    @staticmethod
+    def _mask_step() -> dict:
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[1]
+             / ".github/workflows/independent-verify.yml").read_text()
+        )
+        steps = workflow["jobs"]["panel"]["steps"]
+        return next(
+            step for step in steps
+            if step.get("name") == "Mask the verifier endpoint in the log"
+        )
+
+    @staticmethod
+    def _publisher_step() -> dict:
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[1]
+             / ".github/workflows/independent-verify.yml").read_text()
+        )
+        return next(
+            step for step in workflow["jobs"]["panel"]["steps"]
+            if step.get("name") == "Publish the verdict onto the candidate head"
+        )
+
+    def _run_mask_step(
+            self, tmp_path, *, base_url: str, key_configured: str,
+            require_key_setting: str = "", is_fork: str = "false",
+            is_dependabot_pr: str = "false") -> tuple[subprocess.CompletedProcess, dict[str, str]]:
+        github_output = tmp_path / "verifier-config-output"
+        env = os.environ.copy()
+        env["VERIFIER_BASE_URL"] = base_url
+        env["SECOND_VENDOR_API_KEY_CONFIGURED"] = key_configured
+        env["VERIFIER_REQUIRE_KEY_SETTING"] = require_key_setting
+        env["IS_FORK"] = is_fork
+        env["IS_DEPENDABOT_PR"] = is_dependabot_pr
+        env["GITHUB_OUTPUT"] = str(github_output)
+        env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+        result = subprocess.run(
+            ["bash", "-c", self._mask_step()["run"]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        outputs = {}
+        if github_output.exists():
+            outputs = dict(
+                line.split("=", 1)
+                for line in github_output.read_text().splitlines()
+            )
+        return result, outputs
+
+    def test_workflow_binds_presence_and_runtime_key_to_the_same_secret(self):
+        mask_step = self._mask_step()
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[1]
+             / ".github/workflows/independent-verify.yml").read_text()
+        )
+        panel_step = next(
+            step for step in workflow["jobs"]["panel"]["steps"]
+            if step.get("name") == "Cross-vendor review panel"
+        )
+        assert mask_step["env"]["SECOND_VENDOR_API_KEY_CONFIGURED"] == (
+            "${{ secrets.TRUSTED_VERIFIER_API_KEY != '' }}"
+        )
+        assert panel_step["env"]["SECOND_VENDOR_API_KEY"] == (
+            "${{ secrets.TRUSTED_VERIFIER_API_KEY }}"
+        )
+        assert panel_step["env"]["OPENAI_API_KEY"] == ""
+        assert "SECOND_VENDOR_API_KEY" not in mask_step["env"]
+
+    def test_workflow_derives_one_config_from_raw_setting_and_pr_identity(self):
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[1]
+             / ".github/workflows/independent-verify.yml").read_text()
+        )
+        panel_step = next(
+            step for step in workflow["jobs"]["panel"]["steps"]
+            if step.get("name") == "Cross-vendor review panel"
+        )
+        mask_step = self._mask_step()
+        assert mask_step["id"] == "verifier_config"
+        assert mask_step["env"]["VERIFIER_REQUIRE_KEY_SETTING"] == (
+            "${{ vars.VERIFIER_REQUIRE_KEY }}"
+        )
+        assert mask_step["env"]["IS_FORK"] == (
+            "${{ github.event.pull_request.head.repo.full_name != github.repository }}"
+        )
+        assert mask_step["env"]["IS_DEPENDABOT_PR"] == (
+            "${{ startsWith(github.event.pull_request.user.login, 'dependabot') }}"
+        )
+        assert panel_step["env"]["VERIFIER_REQUIRE_KEY"] == (
+            "${{ steps.verifier_config.outputs.require_key }}"
+        )
+
+    def test_publisher_derives_dormancy_from_the_same_explicit_opt_out(self):
+        assert self._publisher_step()["env"]["PANEL_DORMANT"] == (
+            "${{ steps.verifier_config.outputs.panel_dormant }}"
+        )
+
+    @pytest.mark.parametrize(
+        ("setting", "expected_require_key", "expected_dormant", "expected_returncode"),
+        [
+            ("", "true", "false", 1),
+            ("true", "true", "false", 1),
+            ("FALSE", "true", "false", 1),
+            ("False", "true", "false", 1),
+            ("garbage", "true", "false", 1),
+            ("false", "false", "true", 0),
+        ],
+    )
+    def test_only_exact_lowercase_false_selects_dormant_mode(
+            self, tmp_path, setting, expected_require_key,
+            expected_dormant, expected_returncode):
+        result, outputs = self._run_mask_step(
+            tmp_path,
+            base_url="",
+            key_configured="false",
+            require_key_setting=setting,
+        )
+        assert result.returncode == expected_returncode
+        assert outputs == {
+            "require_key": expected_require_key,
+            "panel_dormant": expected_dormant,
+        }
+
+    @pytest.mark.parametrize("origin", ["fork", "dependabot"])
+    def test_untrusted_origin_cannot_select_dormant_mode(self, tmp_path, origin):
+        result, outputs = self._run_mask_step(
+            tmp_path,
+            base_url="",
+            key_configured="false",
+            require_key_setting="false",
+            is_fork="true" if origin == "fork" else "false",
+            is_dependabot_pr="true" if origin == "dependabot" else "false",
+        )
+        assert result.returncode != 0
+        assert outputs == {"require_key": "true", "panel_dormant": "false"}
+
+    @pytest.mark.parametrize(
+        ("is_fork", "panel_dormant", "outcome", "expected_returncode",
+         "expected_state", "expected_description"),
+        [
+            # dormant NEVER publishes success: this context is a REQUIRED
+            # check, and a zero-vote green would let a repo-variable flip plus
+            # a deleted secret stand in for the mandatory review. The previous
+            # expectation here asserted exactly that defect.
+            ("false", "true", "success", 1, "failure",
+             "panel dormant — no review performed; re-enable the verifier to merge"),
+            ("false", "true", "failure", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("false", "true", "skipped", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("false", "false", "success", 0, "success",
+             "cross-vendor panel approved"),
+            ("false", "false", "failure", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("false", "false", "skipped", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("false", "", "skipped", 1, "failure",
+             "cross-vendor panel refused — see job log"),
+            ("true", "true", "success", 1, "failure",
+             "fork PR: panel not run — maintainer review required"),
+        ],
+    )
+    def test_publisher_state_table_never_hides_a_skipped_or_failed_panel(
+            self, tmp_path, is_fork, panel_dormant, outcome,
+            expected_returncode, expected_state, expected_description):
+        publisher = self._publisher_step()
+        assert publisher["if"] == "always()"
+        capture = tmp_path / "gh-args"
+        fake_gh = tmp_path / "gh"
+        fake_gh.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n")
+        fake_gh.chmod(0o700)
+        env = os.environ.copy()
+        env.update({
+            "CAPTURE": str(capture),
+            "PATH": str(tmp_path) + os.pathsep + env.get("PATH", ""),
+            "HEAD_SHA": "a" * 40,
+            "IS_FORK": is_fork,
+            "OUTCOME": outcome,
+            "PANEL_DORMANT": panel_dormant,
+            "GITHUB_REPOSITORY": "owner/repository",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_SERVER_URL": "https://example.test",
+        })
+        result = subprocess.run(
+            ["bash", "-c", publisher["run"]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert result.returncode == expected_returncode
+        published = capture.read_text()
+        assert f"state={expected_state}" in published
+        assert f"description={expected_description}" in published
+
+    @pytest.mark.parametrize("setting", ["", "false"])
+    def test_blank_endpoint_refuses_before_the_credentialed_panel(
+            self, tmp_path, setting):
+        result, _ = self._run_mask_step(
+            tmp_path,
+            base_url="",
+            key_configured="true",
+            require_key_setting=setting,
+        )
+        assert result.returncode != 0
+        assert "refus" in (result.stdout + result.stderr).casefold()
+
+    @pytest.mark.parametrize("base_url", ["", TEST_BASE_URL, "not-an-endpoint"])
+    def test_required_panel_refuses_a_missing_key(self, tmp_path, base_url):
+        result, _ = self._run_mask_step(
+            tmp_path,
+            base_url=base_url,
+            key_configured="false",
+        )
+        assert result.returncode != 0
+        assert "refus" in (result.stdout + result.stderr).casefold()
+
+    @pytest.mark.parametrize("base_url", ["", "not-an-endpoint"])
+    def test_explicit_dormant_mode_skips_endpoint_preflight(self, tmp_path, base_url):
+        result, outputs = self._run_mask_step(
+            tmp_path,
+            base_url=base_url,
+            key_configured="false",
+            require_key_setting="false",
+        )
+        assert result.returncode == 0
+        assert outputs == {"require_key": "false", "panel_dormant": "true"}
+        assert "error" not in (result.stdout + result.stderr).casefold()
+
+
+class TestVerifierDiagnosticsAreSecretSafe:
+    ESCAPED_KEY = "secret-key-123"  # pragma: allowlist secret
+    ESCAPED_VERDICT = (
+        r'{"refuted":false,"confidence":"high","reason":"approved secret-key-\u0031\u0032\u0033",'
+        r'"defects":[],"proof":"challenge-1"}'
+    )
+
+    def test_redaction_marker_shaped_key_is_still_detected_and_removed(self, monkeypatch):
+        credential = "<redacted>"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        rendered = f"transport exposed {credential}"
+
+        assert iv._contains_protected_text(rendered) is True
+        assert credential not in iv._safe_diag(rendered, limit=None)
+
+    def test_transport_redaction_cannot_reconstruct_the_key(self, monkeypatch):
+        credential = "secret-key"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        # Each one-pass sanitizer removes one literal match and joins the
+        # surviving ends into the next layer, so the second outward-facing
+        # sanitizer would reconstruct the credential in a published reason.
+        peer_diagnostic = f"secret-secret-{credential}keykey"
+
+        def rejected(_req, timeout=None):
+            raise OSError(peer_diagnostic)
+
+        monkeypatch.setattr(iv, "_urlopen", rejected)
+        model_ids, model_reason = iv.fetch_model_ids()
+        attempt = iv.attempt_once("model", "system", "user")
+        rendered = repr((model_reason, attempt))
+
+        assert model_ids is None
+        assert attempt["ok"] is False
+        assert credential.casefold() not in rendered.casefold()
+
+    def test_peer_error_bodies_cannot_echo_key_or_endpoint(self, monkeypatch):
+        credential = "peer-echo-verifier-credential"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+
+        def rejected(req, timeout=None):
+            body = f"bad credential {credential} at {TEST_BASE_URL}".encode()
+            raise urllib.error.HTTPError(
+                req.full_url, 401, "unauthorized", None, io.BytesIO(body)
+            )
+
+        monkeypatch.setattr(iv, "_urlopen", rejected)
+        json_failure = iv._http_json("/models")
+        stream_failure = iv._responses_attempt("model", "system", "user")
+        rendered = repr((json_failure, stream_failure))
+
+        assert json_failure[0] == stream_failure[0] == 401
+        assert credential not in rendered
+        assert TEST_BASE_URL not in rendered
+        assert "withheld" in rendered
+
+    def test_transport_exceptions_cannot_publish_the_private_endpoint(self, monkeypatch):
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+
+        def unreachable(req, timeout=None):
+            raise OSError(f"could not resolve {TEST_BASE_URL}")
+
+        monkeypatch.setattr(iv, "_urlopen", unreachable)
+        failures = (
+            iv._http_json("/models"),
+            iv._responses_attempt("model", "system", "user"),
+        )
+        rendered = repr(failures)
+        assert all(status == 0 for status, _detail in failures)
+        assert TEST_BASE_URL not in rendered
+        assert "verifier.example.test" not in rendered
+
+    def test_success_body_that_echoes_the_key_is_rejected_not_rendered(
+            self, monkeypatch):
+        credential = "model-echo-verifier-credential"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": f"approved with {credential}",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-echo"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+        assert out["ok"] is False
+        assert out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_required_verdict_key_may_equal_credential_without_making_json_impossible(
+            self, monkeypatch):
+        """Public JSON structure must not be mistaken for a peer secret echo."""
+        credential = "confidence"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": "reviewed the changed gateway boundaries",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-schema-key"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is True
+        assert out["v"]["confidence"] == "high"
+
+    def test_verdict_retains_raw_cross_token_credential_scan(self, monkeypatch):
+        credential = 'ence":"high'  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            '{"refuted":false,"confidence":"high",'
+            '"reason":"reviewed gateway boundaries","defects":[],'
+            '"proof":"challenge-1"}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-boundary"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_wrapped_verdict_scans_a_credential_across_the_json_boundary(
+            self, monkeypatch):
+        credential = 'wrap{"ref'  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            '{"refuted":false,"confidence":"high",'
+            '"reason":"reviewed gateway boundaries","defects":[],'
+            '"proof":"challenge-1"}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": "wrap" + verdict},
+            {"type": "response.completed", "response": {"id": "resp-boundary"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_verdict_scan_fails_closed_when_json_exceeds_decoder_depth(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", "depth-test-credential")
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        deeply_nested = "[" * 1100 + '"SAFE"' + "]" * 1100
+
+        assert iv._verdict_echoes_protected_text(deeply_nested) is True
+
+    def test_schema_key_collision_does_not_exempt_the_credential_in_a_value(
+            self, monkeypatch):
+        credential = "confidence"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": f"reviewed with {credential}",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-value-echo"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    @pytest.mark.parametrize("fragment", [
+        '"metadata":{"confidence":"safe"}',
+        r'"\u0063onfidence_extra":"safe"',
+    ])
+    def test_root_key_exemption_does_not_cover_nested_or_unknown_keys(
+            self, monkeypatch, fragment):
+        credential = "confidence"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            '{"refuted":false,"confidence":"high",'
+            '"reason":"reviewed gateway boundaries","defects":[],'
+            '"proof":"challenge-1",' + fragment + '}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-nested-key"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_duplicate_member_cannot_hide_an_escaped_credential_value(
+            self, monkeypatch):
+        credential = "secret-key-123"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            r'{"refuted":false,"confidence":"high",'
+            r'"reason":"secret-key-\u0031\u0032\u0033",'
+            r'"reason":"reviewed gateway boundaries","defects":[],'
+            r'"proof":"challenge-1"}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-duplicate"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_endpoint_literal_set_distinguishes_url_netloc_and_hostname(
+            self, monkeypatch):
+        base_url = "https://verifier.example.test:8443/v1"
+        monkeypatch.setattr(iv, "BASE", base_url)
+
+        assert set(iv._endpoint_literals()) == {
+            base_url,
+            "verifier.example.test:8443",
+            "verifier.example.test",
+        }
+
+    @pytest.mark.parametrize("placement", ["prefix", "suffix"])
+    @pytest.mark.parametrize("protected", [
+        "wrapped-verifier-credential",
+        TEST_BASE_URL,
+        "verifier.example.test",
+    ])
+    def test_wrapped_verdict_scans_protected_text_outside_json(
+            self, monkeypatch, placement, protected):
+        credential = "wrapped-verifier-credential"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": "reviewed the changed gateway boundaries",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wrapped = (f"{protected}\n{verdict}" if placement == "prefix"
+                   else f"{verdict}\n{protected}")
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": wrapped},
+            {"type": "response.completed", "response": {"id": "resp-wrapped"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert protected not in repr(out)
+
+    @pytest.mark.parametrize(("credential", "fragment"), [
+        ("12345678", '"confidence":12345678'),
+        ("12345678", '"usage":12345678'),
+        ("12345678", '"usage":[12345678]'),
+        ("12345678", '"usage":{"value":12345678}'),
+        ("12345.678", '"usage":12345.678'),
+        ("1.2345e67", '"usage":1.2345e67'),
+        ("Infinity", '"usage":Infinity'),
+    ])
+    def test_numeric_credential_echo_in_json_value_fails_closed(
+            self, monkeypatch, credential, fragment):
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = (
+            '{"refuted":false,' + fragment + ','
+            '"reason":"reviewed gateway boundaries","defects":[],'
+            '"proof":"challenge-1"}'
+        )
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-number"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is False and out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_chat_fallback_that_echoes_the_key_is_rejected_not_rendered(
+            self, monkeypatch):
+        credential = "chat-echo-verifier-credential"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        calls = 0
+
+        def routed(req, timeout=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise urllib.error.HTTPError(
+                    req.full_url, 404, "no responses route", None, io.BytesIO(b"missing")
+                )
+            content = json.dumps({
+                "refuted": False,
+                "confidence": "high",
+                "reason": f"approved with {credential}",
+                "defects": [],
+                "proof": "challenge-1",
+            })
+            return _FakeWire([json.dumps({
+                "choices": [{"message": {"content": content}}],
+            }).encode()])
+
+        monkeypatch.setattr(iv, "_urlopen", routed)
+        out = iv.attempt_once("model", "system", "user")
+        assert calls == 2
+        assert out["ok"] is False
+        assert out["status"] == 400
+        assert credential not in repr(out)
+
+    def test_responses_json_escaped_key_echo_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", self.ESCAPED_KEY)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": self.ESCAPED_VERDICT},
+            {"type": "response.completed", "response": {"id": "resp-escaped"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+        assert out["ok"] is False and out["status"] == 400
+        assert self.ESCAPED_KEY not in repr(out)
+
+    def test_chat_json_escaped_key_echo_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", self.ESCAPED_KEY)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        calls = 0
+
+        def routed(req, timeout=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise urllib.error.HTTPError(
+                    req.full_url, 404, "no responses route", None, io.BytesIO(b"missing")
+                )
+            return _FakeWire([json.dumps({
+                "choices": [{"message": {"content": self.ESCAPED_VERDICT}}],
+            }).encode()])
+
+        monkeypatch.setattr(iv, "_urlopen", routed)
+        out = iv.attempt_once("model", "system", "user")
+        assert calls == 2
+        assert out["ok"] is False and out["status"] == 400
+        assert self.ESCAPED_KEY not in repr(out)
 
 
 class TestPanelFindingsOnItself:
@@ -266,7 +1060,7 @@ class TestPanelFindingsOnItself:
         out = subprocess.run([sys.executable, script], capture_output=True, text=True,
                              timeout=60, env=env)
         assert out.returncode == 1
-        assert "fork-origin" in out.stderr
+        assert "required verifier run" in out.stderr
 
     def test_round3_data_denylist_extended(self):
         for ext in ("csv", "tsv", "sql", "jsonl", "parquet", "sqlite", "dump", "bak"):
@@ -299,7 +1093,7 @@ class TestPanelFindingsOnItself:
                           '"reason": "docs only change", "defects": [], "proof": "x-1"}'},
                 {"type": "response.completed", "response": {"id": "resp_r3", "output": []}},
             ]))
-        monkeypatch.setattr(iv.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(iv, "_urlopen", fake_urlopen)
         out = iv.attempt_once("responses-only-model", "sys", "usr")
         assert out["ok"] is True and out["v"]["refuted"] is False
 
@@ -490,7 +1284,7 @@ class TestSelftestAttestsOnlyWhatItRan:
     the attestation, so the print must not outlive the code.
 
     Editing the consistency block once sliced past its own boundary and deleted
-    the auth_header, review_range and normalize_base coverage — including the
+    the auth_header, review_range, normalize_base and _api_url coverage — including the
     guard keeping a non-hex VERIFIER_HEAD_SHA out of a git argv — while the
     print went on naming all three. A false green on a security gate, which is
     the very defect class this file exists to catch.
@@ -503,7 +1297,7 @@ class TestSelftestAttestsOnlyWhatItRan:
     #: Exactly the functions the closing summary claims were checked.
     ATTESTED = ("decide", "model_matches", "require_approvals", "attest_reasons",
                 "attest_proof", "attest_consistency", "auth_header", "review_range",
-                "normalize_base")
+                "normalize_base", "_api_url")
 
     @staticmethod
     def _run_recording(monkeypatch):
@@ -547,10 +1341,14 @@ class TestSelftestAttestsOnlyWhatItRan:
             "review_range() is never exercised with a non-hex VERIFIER_HEAD_SHA")
 
 class TestAuthHeader:
-    """The gateway's auth header is configurable because inference.klee.me runs
+    """The gateway's auth header is configurable because the deployed adapter runs
     providers.openai with authMode="forward" and reserves Authorization for
     upstream forwarding: Bearer answers 401 "opencodex API key required" for
     every model, X-OpenCodex-API-Key answers 200. Verified live."""
+
+    @pytest.fixture(autouse=True)
+    def _valid_key(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", "test-verifier-key")  # pragma: allowlist secret
 
     def test_defaults_to_bearer(self, monkeypatch):
         monkeypatch.delenv("VERIFIER_AUTH_HEADER", raising=False)
@@ -569,6 +1367,111 @@ class TestAuthHeader:
     def test_authorization_by_name_is_the_default_form(self, monkeypatch):
         monkeypatch.setenv("VERIFIER_AUTH_HEADER", "authorization")
         assert "Authorization" in iv.auth_header()
+
+    def test_minimum_length_key_can_carry_an_ordinary_valid_vote(self, monkeypatch):
+        monkeypatch.setattr(iv, "KEY", "12345678")  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        verdict = json.dumps({
+            "refuted": False,
+            "confidence": "high",
+            "reason": "reviewed the candidate and found no concrete defect",
+            "defects": [],
+            "proof": "challenge-1",
+        })
+        wire = _FakeWire(_sse_events([
+            {"type": "response.output_text.delta", "delta": verdict},
+            {"type": "response.completed", "response": {"id": "resp-boundary"}},
+        ]))
+        monkeypatch.setattr(iv, "_urlopen", lambda req, timeout=None: wire)
+
+        out = iv.attempt_once("model", "system", "user")
+
+        assert out["ok"] is True
+        assert out["v"]["refuted"] is False
+
+    @pytest.mark.parametrize("name", [
+        "Host",
+        "Content-Type",
+        "Proxy-Authorization",
+        "Cookie",
+        "Bad Header",
+        "X-Key\r\nInjected: yes",
+    ])
+    def test_unsafe_header_is_guarded_at_both_network_sinks(self, monkeypatch, name):
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", name)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        opened = False
+
+        def forbidden_urlopen(*args, **kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("verifier opened I/O with an unsafe credential header")
+
+        monkeypatch.setattr(iv, "_urlopen", forbidden_urlopen)
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_AUTH_HEADER"):
+            iv._http_json("/models")
+        with pytest.raises(iv.ProviderConfigError, match="VERIFIER_AUTH_HEADER"):
+            iv._responses_attempt("model", "system", "user")
+
+        assert opened is False
+
+    def test_credentialed_main_refuses_unsafe_header_before_diff_io(
+            self, monkeypatch, capsys):
+        credential = "unsafe-header-key-must-not-leak"  # pragma: allowlist secret
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "Host")
+        monkeypatch.setattr(
+            iv, "build_diff",
+            lambda: pytest.fail("verifier read the diff with an unsafe credential header"),
+        )
+        monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
+
+        assert iv.main() == 1
+        captured = capsys.readouterr()
+        assert "VERIFIER_AUTH_HEADER" in captured.err
+        assert credential not in captured.out + captured.err
+
+    @pytest.mark.parametrize("credential", [
+        "short7",
+        "copied-key\n",
+        "copied-key\r",
+        "copied key",
+        "copied-kéy",
+    ])
+    def test_unsafe_key_is_guarded_at_main_and_both_network_sinks(
+            self, monkeypatch, capsys, credential):
+        monkeypatch.setattr(iv, "KEY", credential)
+        monkeypatch.setattr(iv, "BASE", TEST_BASE_URL)
+        monkeypatch.setenv("VERIFIER_AUTH_HEADER", "X-OpenCodex-API-Key")
+        opened = False
+
+        def forbidden_urlopen(*args, **kwargs):
+            nonlocal opened
+            opened = True
+            raise AssertionError("verifier opened I/O with an unsafe credential")
+
+        monkeypatch.setattr(iv, "_urlopen", forbidden_urlopen)
+        for request in (
+            lambda: iv._http_json("/models"),
+            lambda: iv._responses_attempt("model", "system", "user"),
+        ):
+            with pytest.raises(iv.ProviderConfigError, match="API key") as caught:
+                request()
+            assert credential not in str(caught.value)
+            assert repr(credential)[1:-1] not in str(caught.value)
+
+        monkeypatch.setattr(
+            iv, "build_diff",
+            lambda: pytest.fail("verifier read the diff with an unsafe credential"),
+        )
+        monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
+        assert iv.main() == 1
+        captured = capsys.readouterr()
+        rendered = captured.out + captured.err
+        assert credential not in rendered
+        assert repr(credential)[1:-1] not in rendered
+        assert opened is False
 
 
 class TestReviewRange:
@@ -769,7 +1672,7 @@ class TestMainFailsClosedOnAnUnreviewableDiff:
         monkeypatch.setattr(iv.sys, "argv", ["independent_verify.py"])
         monkeypatch.setenv("VERIFIER_REQUIRE_KEY", "true")
         assert iv.main() == 1
-        assert "fork-origin" in capsys.readouterr().err
+        assert "required verifier run" in capsys.readouterr().err
 
     def test_a_same_repo_run_without_a_key_reports_the_residual(self, monkeypatch, capsys):
         monkeypatch.setattr(iv, "KEY", "")
@@ -1403,7 +2306,7 @@ class TestWireFailover:
             raise urllib.error.HTTPError(url, status, "error", None,
                                          io.BytesIO(str(body).encode()))
 
-        monkeypatch.setattr(iv.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(iv, "_urlopen", fake_urlopen)
         return calls
 
     def test_a_504_is_retried_on_the_other_wire(self, monkeypatch, capsys):
@@ -1508,7 +2411,7 @@ class TestWireFailover:
             raise urllib.error.HTTPError(req.full_url, 504, "gateway timeout", None,
                                          io.BytesIO(b"gateway timeout"))
 
-        monkeypatch.setattr(iv.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(iv, "_urlopen", fake_urlopen)
         out = iv.verify_once("combo/SOTA-B", "sys", "usr")
         assert out["ok"] is True
         assert calls == ["responses", "chat", "responses"]

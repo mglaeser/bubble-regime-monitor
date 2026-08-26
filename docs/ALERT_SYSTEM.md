@@ -302,8 +302,11 @@ iMessage. Turning the alert system on still never changes this value or
 implicitly disables the legacy digest.
 
 Volume, lease, retention and LLM settings live in `app/config.py`; each has a
-safe default. Configuration alone never grants delivery permission: the stage,
-evidence, promotion and per-delivery admission checks remain authoritative.
+safe default. The `ALERTS_LLM_*` settings reserve the dormant Stage-7/A-B
+selector — the dispatcher does not invoke it, and configuring the runtime
+gateway activates only the judgment/digest paths. Configuration alone never
+grants delivery permission: the stage, evidence, promotion and per-delivery
+admission checks remain authoritative.
 
 ---
 
@@ -494,6 +497,10 @@ runs notification planning and records the actual resulting volume. Mandatory
 event recall remains unmeasured because the frozen catalogue is deliberately
 empty; filling it with invented events would be false evidence.
 
+The LLM code selector stays dormant Stage-7/A-B work: the dispatcher neither
+imports nor calls it, so neither shadow nor live alert delivery opens the
+runtime gateway for alert phrasing.
+
 Operational mechanisms use the strongest producer that actually exists. The
 recompute watchdog captures and evaluates its own typed input; recovery and the
 dispatcher persist their real outcomes. Inventory-only mechanisms whose typed
@@ -529,8 +536,9 @@ could still reuse that exact render), and events belonging to an open episode
 needed). Inverted horizons — metadata shorter than messages — are refused
 outright rather than half-applied.
 
-Raw model output needs no sweep at all: `alert_llm_attempt` has never stored
-it, only status, timing, hashes and an already-redacted error string.
+The dormant selector's attempt schema needs no raw-output sweep:
+`alert_llm_attempt` stores only status, timing, hashes and an already-redacted
+error string, never raw model output.
 
 ---
 
@@ -545,10 +553,11 @@ Two questions that look like one, and must not be:
   `live_admission_blockers`. Below `LIVE_DELIVERY_STAGE` (3) the answer is
   always no, and neither passing evidence nor exact promotion lifts it.
 
-Stage 1 has no sender and no LLM by design. The dispatcher therefore refuses
-BEFORE constructing a sender rather than after: building one and declining to
-use it would break that promise quietly, since the object reads credentials and
-can open a client.
+Stage 1 has no sender by design. The dispatcher therefore refuses BEFORE
+constructing one rather than after: building one and declining to use it would
+break that promise quietly, since the object reads credentials and can open a
+client. Separately, the dispatcher has no LLM path at any current stage: it
+never imports or calls the dormant future Stage-7/A-B selector.
 
 The floor was briefly removed on the reasoning that `ops.indicator_stale` and
 `ops.coverage_degraded_info` are enabled at Stage 1 and could therefore send.

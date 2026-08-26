@@ -166,7 +166,9 @@ The same data is available as JSON at **`GET /api/v1/status`**. The page is full
 
 ## Daily digest — iMessage or SMS (optional)
 
-The service recomputes the score **every 4 hours (02/06/10/14/18/22 UTC)** and can additionally send a **once-a-day digest** — the headline score, action band, and a tiny LLM-written report. The report body is produced by the same Anthropic model-fallback chain as the judgment call and hard-capped to 160 ASCII characters; if the LLM is unavailable it degrades to a deterministic template built from the snapshot, so the digest always sends. It is disabled by default.
+The service recomputes the score **every 4 hours (02/06/10/14/18/22 UTC)** and can additionally send a **once-a-day digest** — the headline score, action band, and a tiny LLM-written report. The report body and judgment call use one operator-configured route on an OpenAI-compatible hosted gateway and are hard-capped to 160 ASCII and 300 characters respectively. The app never substitutes another model; any provider failover behind the configured route is gateway-controlled and opaque here. If the LLM is unavailable, the judgment becomes stale/null and the digest degrades to a deterministic template, so inference failure never blocks recompute or delivery. The digest is disabled by default.
+
+Gateway inference is disabled until `LLM_API_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, and `LLM_AUTH_HEADER` are all set in the deploy host's ignored `.env`; `LLM_MAX_TOKENS` defaults to 8000. The base must be HTTPS and include its `/v1` path, and the key must contain at least 8 characters so exact-echo leak detection cannot make ordinary output unusable for a trivially short credential. The public `.env.example` intentionally carries no deployment endpoint, key, model route, or custom auth-header value.
 
 Two transports can carry it, and **exactly one sends**. If both switches are on, iMessage wins and sipgate is not called: delivering the same digest twice is a defect, and silently downgrading to SMS would hide the proxy being down at the moment you most need to know. There is no fallback by design.
 

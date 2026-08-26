@@ -45,7 +45,7 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b(api[_-]?key|token|secret|password|authorization)"
                 r"\s*[=:]\s*[^\s,&;\"']+"), r"\1=[redacted]"),
     (re.compile(r"(?i)([?&](?:key|token|api_key|access_token)=)[^\s&]+"), r"\1[redacted]"),
-    # Anthropic / generic long opaque keys.
+    # OpenAI-shaped / generic long opaque keys.
     (re.compile(r"sk-[A-Za-z0-9\-_]{12,}"), "[redacted]"),
     # imessage-proxy bearer keys. These do not always arrive behind a `Bearer`
     # or `key=` marker that the patterns above would catch — a problem+json

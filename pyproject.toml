@@ -30,7 +30,6 @@ dependencies = [
     "xlrd>=2.0.1",  # legacy .xls support (shillerdata ie_data.xls CAPE fallback)
     "beautifulsoup4>=4.12",
     "lxml>=5.2",
-    "anthropic>=0.116",
     # The alert ruleset is a YAML artifact; the loader parses it with safe_load.
     "PyYAML>=6.0",
     "lppls==0.6.24",
