@@ -16,7 +16,13 @@ from sqlalchemy import select
 from app.alerts.artifacts import load_active, register
 from app.alerts.digest import digest_dedupe_key, plan_digest
 from app.alerts.enums import DeliveryKind, DigestItemStatus, Priority
-from app.alerts.models import AlertDelivery, AlertDeliveryMember, AlertDigestItem, AlertEpisode
+from app.alerts.models import (
+    AlertDelivery,
+    AlertDeliveryMember,
+    AlertDigestItem,
+    AlertEpisode,
+    AlertSilence,
+)
 from app.alerts.repository import new_ulid, utc_ms
 from app.db import session_scope
 
@@ -92,6 +98,16 @@ def _pending_item(session, *, rules_sha: str, rule_id: str,
     return item_id
 
 
+def _silence_rule(session, rule_id: str) -> None:
+    """Create the same active silence an operator creates through the API."""
+    session.add(AlertSilence(
+        silence_id=new_ulid(utc_ms(NOW)), matcher_kind="RULE_ID",
+        matcher_value=rule_id, starts_at=NOW - timedelta(minutes=1),
+        ends_at=NOW + timedelta(hours=1), comment="test",
+        created_by_redacted="operator", created_at=NOW,
+    ))
+
+
 def test_a_window_becomes_one_delivery_with_its_items_as_members():
     with session_scope() as session:
         sha = _registered(session)
@@ -118,13 +134,56 @@ def test_a_window_becomes_one_delivery_with_its_items_as_members():
                    for i in session.query(AlertDigestItem).all())
 
 
-def test_a_quiet_week_still_sends():
-    """Silence is what a broken system produces too.
+def test_realtime_dominance_does_not_erase_a_retrospective_digest_item():
+    """A later dominant alert cannot rewrite an event that already occurred."""
+    from app.alerts.outbox import cancel_unsent_for_rules
 
-    After Stage 4 this is the only scheduled message the operator receives, so
-    "nothing fired this week" is the proof-of-life the daily digest used to
-    provide by accident. A digest that skips quiet weeks is indistinguishable
-    from a digest job that died.
+    rule_id = "legs.faber_spy_out_standard"
+    with session_scope() as session:
+        sha = _registered(session)
+        item_id = _pending_item(session, rules_sha=sha, rule_id=rule_id)
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        assert plan.delivery_id is not None
+
+        cancelled = cancel_unsent_for_rules(
+            session,
+            frozenset({rule_id}),
+            mode="shadow",
+            live_profile="default",
+            now=NOW + timedelta(minutes=1),
+        )
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == plan.delivery_id
+            )
+        ).scalar_one()
+        item = session.get(AlertDigestItem, item_id)
+
+        assert cancelled == 0
+        assert delivery.transport_status == "PENDING"
+        assert member.dropped_at is None
+        assert member.drop_reason is None
+        assert item.status == DigestItemStatus.PLANNED
+        assert item.delivery_id == plan.delivery_id
+
+
+def test_a_quiet_week_does_not_fabricate_a_memberless_delivery():
+    """TEST is the only delivery kind allowed to have zero members.
+
+    Digest-job liveness has its own durable heartbeat.  Burning a provider
+    intent with no episode member would contradict the transport invariant and
+    could then be mistaken for one of the successful weekly digests required
+    by cutover.
     """
     with session_scope() as session:
         sha = _registered(session)
@@ -135,11 +194,91 @@ def test_a_quiet_week_still_sends():
                            window_key=WINDOW, now=NOW)
 
     assert plan.quiet is True
-    assert plan.delivery_id is not None, "a quiet week must still produce a delivery"
+    assert plan.delivery_id is None
+    assert plan.skipped_reason == "no digest items for this window"
 
     with session_scope() as session:
-        assert len(session.query(AlertDelivery).all()) == 1
+        assert session.query(AlertDelivery).all() == []
         assert session.query(AlertDeliveryMember).all() == []
+
+
+def test_a_quiet_job_persists_window_proof_without_provider_intent(monkeypatch):
+    """Quiet is observable without weakening the member invariant.
+
+    A component heartbeat answers "is the digest job alive now?" while the
+    scheduler event preserves which closed window was actually inspected.
+    Neither is a provider intent, so a quiet week cannot counterfeit one of
+    the two successfully SENT weekly digests required for Stage 4 cutover.
+    """
+    from app.alerts.calendars import last_closed_digest_window
+    from app.alerts.health import health_projection
+    from app.alerts.models import AlertComponentHeartbeat, AlertEvent
+    from app.jobs import alert_digest
+
+    monkeypatch.setenv("ALERTS_MODE", "shadow")
+    from app.config import get_settings
+    get_settings.cache_clear()
+
+    with session_scope() as session:
+        _registered(session)
+
+    result = alert_digest.run_once(now=NOW)
+    expected_window = last_closed_digest_window(NOW)
+
+    assert result == {
+        "status": "ok",
+        "window_key": expected_window,
+        "delivery_id": None,
+        "items": 0,
+        "quiet": True,
+        "stranded": 0,
+        "carried_forward": 0,
+        "skipped_reason": "no digest items for this window",
+        "windows_offered": 1,
+        "windows_planned": 0,
+        "recovered_windows": [],
+    }
+
+    with session_scope() as session:
+        assert session.query(AlertDelivery).all() == []
+        heartbeat = session.get(AlertComponentHeartbeat, "digest")
+        assert heartbeat is not None
+        assert heartbeat.status == "ok"
+        assert heartbeat.detail_json["window_key"] == expected_window
+        assert heartbeat.detail_json["quiet"] is True
+        assert heartbeat.detail_json["items"] == 0
+        assert heartbeat.detail_json["mode"] == "shadow"
+        assert heartbeat.detail_json["live_profile"] == "default"
+
+        event = session.execute(
+            select(AlertEvent).where(
+                AlertEvent.action == "digest_window_observed_quiet"
+            )
+        ).scalar_one()
+        assert event.causation_type == "SCHEDULER"
+        assert event.actor_type == "SCHEDULER"
+        assert event.causation_id is not None
+        assert len(event.causation_id) == 64
+        assert event.rules_sha256 is not None
+        assert expected_window in (event.detail_redacted or "")
+        assert "provider_intent=none" in (event.detail_redacted or "")
+
+        artifacts = load_active(session)
+        projection = health_projection(
+            session,
+            settings=get_settings(),
+            ruleset=artifacts.ruleset,
+            artifact_source=artifacts.source,
+            fallback_reason=artifacts.fallback_reason,
+            now=datetime.now(UTC),
+        )
+        assert projection["components"]["digest"]["healthy"] is True
+
+        from app.alerts.cutover import preflight
+        cutover = preflight(session, now=datetime.now(UTC))
+        assert any(
+            item.startswith("weekly_digests") for item in cutover.unsatisfied
+        ), "a quiet scheduler event counterfeited a successfully sent digest"
 
 
 def test_replanning_the_same_window_is_a_no_op():
@@ -203,6 +342,15 @@ def test_the_job_digests_the_window_that_closed(monkeypatch):
     from app.config import get_settings
     get_settings.cache_clear()
 
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+            window=digest_window_key(NOW - timedelta(days=1)),
+        )
+
     result = alert_digest.run_once(now=NOW)
     assert result["window_key"] == digest_window_key(NOW - timedelta(days=1))
     assert result["window_key"] != digest_window_key(NOW), (
@@ -235,7 +383,7 @@ def test_a_missed_monday_does_not_lose_the_week(monkeypatch):
     result = alert_digest.run_once(now=NOW)
     assert "2026-W02" in result["recovered_windows"], (
         "a window older than any fixed lookback was stranded")
-    assert result["windows_planned"] >= 2
+    assert result["windows_planned"] == 1
 
     # running again changes nothing: the window key is the identity
     again = alert_digest.run_once(now=NOW)
@@ -269,12 +417,12 @@ def test_a_late_run_never_digests_the_week_it_is_standing_in(monkeypatch):
 
 def _phrase_set():
     from app.alerts.artifacts import validate_phrase_set
-    with open("config/alert_phrases.v3.3.json", encoding="utf-8") as fh:
+    with open("config/alert_phrases.v3.4.json", encoding="utf-8") as fh:
         return validate_phrase_set(fh.read())
 
 
 def test_a_quiet_week_still_has_something_to_say():
-    """Proof-of-life. Silence is also what a dead scheduler produces."""
+    """The reviewed quiet template remains deterministic and transport-safe."""
     from app.alerts.digest import render_digest_body
 
     result = render_digest_body(_phrase_set(), item_count=0)
@@ -306,37 +454,215 @@ def test_the_digest_is_never_assembled_from_invented_text():
         render_digest_body(stripped, item_count=0)
 
 
-def test_a_memberless_digest_is_not_cancelled_as_all_resolved():
-    """The one legitimate memberless market delivery.
+def test_a_legacy_memberless_digest_is_cancelled_before_render_or_send():
+    """The dispatcher independently enforces TEST as the sole exemption.
 
-    Every other kind with no members is a delivery whose reason to exist went
-    away. A quiet digest's reason to exist IS that nothing happened, so the
-    generic cancel would delete exactly the message Stage 4 depends on.
+    Migrations 0016-0017 prevent new non-TEST rows from reaching SENDING
+    without a member, but a queued row may predate those migrations. Runtime
+    must fail closed too, before either a final render or provider call exists.
     """
     from app.alerts.dispatcher import dispatch_once
-    from app.alerts.enums import TransportStatus
+    from app.alerts.enums import PlanningState, TransportStatus
+    from app.alerts.models import AlertRender
     from app.alerts.sender import NullSender
 
     sender = NullSender()
 
     with session_scope() as session:
         rules_sha = _registered(session)
-        plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha,
-                           phrase_set_version=_provenance()[0],
-                           phrase_set_sha256=_provenance()[1], window_key=WINDOW,
-                           now=NOW)
-        assert plan.quiet is True
-        delivery_id = plan.delivery_id
+        delivery_id = new_ulid(utc_ms(NOW))
+        session.add(AlertDelivery(
+            delivery_id=delivery_id,
+            dedupe_key=f"v1|DIGEST|shadow|default|{WINDOW}",
+            dedupe_version=1,
+            manual_retry_sequence=0,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            delivery_kind=DeliveryKind.DIGEST,
+            priority=Priority.P3,
+            transport_status=TransportStatus.PENDING,
+            planning_state=PlanningState.READY,
+            scheduled_window_key=WINDOW,
+            not_before=NOW,
+            created_at=NOW,
+            updated_at=NOW,
+            attempts=0,
+            duplicate_risk_acknowledged=False,
+            recipient_ref="default",
+        ))
 
     report = dispatch_once(session_scope, phrase_set=_phrase_set(), mode="shadow",
                            live_profile="default", sender=sender, now=NOW)
 
-    assert report.cancelled == 0, "the quiet digest was cancelled"
-    assert sender.sent and "keine Ereignisse" in sender.sent[0][1]
+    assert report.cancelled == 1
+    assert sender.sent == []
     with session_scope() as session:
         delivery = session.get(AlertDelivery, delivery_id)
-        assert delivery.transport_status == TransportStatus.SENT
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "ALL_MEMBERS_RESOLVED"
+        assert session.execute(select(AlertRender)).scalars().all() == []
+
+
+def test_a_digest_member_without_its_item_binding_never_reaches_the_wire():
+    """The count and the digest-item lifecycle must describe the same set."""
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import TransportStatus
+    from app.alerts.sender import NullSender
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        item = session.get(AlertDigestItem, item_id)
+        assert item is not None
+        item.delivery_id = None
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert sender.sent == []
+    assert report.cancelled == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "DIGEST_MEMBER_ITEM_UNBOUND"
+
+
+def test_eager_silence_fails_closed_on_an_unbound_digest_item():
+    """Silence must not hide a malformed member/item graph and carry on."""
+    from app.alerts.enums import TransportStatus
+    from app.alerts.outbox import apply_silences_to_unsent
+    from app.alerts.repository import load_active_silences
+
+    rule_id = "regime.band_to_derisk"
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(session, rules_sha=rules_sha, rule_id=rule_id)
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        item = session.get(AlertDigestItem, item_id)
+        assert item is not None
+        item.delivery_id = None
+        _silence_rule(session, rule_id)
+        active = load_active_silences(session, now=NOW)
+
+        effect = apply_silences_to_unsent(session, active, now=NOW)
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+
+        assert effect["deliveries_cancelled"] == 1
+        assert effect["members_dropped"] == 0
+        assert delivery is not None
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "DIGEST_MEMBER_ITEM_UNBOUND"
+        assert member.drop_reason is None
+
+
+@pytest.mark.parametrize("malformation", ["wrong_state", "orphan_item"])
+def test_digest_binding_rejects_a_mismatched_or_orphaned_item(malformation):
+    """Neither side of the count ledger may be selected independently."""
+    from app.alerts.errors import DigestBindingError
+    from app.alerts.outbox import revalidate_members
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        item = session.get(AlertDigestItem, item_id)
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+        assert delivery is not None and item is not None
+        if malformation == "wrong_state":
+            item.status = DigestItemStatus.CANCELLED
+        else:
+            session.delete(member)
+        session.flush()
+
+        with pytest.raises(DigestBindingError):
+            revalidate_members(session, delivery, now=NOW)
+
+
+def test_digest_binding_rejects_duplicate_items_for_one_member():
+    from app.alerts.errors import DigestBindingError
+    from app.alerts.outbox import revalidate_members
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        item = session.get(AlertDigestItem, item_id)
+        assert delivery is not None and item is not None
+        session.add(AlertDigestItem(
+            digest_item_id=new_ulid(utc_ms(NOW) + 1),
+            episode_id=item.episode_id,
+            digest_window_key=item.digest_window_key,
+            status=DigestItemStatus.PLANNED,
+            delivery_id=delivery.delivery_id,
+            pending_at=NOW,
+            planned_at=NOW,
+            still_active_summary=not item.still_active_summary,
+        ))
+        session.flush()
+
+        with pytest.raises(DigestBindingError):
+            revalidate_members(session, delivery, now=NOW)
 
 
 # --- what the panel caught -------------------------------------------------
@@ -443,7 +769,9 @@ def test_a_silenced_episode_is_not_disclosed_by_the_count():
 
         episodes = session.execute(select(AlertEpisode)).scalars().all()
         # one silenced, one resolved, one still open
-        episodes[0].suppression_reasons = ["SILENCED"]
+        silenced_rule = episodes[0].rule_id
+        resolved_rule = episodes[1].rule_id
+        _silence_rule(session, silenced_rule)
         episodes[1].is_open = False
         episodes[1].episode_status = EpisodeStatus.RESOLVED
         episodes[1].resolved_at = NOW
@@ -455,17 +783,255 @@ def test_a_silenced_episode_is_not_disclosed_by_the_count():
     body = sender.sent[0][1]
     assert "2 Ereignisse" in body, (
         f"the silenced episode was disclosed, or the resolved one dropped: {body!r}")
+    with session_scope() as session:
+        items = session.execute(
+            select(AlertDigestItem).order_by(AlertDigestItem.digest_item_id)
+        ).scalars().all()
+        by_rule = {
+            session.get(AlertEpisode, item.episode_id).rule_id: item
+            for item in items
+        }
+        assert by_rule[silenced_rule].status == DigestItemStatus.CANCELLED
+        assert by_rule[resolved_rule].status == DigestItemStatus.DELIVERED
 
 
-def test_a_silence_after_the_first_render_is_not_disclosed_by_a_stale_body():
-    """Render reuse exists so a retry does not change a message that may have
-    arrived. That reasoning only holds once something has been transmitted.
+def test_a_resolved_digest_member_still_honors_a_later_silence():
+    """Resolution preserves history; it must not exempt that history from silence."""
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import EpisodeStatus, TransportStatus
+    from app.alerts.sender import NullSender
 
-    A digest that was rendered and then held — budget, quiet hours, a crash —
-    has sent nothing, so its cached count is just a stale number. Reusing it
-    after an episode is silenced discloses exactly what the silence was for.
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        episode = session.execute(select(AlertEpisode)).scalar_one()
+        episode.is_open = False
+        episode.episode_status = EpisodeStatus.RESOLVED
+        episode.resolved_at = NOW
+        _silence_rule(session, episode.rule_id)
+
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert sender.sent == []
+    assert report.cancelled == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+        item = session.get(AlertDigestItem, item_id)
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert member.drop_reason == "SILENCED_BEFORE_SEND"
+        assert item.status == DigestItemStatus.CANCELLED
+        assert item.last_error_code == "SILENCED"
+
+
+def test_eager_silence_sweep_revisits_a_resolved_digest_member():
+    """A prior resolution pass cannot make a pending digest invisible to silence."""
+    from app.alerts.enums import EpisodeStatus
+    from app.alerts.outbox import apply_silences_to_unsent, revalidate_members
+    from app.alerts.repository import load_active_silences
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        episode = session.execute(select(AlertEpisode)).scalar_one()
+        episode.is_open = False
+        episode.episode_status = EpisodeStatus.RESOLVED
+        episode.resolved_at = NOW
+        assert revalidate_members(session, delivery, now=NOW) == []
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+        assert member.drop_reason == "RESOLVED_BEFORE_SEND"
+
+        _silence_rule(session, episode.rule_id)
+        active = load_active_silences(session, now=NOW)
+        result = apply_silences_to_unsent(session, active, now=NOW)
+
+        item = session.get(AlertDigestItem, item_id)
+        assert result["members_dropped"] == 1
+        assert member.drop_reason == "SILENCED_BEFORE_SEND"
+        assert item.status == DigestItemStatus.CANCELLED
+
+
+def test_wire_time_silence_withdraws_an_already_resolved_digest_member():
+    """The represented set is rechecked at the wire clock, not frozen at pass start."""
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import EpisodeStatus, TransportStatus
+    from app.alerts.sender import NullSender
+
+    wire_now = NOW + timedelta(minutes=2)
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        episode = session.execute(select(AlertEpisode)).scalar_one()
+        episode.is_open = False
+        episode.episode_status = EpisodeStatus.RESOLVED
+        episode.resolved_at = NOW
+        session.add(AlertSilence(
+            silence_id=new_ulid(utc_ms(NOW)),
+            matcher_kind="RULE_ID",
+            matcher_value=episode.rule_id,
+            starts_at=NOW + timedelta(minutes=1),
+            ends_at=NOW + timedelta(hours=1),
+            comment="begins while the digest is rendering",
+            created_by_redacted="operator",
+            created_at=NOW,
+        ))
+
+    clock_values = iter([wire_now, wire_now])
+    sender = NullSender()
+    report = dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+        clock=lambda: next(clock_values),
+    )
+
+    assert sender.sent == []
+    assert report.cancelled == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        member = session.execute(select(AlertDeliveryMember)).scalar_one()
+        item = session.get(AlertDigestItem, item_id)
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "ALL_MEMBERS_WITHDRAWN_AT_WIRE"
+        assert member.drop_reason == "SILENCED_BEFORE_SEND"
+        assert item.status == DigestItemStatus.CANCELLED
+
+
+def test_resolution_between_digest_render_and_wire_preserves_the_retrospective(
+        monkeypatch):
+    """The wire gate compares represented history, not only still-open episodes."""
+    from app.alerts import dispatcher as dispatcher_module
+    from app.alerts.enums import EpisodeStatus, TransportStatus
+    from app.alerts.sender import NullSender
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+
+    real_revalidate = dispatcher_module.revalidate_members
+    calls = 0
+
+    def resolve_on_wire(session, delivery, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            member = session.execute(
+                select(AlertDeliveryMember).where(
+                    AlertDeliveryMember.delivery_id == delivery.delivery_id
+                )
+            ).scalar_one()
+            episode = session.get(AlertEpisode, member.episode_id)
+            episode.is_open = False
+            episode.episode_status = EpisodeStatus.RESOLVED
+            episode.resolved_at = kwargs["now"]
+        return real_revalidate(session, delivery, **kwargs)
+
+    monkeypatch.setattr(
+        dispatcher_module,
+        "revalidate_members",
+        resolve_on_wire,
+    )
+    sender = NullSender()
+    report = dispatcher_module.dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+
+    assert calls == 2
+    assert report.sent == 1
+    assert report.cancelled == 0
+    assert len(sender.sent) == 1
+    assert "1 Ereignisse" in sender.sent[0][1]
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        item = session.get(AlertDigestItem, item_id)
+        assert delivery.transport_status == TransportStatus.SENT
+        assert item.status == DigestItemStatus.DELIVERED
+
+
+def test_a_frozen_digest_is_cancelled_when_membership_changes():
+    """A final render is immutable even when the provider was not attempted.
+
+    Replacing it would create two competing final renders and make timestamp
+    ordering decide which text is authoritative.  Sending it after a silence
+    would disclose stale membership.  The only safe outcome is cancellation,
+    with the unaffected item moved into the documented later-window retry
+    lifecycle.
     """
     from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import TransportStatus
     from app.alerts.models import AlertRender
     from app.alerts.sender import NullSender
 
@@ -479,6 +1045,10 @@ def test_a_silence_after_the_first_render_is_not_disclosed_by_a_stale_body():
                            phrase_set_sha256=_provenance()[1], window_key=WINDOW,
                            now=NOW)
         delivery_id = plan.delivery_id
+        episodes = session.execute(
+            select(AlertEpisode).order_by(AlertEpisode.rule_id)
+        ).scalars().all()
+        represented = [episode.episode_id for episode in episodes]
 
         # a render exists from an earlier pass that never reached the wire
         session.add(AlertRender(
@@ -486,23 +1056,45 @@ def test_a_silence_after_the_first_render_is_not_disclosed_by_a_stale_body():
             render_source="TEMPLATE_FULL", fallback_reason=None,
             planning_phrase_set_version="v3.2", planning_phrase_set_sha256="p" * 64,
             render_context_hash="c" * 64, fact_catalog_hash="f" * 64,
-            selected_fact_ids=[], selected_phrase_codes=[], validation_results={},
+            selected_fact_ids=[], selected_phrase_codes=[],
+            validation_results={"represented_member_ids": represented},
             final_message="Wochenrueckblick: 2 Ereignisse. Naechster Rueckblick Montag.",
             gsm7_septets=60, created_at=NOW))
         session.flush()
         assert session.get(AlertDelivery, delivery_id).attempts == 0
 
         # then one of them is silenced
-        episode = session.execute(select(AlertEpisode)).scalars().first()
-        episode.suppression_reasons = ["SILENCED"]
+        silenced = episodes[0]
+        survivor = episodes[1]
+        _silence_rule(session, silenced.rule_id)
 
     sender = NullSender()
-    dispatch_once(session_scope, phrase_set=_phrase_set(), mode="shadow",
-                  live_profile="default", sender=sender, now=NOW)
+    report = dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
 
-    body = sender.sent[0][1]
-    assert "1 Ereignisse" in body, (
-        f"the stale render disclosed the silenced episode: {body!r}")
+    assert sender.sent == []
+    assert report.cancelled == 1
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "RENDERED_MEMBER_WITHDRAWN"
+        rows = session.execute(
+            select(AlertDigestItem).where(
+                AlertDigestItem.delivery_id == delivery_id
+            )
+        ).scalars().all()
+        by_episode = {item.episode_id: item for item in rows}
+        assert by_episode[silenced.episode_id].status == DigestItemStatus.CANCELLED
+        assert by_episode[silenced.episode_id].last_error_code == "SILENCED"
+        assert by_episode[survivor.episode_id].status == DigestItemStatus.FAILED
+        assert by_episode[survivor.episode_id].last_error_code \
+            == "RENDERED_MEMBER_WITHDRAWN"
 
 
 def test_the_catch_up_does_not_look_into_another_namespace(monkeypatch):
@@ -547,6 +1139,12 @@ def test_the_recovered_list_survives_an_already_planned_current_window(monkeypat
     with session_scope() as session:
         rules_sha = _registered(session)
         # the current window is already done...
+        _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="structure.s2_saturation",
+            window=current,
+        )
         plan_digest(session, mode="shadow", live_profile="default",
                     planning_rules_sha256=rules_sha,
                            phrase_set_version=_provenance()[0],
@@ -560,11 +1158,10 @@ def test_the_recovered_list_survives_an_already_planned_current_window(monkeypat
 
 
 def test_quiet_windows_spanned_by_an_outage_are_not_replayed(monkeypatch):
-    """A fortnight of downtime must not deliver a dozen empty messages.
+    """A fortnight of downtime must not fabricate historical empty intents.
 
-    That is worse than the gap it fills: it trains the operator to ignore the
-    one channel Stage 4 leaves them. The resumed cadence is the proof-of-life;
-    history that held nothing carries no information.
+    The current heartbeat proves the job resumed; history that held no member
+    evidence carries no additional information.
     """
     from app.jobs import alert_digest
 
@@ -576,7 +1173,7 @@ def test_quiet_windows_spanned_by_an_outage_are_not_replayed(monkeypatch):
         _registered(session)
 
     result = alert_digest.run_once(now=NOW)
-    assert result["windows_planned"] == 1, (
+    assert result["windows_planned"] == 0, (
         f"an outage replayed empty weeks: {result['recovered_windows']}")
 
 
@@ -611,6 +1208,90 @@ def test_an_item_arriving_late_joins_a_digest_that_has_not_been_sent():
                 AlertDigestItem.status == DigestItemStatus.PENDING)
         ).scalars().all()
         assert remaining == []
+
+
+def test_a_late_item_cannot_mutate_a_digest_after_its_render_is_final():
+    """Late evidence waits for carry-forward once provider intent is frozen."""
+    from app.alerts.enums import TransportStatus
+    from app.alerts.models import AlertRender
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        first = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        original_member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == first.delivery_id
+            )
+        ).scalars().one()
+        delivery = session.get(AlertDelivery, first.delivery_id)
+        delivery.transport_status = TransportStatus.RETRY_DUE
+        delivery.attempts = 1
+        delivery.not_before = NOW
+        session.add(AlertRender(
+            render_id=new_ulid(utc_ms(NOW)),
+            delivery_id=first.delivery_id,
+            render_source="template_full",
+            planning_phrase_set_version=_provenance()[0],
+            planning_phrase_set_sha256=_provenance()[1],
+            render_context_hash="c" * 64,
+            fact_catalog_hash="f" * 64,
+            selected_fact_ids=["F_DIGEST_COUNT"],
+            selected_phrase_codes=["DIGEST_SUMMARY"],
+            validation_results={
+                "represented_member_ids": [original_member.episode_id],
+            },
+            final_message=(
+                "Wochenrueckblick: 1 Ereignisse. Naechster Rueckblick Montag."
+            ),
+            gsm7_septets=60,
+            created_at=NOW,
+        ))
+        session.flush()
+
+        late_item_id = _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="tripwire.rf4_first",
+        )
+        after = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+
+        assert after.delivery_id == first.delivery_id
+        assert after.item_ids == []
+        assert after.stranded == 1
+        assert "frozen" in (after.skipped_reason or "")
+        late_item = session.get(AlertDigestItem, late_item_id)
+        assert late_item.status == DigestItemStatus.PENDING
+        assert late_item.delivery_id is None
+        members = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == first.delivery_id
+            )
+        ).scalars().all()
+        assert [member.episode_id for member in members] \
+            == [original_member.episode_id]
 
 
 def test_an_item_arriving_after_the_send_is_counted_not_folded_in():
@@ -700,8 +1381,8 @@ def test_plan_digest_refuses_an_open_or_future_window():
         assert session.execute(select(AlertDelivery)).scalars().all() == []
 
 
-def test_a_late_item_inherits_the_message_it_joins():
-    """Provenance that varies inside one message cannot answer its question."""
+def test_a_late_item_keeps_its_episode_origin_not_the_callers_current_pair():
+    """Digest membership provenance comes from the episode registry binding."""
     from app.alerts.models import AlertDeliveryMember
 
     with session_scope() as session:
@@ -709,15 +1390,16 @@ def test_a_late_item_inherits_the_message_it_joins():
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
         first = plan_digest(session, mode="shadow", live_profile="default",
                             planning_rules_sha256=rules_sha,
-                            phrase_set_version="v3.2",
-                            phrase_set_sha256="a" * 64,
+                            phrase_set_version=_provenance()[0],
+                            phrase_set_sha256=_provenance()[1],
                             window_key=WINDOW, now=NOW)
 
-        # the phrase set moves on before the late item arrives
+        # A late planning call cannot stamp arbitrary current bytes on it.
         _pending_item(session, rules_sha=rules_sha, rule_id="tripwire.rf4_first")
         plan_digest(session, mode="shadow", live_profile="default",
                     planning_rules_sha256=rules_sha,
-                    phrase_set_version="v9.9", phrase_set_sha256="b" * 64,
+                    phrase_set_version=_provenance()[0],
+                    phrase_set_sha256=_provenance()[1],
                     window_key=WINDOW, now=NOW)
 
         members = session.execute(
@@ -726,8 +1408,8 @@ def test_a_late_item_inherits_the_message_it_joins():
         ).scalars().all()
 
     assert len(members) == 2
-    assert {m.origin_phrase_set_version for m in members} == {"v3.2"}, (
-        "one delivery ended up with members built from different phrase sets")
+    assert {m.origin_phrase_set_version for m in members} == {_provenance()[0]}
+    assert {m.origin_phrase_set_sha256 for m in members} == {_provenance()[1]}
 
 
 def test_an_item_orphaned_by_a_sent_digest_is_carried_into_the_next_one():
@@ -804,15 +1486,8 @@ def test_an_unreported_earlier_window_keeps_its_own_items():
         assert len(last.item_ids) == 1
 
 
-def test_every_kind_renders_from_the_phrase_set_it_was_planned_under():
-    """The registry stores the bytes precisely so this is possible.
-
-    A delivery queued before a deploy must render with the phrases it was
-    planned against. Building the body from whatever the process holds and then
-    stamping the member's version on the render row leaves a record that cannot
-    explain its own text — and resolving it for digests only left the market
-    path doing exactly that.
-    """
+def test_member_phrase_pair_must_match_its_exact_origin_ruleset():
+    """A member cannot self-authorize unrelated, otherwise valid phrase bytes."""
     from app.alerts.artifacts import register
     from app.alerts.dispatcher import planning_phrase_set
     from app.alerts.models import AlertPhraseSetRegistry
@@ -824,14 +1499,16 @@ def test_every_kind_renders_from_the_phrase_set_it_was_planned_under():
     with session_scope() as session:
         rules_sha = _registered(session)
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
-        # planned against v3.2, recording the version AND the digest
+        # Plan truthfully, then tamper the persisted member to an unrelated but
+        # otherwise valid artifact. The member cannot self-authorise it.
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=rules_sha,
-                           phrase_set_version=v32.version,
-                           phrase_set_sha256=v32.sha256,
+                           phrase_set_version=_provenance()[0],
+                           phrase_set_sha256=_provenance()[1],
                            window_key=WINDOW, now=NOW)
 
-        # the registry holds v3.2's real bytes; the process is holding v3.3
+        # The registry holds v3.2's real bytes; mere registry presence does not
+        # let the member override what its origin ruleset authorized.
         register(session, load_active(session))
         session.add(AlertPhraseSetRegistry(
             phrase_set_version=v32.version, phrase_set_sha256=v32.sha256,
@@ -840,42 +1517,46 @@ def test_every_kind_renders_from_the_phrase_set_it_was_planned_under():
             worst_case_test_sha256=v32.worst_case_test_sha256))
         session.flush()
 
+        member = session.execute(
+            select(AlertDeliveryMember).where(
+                AlertDeliveryMember.delivery_id == plan.delivery_id)
+        ).scalars().one()
+        member.origin_phrase_set_version = v32.version
+        member.origin_phrase_set_sha256 = v32.sha256
+        session.flush()
+
         delivery = session.get(AlertDelivery, plan.delivery_id)
         resolved = planning_phrase_set(session, delivery, _phrase_set())
 
-    assert resolved.version == "v3.2", (
-        "the render would have used the running phrase set, not the planned one")
+    assert resolved is None
 
 
-def test_an_unregistered_planning_phrase_set_fails_the_render(monkeypatch):
+def test_an_unregistered_planning_phrase_set_is_refused_before_queueing(monkeypatch):
     """Fail-closed. A quietly re-worded alert is worse than a visible failure.
 
     Falling back to whatever this process holds meant the message could go out
     worded differently from the one that was planned and reviewed. A render
     failure is visible and recoverable; that is not.
     """
-    from app.alerts.dispatcher import planning_phrase_set
-
     with session_scope() as session:
         rules_sha = _registered(session)
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
-        plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha,
-                           phrase_set_version="v0.0-never-registered",
-                           phrase_set_sha256="z" * 64,
-                           window_key=WINDOW, now=NOW)
-        delivery = session.get(AlertDelivery, plan.delivery_id)
-        assert planning_phrase_set(session, delivery, _phrase_set()) is None
+        with pytest.raises(ValueError, match="registry binding"):
+            plan_digest(session, mode="shadow", live_profile="default",
+                        planning_rules_sha256=rules_sha,
+                        phrase_set_version="v0.0-never-registered",
+                        phrase_set_sha256="z" * 64,
+                        window_key=WINDOW, now=NOW)
+        assert session.execute(select(AlertDelivery)).scalars().all() == []
 
 
-def test_a_phrase_set_whose_bytes_moved_fails_the_render():
+def test_a_phrase_set_whose_bytes_moved_is_refused_before_queueing():
     """Resolving by VERSION alone trusts that a version still means what it did.
 
     The member recorded the digest precisely so that could be verified rather
     than assumed.
     """
     from app.alerts.artifacts import register
-    from app.alerts.dispatcher import planning_phrase_set
     from app.alerts.models import AlertPhraseSetRegistry
     from app.alerts.phrase_registry import validate_phrase_set
 
@@ -892,34 +1573,32 @@ def test_a_phrase_set_whose_bytes_moved_fails_the_render():
 
         _pending_item(session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
         # planned against v3.2's VERSION but a digest that is not v3.2's
-        plan = plan_digest(session, mode="shadow", live_profile="default",
-                           planning_rules_sha256=rules_sha,
-                           phrase_set_version=v32.version,
-                           phrase_set_sha256="9" * 64,
-                           window_key=WINDOW, now=NOW)
-        delivery = session.get(AlertDelivery, plan.delivery_id)
+        with pytest.raises(ValueError, match="registry binding"):
+            plan_digest(session, mode="shadow", live_profile="default",
+                        planning_rules_sha256=rules_sha,
+                        phrase_set_version=v32.version,
+                        phrase_set_sha256="9" * 64,
+                        window_key=WINDOW, now=NOW)
+        assert session.execute(select(AlertDelivery)).scalars().all() == []
 
-        assert planning_phrase_set(session, delivery, _phrase_set()) is None
 
-
-def test_a_quiet_digest_takes_its_text_from_the_ruleset_that_planned_it():
-    """A memberless digest still HAS a planned text.
-
-    The ruleset it was planned under names a phrase set, and that is what its
-    wording was reviewed against — so falling back to the running set would let
-    a digest queued before a deploy go out worded from phrases nobody planned
-    it against.
-    """
+def test_a_digest_takes_its_text_from_the_ruleset_that_planned_it():
+    """A queued digest uses the reviewed phrase artifact bound at planning."""
     from app.alerts.dispatcher import planning_phrase_set
 
     with session_scope() as session:
         rules_sha = _registered(session)
+        _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=rules_sha,
                            phrase_set_version=_provenance()[0],
                            phrase_set_sha256=_provenance()[1],
                            window_key=WINDOW, now=NOW)
-        assert plan.quiet is True
+        assert plan.quiet is False
         delivery = session.get(AlertDelivery, plan.delivery_id)
         current = _phrase_set()
         assert planning_phrase_set(session, delivery, current) is current
@@ -968,7 +1647,7 @@ def test_plan_digest_will_not_record_a_member_without_provenance():
             f"{name} has a default again, which re-enables the hole")
 
 
-def test_a_quiet_digest_whose_ruleset_text_is_gone_fails_the_render():
+def test_a_digest_whose_planning_ruleset_text_is_gone_fails_the_render():
     """Same rule as the member path: unreproducible planned text fails."""
     from app.alerts.dispatcher import planning_phrase_set
     from app.alerts.models import AlertRulesetRegistry
@@ -980,12 +1659,17 @@ def test_a_quiet_digest_whose_ruleset_text_is_gone_fails_the_render():
 
     with session_scope() as session:
         rules_sha = _registered(session)
+        _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
         plan = plan_digest(session, mode="shadow", live_profile="default",
                            planning_rules_sha256=rules_sha,
                            phrase_set_version=_provenance()[0],
                            phrase_set_sha256=_provenance()[1],
                            window_key=WINDOW, now=NOW)
-        assert plan.quiet is True
+        assert plan.quiet is False
         delivery = session.get(AlertDelivery, plan.delivery_id)
 
         # the ruleset's phrase set IS registered, so it resolves
@@ -1000,33 +1684,310 @@ def test_a_quiet_digest_whose_ruleset_text_is_gone_fails_the_render():
         assert planning_phrase_set(session, delivery, _Different()) is None
 
 
-def test_a_retry_after_a_definite_failure_re_renders_the_digest():
-    """A definite non-acceptance delivered nothing, so the text may change.
+def test_automatic_digest_retry_reuses_one_byte_identical_final_render(monkeypatch):
+    """Definite provider rejection permits a retry, not a different message."""
+    import app.alerts.dispatcher as dispatcher_module
+    from app.alerts.enums import SenderOutcome, TransportStatus
+    from app.alerts.models import AlertRender
+    from app.alerts.sender import SendResult
 
-    `attempts == 0` froze the wording after the first failed attempt, so a
-    silence landing afterwards was disclosed by a stale count on every retry.
-    Only an AMBIGUOUS outcome — the bytes may have arrived — should freeze it.
-    """
-    from app.alerts.dispatcher import _digest_may_rerender
-    from app.alerts.enums import TransportStatus
+    class SequenceSender:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None]] = []
 
-    class _D:
-        transport_status = TransportStatus.RETRY_DUE
-        prior_unknown_delivery_id = None
-        duplicate_risk_acknowledged = False
+        def send(self, message, *, recipient_ref, idempotency_key=None):
+            self.calls.append((message, idempotency_key))
+            if len(self.calls) == 1:
+                return SendResult(
+                    outcome=SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED,
+                    http_status=503,
+                    error_code="TEMPORARY",
+                    request_started=False,
+                )
+            return SendResult(
+                outcome=SenderOutcome.CONFIRMED_SUCCESS,
+                http_status=204,
+                request_started=True,
+            )
 
-    assert _digest_may_rerender(_D()) is True
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        _pending_item(
+            session,
+            rules_sha=rules_sha,
+            rule_id="regime.band_to_derisk",
+        )
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        delivery_id = plan.delivery_id
 
-    # ambiguous: it may already have arrived, so the wording is frozen
-    ambiguous = _D()
-    ambiguous.transport_status = TransportStatus.UNKNOWN
-    assert _digest_may_rerender(ambiguous) is False
+    sender = SequenceSender()
+    first = dispatcher_module.dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+    assert first.failed == 1
 
-    # and it stays frozen once an ambiguous send is on record
-    after = _D()
-    after.prior_unknown_delivery_id = "01M0PRIORUNKNOWN0000000000"
-    assert _digest_may_rerender(after) is False
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery.transport_status == TransportStatus.RETRY_DUE
+        original = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == delivery_id)
+        ).scalars().one()
+        original_id = original.render_id
+        original_body = original.final_message
 
-    acknowledged = _D()
-    acknowledged.duplicate_risk_acknowledged = True
-    assert _digest_may_rerender(acknowledged) is False
+    def forbidden_rerender(*_args, **_kwargs):
+        raise AssertionError("automatic retry attempted to replace its final render")
+
+    monkeypatch.setattr(
+        dispatcher_module,
+        "render_digest_body",
+        forbidden_rerender,
+    )
+    second = dispatcher_module.dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert second.sent == 1
+    assert sender.calls == [
+        (original_body, delivery_id),
+        (original_body, delivery_id),
+    ]
+    with session_scope() as session:
+        renders = session.execute(
+            select(AlertRender).where(AlertRender.delivery_id == delivery_id)
+        ).scalars().all()
+        assert [render.render_id for render in renders] == [original_id]
+
+
+def test_frozen_digest_cancellation_replans_only_the_unsilenced_survivor():
+    """Invalidating frozen prose cannot strand unaffected digest evidence."""
+    from app.alerts.dispatcher import dispatch_once
+    from app.alerts.enums import SenderOutcome, TransportStatus
+    from app.alerts.sender import SendResult
+
+    class TransientSender:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def send(self, message, *, recipient_ref, idempotency_key=None):
+            self.messages.append(message)
+            return SendResult(
+                outcome=SenderOutcome.DEFINITE_TRANSIENT_NOT_ACCEPTED,
+                http_status=503,
+                error_code="TEMPORARY",
+                request_started=False,
+            )
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        for rule_id in (
+            "regime.band_to_derisk",
+            "structure.s2_saturation",
+        ):
+            _pending_item(session, rules_sha=rules_sha, rule_id=rule_id)
+        plan = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW,
+            now=NOW,
+        )
+        delivery_id = plan.delivery_id
+
+    sender = TransientSender()
+    first = dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW,
+    )
+    assert first.failed == 1
+
+    with session_scope() as session:
+        episodes = session.execute(
+            select(AlertEpisode).order_by(AlertEpisode.rule_id)
+        ).scalars().all()
+        silenced_id = episodes[0].episode_id
+        survivor_id = episodes[1].episode_id
+        _silence_rule(session, episodes[0].rule_id)
+
+    second = dispatch_once(
+        session_scope,
+        phrase_set=_phrase_set(),
+        mode="shadow",
+        live_profile="default",
+        sender=sender,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert second.cancelled == 1
+    assert len(sender.messages) == 1
+
+    with session_scope() as session:
+        delivery = session.get(AlertDelivery, delivery_id)
+        assert delivery.transport_status == TransportStatus.CANCELLED
+        assert delivery.cancel_reason == "RENDERED_MEMBER_WITHDRAWN"
+        items = session.execute(
+            select(AlertDigestItem).where(
+                AlertDigestItem.delivery_id == delivery_id
+            )
+        ).scalars().all()
+        by_episode = {item.episode_id: item for item in items}
+        assert by_episode[silenced_id].status == DigestItemStatus.CANCELLED
+        assert by_episode[silenced_id].last_error_code == "SILENCED"
+        assert by_episode[survivor_id].status == DigestItemStatus.FAILED
+        assert by_episode[survivor_id].last_error_code \
+            == "RENDERED_MEMBER_WITHDRAWN"
+
+        later = plan_digest(
+            session,
+            mode="shadow",
+            live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key="2026-W35",
+            now=NOW + timedelta(days=7),
+        )
+        assert later.carried_forward == 1
+        assert len(later.item_ids) == 1
+        survivor = session.get(AlertDigestItem, by_episode[survivor_id].digest_item_id)
+        assert survivor.delivery_id == later.delivery_id
+        assert survivor.status == DigestItemStatus.PLANNED
+        assert by_episode[silenced_id].delivery_id == delivery_id
+
+
+def test_digest_item_becomes_delivered_only_after_confirmed_send():
+    from app.alerts.outbox import mark_sent
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        plan = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW, now=NOW)
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        mark_sent(session, delivery, now=NOW, http_status=200)
+        item = session.get(AlertDigestItem, item_id)
+        assert item.status == DigestItemStatus.DELIVERED
+        assert item.delivered_at == NOW
+        assert item.last_error_code is None
+
+
+@pytest.mark.parametrize("outcome", ["permanent", "render"])
+def test_definite_digest_failure_marks_its_items_failed(outcome):
+    from app.alerts.outbox import mark_permanent, mark_render_failed
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session, rules_sha=rules_sha, rule_id="regime.band_to_derisk")
+        plan = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW, now=NOW)
+        delivery = session.get(AlertDelivery, plan.delivery_id)
+        if outcome == "permanent":
+            mark_permanent(
+                session, delivery, now=NOW, error_code="HTTP_400",
+                message="definite rejection", http_status=400)
+            expected_error = "HTTP_400"
+        else:
+            mark_render_failed(
+                session, delivery, now=NOW, reason="reviewed text unavailable")
+            expected_error = "RENDER_REJECTED"
+        item = session.get(AlertDigestItem, item_id)
+        assert item.status == DigestItemStatus.FAILED
+        assert item.delivered_at is None
+        assert item.last_error_code == expected_error
+
+
+def test_ambiguous_digest_marks_items_unknown_and_blocks_carry_forward():
+    from app.alerts.outbox import mark_unknown
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session, rules_sha=rules_sha, rule_id="regime.band_to_derisk",
+            window="2026-W33")
+        first = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key="2026-W33", now=NOW)
+        delivery = session.get(AlertDelivery, first.delivery_id)
+        mark_unknown(session, delivery, now=NOW, reason="socket closed")
+
+        later = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW, now=NOW)
+        item = session.get(AlertDigestItem, item_id)
+        assert item.status == DigestItemStatus.UNKNOWN
+        assert item.last_error_code == "AMBIGUOUS"
+        assert later.quiet is True
+        assert later.item_ids == []
+
+
+def test_definitely_failed_digest_item_is_replanned_in_the_next_window():
+    from app.alerts.outbox import mark_permanent
+
+    with session_scope() as session:
+        rules_sha = _registered(session)
+        item_id = _pending_item(
+            session, rules_sha=rules_sha, rule_id="regime.band_to_derisk",
+            window="2026-W33")
+        first = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key="2026-W33", now=NOW)
+        mark_permanent(
+            session, session.get(AlertDelivery, first.delivery_id), now=NOW,
+            error_code="HTTP_400", message="rejected", http_status=400)
+
+        later = plan_digest(
+            session, mode="shadow", live_profile="default",
+            planning_rules_sha256=rules_sha,
+            phrase_set_version=_provenance()[0],
+            phrase_set_sha256=_provenance()[1],
+            window_key=WINDOW, now=NOW)
+        item = session.get(AlertDigestItem, item_id)
+        assert later.carried_forward == 1
+        assert later.item_ids == [item_id]
+        assert item.status == DigestItemStatus.PLANNED
+        assert item.delivery_id == later.delivery_id
+        assert item.last_error_code is None

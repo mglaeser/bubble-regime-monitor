@@ -335,6 +335,78 @@ def test_recovery_from_unknown_resumes_the_candidate_it_never_opens_a_second():
     assert decision.activate_episode is True
 
 
+def test_explicit_revision_sensitive_confirmation_counts_two_same_period_revisions():
+    """The exceptional basis counts revision keys, not economic-period keys."""
+    rule = _rule(
+        rule_id="test.revision-sensitive",
+        note="revision_sensitive: reviewed vendor restatements are distinct evidence",
+        source_fields=["data_degraded", "breadth_pct"],
+        condition={
+            "kind": "all_of",
+            "terms": [
+                {"kind": "boolean_state", "source": "data_degraded", "equals": True},
+                {"kind": "freshness", "source": "breadth_pct", "require": "fresh"},
+            ],
+        },
+        confirmation={"count": 2, "basis": "distinct_source_revision"},
+        confirmation_sources=["breadth_pct"],
+        candidate_ttl={"calendar": "US_TRADING", "intervals": 10, "grace_seconds": 0},
+    )
+
+    def revised_input(identity: str, vintage: str) -> tuple[AlertInput, str, str]:
+        evidence = build_evidence(
+            obs.DOMAIN_BREADTH,
+            42.0,
+            observed_at="2026-08-15T10:00:00+00:00",
+            source_id="d1",
+            provider_id="provider-a",
+            provider_vintage=vintage,
+            source_payload_sha256=vintage,
+            period_start="2026-08-14",
+            period_end="2026-08-14",
+        )
+        inp = make_input(identity=identity, degraded=True).model_copy(
+            update={"indicators": [EvidenceModel(**evidence.as_dict())]}
+        )
+        return inp, evidence.economic_observation_key, evidence.source_revision_key
+
+    first, first_economic, first_revision = revised_input("revision-a", "v1")
+    second, second_economic, second_revision = revised_input("revision-b", "v2")
+    assert first_economic == second_economic
+    assert first_revision != second_revision
+
+    opened = evaluate_state(
+        rule=rule,
+        instance_fingerprint="revision-fp",
+        memory=InstanceMemory(),
+        outcome=evaluate_rule(rule, _ctx(first)),
+        ctx=_ctx(first),
+        now=NOW,
+    )
+    assert opened.condition_state == ConditionState.PENDING
+    assert opened.confirmations[0].economic_observation_key == first_revision
+
+    memory = InstanceMemory(
+        state_version=1,
+        condition_state=ConditionState.PENDING,
+        candidate_started_input=opened.candidate_started_input,
+        candidate_expires_at=opened.candidate_expires_at,
+        current_episode_id="EP-REVISION",
+        confirmed_keys={"breadth_pct": frozenset({first_revision})},
+    )
+    confirmed = evaluate_state(
+        rule=rule,
+        instance_fingerprint="revision-fp",
+        memory=memory,
+        outcome=evaluate_rule(rule, _ctx(second, first)),
+        ctx=_ctx(second, first),
+        now=NOW + timedelta(minutes=1),
+    )
+    assert confirmed.confirmation_progress == {"breadth_pct": 2}
+    assert confirmed.condition_state == ConditionState.FIRING
+    assert confirmed.activate_episode is True
+
+
 def test_a_candidate_is_never_latched_over_an_open_episode():
     """The general form of the same invariant, independent of UNKNOWN."""
     rule = _rule(
@@ -547,6 +619,42 @@ def test_constellation_requires_every_confirmation_source_to_advance():
     assert decision.activate_episode is False
 
 
+def test_auto_on_inverse_latches_a_transition_until_the_target_state_ends():
+    """A transition episode is active while its target state remains active.
+
+    Without this distinction, ``auto_on_inverse`` behaved exactly like
+    ``auto_on_condition_false``: the first steady observation after a real
+    transition resolved the episode merely because no *second* transition
+    occurred.  That also made every configured 48-hour reminder for transition
+    rules unreachable.
+    """
+    rule = _rule(resolution={"policy": "auto_on_inverse"})
+    previous = make_input(identity="before", effective="de-risk")
+    current = make_input(identity="steady", effective="de-risk")
+
+    held = evaluate_rule(
+        rule,
+        _ctx(current, previous),
+        currently_firing=True,
+    )
+    assert held.truth is True
+    assert "inverse_resolution_hold" in held.reasons
+
+    event_only = _rule(resolution={"policy": "auto_on_condition_false"})
+    assert evaluate_rule(
+        event_only,
+        _ctx(current, previous),
+        currently_firing=True,
+    ).truth is False
+
+    reversed_input = make_input(identity="reversed", effective="trim")
+    assert evaluate_rule(
+        rule,
+        _ctx(reversed_input, current),
+        currently_firing=True,
+    ).truth is False
+
+
 def test_provider_failover_mid_confirmation_does_not_confirm():
     """Same day, different vendor: the economic key collides, so it cannot count."""
     rule = _persistence_rule()
@@ -600,6 +708,42 @@ def test_median_and_point_score_are_never_conflated():
     # median below the gate, point score above it: must NOT fire.
     inp = make_input(identity="a", median=52.0, point=90.0)
     assert evaluate_rule(rule, _ctx(inp)).truth is False
+
+
+def test_real_faber_p1_accepts_engine_vocabulary_and_uses_the_exact_median_gate():
+    """Exercise the shipped P1, not a hand-written approximation of it.
+
+    The scoring engine persists IN/OUT.  The alert contract names in/out.  The
+    typed boundary must bridge those vocabularies for both new and historical
+    sidecars, while the gate remains the Monte Carlo median at exactly 55 and
+    refuses degraded data.
+    """
+    rule = _artifacts(stage=3).ruleset.rule("legs.faber_spy_out_high_risk")
+    assert rule is not None
+
+    before = make_input(identity="faber-before", faber="IN", median=55.0, point=99.0)
+    at_gate = make_input(identity="faber-at-gate", faber="OUT", median=55.0,
+                         point=1.0)
+    assert evaluate_rule(rule, _ctx(at_gate, before)).truth is True
+
+    below_gate = make_input(identity="faber-below", faber="OUT", median=54.999,
+                            point=99.0)
+    assert evaluate_rule(rule, _ctx(below_gate, before)).truth is not True
+
+    degraded = make_input(identity="faber-degraded", faber="OUT", median=90.0,
+                          point=99.0, degraded=True)
+    assert evaluate_rule(rule, _ctx(degraded, before)).truth is not True
+
+
+def test_unrecognised_execution_leg_enum_is_unknown_not_false():
+    from app.alerts.sources import read_source
+
+    value = read_source(
+        "spy_faber_state",
+        make_input(identity="faber-invalid", faber="SIDEWAYS"),
+    )
+    assert value.available is False
+    assert value.value is None
 
 
 def test_crossing_fires_once_not_on_every_evaluation():
@@ -664,7 +808,7 @@ def _artifacts(stage: int = 3, tmp_path=None):
     target.write_text(raw, encoding="utf-8")
     return validate_from_disk(
         rules_path=target,
-        phrase_path=Path("config/alert_phrases.v3.3.json"),
+        phrase_path=Path("config/alert_phrases.v3.4.json"),
         service_version="3.8.0",
     )
 
@@ -1073,6 +1217,24 @@ def test_an_outage_is_not_a_flap():
 
     real = [ConditionState.FIRING, ConditionState.NORMAL] * 3
     assert flapping_projection(real)["flapping"] is True, "a real oscillation must still flap"
+
+
+def test_unknown_at_a_full_window_does_not_erase_known_flap_history():
+    """UNKNOWN is a mask, so it cannot consume one bounded history slot."""
+    known = [
+        ConditionState.NORMAL,
+        ConditionState.FIRING,
+        ConditionState.FIRING,
+        ConditionState.NORMAL,
+        ConditionState.FIRING,
+        ConditionState.NORMAL,
+    ]
+
+    before = flapping_projection(known)
+    after = flapping_projection([*known, ConditionState.UNKNOWN])
+
+    assert after["states"] == before["states"] == known
+    assert after["transitions"] == before["transitions"]
 
 
 def test_an_unloadable_origin_ruleset_fails_the_batch(isolated_db, monkeypatch):

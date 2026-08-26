@@ -2,17 +2,31 @@
   "artifact": "alert-stage1-gate",
   "artifacts": {
     "digests": "carried GROUPED above — the full sha256 split into eight-character runs, so an entropy detector does not read it as a credential. The promotion gate binds evidence to bytes with them; per-run summaries still omit bare digests. See app.alerts.promotion.group_digest",
-    "phrase_set_sha256_grouped": "68307d7a-c6bc450c-a4add042-2930eb63-0f06a59f-3570de09-040dcc2f-0cf0452b",
-    "phrase_set_version": "v3.3",
+    "phrase_set_sha256_grouped": "96d915f5-1a8fb496-aded9c1d-907abe76-b5d9be96-e23b8fc1-fab525fc-567d3196",
+    "phrase_set_version": "v3.4",
     "rule_version": "v3.2.1",
-    "rules_sha256_grouped": "860d0aa5-5f08e870-5fbdb0e0-9279227d-26d0bf39-2aa8d764-65d42a6e-20647ae7"
+    "rules_sha256_grouped": "e143a98b-1b4feeb5-a4b6f05b-3d52d23d-023f5cbd-e55066f5-ec5bf426-fc461dcd"
   },
   "gate": "deterministic replay; no PII; no scoring regression",
+  "generation": {
+    "command": "python -m scripts.export_alert_stage1_gate",
+    "determinism_contract": "byte-identical for fixed code and committed inputs; reviewed behaviour or bound-artifact changes must change and regenerate this file",
+    "generator": "scripts/export_alert_stage1_gate.py",
+    "scoring_scope": "alert replay only; frozen_methodology.json, MC_SEED, and the score golden fixture are not inputs and remain separately gated"
+  },
   "history": {
     "arc_schema_version": 2,
     "inputs": 20,
     "source": "tests/fixtures/alert_replay_history.json",
     "synthetic": true
+  },
+  "mandatory_event_catalogue": {
+    "catalogue_version": "3.2",
+    "event_count": 0,
+    "frozen": false,
+    "schema_version": 1,
+    "sha256_grouped": "2c45e086-f5373707-82dd8335-12251f93-e38758dd-a69ad876-30914b86-73377267",
+    "source": "config/alert_mandatory_events.v3.2.json"
   },
   "runs": {
     "stage_1": {
@@ -74,7 +88,7 @@
       "p1_bypasses_of_unknown": 0,
       "p1_total": 0,
       "passed": true,
-      "schema_version": 1,
+      "schema_version": 2,
       "suppressions_by_reason": {},
       "transient_one_snapshot_band_p1": 1,
       "unknown_blocks": 0,
@@ -135,9 +149,10 @@
       "evaluations_timed_out": 0,
       "failures": [
         "non-P1 volume breached the 24h cap: 5 > 3",
-        "non-P1 volume breached the 168h cap: 8 > 6"
+        "non-P1 volume breached the 168h cap: 8 > 6",
+        "mandatory-event recall is unmeasured: Stage 2+ requires a non-empty operator-frozen catalogue"
       ],
-      "held_budget": 0,
+      "held_budget": 3,
       "held_grouping": 0,
       "held_quiet": 3,
       "indeterminate_band_excursions": 1,
@@ -166,9 +181,9 @@
       "p1_bypasses_of_unknown": 0,
       "p1_total": 5,
       "passed": false,
-      "schema_version": 1,
+      "schema_version": 2,
       "suppressions_by_reason": {
-        "DATA_QUALITY_GUARD": 1,
+        "DATA_QUALITY_GUARD": 5,
         "SUPERSEDED": 4
       },
       "transient_one_snapshot_band_p1": 1,
@@ -230,9 +245,10 @@
       "evaluations_timed_out": 0,
       "failures": [
         "non-P1 volume breached the 24h cap: 5 > 3",
-        "non-P1 volume breached the 168h cap: 8 > 6"
+        "non-P1 volume breached the 168h cap: 8 > 6",
+        "mandatory-event recall is unmeasured: Stage 2+ requires a non-empty operator-frozen catalogue"
       ],
-      "held_budget": 0,
+      "held_budget": 3,
       "held_grouping": 0,
       "held_quiet": 3,
       "indeterminate_band_excursions": 1,
@@ -261,9 +277,9 @@
       "p1_bypasses_of_unknown": 0,
       "p1_total": 5,
       "passed": false,
-      "schema_version": 1,
+      "schema_version": 2,
       "suppressions_by_reason": {
-        "DATA_QUALITY_GUARD": 1,
+        "DATA_QUALITY_GUARD": 5,
         "SUPERSEDED": 4
       },
       "transient_one_snapshot_band_p1": 1,

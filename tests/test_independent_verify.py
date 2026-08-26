@@ -490,8 +490,12 @@ class TestTrustedWorkflowEndpointPreflight:
         ("is_fork", "panel_dormant", "outcome", "expected_returncode",
          "expected_state", "expected_description"),
         [
-            ("false", "true", "success", 0, "success",
-             "panel dormant — deterministic CI only"),
+            # dormant NEVER publishes success: this context is a REQUIRED
+            # check, and a zero-vote green would let a repo-variable flip plus
+            # a deleted secret stand in for the mandatory review. The previous
+            # expectation here asserted exactly that defect.
+            ("false", "true", "success", 1, "failure",
+             "panel dormant — no review performed; re-enable the verifier to merge"),
             ("false", "true", "failure", 1, "failure",
              "cross-vendor panel refused — see job log"),
             ("false", "true", "skipped", 1, "failure",

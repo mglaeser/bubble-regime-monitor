@@ -44,7 +44,8 @@ PROTECTED: tuple[tuple[str, str], ...] = (
     # protection more than the version still being worked on, not less.
     # Repointing this at v3.3 quietly removed the older one from cover.
     ("config/alert_phrases.v3.2.json", "the alert phrasing artifact (released)"),
-    ("config/alert_phrases.v3.3.json", "the alert phrasing artifact"),
+    ("config/alert_phrases.v3.3.json", "the alert phrasing artifact (released)"),
+    ("config/alert_phrases.v3.4.json", "the alert phrasing artifact"),
 )
 
 

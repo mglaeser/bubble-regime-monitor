@@ -60,9 +60,9 @@ def main(argv: list[str] | None = None) -> int:
                         ("--phrases", args.phrases), ("--out", args.out)):
         if value:
             forwarded += [flag, value]
-    # An events file that does not exist is not an error: the catalogue ships
-    # empty, and replay reports recall as "not measurable" rather than 100%.
-    if args.events and Path(args.events).exists():
+    # A supplied catalogue is evidence, so a missing/malformed path is a hard
+    # failure in the replay loader rather than a silent empty catalogue.
+    if args.events:
         forwarded += ["--events", args.events]
     if args.stage is not None:
         forwarded += ["--stage", str(args.stage)]

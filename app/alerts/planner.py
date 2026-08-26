@@ -42,6 +42,7 @@ from app.alerts.enums import (
 )
 from app.alerts.quiet_hours import release_time_for
 from app.alerts.rulespec import RuleSpec
+from app.alerts.silences import ActiveSilences, matches_silence
 from app.alerts.state_machine import StateDecision
 
 DEDUPE_VERSION = 1
@@ -167,10 +168,7 @@ class PlanInputs:
     decisions: list[StateDecision]
     episode_ids: dict[str, str]                       # instance_fingerprint -> episode_id
     memories: dict[str, NotificationMemory]           # instance_fingerprint -> memory
-    silenced_fingerprints: frozenset[str] = frozenset()
-    silenced_rule_ids: frozenset[str] = frozenset()
-    silenced_buckets: frozenset[str] = frozenset()
-    silence_all: bool = False
+    active_silences: ActiveSilences = ActiveSilences()
     open_generations: frozenset[tuple[str, int]] = frozenset()   # (fingerprint, generation)
     origin_rules_sha256: str = ""
     phrase_set_version: str = ""
@@ -181,11 +179,11 @@ class PlanInputs:
 
 
 def _is_silenced(rule: RuleSpec, fingerprint: str, inputs: PlanInputs) -> bool:
-    return (
-        inputs.silence_all
-        or fingerprint in inputs.silenced_fingerprints
-        or rule.rule_id in inputs.silenced_rule_ids
-        or rule.bucket in inputs.silenced_buckets
+    return matches_silence(
+        inputs.active_silences,
+        instance_fingerprint=fingerprint,
+        rule_id=rule.rule_id,
+        bucket=rule.bucket,
     )
 
 
@@ -303,6 +301,7 @@ def plan(inputs: PlanInputs) -> PlanResult:
     for item in p2:
         groups.setdefault(group_key_for(item[0]), []).append(item)
 
+    advisory_usage = inputs.budget_usage
     for group, items in sorted(groups.items()):
         members = [
             _member(rule, episode_id, memory, inputs,
@@ -314,8 +313,10 @@ def plan(inputs: PlanInputs) -> PlanResult:
         not_before = release_time_for(Priority.P2, now)
         held_quiet = not_before > now
         # -- step 10: advisory budget --------------------------------------
-        budget = check_budget(Priority.P2, inputs.budget_usage, inputs.budget_limits)
+        budget = check_budget(Priority.P2, advisory_usage, inputs.budget_limits)
 
+        state: str
+        hold: str | None
         if held_quiet:
             state, hold = PlanningState.HELD_QUIET, "quiet_hours"
         elif not budget.allowed:
@@ -339,6 +340,71 @@ def plan(inputs: PlanInputs) -> PlanResult:
             hold_reason_code=hold,
             budget=budget,
         ))
+        # This intent is now credible queued work even when held, and every
+        # later group in the same pure plan must see that reservation. The
+        # database-backed usage catches earlier evaluations; this catches
+        # siblings not persisted until the plan returns.
+        advisory_usage = BudgetUsage(
+            sent_24h=advisory_usage.sent_24h,
+            sent_168h=advisory_usage.sent_168h,
+            reserved=advisory_usage.reserved + 1,
+            digest_168h=advisory_usage.digest_168h,
+        )
+
+    # -- reminders for episodes that were already firing ------------------
+    # A reminder is not an activation, so the activation-only loop above can
+    # never discover one. It is a fresh semantic generation of the SAME open
+    # episode, and therefore runs through the same silence, ambiguity,
+    # flapping, open-generation, quiet-hour, and non-P1 budget controls.
+    for decision in inputs.decisions:
+        if decision.activate_episode or decision.condition_state != "FIRING":
+            continue
+        rule = inputs.rules.get(decision.rule_id)
+        episode_id = inputs.episode_ids.get(decision.instance_fingerprint)
+        if rule is None or episode_id is None or rule.priority not in (
+                Priority.P1, Priority.P2):
+            continue
+        memory = inputs.memories.get(
+            decision.instance_fingerprint, NotificationMemory())
+        reminder = reminder_intent(
+            rule=rule, episode_id=episode_id, memory=memory, inputs=inputs)
+        if reminder is None:
+            continue
+        generation = reminder.members[0].notification_generation
+
+        if (decision.instance_fingerprint, generation) in inputs.open_generations:
+            result.suppress(episode_id, SuppressionReason.COOLDOWN)
+            result.notes.append(
+                f"{rule.rule_id}: reminder generation {generation} already open")
+            continue
+        if memory.open_unknown_delivery_id is not None:
+            result.suppress(episode_id, SuppressionReason.UNKNOWN_BLOCK)
+            continue
+        if _is_silenced(rule, decision.instance_fingerprint, inputs):
+            result.suppress(episode_id, SuppressionReason.SILENCED)
+            continue
+        if decision.instance_fingerprint in inputs.flapping_fingerprints:
+            result.suppress(episode_id, SuppressionReason.FLAPPING)
+            continue
+        for reason in decision.suppression_reasons:
+            result.suppress(episode_id, reason)
+        if decision.suppression_reasons:
+            continue
+
+        budget = check_budget(rule.priority, advisory_usage, inputs.budget_limits)
+        reminder.budget = budget
+        if (rule.priority != Priority.P1 and not budget.allowed
+                and reminder.planning_state != PlanningState.HELD_QUIET):
+            reminder.planning_state = PlanningState.HELD_BUDGET
+            reminder.hold_reason_code = budget.reason
+        result.deliveries.append(reminder)
+        if rule.priority != Priority.P1:
+            advisory_usage = BudgetUsage(
+                sent_24h=advisory_usage.sent_24h,
+                sent_168h=advisory_usage.sent_168h,
+                reserved=advisory_usage.reserved + 1,
+                digest_168h=advisory_usage.digest_168h,
+            )
     return result
 
 
@@ -395,21 +461,21 @@ def reminder_intent(
         rule_id=rule.rule_id,
         instance_fingerprint=_fingerprint_for(rule, inputs),
         member_role=MemberRole.PRIMARY,
-        notification_generation=memory.next_notification_generation + 1,
+        notification_generation=memory.next_notification_generation,
         origin_rules_sha256=inputs.origin_rules_sha256,
         origin_phrase_set_version=inputs.phrase_set_version,
         origin_phrase_set_sha256=inputs.phrase_set_sha256,
         priority=rule.priority,
     )
+    release_at = release_time_for(rule.priority, inputs.now)
+    held_quiet = rule.priority != Priority.P1 and release_at > inputs.now
     return DeliveryIntent(
         delivery_kind=DeliveryKind.REMINDER,
         priority=rule.priority,
         members=[member],
         dedupe_key=dedupe_key(delivery_kind=DeliveryKind.REMINDER, members=[member],
                               scheduled_window_key=None, manual_retry_sequence=0),
-        planning_state=(PlanningState.READY if rule.priority == Priority.P1
-                        else PlanningState.HELD_QUIET
-                        if release_time_for(rule.priority, inputs.now) > inputs.now
-                        else PlanningState.READY),
-        not_before=release_time_for(rule.priority, inputs.now),
+        planning_state=(PlanningState.HELD_QUIET if held_quiet else PlanningState.READY),
+        not_before=release_at,
+        hold_reason_code="quiet_hours" if held_quiet else None,
     )

@@ -329,6 +329,68 @@ class ReminderSpec(BaseModel):
         return self
 
 
+RUNTIME_CAVEAT_CODES: frozenset[str] = frozenset({
+    "CONTEXT_STALE",
+    "DATA_DEGRADED",
+    "KNOWN_ISSUE",
+    "UNKNOWN_AT_RENDER",
+})
+
+# Runtime capabilities added after the first released phrase registries are
+# optional by exact archived phrase bytes.  Treating them like the original
+# closed set above would make a v3.2 queued delivery unloadable merely because
+# the running code learned a new reviewed caveat.  The dispatcher authorizes
+# one of these only when the delivery's OWN phrase set contains it.
+OPTIONAL_RUNTIME_CAVEAT_CODES: frozenset[str] = frozenset({
+    "MATERIAL_CHANGE",
+})
+
+# Filled by the deterministic renderer, never by a rule or an LLM.  They are
+# deliberately not required in every rule's render contract: the originating
+# fact remains rule-authorized, while these two slots disclose its trigger and
+# current render-time values when the archived phrase set supports the feature.
+OPTIONAL_RUNTIME_FACT_IDS: frozenset[str] = frozenset({
+    "F_TRIGGER_VALUE",
+    "F_CURRENT_VALUE",
+})
+
+
+class RenderContractSpec(BaseModel):
+    """The exact reviewed rendering authority for one rule instance.
+
+    This is intentionally rule data, not a dispatcher switch statement.  A
+    queued member is rebuilt from its archived RuleSpec and receives only the
+    codes and facts declared here.  Runtime data-quality caveats are a closed
+    global set; they can be added when their typed condition is observed, but
+    arbitrary phrase-set codes never become authorized implicitly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    headline_code: str
+    allowed_phrase_codes: list[str] = Field(default_factory=list)
+    allowed_fact_ids: list[str] = Field(default_factory=list)
+    next_check_code: str | None = None
+
+    @model_validator(mode="after")
+    def _unique(self) -> RenderContractSpec:
+        for field_name in ("allowed_phrase_codes", "allowed_fact_ids"):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(f"render.{field_name} contains duplicates")
+        return self
+
+    def authorized_codes(self, rule: RuleSpec) -> frozenset[str]:
+        """All and only the codes a deterministic render may consume."""
+        return frozenset({
+            self.headline_code,
+            *self.allowed_phrase_codes,
+            *rule.required_caveat_codes,
+            *RUNTIME_CAVEAT_CODES,
+            *([self.next_check_code] if self.next_check_code else []),
+        })
+
+
 class RuleSpec(BaseModel):
     """One rule definition (mandate 13.2)."""
 
@@ -346,6 +408,7 @@ class RuleSpec(BaseModel):
     bucket: str
     priority: Literal[1, 2, 3, 4]
     labels_schema: list[str] = Field(default_factory=list)
+    labels: dict[str, str] = Field(default_factory=dict)
     # Empty ONLY for a `never` rule: an inventory entry whose input this
     # service does not have is written down explicitly rather than omitted, so
     # the API can say WHY the mechanism is dark.
@@ -370,6 +433,7 @@ class RuleSpec(BaseModel):
     budget_exempt: bool = False
     calibration_id: str | None = None
     phrase_set: str
+    render: RenderContractSpec | None = None
     required_caveat_codes: list[str] = Field(default_factory=list)
     disabled_reason: str | None = None
     note: str | None = None
@@ -378,6 +442,16 @@ class RuleSpec(BaseModel):
 
     @model_validator(mode="after")
     def _coherent(self) -> RuleSpec:
+        if len(self.labels_schema) != len(set(self.labels_schema)):
+            raise ValueError(f"{self.rule_id}: labels_schema contains duplicates")
+        if set(self.labels) != set(self.labels_schema):
+            raise ValueError(
+                f"{self.rule_id}: labels {sorted(self.labels)} do not exactly match "
+                f"labels_schema {sorted(self.labels_schema)}"
+            )
+        if any(not key or not value for key, value in self.labels.items()):
+            raise ValueError(f"{self.rule_id}: labels must have non-empty keys and values")
+
         declared = set(self.source_fields)
         used = referenced_sources(self.condition)
         structurally_dark = isinstance(self.condition, NeverCondition)

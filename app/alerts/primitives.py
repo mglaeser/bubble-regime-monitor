@@ -129,10 +129,21 @@ def _read(source_id: str, inp: AlertInput | None) -> SourceValue | None:
 # ---------------------------------------------------------------------------
 
 
-def _eval_transition(node: TransitionCondition, ctx: EvaluationContext) -> ConditionOutcome:
+def _eval_transition(
+    node: TransitionCondition,
+    ctx: EvaluationContext,
+    *,
+    hold_target: bool = False,
+) -> ConditionOutcome:
     now = read_source(node.source, ctx.current)
     if not now.available:
         return _unknown(f"{node.source}:current_unavailable", {node.source: now})
+    if hold_target:
+        return ConditionOutcome(
+            truth=str(now.value) in node.to_states,
+            reasons=["inverse_resolution_hold"],
+            evidence={node.source: now},
+        )
     if ctx.previous is None:
         # A real answer, not UNKNOWN: with no predecessor there IS no
         # transition. A cold start already in the target state must not fire.
@@ -153,11 +164,21 @@ def _eval_transition(node: TransitionCondition, ctx: EvaluationContext) -> Condi
                             evidence={node.source: now, f"{node.source}@prev": before})
 
 
-def _eval_boolean_transition(node: BooleanTransitionCondition,
-                             ctx: EvaluationContext) -> ConditionOutcome:
+def _eval_boolean_transition(
+    node: BooleanTransitionCondition,
+    ctx: EvaluationContext,
+    *,
+    hold_target: bool = False,
+) -> ConditionOutcome:
     now = read_source(node.source, ctx.current)
     if not now.available:
         return _unknown(f"{node.source}:current_unavailable", {node.source: now})
+    if hold_target:
+        return ConditionOutcome(
+            truth=bool(now.value) is node.to,
+            reasons=["inverse_resolution_hold"],
+            evidence={node.source: now},
+        )
     if ctx.previous is None:
         return ConditionOutcome(truth=False, reasons=["cold_start_no_predecessor"],
                                 evidence={node.source: now})
@@ -350,10 +371,13 @@ def evaluate_condition(node: Condition, ctx: EvaluationContext, rule: RuleSpec,
     if isinstance(node, NeverCondition):
         return ConditionOutcome(truth=False, status=EvaluationStatus.DISABLED,
                                 reasons=[f"structurally dark: {node.reason}"])
+    hold_inverse_target = (
+        currently_firing and rule.resolution.policy == "auto_on_inverse"
+    )
     if isinstance(node, TransitionCondition):
-        return _eval_transition(node, ctx)
+        return _eval_transition(node, ctx, hold_target=hold_inverse_target)
     if isinstance(node, BooleanTransitionCondition):
-        return _eval_boolean_transition(node, ctx)
+        return _eval_boolean_transition(node, ctx, hold_target=hold_inverse_target)
     if isinstance(node, BooleanStateCondition):
         return _eval_boolean_state(node, ctx)
     if isinstance(node, EnumEqualsCondition):
@@ -433,7 +457,7 @@ def evaluate_rule(rule: RuleSpec, ctx: EvaluationContext,
     if outcome.truth is not True:
         return outcome
     for source_id in rule.hold_sources:
-        value = ctx.current and read_source(source_id, ctx.current)
+        value = read_source(source_id, ctx.current)
         outcome.evidence.setdefault(source_id, value)
         if not value.fresh:
             outcome.unfresh_hold_sources.append(source_id)

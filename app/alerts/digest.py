@@ -12,10 +12,11 @@ obvious implementation gets it wrong:
    replanned for the same window without an operator, because the message may
    already have arrived.
 
-2. A quiet week still sends. Silence is what a broken system produces too, and
-   after cutover this is the only scheduled message the operator receives — so
-   "nothing fired this week" is the proof-of-life that the daily digest used to
-   provide by accident.
+2. TEST is the sole memberless delivery kind.  A quiet run records the digest
+   heartbeat plus an append-only scheduler event, but creates no provider
+   intent; otherwise an empty DIGEST would violate the same member guard that
+   protects every market delivery.  The reviewed quiet template remains
+   available, but liveness evidence is not a fabricated episode.
 
 3. The digest is reported in user load but does NOT count against the non-P1
    budget (mandate 9.2). It is a scheduled summary, not an interruption.
@@ -27,13 +28,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.alerts.calendars import digest_window_key, last_closed_digest_window
-from app.alerts.canonical import new_ulid
+from app.alerts.canonical import identity_hash, new_ulid
 from app.alerts.enums import (
+    ActorType,
+    CausationType,
     DeliveryKind,
     DigestItemStatus,
     MemberRole,
@@ -42,13 +45,16 @@ from app.alerts.enums import (
     RenderSource,
     TransportStatus,
 )
-from app.alerts.errors import RenderRejected
+from app.alerts.errors import RenderRejected, sanitize
 from app.alerts.gsm7 import SINGLE_SMS_SEPTETS, first_non_gsm7, septets
 from app.alerts.models import (
     AlertDelivery,
     AlertDeliveryMember,
     AlertDigestItem,
     AlertEpisode,
+    AlertEvent,
+    AlertRender,
+    AlertRulesetRegistry,
 )
 from app.alerts.phrase_registry import JOIN
 from app.alerts.renderer import RenderResult, honesty_lint
@@ -88,9 +94,23 @@ def digest_dedupe_key(*, mode: str, live_profile: str, window_key: str) -> str:
 
 
 
-#: Transport states in which a digest has definitely not reached the wire, so
-#: its contents may still change.
-_UNSENT = (TransportStatus.PENDING, TransportStatus.RETRY_DUE)
+def _may_absorb_late_items(session: Session, delivery: AlertDelivery) -> bool:
+    """Whether membership is still mutable for this provider intent.
+
+    A final render freezes the exact represented members even before the first
+    provider attempt.  A definite provider rejection permits an automatic
+    retry of those same bytes; it does not reopen membership.  Only a pristine
+    pending row with no attempt and no render can safely absorb late evidence.
+    """
+    if delivery.transport_status != TransportStatus.PENDING \
+            or delivery.attempts != 0:
+        return False
+    render_exists = session.execute(
+        select(AlertRender.render_id).where(
+            AlertRender.delivery_id == delivery.delivery_id
+        ).limit(1)
+    ).scalar_one_or_none()
+    return render_exists is None
 
 
 def _pending_items(session: Session, *, mode: str, live_profile: str,
@@ -112,53 +132,85 @@ def _count_pending(session: Session, *, mode: str, live_profile: str,
                               window=window))
 
 
+def _origin_phrase_pair(session: Session, episode: AlertEpisode) -> tuple[str, str]:
+    """The exact phrase artifact bound to an episode's origin ruleset."""
+    origin = session.get(AlertRulesetRegistry, episode.origin_rules_sha256)
+    if origin is None:
+        raise ValueError(
+            f"origin ruleset {episode.origin_rules_sha256[:12]} is unavailable")
+    return origin.phrase_set_version, origin.phrase_set_sha256
+
+
+def _record_quiet_window(
+    session: Session,
+    *,
+    mode: str,
+    live_profile: str,
+    window: str,
+    planning_rules_sha256: str,
+    now: datetime,
+) -> None:
+    """Preserve per-window proof without inventing a provider intent.
+
+    The component heartbeat written by the scheduler answers current liveness;
+    this append-only scheduler event answers the retrospective question "which
+    closed window did the job actually inspect?".  It deliberately is not an
+    ``AlertDelivery`` and therefore cannot counterfeit a successfully sent
+    digest in the Stage-4 cutover gate.
+
+    Repeated observations are retained rather than deduplicated: each is a
+    truthful scheduler execution, while the stable causation id groups every
+    observation of the same namespace/window for audit queries.
+    """
+    session.add(AlertEvent(
+        event_id=new_ulid(utc_ms(now)),
+        occurred_at=now,
+        causation_type=CausationType.SCHEDULER,
+        causation_id=identity_hash(
+            "DIGEST_WINDOW", mode, live_profile, window
+        ),
+        actor_type=ActorType.SCHEDULER,
+        actor_id_redacted="alert_digest",
+        action="digest_window_observed_quiet",
+        suppression_reasons=[],
+        detail_redacted=sanitize(
+            f"window={window}; mode={mode}; live_profile={live_profile}; "
+            "provider_intent=none; reason=no digest items"
+        ),
+        rules_sha256=planning_rules_sha256,
+    ))
+
+
 def _absorb(session: Session, delivery: AlertDelivery, *, mode: str,
-            live_profile: str, window: str, phrase_set_version: str,
-            phrase_set_sha256: str, planning_rules_sha256: str,
-            now: datetime) -> list[str]:
+            live_profile: str, window: str, now: datetime) -> list[str]:
     """Add late items to a digest that has not been sent yet."""
     absorbed: list[str] = []
     for item in _pending_items(session, mode=mode, live_profile=live_profile,
                                window=window):
         episode = session.get(AlertEpisode, item.episode_id)
+        if episode is None:
+            raise ValueError(
+                f"digest item {item.digest_item_id} has no episode evidence")
+        origin_phrase_version, origin_phrase_sha = _origin_phrase_pair(
+            session, episode)
         session.add(AlertDeliveryMember(
             delivery_id=delivery.delivery_id,
             episode_id=item.episode_id,
-            rule_id=episode.rule_id if episode is not None else "",
-            instance_fingerprint=(episode.instance_fingerprint if episode else ""),
+            rule_id=episode.rule_id,
+            instance_fingerprint=episode.instance_fingerprint,
             member_role=MemberRole.SUMMARY,
             notification_generation=1,
-            origin_rules_sha256=(episode.origin_rules_sha256 if episode
-                                 else planning_rules_sha256),
-            origin_phrase_set_version=phrase_set_version,
-            origin_phrase_set_sha256=phrase_set_sha256,
+            origin_rules_sha256=episode.origin_rules_sha256,
+            origin_phrase_set_version=origin_phrase_version,
+            origin_phrase_set_sha256=origin_phrase_sha,
             included_at=now,
         ))
         item.status = DigestItemStatus.PLANNED
         item.planned_at = now
         item.delivery_id = delivery.delivery_id
-        item.still_active_summary = bool(episode is not None and episode.is_open)
+        item.still_active_summary = episode.is_open
         absorbed.append(item.digest_item_id)
     return absorbed
-
-
-def _delivery_provenance(session: Session, delivery_id: str,
-                         fallback: tuple[str, str]) -> tuple[str, str]:
-    """The phrase set the delivery's EXISTING members were planned under.
-
-    A late item joins a message that was already assembled, so it has to carry
-    the same provenance as the rest of it. Stamping today's artifacts on it
-    would leave one delivery whose members disagree about which reviewed text
-    they were built from — and provenance that varies inside a single message
-    cannot answer the question it exists for.
-    """
-    row = session.execute(
-        select(AlertDeliveryMember.origin_phrase_set_version,
-               AlertDeliveryMember.origin_phrase_set_sha256)
-        .where(AlertDeliveryMember.delivery_id == delivery_id)
-        .order_by(AlertDeliveryMember.included_at).limit(1)
-    ).first()
-    return (row[0], row[1]) if row else fallback
 
 
 def plan_digest(session: Session, *, mode: str, live_profile: str,
@@ -181,6 +233,15 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
     control.
     """
     now = now or datetime.now(UTC)
+    planning_ruleset = session.get(AlertRulesetRegistry, planning_rules_sha256)
+    if planning_ruleset is None:
+        raise ValueError(
+            f"planning ruleset {planning_rules_sha256[:12]} is unavailable")
+    if (planning_ruleset.phrase_set_version, planning_ruleset.phrase_set_sha256) != (
+            phrase_set_version, phrase_set_sha256):
+        raise ValueError(
+            "the supplied planning phrase artifact does not match the exact "
+            "planning ruleset registry binding")
     # The DEFAULT must be the window that closed, not the one we are standing
     # in. Defaulting to the current week meant any caller who omitted the
     # argument consumed a partial week — and since the window key IS the
@@ -215,26 +276,25 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         # While the digest is still UNSENT it can simply take them, which is
         # both correct and what the operator expects: the message has not gone
         # anywhere, and it is supposed to describe the whole week.
-        if existing.transport_status in _UNSENT:
-            inherited = _delivery_provenance(
-                session, existing.delivery_id,
-                (phrase_set_version, phrase_set_sha256))
+        if _may_absorb_late_items(session, existing):
             plan.item_ids = _absorb(session, existing, mode=mode,
                                     live_profile=live_profile, window=window,
-                                    phrase_set_version=inherited[0],
-                                    phrase_set_sha256=inherited[1],
-                                    planning_rules_sha256=planning_rules_sha256,
                                     now=now)
             plan.skipped_reason = (
                 f"already planned; absorbed {len(plan.item_ids)} late item(s)"
                 if plan.item_ids else "already planned for this window")
             return plan
-        # Already on the wire or past it. Absorbing now would claim the message
-        # said something it did not, so the items stay PENDING and are counted
-        # as stranded rather than quietly folded in.
+        # A render or provider attempt freezes this intent. Absorbing now would
+        # either mutate immutable prose or claim the message represented an
+        # item it did not. Keep the item PENDING so a later window can carry it,
+        # and make the deferral explicit rather than silently folding it in.
         plan.stranded = _count_pending(session, mode=mode,
                                        live_profile=live_profile, window=window)
-        plan.skipped_reason = "already sent for this window"
+        plan.skipped_reason = (
+            "already sent for this window"
+            if existing.transport_status == TransportStatus.SENT
+            else "existing digest intent is frozen for this window"
+        )
         if plan.stranded:
             log.warning("alert_digest_items_stranded", window=window,
                         count=plan.stranded)
@@ -261,7 +321,13 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         .join(AlertEpisode, AlertEpisode.episode_id == AlertDigestItem.episode_id)
         .where(
             AlertDigestItem.digest_window_key <= window,
-            AlertDigestItem.status == DigestItemStatus.PENDING,
+            or_(
+                AlertDigestItem.status == DigestItemStatus.PENDING,
+                and_(
+                    AlertDigestItem.status == DigestItemStatus.FAILED,
+                    AlertDigestItem.digest_window_key < window,
+                ),
+            ),
             AlertEpisode.mode == mode,
             AlertEpisode.live_profile == live_profile,
         ).order_by(AlertDigestItem.pending_at)
@@ -288,6 +354,26 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
                  count=len(carried),
                  from_windows=sorted({i.digest_window_key for i in carried}))
 
+    # Mandate 21.3 is structural: TEST is the ONLY delivery kind permitted to
+    # have zero alert_delivery_member rows.  The digest heartbeat is the
+    # durable proof that this scheduled job ran; a quiet provider intent would
+    # invent a memberless market delivery and could falsely satisfy cutover's
+    # successful-digest evidence gate.  Do not burn the window key: if a late
+    # item arrives, a later run can still create the real memberful digest.
+    if not items:
+        plan.quiet = True
+        plan.skipped_reason = "no digest items for this window"
+        _record_quiet_window(
+            session,
+            mode=mode,
+            live_profile=live_profile,
+            window=window,
+            planning_rules_sha256=planning_rules_sha256,
+            now=now,
+        )
+        log.info("alert_digest_quiet", window=window)
+        return plan
+
     # CHECK-THEN-INSERT is a race. Two runs of the job — a scheduler restart
     # overlapping a manual trigger, two workers — can both find no delivery for
     # this window and both proceed. `dedupe_key` is UNIQUE, so the database
@@ -307,6 +393,8 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
                                      window_key=window),
         dedupe_version=DEDUPE_VERSION,
         manual_retry_sequence=0,
+        manual_retry_root_delivery_id=None,
+        scheduled_window_key=window,
         mode=mode,
         live_profile=live_profile,
         planning_rules_sha256=planning_rules_sha256,
@@ -328,32 +416,34 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
 
     for item in items:
         episode = session.get(AlertEpisode, item.episode_id)
+        if episode is None:
+            raise ValueError(
+                f"digest item {item.digest_item_id} has no episode evidence")
+        origin_phrase_version, origin_phrase_sha = _origin_phrase_pair(
+            session, episode)
         session.add(AlertDeliveryMember(
             delivery_id=delivery_id,
             episode_id=item.episode_id,
-            rule_id=episode.rule_id if episode is not None else "",
-            instance_fingerprint=(episode.instance_fingerprint if episode
-                                  else ""),
+            rule_id=episode.rule_id,
+            instance_fingerprint=episode.instance_fingerprint,
             member_role=MemberRole.SUMMARY,
             notification_generation=1,
             # The member keeps the artifacts its EPISODE was planned under, so
             # a digest assembled weeks later still renders from what produced
             # the item rather than whatever is active on the Monday.
-            origin_rules_sha256=(episode.origin_rules_sha256 if episode
-                                 else planning_rules_sha256),
-            origin_phrase_set_version=phrase_set_version,
-            origin_phrase_set_sha256=phrase_set_sha256,
+            origin_rules_sha256=episode.origin_rules_sha256,
+            origin_phrase_set_version=origin_phrase_version,
+            origin_phrase_set_sha256=origin_phrase_sha,
             included_at=now,
         ))
         item.status = DigestItemStatus.PLANNED
         item.planned_at = now
         item.delivery_id = delivery_id
-        item.still_active_summary = bool(episode is not None and episode.is_open)
+        item.delivered_at = None
+        item.last_error_code = None
+        item.still_active_summary = episode.is_open
         plan.item_ids.append(item.digest_item_id)
 
-    # A QUIET WEEK STILL SENDS. After Stage 4 this is the only scheduled
-    # message the operator gets, so "nothing fired" is the proof that the
-    # machinery is alive — the job the daily digest was doing by accident.
     try:
         session.flush()
         savepoint.commit()
@@ -372,10 +462,7 @@ def plan_digest(session: Session, *, mode: str, live_profile: str,
         plan.skipped_reason = "another run planned this window first"
         return plan
 
-    # A digest with no members is the one legitimate memberless market
-    # delivery, and it is marked so the dispatcher does not cancel it as
-    # "all members resolved".
-    plan.quiet = not items
+    plan.quiet = False
     plan.delivery_id = delivery_id
     log.info("alert_digest_planned", window=window, items=len(items),
              quiet=plan.quiet, delivery_id=delivery_id)

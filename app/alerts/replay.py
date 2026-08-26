@@ -27,6 +27,7 @@ is `DRYRUN`, which is its own state namespace.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -58,11 +59,23 @@ log = get_logger(__name__)
 
 #: Bumped when the SHAPE of the summary changes, so a stored gate artifact can
 #: be told apart from one produced by a different harness.
-REPLAY_SCHEMA_VERSION = 1
+REPLAY_SCHEMA_VERSION = 2
 
 #: Rolling windows the load report uses.
 WINDOW_24H = timedelta(hours=24)
 WINDOW_168H = timedelta(hours=168)
+
+_MANDATORY_EVENT_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_MANDATORY_EVENT_FIELDS = frozenset({
+    "event_id",
+    "description",
+    "window_start",
+    "window_end",
+    "rule_id",
+    "expected_priority",
+    "max_detection_slots",
+    "source",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +206,33 @@ class ReplaySummary:
         return json.dumps(self.as_dict(), indent=2, sort_keys=True, default=str)
 
 
+@dataclass(frozen=True)
+class MandatoryEvent:
+    """One operator-frozen recall assertion, validated before replay."""
+
+    event_id: str
+    description: str
+    window_start: datetime
+    window_end: datetime
+    rule_id: str
+    expected_priority: int
+    max_detection_slots: int
+    source: str
+
+
+@dataclass(frozen=True)
+class ActivatedEpisode:
+    """The identifier-free episode fields the recall gate is allowed to read."""
+
+    rule_id: str
+    priority: int
+    activated_at: datetime
+
+
+class MandatoryEventCatalogueInvalid(ValueError):
+    """A supplied recall catalogue cannot be interpreted safely."""
+
+
 # ---------------------------------------------------------------------------
 # isolated state database
 # ---------------------------------------------------------------------------
@@ -311,6 +351,7 @@ def ruleset_at_stage(ruleset: ValidatedRuleset, stage: int,
     document["meta"]["active_stage"] = int(stage)
     return validate_ruleset(
         yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+        phrase_set=phrase_set,
         phrase_set_version=phrase_set.version,
         phrase_set_sha256=phrase_set.sha256,
         methodology_version=_M.get_path("_meta", "methodology_version"),
@@ -319,15 +360,120 @@ def ruleset_at_stage(ruleset: ValidatedRuleset, stage: int,
     )
 
 
-def _load_mandatory_events(path: Path | None) -> list[dict[str, Any]]:
-    if path is None or not path.exists():
+def _catalogue_moment(value: Any, *, field_name: str, event_id: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise MandatoryEventCatalogueInvalid(
+            f"mandatory event {event_id!r} has no {field_name}")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise MandatoryEventCatalogueInvalid(
+            f"mandatory event {event_id!r} has invalid {field_name}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise MandatoryEventCatalogueInvalid(
+            f"mandatory event {event_id!r} {field_name} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _load_mandatory_events(
+    path: Path | None,
+    *,
+    known_rule_ids: frozenset[str],
+) -> list[MandatoryEvent]:
+    """Load the operator catalogue strictly; malformed evidence is a hard stop."""
+    if path is None:
         return []
+    if not path.exists():
+        raise MandatoryEventCatalogueInvalid(
+            "the supplied mandatory-event catalogue does not exist")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    events = payload.get("events", [])
-    return events if isinstance(events, list) else []
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MandatoryEventCatalogueInvalid(
+            "the mandatory-event catalogue is unreadable or invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise MandatoryEventCatalogueInvalid(
+            "the mandatory-event catalogue must be a JSON object")
+    if not isinstance(payload.get("catalogue_version"), str) \
+            or not str(payload["catalogue_version"]).strip():
+        raise MandatoryEventCatalogueInvalid(
+            "the mandatory-event catalogue needs a catalogue_version")
+    schema_version = payload.get("schema_version")
+    if isinstance(schema_version, bool) or schema_version != 1:
+        raise MandatoryEventCatalogueInvalid(
+            "the mandatory-event catalogue schema_version must be exactly 1")
+    frozen = payload.get("frozen")
+    if not isinstance(frozen, bool):
+        raise MandatoryEventCatalogueInvalid(
+            "the mandatory-event catalogue frozen flag must be boolean")
+    raw_events = payload.get("events")
+    if not isinstance(raw_events, list):
+        raise MandatoryEventCatalogueInvalid(
+            "the mandatory-event catalogue events field must be a list")
+    if raw_events and not frozen:
+        raise MandatoryEventCatalogueInvalid(
+            "a non-empty mandatory-event catalogue must declare frozen=true")
+
+    events: list[MandatoryEvent] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_events):
+        if not isinstance(raw, dict):
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event at index {index} must be an object")
+        keys = set(raw)
+        missing = sorted(_MANDATORY_EVENT_FIELDS - keys)
+        extra = sorted(keys - _MANDATORY_EVENT_FIELDS)
+        if missing or extra:
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event at index {index} has missing fields {missing} "
+                f"and unknown fields {extra}")
+        event_id = raw.get("event_id")
+        if not isinstance(event_id, str) or not _MANDATORY_EVENT_ID.fullmatch(event_id):
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event at index {index} has an unsafe event_id")
+        if event_id in seen:
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event id {event_id!r} is duplicated")
+        seen.add(event_id)
+
+        rule_id = raw.get("rule_id")
+        if not isinstance(rule_id, str) or rule_id not in known_rule_ids:
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event {event_id!r} names an unknown rule_id")
+        expected = raw.get("expected_priority")
+        if not isinstance(expected, str) or expected not in {"P1", "P2", "P3", "P4"}:
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event {event_id!r} has invalid expected_priority")
+        max_slots = raw.get("max_detection_slots")
+        if isinstance(max_slots, bool) or not isinstance(max_slots, int) or max_slots < 0:
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event {event_id!r} needs max_detection_slots >= 0")
+        description = raw.get("description")
+        source = raw.get("source")
+        if not isinstance(description, str) or not description.strip():
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event {event_id!r} needs a description")
+        if not isinstance(source, str) or not source.strip():
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event {event_id!r} needs a source")
+        window_start = _catalogue_moment(
+            raw.get("window_start"), field_name="window_start", event_id=event_id)
+        window_end = _catalogue_moment(
+            raw.get("window_end"), field_name="window_end", event_id=event_id)
+        if window_start > window_end:
+            raise MandatoryEventCatalogueInvalid(
+                f"mandatory event {event_id!r} starts after it ends")
+        events.append(MandatoryEvent(
+            event_id=event_id,
+            description=description.strip(),
+            window_start=window_start,
+            window_end=window_end,
+            rule_id=rule_id,
+            expected_priority=int(expected[1:]),
+            max_detection_slots=max_slots,
+            source=source.strip(),
+        ))
+    return events
 
 
 def run_replay(
@@ -364,6 +510,10 @@ def run_replay(
             f"{committed_stage}; production gating is unchanged"
         )
 
+    mandatory_events = _load_mandatory_events(
+        config.mandatory_events_path,
+        known_rule_ids=frozenset(rule.rule_id for rule in ruleset.rules()),
+    )
     records = inputs if inputs is not None else load_source_inputs(config)
     summary.inputs_total = len(records)
     if not records:
@@ -440,16 +590,23 @@ def run_replay(
         summary.window_first = _moment_of(records[0]).isoformat()
         summary.window_last = _moment_of(records[-1]).isoformat()
 
+        activated_episodes: list[ActivatedEpisode] = []
         with scope() as session:
             _collect_episodes(session, summary, ruleset)
             _collect_deliveries(session, summary)
             summary.digest_items = len(
                 session.execute(select(AlertDigestItem)).scalars().all())
             _collect_band_excursions(summary, records)
+            activated_episodes = _activated_episodes(session)
     finally:
         engine.dispose()
 
-    _collect_mandatory_events(config, summary)
+    _collect_mandatory_events(
+        mandatory_events,
+        records=records,
+        activated_episodes=activated_episodes,
+        summary=summary,
+    )
     _decide(summary)
     return summary
 
@@ -585,14 +742,42 @@ def _collect_band_excursions(summary: ReplaySummary,
         summary.band_excursion_months = round(span.days / 30.44, 2)
 
 
-def _collect_mandatory_events(config: ReplayConfig, summary: ReplaySummary) -> None:
+def _aware_utc(moment: datetime) -> datetime:
+    return (moment if moment.tzinfo else moment.replace(tzinfo=UTC)).astimezone(UTC)
+
+
+def _activated_episodes(session: Session) -> list[ActivatedEpisode]:
+    """Read recall evidence before the isolated replay database is disposed."""
+    from app.alerts.models import AlertEpisode
+
+    rows = session.execute(
+        select(AlertEpisode).where(AlertEpisode.activated_at.is_not(None))
+        .order_by(AlertEpisode.activated_at.asc(), AlertEpisode.rule_id.asc())
+    ).scalars().all()
+    return [
+        ActivatedEpisode(
+            rule_id=str(row.rule_id),
+            priority=int(row.priority),
+            activated_at=_aware_utc(row.activated_at),
+        )
+        for row in rows
+        if row.activated_at is not None
+    ]
+
+
+def _collect_mandatory_events(
+    events: list[MandatoryEvent],
+    *,
+    records: list[AlertInput],
+    activated_episodes: list[ActivatedEpisode],
+    summary: ReplaySummary,
+) -> None:
     """Recall against the frozen catalogue of events that MUST be detected.
 
     An event whose window has no evaluable input is reported as NOT_EVALUABLE,
     never as a miss and never as a detection — inflating recall either way
     would make the Stage 2 gate meaningless.
     """
-    events = _load_mandatory_events(config.mandatory_events_path)
     summary.mandatory_event_total = len(events)
     if not events:
         summary.notes.append(
@@ -600,10 +785,45 @@ def _collect_mandatory_events(config: ReplayConfig, summary: ReplaySummary) -> N
             "(Stage 2 gate input, requires operator-frozen fixtures)"
         )
         return
-    detected = sum(1 for e in events
-                   if e.get("rule_id") in summary.episodes_by_rule)
-    summary.mandatory_event_detected = detected
-    summary.mandatory_event_not_evaluable = summary.inputs_not_evaluable
+    ordered_records = sorted(
+        records,
+        key=lambda item: (_moment_of(item), item.input_identity),
+    )
+    for event in events:
+        window_records = [
+            record for record in ordered_records
+            if event.window_start <= _moment_of(record) <= event.window_end
+        ]
+        if not any(
+            record.evaluation_eligibility != Evaluability.NOT_EVALUABLE
+            for record in window_records
+        ):
+            summary.mandatory_event_not_evaluable += 1
+            continue
+
+        matches = [
+            episode for episode in activated_episodes
+            if episode.rule_id == event.rule_id
+            and episode.priority == event.expected_priority
+            and event.window_start <= episode.activated_at <= event.window_end
+        ]
+        if not matches:
+            continue
+        activation = min(episode.activated_at for episode in matches)
+        detection_slot = next(
+            (
+                index for index, record in enumerate(window_records)
+                if _moment_of(record) >= activation
+            ),
+            None,
+        )
+        if detection_slot is None:
+            continue
+        # event_id is frozen catalogue vocabulary.  No episode/evaluation ULID
+        # or recipient-associated value enters the committed replay summary.
+        summary.detection_times_slots[event.event_id] = detection_slot
+        if detection_slot <= event.max_detection_slots:
+            summary.mandatory_event_detected += 1
 
 
 def _window_hours(summary: ReplaySummary) -> float | None:
@@ -714,6 +934,32 @@ def _decide(summary: ReplaySummary) -> None:
             "mandatory_event_recall — the catalogue is empty; recall over zero "
             "events is undefined, not 100%"
         )
+        if summary.evaluated_at_stage >= 2:
+            failures.append(
+                "mandatory-event recall is unmeasured: Stage 2+ requires a "
+                "non-empty operator-frozen catalogue"
+            )
+    else:
+        evaluable_events = (
+            summary.mandatory_event_total
+            - summary.mandatory_event_not_evaluable
+        )
+        if evaluable_events == 0:
+            unmeasured.append(
+                "mandatory_event_recall — every catalogue event is NOT_EVALUABLE "
+                "in this replay window"
+            )
+            if summary.evaluated_at_stage >= 2:
+                failures.append(
+                    "mandatory-event recall is unmeasured: every catalogue "
+                    "event is NOT_EVALUABLE in this replay window"
+                )
+        elif summary.mandatory_event_detected < evaluable_events:
+            failures.append(
+                "mandatory-event recall missed "
+                f"{evaluable_events - summary.mandatory_event_detected} of "
+                f"{evaluable_events} evaluable event(s)"
+            )
     if summary.band_excursion_months < 24.0:
         unmeasured.append(
             f"transient_derisk_p1_rate — the window spans "

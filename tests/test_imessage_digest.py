@@ -673,6 +673,28 @@ class TestTransportSelection:
         assert get_settings().daily_digest_transport == "none"
         get_settings.cache_clear()
 
+    def test_explicit_stage4_toggle_disables_imessage_legacy_digest_too(
+            self, isolated_db, monkeypatch):
+        """DAILY_SMS_ENABLED is the legacy-digest master cutover switch.
+
+        The old implementation applied ``false`` only to sipgate, so a fully
+        configured iMessage digest remained scheduled after an operator had
+        performed the documented Stage-4 cutover.
+        """
+        monkeypatch.setenv("DAILY_SMS_ENABLED", "false")
+        monkeypatch.setenv("IMESSAGE_ENABLED", "true")
+        monkeypatch.setenv("IMESSAGE_API_BASE_URL", "http://127.0.0.1:12345")
+        monkeypatch.setenv("IMESSAGE_API_KEY", "configured-test-key-123456789")
+        monkeypatch.setenv("IMESSAGE_RECIPIENT", "+491510000000")
+        monkeypatch.setenv("SMS_ENABLED", "true")
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        assert settings.effective_daily_sms_enabled is False
+        assert settings.daily_digest_transport == "none"
+        get_settings.cache_clear()
+
     def test_digest_sends_over_imessage_and_not_sipgate(
             self, isolated_db, imessage_env, monkeypatch):
         import app.notify.imessage as im

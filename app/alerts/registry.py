@@ -24,8 +24,14 @@ import yaml
 
 from app.alerts.canonical import canonical_json, sha256_hex, sha256_of
 from app.alerts.errors import RulesetInvalid
+from app.alerts.gsm7 import SINGLE_SMS_SEPTETS, septets
+from app.alerts.phrase_registry import FragmentSpec, ValidatedPhraseSet
+from app.alerts.render_context import MEMBER_FACT_BUILDERS
 from app.alerts.rulespec import (
     AUTHORITATIVE_SAFE_KINDS,
+    OPTIONAL_RUNTIME_CAVEAT_CODES,
+    OPTIONAL_RUNTIME_FACT_IDS,
+    RUNTIME_CAVEAT_CODES,
     RulesetDocument,
     RuleSpec,
     canonical_document,
@@ -53,6 +59,7 @@ class ValidatedRuleset:
     phrase_set_version: str
     phrase_set_sha256: str
     warnings: tuple[str, ...] = ()
+    renderability_report: tuple[dict[str, Any], ...] = ()
     _by_id: dict[str, RuleSpec] = field(default_factory=dict, compare=False)
 
     def rule(self, rule_id: str) -> RuleSpec | None:
@@ -230,9 +237,153 @@ def _check_stage_gating(document: RulesetDocument, rules: list[RuleSpec],
                 problems.append(f"{rule.rule_id}: SMS-capable but names no phrase set")
 
 
+def _worst_fragment(fragment: FragmentSpec, phrase_set: ValidatedPhraseSet) -> str:
+    text = fragment.text
+    for slot in fragment.slots:
+        text = text.replace(
+            "{" + slot + "}", "W" * phrase_set.facts[slot].max_width)
+    return text
+
+
+def _check_render_contracts(
+    rules: list[RuleSpec],
+    phrase_set: ValidatedPhraseSet | None,
+    problems: list[str],
+) -> tuple[dict[str, Any], ...]:
+    """Prove every Stage-3-capable P1/P2 rule before it can be registered.
+
+    The check deliberately includes all runtime caveats at once.  Degraded,
+    stale, UNKNOWN, and known-issue evidence can coexist; a validator that
+    proves only the pleasant path would merely move an oversized message to a
+    live-time render failure.
+    """
+    report: list[dict[str, Any]] = []
+    sms_rules = [
+        rule for rule in rules
+        if rule.enabled and rule.priority in (1, 2)
+        and any(stage >= 3 for stage in rule.enabled_in_stages)
+    ]
+    if sms_rules and phrase_set is None:
+        problems.append(
+            "exact phrase bytes are required to validate Stage-3 render contracts"
+        )
+        return ()
+
+    if phrase_set is None:
+        return ()
+
+    for rule in sms_rules:
+        contract = rule.render
+        prefix = f"{rule.rule_id}: render"
+        if contract is None:
+            problems.append(f"{prefix} contract is required for an enabled SMS rule")
+            continue
+
+        local: list[str] = []
+        headline = phrase_set.headlines.get(contract.headline_code)
+        if headline is None:
+            local.append(f"headline {contract.headline_code!r} does not exist")
+
+        unknown_facts = set(contract.allowed_fact_ids) - set(phrase_set.facts)
+        if unknown_facts:
+            local.append(f"facts absent from phrase set: {sorted(unknown_facts)}")
+        unbuildable = set(contract.allowed_fact_ids) - set(MEMBER_FACT_BUILDERS)
+        if unbuildable:
+            local.append(f"facts have no typed persisted builder: {sorted(unbuildable)}")
+
+        fragments: list[FragmentSpec] = []
+        if headline is not None:
+            fragments.append(headline)
+        for code in contract.allowed_phrase_codes:
+            fragment = phrase_set.phrases.get(code)
+            if fragment is None:
+                local.append(f"allowed phrase {code!r} does not exist as a phrase")
+            else:
+                fragments.append(fragment)
+        if contract.next_check_code:
+            fragment = phrase_set.next_checks.get(contract.next_check_code)
+            if fragment is None:
+                local.append(
+                    f"next-check {contract.next_check_code!r} does not exist")
+            else:
+                fragments.append(fragment)
+
+        optional_runtime_codes = (
+            OPTIONAL_RUNTIME_CAVEAT_CODES & set(phrase_set.caveats)
+        )
+        caveat_codes = tuple(dict.fromkeys([
+            *rule.required_caveat_codes,
+            *sorted(RUNTIME_CAVEAT_CODES),
+            *sorted(optional_runtime_codes),
+        ]))
+        caveats: list[FragmentSpec] = []
+        for code in caveat_codes:
+            fragment = phrase_set.caveats.get(code)
+            if fragment is None:
+                local.append(f"caveat {code!r} does not exist")
+            else:
+                caveats.append(fragment)
+
+        allowed_facts = set(contract.allowed_fact_ids)
+        if optional_runtime_codes:
+            allowed_facts.update(OPTIONAL_RUNTIME_FACT_IDS)
+        unauthorized_slots = sorted({
+            slot for fragment in [*fragments, *caveats]
+            for slot in fragment.slots if slot not in allowed_facts
+        })
+        if unauthorized_slots:
+            local.append(
+                f"fragments require unauthorized facts {unauthorized_slots}")
+
+        worst_case = 0
+        if not local and fragments:
+            # UNKNOWN/stale and material-change are mutually exclusive render
+            # outcomes.  Prove every *reachable* simultaneous caveat set rather
+            # than summing an impossible message; DATA_DEGRADED and KNOWN_ISSUE
+            # remain in both sets because they can coexist with either outcome.
+            fixed = [
+                caveat for caveat in caveats
+                if caveat.code not in {
+                    "CONTEXT_STALE", "UNKNOWN_AT_RENDER", "MATERIAL_CHANGE"
+                }
+            ]
+            status_sets = [
+                [caveat for caveat in caveats
+                 if caveat.code in {"CONTEXT_STALE", "UNKNOWN_AT_RENDER"}],
+                [caveat for caveat in caveats if caveat.code == "MATERIAL_CHANGE"],
+            ]
+            candidates = []
+            for status_caveats in status_sets:
+                texts = [_worst_fragment(fragment, phrase_set)
+                         for fragment in [*fragments, *fixed, *status_caveats]]
+                candidates.append(septets(" ".join(texts)))
+            worst_case = max(candidates, default=0)
+            if worst_case > SINGLE_SMS_SEPTETS:
+                local.append(
+                    f"worst-case deterministic assembly is {worst_case} septets, "
+                    f"over {SINGLE_SMS_SEPTETS}")
+
+        if local:
+            problems.extend(f"{prefix} {problem}" for problem in local)
+            continue
+        report.append({
+            "rule_id": rule.rule_id,
+            "stages": sorted(stage for stage in rule.enabled_in_stages if stage >= 3),
+            "headline_code": contract.headline_code,
+            "allowed_fact_ids": list(contract.allowed_fact_ids),
+            "allowed_phrase_codes": list(contract.allowed_phrase_codes),
+            "next_check_code": contract.next_check_code,
+            "required_caveat_codes": list(rule.required_caveat_codes),
+            "worst_case_septets": worst_case,
+            "renderable": True,
+        })
+    return tuple(sorted(report, key=lambda item: item["rule_id"]))
+
+
 def validate_ruleset(
     raw_yaml: str,
     *,
+    phrase_set: ValidatedPhraseSet | None = None,
     phrase_set_version: str,
     phrase_set_sha256: str,
     methodology_version: str,
@@ -277,6 +428,15 @@ def validate_ruleset(
 
     _check_dominance(rules, problems)
     _check_stage_gating(document, rules, problems)
+    renderability_report = _check_render_contracts(rules, phrase_set, problems)
+
+    if phrase_set is not None:
+        if phrase_set.version != phrase_set_version:
+            problems.append(
+                f"supplied phrase object is {phrase_set.version!r}, not "
+                f"{phrase_set_version!r}")
+        if phrase_set.sha256 != phrase_set_sha256:
+            problems.append("supplied phrase object does not match phrase_set_sha256")
 
     if document.meta.phrase_set != phrase_set_version:
         problems.append(
@@ -343,6 +503,7 @@ def validate_ruleset(
         phrase_set_version=phrase_set_version,
         phrase_set_sha256=phrase_set_sha256,
         warnings=tuple(sorted(warnings)),
+        renderability_report=renderability_report,
         _by_id=document.by_id(),
     )
 
@@ -368,6 +529,7 @@ def ruleset_summary(validated: ValidatedRuleset) -> dict[str, Any]:
             if any(not t.is_pinned for t in r.thresholds)
         ),
         "warnings": list(validated.warnings),
+        "renderability_report": list(validated.renderability_report),
     }
 
 

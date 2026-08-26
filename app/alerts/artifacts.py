@@ -41,7 +41,7 @@ log = get_logger(__name__)
 #: Shipped defaults. An operator overrides them with ALERTS_RULES_PATH /
 #: ALERTS_PHRASE_PATH; the shipped copies are what CI validates.
 REPO_RULES = Path(__file__).resolve().parents[2] / "config" / "alert_rules.v3.2.yaml"
-REPO_PHRASES = Path(__file__).resolve().parents[2] / "config" / "alert_phrases.v3.3.json"
+REPO_PHRASES = Path(__file__).resolve().parents[2] / "config" / "alert_phrases.v3.4.json"
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,7 @@ def validate_from_disk(
 
     ruleset = validate_ruleset(
         raw_rules,
+        phrase_set=phrase_set,
         phrase_set_version=phrase_set.version,
         phrase_set_sha256=phrase_set.sha256,
         methodology_version=_M.get_path("_meta", "methodology_version"),
@@ -208,6 +209,7 @@ def load_by_hash(session: Session, rules_sha256: str, *,
     phrase_set = validate_phrase_set(phrase_row.canonical_json)
     ruleset = validate_ruleset(
         row.canonical_yaml,
+        phrase_set=phrase_set,
         phrase_set_version=phrase_set.version,
         phrase_set_sha256=phrase_set.sha256,
         methodology_version=row.methodology_version,

@@ -278,8 +278,13 @@ jobs:
             state=failure
             desc="fork PR: panel not run — maintainer review required"
           elif [ "$PANEL_DORMANT" = "true" ] && [ "$OUTCOME" = "success" ]; then
-            state=success
-            desc="panel dormant — deterministic CI only"
+            # Dormancy pauses MERGING, not reviewing. This context is a
+            # REQUIRED check: publishing success here would let a repo-variable
+            # flip plus a deleted secret turn the mandatory cross-vendor review
+            # into automatic green — zero votes, green gate. The operator may
+            # idle the panel; while it is idle, nothing merges over it.
+            state=failure
+            desc="panel dormant — no review performed; re-enable the verifier to merge"
           elif [ "$OUTCOME" = "success" ]; then
             state=success
             desc="cross-vendor panel approved"

@@ -21,6 +21,7 @@ Every datetime is stored as aware UTC and returned as RFC 3339 `Z`.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     DDL,
@@ -53,6 +54,7 @@ from app.alerts.enums import (
     RulesetItemStatus,
     RulesetRole,
     RulesetStatus,
+    SilenceMatcherKind,
     TransportStatus,
 )
 from app.models import Base
@@ -519,6 +521,14 @@ class AlertDelivery(Base):
     dedupe_key: Mapped[str] = mapped_column(String(SHA_LEN), unique=True, nullable=False)
     dedupe_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     manual_retry_sequence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Stable root across a retry-of-a-retry chain.  ``prior_unknown`` below is
+    #: deliberately different: it is the immediately preceding ambiguous
+    #: delivery, while this field owns the monotonic sequence namespace.
+    manual_retry_root_delivery_id: Mapped[str | None] = mapped_column(
+        ForeignKey("alert_delivery.delivery_id"), nullable=True)
+    #: Part of the canonical dedupe material.  Persist it so an authorised
+    #: retry can reproduce the original intent instead of parsing a hash.
+    scheduled_window_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     live_profile: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -532,6 +542,12 @@ class AlertDelivery(Base):
                                                 default=PlanningState.NONE)
     hold_reason_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
     budget_recheck_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    planning_budget_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True)
+    dispatch_budget_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True)
+    dispatch_budget_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
     not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -571,6 +587,12 @@ class AlertDelivery(Base):
         CheckConstraint("priority BETWEEN 1 AND 4", name="ck_alert_delivery_priority"),
         CheckConstraint("attempts >= 0", name="ck_alert_delivery_attempts"),
         CheckConstraint("manual_retry_sequence >= 0", name="ck_alert_delivery_manual_seq"),
+        CheckConstraint(
+            "(manual_retry_root_delivery_id IS NULL AND manual_retry_sequence = 0) OR "
+            "(manual_retry_root_delivery_id IS NOT NULL AND manual_retry_sequence >= 1 "
+            "AND prior_unknown_delivery_id IS NOT NULL)",
+            name="ck_alert_delivery_manual_retry_identity",
+        ),
         # A P1 may never be parked by quiet hours or by budget. Enforced here so
         # a future planner bug cannot even persist the mistake.
         CheckConstraint(
@@ -578,6 +600,12 @@ class AlertDelivery(Base):
             name="ck_alert_delivery_p1_never_held",
         ),
         Index("ix_alert_delivery_claim", "transport_status", "not_before", "priority"),
+        Index(
+            "uq_alert_delivery_manual_retry_root_sequence",
+            "manual_retry_root_delivery_id", "manual_retry_sequence",
+            unique=True,
+            sqlite_where=text("manual_retry_root_delivery_id IS NOT NULL"),
+        ),
     )
 
 
@@ -625,7 +653,7 @@ class AlertRender(Base):
 
     render_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
     delivery_id: Mapped[str] = mapped_column(
-        ForeignKey("alert_delivery.delivery_id"), nullable=False, index=True)
+        ForeignKey("alert_delivery.delivery_id"), nullable=False)
     render_source: Mapped[str] = mapped_column(String(24), nullable=False)
     fallback_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -649,6 +677,11 @@ class AlertRender(Base):
 
     __table_args__ = (
         CheckConstraint("gsm7_septets BETWEEN 0 AND 160", name="ck_alert_render_septets"),
+        # A delivery row is one provider intent. Automatic attempts reuse its
+        # one final render; a manual retry is a new delivery and therefore gets
+        # its own row. Database authority removes timestamp/ULID ordering as a
+        # hidden supersession mechanism.
+        Index("uq_alert_render_delivery", "delivery_id", unique=True),
     )
 
 
@@ -697,10 +730,8 @@ class AlertSilence(Base):
 
     __table_args__ = (
         CheckConstraint("ends_at > starts_at", name="ck_alert_silence_window"),
-        CheckConstraint(
-            "matcher_kind IN ('RULE_ID','INSTANCE_FINGERPRINT','BUCKET','ALL')",
-            name="ck_alert_silence_matcher",
-        ),
+        CheckConstraint(_enum_check("matcher_kind", SilenceMatcherKind),
+                        name="ck_alert_silence_matcher"),
     )
 
 
@@ -727,6 +758,23 @@ class AlertActionabilityReview(Base):
     """
 
     __tablename__ = "alert_actionability_review"
+    __table_args__ = (
+        # the DB-level backstop for "one label per alert": the route's
+        # duplicate check is a race, and the race's loser must become a
+        # constraint violation, not a second label. Two partial indexes
+        # because SQLite treats NULLs as distinct in a plain unique index.
+        Index("uq_alert_actionability_delivery", "delivery_id",
+              unique=True, sqlite_where=text("delivery_id IS NOT NULL")),
+        Index("uq_alert_actionability_episode_memberless", "episode_id",
+              unique=True, sqlite_where=text("delivery_id IS NULL")),
+        # Stage-7 aggregates slice by decision and review time. Without these,
+        # the evidence query becomes a full 800-day metadata scan precisely
+        # when the operator is deciding whether the model path is beneficial.
+        Index("ix_alert_actionability_reviewed_at", "reviewed_at"),
+        Index("ix_alert_actionability_value_reviewed_at", "actionable", "reviewed_at"),
+        CheckConstraint("actionable IN ('YES','NO','AMBIGUOUS')",
+                        name="ck_alert_actionability_value"),
+    )
 
     review_id: Mapped[str] = mapped_column(String(ULID_LEN), primary_key=True)
     episode_id: Mapped[str] = mapped_column(
@@ -739,11 +787,6 @@ class AlertActionabilityReview(Base):
     reviewer_redacted: Mapped[str | None] = mapped_column(String(128), nullable=True)
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     comment_redacted: Mapped[str | None] = mapped_column(String(512), nullable=True)
-
-    __table_args__ = (
-        CheckConstraint("actionable IN ('YES','NO','AMBIGUOUS')",
-                        name="ck_alert_actionability_value"),
-    )
 
 
 class AlertComponentHeartbeat(Base):
@@ -815,22 +858,45 @@ END
 """,
     ),
     (
-        # A market/watchdog/bundle delivery that reaches the wire with no
-        # member would be an SMS about nothing. TEST and DIGEST are the
-        # exemptions: a quiet week's digest is a message ABOUT the absence,
-        # and after Stage 4 it is the only proof the scheduler still runs.
+        # TEST is the sole zero-member kind (mandate 21.3). A retrospective
+        # DIGEST may represent a resolved episode, so its row can be dropped
+        # from the live set while remaining part of the weekly count; a
+        # silenced member is never representation authority.
         "alert_delivery_requires_member",
         """
 CREATE TRIGGER IF NOT EXISTS alert_delivery_requires_member
 BEFORE UPDATE OF transport_status ON alert_delivery
-WHEN NEW.transport_status = 'SENDING'
-  AND NEW.delivery_kind NOT IN ('TEST', 'DIGEST')
+WHEN NEW.transport_status IN ('SENDING', 'SENT')
+  AND NEW.delivery_kind <> 'TEST'
   AND NOT EXISTS (
       SELECT 1 FROM alert_delivery_member m
-      WHERE m.delivery_id = NEW.delivery_id AND m.dropped_at IS NULL
+      WHERE m.delivery_id = NEW.delivery_id
+        AND (
+          (NEW.delivery_kind = 'DIGEST'
+           AND COALESCE(m.drop_reason, '') <> 'SILENCED_BEFORE_SEND')
+          OR
+          (NEW.delivery_kind <> 'DIGEST' AND m.dropped_at IS NULL)
+        )
   )
 BEGIN
-    SELECT RAISE(ABORT, 'a non-TEST delivery must carry at least one live member');
+    SELECT RAISE(ABORT, 'a non-TEST delivery must carry a represented member');
+END
+""",
+    ),
+    (
+        # A foreign-keyed non-TEST delivery cannot have members before its
+        # parent exists.  It must therefore be inserted in a pre-wire state,
+        # gain represented members, and cross the UPDATE guard above.  Without
+        # this companion trigger a direct INSERT at SENDING or SENT skips that
+        # gate and can fabricate provider evidence.
+        "alert_delivery_insert_requires_member",
+        """
+CREATE TRIGGER IF NOT EXISTS alert_delivery_insert_requires_member
+BEFORE INSERT ON alert_delivery
+WHEN NEW.transport_status IN ('SENDING', 'SENT')
+  AND NEW.delivery_kind <> 'TEST'
+BEGIN
+    SELECT RAISE(ABORT, 'a non-TEST delivery must carry a represented member');
 END
 """,
     ),
