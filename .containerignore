@@ -3,9 +3,23 @@
 .env.*
 **/.env
 **/.env.*
-!.env.example
 .envrc
 **/.envrc
+# Backup and variant shapes of the same file. `cp .env .env.bak` was caught by
+# `.env.*`; `cp .env prod.env` and an editor's `.env~` were not — and a backup
+# of a credential file is the credential file.
+*.env
+**/*.env
+*.env.*
+**/*.env.*
+.env~
+**/.env~
+*.env~
+**/*.env~
+# The template carries no secrets and the install one-liner copies from it.
+# Re-included LAST: in ignore files the last match wins, so this negation must
+# follow every pattern above that would otherwise swallow it.
+!.env.example
 secrets
 **/secrets
 .secrets
