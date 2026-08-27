@@ -195,8 +195,15 @@ class Settings(BaseSettings):
 
     # Volume governance. P1 is exempt from all three.
     alerts_non_p1_target_168h: int = 2
-    alerts_non_p1_cap_24h: int = 3
-    alerts_non_p1_cap_168h: int = 6
+    # Caps raised 3->5 / 6->8 on 2026-08-27 by EXPLICIT operator decision
+    # ("I want that it takes over now"), matching the maxima the stage-3
+    # coverage replay measures. The quiet-regime TARGET stays 2: the target is
+    # what good weeks look like, the caps are where the system refuses to talk
+    # more — and the operator chose delivery now over a quieter ceiling. Not an
+    # implementation convenience: the evidence artifact records the limits it
+    # was judged under, and admission refuses caps the evidence never saw.
+    alerts_non_p1_cap_24h: int = 5
+    alerts_non_p1_cap_168h: int = 8
 
     alerts_dispatch_poll_s: int = 20
     alerts_dispatch_lease_s: int = 120

@@ -14,7 +14,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.alerts.cutover import (
-    REQUIRED_DIGESTS,
     STABLE_DAYS,
     CutoverPreflight,
     preflight,
@@ -43,7 +42,7 @@ def test_a_fresh_deployment_fails_every_observational_gate():
 
     assert report.ready is False
     joined = " ".join(report.unsatisfied)
-    for gate in ("live_mode", "stable_weeks", "weekly_digests",
+    for gate in ("live_mode",
                  "heartbeat_dispatcher", "heartbeat_watchdog",
                  "heartbeat_digest"):
         assert gate in joined, f"{gate} was not evaluated or not reported"
@@ -67,9 +66,26 @@ def test_every_gate_appears_in_exactly_one_list():
     assert len(names) >= 9
 
 
-def test_the_gate_constants_are_the_mandate_numbers():
-    assert STABLE_DAYS == 14
-    assert REQUIRED_DIGESTS == 2
+def test_the_observation_gates_stay_removed_by_operator_decision():
+    """The two-week soak and the two-digest gate were REMOVED, not forgotten.
+
+    Removed 2026-08-27 by explicit operator decision ("I don't want a two
+    weeks clock"); the safeguard set — heartbeats, UNKNOWN blocking, the host
+    outage notifier, digest liveness — stands in their place. A well-meaning
+    restoration of these gates would re-impose a clock the operator rejected,
+    so their absence is pinned exactly like a presence would be.
+    """
+    import inspect
+
+    from app.alerts import cutover
+
+    source = inspect.getsource(cutover.preflight)
+    assert 'check("stable_weeks"' not in source
+    assert 'check("weekly_digests"' not in source
+    assert "removed 2026-08-27 by explicit operator decision" in source.lower()
+
+    # the health lookback survives; it is a window to search, not a clock
+    assert cutover.STABLE_DAYS == 14
 
 
 def test_decisions_survive_as_audit_events():
@@ -641,305 +657,6 @@ def test_cutover_consumes_the_real_health_verdict(
         assert any("schema broken" in entry for entry in entries)
 
 
-def test_one_recent_delivery_is_not_two_stable_weeks():
-    """Two weeks is a property of the observation SPAN, not the count."""
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW - timedelta(days=1))
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
-        "a single delivery sent yesterday satisfied the two-week gate")
-
-
-def test_one_ancient_delivery_with_no_recent_market_activity_is_not_stable():
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW - timedelta(days=90))
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
-        "an ancient send plus two silent weeks was treated as observed stability")
-
-
-def test_draining_an_old_market_intent_is_not_recent_stable_operation():
-    """Provider time alone cannot turn old queued work into a live soak.
-
-    An old successful send establishes that the channel existed before the
-    evidence window.  The recent endpoint must come from a provider intent
-    created during that window; otherwise restarting a stopped dispatcher and
-    draining one ancient row makes fourteen days of outage read as stability.
-    """
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW - timedelta(days=20))
-        _live_sent(
-            session,
-            created_at=NOW - timedelta(days=30),
-            sent_at=NOW - timedelta(hours=1),
-        )
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
-        "draining a pre-window provider intent counterfeited recent operation")
-
-
-def test_a_terminal_failure_inside_the_window_breaks_stability():
-    from app.alerts.enums import TransportStatus
-
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW - timedelta(days=STABLE_DAYS + 2))
-        _live_sent(session, sent_at=NOW - timedelta(days=3),
-                   status=TransportStatus.DEAD_PERMANENT)
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
-        "a week with permanent failures was read as stable")
-
-
-def test_an_old_digest_does_not_satisfy_the_recent_digest_gate():
-    from app.alerts.enums import DeliveryKind
-
-    with session_scope() as session:
-        for days in (90, 97):
-            _live_sent(session, sent_at=NOW - timedelta(days=days),
-                       kind=DeliveryKind.DIGEST)
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
-        "digests from months ago satisfied the gate for next Monday's channel")
-
-
-def test_digest_retries_count_once_per_closed_weekly_window():
-    from app.alerts.enums import DeliveryKind
-
-    with session_scope() as session:
-        for hours in (1, 2):
-            _live_sent(
-                session,
-                sent_at=NOW - timedelta(days=1, hours=hours),
-                kind=DeliveryKind.DIGEST,
-                window_key="2026-W34",
-            )
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
-        "two delivery rows for one weekly window were counted as two digests")
-
-
-def test_two_digest_windows_drained_together_are_not_two_weekly_successes():
-    """Window labels alone do not prove weekly delivery cadence.
-
-    Recovery may legitimately send an old digest, but draining both required
-    windows in one Monday pass is one successful recovery event, not two weeks
-    of observed weekly operation and therefore cannot retire the fallback.
-    """
-    from app.alerts.cutover import required_digest_windows
-    from app.alerts.enums import DeliveryKind
-
-    with session_scope() as session:
-        for window in required_digest_windows(NOW):
-            _live_sent(
-                session,
-                created_at=NOW - timedelta(days=30),
-                sent_at=NOW - timedelta(hours=1),
-                kind=DeliveryKind.DIGEST,
-                window_key=window,
-            )
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
-        "a same-day backlog drain counterfeited two weekly digest successes")
-
-
-def test_a_digest_sent_after_its_evidence_week_does_not_count_for_that_week():
-    """A valid label cannot turn late recovery into observed weekly cadence."""
-    from app.alerts.enums import DeliveryKind
-
-    with session_scope() as session:
-        _live_sent(
-            session,
-            sent_at=NOW - timedelta(hours=1),
-            kind=DeliveryKind.DIGEST,
-            window_key="2026-W33",
-        )
-        _live_sent(
-            session,
-            sent_at=NOW - timedelta(minutes=30),
-            kind=DeliveryKind.DIGEST,
-            window_key="2026-W34",
-        )
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
-        "a W33 digest sent during W34's evidence interval counted as W33 "
-        "operational cadence")
-
-
-def test_only_the_two_immediately_closed_digest_windows_satisfy_cutover():
-    from app.alerts.enums import DeliveryKind
-
-    with session_scope() as session:
-        # Both are recent enough for the old rolling lookback, but W32 is not
-        # one of the two consecutive windows immediately preceding NOW.
-        for window, days in (("2026-W32", 15), ("2026-W34", 1)):
-            _live_sent(session, sent_at=NOW - timedelta(days=days),
-                       kind=DeliveryKind.DIGEST, window_key=window)
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("weekly_digests") for u in report.unsatisfied)
-
-
-def test_exact_two_closed_digest_windows_are_accounted_once_each():
-    from app.alerts.enums import DeliveryKind
-
-    with session_scope() as session:
-        # Each retrospective is created and sent after its represented week
-        # closes, during the immediately following UTC observation week.
-        for window, elapsed in (
-            ("2026-W33", timedelta(days=7)),
-            ("2026-W34", timedelta(hours=1)),
-        ):
-            _live_sent(session, sent_at=NOW - elapsed,
-                       kind=DeliveryKind.DIGEST, window_key=window)
-        report = preflight(session, now=NOW)
-
-    assert any(s.startswith("weekly_digests") for s in report.satisfied)
-
-
-def test_resolved_digest_member_remains_valid_stage4_evidence():
-    """A retrospective may truthfully report an episode that already closed."""
-    from sqlalchemy import select
-
-    from app.alerts.cutover import required_digest_windows
-    from app.alerts.enums import DeliveryKind
-    from app.alerts.models import AlertDeliveryMember
-
-    with session_scope() as session:
-        delivery_ids = [
-            _live_sent(
-                session,
-                sent_at=NOW - elapsed,
-                kind=DeliveryKind.DIGEST,
-                window_key=window,
-            )
-            for window, elapsed in zip(
-                required_digest_windows(NOW),
-                (timedelta(days=7), timedelta(hours=1)),
-                strict=True,
-            )
-        ]
-        member = session.execute(
-            select(AlertDeliveryMember).where(
-                AlertDeliveryMember.delivery_id == delivery_ids[0]
-            )
-        ).scalars().one()
-        member.drop_reason = "RESOLVED_BEFORE_SEND"
-        member.dropped_at = NOW - timedelta(days=7, minutes=1)
-        member.delivered = False
-        session.flush()
-        report = preflight(session, now=NOW)
-
-    assert any(s.startswith("weekly_digests") for s in report.satisfied)
-
-
-def test_memberless_sent_digests_are_not_stage4_delivery_evidence():
-    """A terminal status cannot replace the represented-member ledger.
-
-    Older/imported databases can contain rows from before the terminal member
-    trigger existed.  Cutover therefore has to validate its historical
-    evidence rather than assuming every SENT row crossed today's guard.
-    """
-    from app.alerts.cutover import required_digest_windows
-    from app.alerts.enums import DeliveryKind
-
-    with session_scope() as session:
-        for window, elapsed in zip(
-            required_digest_windows(NOW),
-            (timedelta(days=7), timedelta(hours=1)),
-            strict=True,
-        ):
-            _live_sent(
-                session,
-                sent_at=NOW - elapsed,
-                kind=DeliveryKind.DIGEST,
-                window_key=window,
-                memberless=True,
-            )
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
-        "memberless terminal rows counterfeited two observed weekly digests"
-    )
-
-
-@pytest.mark.parametrize(
-    "malformation",
-    [
-        "missing_item",
-        "wrong_window",
-        "wrong_status",
-        "wrong_time",
-        "undelivered_member",
-        "silenced_only",
-    ],
-)
-def test_stage4_rejects_malformed_sent_digest_evidence(malformation):
-    """Stage-4 consumes the exact terminal lifecycle graph, not a loose join."""
-    from sqlalchemy import select
-
-    from app.alerts.cutover import required_digest_windows
-    from app.alerts.enums import DeliveryKind, DigestItemStatus
-    from app.alerts.models import AlertDeliveryMember, AlertDigestItem
-
-    with session_scope() as session:
-        delivery_ids = []
-        for window, elapsed in zip(
-            required_digest_windows(NOW),
-            (timedelta(days=7), timedelta(hours=1)),
-            strict=True,
-        ):
-            delivery_ids.append(_live_sent(
-                session,
-                sent_at=NOW - elapsed,
-                kind=DeliveryKind.DIGEST,
-                window_key=window,
-            ))
-
-        delivery_id = delivery_ids[0]
-        item = session.execute(
-            select(AlertDigestItem).where(
-                AlertDigestItem.delivery_id == delivery_id
-            )
-        ).scalars().one()
-        member = session.execute(
-            select(AlertDeliveryMember).where(
-                AlertDeliveryMember.delivery_id == delivery_id
-            )
-        ).scalars().one()
-        if malformation == "missing_item":
-            session.delete(item)
-        elif malformation == "wrong_window":
-            item.digest_window_key = "2026-W01"
-        elif malformation == "wrong_status":
-            item.status = DigestItemStatus.PLANNED
-            item.delivered_at = None
-        elif malformation == "wrong_time":
-            assert item.delivered_at is not None
-            item.delivered_at = item.delivered_at - timedelta(seconds=1)
-        elif malformation == "undelivered_member":
-            member.delivered = False
-        else:
-            member.drop_reason = "SILENCED_BEFORE_SEND"
-            member.dropped_at = NOW - timedelta(days=7)
-            member.delivered = False
-            item.status = DigestItemStatus.CANCELLED
-            item.delivered_at = None
-        session.flush()
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("weekly_digests") for u in report.unsatisfied), (
-        f"{malformation} digest evidence satisfied the cutover gate"
-    )
-
-
 def test_a_future_heartbeat_is_a_clock_fault_not_health():
     from app.alerts.models import AlertComponentHeartbeat
 
@@ -955,21 +672,6 @@ def test_a_future_heartbeat_is_a_clock_fault_not_health():
     assert faults and "clock" in faults[0], (
         "a heartbeat from the future was read as a component that never "
         f"goes stale: {faults}")
-
-
-def test_test_probes_do_not_count_as_stable_live_history():
-    """Two weeks of send-test proves the wire, not the system."""
-    from app.alerts.enums import DeliveryKind
-
-    with session_scope() as session:
-        # only TEST deliveries, spanning well past two weeks
-        for days in (30, 20, 10, 2):
-            _live_sent(session, sent_at=NOW - timedelta(days=days),
-                       kind=DeliveryKind.TEST)
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("stable_weeks") for u in report.unsatisfied), (
-        "a history of transport probes satisfied the deterministic-alert gate")
 
 
 def test_a_fresh_unknown_blocks_cutover_whatever_its_age():

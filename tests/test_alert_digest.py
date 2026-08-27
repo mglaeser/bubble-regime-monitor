@@ -274,11 +274,18 @@ def test_a_quiet_job_persists_window_proof_without_provider_intent(monkeypatch):
         )
         assert projection["components"]["digest"]["healthy"] is True
 
+        # The two-digest observation gate was removed 2026-08-27 by explicit
+        # operator decision, so the counterfeit surface this assertion guarded
+        # is gone with it. The invariant that REMAINS is stronger and still
+        # pinned above: a quiet window persists a heartbeat and a scheduler
+        # event, never an AlertDelivery — nothing here can impersonate a
+        # provider intent whatever any future gate counts.
         from app.alerts.cutover import preflight
         cutover = preflight(session, now=datetime.now(UTC))
-        assert any(
-            item.startswith("weekly_digests") for item in cutover.unsatisfied
-        ), "a quiet scheduler event counterfeited a successfully sent digest"
+        assert not any(
+            item.startswith("weekly_digests")
+            for item in cutover.unsatisfied + cutover.satisfied
+        ), "the removed two-digest observation gate has quietly returned"
 
 
 def test_replanning_the_same_window_is_a_no_op():

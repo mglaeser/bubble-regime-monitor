@@ -27,7 +27,7 @@
 # not get to be ambiguous.
 
 meta:
-  rule_version: "v3.2.1"
+  rule_version: "v3.2.2"
   alert_input_schema_version: 1
   methodology_version: "v4.1-s4-asymmetric-contested"
   methodology_manifest_sha256: "bfb3d9a536e70042ada48ab4c2ffa29ac052540171b55f158e4f2b15d7fe5483"  # pragma: allowlist secret  (public content hash of frozen_methodology.json)
@@ -35,11 +35,14 @@ meta:
   max_service_version: "3.99.99"
   phrase_set: "v3.4"
   evaluator_version: "1"
-  active_stage: 1
+  active_stage: 3
   note: >-
-    Stage 1: schema, sidecar capture and pure evaluation only. Nothing in this
-    file sends anything at active_stage 1 — delivery begins at stage 3 and only
-    after an operator promotes this artifact by hand.
+    Stage 3, committed 2026-08-27 by explicit operator decision ("I want that
+    it takes over now"): deterministic P1/P2 delivery and the weekly digest are
+    admitted. Committing this line is still not delivery — the deployment sends
+    only after the operator promotes this exact artifact through the
+    evidence-gated service AND sets ALERTS_MODE=live by hand, and the stage-3
+    replay evidence must pass for promotion to succeed.
 
 capture:
   enabled: true

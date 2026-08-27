@@ -17,7 +17,7 @@ the decision, and says exactly what to set; it does not set it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -25,21 +25,16 @@ from sqlalchemy.orm import Session
 
 import app.alerts.health as alert_health
 from app.alerts.artifacts import load_active
-from app.alerts.calendars import last_closed_digest_window
 from app.alerts.canonical import new_ulid
 from app.alerts.enums import (
     DeliveryKind,
-    DigestItemStatus,
     PlanningState,
     Priority,
-    TransportStatus,
 )
 from app.alerts.errors import AlertingUnavailable
 from app.alerts.models import (
     AlertComponentHeartbeat,
     AlertDelivery,
-    AlertDeliveryMember,
-    AlertDigestItem,
     AlertEpisode,
     AlertEvent,
 )
@@ -52,104 +47,16 @@ from app.redaction import sanitize
 log = get_logger(__name__)
 
 #: The observation the mandate demands before the legacy channel goes dark.
+#: Lookback for the health checks (P1-suppression sweep). This is NOT an
+#: observation clock: the two-week soak and the two-digest requirement were
+#: REMOVED on 2026-08-27 by explicit operator decision ("I don't want a two
+#: weeks clock"). The safeguard set stands in their place — component
+#: heartbeats, UNKNOWN blocking, the host-side outage notifier, and the weekly
+#: digest's own liveness — which is the trade the operator chose at the start
+#: of this project: full stage now, safeguards instead of a soak.
 STABLE_DAYS = 14
-REQUIRED_DIGESTS = 2
 HEARTBEAT_FRESH_HOURS = 2
 UNKNOWN_STALE_HOURS = 24
-
-
-def _sent_digest_evidence_is_complete(
-    session: Session,
-    delivery: AlertDelivery,
-) -> bool:
-    """Validate the historical graph behind one successful weekly digest.
-
-    Current dispatch rejects a malformed graph before the wire and the database
-    rejects memberless provider-boundary transitions. Stage 4 must still
-    distrust imported or legacy rows that predate those controls: a terminal
-    scalar is not evidence that an episode was represented. A qualifying SENT
-    digest has an exact one-to-one member/item ledger, at least one
-    non-silenced member, and member/item lifecycle plus timestamp evidence
-    consistent with the provider success it claims.
-    """
-    if (
-        delivery.delivery_kind != DeliveryKind.DIGEST
-        or delivery.transport_status != TransportStatus.SENT
-        or delivery.sent_at is None
-        or delivery.scheduled_window_key is None
-    ):
-        return False
-
-    members = session.execute(
-        select(AlertDeliveryMember).where(
-            AlertDeliveryMember.delivery_id == delivery.delivery_id
-        )
-    ).scalars().all()
-    items = session.execute(
-        select(AlertDigestItem).where(
-            AlertDigestItem.delivery_id == delivery.delivery_id
-        )
-    ).scalars().all()
-    if not members or len(items) != len(members):
-        return False
-
-    items_by_episode: dict[str, list[AlertDigestItem]] = {}
-    for item in items:
-        items_by_episode.setdefault(item.episode_id, []).append(item)
-    if set(items_by_episode) != {member.episode_id for member in members}:
-        return False
-
-    sent_at = _aware(delivery.sent_at)
-    represented = 0
-    for member in members:
-        bound = items_by_episode.get(member.episode_id, [])
-        if len(bound) != 1:
-            return False
-        item = bound[0]
-        if item.digest_window_key != delivery.scheduled_window_key:
-            return False
-        if member.drop_reason == "SILENCED_BEFORE_SEND":
-            if (
-                member.dropped_at is None
-                or member.delivered
-                or item.status != DigestItemStatus.CANCELLED
-                or item.delivered_at is not None
-            ):
-                return False
-            continue
-        if member.drop_reason == "RESOLVED_BEFORE_SEND":
-            # Resolution remains valid retrospective representation.  The
-            # member itself was dropped before the wire, while its bound item
-            # records that the digest successfully reported the episode.
-            if member.dropped_at is None or member.delivered:
-                return False
-        elif (
-            member.drop_reason is not None
-            or member.dropped_at is not None
-            or not member.delivered
-        ):
-            return False
-        represented += 1
-        if (
-            item.status != DigestItemStatus.DELIVERED
-            or item.delivered_at is None
-            or _aware(item.delivered_at) != sent_at
-        ):
-            return False
-    return represented > 0
-
-
-def required_digest_windows(now: datetime) -> tuple[str, ...]:
-    """The exact consecutive weekly windows Stage 4 must have observed."""
-    latest = last_closed_digest_window(now)
-    year_text, week_text = latest.split("-W", 1)
-    latest_monday = date.fromisocalendar(int(year_text), int(week_text), 1)
-    windows = []
-    for offset in reversed(range(REQUIRED_DIGESTS)):
-        monday = latest_monday - timedelta(days=7 * offset)
-        iso_year, iso_week, _ = monday.isocalendar()
-        windows.append(f"{iso_year}-W{iso_week:02d}")
-    return tuple(windows)
 
 
 @dataclass
@@ -234,59 +141,16 @@ def preflight(
         ),
     )
 
-    # 2: two stable weeks of live deterministic alerts. "Two weeks" is a
-    # property of the OBSERVATION SPAN, not of the count: one delivery sent
-    # yesterday is one data point, however recent. The earliest live send has
-    # to predate the window, and the window has to be failure-free — a week of
-    # DEAD_PERMANENT outcomes is observed instability, not observed stability.
-    window_start = now - timedelta(days=STABLE_DAYS)
-    # MARKET deliveries only. A TEST probe proves the wire, not the system:
-    # two weeks of send-test invocations is two weeks of nothing observed
-    # about evaluation, planning or rendering, and the digest has its own
-    # gate below.
+    # Market delivery kinds, named once: the UNKNOWN gate below scopes to the
+    # load-bearing kinds. (The two-week stable-observation gate that used to
+    # live here was removed 2026-08-27 by explicit operator decision; see the
+    # module docstring.)
     market_kinds = [DeliveryKind.INITIAL, DeliveryKind.REMINDER,
                     DeliveryKind.BUNDLE, DeliveryKind.STORM,
                     DeliveryKind.WATCHDOG]
-    first_sent = session.execute(
-        select(func.min(AlertDelivery.sent_at)).where(
-            AlertDelivery.mode == "live",
-            AlertDelivery.live_profile == live_profile,
-            AlertDelivery.transport_status == TransportStatus.SENT,
-            AlertDelivery.delivery_kind.in_(market_kinds),
-            AlertDelivery.sent_at <= now,
-        )
-    ).scalar()
-    span_ok = first_sent is not None and _aware(first_sent) <= window_start
-    recent_market_sends = session.execute(
-        select(func.count()).select_from(AlertDelivery).where(
-            AlertDelivery.mode == "live",
-            AlertDelivery.live_profile == live_profile,
-            AlertDelivery.transport_status == TransportStatus.SENT,
-            AlertDelivery.delivery_kind.in_(market_kinds),
-            AlertDelivery.created_at >= window_start,
-            AlertDelivery.created_at <= AlertDelivery.sent_at,
-            AlertDelivery.sent_at >= window_start,
-            AlertDelivery.sent_at <= now,
-        )
-    ).scalar_one()
-    failures = session.execute(
-        select(func.count()).select_from(AlertDelivery).where(
-            AlertDelivery.mode == "live",
-            AlertDelivery.live_profile == live_profile,
-            AlertDelivery.delivery_kind.in_(market_kinds),
-            AlertDelivery.transport_status.in_(
-                [TransportStatus.DEAD_PERMANENT, TransportStatus.RENDER_FAILED]),
-            AlertDelivery.updated_at >= window_start,
-            AlertDelivery.updated_at <= now,
-        )
-    ).scalar_one()
-    check("stable_weeks", span_ok and recent_market_sends > 0 and failures == 0,
-          (f"profile={live_profile}; first live send {first_sent}; "
-           f"{recent_market_sends} market send(s) and {failures} terminal "
-           f"failure(s) in the last {STABLE_DAYS}d"
-           if first_sent is not None else
-           "no live delivery has ever been SENT — there is nothing observed "
-           "to cut over TO"))
+    # Lookback for the health sweeps below — a window to search, not a clock
+    # to wait out.
+    window_start = now - timedelta(days=STABLE_DAYS)
 
     # 3: zero P1 suppression inside the exact two-week evidence window.
     #
@@ -396,48 +260,9 @@ def preflight(
         f"rules={unattributed_rules}",
     )
 
-    # 4: one confirmed digest for EACH of the two immediately closed weekly
-    # windows. Delivery-row count is not window count: a manually-authorised
-    # retry for W34 remains evidence for W34, not a second successful week.
-    wanted_windows = required_digest_windows(now)
-    observed_windows: set[str] = set()
-    for window in wanted_windows:
-        iso_year, iso_week = window.split("-W", 1)
-        window_monday = date.fromisocalendar(
-            int(iso_year), int(iso_week), 1)
-        # A digest labels the week it RETROSPECTIVELY represents.  It cannot
-        # be operational evidence before that week has closed, and draining a
-        # backlog in a later week cannot turn several historical labels into
-        # several weeks of observed delivery cadence.  Bind each label to the
-        # one UTC week immediately following its close.
-        evidence_start = datetime.combine(
-            window_monday + timedelta(days=7), datetime.min.time(), tzinfo=UTC)
-        evidence_end = evidence_start + timedelta(days=7)
-        candidates = session.execute(
-            select(AlertDelivery).where(
-                AlertDelivery.mode == "live",
-                AlertDelivery.live_profile == live_profile,
-                AlertDelivery.delivery_kind == DeliveryKind.DIGEST,
-                AlertDelivery.transport_status == TransportStatus.SENT,
-                AlertDelivery.scheduled_window_key == window,
-                AlertDelivery.created_at >= evidence_start,
-                AlertDelivery.created_at < evidence_end,
-                AlertDelivery.created_at <= AlertDelivery.sent_at,
-                AlertDelivery.sent_at >= evidence_start,
-                AlertDelivery.sent_at < evidence_end,
-                AlertDelivery.sent_at <= now,
-            )
-        ).scalars().all()
-        if any(
-            _sent_digest_evidence_is_complete(session, delivery)
-            for delivery in candidates
-        ):
-            observed_windows.add(window)
-    missing_windows = [window for window in wanted_windows
-                       if window not in observed_windows]
-    check("weekly_digests", not missing_windows,
-          f"observed={sorted(observed_windows)}; required={list(wanted_windows)}; "
-          f"missing={missing_windows} (retries count once by scheduled window)")
+    # (The two-successful-digests gate that used to live here was removed
+    # 2026-08-27 by the same operator decision; the digest job's own component
+    # heartbeat below is the liveness signal that remains.)
 
     # 5: no UNRECONCILED UNKNOWN delivery at all.  UNKNOWN remains the
     # immutable transport history even after an operator authorises an exact-
