@@ -954,6 +954,18 @@ def _decide(summary: ReplaySummary) -> None:
                     "mandatory-event recall is unmeasured: every catalogue "
                     "event is NOT_EVALUABLE in this replay window"
                 )
+        elif summary.evaluated_at_stage < 2:
+            # Below stage 2 the delivery rules are gated off, so an ACTIVATION
+            # cannot exist and every catalogue event reads as a miss. That is
+            # the same shape as the volume figures being "0 by construction"
+            # before the planner ran: structurally unmeasurable, and reporting
+            # it as failure (or success) would judge the stage gate, not the
+            # detection path.
+            unmeasured.append(
+                "mandatory_event_recall — delivery rules are gated off below "
+                "stage 2, so activation-based recall is structurally zero here; "
+                "the stage-3 run in this same artifact measures it"
+            )
         elif summary.mandatory_event_detected < evaluable_events:
             failures.append(
                 "mandatory-event recall missed "

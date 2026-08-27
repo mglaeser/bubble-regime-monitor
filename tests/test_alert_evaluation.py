@@ -791,17 +791,24 @@ def test_unresolved_pin_disables_rather_than_firing():
 def _artifacts(stage: int = 3, tmp_path=None):
     """The shipped artifacts, re-stamped to a rollout stage.
 
-    The committed ruleset sits at active_stage 1 (schema and shadow evaluation
-    only), so a delivery-stage rule is correctly INACTIVE there. Tests that
-    exercise those rules have to say which stage they are simulating.
+    Tests that exercise stage-dependent behaviour say which stage they are
+    simulating instead of leaning on whatever stage happens to be committed.
+    The replacement anchors on the committed value (stage 3 since the
+    2026-08-27 operator decision) — an earlier version hardcoded
+    "active_stage: 1" and silently returned the committed bytes for EVERY
+    requested stage once the commitment moved, which made two "different"
+    rulesets hash identically.
     """
+    import re
     import tempfile
     from pathlib import Path
 
     from app.alerts.artifacts import validate_from_disk
 
     raw = Path("config/alert_rules.v3.2.yaml").read_text(encoding="utf-8")
-    raw = raw.replace("  active_stage: 1", f"  active_stage: {stage}", 1)
+    raw, replaced = re.subn(r"(?m)^  active_stage: \d+$",
+                            f"  active_stage: {stage}", raw, count=1)
+    assert replaced == 1, "could not find the committed active_stage to re-stamp"
     directory = Path(tmp_path or tempfile.mkdtemp())
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / "rules.yaml"

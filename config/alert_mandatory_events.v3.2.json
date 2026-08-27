@@ -1,22 +1,27 @@
 {
   "catalogue_version": "3.2",
   "schema_version": 1,
-  "frozen": false,
+  "frozen": true,
   "note": [
-    "The frozen catalogue of historical episodes the alert system MUST detect.",
-    "It is a GATE INPUT for Stage 2 (mandate 28 and 29), not a Stage 1 gate: the",
-    "recall number it produces is only meaningful once an operator has fixed the",
-    "windows against real captured history.",
+    "The frozen catalogue of episodes the alert system MUST detect.",
     "",
-    "It ships EMPTY on purpose. Every entry names a real market episode and a",
-    "real window, and inventing either would manufacture a recall number that",
-    "nothing measured — the same failure mode as inventing a [PIN] threshold.",
-    "Until an operator freezes entries here, `mandatory_event_total` is 0 and the",
-    "replay report says recall is not yet measurable rather than reporting 100%.",
+    "Frozen 2026-08-27 by explicit operator instruction ('I want that it takes",
+    "over now'), against the committed synthetic coverage history",
+    "(tests/fixtures/alert_replay_history, 2026-07-10..2026-07-13). Every entry",
+    "below names a transition that history deliberately stages, so the number",
+    "this produces is PIPELINE recall — proof the capture->evaluate->activate",
+    "path detects each must-never-miss transition end to end. It is not yet a",
+    "market-history recall figure; re-freeze against real captured sidecars to",
+    "get that, and append rather than replace when doing so.",
     "",
-    "Set `frozen` to true in the same commit that adds the first entries; after",
-    "that the file is append-only, because silently deleting an event the system",
-    "failed to detect would turn a miss into a pass."
+    "KNOWN TIER-A GAPS, left visible on purpose: override.fires and",
+    "structure.s3_tier_150 are must-never-miss rules with NO arc in the",
+    "coverage history yet, so freezing entries for them would record a miss",
+    "nothing staged. Extending the coverage history to fire both is the next",
+    "evidence task; their absence here must not be read as their demotion.",
+    "",
+    "Append-only: silently deleting an event the system failed to detect would",
+    "turn a miss into a pass."
   ],
   "entry_shape": {
     "event_id": "stable slug, never reused",
@@ -28,5 +33,56 @@
     "max_detection_slots": "integer — recompute slots allowed before it counts as late",
     "source": "where the operator took the dates from"
   },
-  "events": []
+  "events": [
+    {
+      "event_id": "cov-band-to-derisk",
+      "description": "Effective action state enters de-risk from a lower band — the single most consequential signal the system produces.",
+      "window_start": "2026-07-10T02:00:00+00:00",
+      "window_end": "2026-07-13T06:00:00+00:00",
+      "rule_id": "regime.band_to_derisk",
+      "expected_priority": "P1",
+      "max_detection_slots": 20,
+      "source": "synthetic coverage history tests/fixtures/alert_replay_history; operator freeze 2026-08-27"
+    },
+    {
+      "event_id": "cov-faber-out-high-risk",
+      "description": "SPY Faber month-end IN->OUT under the high-risk gate — a mechanical exit meant to be acted on the day it fires.",
+      "window_start": "2026-07-10T02:00:00+00:00",
+      "window_end": "2026-07-13T06:00:00+00:00",
+      "rule_id": "legs.faber_spy_out_high_risk",
+      "expected_priority": "P1",
+      "max_detection_slots": 20,
+      "source": "synthetic coverage history tests/fixtures/alert_replay_history; operator freeze 2026-08-27"
+    },
+    {
+      "event_id": "cov-rf4-persistent",
+      "description": "rf4 still true on a second distinct breadth observation — persistence is what makes the flag actionable.",
+      "window_start": "2026-07-10T02:00:00+00:00",
+      "window_end": "2026-07-13T06:00:00+00:00",
+      "rule_id": "tripwire.rf4_persistent",
+      "expected_priority": "P1",
+      "max_detection_slots": 20,
+      "source": "synthetic coverage history tests/fixtures/alert_replay_history; operator freeze 2026-08-27"
+    },
+    {
+      "event_id": "cov-execution-armed",
+      "description": "C-05: fresh Faber OUT with median >= 55 and clean data — the constellation that says the exit conditions align.",
+      "window_start": "2026-07-10T02:00:00+00:00",
+      "window_end": "2026-07-13T06:00:00+00:00",
+      "rule_id": "constellation.execution_armed",
+      "expected_priority": "P1",
+      "max_detection_slots": 20,
+      "source": "synthetic coverage history tests/fixtures/alert_replay_history; operator freeze 2026-08-27"
+    },
+    {
+      "event_id": "cov-coverage-risk-masking",
+      "description": "Coverage degradation while the decision is suppressed — the system going blind exactly when it matters; a missed blindness alert is worse than a missed market alert.",
+      "window_start": "2026-07-10T02:00:00+00:00",
+      "window_end": "2026-07-13T06:00:00+00:00",
+      "rule_id": "ops.coverage_risk_masking",
+      "expected_priority": "P2",
+      "max_detection_slots": 20,
+      "source": "synthetic coverage history tests/fixtures/alert_replay_history; operator freeze 2026-08-27"
+    }
+  ]
 }
