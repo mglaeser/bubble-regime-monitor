@@ -837,3 +837,50 @@ def test_cutover_rollback_is_also_two_phase(monkeypatch, capsys):
     refused = _last_json_object(output)
     assert refused["rolled_back"] is False
     get_settings.cache_clear()
+
+
+def test_a_deployment_that_never_sent_anything_cannot_cut_over():
+    """One send is the minimum evidence the replacement channel exists.
+
+    Not a clock — the operator removed those — a single bit: retiring the
+    only working channel on zero observations of its replacement would be a
+    cutover to a wire nobody has ever seen carry a message.
+    """
+    with session_scope() as session:
+        report = preflight(session, now=NOW)
+
+    faults = [u for u in report.unsatisfied if u.startswith("wire_proven")]
+    assert faults, "a zero-send deployment passed the wire gate"
+    assert "not a clock" in faults[0]
+
+
+def test_one_sent_test_probe_proves_the_wire():
+    """A TEST probe counts: the gate asks whether the transport works, and a
+    probe is precisely that question asked on purpose."""
+    from app.alerts.enums import DeliveryKind
+
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(hours=1),
+                   kind=DeliveryKind.TEST)
+        report = preflight(session, now=NOW)
+
+    assert any(s.startswith("wire_proven") for s in report.satisfied), (
+        "a confirmed SENT test probe did not satisfy the wire gate")
+
+
+def test_an_unreconciled_digest_unknown_blocks_cutover():
+    """DIGEST is a load-bearing kind: after cutover it is the only scheduled
+    message, so an ambiguous digest send blocks exactly like a market one."""
+    from app.alerts.enums import DeliveryKind, TransportStatus
+    from app.alerts.models import AlertDelivery
+
+    with session_scope() as session:
+        delivery_id = _live_sent(session, sent_at=NOW - timedelta(hours=2),
+                                 status=TransportStatus.UNKNOWN,
+                                 kind=DeliveryKind.DIGEST)
+        session.get(AlertDelivery, delivery_id).blocks_replanning = True
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("unknowns_reconciled") for u in report.unsatisfied), (
+        "an unreconciled DIGEST ambiguity did not block cutover")

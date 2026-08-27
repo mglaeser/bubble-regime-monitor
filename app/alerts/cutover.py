@@ -30,6 +30,7 @@ from app.alerts.enums import (
     DeliveryKind,
     PlanningState,
     Priority,
+    TransportStatus,
 )
 from app.alerts.errors import AlertingUnavailable
 from app.alerts.models import (
@@ -263,6 +264,25 @@ def preflight(
     # (The two-successful-digests gate that used to live here was removed
     # 2026-08-27 by the same operator decision; the digest job's own component
     # heartbeat below is the liveness signal that remains.)
+
+    # The wire must have been PROVEN at least once before the fallback channel
+    # is retired. This is deliberately not a clock — the operator removed the
+    # two-week observation gates — it is one bit of evidence: some live
+    # delivery, of any kind INCLUDING a TEST probe, has reached CONFIRMED
+    # SENT through this deployment's transport. A cutover on a deployment
+    # that has never sent anything would retire the only working channel on
+    # zero observations of its replacement.
+    wire_sends = session.execute(
+        select(func.count()).select_from(AlertDelivery).where(
+            AlertDelivery.mode == "live",
+            AlertDelivery.live_profile == live_profile,
+            AlertDelivery.transport_status == TransportStatus.SENT,
+        )
+    ).scalar_one()
+    check("wire_proven", wire_sends > 0,
+          f"{wire_sends} live delivery/deliveries CONFIRMED SENT — one send, "
+          "of any kind including a TEST probe, is the minimum evidence the "
+          "replacement channel exists; this is a bit, not a clock")
 
     # 5: no UNRECONCILED UNKNOWN delivery at all.  UNKNOWN remains the
     # immutable transport history even after an operator authorises an exact-
