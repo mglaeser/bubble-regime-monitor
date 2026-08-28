@@ -63,6 +63,9 @@ REQUIRED_MARKERS = [
     "REFRESH FAILED - showing data as of",
     # Commit ordering: overlapping loads may not render out of order.
     "seq!==LOAD_SEQ",
+    # Retained (last-known-good) content is labeled stale when its refresh
+    # failed — it may not silently pose as current beside newer status data.
+    "CONTENT REFRESH FAILED - explanatory blocks shown from an earlier load.",
 ]
 
 

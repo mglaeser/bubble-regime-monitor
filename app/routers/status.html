@@ -84,6 +84,7 @@
        GET /api/v1/content/dashboard. On fetch failure no scientific claims
        render at all, so nothing is ever shown un-disclaimed. -->
   <div class="disclaimer" id="disclaimer"></div>
+  <div class="disclaimer" id="content-stale"></div>
 </header>
 <main>
   <section id="sec-headline"><h2>Headline</h2><div id="headline" class="headline"></div></section>
@@ -157,12 +158,16 @@ let SLOTS = {};
 let EXAMPLE = {};
 let LAST_OK = null; // service.now of the last successful status load
 let LOAD_SEQ = 0;   // commit ordering: only the newest load() may render
+let CONTENT_STALE = false; // retained blocks/slots are from an earlier load
 function ctext(slug, fb){ const b=CONTENT[slug]; return (b && typeof b.text==='string') ? b.text : (fb||''); }
 function citems(slug){ const b=CONTENT[slug]; return (b && Array.isArray(b.items)) ? b.items : []; }
 function cmap(slug){ const b=CONTENT[slug]; return (b && b.entries && typeof b.entries==='object') ? b.entries : {}; }
 function slotText(name){ const s=SLOTS[name]; return (s && typeof s.text==='string') ? s.text : null; }
 
 function renderContentText(){
+  const stale=document.getElementById('content-stale');
+  stale.textContent = CONTENT_STALE ? 'CONTENT REFRESH FAILED - explanatory blocks shown from an earlier load.' : '';
+  stale.style.color = CONTENT_STALE ? 'var(--err)' : '';
   document.getElementById('disclaimer').textContent = ctext('disclaimer_full','');
   document.getElementById('intro-audit').textContent = ctext('intro.science_audit','');
   document.getElementById('intro-sources').textContent = ctext('intro.sources','');
@@ -388,16 +393,22 @@ async function load(){
   // A failed refresh keeps the previous (disclaimed) content on screen, so
   // the disclaimer gate cannot be blanked while stale grounded values remain
   // rendered (reentrancy hole flagged by the cross-vendor panel).
+  let contentFresh = true;
   try{
     const c = await fetchJson('/api/v1/content/dashboard');
     const blocks = c.data&&c.data.blocks;
     if(blocks && typeof blocks==='object') CONTENT = blocks;
-  }catch(e){ /* keep last-known-good CONTENT */ }
+  }catch(e){ contentFresh = false; /* keep last-known-good CONTENT */ }
   try{
     const dyn = await fetchJson('/api/v1/content/dynamic');
     const slots = dyn.data&&dyn.data.slots;
     if(slots && typeof slots==='object') SLOTS = slots;
-  }catch(e){ /* keep last-known-good SLOTS */ }
+  }catch(e){ contentFresh = false; /* keep last-known-good SLOTS */ }
+  // Round-2 + round-6 reconciliation: retained content stays on screen
+  // (last-known-good, never blanked) but is explicitly LABELED stale when a
+  // content refresh fails — retained blocks may not silently pose as current
+  // beside newer status data.
+  CONTENT_STALE = !contentFresh && !!ctext('disclaimer_full','');
   if(seq!==LOAD_SEQ) return; // a newer load started; let it render
   renderContentText(); renderDoclinks();
   // DISCLAIMER GATE (fail-closed): grounded values render ONLY when the
