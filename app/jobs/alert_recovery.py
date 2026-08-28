@@ -36,18 +36,28 @@ def heartbeat(
     *,
     mode: str | None = None,
     live_profile: str | None = None,
+    only_if_absent: bool = False,
 ) -> None:
     """Record liveness with the namespace whose work was actually checked.
 
     A fresh shadow heartbeat is not evidence that the live profile is healthy.
     Stamping the namespace at the shared write boundary keeps every component
     from inventing its own partially-compatible heartbeat shape.
+
+    ``only_if_absent`` writes only when the component has NO row yet, for
+    stamps that assert existence rather than work — a boot-time registration
+    must never overwrite what the job itself last reported: a restart that
+    refreshed the timestamp would launder a recorded failure into health and
+    keep a registered-but-never-running job green forever.
     """
     now = datetime.now(UTC)
     settings = get_settings()
     current_mode = mode or settings.alerts_mode
     current_profile = live_profile or settings.alerts_live_profile
     with session_scope() as session:
+        if only_if_absent and session.get(
+                AlertComponentHeartbeat, component) is not None:
+            return
         row = session.get(AlertComponentHeartbeat, component)
         if row is None:
             payload = {

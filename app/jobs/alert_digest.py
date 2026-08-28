@@ -31,16 +31,21 @@ COMPONENT = "digest"
 
 
 def record_scheduled() -> None:
-    """Boot-time proof that the weekly job is registered with the scheduler.
+    """First-boot proof that the weekly job is registered with the scheduler.
 
-    Written the moment `scheduler.start()` adds the digest job, in the same
-    namespace-stamped shape as a real run's heartbeat. This is what lets the
-    cutover gate refuse a deployment whose digest job is not scheduled AT ALL
-    without asking anyone to wait for the first Monday: day one already has a
-    row, and absence therefore always means "not scheduled", never "new".
+    Written when `scheduler.start()` adds the digest job — but ONLY if the
+    component has no heartbeat row yet. The first boot creates the row, and
+    from then on only the job itself may speak: a restart must never refresh
+    the stamp (a registered-but-never-running job has to go stale after one
+    full cadence) and must never overwrite a recorded failure with "ok".
+    This is what lets the cutover gate refuse a deployment whose digest job
+    is not scheduled AT ALL without asking anyone to wait for the first
+    Monday: day one already has a row, and absence always means "not
+    scheduled", never "new".
     """
     heartbeat(COMPONENT, "ok",
-              {"note": "scheduled; runs Monday 08:30 Europe/Berlin"})
+              {"note": "scheduled; runs Monday 08:30 Europe/Berlin"},
+              only_if_absent=True)
 
 
 

@@ -155,7 +155,10 @@ def start() -> BackgroundScheduler:
                            coalesce=True, misfire_grace_time=21600, max_instances=1)
         # Registration IS the day-one liveness proof for the weekly job: the
         # cutover gate treats a missing digest heartbeat as "not scheduled",
-        # and this stamp is why that is true from the first boot onward.
+        # and this stamp is why that is true from the first boot onward. It
+        # writes only when no digest row exists — later boots preserve
+        # whatever the job last reported, so failures survive restarts and a
+        # never-running job goes stale on schedule.
         try:
             from app.jobs.alert_digest import record_scheduled
             record_scheduled()

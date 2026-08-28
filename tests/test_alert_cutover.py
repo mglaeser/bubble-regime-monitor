@@ -971,6 +971,16 @@ def test_a_digest_that_reported_failure_is_not_never_ran():
             status="critical",
             detail_json={"mode": "live", "live_profile": "default"}))
         session.flush()
+
+    # A routine restart re-registers the job. The boot stamp is only-if-absent,
+    # so it must NOT launder the recorded failure into fresh health.
+    from app.jobs.alert_digest import record_scheduled
+    record_scheduled()
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        assert row.status == "critical", (
+            "a process restart overwrote the digest's recorded failure")
         report = preflight(session, now=NOW)
 
     faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
@@ -995,3 +1005,40 @@ def test_the_schema_forbids_a_heartbeat_row_without_a_timestamp():
             component="digest", last_heartbeat_at=None, status="ok",
             detail_json={"mode": "live", "live_profile": "default"}))
         session.flush()
+
+
+def test_restarts_never_refresh_the_registration_stamp():
+    """A registered-but-never-running digest must go stale after one cadence.
+
+    If every boot re-stamped the row, any restart cadence under eight days
+    would keep a job that never executes green forever — the gate would
+    degrade to a schedule-registration check while still gating retirement
+    of the legacy channel. So later boots are no-ops: the row ages until the
+    job itself speaks.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.jobs.alert_digest import record_scheduled
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest",
+            last_heartbeat_at=NOW - timedelta(days=9),
+            status="ok",
+            detail_json={"mode": "live", "live_profile": "default",
+                         "note": "scheduled; runs Monday 08:30 Europe/Berlin"}))
+        session.flush()
+
+    record_scheduled()  # the restart
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        beat = row.last_heartbeat_at
+        beat = beat.replace(tzinfo=UTC) if beat.tzinfo is None else beat
+        assert beat == NOW - timedelta(days=9), (
+            "the restart moved the digest heartbeat forward")
+        report = preflight(session, now=NOW)
+
+    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert faults, (
+        "a restart refreshed the registration stamp and kept a never-running "
+        "digest green past a full cadence")
