@@ -566,81 +566,32 @@ They are enabled and they cannot send — both are P4, and the planner maps P4 t
 without checking what they produce turned a refusal into an evidence check, and
 a promoted Stage-1 artifact then cleared live admission.
 
-## 11b. Open Stage 3 blocker: the ruleset exceeds its own non-P1 budget
+## 11b. The former Stage 2 blocker, resolved by named operator decisions
 
-Wiring the planner into the atomic apply (audit B-01) turned every non-P1
-volume figure in the replay from "0 by construction" into a real count. On the
-replayed history the stage-3 replay plans 13 deliveries and breaches both caps:
+Until 2026-08-27 the stage-3 replay FAILED on its own non-P1 volume caps
+(24h 5 > 3, 168h 8 > 6 on the coverage history) and, later, on the empty
+mandatory-event catalogue. Both were held open as operator decisions rather
+than absorbed, and on 2026-08-27 the operator made them ("I want that it
+takes over now"):
 
-```
-non-P1 24h  : 5   cap 3          BREACHED
-non-P1 168h : 8   cap 6          BREACHED
-non-P1 mean : 8.0 per 168h       UNMEASURED (see below)
-```
-
-`docs/alert-stage1-gate.json` records **stage 3 as FAILING**, and
-`tests/test_alert_replay.py` pins both failures exactly so a new one cannot be
-absorbed silently.
-
-### Why a 76-hour window can prove a one-week breach
-
-The replay covers 76 hours, which looks too short to judge a 168-hour cap. It
-is not, and the asymmetry is worth stating because I got it wrong once and had
-to be corrected.
-
-A sliding-window **maximum is monotonic** in the window length. Observing 8
-non-P1 messages inside 76 hours means every 168-hour window containing them
-holds at least 8 — so the cap of 6 is broken, and no additional history can
-undo it. A longer window only accumulates more.
-
-The converse does not hold. Staying *under* a cap for 76 hours says nothing
-about a week, so a non-breach on a short window is reported UNMEASURED rather
-than passed.
-
-The **mean** is different again: it is not monotonic, so a per-168h mean taken
-from 76 hours is an arithmetic accident rather than a rate. It is the one
-volume figure this window cannot establish.
-
-### Deciding what to do about it
-
-Two things are worth knowing:
-
-* The history is a **coverage fixture** (`history.source` in the artifact),
-  built to exercise every rule, so its density is a property of the fixture as
-  much as of the ruleset. Stage 2 exists to re-measure on real captured
-  sidecars. The breach is real; its magnitude is not a production forecast.
-* Grouping is working. P2s firing in the SAME evaluation bundle into one
-  delivery; these 13 are spread across 20 inputs over three days, so there is
-  nothing for bundling to collapse. Bundling messages hours apart would mean
-  delaying the first, which is not a trade the mandate makes.
-
-This is an operator decision, not an engineering one. The options are to tune
-the rules that generate the volume, to raise the caps deliberately with a
-recorded reason, or to accept the breach for Stage 3 and re-measure on real
-history before Stage 4. What must not happen is the caps being relaxed to make
-a gate pass: the budget exists precisely to catch a ruleset that talks too
-much, and it has just done its job on the first history it was ever able to
-measure.
-
-Until this is decided, Stage 3 cannot be promoted. That refusal is executable,
-not advisory:
-
-* the evidence carries the complete rules, phrase-set, and mandatory-event
-  catalogue digests as stable grouped values; promotion checks the rule and
-  phrase bytes at every stage and, from Stage 2 onward, checks the exact frozen
-  catalogue plus its version/schema/count against the replay results;
-* the promotion service refuses every recorded replay failure;
-* runtime live admission rechecks the active stage, evidence and currently
-  promoted bytes before constructing a sender; and
-* wire-time delivery admission verifies that the exact planning ruleset was
-  deliberately promoted with evidence, was not revoked, and is not from a
-  stage above the current deployment.
-
-`tests/test_alert_replay.py` pins both volume failures literally, and CI
-regenerates the gate artifact. A changed ruleset therefore needs changed,
-reviewable evidence; a version label alone cannot authorize different bytes.
-
----
+* **Caps raised 3→5 / 6→8**, recorded in `app/config.py` beside the values.
+  The quiet-regime target stays 2. The evidence artifact records the limits
+  each verdict used, and admission refuses caps the evidence never saw — so
+  the raise is bound into the gate, not slipped past it.
+* **The mandatory-event catalogue frozen** at five pipeline-recall entries the
+  coverage history genuinely activates (recall 5/5). `override.fires` and
+  `structure.s3_tier_150` are named IN the catalogue as known Tier-A coverage
+  gaps — must-never-miss rules with no staged arc yet — so their absence
+  reads as outstanding evidence work, not demotion.
+* **`active_stage` committed to 3** in the same decision. Committing the stage
+  is still not delivery: the deployment sends only after the operator promotes
+  the exact artifact through the evidence-gated service and sets
+  `ALERTS_MODE=live` by hand.
+* **The two-week/two-digest observation gates removed from cutover preflight**
+  ("I don't want a two weeks clock"). The safeguard set stands in their place:
+  component heartbeats bounded on both sides, any-open-UNKNOWN blocking, the
+  host-side outage notifier, and the weekly digest's own liveness event. Their
+  absence is pinned by a test exactly as their presence was.
 
 ## 11c. The weekly digest
 

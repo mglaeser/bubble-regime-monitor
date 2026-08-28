@@ -4,8 +4,8 @@
     "digests": "carried GROUPED above — the full sha256 split into eight-character runs, so an entropy detector does not read it as a credential. The promotion gate binds evidence to bytes with them; per-run summaries still omit bare digests. See app.alerts.promotion.group_digest",
     "phrase_set_sha256_grouped": "96d915f5-1a8fb496-aded9c1d-907abe76-b5d9be96-e23b8fc1-fab525fc-567d3196",
     "phrase_set_version": "v3.4",
-    "rule_version": "v3.2.1",
-    "rules_sha256_grouped": "e143a98b-1b4feeb5-a4b6f05b-3d52d23d-023f5cbd-e55066f5-ec5bf426-fc461dcd"
+    "rule_version": "v3.2.2",
+    "rules_sha256_grouped": "93efd9c8-58cceff1-3b45778e-13f9496b-64990cda-9a4f169a-85abf8c6-a9978e1d"
   },
   "gate": "deterministic replay; no PII; no scoring regression",
   "generation": {
@@ -22,15 +22,15 @@
   },
   "mandatory_event_catalogue": {
     "catalogue_version": "3.2",
-    "event_count": 0,
-    "frozen": false,
+    "event_count": 5,
+    "frozen": true,
     "schema_version": 1,
-    "sha256_grouped": "2c45e086-f5373707-82dd8335-12251f93-e38758dd-a69ad876-30914b86-73377267",
+    "sha256_grouped": "a5262419-d82dee59-cd4ec4ae-db8519d5-4f523e35-8e8736c3-7a458fa8-f4d992da",
     "source": "config/alert_mandatory_events.v3.2.json"
   },
   "runs": {
     "stage_1": {
-      "active_stage": 1,
+      "active_stage": 3,
       "band_excursion_months": 0.1,
       "budget_limits": {},
       "cancelled_superseded": 0,
@@ -70,7 +70,7 @@
       "inputs_total": 20,
       "mandatory_event_detected": 0,
       "mandatory_event_not_evaluable": 0,
-      "mandatory_event_total": 0,
+      "mandatory_event_total": 5,
       "max_non_p1_168h": 0,
       "max_non_p1_24h": 0,
       "mean_non_p1_per_168h": 0.0,
@@ -78,11 +78,11 @@
       "not_measured": [
         "non_p1_volume_targets (24h cap, 168h cap, 168h mean) — no delivery was planned at this stage, so every count is 0 by construction rather than by governance",
         "quiet_hours_and_budget_holds — no delivery was planned to hold",
-        "mandatory_event_recall — the catalogue is empty; recall over zero events is undefined, not 100%",
+        "mandatory_event_recall — delivery rules are gated off below stage 2, so activation-based recall is structurally zero here; the stage-3 run in this same artifact measures it",
         "transient_derisk_p1_rate — the window spans 0.1 months; the target is stated per 24 months and cannot be judged on a shorter history"
       ],
       "notes": [
-        "mandatory-event catalogue is empty — recall is not yet measurable (Stage 2 gate input, requires operator-frozen fixtures)"
+        "forward-looking replay: rules gated at stage 1, committed ruleset is at stage 3; production gating is unchanged"
       ],
       "notification_planning_ran": false,
       "p1_bypasses_of_unknown": 0,
@@ -96,11 +96,11 @@
       "window_last": "2026-07-13T06:00:00+00:00"
     },
     "stage_3": {
-      "active_stage": 1,
+      "active_stage": 3,
       "band_excursion_months": 0.1,
       "budget_limits": {
-        "cap_168h": 6,
-        "cap_24h": 3,
+        "cap_168h": 8,
+        "cap_24h": 5,
         "target_168h": 2
       },
       "cancelled_superseded": 0,
@@ -109,7 +109,13 @@
       },
       "deliveries_planned": 13,
       "deliveries_sent": 0,
-      "detection_times_slots": {},
+      "detection_times_slots": {
+        "cov-band-to-derisk": 8,
+        "cov-coverage-risk-masking": 6,
+        "cov-execution-armed": 8,
+        "cov-faber-out-high-risk": 8,
+        "cov-rf4-persistent": 12
+      },
       "digest_items": 0,
       "episodes_activated": 19,
       "episodes_by_bucket": {
@@ -147,12 +153,8 @@
       "evaluations_conflict": 0,
       "evaluations_failed": 0,
       "evaluations_timed_out": 0,
-      "failures": [
-        "non-P1 volume breached the 24h cap: 5 > 3",
-        "non-P1 volume breached the 168h cap: 8 > 6",
-        "mandatory-event recall is unmeasured: Stage 2+ requires a non-empty operator-frozen catalogue"
-      ],
-      "held_budget": 3,
+      "failures": [],
+      "held_budget": 2,
       "held_grouping": 0,
       "held_quiet": 3,
       "indeterminate_band_excursions": 1,
@@ -161,26 +163,23 @@
       "inputs_partial": 0,
       "inputs_reconstructed": 0,
       "inputs_total": 20,
-      "mandatory_event_detected": 0,
+      "mandatory_event_detected": 5,
       "mandatory_event_not_evaluable": 0,
-      "mandatory_event_total": 0,
+      "mandatory_event_total": 5,
       "max_non_p1_168h": 8,
       "max_non_p1_24h": 5,
       "mean_non_p1_per_168h": 8.0,
       "mode": "dryrun",
       "not_measured": [
+        "non_p1_volume_168h_cap — the window spans 76.0h and the cap is stated per 168h; staying under it here proves nothing about a full period",
         "non_p1_mean_per_168h — a mean is not monotonic in the window length, so it cannot be inferred from a shorter history",
-        "mandatory_event_recall — the catalogue is empty; recall over zero events is undefined, not 100%",
         "transient_derisk_p1_rate — the window spans 0.1 months; the target is stated per 24 months and cannot be judged on a shorter history"
       ],
-      "notes": [
-        "forward-looking replay: rules gated at stage 3, committed ruleset is at stage 1; production gating is unchanged",
-        "mandatory-event catalogue is empty — recall is not yet measurable (Stage 2 gate input, requires operator-frozen fixtures)"
-      ],
+      "notes": [],
       "notification_planning_ran": true,
       "p1_bypasses_of_unknown": 0,
       "p1_total": 5,
-      "passed": false,
+      "passed": true,
       "schema_version": 2,
       "suppressions_by_reason": {
         "DATA_QUALITY_GUARD": 5,
@@ -192,11 +191,11 @@
       "window_last": "2026-07-13T06:00:00+00:00"
     },
     "stage_4": {
-      "active_stage": 1,
+      "active_stage": 3,
       "band_excursion_months": 0.1,
       "budget_limits": {
-        "cap_168h": 6,
-        "cap_24h": 3,
+        "cap_168h": 8,
+        "cap_24h": 5,
         "target_168h": 2
       },
       "cancelled_superseded": 0,
@@ -205,7 +204,13 @@
       },
       "deliveries_planned": 13,
       "deliveries_sent": 0,
-      "detection_times_slots": {},
+      "detection_times_slots": {
+        "cov-band-to-derisk": 8,
+        "cov-coverage-risk-masking": 6,
+        "cov-execution-armed": 8,
+        "cov-faber-out-high-risk": 8,
+        "cov-rf4-persistent": 12
+      },
       "digest_items": 0,
       "episodes_activated": 19,
       "episodes_by_bucket": {
@@ -243,12 +248,8 @@
       "evaluations_conflict": 0,
       "evaluations_failed": 0,
       "evaluations_timed_out": 0,
-      "failures": [
-        "non-P1 volume breached the 24h cap: 5 > 3",
-        "non-P1 volume breached the 168h cap: 8 > 6",
-        "mandatory-event recall is unmeasured: Stage 2+ requires a non-empty operator-frozen catalogue"
-      ],
-      "held_budget": 3,
+      "failures": [],
+      "held_budget": 2,
       "held_grouping": 0,
       "held_quiet": 3,
       "indeterminate_band_excursions": 1,
@@ -257,26 +258,25 @@
       "inputs_partial": 0,
       "inputs_reconstructed": 0,
       "inputs_total": 20,
-      "mandatory_event_detected": 0,
+      "mandatory_event_detected": 5,
       "mandatory_event_not_evaluable": 0,
-      "mandatory_event_total": 0,
+      "mandatory_event_total": 5,
       "max_non_p1_168h": 8,
       "max_non_p1_24h": 5,
       "mean_non_p1_per_168h": 8.0,
       "mode": "dryrun",
       "not_measured": [
+        "non_p1_volume_168h_cap — the window spans 76.0h and the cap is stated per 168h; staying under it here proves nothing about a full period",
         "non_p1_mean_per_168h — a mean is not monotonic in the window length, so it cannot be inferred from a shorter history",
-        "mandatory_event_recall — the catalogue is empty; recall over zero events is undefined, not 100%",
         "transient_derisk_p1_rate — the window spans 0.1 months; the target is stated per 24 months and cannot be judged on a shorter history"
       ],
       "notes": [
-        "forward-looking replay: rules gated at stage 4, committed ruleset is at stage 1; production gating is unchanged",
-        "mandatory-event catalogue is empty — recall is not yet measurable (Stage 2 gate input, requires operator-frozen fixtures)"
+        "forward-looking replay: rules gated at stage 4, committed ruleset is at stage 3; production gating is unchanged"
       ],
       "notification_planning_ran": true,
       "p1_bypasses_of_unknown": 0,
       "p1_total": 5,
-      "passed": false,
+      "passed": true,
       "schema_version": 2,
       "suppressions_by_reason": {
         "DATA_QUALITY_GUARD": 5,
