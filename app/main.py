@@ -95,6 +95,7 @@ def create_app() -> FastAPI:
         admin,
         admin_alerts,
         alerts,
+        content,
         dashboard,
         health,
         indicators,
@@ -137,6 +138,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(admin.router)
     app.include_router(status.router)
+    app.include_router(content.router)
     app.include_router(dashboard.router)
     app.include_router(webhooks.router)
     app.include_router(replay.router)

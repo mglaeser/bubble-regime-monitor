@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import session_scope
+from app.engine.recompute_slots import schedule_display
 from app.models import DashboardFeed, ProviderHealth, Snapshot, SourceHealth
 from app.references import (
     CHANGELOG,
@@ -298,7 +299,7 @@ def build_status() -> dict[str, Any]:
         "service": {
             "name": "bubblegauge", "version": settings.service_version,
             "now": _iso(datetime.now(UTC)),
-            "recompute_schedule": "every 4h (02/06/10/14/18/22 UTC)",
+            "recompute_schedule": schedule_display(),
             "sms_enabled": settings.sms_enabled,
             "docs": {"swagger": "/docs", "redoc": "/redoc", "openapi": "/openapi.json"},
         },
