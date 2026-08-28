@@ -313,3 +313,17 @@ class TestBlockArtifact:
         reg._file_artifact.cache_clear()
         assert reg.content_version() == 0
         reg._file_artifact.cache_clear()
+
+    def test_exponent_overflow_infinity_rejected(self, monkeypatch, tmp_path):
+        # Round 6: 1e400 parses to float('inf') via parse_float (bypassing
+        # parse_constant); the strict round-trip must reject it at load.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text('{"content_version": 1, "blocks": {'
+                       '"x.y": {"kind": "table", "items": [{"v": 1e400}]}}}',
+                       encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        reg._file_artifact.cache_clear()

@@ -49,6 +49,8 @@ fixed with priority.
 
 | 5 | SOTA-A + SOTA-C | Non-finite numbers survive preflight (Starlette's `allow_nan=False` encoder 500s on cached v1 data); nested-item validation container-shallow (`table` holding a string item advertises v1) | **UPHELD ×2 → fixed**: `json.load(parse_constant=reject)` refuses Infinity/NaN at load; `_valid_member` validates every ITEM per kind (links/catalog/table items must be non-empty dicts, list items strings-or-dicts, map values non-empty strings). Both pinned with hostile-file tests |
 
+| 6 | SOTA-A + SOTA-C (convergent) | `1e400` overflows to `float('inf')` via `parse_float`, bypassing `parse_constant`; `json.dumps` default `allow_nan=True` emits it, so preflight passes and the `allow_nan=False` response encoder 500s | **UPHELD → fixed**: the load-time round-trip now runs under the response encoder's own strictness (`allow_nan=False`) — any non-finite float anywhere in the artifact rejects it whole at load. Pinned with a `1e400` hostile-file test |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit

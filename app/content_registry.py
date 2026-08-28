@@ -56,10 +56,12 @@ def _file_artifact() -> dict[str, Any]:
         with _BLOCKS_FILE.open(encoding="utf-8") as fh:
             loaded = json.load(fh, parse_constant=_reject_constant)
         # A payload that json.load accepts can still be unserializable at
-        # RESPONSE time (lone UTF-16 surrogates raise UnicodeEncodeError in
-        # the response encoder — a 500 far past this try/except). Prove the
-        # whole artifact round-trips to UTF-8 here or reject it whole.
-        json.dumps(loaded, ensure_ascii=False).encode("utf-8")
+        # RESPONSE time (lone UTF-16 surrogates raise UnicodeEncodeError; a
+        # 1e400 exponent overflows to float('inf') via parse_float, bypassing
+        # parse_constant, and the allow_nan=False response encoder raises).
+        # Prove the whole artifact round-trips under the RESPONSE encoder's
+        # own strictness here, or reject it whole.
+        json.dumps(loaded, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (OSError, ValueError, RecursionError, UnicodeEncodeError):
         return dict(_EMPTY_ARTIFACT)
     version = loaded.get("content_version") if isinstance(loaded, dict) else None
