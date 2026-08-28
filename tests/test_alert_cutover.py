@@ -43,8 +43,7 @@ def test_a_fresh_deployment_fails_every_observational_gate():
     assert report.ready is False
     joined = " ".join(report.unsatisfied)
     for gate in ("live_mode",
-                 "heartbeat_dispatcher", "heartbeat_watchdog",
-                 "heartbeat_digest"):
+                 "heartbeat_dispatcher", "heartbeat_watchdog"):
         assert gate in joined, f"{gate} was not evaluated or not reported"
 
     # and the checks that CAN pass on a fresh db are reported as satisfied,
@@ -884,3 +883,52 @@ def test_an_unreconciled_digest_unknown_blocks_cutover():
 
     assert any(u.startswith("unknowns_reconciled") for u in report.unsatisfied), (
         "an unreconciled DIGEST ambiguity did not block cutover")
+
+
+def test_the_weekly_digest_is_judged_on_its_own_cadence():
+    """Two hours of silence from a WEEKLY job is Tuesday, not death.
+
+    The single 2h freshness limit made `cutover apply` refusable six and a
+    half days out of seven — a clock in disguise. A digest heartbeat from last
+    Monday is healthy all week; one older than a full cadence plus grace means
+    the job died and blocks.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest",
+            last_heartbeat_at=NOW - timedelta(days=3),   # last Monday-ish
+            status="ok",
+            detail_json={"mode": "live", "live_profile": "default"}))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    assert any(s_.startswith("heartbeat_digest") for s_ in report.satisfied), (
+        "a three-day-old weekly heartbeat was read as a dead component")
+
+    with session_scope() as session:
+        session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at = \
+            NOW - timedelta(days=10)
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("heartbeat_digest") for u in report.unsatisfied), (
+        "a ten-day-dead weekly job passed the gate")
+
+
+def test_a_digest_that_never_ran_does_not_block_first_activation():
+    """Never-ran is not stale: the first proof-of-life lands next Monday.
+
+    Refusing cutover until the weekly job has run once would be a waiting
+    period in disguise — the thing the operator explicitly removed. A
+    dispatcher or watchdog with no heartbeat still blocks: their cadence is
+    minutes, so absence IS death.
+    """
+    with session_scope() as session:
+        report = preflight(session, now=NOW)
+
+    digest = [s_ for s_ in report.satisfied if s_.startswith("heartbeat_digest")]
+    assert digest and "not staleness" in digest[0]
+    assert any(u.startswith("heartbeat_dispatcher") for u in report.unsatisfied)
+    assert any(u.startswith("heartbeat_watchdog") for u in report.unsatisfied)

@@ -56,7 +56,13 @@ log = get_logger(__name__)
 #: digest's own liveness — which is the trade the operator chose at the start
 #: of this project: full stage now, safeguards instead of a soak.
 STABLE_DAYS = 14
+#: Freshness is CADENCE-APPROPRIATE, not one number: the dispatcher polls in
+#: seconds and the watchdog in minutes, so two hours of silence from either is
+#: a dead component — but the digest runs WEEKLY (Monday 08:30 Berlin), and
+#: holding it to the same two hours made `cutover apply` refusable six and a
+#: half days out of seven. Eight days covers one full cadence plus grace.
 HEARTBEAT_FRESH_HOURS = 2
+_HEARTBEAT_FRESH = {"dispatcher": 2, "watchdog": 2, "digest": 8 * 24}
 UNKNOWN_STALE_HOURS = 24
 
 
@@ -305,12 +311,12 @@ def preflight(
           "whatever its age)")
 
     # 6: the components that replace the daily message are alive
-    for component in ("dispatcher", "watchdog", "digest"):
+    for component, fresh_hours in _HEARTBEAT_FRESH.items():
         row = session.get(AlertComponentHeartbeat, component)
         beat = _aware(row.last_heartbeat_at) if (
             row is not None and row.last_heartbeat_at is not None) else None
         # Bounded on BOTH sides. A timestamp from the future satisfies any
-        # `>= now - 2h` check forever, so a clock fault would read as a
+        # `>= now - N` check forever, so a clock fault would read as a
         # component that never goes stale — the exact component this gate
         # exists to distrust. Small forward skew is tolerated; beyond it the
         # heartbeat is evidence of a broken clock, not of health.
@@ -323,9 +329,20 @@ def preflight(
         row_status = row.status if row is not None else None
         status_ok = row_status == "ok"
         if beat is None:
-            fresh, detail = False, (
-                f"no heartbeat in {HEARTBEAT_FRESH_HOURS}h — after cutover "
-                "this component is load-bearing")
+            if component == "digest":
+                # Never run is not stale. The weekly job's first proof-of-life
+                # lands on the first Monday AFTER activation, and refusing the
+                # cutover until then would be a clock in disguise — the thing
+                # the operator explicitly removed. "Ran and stopped" still
+                # blocks below; "has not had its first Monday yet" does not.
+                fresh, detail = True, (
+                    "no digest run yet — the weekly job's first proof-of-life "
+                    "lands next Monday 08:30; absence at first activation is "
+                    "not staleness")
+            else:
+                fresh, detail = False, (
+                    f"no heartbeat in {fresh_hours}h — after cutover this "
+                    "component is load-bearing")
         elif beat > now + timedelta(minutes=5):
             fresh, detail = False, (
                 f"heartbeat is {beat.isoformat()} — in the future, which is a "
@@ -338,12 +355,12 @@ def preflight(
         elif not status_ok:
             fresh, detail = False, (
                 f"heartbeat status is {row_status!r}, not accepted health")
-        elif beat >= now - timedelta(hours=HEARTBEAT_FRESH_HOURS):
+        elif beat >= now - timedelta(hours=fresh_hours):
             fresh, detail = True, "fresh, healthy, and live-namespace matched"
         else:
             fresh, detail = False, (
                 f"last heartbeat {beat.isoformat()}, older than "
-                f"{HEARTBEAT_FRESH_HOURS}h")
+                f"{fresh_hours}h (cadence-appropriate limit for {component})")
         check(f"heartbeat_{component}", fresh, detail)
 
     # 7: there is still something to cut over
