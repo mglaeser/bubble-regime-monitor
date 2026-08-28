@@ -58,6 +58,9 @@ REQUIRED_MARKERS = [
     # Reentrancy: content only ever advances on a successful fetch, so a failed
     # 60s refresh can never blank the disclaimer over stale grounded values.
     "last-known-good",
+    # Staleness honesty: after a failed refresh the retained sections are
+    # explicitly labeled stale, never presented as current.
+    "REFRESH FAILED - showing data as of",
 ]
 
 

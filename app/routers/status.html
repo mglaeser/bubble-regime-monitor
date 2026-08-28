@@ -155,6 +155,7 @@ function kv(pairs){ const d=h('div','kv'); pairs.forEach(([k,v])=>{ d.appendChil
 let CONTENT = {};
 let SLOTS = {};
 let EXAMPLE = {};
+let LAST_OK = null; // service.now of the last successful status load
 function ctext(slug, fb){ const b=CONTENT[slug]; return (b && typeof b.text==='string') ? b.text : (fb||''); }
 function citems(slug){ const b=CONTENT[slug]; return (b && Array.isArray(b.items)) ? b.items : []; }
 function cmap(slug){ const b=CONTENT[slug]; return (b && b.entries && typeof b.entries==='object') ? b.entries : {}; }
@@ -404,8 +405,10 @@ async function load(){
   }
   try{
     const s = await fetchJson('/api/v1/status');
+    LAST_OK = (s.service&&s.service.now)||null;
     document.getElementById('ver').textContent = 'v'+((s.service&&s.service.version)||'?');
-    document.getElementById('ts').textContent = 'as of '+((s.service&&s.service.now)||'');
+    const ts=document.getElementById('ts');
+    ts.textContent = 'as of '+(LAST_OK||''); ts.style.color='';
     EXAMPLE = s.example || {};
     renderEndpoints();
     renderHeadline(s); renderAudit(s); renderSources(s); renderFeedSources(s); renderProviders(s);
@@ -416,7 +419,16 @@ async function load(){
       (ctext('advice_tag','')?(' · '+ctext('advice_tag','')):'');
   }catch(e){
     renderEndpoints();
-    document.getElementById('headline').textContent = 'Failed to load status: '+e;
+    if(LAST_OK){
+      // A refresh failed AFTER a successful load: the grounded sections still
+      // show the last successful data — say so loudly instead of presenting
+      // stale values as current (cross-vendor panel finding, round 3).
+      const ts=document.getElementById('ts');
+      ts.textContent = 'REFRESH FAILED - showing data as of '+LAST_OK;
+      ts.style.color = 'var(--err)';
+    } else {
+      document.getElementById('headline').textContent = 'Failed to load status: '+e;
+    }
   }
 }
 document.getElementById('refresh').onclick=load;
