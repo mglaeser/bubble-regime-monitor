@@ -35,18 +35,28 @@ from app.references import DISCLAIMER
 _BLOCKS_FILE = Path(__file__).resolve().parents[1] / "config" / "content_blocks.v1.json"
 
 
+_EMPTY_ARTIFACT: dict[str, Any] = {"content_version": 0, "blocks": {}}
+
+
 @lru_cache(maxsize=1)
 def _file_artifact() -> dict[str, Any]:
     # NEVER couple request handling to artifact health: a missing, unreadable
-    # or malformed artifact degrades to built-ins at version 0 (the repo's
-    # never-500-on-data-failure invariant; panel finding, PR #97).
+    # or malformed artifact degrades WHOLLY to built-ins at version 0 (the
+    # never-500-on-data-failure invariant). Validation is deep, not root-only:
+    # an artifact with a structurally invalid blocks/version must not keep
+    # advertising its version while serving built-ins; and a hostile
+    # deeply-nested file raises RecursionError, which must not escape into a
+    # request handler (panel findings, PR #97 rounds 2-3).
     try:
         with _BLOCKS_FILE.open(encoding="utf-8") as fh:
             loaded = json.load(fh)
-    except (OSError, ValueError):
-        return {"content_version": 0, "blocks": {}}
-    if not isinstance(loaded, dict):
-        return {"content_version": 0, "blocks": {}}
+    except (OSError, ValueError, RecursionError):
+        return dict(_EMPTY_ARTIFACT)
+    if (not isinstance(loaded, dict)
+            or not isinstance(loaded.get("blocks"), dict)
+            or not isinstance(loaded.get("content_version"), int)
+            or loaded["content_version"] < 1):
+        return dict(_EMPTY_ARTIFACT)
     return loaded
 
 
@@ -87,6 +97,10 @@ def _builtin_blocks() -> dict[str, dict[str, Any]]:
         # The canonical disclaimer (app.references.DISCLAIMER) with markdown
         # emphasis markers stripped for plain-text display surfaces.
         "disclaimer_full": _text(DISCLAIMER.replace("**", "")),
+        # Canonical alias for the companion dashboard's frozen content
+        # contract: its client, fallback generator and acceptance suite all
+        # gate on blocks['site.disclaimer'] carrying 'not investment advice'.
+        "site.disclaimer": _text(DISCLAIMER.replace("**", "")),
         "advice_tag": _text(ADVICE_TAG),
         "intro.science_audit": _text(
             "Everything currently unclear, incomplete, contested, proxied, judgmental, "

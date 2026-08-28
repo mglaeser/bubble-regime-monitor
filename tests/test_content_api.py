@@ -208,3 +208,38 @@ class TestBlockArtifact:
             assert band in entries, band
         assert "derisk" not in entries
         reg._file_artifact.cache_clear()
+
+    def test_structurally_invalid_blocks_degrades_wholly_to_v0(self, monkeypatch, tmp_path):
+        # Round 3: blocks-as-list must not serve built-ins while STILL
+        # advertising the artifact's version — the whole artifact degrades.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text('{"content_version": 1, "blocks": []}', encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        reg._file_artifact.cache_clear()
+
+    def test_hostile_deep_nesting_never_escapes(self, monkeypatch, tmp_path):
+        # Round 3: a deeply nested JSON file raises RecursionError inside
+        # json.load — it must degrade to v0, never crash a request handler.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text("[" * 200000 + "]" * 200000, encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        assert "disclaimer_full" in reg.static_blocks()
+        reg._file_artifact.cache_clear()
+
+    def test_site_disclaimer_alias_for_companion_contract(self):
+        # The companion dashboard's frozen contract gates on this exact slug
+        # and phrase; its deploy-time fallback generator exits 1 without it.
+        import app.content_registry as reg
+
+        reg._file_artifact.cache_clear()
+        block = reg.static_blocks()["site.disclaimer"]
+        assert "not investment advice" in block["text"]
+        reg._file_artifact.cache_clear()
