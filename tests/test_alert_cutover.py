@@ -975,3 +975,22 @@ def test_the_schema_forbids_a_heartbeat_row_without_a_timestamp():
             component="digest", last_heartbeat_at=None, status="ok",
             detail_json={"mode": "live", "live_profile": "default"}))
         session.flush()
+
+
+def test_a_digest_absent_beyond_its_own_cadence_is_a_missing_job():
+    """The never-ran exemption is bounded by the deployment's own history.
+
+    Absence is "new" only while this deployment's live footprint is younger
+    than one digest cadence. A deployment whose earliest live delivery is
+    nine days old has lived through a full weekly cycle — no digest row by
+    then means the job was never deployed. Bounded by evidence age, not by
+    any waiting clock: a day-one cutover still passes immediately.
+    """
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(days=9),
+                   created_at=NOW - timedelta(days=9))
+        report = preflight(session, now=NOW)
+
+    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert faults, "nine live days with no digest row still read as never-ran"
+    assert "never deployed" in faults[0]

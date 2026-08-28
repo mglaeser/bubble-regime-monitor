@@ -337,10 +337,34 @@ def preflight(
                 # first Monday after activation, and refusing the cutover
                 # until then would be a clock in disguise — the thing the
                 # operator explicitly removed.
-                fresh, detail = True, (
-                    "no digest run yet — the weekly job's first proof-of-life "
-                    "lands next Monday 08:30; absence at first activation is "
-                    "not staleness")
+                #
+                # The exemption is still BOUNDED, by the deployment's own
+                # evidence rather than by a waiting clock: once this
+                # deployment's earliest live delivery is older than one full
+                # digest cadence, a whole weekly cycle has elapsed without a
+                # single digest breath — that is a job that was never
+                # deployed, not a job that has not had its Monday yet. A
+                # day-one cutover passes untouched; nobody is asked to wait.
+                earliest = session.execute(
+                    select(func.min(AlertDelivery.created_at)).where(
+                        AlertDelivery.mode == "live",
+                        AlertDelivery.live_profile == live_profile,
+                    )
+                ).scalar_one()
+                earliest_at = _aware(earliest) if earliest is not None else None
+                if (earliest_at is not None
+                        and earliest_at <= now - timedelta(hours=fresh_hours)):
+                    fresh, detail = False, (
+                        f"no digest heartbeat, yet this deployment's earliest "
+                        f"live delivery ({earliest_at.isoformat()}) predates "
+                        f"one full digest cadence ({fresh_hours}h) — a whole "
+                        "cycle without proof-of-life means the digest job "
+                        "was never deployed, not that it is new")
+                else:
+                    fresh, detail = True, (
+                        "no digest run yet — the weekly job's first "
+                        "proof-of-life lands next Monday 08:30; absence at "
+                        "first activation is not staleness")
             else:
                 fresh, detail = False, (
                     f"no heartbeat in {fresh_hours}h — after cutover this "
