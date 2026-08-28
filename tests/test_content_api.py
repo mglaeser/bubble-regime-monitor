@@ -243,3 +243,45 @@ class TestBlockArtifact:
         block = reg.static_blocks()["site.disclaimer"]
         assert "not investment advice" in block["text"]
         reg._file_artifact.cache_clear()
+
+    def test_member_corruption_degrades_whole_artifact(self, monkeypatch, tmp_path):
+        # Round 4: partial content must never be served under the artifact's
+        # version — one corrupt member degrades the whole artifact to v0.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text('{"content_version": 1, "blocks": {'
+                       '"good.block": {"kind": "text", "text": "fine"},'
+                       '"bad.block": {"kind": "text", "text": ""}}}',
+                       encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        assert "good.block" not in reg.static_blocks()
+        reg._file_artifact.cache_clear()
+
+    def test_lone_surrogate_rejected_at_load_not_at_response(self, monkeypatch, tmp_path):
+        # Round 4: a lone UTF-16 surrogate passes json.load but raises
+        # UnicodeEncodeError in the RESPONSE encoder — reject at load.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text('{"content_version": 1, "blocks": {'
+                       '"x.y": {"kind": "text", "text": "bad \\ud800 char"}}}',
+                       encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        reg._file_artifact.cache_clear()
+
+    def test_boolean_version_rejected(self, monkeypatch, tmp_path):
+        # Round 4: bool is an int subclass — `true` must not pass as version.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text('{"content_version": true, "blocks": {'
+                       '"x.y": {"kind": "text", "text": "fine"}}}', encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        reg._file_artifact.cache_clear()

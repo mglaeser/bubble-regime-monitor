@@ -45,6 +45,8 @@ fixed with priority.
 
 | 3 | SOTA-A | Artifact-health validation root-only and exception-incomplete: `blocks: []` serves built-ins while advertising v1; deep-nested JSON raises uncaught RecursionError into request handlers | **UPHELD ×2 → fixed**: deep validation (blocks must be a dict, version an int ≥ 1 — else the WHOLE artifact degrades to v0) and `RecursionError` joins the catch. Both pinned with hostile-file tests. Also adds the `site.disclaimer` canonical alias the companion dashboard's frozen contract requires |
 
+| 4 | SOTA-A | Member corruption retains v1; lone-surrogate payload 500s at response encoding; boolean version emitted | **UPHELD ×3 → fixed**: all-or-nothing member validation (any corrupt member degrades the whole artifact — partial content never served under the artifact's version); whole-artifact UTF-8 round-trip at load (`json.dumps(...).encode` — lone surrogates rejected where the try/except can see them); `type(version) is int` (bool is an int subclass in Python). The loader now returns only the normalized `{content_version, blocks}` pair. All pinned with hostile-file tests |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit

@@ -50,14 +50,38 @@ def _file_artifact() -> dict[str, Any]:
     try:
         with _BLOCKS_FILE.open(encoding="utf-8") as fh:
             loaded = json.load(fh)
-    except (OSError, ValueError, RecursionError):
+        # A payload that json.load accepts can still be unserializable at
+        # RESPONSE time (lone UTF-16 surrogates raise UnicodeEncodeError in
+        # the response encoder — a 500 far past this try/except). Prove the
+        # whole artifact round-trips to UTF-8 here or reject it whole.
+        json.dumps(loaded, ensure_ascii=False).encode("utf-8")
+    except (OSError, ValueError, RecursionError, UnicodeEncodeError):
         return dict(_EMPTY_ARTIFACT)
-    if (not isinstance(loaded, dict)
-            or not isinstance(loaded.get("blocks"), dict)
-            or not isinstance(loaded.get("content_version"), int)
-            or loaded["content_version"] < 1):
+    version = loaded.get("content_version") if isinstance(loaded, dict) else None
+    blocks = loaded.get("blocks") if isinstance(loaded, dict) else None
+    # bool is an int subclass in Python: `true` must not pass as a version.
+    if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
+            or not all(_valid_member(b) for b in blocks.values())):
+        # All-or-nothing: an artifact with ANY corrupt member degrades whole —
+        # partial content must never be served under the artifact's version.
         return dict(_EMPTY_ARTIFACT)
-    return loaded
+    return {"content_version": version, "blocks": blocks}
+
+
+def _valid_member(block: Any) -> bool:
+    if not isinstance(block, dict):
+        return False
+    kind = block.get("kind")
+    if kind in ("text", "template"):
+        text = block.get("text")
+        return isinstance(text, str) and bool(text.strip())
+    if kind in ("links", "endpoint_catalog", "list", "table"):
+        items = block.get("items")
+        return isinstance(items, list) and bool(items)
+    if kind == "map":
+        entries = block.get("entries")
+        return isinstance(entries, dict) and bool(entries)
+    return False
 
 
 def content_version() -> int:
