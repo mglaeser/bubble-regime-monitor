@@ -1507,7 +1507,9 @@
       "entries": {
         "hold": "Structural risk present, not acute.",
         "trim": "Fragility elevated — the trend rule is the trigger.",
-        "derisk": "Fragility high, or a hard override fired.",
+        "de-risk": "Fragility high, or a hard override fired.",
+        "suppressed": "Not scored — inputs degraded.",
+        "suppressed (block degraded)": "Not scored — inputs degraded.",
         "fallback": "Not scored — inputs degraded."
       },
       "source": "src/bubblegauge.tsx:1438"

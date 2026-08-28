@@ -51,6 +51,8 @@ fixed with priority.
 
 | 6 | SOTA-A + SOTA-C (convergent) | `1e400` overflows to `float('inf')` via `parse_float`, bypassing `parse_constant`; `json.dumps` default `allow_nan=True` emits it, so preflight passes and the `allow_nan=False` response encoder 500s | **UPHELD → fixed**: the load-time round-trip now runs under the response encoder's own strictness (`allow_nan=False`) — any non-finite float anywhere in the artifact rejects it whole at load. Pinned with a `1e400` hostile-file test |
 
+| 7 | SOTA-B (+A) | The round-2 band-key fix was applied to `gauge.band.oneliner` only — the sibling `gauge.splash.band_blurb` shipped the same `derisk` defect, masked by an instance-scoped test | **UPHELD → fixed class-wide**: the sibling map is re-keyed (its `fallback` entry — "Not scored — inputs degraded." — was the suppressed-state text and now backs both suppressed keys), and the pin test scans EVERY band-shaped map in the artifact for the real band strings, so no future sibling can hide |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit

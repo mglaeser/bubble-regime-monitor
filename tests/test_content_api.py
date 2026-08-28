@@ -196,17 +196,26 @@ class TestBlockArtifact:
         assert "disclaimer_full" in reg.static_blocks()
         reg._file_artifact.cache_clear()
 
-    def test_band_oneliner_keys_match_real_band_values(self):
-        # Panel finding (PR #97): the band map must key the REAL bubblegauge
-        # band strings — a 'derisk' key would make the highest-severity band
-        # miss the lookup (and ||hold client patterns would show HOLD).
+    def test_every_band_shaped_map_keys_real_band_values(self):
+        # Panel findings (PR #97 rounds 2 + 7): EVERY band-keyed map in the
+        # artifact must key the REAL bubblegauge band strings — a 'derisk'
+        # key makes the highest-severity band miss the lookup (and ||hold
+        # client patterns would show HOLD). Round 7 caught the sibling map
+        # this test previously masked by pinning only band.oneliner.
         import app.content_registry as reg
 
         reg._file_artifact.cache_clear()
-        entries = reg.static_blocks()["gauge.band.oneliner"]["entries"]
-        for band in ("hold", "trim", "de-risk", "suppressed (block degraded)"):
-            assert band in entries, band
-        assert "derisk" not in entries
+        band_maps = [
+            (slug, block["entries"])
+            for slug, block in reg.static_blocks().items()
+            if block.get("kind") == "map"
+            and "hold" in block.get("entries", {}) and "trim" in block["entries"]
+        ]
+        assert band_maps, "no band-shaped maps found - artifact regression?"
+        for slug, entries in band_maps:
+            for band in ("hold", "trim", "de-risk", "suppressed (block degraded)"):
+                assert band in entries, f"{slug} missing band key {band!r}"
+            assert "derisk" not in entries, f"{slug} carries the broken 'derisk' key"
         reg._file_artifact.cache_clear()
 
     def test_structurally_invalid_blocks_degrades_wholly_to_v0(self, monkeypatch, tmp_path):
