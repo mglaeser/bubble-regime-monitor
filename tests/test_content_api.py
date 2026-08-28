@@ -112,3 +112,20 @@ class TestDynamicContent:
     def test_cache_header(self, client):
         r = client.get("/api/v1/content/dynamic")
         assert "max-age=60" in r.headers.get("cache-control", "")
+
+
+class TestCacheScope:
+    def test_public_while_read_surface_is_public(self, client):
+        # TESTING default: READ_ENDPOINTS_PUBLIC=true -> shared caching is fine.
+        r = client.get("/api/v1/content/dashboard")
+        assert r.headers["cache-control"].startswith("public, ")
+
+    def test_private_when_reads_are_keyed(self, monkeypatch):
+        # A keyed reply must never be shared-cacheable (panel finding, PR #95).
+        from app.routers import content as content_router
+
+        class _Keyed:
+            read_endpoints_public = False
+
+        monkeypatch.setattr(content_router, "get_settings", lambda: _Keyed())
+        assert content_router._cache_control(300) == "private, max-age=300"

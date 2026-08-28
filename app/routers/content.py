@@ -33,11 +33,18 @@ def _meta() -> dict[str, Any]:
     }
 
 
+def _cache_control(max_age: int) -> str:
+    # 'public' only while the read surface itself is public; a keyed reply must
+    # never be shared-cacheable (cross-vendor panel finding, PR #95).
+    scope = "public" if get_settings().read_endpoints_public else "private"
+    return f"{scope}, max-age={max_age}"
+
+
 @router.get("/dashboard", summary="Static UI content blocks (slug-keyed), served as a resource")
 @limiter.limit(READ_RATE_LIMIT)
 def get_dashboard_content(request: Request, response: Response,
                           _: None = Depends(require_read_access)) -> dict[str, Any]:
-    response.headers["Cache-Control"] = "public, max-age=300"
+    response.headers["Cache-Control"] = _cache_control(300)
     return {"data": {"blocks": static_blocks()}, "meta": _meta()}
 
 
@@ -45,5 +52,5 @@ def get_dashboard_content(request: Request, response: Response,
 @limiter.limit(READ_RATE_LIMIT)
 def get_dynamic_content(request: Request, response: Response,
                         _: None = Depends(require_read_access)) -> dict[str, Any]:
-    response.headers["Cache-Control"] = "public, max-age=60"
+    response.headers["Cache-Control"] = _cache_control(60)
     return {"data": {"slots": dynamic_slots_payload()}, "meta": _meta()}

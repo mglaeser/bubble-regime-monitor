@@ -378,14 +378,20 @@ async function load(){
   // Content first (blocks + slots), then the live status; each degrades
   // independently — a failed content fetch leaves neutral text, a failed
   // status fetch shows the generic failure line and no grounded values.
+  // last-known-good: CONTENT/SLOTS only ever advance on a successful fetch.
+  // A failed refresh keeps the previous (disclaimed) content on screen, so
+  // the disclaimer gate cannot be blanked while stale grounded values remain
+  // rendered (reentrancy hole flagged by the cross-vendor panel).
   try{
     const c = await fetchJson('/api/v1/content/dashboard');
-    CONTENT = (c.data&&c.data.blocks)||{};
-  }catch(e){ CONTENT = {}; }
+    const blocks = c.data&&c.data.blocks;
+    if(blocks && typeof blocks==='object') CONTENT = blocks;
+  }catch(e){ /* keep last-known-good CONTENT */ }
   try{
     const dyn = await fetchJson('/api/v1/content/dynamic');
-    SLOTS = (dyn.data&&dyn.data.slots)||{};
-  }catch(e){ SLOTS = {}; }
+    const slots = dyn.data&&dyn.data.slots;
+    if(slots && typeof slots==='object') SLOTS = slots;
+  }catch(e){ /* keep last-known-good SLOTS */ }
   renderContentText(); renderDoclinks();
   // DISCLAIMER GATE (fail-closed): grounded values render ONLY when the
   // disclaimer is actually on screen. Without it, no score, no indicators,

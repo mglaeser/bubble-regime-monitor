@@ -55,6 +55,9 @@ REQUIRED_MARKERS = [
     "data display disabled",
     "if(!r.ok) throw",
     "sameOrigin",
+    # Reentrancy: content only ever advances on a successful fetch, so a failed
+    # 60s refresh can never blank the disclaimer over stale grounded values.
+    "last-known-good",
 ]
 
 
