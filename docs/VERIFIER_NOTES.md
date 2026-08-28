@@ -34,6 +34,8 @@ fixed with priority.
 
 | 7 | SOTA-A | "Status commit ordering + partial-failure labeling broken" | **UPHELD (steelman succeeded) → fixed**: (a) the seq guard protected renders but not *state commits* — an older response could overwrite `CONTENT`/`SLOTS` globals after a newer load rendered; fetches now land in locals and commit only behind the seq guard. (b) One staleness flag conflated blocks with slots and mislabeled first-load partial failure as "from an earlier load"; now split (`BLOCKS_STALE`/`SLOTS_STALE`), each set only when *its* refresh failed *and* a previous value is genuinely retained. Both pinned |
 
+| 8 | SOTA-A | 2xx shape-miss unclassified; gate omits status-DOM purge; 60s interval invalidates >60s replies | **UPHELD ×3 (steelman succeeded on all) → fixed**: (a) a 2xx whose body fails shape validation is now classified as FAILURE (`if(!newBlocks) blocksFailed = true`), so retained content gets the stale label instead of silently pairing with fresh status; (b) a content payload commits ONLY if it carries a non-empty disclaimer (response-shape validator), and if the disclaimer is ever unavailable the gate now `purgeGrounded()`s every previously-rendered section before disabling display; (c) `load()` is single-flight with 30s fetch bounds — slow replies commit, ticks never stack, the flight always terminates. All pinned |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit

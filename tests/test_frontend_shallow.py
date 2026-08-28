@@ -72,6 +72,12 @@ REQUIRED_MARKERS = [
     # State commits (not just renders) are seq-guarded: an older response can
     # never win in the CONTENT/SLOTS globals.
     "a newer load owns state from here on",
+    # Round 8: 2xx shape-misses are failures; the gate purges rendered
+    # sections when the disclaimer is unavailable; loads are single-flight
+    # with bounded fetches so slow replies still commit.
+    "Response-shape validator",
+    "purgeGrounded",
+    "if(LOADING) return",
 ]
 
 
