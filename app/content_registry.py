@@ -68,11 +68,31 @@ def _file_artifact() -> dict[str, Any]:
     blocks = loaded.get("blocks") if isinstance(loaded, dict) else None
     # bool is an int subclass in Python: `true` must not pass as a version.
     if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
+            or _max_depth(blocks) > 32
             or not all(_valid_member(b) for b in blocks.values())):
         # All-or-nothing: an artifact with ANY corrupt member degrades whole —
         # partial content must never be served under the artifact's version.
         return dict(_EMPTY_ARTIFACT)
     return {"content_version": version, "blocks": blocks}
+
+
+def _max_depth(obj: Any) -> int:
+    """Iterative nesting depth (no recursion): the preflight round-trip dumps
+    the RAW artifact, but responses serialize it WRAPPED in {data:{...},meta}
+    — an artifact near the interpreter recursion limit passes a raw dump yet
+    raises inside the response encoder. An explicit bound (32) decouples
+    artifact health from interpreter limits entirely."""
+    depth, stack = 0, [(obj, 1)]
+    while stack:
+        node, d = stack.pop()
+        depth = max(depth, d)
+        if d > 64:  # hard stop: deeper than any legitimate artifact
+            return d
+        if isinstance(node, dict):
+            stack.extend((v, d + 1) for v in node.values())
+        elif isinstance(node, list):
+            stack.extend((v, d + 1) for v in node)
+    return depth
 
 
 def _valid_member(block: Any) -> bool:

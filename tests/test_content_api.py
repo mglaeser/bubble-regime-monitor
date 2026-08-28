@@ -213,7 +213,7 @@ class TestBlockArtifact:
         ]
         assert band_maps, "no band-shaped maps found - artifact regression?"
         for slug, entries in band_maps:
-            for band in ("hold", "trim", "de-risk", "suppressed (block degraded)"):
+            for band in ("hold", "trim", "de-risk", "suppressed (block degraded)", "fallback"):
                 assert band in entries, f"{slug} missing band key {band!r}"
             assert "derisk" not in entries, f"{slug} carries the broken 'derisk' key"
         reg._file_artifact.cache_clear()
@@ -332,6 +332,27 @@ class TestBlockArtifact:
         bad.write_text('{"content_version": 1, "blocks": {'
                        '"x.y": {"kind": "table", "items": [{"v": 1e400}]}}}',
                        encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        reg._file_artifact.cache_clear()
+
+    def test_depth_bound_covers_wrapped_response_margin(self, monkeypatch, tmp_path):
+        # Round 8: preflight dumped the RAW artifact while responses serialize
+        # it WRAPPED — depth is now bounded explicitly (32), iteratively,
+        # independent of interpreter recursion limits.
+        import json as _json
+
+        import app.content_registry as reg
+
+        deep: dict = {"kind": "map", "entries": {"k": "v"}}
+        nested: object = "leaf"
+        for _ in range(40):
+            nested = [nested]
+        deep_block = {"kind": "table", "items": [{"v": nested}]}
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text(_json.dumps({"content_version": 1, "blocks": {
+            "ok.map": deep, "deep.block": deep_block}}), encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
         reg._file_artifact.cache_clear()
         assert reg.content_version() == 0

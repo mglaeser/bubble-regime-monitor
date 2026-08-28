@@ -53,6 +53,8 @@ fixed with priority.
 
 | 7 | SOTA-B (+A) | The round-2 band-key fix was applied to `gauge.band.oneliner` only — the sibling `gauge.splash.band_blurb` shipped the same `derisk` defect, masked by an instance-scoped test | **UPHELD → fixed class-wide**: the sibling map is re-keyed (its `fallback` entry — "Not scored — inputs degraded." — was the suppressed-state text and now backs both suppressed keys), and the pin test scans EVERY band-shaped map in the artifact for the real band strings, so no future sibling can hide |
 
+| 8 | SOTA-A | Raw-depth preflight ≠ wrapped response (near-limit artifact passes raw dump, 500s inside `{data:{...},meta}`); unknown/degraded band still defaults to HOLD in `\|\|hold` clients when a band map carries no correct fallback | **UPHELD ×2 → fixed**: explicit iterative depth bound (≤32, no recursion — decoupled from interpreter limits entirely); every band-shaped map now ships a `fallback` entry carrying the suppressed-state text, and the class-wide pin test requires it — an unrecognized band renders "Not scored" copy, never HOLD |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit
