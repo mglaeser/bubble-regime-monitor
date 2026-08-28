@@ -55,8 +55,30 @@ def heartbeat(
     current_mode = mode or settings.alerts_mode
     current_profile = live_profile or settings.alerts_live_profile
     with session_scope() as session:
-        if only_if_absent and session.get(
-                AlertComponentHeartbeat, component) is not None:
+        if only_if_absent:
+            # Atomic conditional INSERT — no check-then-write window at all.
+            # ON CONFLICT DO NOTHING can only create the row or leave an
+            # existing one byte-for-byte alone, so a concurrent job writing
+            # its own real heartbeat can never be overwritten, raced, or
+            # crashed into; the losing insert simply evaporates.
+            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+            payload = {
+                **(detail or {}),
+                "mode": current_mode,
+                "live_profile": current_profile,
+                "run_count": 1,
+                "first_heartbeat_at": now.isoformat(),
+                "previous_heartbeat_at": None,
+                "previous_status": None,
+                "previous_mode": None,
+                "previous_live_profile": None,
+                "consecutive_non_ok": 0 if status == "ok" else 1,
+            }
+            session.execute(
+                sqlite_insert(AlertComponentHeartbeat)
+                .values(component=component, last_heartbeat_at=now,
+                        status=status, detail_json=payload)
+                .on_conflict_do_nothing(index_elements=["component"]))
             return
         row = session.get(AlertComponentHeartbeat, component)
         if row is None:
