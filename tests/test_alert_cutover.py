@@ -1042,3 +1042,34 @@ def test_restarts_never_refresh_the_registration_stamp():
     assert faults, (
         "a restart refreshed the registration stamp and kept a never-running "
         "digest green past a full cadence")
+
+
+def test_the_digest_grace_detects_the_first_missed_firing_within_a_day():
+    """192h is one weekly cadence plus 24h of grace — not two firings' worth.
+
+    A beat stamped at a Monday firing goes red 192 hours later: the Tuesday
+    after the FIRST missed Monday, six days before a second missed firing
+    could even exist (that would need 336h). Pinned at the boundary from
+    both sides so the window can neither quietly widen past a second firing
+    nor shrink back into the 2h clock-in-disguise this PR removes.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest",
+            last_heartbeat_at=NOW - timedelta(hours=191),  # inside the grace
+            status="ok",
+            detail_json={"mode": "live", "live_profile": "default"}))
+        session.flush()
+        report = preflight(session, now=NOW)
+    assert any(s_.startswith("heartbeat_digest") for s_ in report.satisfied), (
+        "still inside one-cadence-plus-grace, yet the gate went red")
+
+    with session_scope() as session:
+        session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at = \
+            NOW - timedelta(hours=193)  # first missed firing, +25h
+        session.flush()
+        report = preflight(session, now=NOW)
+    assert any(u.startswith("heartbeat_digest") for u in report.unsatisfied), (
+        "the first missed weekly firing went undetected past the 24h grace")
