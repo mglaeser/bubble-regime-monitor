@@ -663,7 +663,8 @@ def test_a_future_heartbeat_is_a_clock_fault_not_health():
         session.add(AlertComponentHeartbeat(
             component="dispatcher",
             last_heartbeat_at=NOW + timedelta(days=2),
-            status="ok", detail_json={}))
+            status="ok",
+            detail_json={"mode": "live", "live_profile": "default"}))
         session.flush()
         report = preflight(session, now=NOW)
 
@@ -932,3 +933,45 @@ def test_a_digest_that_never_ran_does_not_block_first_activation():
     assert digest and "not staleness" in digest[0]
     assert any(u.startswith("heartbeat_dispatcher") for u in report.unsatisfied)
     assert any(u.startswith("heartbeat_watchdog") for u in report.unsatisfied)
+
+
+def test_a_digest_that_reported_failure_is_not_never_ran():
+    """"Never run" means NO ROW AT ALL. A row is the job speaking.
+
+    The first version of the exemption keyed on the timestamp being NULL, so a
+    digest heartbeat row carrying an explicit critical status — the job
+    crashed and said so — was waved through as if it had never existed.
+    Fail-open on a recorded failure, caught by two verifiers at once.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest", last_heartbeat_at=NOW - timedelta(hours=1),
+            status="critical",
+            detail_json={"mode": "live", "live_profile": "default"}))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert faults, "a recorded digest FAILURE was treated as never-ran"
+    assert "critical" in faults[0]
+
+
+def test_the_schema_forbids_a_heartbeat_row_without_a_timestamp():
+    """The panel's fail-open scenario — a row with NULL timestamp slipping
+    past the never-ran exemption — is impossible at the database level:
+    `last_heartbeat_at` is NOT NULL. Pinned so a schema relaxation cannot
+    silently reopen it; the gate also keeps a fail-closed branch for exactly
+    that future.
+    """
+    import pytest as _pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from app.alerts.models import AlertComponentHeartbeat
+
+    with _pytest.raises(IntegrityError), session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest", last_heartbeat_at=None, status="ok",
+            detail_json={"mode": "live", "live_profile": "default"}))
+        session.flush()

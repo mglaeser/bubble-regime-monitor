@@ -328,13 +328,15 @@ def preflight(
         )
         row_status = row.status if row is not None else None
         status_ok = row_status == "ok"
-        if beat is None:
+        if row is None:
             if component == "digest":
-                # Never run is not stale. The weekly job's first proof-of-life
-                # lands on the first Monday AFTER activation, and refusing the
-                # cutover until then would be a clock in disguise — the thing
-                # the operator explicitly removed. "Ran and stopped" still
-                # blocks below; "has not had its first Monday yet" does not.
+                # Never run is not stale — but "never run" means NO ROW AT
+                # ALL. A row that exists is the job speaking, whatever its
+                # timestamp says, and it is judged below like any other
+                # report. The weekly job's first proof-of-life lands on the
+                # first Monday after activation, and refusing the cutover
+                # until then would be a clock in disguise — the thing the
+                # operator explicitly removed.
                 fresh, detail = True, (
                     "no digest run yet — the weekly job's first proof-of-life "
                     "lands next Monday 08:30; absence at first activation is "
@@ -343,10 +345,6 @@ def preflight(
                 fresh, detail = False, (
                     f"no heartbeat in {fresh_hours}h — after cutover this "
                     "component is load-bearing")
-        elif beat > now + timedelta(minutes=5):
-            fresh, detail = False, (
-                f"heartbeat is {beat.isoformat()} — in the future, which is a "
-                "clock fault, not health")
         elif not namespace_ok:
             fresh, detail = False, (
                 f"fresh heartbeat belongs to another namespace; expected "
@@ -355,6 +353,18 @@ def preflight(
         elif not status_ok:
             fresh, detail = False, (
                 f"heartbeat status is {row_status!r}, not accepted health")
+        elif beat is None:  # pragma: no cover - schema-impossible, fails closed
+            # `last_heartbeat_at` is NOT NULL, so an existing row always
+            # carries a timestamp — pinned by test against the schema. Kept
+            # only so a future schema relaxation fails closed here instead of
+            # falling through to a freshness comparison against None.
+            fresh, detail = False, (
+                "heartbeat row exists but carries no timestamp — malformed "
+                "liveness evidence fails closed")
+        elif beat > now + timedelta(minutes=5):
+            fresh, detail = False, (
+                f"heartbeat is {beat.isoformat()} — in the future, which is a "
+                "clock fault, not health")
         elif beat >= now - timedelta(hours=fresh_hours):
             fresh, detail = True, "fresh, healthy, and live-namespace matched"
         else:
