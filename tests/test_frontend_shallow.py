@@ -61,6 +61,8 @@ REQUIRED_MARKERS = [
     # Staleness honesty: after a failed refresh the retained sections are
     # explicitly labeled stale, never presented as current.
     "REFRESH FAILED - showing data as of",
+    # Commit ordering: overlapping loads may not render out of order.
+    "seq!==LOAD_SEQ",
 ]
 
 

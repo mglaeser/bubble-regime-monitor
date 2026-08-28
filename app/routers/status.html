@@ -156,6 +156,7 @@ let CONTENT = {};
 let SLOTS = {};
 let EXAMPLE = {};
 let LAST_OK = null; // service.now of the last successful status load
+let LOAD_SEQ = 0;   // commit ordering: only the newest load() may render
 function ctext(slug, fb){ const b=CONTENT[slug]; return (b && typeof b.text==='string') ? b.text : (fb||''); }
 function citems(slug){ const b=CONTENT[slug]; return (b && Array.isArray(b.items)) ? b.items : []; }
 function cmap(slug){ const b=CONTENT[slug]; return (b && b.entries && typeof b.entries==='object') ? b.entries : {}; }
@@ -376,6 +377,10 @@ function sameOrigin(href){ // relative path only; rejects protocol-relative //ho
 }
 
 async function load(){
+  // Commit ordering: the 60s interval and the Refresh button can overlap; a
+  // slow older request must never overwrite a newer render (seq guard after
+  // every await — cross-vendor panel finding, round 5).
+  const seq = ++LOAD_SEQ;
   // Content first (blocks + slots), then the live status; each degrades
   // independently — a failed content fetch leaves neutral text, a failed
   // status fetch shows the generic failure line and no grounded values.
@@ -393,6 +398,7 @@ async function load(){
     const slots = dyn.data&&dyn.data.slots;
     if(slots && typeof slots==='object') SLOTS = slots;
   }catch(e){ /* keep last-known-good SLOTS */ }
+  if(seq!==LOAD_SEQ) return; // a newer load started; let it render
   renderContentText(); renderDoclinks();
   // DISCLAIMER GATE (fail-closed): grounded values render ONLY when the
   // disclaimer is actually on screen. Without it, no score, no indicators,
@@ -405,6 +411,7 @@ async function load(){
   }
   try{
     const s = await fetchJson('/api/v1/status');
+    if(seq!==LOAD_SEQ) return; // a newer load started; discard this response
     LAST_OK = (s.service&&s.service.now)||null;
     document.getElementById('ver').textContent = 'v'+((s.service&&s.service.version)||'?');
     const ts=document.getElementById('ts');
@@ -418,6 +425,7 @@ async function load(){
       ((s.service&&s.service.recompute_schedule)||'')+
       (ctext('advice_tag','')?(' · '+ctext('advice_tag','')):'');
   }catch(e){
+    if(seq!==LOAD_SEQ) return; // stale failure must not clobber a newer render
     renderEndpoints();
     if(LAST_OK){
       // A refresh failed AFTER a successful load: the grounded sections still
