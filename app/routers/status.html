@@ -172,7 +172,7 @@ function renderContentText(){
 function renderDoclinks(){
   const el=document.getElementById('doclinks'); clear(el);
   citems('api.doc_links').forEach(l=>{
-    if(typeof l.href!=='string' || l.href.charAt(0)!=='/') return; // same-origin only
+    if(!sameOrigin(l.href)) return;
     const a=h('a',null,l.label||l.href); a.href=l.href; el.appendChild(a);
   });
 }
@@ -186,7 +186,7 @@ function renderEndpoints(){
   thead.appendChild(htr); tb.appendChild(thead); const tbody=h('tbody');
   items.forEach(it=>{ const tr=h('tr'); tr.appendChild(h('td','mono',it.method));
     const pc=h('td'); const a=h('a',null,it.path);
-    a.href=(typeof it.path==='string' && it.path.charAt(0)==='/' && it.path.indexOf('{')<0)?it.path:'#';
+    a.href=(sameOrigin(it.path) && it.path.indexOf('{')<0)?it.path:'#';
     pc.appendChild(a); tr.appendChild(pc);
     tr.appendChild(h('td','muted',it.purpose)); tbody.appendChild(tr); });
   tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
@@ -367,7 +367,11 @@ function renderMeta(s){
 
 async function fetchJson(url){
   const r = await fetch(url, {headers:{'Accept':'application/json'}});
+  if(!r.ok) throw new Error('HTTP '+r.status+' for '+url);
   return r.json();
+}
+function sameOrigin(href){ // relative path only; rejects protocol-relative //host
+  return typeof href==='string' && href.charAt(0)==='/' && href.charAt(1)!=='/';
 }
 
 async function load(){
@@ -383,6 +387,15 @@ async function load(){
     SLOTS = (dyn.data&&dyn.data.slots)||{};
   }catch(e){ SLOTS = {}; }
   renderContentText(); renderDoclinks();
+  // DISCLAIMER GATE (fail-closed): grounded values render ONLY when the
+  // disclaimer is actually on screen. Without it, no score, no indicators,
+  // no audit — the page must never show a scientific claim un-disclaimed.
+  if(!ctext('disclaimer_full','')){
+    renderEndpoints();
+    document.getElementById('headline').textContent =
+      'Failed to load page content: data display disabled.';
+    return;
+  }
   try{
     const s = await fetchJson('/api/v1/status');
     document.getElementById('ver').textContent = 'v'+((s.service&&s.service.version)||'?');

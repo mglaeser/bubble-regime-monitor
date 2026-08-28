@@ -79,9 +79,13 @@ GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, updated_at, 
 1. **The static-disclaimer rule is deliberately reversed.** v3.6.0 kept the
    disclaimer static-on-page so it survives a fetch failure. Under the
    shallow-frontend directive it now hydrates from the content API like all
-   scientific text. Mitigation: on fetch failure the page shows *no scientific
-   claims at all* (score included), so no claim is ever shown un-disclaimed;
-   the disclaimer remains on `README`, `/docs`, and `/api/v1/meta/methodology`.
+   scientific text. Mitigation — the **disclaimer gate**, enforced in
+   `load()`: grounded values render *only after* the disclaimer text is
+   actually on screen; if the content fetch fails (network error **or**
+   non-2xx — `fetchJson` throws on `!r.ok`), the page renders
+   "data display disabled" and never fetches/renders the status document, so
+   no claim is ever shown un-disclaimed. The disclaimer also remains on
+   `README`, `/docs`, and `/api/v1/meta/methodology`.
    The v3.6.0 rule that machine payloads carry **no per-response advice tag**
    is untouched — the content API serves the text as requested data, exactly
    like `meta/methodology` already does.

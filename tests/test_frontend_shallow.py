@@ -49,6 +49,12 @@ REQUIRED_MARKERS = [
     'id="doclinks"',
     'id="endpoints"',
     "textContent",
+    # The disclaimer gate: grounded values may only render once the disclaimer
+    # is on screen; the gated failure branch and the fail-closed fetch are
+    # load-bearing (cross-vendor panel finding, PR #95).
+    "data display disabled",
+    "if(!r.ok) throw",
+    "sameOrigin",
 ]
 
 
