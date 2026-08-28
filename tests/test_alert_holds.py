@@ -194,7 +194,9 @@ def test_budget_hold_rechecks_and_reholds_when_cap_remains_full(monkeypatch):
     monkeypatch.setattr(
         dispatcher_module,
         "dispatch_budget_usage",
-        lambda *args, **kwargs: BudgetUsage(3, 3, 0, 0),
+        # saturated at the caps as raised by the 2026-08-27 operator
+        # decision (5/24h, 8/168h)
+        lambda *args, **kwargs: BudgetUsage(5, 8, 0, 0),
     )
     report = dispatch_once(
         session_scope,

@@ -107,7 +107,7 @@ def test_health_reports_mode_artifacts_and_sqlite(client):
                          headers={"X-API-Key": READ_KEY}).json()
     assert payload["alerts_mode"] == "disabled"
     assert payload["capture_enabled"] is True
-    assert payload["ruleset"]["active_stage"] == 1
+    assert payload["ruleset"]["active_stage"] == 3   # committed 2026-08-27
     assert payload["sqlite"]["busy_timeout"] > 0
     assert payload["sqlite"]["foreign_keys"] == 1
     assert str(payload["sqlite"]["journal_mode"]).lower() == "wal"
@@ -484,10 +484,13 @@ def test_mechanism_list_shows_dark_rules_and_why(client):
     by_id = {m["rule_id"]: m for m in payload["items"]}
     assert payload["total"] == 90
 
-    # Enabled, but not part of rollout stage 1 -> INACTIVE with a reason.
+    # Delivery rules are ACTIVE at the committed stage 3; a stage-7 rule is
+    # still dark, with the stage named as the reason.
     band = by_id["regime.band_to_derisk"]
-    assert band["activation_status"] == "INACTIVE"
-    assert "stage 1" in band["disabled_reason"]
+    assert band["activation_status"] == "ACTIVE"
+    edge = by_id["regime.derisk_edge_approach"]
+    assert edge["activation_status"] == "INACTIVE"
+    assert "Stage 7" in edge["disabled_reason"]
 
     # Unpinned rule -> null threshold value plus a reason, never "<PIN>".
     jump = by_id["regime.score_jump_1r"]

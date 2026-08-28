@@ -295,9 +295,11 @@ def test_a_breached_non_p1_cap_fails_the_gate(tmp_path, artifacts):
     summary = ReplaySummary()
     summary.mode = "DRYRUN"
     summary.notification_planning_ran = True
-    summary.max_non_p1_24h = 5
-    summary.max_non_p1_168h = 8
-    summary.mean_non_p1_per_168h = 8.0
+    # Over the caps as raised by the 2026-08-27 operator decision (5/24h,
+    # 8/168h): the gate still bites, just at the operator's chosen ceiling.
+    summary.max_non_p1_24h = 6
+    summary.max_non_p1_168h = 9
+    summary.mean_non_p1_per_168h = 9.0
     # Long enough for both caps to MEAN something. Without this the figures are
     # judged against periods the window never covered — see
     # test_a_cap_is_not_judged_on_a_window_shorter_than_its_period.
@@ -329,9 +331,9 @@ def test_a_breach_is_provable_on_a_short_window_but_compliance_is_not():
     short = ReplaySummary()
     short.mode = "DRYRUN"
     short.notification_planning_ran = True
-    short.max_non_p1_24h = 5
-    short.max_non_p1_168h = 8
-    short.mean_non_p1_per_168h = 8.0
+    short.max_non_p1_24h = 6      # over the operator-raised caps (5/8)
+    short.max_non_p1_168h = 9
+    short.mean_non_p1_per_168h = 9.0
     short.window_first = "2026-07-10T02:00:00+00:00"
     short.window_last = "2026-07-13T06:00:00+00:00"      # 76 hours
     _decide(short)
@@ -376,10 +378,23 @@ def test_a_window_with_no_span_still_reports_a_breach():
 
 
 def test_an_empty_mandatory_catalogue_reports_zero_not_full_recall(tmp_path, artifacts):
-    """Recall over an empty catalogue is undefined, never 100%."""
-    catalogue = Path("config/alert_mandatory_events.v3.2.json")
-    payload = json.loads(catalogue.read_text(encoding="utf-8"))
-    assert payload["events"] == [], "the shipped catalogue must ship empty"
+    """Recall over an empty catalogue is undefined, never 100%.
+
+    The SHIPPED catalogue is no longer empty — it was frozen on 2026-08-27 by
+    operator decision — so the empty-case semantics are pinned against a
+    constructed empty catalogue instead. The invariant it protects is
+    unchanged: zero events must read as unmeasured, never as perfect recall.
+    """
+    shipped = json.loads(
+        Path("config/alert_mandatory_events.v3.2.json").read_text(encoding="utf-8"))
+    assert shipped["frozen"] is True
+    assert shipped["events"], "the frozen catalogue must not quietly empty out"
+
+    catalogue = tmp_path / "empty-catalogue.json"
+    catalogue.write_text(json.dumps({
+        "catalogue_version": "test-empty", "schema_version": 1,
+        "frozen": False, "events": [],
+    }), encoding="utf-8")
 
     summary = _run(tmp_path, artifacts, events=catalogue)
     assert summary.mandatory_event_total == 0
@@ -527,19 +542,23 @@ def test_malformed_mandatory_catalogue_is_refused(tmp_path, payload):
 
 
 def test_a_replay_reports_the_stage_it_actually_evaluated(tmp_path, artifacts):
-    """A forward-looking run must never be mistaken for the committed one."""
-    summary = _run(tmp_path, artifacts, stage=3)
-    assert summary.active_stage == 1               # what is committed
-    assert summary.evaluated_at_stage == 3         # what this run measured
+    """A forward-looking run must never be mistaken for the committed one.
+
+    The committed stage is 3 since the 2026-08-27 operator decision, so the
+    forward-looking probe is stage 4 now.
+    """
+    summary = _run(tmp_path, artifacts, stage=4)
+    assert summary.active_stage == 3               # what is committed
+    assert summary.evaluated_at_stage == 4         # what this run measured
     assert summary.rules_sha256 != artifacts.ruleset.rules_sha256
     assert any("forward-looking" in note for note in summary.notes)
 
 
 def test_replaying_at_the_committed_stage_uses_the_committed_bytes(tmp_path, artifacts):
     """No silent re-stamp: at the committed stage the hash is the real one."""
-    summary = _run(tmp_path, artifacts, stage=1)
+    summary = _run(tmp_path, artifacts, stage=3)
     assert summary.rules_sha256 == artifacts.ruleset.rules_sha256
-    assert summary.evaluated_at_stage == summary.active_stage == 1
+    assert summary.evaluated_at_stage == summary.active_stage == 3
 
 
 def test_restamping_a_stage_rehashes_the_ruleset(artifacts):
@@ -672,32 +691,23 @@ def test_the_gate_artifact_exercises_more_than_the_committed_stage():
     # The verdict must follow its own evidence, in either direction.
     assert stage3["passed"] is (stage3["failures"] == [])
 
-    # Stage 3 currently FAILS, and the exact failures are pinned so that CI
-    # cannot quietly absorb a NEW one.
-    #
-    # Wiring the planner into the atomic apply (B-01) turned every non-P1
-    # volume figure from "0 by construction" into a real count, and on this
-    # history the ruleset breaches its own caps. That is a Stage 2 input and an
-    # open decision for the operator — tune the rules or raise the caps
-    # deliberately — not something to relax here. Loosening this assertion to
-    # "some failure containing the word cap" would be the same defect class the
-    # rest of this branch exists to remove: a control that still looks armed.
-    #
-    # When the breach is resolved this list becomes empty and the test fails
-    # until it is updated, which is the point.
-    assert stage3["failures"] == [
-        "non-P1 volume breached the 24h cap: 5 > 3",
-        "non-P1 volume breached the 168h cap: 8 > 6",
-        "mandatory-event recall is unmeasured: Stage 2+ requires a "
-        "non-empty operator-frozen catalogue",
-    ], (
-        "stage-3 failures changed. If the breach was FIXED, empty this list. "
-        f"If a NEW failure appeared, it needs its own decision: {stage3['failures']}"
+    # Stage 3 PASSES since 2026-08-27, and that resolution is pinned as
+    # deliberately as the breach was. The caps were raised 3->5 / 6->8 by
+    # explicit operator decision ("I want that it takes over now") — recorded
+    # in app/config.py — and the mandatory-event catalogue was frozen in the
+    # same decision, so both former failures are resolved by named operator
+    # acts, not absorbed. If a NEW failure appears here it needs its own
+    # decision, exactly as the cap breach did.
+    assert stage3["failures"] == [], (
+        "stage-3 failures reappeared. Each one needs its own operator "
+        f"decision, not absorption: {stage3['failures']}"
     )
+    assert stage3["mandatory_event_total"] == 5
+    assert stage3["mandatory_event_detected"] == 5
 
     # the MEAN is the only volume figure a 76-hour window cannot establish
     assert any("mean" in u for u in stage3["not_measured"])
-    assert stage3["passed"] is False
+    assert stage3["passed"] is True
 
 
 def test_the_gate_artifact_carries_no_pii():

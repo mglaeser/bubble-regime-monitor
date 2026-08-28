@@ -185,21 +185,25 @@ def test_the_committed_stage_is_backed_by_the_committed_evidence():
         f"evidence does not support: {blockers}")
 
 
-def test_stage_three_is_currently_blocked_by_the_non_p1_breach():
-    """Records WHY the cutover is not simply a config change today.
+def test_stage_three_clears_the_gate_by_the_recorded_operator_decision():
+    """The former breach is resolved the way the old test demanded: noticed.
 
-    Wiring the planner into the atomic apply turned every non-P1 volume figure
-    from "0 by construction" into a real count, and on this history the ruleset
-    breaches its own caps. That is an open decision for the operator — tune the
-    rules, or raise the caps deliberately — and until it is made, stage 3 is
-    not reachable. This test fails when that changes, which is how the change
-    gets noticed rather than assumed.
+    This test used to pin that stage 3 was BLOCKED by the non-P1 cap breach and
+    said "if the breach was resolved, update this test deliberately". It was:
+    on 2026-08-27 the operator raised the caps 3->5 / 6->8 ("I want that it
+    takes over now") and froze the mandatory-event catalogue in the same
+    decision. Both acts are named in app/config.py and the catalogue file, so
+    the gate now clears on evidence the deployment actually enforces — the
+    artifact records the raised limits, and admission refuses any drift from
+    them.
     """
     blockers = promotion_blockers(target_stage=3, artifact=_artifact())
-    assert blockers, (
-        "stage 3 now clears the gate. If the non-P1 breach was resolved, this "
-        "test should be updated to assert that — deliberately, not silently.")
-    assert any("cap" in b for b in blockers)
+    assert blockers == [], blockers
+
+    evidence = _artifact()["runs"]["stage_3"]
+    assert evidence["budget_limits"] == {"cap_24h": 5, "cap_168h": 8,
+                                         "target_168h": 2}
+    assert evidence["mandatory_event_detected"] == 5
 
 
 # --- the second refutation -------------------------------------------------
@@ -692,16 +696,29 @@ def test_work_planned_below_the_delivery_floor_never_becomes_sendable(monkeypatc
     by the time the stage rises and were never part of what the operator
     promoted.
     """
+    import yaml
+
     from app.alerts.artifacts import load_active
+    from app.alerts.models import AlertRulesetRegistry
     from app.alerts.promotion import delivery_admission_blockers
     from app.db import session_scope
 
     with session_scope() as session:
         loaded = load_active(session)
-        sha = register_promoted(session, loaded)      # committed stage: 1
+        base = register_promoted(session, loaded)
+        # The COMMITTED ruleset is stage 3 since 2026-08-27, so the stage-1
+        # planning ruleset this test is about is a registry clone.
+        doc = yaml.safe_load(
+            session.get(AlertRulesetRegistry, base).canonical_yaml)
+        doc["meta"]["active_stage"] = 1
+        _registry_clone(session, base, sha="1" * 64,
+                        yaml_text=yaml.safe_dump(doc))
+        clone = session.get(AlertRulesetRegistry, "1" * 64)
+        clone.evidence_checked_at = clone.promoted_at
+        session.flush()
         _deployment_at_stage(monkeypatch, 3)          # promoted upward later
 
-        blockers = delivery_admission_blockers(session, sha)
+        blockers = delivery_admission_blockers(session, "1" * 64)
 
     assert blockers
     assert "below the delivery floor" in blockers[0]
@@ -924,7 +941,7 @@ def test_the_schema_binds_a_delivery_to_its_reviewed_text():
 
 @pytest.mark.parametrize("promote", [False, True])
 @pytest.mark.usefixtures("isolated_db")
-def test_stage_one_is_never_admitted_for_live_delivery(promote):
+def test_stage_one_is_never_admitted_for_live_delivery(promote, monkeypatch):
     """Promotion accepts ARTIFACT BYTES. It is not a delivery switch.
 
     Passing stage-1 evidence proves stage-1 EVALUATION behaviour. Stage 1 has
@@ -952,10 +969,12 @@ def test_stage_one_is_never_admitted_for_live_delivery(promote):
             register(session, artifacts)
         session.flush()
 
+        # The committed ruleset is stage 3 since 2026-08-27, so the stage-1
+        # deployment this test is ABOUT is stubbed rather than committed.
+        _deployment_at_stage(monkeypatch, 1)
         blockers = live_admission_blockers(session)
         assert any("not admitted before Stage" in b for b in blockers), blockers
-        assert any(f"active_stage={artifacts.ruleset.document.meta.active_stage}"
-                   in b for b in blockers)
+        assert any("active_stage=1" in b for b in blockers)
 
         # ...while the artifact itself may still be perfectly promotable
         evidence = json.loads(ARTIFACT.read_text(encoding="utf-8"))
@@ -989,6 +1008,7 @@ def test_live_health_consumes_the_same_stage_floor_as_dispatch(monkeypatch):
         # Even exact promotion cannot lift the Stage-3 delivery floor.
         register_promoted(session, artifacts)
         session.flush()
+        _deployment_at_stage(monkeypatch, 1)   # committed stage is 3 now
         expected = live_admission_blockers(session)
         payload = health_projection(
             session,
@@ -1014,7 +1034,7 @@ def test_live_health_consumes_the_same_stage_floor_as_dispatch(monkeypatch):
 
 
 @pytest.mark.usefixtures("isolated_db")
-def test_the_stage_floor_does_not_hide_missing_evidence():
+def test_the_stage_floor_does_not_hide_missing_evidence(monkeypatch):
     """Both answers, not the first one only.
 
     An early return on the stage floor would make a deployment that is also
@@ -1023,6 +1043,7 @@ def test_the_stage_floor_does_not_hide_missing_evidence():
     from app.alerts.promotion import live_admission_blockers
     from app.db import session_scope
 
+    _deployment_at_stage(monkeypatch, 1)   # committed stage is 3 now
     with session_scope() as session:
         blockers = live_admission_blockers(session)
 
@@ -1059,6 +1080,10 @@ def test_stage_one_live_dispatch_refuses_before_sender_construction(
                             lambda path=None: None)
 
     from tests.conftest import register_promoted
+
+    # The committed ruleset is stage 3 since 2026-08-27; the stage-1 deployment
+    # this test refuses for is stubbed.
+    _deployment_at_stage(monkeypatch, 1)
 
     with session_scope() as session:
         if promote:
@@ -1242,7 +1267,7 @@ def test_changed_caps_invalidate_the_evidence_that_never_saw_them(monkeypatch):
         "runs": {"stage_3": {
             "evaluated_at_stage": 3, "passed": True, "failures": [],
             "notification_planning_ran": True,
-            "budget_limits": {"cap_24h": 3, "cap_168h": 6, "target_168h": 2},
+            "budget_limits": {"cap_24h": 5, "cap_168h": 8, "target_168h": 2},
         }},
     }
     initial = promotion_blockers(target_stage=3, artifact=artifact)
