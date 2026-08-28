@@ -47,6 +47,8 @@ fixed with priority.
 
 | 4 | SOTA-A | Member corruption retains v1; lone-surrogate payload 500s at response encoding; boolean version emitted | **UPHELD ×3 → fixed**: all-or-nothing member validation (any corrupt member degrades the whole artifact — partial content never served under the artifact's version); whole-artifact UTF-8 round-trip at load (`json.dumps(...).encode` — lone surrogates rejected where the try/except can see them); `type(version) is int` (bool is an int subclass in Python). The loader now returns only the normalized `{content_version, blocks}` pair. All pinned with hostile-file tests |
 
+| 5 | SOTA-A + SOTA-C | Non-finite numbers survive preflight (Starlette's `allow_nan=False` encoder 500s on cached v1 data); nested-item validation container-shallow (`table` holding a string item advertises v1) | **UPHELD ×2 → fixed**: `json.load(parse_constant=reject)` refuses Infinity/NaN at load; `_valid_member` validates every ITEM per kind (links/catalog/table items must be non-empty dicts, list items strings-or-dicts, map values non-empty strings). Both pinned with hostile-file tests |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit

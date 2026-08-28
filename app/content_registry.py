@@ -47,9 +47,14 @@ def _file_artifact() -> dict[str, Any]:
     # advertising its version while serving built-ins; and a hostile
     # deeply-nested file raises RecursionError, which must not escape into a
     # request handler (panel findings, PR #97 rounds 2-3).
+    def _reject_constant(name: str) -> Any:
+        # Python's json accepts Infinity/NaN by default; Starlette's response
+        # encoder (allow_nan=False) then 500s — reject at load instead.
+        raise ValueError(f"non-finite JSON constant: {name}")
+
     try:
         with _BLOCKS_FILE.open(encoding="utf-8") as fh:
-            loaded = json.load(fh)
+            loaded = json.load(fh, parse_constant=_reject_constant)
         # A payload that json.load accepts can still be unserializable at
         # RESPONSE time (lone UTF-16 surrogates raise UnicodeEncodeError in
         # the response encoder — a 500 far past this try/except). Prove the
@@ -69,18 +74,27 @@ def _file_artifact() -> dict[str, Any]:
 
 
 def _valid_member(block: Any) -> bool:
+    # Deep, not container-shallow: the all-or-nothing invariant means every
+    # ITEM must satisfy its kind's shape, not just the container's presence.
     if not isinstance(block, dict):
         return False
     kind = block.get("kind")
     if kind in ("text", "template"):
         text = block.get("text")
         return isinstance(text, str) and bool(text.strip())
-    if kind in ("links", "endpoint_catalog", "list", "table"):
+    if kind in ("links", "endpoint_catalog", "table"):
         items = block.get("items")
-        return isinstance(items, list) and bool(items)
+        return (isinstance(items, list) and bool(items)
+                and all(isinstance(i, dict) and i for i in items))
+    if kind == "list":
+        items = block.get("items")
+        return (isinstance(items, list) and bool(items)
+                and all((isinstance(i, str) and i.strip())
+                        or (isinstance(i, dict) and i) for i in items))
     if kind == "map":
         entries = block.get("entries")
-        return isinstance(entries, dict) and bool(entries)
+        return (isinstance(entries, dict) and bool(entries)
+                and all(isinstance(v, str) and v.strip() for v in entries.values()))
     return False
 
 

@@ -285,3 +285,31 @@ class TestBlockArtifact:
         reg._file_artifact.cache_clear()
         assert reg.content_version() == 0
         reg._file_artifact.cache_clear()
+
+    def test_non_finite_numbers_rejected_at_load(self, monkeypatch, tmp_path):
+        # Round 5: python json accepts Infinity/NaN; the response encoder
+        # (allow_nan=False) then 500s — reject at load.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text('{"content_version": 1, "blocks": {'
+                       '"x.y": {"kind": "table", "items": [{"v": Infinity}]}}}',
+                       encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        reg._file_artifact.cache_clear()
+
+    def test_nested_item_corruption_degrades_whole_artifact(self, monkeypatch, tmp_path):
+        # Round 5: a table holding a string item is corrupt — the all-or-
+        # nothing invariant applies to ITEMS, not just containers.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text('{"content_version": 1, "blocks": {'
+                       '"x.y": {"kind": "table", "items": [{"a": 1}, "corrupt"]}}}',
+                       encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        reg._file_artifact.cache_clear()
