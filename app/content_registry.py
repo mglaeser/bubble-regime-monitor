@@ -69,8 +69,9 @@ def static_blocks() -> dict[str, dict[str, Any]]:
 
 def gauge_display() -> dict[str, Any]:
     """The gauge display deck (Q8: copy rides the score payload) — every
-    file block under the gauge.display. prefix, keyed by its sub-slug."""
-    prefix = "gauge.display."
+    file block under the gauge. prefix (the A1 ledger's namespace for the
+    deck), keyed by its sub-slug (e.g. band.oneliner, badge.static)."""
+    prefix = "gauge."
     return {slug[len(prefix):]: block
             for slug, block in static_blocks().items() if slug.startswith(prefix)}
 
@@ -190,13 +191,19 @@ def _save_haven_slots() -> list[DynamicSlot]:
     Analytics slots serve today's frozen editorial values as placeholders until
     the Phase-E battery produces them server-side."""
     slots: list[DynamicSlot] = [
+        # Banner placeholders carry the CURRENT editorial values (A2: analytics/
+        # banner slots serve today's frozen editorial state until generation
+        # lands) — a placeholder shaped like a date must never fabricate one.
         DynamicSlot("atlas.explorer.potential-banner.anchor-date",
                     "Anchor month of the potential-crisis banner", 8,
-                    r"^[A-Z][a-z]{2} 20\d{2}$", "Jan 2026"),
-        _ascii_slot("atlas.explorer.potential-banner.backfill-window",
-                    "Backfill window of the potential-crisis banner", 24),
-        _ascii_slot("atlas.explorer.potential-banner.freshness",
-                    "Source-freshness line of the potential-crisis banner", 120),
+                    r"^[A-Z][a-z]{2} 20\d{2}$", "Jul 2026"),
+        DynamicSlot("atlas.explorer.potential-banner.backfill-window",
+                    "Backfill window of the potential-crisis banner", 24,
+                    r"^[\x20-\x7E]{1,24}$", "Jul 2021 - Jul 2026"),
+        DynamicSlot("atlas.explorer.potential-banner.freshness",
+                    "Source-freshness line of the potential-crisis banner", 120,
+                    r"^[\x20-\x7E]{1,120}$",
+                    "<= 6 weeks old (BIS 28 Jun / ECB 2 Jun & 27 May / Fed 8 May 2026)"),
         _ascii_slot("atlas.crises.ai2026.peak", "AI-2026 crisis peak label", 48),
         _ascii_slot("atlas.crises.ai2026.cause", "AI-2026 crisis cause prose", 600),
         _ascii_slot("atlas.crises.ai2026.highlight", "AI-2026 crisis highlight prose", 700),
@@ -229,9 +236,10 @@ def _save_haven_slots() -> list[DynamicSlot]:
                                  f"AI-2026 matrix note for {crisis_asset}", n))
     for asset in ("gold", "ust10y", "cash"):
         for stat in ("bf", "bc", "hit", "lam"):
+            # max_len must dominate the regex's worst case ('+123.45%' = 8).
             slots.append(DynamicSlot(
                 f"analytics.tail.{asset}.{stat}",
-                f"Tail-regression {stat} statistic for {asset}", 7,
+                f"Tail-regression {stat} statistic for {asset}", 8,
                 r"^[+-]?\d{1,3}(\.\d{1,2})?%?$", "0.0"))
     for i in range(1, 5):
         slots.append(_ascii_slot(f"analytics.explos.{i}.label",

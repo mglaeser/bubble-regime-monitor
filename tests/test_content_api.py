@@ -155,11 +155,23 @@ class TestBlockArtifact:
 
     def test_gauge_display_prefix_extraction(self, monkeypatch):
         reg = self._with_artifact(monkeypatch, {"content_version": 1, "blocks": {
-            "gauge.display.band.hold": {"kind": "text", "text": "example copy"},
+            "gauge.band.oneliner": {"kind": "text", "text": "example copy"},
             "site.intro": {"kind": "text", "text": "not gauge"},
         }})
         display = reg.gauge_display()
-        assert display == {"band.hold": {"kind": "text", "text": "example copy"}}
+        assert display == {"band.oneliner": {"kind": "text", "text": "example copy"}}
+
+    def test_shipped_artifact_actually_feeds_the_display_deck(self):
+        # Panel finding (PR-1a round 1): the deck must be verified against the
+        # REAL shipped artifact, never a fabricated slug — Q8 may not be dead
+        # on arrival while the artifact ships in the same PR.
+        import app.content_registry as reg
+
+        reg._file_artifact.cache_clear()
+        display = reg.gauge_display()
+        assert display, "score data.display is empty with the shipped artifact"
+        assert "band.oneliner" in display
+        reg._file_artifact.cache_clear()
 
     def test_missing_file_serves_builtins_with_version_zero(self, monkeypatch):
         import app.content_registry as reg
