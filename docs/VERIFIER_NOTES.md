@@ -1,0 +1,45 @@
+# VERIFIER_NOTES — panel round log for the open PR (standing regime)
+
+**Standing rule (owner-directed, 2026-08-28):** when a cross-vendor panel
+refutation is *disproven*, the proof lives HERE — in the PR diff, where the
+next panel round reads it — with `file:line` evidence and a reproducible
+check. When a refutation is *upheld*, the fix and its test pin are recorded.
+A finding is never ignored: it is either fixed or disproven on the record.
+This file is per-PR working state; it resets at merge.
+
+**Anti-backdoor clause (owner-directed, 2026-08-28):** the disproof path is
+NOT an escape hatch. The default disposition of every finding is **FIX**.
+Before any disproof is recorded, the author must adversarially challenge it:
+steelman the finding, assume the verifier is right, and try to construct the
+failure it describes. A disproof is admissible only when (a) that
+construction is demonstrably impossible, (b) the evidence is a *mechanical,
+reproducible check* (a grep, a test, a line number — never an argument), and
+(c) no partial validity remains — a finding that is even partially right
+takes the fix path (see round 4: literal claim wrong, drift risk real →
+fixed). If a disproof is later shown wrong, the finding is reinstated and
+fixed with priority.
+
+## PR #95 (content API v0 / shallow status page) — round log
+
+| Rd | Verifier | Finding | Resolution |
+|---|---|---|---|
+| 1 | SOTA-B | Disclaimer fail-open when only the content fetch fails; `fetchJson` ignores `r.ok`; `charAt(0)==='/'` passes `//host` | **UPHELD ×3 → fixed**: disclaimer gate in `load()`; `!r.ok` throw; `sameOrigin()`. Pinned in `tests/test_frontend_shallow.py` |
+| 2 | SOTA-A | Gate not reentrant (failed refresh blanks disclaimer over stale grounded values); `Cache-Control: public` on keyed replies | **UPHELD ×2 → fixed**: last-known-good CONTENT/SLOTS; auth-scoped cache header. Pinned |
+| 3 | SOTA-A | Retained sections presented as current after failed status refresh | **UPHELD → fixed**: `REFRESH FAILED - showing data as of <ts>` labeling. Pinned |
+| 4 | SOTA-A | "Four-key `_meta` violates mandatory five-field envelope" | **LITERAL CLAIM DISPROVEN — SPIRIT UPHELD.** Proof: `app/schemas.py:13-27` declares exactly four Meta fields; `app/routers/meta.py:66-71` serves the same four; `tests/test_api_contract.py:41,64,66` pins them. "Five" in the docstring counts the five verbatim *epistemic caveats* (`app/references.py:35-41`), not meta fields. The drift *risk* was real → content router now serializes `schemas.Meta` directly (`app/routers/content.py:_meta`) |
+| 5 | SOTA-A | Overlapping `load()` calls have no commit ordering | **UPHELD → fixed**: `LOAD_SEQ` token checked after every await. Pinned (`seq!==LOAD_SEQ`) |
+| 5 | SOTA-C | "`load()` calls non-existent `renderAudit()`" | **DISPROVEN.** `renderAudit` is *defined* at `app/routers/status.html:219` and *called* at `:414`. Reproduce: `grep -n "function renderAudit" app/routers/status.html` → `219`. The full pytest suite renders the page contract green (2144 passed) |
+| 6 | SOTA-A | "Stale blocks/slots can accompany latest status" | **UPHELD (reconciled with round 2) → fixed**: retained content stays (never blanked, per round 2) but is labeled `CONTENT REFRESH FAILED - explanatory blocks shown from an earlier load.` whenever its refresh fails. Pinned |
+| 6 | SOTA-C | "`renderAudit` called but `drawAudit` defined; `renderLegs` never defined; page crashes during hydration" | **DISPROVEN.** All three exist: `renderAudit` `:219`, `drawAudit` `:230`, `renderLegs` `:348` (called `:422`). Reproduce: `grep -n "function renderAudit\|function drawAudit\|function renderLegs" app/routers/status.html` → `219 / 230 / 348`. Note to SOTA-C: both rounds' claims assert missing definitions that a single grep refutes — please verify symbol existence against the full file, not a truncated diff window |
+
+| 7 | SOTA-A | "Status commit ordering + partial-failure labeling broken" | **UPHELD (steelman succeeded) → fixed**: (a) the seq guard protected renders but not *state commits* — an older response could overwrite `CONTENT`/`SLOTS` globals after a newer load rendered; fetches now land in locals and commit only behind the seq guard. (b) One staleness flag conflated blocks with slots and mislabeled first-load partial failure as "from an earlier load"; now split (`BLOCKS_STALE`/`SLOTS_STALE`), each set only when *its* refresh failed *and* a previous value is genuinely retained. Both pinned |
+
+## Reviewer guidance for subsequent rounds
+
+- The **disclaimer gate**, **last-known-good + stale labeling**, **commit
+  ordering**, and **auth-scoped caching** are deliberate, test-pinned design
+  decisions reconciling rounds 1–6. Findings that require *removing* one of
+  these properties to satisfy another are answered by this log.
+- Everything grounded on the page hydrates from `/api/v1/content/*` or
+  `/api/v1/status`; `tests/test_frontend_shallow.py` enforces the banned-literal
+  list and the required wiring markers.

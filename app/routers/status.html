@@ -158,7 +158,8 @@ let SLOTS = {};
 let EXAMPLE = {};
 let LAST_OK = null; // service.now of the last successful status load
 let LOAD_SEQ = 0;   // commit ordering: only the newest load() may render
-let CONTENT_STALE = false; // retained blocks/slots are from an earlier load
+let BLOCKS_STALE = false; // retained explanatory blocks are from an earlier load
+let SLOTS_STALE = false;  // retained automated notes are from an earlier load
 function ctext(slug, fb){ const b=CONTENT[slug]; return (b && typeof b.text==='string') ? b.text : (fb||''); }
 function citems(slug){ const b=CONTENT[slug]; return (b && Array.isArray(b.items)) ? b.items : []; }
 function cmap(slug){ const b=CONTENT[slug]; return (b && b.entries && typeof b.entries==='object') ? b.entries : {}; }
@@ -166,8 +167,11 @@ function slotText(name){ const s=SLOTS[name]; return (s && typeof s.text==='stri
 
 function renderContentText(){
   const stale=document.getElementById('content-stale');
-  stale.textContent = CONTENT_STALE ? 'CONTENT REFRESH FAILED - explanatory blocks shown from an earlier load.' : '';
-  stale.style.color = CONTENT_STALE ? 'var(--err)' : '';
+  const parts=[];
+  if(BLOCKS_STALE) parts.push('CONTENT REFRESH FAILED - explanatory blocks shown from an earlier load.');
+  if(SLOTS_STALE) parts.push('NOTE REFRESH FAILED - automated notes shown from an earlier load.');
+  stale.textContent = parts.join(' ');
+  stale.style.color = parts.length ? 'var(--err)' : '';
   document.getElementById('disclaimer').textContent = ctext('disclaimer_full','');
   document.getElementById('intro-audit').textContent = ctext('intro.science_audit','');
   document.getElementById('intro-sources').textContent = ctext('intro.sources','');
@@ -393,23 +397,30 @@ async function load(){
   // A failed refresh keeps the previous (disclaimed) content on screen, so
   // the disclaimer gate cannot be blanked while stale grounded values remain
   // rendered (reentrancy hole flagged by the cross-vendor panel).
-  let contentFresh = true;
+  // Fetch into locals first: NO global (state) commit may happen from a load
+  // that is no longer the newest — the seq guard protects state commits, not
+  // just renders (panel round 7: an older response must not win in state).
+  let newBlocks=null, newSlots=null, blocksFailed=false, slotsFailed=false;
   try{
     const c = await fetchJson('/api/v1/content/dashboard');
-    const blocks = c.data&&c.data.blocks;
-    if(blocks && typeof blocks==='object') CONTENT = blocks;
-  }catch(e){ contentFresh = false; /* keep last-known-good CONTENT */ }
+    const b = c.data&&c.data.blocks;
+    if(b && typeof b==='object') newBlocks = b;
+  }catch(e){ blocksFailed = true; }
+  if(seq!==LOAD_SEQ) return; // a newer load owns state from here on
   try{
     const dyn = await fetchJson('/api/v1/content/dynamic');
-    const slots = dyn.data&&dyn.data.slots;
-    if(slots && typeof slots==='object') SLOTS = slots;
-  }catch(e){ contentFresh = false; /* keep last-known-good SLOTS */ }
-  // Round-2 + round-6 reconciliation: retained content stays on screen
-  // (last-known-good, never blanked) but is explicitly LABELED stale when a
-  // content refresh fails — retained blocks may not silently pose as current
-  // beside newer status data.
-  CONTENT_STALE = !contentFresh && !!ctext('disclaimer_full','');
-  if(seq!==LOAD_SEQ) return; // a newer load started; let it render
+    const sl = dyn.data&&dyn.data.slots;
+    if(sl && typeof sl==='object') newSlots = sl;
+  }catch(e){ slotsFailed = true; }
+  if(seq!==LOAD_SEQ) return;
+  // Commit + precise staleness: a part is 'stale' only when ITS refresh
+  // failed AND a previous value is actually retained on screen; a first-load
+  // failure is absence, not staleness (panel round 7: partial-failure
+  // labeling must not conflate blocks with slots or invent an earlier load).
+  if(newBlocks){ CONTENT = newBlocks; BLOCKS_STALE = false; }
+  else if(blocksFailed && ctext('disclaimer_full','')) BLOCKS_STALE = true;
+  if(newSlots){ SLOTS = newSlots; SLOTS_STALE = false; }
+  else if(slotsFailed && Object.keys(SLOTS).length) SLOTS_STALE = true;
   renderContentText(); renderDoclinks();
   // DISCLAIMER GATE (fail-closed): grounded values render ONLY when the
   // disclaimer is actually on screen. Without it, no score, no indicators,

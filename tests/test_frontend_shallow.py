@@ -65,7 +65,13 @@ REQUIRED_MARKERS = [
     "seq!==LOAD_SEQ",
     # Retained (last-known-good) content is labeled stale when its refresh
     # failed — it may not silently pose as current beside newer status data.
+    # Blocks and slots are labeled SEPARATELY; a first-load failure is absence,
+    # never mislabeled as "from an earlier load".
     "CONTENT REFRESH FAILED - explanatory blocks shown from an earlier load.",
+    "NOTE REFRESH FAILED - automated notes shown from an earlier load.",
+    # State commits (not just renders) are seq-guarded: an older response can
+    # never win in the CONTENT/SLOTS globals.
+    "a newer load owns state from here on",
 ]
 
 
