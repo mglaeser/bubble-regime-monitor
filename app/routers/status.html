@@ -72,6 +72,7 @@
   button:hover{border-color:var(--accent)}
   .overflow{overflow-x:auto}
   code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:5px;font-size:12px}
+  .slot{font-size:12.5px;color:var(--muted);font-style:italic;margin-top:6px;flex-basis:100%}
 </style>
 </head>
 <body>
@@ -79,41 +80,30 @@
   <h1>bubblegauge</h1>
   <span class="ver" id="ver"></span>
   <span class="refresh"><span class="muted" id="ts"></span> <button id="refresh">Refresh</button></span>
-  <!-- The disclaimer lives STATICALLY on this human-facing page (and /docs);
-       since v3.6.0 the machine JSON payloads no longer repeat it. -->
-  <div class="disclaimer" id="disclaimer">bubblegauge is a research instrument, not investment
-    advice. The headline is a 0&ndash;100 regime heuristic produced by structured expert judgment;
-    it is uncalibrated and is not a probability. The reference class of comparable US equity manias
-    is roughly four events {1929, 2000, 2007, 2021}, so no honest probability calibration is
-    possible. The current episode may be rational general-purpose-technology repricing rather than
-    a bubble. Nothing here is a recommendation to buy, sell, or hold any security. Any de-risking
-    rule may destroy value net of costs. Use at your own risk.</div>
+  <!-- Shallow page: ALL grounded text (the disclaimer included) hydrates from
+       GET /api/v1/content/dashboard. On fetch failure no scientific claims
+       render at all, so nothing is ever shown un-disclaimed. -->
+  <div class="disclaimer" id="disclaimer"></div>
 </header>
 <main>
   <section id="sec-headline"><h2>Headline</h2><div id="headline" class="headline"></div></section>
 
   <section id="sec-audit">
     <h2>Science audit <span class="counts" id="audit-counts"></span></h2>
-    <p class="muted" style="margin-top:0">Everything currently unclear, incomplete, contested,
-      proxied, judgmental, or deviating from the written spec — flagged and made visible.
-      Scientific correctness is the leading design aspect.</p>
+    <p class="muted" style="margin-top:0" id="intro-audit"></p>
     <div class="tabs" id="audit-tabs"></div>
     <div id="audit"></div>
   </section>
 
   <section id="sec-sources">
     <h2>Data source pulls</h2>
-    <p class="muted" style="margin-top:0">Live success/failure of each external fetch from the
-      most recent recompute, with the scientific/official basis of each source.</p>
+    <p class="muted" style="margin-top:0" id="intro-sources"></p>
     <div id="sources"></div>
   </section>
 
   <section id="sec-feedsrc">
     <h2>Dashboard-feed sources (non-scoring)</h2>
-    <p class="muted" style="margin-top:0">Per-item health of the companion-dashboard feed
-      (<span class="mono">GET /api/v1/dashboard/feed</span>) — incl. the CNN Fear &amp; Greed
-      pull. These sources feed display only; each degrades independently and never touches
-      the score.</p>
+    <p class="muted" style="margin-top:0" id="intro-feed"></p>
     <div id="feedsrc"></div>
   </section>
 
@@ -126,22 +116,14 @@
 
   <section id="sec-legs">
     <h2>Legs 2–3 &amp; action bands — scientific sources</h2>
-    <p class="muted" style="margin-top:0">The trend trigger, fast alarm, and action-band
-      thresholds that gate the headline, with their literature basis and caveats.</p>
+    <p class="muted" style="margin-top:0" id="intro-legs"></p>
     <div id="legs"></div>
   </section>
 
   <section id="sec-api">
     <h2>API reference</h2>
-    <p class="muted" style="margin-top:0">Interactive, machine-readable spec with schemas and
-      try-it-out:</p>
-    <div class="row" style="margin-bottom:12px">
-      <a href="/docs">Swagger UI →</a>
-      <a href="/redoc">ReDoc →</a>
-      <a href="/openapi.json">openapi.json →</a>
-      <a href="/api/v1/status">this status as JSON →</a>
-      <a href="/api/v1/meta/methodology">methodology JSON →</a>
-    </div>
+    <p class="muted" style="margin-top:0" id="intro-api"></p>
+    <div class="row" style="margin-bottom:12px" id="doclinks"></div>
     <div id="endpoints"></div>
     <h2 style="margin-top:18px">Example — <code>GET /api/v1/score</code></h2>
     <pre id="example"></pre>
@@ -157,7 +139,7 @@
 </main>
 
 <script>
-// -- safe DOM helpers: all dynamic/external text via textContent, never innerHTML --
+// -- safe DOM helpers: all dynamic/external text via textContent, never markup injection --
 function h(tag, cls, text){ const e=document.createElement(tag); if(cls) e.className=cls;
   if(text!=null) e.textContent=String(text); return e; }
 function badge(status){ const b=h('span','badge b-'+status, status); return b; }
@@ -166,27 +148,55 @@ function clear(el){ while(el.firstChild) el.removeChild(el.firstChild); }
 function kv(pairs){ const d=h('div','kv'); pairs.forEach(([k,v])=>{ d.appendChild(h('b',null,k));
   d.appendChild(h('span',null, v==null?'—':v)); }); return d; }
 
-// The worked example is served from the status document (single source of
-// truth shared with the OpenAPI /score example) — set at load time.
+// Content-as-a-resource: every grounded string on this page comes from the
+// content API. CONTENT holds static blocks by slug; SLOTS holds dynamic slots.
+// On content-fetch failure the accessors return neutral fallbacks so the page
+// stays usable without stating any scientific fact.
+let CONTENT = {};
+let SLOTS = {};
 let EXAMPLE = {};
+function ctext(slug, fb){ const b=CONTENT[slug]; return (b && typeof b.text==='string') ? b.text : (fb||''); }
+function citems(slug){ const b=CONTENT[slug]; return (b && Array.isArray(b.items)) ? b.items : []; }
+function cmap(slug){ const b=CONTENT[slug]; return (b && b.entries && typeof b.entries==='object') ? b.entries : {}; }
+function slotText(name){ const s=SLOTS[name]; return (s && typeof s.text==='string') ? s.text : null; }
 
-const ENDPOINTS = [
-  ["GET","/api/v1/score","Headline median, IQR, band, both blocks, red flags, legs, judgment"],
-  ["GET","/api/v1/score/history","Historical snapshots (raw/daily/monthly)"],
-  ["GET","/api/v1/indicators/{id}","Full WHAT/HOW/WHY methodology + references"],
-  ["GET","/api/v1/legs/trend","Faber trend states (SPY, QQQ)"],
-  ["GET","/api/v1/legs/fast-alarm","VIX term structure, VRP, SKEW"],
-  ["GET","/api/v1/meta/methodology","Framework, references, falsification, changelog"],
-  ["GET","/api/v1/dashboard/feed","Dashboard feed: 12 monthly series + 34 scalars (DASHBOARD_FEED_SPEC.md)"],
-  ["GET","/api/v1/status","This status document"],
-  ["GET","/readyz","Per-source health matrix + GSADF R self-check"],
-  ["POST","/api/v1/admin/refresh","Trigger a recompute (X-API-Key)"],
-];
+function renderContentText(){
+  document.getElementById('disclaimer').textContent = ctext('disclaimer_full','');
+  document.getElementById('intro-audit').textContent = ctext('intro.science_audit','');
+  document.getElementById('intro-sources').textContent = ctext('intro.sources','');
+  document.getElementById('intro-feed').textContent = ctext('intro.feed_sources','');
+  document.getElementById('intro-legs').textContent = ctext('intro.legs','');
+  document.getElementById('intro-api').textContent = ctext('intro.api','');
+}
+
+function renderDoclinks(){
+  const el=document.getElementById('doclinks'); clear(el);
+  citems('api.doc_links').forEach(l=>{
+    if(typeof l.href!=='string' || l.href.charAt(0)!=='/') return; // same-origin only
+    const a=h('a',null,l.label||l.href); a.href=l.href; el.appendChild(a);
+  });
+}
+
+function renderEndpoints(){
+  const el=document.getElementById('endpoints'); clear(el);
+  const items=citems('api.endpoints');
+  if(!items.length){ el.appendChild(h('div','muted','—')); return; }
+  const wrap=h('div','overflow'); const tb=h('table');
+  const thead=h('thead'); const htr=h('tr'); ['method','path','purpose'].forEach(x=>htr.appendChild(h('th',null,x)));
+  thead.appendChild(htr); tb.appendChild(thead); const tbody=h('tbody');
+  items.forEach(it=>{ const tr=h('tr'); tr.appendChild(h('td','mono',it.method));
+    const pc=h('td'); const a=h('a',null,it.path);
+    a.href=(typeof it.path==='string' && it.path.charAt(0)==='/' && it.path.indexOf('{')<0)?it.path:'#';
+    pc.appendChild(a); tr.appendChild(pc);
+    tr.appendChild(h('td','muted',it.purpose)); tbody.appendChild(tr); });
+  tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
+  document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
+}
 
 function renderHeadline(s){
   const el=document.getElementById('headline'); clear(el);
   const snap=s.snapshot;
-  if(!snap){ el.appendChild(h('div','muted','No snapshot computed yet — trigger a recompute or wait for the 4-hourly (02/06/10/14/18/22 UTC) schedule.')); return; }
+  if(!snap){ el.appendChild(h('div','muted', ctext('empty.snapshot','No data yet.'))); return; }
   el.appendChild(h('div','score', snap.headline_median));
   const right=h('div');
   right.appendChild(badge(snap.action_band||'—'));
@@ -199,6 +209,8 @@ function renderHeadline(s){
   el.appendChild(right);
   if(snap.judgment_call){ const j=h('div','ind-meta'); j.style.flexBasis='100%';
     j.textContent='Judgment: '+snap.judgment_call+(snap.judgment_stale?' (stale)':''); el.appendChild(j); }
+  const note=slotText('headline_note');
+  if(note){ el.appendChild(h('div','slot', note)); }
 }
 
 let AUDIT=[], AUDIT_FILTER='all';
@@ -218,6 +230,8 @@ function drawAudit(){
   const el=document.getElementById('audit'); clear(el);
   const list=AUDIT.filter(f=>AUDIT_FILTER==='all'||f.severity===AUDIT_FILTER);
   if(!list.length){ el.appendChild(h('div','muted','Nothing flagged at this level.')); return; }
+  const note=slotText('audit_note');
+  if(note){ el.appendChild(h('div','slot', note)); }
   list.forEach(f=>{
     const d=h('div','flag '+f.severity);
     const t=h('div','t'); t.appendChild(badge(f.severity==='error'?'error':(f.severity==='warn'?'warn':'info')));
@@ -265,7 +279,7 @@ function renderSources(s){
 function renderFeedSources(s){
   const el=document.getElementById('feedsrc'); clear(el);
   const fs=s.feed_sources;
-  if(!fs){ el.appendChild(h('div','muted','No feed payload persisted yet — builds with the next recompute.')); return; }
+  if(!fs){ el.appendChild(h('div','muted', ctext('empty.feed','No data yet.'))); return; }
   el.appendChild(h('div','ind-meta','Feed built: '+(fs.computed_at||'—')+
     (fs.unavailable&&fs.unavailable.length?(' · unavailable: '+fs.unavailable.join(', ')):' · all items available')));
   const wrap=h('div','overflow'); const tb=h('table');
@@ -288,7 +302,7 @@ function renderFeedSources(s){
 function renderProviders(s){
   const el=document.getElementById('providers'); clear(el);
   const list=s.providers||[];
-  if(!list.length){ el.appendChild(h('div','muted','No price-provider health recorded yet (first recompute pending).')); return; }
+  if(!list.length){ el.appendChild(h('div','muted', ctext('empty.providers','No data yet.'))); return; }
   const wrap=h('div','overflow'); const tb=h('table');
   const thead=h('thead'); const htr=h('tr'); ['provider','status','consecutive failures','cooldown until','updated'].forEach(x=>htr.appendChild(h('th',null,x)));
   thead.appendChild(htr); tb.appendChild(thead); const tbody=h('tbody');
@@ -300,12 +314,12 @@ function renderProviders(s){
   tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
 }
 
-const GROUND_BADGE={'literature-grounded':'ok','literature-adjacent':'info','judgmental':'warn','contested':'error','lagging-confirmation':'info'};
 function renderIndicators(s){
+  const groundBadge=cmap('taxonomy.grounding');
   const el=document.getElementById('indicators'); clear(el);
   (s.indicators||[]).forEach(ind=>{
     const det=h('details'); const sum=h('summary');
-    const gb=badge(GROUND_BADGE[ind.grounding]||'unknown'); gb.textContent=ind.grounding; sum.appendChild(gb);
+    const gb=badge(groundBadge[ind.grounding]||'unknown'); gb.textContent=ind.grounding; sum.appendChild(gb);
     sum.appendChild(h('span',null,ind.id.toUpperCase()+' · '+ind.name));
     sum.appendChild(h('span','weight','w='+ind.weight+' · block '+ind.block));
     const lv=ind.live;
@@ -351,33 +365,38 @@ function renderMeta(s){
   (s.changelog||[]).forEach(e=>{ const d=h('div','ind-meta'); d.appendChild(h('b',null,(e.version||'')+' ')); d.appendChild(document.createTextNode((e.score?'('+e.score+') ':'')+(e.notes||''))); cl.appendChild(d); });
 }
 
-function renderEndpoints(){
-  const el=document.getElementById('endpoints'); clear(el);
-  const wrap=h('div','overflow'); const tb=h('table');
-  const thead=h('thead'); const htr=h('tr'); ['method','path','purpose'].forEach(x=>htr.appendChild(h('th',null,x)));
-  thead.appendChild(htr); tb.appendChild(thead); const tbody=h('tbody');
-  ENDPOINTS.forEach(([m,p,d])=>{ const tr=h('tr'); tr.appendChild(h('td','mono',m));
-    const pc=h('td'); const a=h('a',null,p); a.href=p.indexOf('{')<0?p:'#'; pc.appendChild(a); tr.appendChild(pc);
-    tr.appendChild(h('td','muted',d)); tbody.appendChild(tr); });
-  tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
-  document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
+async function fetchJson(url){
+  const r = await fetch(url, {headers:{'Accept':'application/json'}});
+  return r.json();
 }
 
 async function load(){
-  renderEndpoints();
+  // Content first (blocks + slots), then the live status; each degrades
+  // independently — a failed content fetch leaves neutral text, a failed
+  // status fetch shows the generic failure line and no grounded values.
   try{
-    const r = await fetch('/api/v1/status', {headers:{'Accept':'application/json'}});
-    const s = await r.json();
+    const c = await fetchJson('/api/v1/content/dashboard');
+    CONTENT = (c.data&&c.data.blocks)||{};
+  }catch(e){ CONTENT = {}; }
+  try{
+    const dyn = await fetchJson('/api/v1/content/dynamic');
+    SLOTS = (dyn.data&&dyn.data.slots)||{};
+  }catch(e){ SLOTS = {}; }
+  renderContentText(); renderDoclinks();
+  try{
+    const s = await fetchJson('/api/v1/status');
     document.getElementById('ver').textContent = 'v'+((s.service&&s.service.version)||'?');
     document.getElementById('ts').textContent = 'as of '+((s.service&&s.service.now)||'');
     EXAMPLE = s.example || {};
-    document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
+    renderEndpoints();
     renderHeadline(s); renderAudit(s); renderSources(s); renderFeedSources(s); renderProviders(s);
     renderIndicators(s); renderLegs(s); renderMeta(s);
-    document.getElementById('foot').textContent =
-      'bubblegauge '+((s.service&&s.service.version)||'')+' · recompute '+((s.service&&s.service.recompute_schedule)||'')+
-      ' · Research, not advice.';
+    const foot=document.getElementById('foot');
+    foot.textContent = 'bubblegauge '+((s.service&&s.service.version)||'')+' · recompute '+
+      ((s.service&&s.service.recompute_schedule)||'')+
+      (ctext('advice_tag','')?(' · '+ctext('advice_tag','')):'');
   }catch(e){
+    renderEndpoints();
     document.getElementById('headline').textContent = 'Failed to load status: '+e;
   }
 }
