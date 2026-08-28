@@ -182,3 +182,29 @@ class TestBlockArtifact:
         assert reg.content_version() == 0
         assert "disclaimer_full" in reg.static_blocks()
         reg._file_artifact.cache_clear()
+
+    def test_malformed_artifact_never_couples_to_requests(self, monkeypatch, tmp_path):
+        # Panel finding (PR #97): a corrupt artifact file must degrade to
+        # built-ins at version 0, never raise into a request handler.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        assert "disclaimer_full" in reg.static_blocks()
+        reg._file_artifact.cache_clear()
+
+    def test_band_oneliner_keys_match_real_band_values(self):
+        # Panel finding (PR #97): the band map must key the REAL bubblegauge
+        # band strings — a 'derisk' key would make the highest-severity band
+        # miss the lookup (and ||hold client patterns would show HOLD).
+        import app.content_registry as reg
+
+        reg._file_artifact.cache_clear()
+        entries = reg.static_blocks()["gauge.band.oneliner"]["entries"]
+        for band in ("hold", "trim", "de-risk", "suppressed (block degraded)"):
+            assert band in entries, band
+        assert "derisk" not in entries
+        reg._file_artifact.cache_clear()

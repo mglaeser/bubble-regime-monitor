@@ -36,6 +36,13 @@ fixed with priority.
 
 | 8 | SOTA-A | 2xx shape-miss unclassified; gate omits status-DOM purge; 60s interval invalidates >60s replies | **UPHELD ×3 (steelman succeeded on all) → fixed**: (a) a 2xx whose body fails shape validation is now classified as FAILURE (`if(!newBlocks) blocksFailed = true`), so retained content gets the stale label instead of silently pairing with fresh status; (b) a content payload commits ONLY if it carries a non-empty disclaimer (response-shape validator), and if the disclaimer is ever unavailable the gate now `purgeGrounded()`s every previously-rendered section before disabling display; (c) `load()` is single-flight with 30s fetch bounds — slow replies commit, ticks never stack, the flight always terminates. All pinned |
 
+## PR #97 (content namespace v1) — round log
+
+| Rd | Verifier | Finding | Resolution |
+|---|---|---|---|
+| 1 | SOTA-A/B | `gauge_display()` prefix `gauge.display.` vs artifact namespace `gauge.` — score `data.display` empty with the artifact shipped in the same PR, and the unit test masked it with a fabricated slug; banner placeholder `Jan 2026` fabricated a date; `analytics.tail.*` max_len 7 vs regex worst case 8 | **UPHELD ×3 → fixed**: prefix matches the ledger namespace; the deck is pinned NON-EMPTY against the real shipped artifact; banner slots carry the true editorial values; length bound dominates the regex |
+| 2 | SOTA-A | Artifact failure coupling; false zero fallbacks; invalid numeric-domain acceptance; unknown-band HOLD default | **UPHELD ×4 → fixed**: (a) a malformed/unreadable artifact degrades to built-ins at version 0 instead of raising into `/score`+`/content` handlers (never-500 invariant); (b) numeric placeholders now carry the TRUE frozen editorial values (tail stats, explosiveness stats, clock values, hedge scores 0.88…0.11) — zero-shaped placeholders fabricated measurements; (c) hedge-score regex tightened to `^(0\.\d{2}\|1\.00)$` — 1.50 was regex-valid but domain-impossible; (d) the band map keyed `derisk` while the real band value is `de-risk` (plus full `suppressed (block degraded)`) — the highest-severity band missed the lookup and `\|\|hold` client patterns would render HOLD; keys fixed and pinned |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit

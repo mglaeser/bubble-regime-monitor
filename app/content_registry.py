@@ -37,10 +37,16 @@ _BLOCKS_FILE = Path(__file__).resolve().parents[1] / "config" / "content_blocks.
 
 @lru_cache(maxsize=1)
 def _file_artifact() -> dict[str, Any]:
-    if not _BLOCKS_FILE.exists():
+    # NEVER couple request handling to artifact health: a missing, unreadable
+    # or malformed artifact degrades to built-ins at version 0 (the repo's
+    # never-500-on-data-failure invariant; panel finding, PR #97).
+    try:
+        with _BLOCKS_FILE.open(encoding="utf-8") as fh:
+            loaded = json.load(fh)
+    except (OSError, ValueError):
         return {"content_version": 0, "blocks": {}}
-    with _BLOCKS_FILE.open(encoding="utf-8") as fh:
-        loaded: dict[str, Any] = json.load(fh)
+    if not isinstance(loaded, dict):
+        return {"content_version": 0, "blocks": {}}
     return loaded
 
 
@@ -234,30 +240,57 @@ def _save_haven_slots() -> list[DynamicSlot]:
                             ("jpy", 160), ("btc", 200)):
         slots.append(_ascii_slot(f"atlas.matrix.{crisis_asset}.ai2026",
                                  f"AI-2026 matrix note for {crisis_asset}", n))
-    for asset in ("gold", "ust10y", "cash"):
-        for stat in ("bf", "bc", "hit", "lam"):
-            # max_len must dominate the regex's worst case ('+123.45%' = 8).
+    # Numeric analytics placeholders carry the TRUE frozen editorial values
+    # from the dashboard's battery (A2; ASCII-normalized) — a zero-shaped
+    # placeholder would fabricate a measurement (panel finding, PR #97).
+    tail_editorial = {
+        "gold": {"bf": "-0.08", "bc": "-0.02", "hit": "42%", "lam": "0.26"},
+        "ust10y": {"bf": "+0.08", "bc": "-0.02", "hit": "33%", "lam": "0.31"},
+        "cash": {"bf": "+0.01", "bc": "+0.01", "hit": "100%", "lam": "0.37"},
+    }
+    for asset, stats in tail_editorial.items():
+        for stat, value in stats.items():
+            # max_len dominates the regex's worst case ('+123.45%' = 8).
             slots.append(DynamicSlot(
                 f"analytics.tail.{asset}.{stat}",
                 f"Tail-regression {stat} statistic for {asset}", 8,
-                r"^[+-]?\d{1,3}(\.\d{1,2})?%?$", "0.0"))
-    for i in range(1, 5):
-        slots.append(_ascii_slot(f"analytics.explos.{i}.label",
-                                 f"Explosiveness row {i} label", 48))
+                r"^[+-]?\d{1,3}(\.\d{1,2})?%?$", value))
+    explos_editorial = [
+        ("Raw log price", "+0.75", "borderline (crit 0.62-0.78, seed-sensitive)"),
+        ("Linear-trend residual", "-0.76", "not explosive"),
+        ("Broken-trend residual (break Dec '22)", "-1.20", "not explosive"),
+        ("Earnings-proxy residual (17%/yr)", "-0.83", "not explosive"),
+    ]
+    for i, (label, stat, verdict) in enumerate(explos_editorial, start=1):
+        slots.append(DynamicSlot(f"analytics.explos.{i}.label",
+                                 f"Explosiveness row {i} label", 48,
+                                 r"^[\x20-\x7E]{1,48}$", label))
         slots.append(DynamicSlot(f"analytics.explos.{i}.stat",
                                  f"Explosiveness row {i} statistic", 6,
-                                 r"^[+-]\d\.\d{2}$", "+0.00"))
-        slots.append(_ascii_slot(f"analytics.explos.{i}.verdict",
-                                 f"Explosiveness row {i} verdict", 44))
-    for clock in ("weighted", "dotcom", "lppl", "gold-lead"):
-        slots.append(_ascii_slot(f"analytics.clock.{clock}.value",
-                                 f"Analytics clock {clock} value", 16))
+                                 r"^[+-]\d\.\d{2}$", stat))
+        slots.append(DynamicSlot(f"analytics.explos.{i}.verdict",
+                                 f"Explosiveness row {i} verdict", 44,
+                                 r"^[\x20-\x7E]{1,44}$", verdict))
+    clock_editorial = {
+        "weighted": "~ -12 mo", "dotcom": "p ~ 0 / +1",
+        "lppl": "+2.5 mo", "gold-lead": "now -> +19 mo",
+    }
+    for clock, value in clock_editorial.items():
+        slots.append(DynamicSlot(f"analytics.clock.{clock}.value",
+                                 f"Analytics clock {clock} value", 16,
+                                 r"^[\x20-\x7E]{1,16}$", value))
         slots.append(_ascii_slot(f"analytics.clock.{clock}.caption",
                                  f"Analytics clock {clock} caption", 180))
-    for asset in ("cash", "gold", "chf", "usd", "ust10y", "jpy", "btc"):
+    hedge_editorial = {
+        "cash": "0.88", "gold": "0.85", "chf": "0.59", "usd": "0.44",
+        "ust10y": "0.42", "jpy": "0.21", "btc": "0.11",
+    }
+    for asset, score in hedge_editorial.items():
+        # Domain-tight: a hedge score lives in [0, 1] — the regex must not
+        # admit 1.50 (panel finding, PR #97).
         slots.append(DynamicSlot(f"analytics.hedgeweight.{asset}.score",
                                  f"Hedge weighting score for {asset}", 4,
-                                 r"^[01]\.\d{2}$", "0.00"))
+                                 r"^(0\.\d{2}|1\.00)$", score))
         slots.append(_ascii_slot(f"analytics.hedgeweight.{asset}.reason",
                                  f"Hedge weighting reason for {asset}", 140))
     return slots

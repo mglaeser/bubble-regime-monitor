@@ -1214,8 +1214,9 @@
       "entries": {
         "hold": "Hold — structural risk is present but not acute. No action indicated by the trend rule.",
         "trim": "Trim — fragility is elevated. Consider easing risk if the trend rule confirms.",
-        "derisk": "De-risk — fragility is high or a hard override has fired. The trend rule is now the thing to watch.",
-        "suppressed": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed."
+        "de-risk": "De-risk — fragility is high or a hard override has fired. The trend rule is now the thing to watch.",
+        "suppressed": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
+        "suppressed (block degraded)": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed."
       },
       "source": "src/bubblegauge.tsx:149-154"
     },
