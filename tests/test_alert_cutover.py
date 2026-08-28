@@ -994,3 +994,49 @@ def test_a_digest_absent_beyond_its_own_cadence_is_a_missing_job():
     faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
     assert faults, "nine live days with no digest row still read as never-ran"
     assert "never deployed" in faults[0]
+
+
+def test_retention_cannot_renew_the_digest_grace_by_deleting_deliveries():
+    """The age bound reads MIN(created_at) over deliveries — pinned immutable.
+
+    Retention redacts message bodies and sweeps settled audit EVENTS; it never
+    deletes delivery rows ("keep the audit trail"). This test runs retention
+    with horizons far more aggressive than production and asserts the earliest
+    delivery survives and the digest absence still blocks — a future retention
+    change that starts deleting deliveries fails here and must reconsider the
+    exemption's bound before it lands.
+    """
+    from types import SimpleNamespace
+
+    from sqlalchemy import func, select
+
+    from app.alerts.models import AlertDelivery
+    from app.alerts.retention import run_retention
+
+    aggressive = SimpleNamespace(alerts_message_retention_days=1,
+                                 alerts_metadata_retention_days=2)
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(days=9),
+                   created_at=NOW - timedelta(days=9))
+        before = session.execute(
+            select(func.count()).select_from(AlertDelivery)).scalar_one()
+        run_retention(session, settings=aggressive, now=NOW)
+        after = session.execute(
+            select(func.count()).select_from(AlertDelivery)).scalar_one()
+        report = preflight(session, now=NOW)
+
+    assert after == before, "retention deleted delivery rows — the digest age bound just became mutable"
+    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert faults and "never deployed" in faults[0]
+
+
+def test_a_future_earliest_delivery_is_a_clock_fault_not_youth():
+    """A future minimum must not mint fresh grace for the never-ran exemption."""
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW + timedelta(days=2),
+                   created_at=NOW + timedelta(days=2))
+        report = preflight(session, now=NOW)
+
+    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert faults, "a future-dated delivery bought the digest exemption youth"
+    assert "clock fault" in faults[0]

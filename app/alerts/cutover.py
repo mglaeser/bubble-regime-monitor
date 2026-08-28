@@ -352,6 +352,17 @@ def preflight(
                     )
                 ).scalar_one()
                 earliest_at = _aware(earliest) if earliest is not None else None
+                if earliest_at is not None and earliest_at > now + timedelta(
+                        minutes=5):
+                    # The same future-skew rule the heartbeats live under: a
+                    # minimum that sits in the future is a clock fault, and a
+                    # clock fault must not mint fresh grace for the exemption.
+                    fresh, detail = False, (
+                        f"earliest live delivery is {earliest_at.isoformat()} "
+                        "— in the future, which is a clock fault; a faulted "
+                        "clock cannot vouch for a deployment being young")
+                    check(f"heartbeat_{component}", fresh, detail)
+                    continue
                 if (earliest_at is not None
                         and earliest_at <= now - timedelta(hours=fresh_hours)):
                     fresh, detail = False, (
