@@ -1,0 +1,1731 @@
+{
+  "content_version": 1,
+  "generated": "2026-08-28",
+  "origin": "save-haven-monitor prose migration (shallow-frontend program, A1 ledger; verbatim extraction)",
+  "blocks": {
+    "atlas.explorer.expl.crisis-card": {
+      "kind": "text",
+      "text": "<b>What this card tells you.</b> The colored badge is the crisis <i>type</i> (equity bubble, credit bubble, currency crisis…). \"Weight\" is how much this crisis counts in the averages — pure financial bubbles count fully (1.0), outside shocks like COVID count half. The gold text below highlights the single most important takeaway: which asset the retrospectively smartest investor held.",
+      "source": "src/dashboard.tsx:161-164"
+    },
+    "atlas.explorer.potential-banner.method": {
+      "kind": "text",
+      "text": "POTENTIAL crisis — the peak is anchored at today (Jul 2026) <b>by construction, not as a forecast</b>. All lines end at t0 and the right half of the axis is intentionally empty: no forward projection. Backfill uses real market anchors (Jul 2021 → Jul 2026); current-state sources are ≤ 6 weeks old (BIS 28 Jun · ECB 2 Jun & 27 May · Fed 8 May 2026). Safe-haven candidates are shown dashed.",
+      "source": "src/dashboard.tsx:173"
+    },
+    "atlas.explorer.expl.chart-controls": {
+      "kind": "text",
+      "text": "<b>The chart, in plain words.</b> \"Index: peak = 100\" re-scales every line so they all meet at 100 at the crisis peak — best for seeing what happened <i>around the crash</i>. \"t−60 = 100\" starts everything at 100 five years earlier — best for seeing the whole boom. \"Log\" makes equal <i>percentage</i> moves look equally big (100→200 looks like 200→400) — switch it on when one line (like Bitcoin) dwarfs the rest. Tap the colored chips below the chart to hide/show lines. Tags: ▼ the crashing market · U works in almost every crisis · C works in this crisis type · ★ one-off winner · ! famously failed.",
+      "source": "src/dashboard.tsx:184-190"
+    },
+    "atlas.explorer.provenance": {
+      "kind": "map",
+      "entries": {
+        "market-backfill": "market-reference backfill · ends at t0 · no projection",
+        "fully-stylized": "fully stylized (pre-1970 data)",
+        "stylized": "stylized reconstruction"
+      },
+      "source": "src/dashboard.tsx:191"
+    },
+    "atlas.explorer.footer.coverage-note": {
+      "kind": "text",
+      "text": "Panels chart the top evidence-scored assets; the complete asset × crisis coverage is in the Similarity Matrix.",
+      "source": "src/dashboard.tsx:230"
+    },
+    "atlas.matrix.expl.scorecard": {
+      "kind": "text",
+      "text": "<b>The scorecard, in plain words.</b> Each cell answers one simple question: did this asset go UP during that crisis? Green ✓ = yes, clearly. Amber ~ = sort of / only in some places. Red ✗ = no, it fell. Gray ? = the 2026 AI crisis hasn't actually happened, so those cells show only what experts <i>currently expect</i>. Blank = the academic literature has no evidence either way. Tap any cell to read the one-sentence story behind it, with the research paper it comes from.",
+      "source": "src/dashboard.tsx:256-260"
+    },
+    "atlas.matrix.intro-citation": {
+      "kind": "text",
+      "text": "Qualitative similarity matrix implied by the Baur–McDermott safe-haven regressions and the flight-to-safety literature.",
+      "source": "src/dashboard.tsx:264-265"
+    },
+    "atlas.matrix.legend": {
+      "kind": "text",
+      "text": "✓ rose / strong safe haven · ~ weak or mixed · ✗ fell · ? potential (AI ’26 — no outcome yet, current institutional view only) · blank = no academic evidence. Tap any cell for the note.",
+      "source": "src/dashboard.tsx:265"
+    },
+    "atlas.matrix.expl.buckets": {
+      "kind": "text",
+      "text": "<b>Why four buckets?</b> Decades of research boil down to this: some things protect you in almost <i>every</i> crisis (U — like cash first, then safe government bonds), some only in the <i>matching type</i> of crisis (C — gold shines in money/inflation crises, cheap \"value\" stocks shine after tech bubbles), some were one-off jackpots you couldn't have planned (★ — like a gold miner in the 1930s), and some famous ideas simply failed the real-world test (! — Bitcoin in 2020, the yen this cycle). The two-phase rule inside U: in the first weeks everyone runs to CASH; only later does the money flow into long bonds.",
+      "source": "src/dashboard.tsx:314-319"
+    },
+    "atlas.matrix.verification.heading": {
+      "kind": "text",
+      "text": "Verification pass — cross-checked against a second AI’s report",
+      "source": "src/dashboard.tsx:338"
+    },
+    "atlas.matrix.expl.verification": {
+      "kind": "text",
+      "text": "<b>What happened here?</b> A second AI produced a competing report. Instead of trusting it, every one of its novel claims was traced back to the original academic papers. CONFIRMED = the claim held up when we read the source. CORRECTED = we found and fixed an error (for example, it named the wrong journal). ADJUDICATED = two candidates competed for a title and we ruled on it with a stated criterion. This is how the dashboard keeps AI-generated claims honest.",
+      "source": "src/dashboard.tsx:340-344"
+    },
+    "atlas.matrix.verification.items": {
+      "kind": "map",
+      "entries": {
+        "cash-phase1": "<b>CONFIRMED</b> — cash/T-bills/USD liquidity as a distinct phase-1 universal winner: Longstaff (2004, <i>J. Business</i>; NBER 2002), Nagel (2016, <i>QJE</i>), Krishnamurthy & Vissing-Jorgensen (2012, <i>JPE</i>), Baele et al. (2020, <i>RFS</i>), Duffie (2020, Brookings).",
+        "gold-ambiguity": "<b>CONFIRMED</b> — gold’s ambiguity mechanism (buy gold on ambiguous signals, bonds on extreme-but-clear ones): Baur & McDermott (2012) — an IIIS/UTS <i>working paper</i>, not a journal article; theory anchored by Caballero & Krishnamurthy (2008, <i>J. Finance</i>).",
+        "vix-hedge": "<b>CONFIRMED</b> — VIX a stronger US hedge than gold (Hood & Malik 2013, <i>Rev. Fin. Econ.</i>; Szado 2009, <i>JAI</i>), with persistently negative carry (Carr & Wu 2009, <i>RFS</i>; Dew-Becker et al. 2017, <i>JFE</i>). VIX futures tradable only since 2004, options 2006 — earlier “long vol” = index puts.",
+        "oil-unique": "<b>CONFIRMED</b> — oil/energy as the 1973–74 crisis-unique winner; note Alpanda & Peralta-Alva is a <i>published</i> Review of Economic Dynamics (2010) article, not a St. Louis Fed working paper.",
+        "cheema-correction": "<b>CORRECTED</b> — Cheema, Ryan & Sarwar (2025) appeared in <i>International Review of Economics & Finance</i> (vol. 102, art. 104364), NOT the “Journal of Economics and Business”; their peak-to-trough windows complement (don’t replace) the fixed t−60/+60 scale used here.",
+        "most-unique-adjudication": "<b>ADJUDICATED</b> — “most unique” winner: oil/energy leads on <i>magnitude</i> within a recurring crisis type; Homestake (Burdekin & Weidenmier 2004) leads on <i>structural non-recurrence</i>. Both are shown."
+      },
+      "source": "src/dashboard.tsx:348-353"
+    },
+    "atlas.aggregate.pairs": {
+      "kind": "table",
+      "items": [
+        {
+          "tile": "Feared market",
+          "expl_slug": "atlas.aggregate.expl.pair-market",
+          "expl": "Solid red = the average path of ten historical crashes. Dashed = the real NASDAQ-100, July 2021 to today. Both equal 100 at the peak. Compare how steep the climbs are — then look at what history did after its peaks: it kept falling for about two more years.",
+          "note_slug": "atlas.aggregate.pair-note.market",
+          "note": "History keeps falling for ~2 years past the peak; the 2026 line simply ends at today — that right half is the open question."
+        },
+        {
+          "tile": "Phase 1 · Cash / T-bills",
+          "expl_slug": "atlas.aggregate.expl.pair-cash",
+          "expl": "Cash and Treasury bills are the 'boring' hedge: they never crash, they just tick upward with interest. In the first weeks of every panic, this is where the money runs FIRST — before it moves into bonds. Notice: no dip anywhere, in any era.",
+          "note_slug": "atlas.aggregate.pair-note.cash",
+          "note": "The only family with no drawdown in either era — unspectacular but unbroken (Longstaff 2004; Nagel 2016; Duffie 2020)."
+        },
+        {
+          "tile": "Phase 2 · Duration bonds",
+          "expl_slug": "atlas.aggregate.expl.pair-bonds",
+          "expl": "Long government bonds are history's classic crash cushion — the solid line climbs right through past crises. But the dashed 2026 line tells a warning: after the 2022 inflation shock, Treasuries enter today's assumed peak BELOW where they started in 2021. The old cushion may not be plumped up this time.",
+          "note_slug": "atlas.aggregate.pair-note.bonds",
+          "note": "History climbs steadily through the crash; the 2026 Treasury line enters the assumed peak BELOW its 2021 level — the challenged haven (BIS Sep 2025; ECB)."
+        },
+        {
+          "tile": "Gold",
+          "expl_slug": "atlas.aggregate.expl.pair-gold",
+          "expl": "Gold usually drifts modestly upward before a crisis and shines after. Today's dashed line is different: gold has already MORE than doubled into the assumed peak — far above the historical norm. Good news: the hedge is working. Caution: much of the protection may already be paid for in the price.",
+          "note_slug": "atlas.aggregate.pair-note.gold",
+          "note": "2026 gold has risen far above the historical pre-crisis norm into the assumed peak — elevated to lead regime-matched hedge (score 0.85, Analytics ranking), but hedge demand may be pre-paid."
+        }
+      ],
+      "source": "src/dashboard.tsx:378-391"
+    },
+    "atlas.aggregate.stat (each with .value and .caption)": {
+      "kind": "table",
+      "items": [
+        {
+          "key": "cape",
+          "value": "CAPE ≈ 41",
+          "caption": "Shiller CAPE, Jul 2026 — near the ~44 dot-com record; flagged by BIS, ECB, Fed & BoE 2026 stability reports"
+        },
+        {
+          "key": "reserve-shares",
+          "value": "27% vs 22%",
+          "caption": "gold vs US Treasuries share of global reserves at end-2025 — gold overtook Treasuries (ECB, 2 Jun 2026)"
+        }
+      ],
+      "source": "src/dashboard.tsx:463-464"
+    },
+    "atlas.aggregate.expl.tab": {
+      "kind": "text",
+      "text": "<b>This tab in one breath.</b> We averaged all ten historical crises into one \"typical crisis\" per asset family, then laid today's 2026 situation (dashed) on top. Both are forced to equal 100 at the peak, so the only fair comparison is the <i>shape of the climb</i> before the peak — and what history did afterwards. \"History ↔ 2026 pairs\" shows one small chart per family (easiest to read). \"All composites\" puts everything in one big chart. The dashed lines stop at the peak because the 2026 future is unknown — that empty right half is the whole point.",
+      "source": "src/dashboard.tsx:487-492"
+    },
+    "atlas.aggregate.method-intro": {
+      "kind": "text",
+      "text": "Ten historical crises rebased to <b>100 at the peak (t0)</b>, crisis-weight-averaged into unified families (bubbles 1.0 · currency/sovereign 0.8 · Black Monday 0.7 · COVID 0.5). The default view pairs each historical family (solid) with its 2026 counterpart (dashed, real Jul 2021 → today backfill, ending at t0 — no projection). Both lines equal 100 at the peak by construction, so the comparison lives in the <b>run-up shape</b> into the peak and the <b>historical aftermath</b> that follows it. Bitcoin (falsified) is excluded.",
+      "source": "src/dashboard.tsx:496-500"
+    },
+    "atlas.aggregate.history-only-note": {
+      "kind": "text",
+      "text": "Convexity spikes into the crash and decays after — insurance, not a store of value. No 2026 trend/long-vol backfill is charted; crisis-unique winners are identifiable only ex post; the category composite is paired above via its lead asset, gold.",
+      "source": "src/dashboard.tsx:537-539"
+    },
+    "atlas.aggregate.core-lesson": {
+      "kind": "text",
+      "text": "No asset is an unconditional safe haven. Universal winners compound quietly through the crash; category-specific winners (led by gold) deliver the largest gains but only in the matching regime; crisis-unique winners are spectacular and non-replicable. Retrospectively, the smartest investor was a diversifier holding the regime-appropriate hedge — then rotating into cheap, high-quality survivors at the trough.",
+      "source": "src/dashboard.tsx:590-593"
+    },
+    "atlas.analytics.expl.tab": {
+      "kind": "text",
+      "text": "<b>What this tab is.</b> Six statistical methods were run in Python on the real 2021–26 data and the historical templates; the heavy results (LPPL, Markov, tail regressions) are reported as fixed numbers, while the correlation curves and outcome fans below are recomputed live in your browser from the same anchors. None of it is a prediction — it answers \"what does today most RESEMBLE, and what usually followed that resemblance?\"",
+      "source": "src/dashboard.tsx:698-704"
+    },
+    "analytics.intro.expl": {
+      "kind": "text",
+      "text": "<b>What this tab is.</b> Six statistical methods were run in Python on the real 2021–26 data and the historical templates; the heavy results (LPPL, Markov, tail regressions) are reported as fixed numbers, while the correlation curves and outcome fans below are recomputed live in your browser from the same anchors. None of it is a prediction — it answers \"what does today most RESEMBLE, and what usually followed that resemblance?\"",
+      "source": "src/dashboard.tsx:698-704"
+    },
+    "analytics.intro.methods": {
+      "kind": "text",
+      "text": "Template matching (cross-correlation + DTW), LPPL critical-time estimation, PSY/SADF explosiveness, Baur–McDermott tail regressions, Hamilton regime switching, and Granger lead–lag — individually per asset, then weighted into one clock reading.",
+      "source": "src/dashboard.tsx:706-709"
+    },
+    "analytics.clock.expl": {
+      "kind": "text",
+      "text": "<b>How to read this.</b> We took today's last 24 months of NASDAQ-100 and slid it along each historical bubble's path, asking at every position: how similar are the shapes? The horizontal axis is the position — \"0\" means \"today looks like the historical peak day\", \"−12\" means \"today looks like 12 months BEFORE that peak\". Where a line is highest is where today fits best. Dot-com peaks at ≈ 0 (we look like its top); 1929 and Japan peak further left (we look like their run-up phase, 1–2 years early).",
+      "source": "src/dashboard.tsx:727-733"
+    },
+    "analytics.clock.caption": {
+      "kind": "text",
+      "text": "Correlation of today's last 24 months vs the analog window ending at position p (computed live; K=36 confirms the pattern).",
+      "source": "src/dashboard.tsx:749-751"
+    },
+    "analytics.fans.expl": {
+      "kind": "text",
+      "text": "<b>What is a \"fan\"?</b> We took the months AFTER past peaks, shuffled them thousands of times in 6-month blocks, and rebuilt 1,500 possible \"afterwards\" paths per family. The dark band is where the middle half of those historical outcomes landed; the light band covers 80%. It shows what USUALLY happened after such peaks — it is explicitly NOT a forecast; if the optimists (BIS's \"capex boom, not solvency bubble\") are right, reality can land above the whole fan.",
+      "source": "src/dashboard.tsx:756-762"
+    },
+    "analytics.fans.analogs": {
+      "kind": "map",
+      "entries": {
+        "market": "analog class: dot-com · 1929 · Japan",
+        "gold": "monetary-crisis refs: 1973 · GFC · Euro",
+        "bonds": "deflationary analogs: dot-com · 1929 · Japan"
+      },
+      "source": "src/dashboard.tsx:765,768,771"
+    },
+    "analytics.fans": {
+      "kind": "table",
+      "items": [
+        {
+          "family": "market",
+          "expl": "If today's peak plays out like the average tech/equity bubble, the middle-of-the-road historical outcome is a fall of roughly 60% spread over years, still below the starting point three years later in ~4 of 5 bootstrap paths.",
+          "note": "Historical conditional distribution under peak-at-today — the central case is a deep multi-year decline; the top of the light band shows the mildest historical outcomes."
+        },
+        {
+          "family": "gold",
+          "expl": "Gold's script after monetary-crisis peaks: a brief early wobble (people sell everything for cash for a few weeks), then a strong climb. Median around +35% three years on.",
+          "note": "Applies IF gold keeps following the monetary-crisis regime it has tracked since 2021 — its −0.88 anti-correlation with the equity-bubble script supports that."
+        },
+        {
+          "family": "bonds",
+          "expl": "In past DEFLATIONARY crises, long government bonds simply climbed — no drawdown at all. Caution: today's bond market has been living in an INFLATION regime since 2022, so this friendly fan assumes a regime change back to the old script.",
+          "note": "The most regime-fragile fan: today's Treasuries enter the peak below their 2021 level — if inflation persists, this deflationary-analog band does not apply."
+        }
+      ],
+      "source": "src/dashboard.tsx:766-773"
+    },
+    "analytics.tail.expl": {
+      "kind": "text",
+      "text": "<b>Beta, in plain words.</b> Beta answers: when the market falls 1%, what does the hedge do on average? A beta near zero or negative <i>in the market's WORST months</i> (second column) is the definition of a real safe haven (Baur & McDermott's method). \"Hit rate\" = how often the hedge was actually UP in those worst months. λ_L (tail dependence) measures how glued the hedge is to the market in disasters — 0 would be perfectly decoupled, 1 perfectly glued. Verdict this cycle: cash perfect, gold and Treasuries weak-but-real havens, nothing fully decoupled.",
+      "source": "src/dashboard.tsx:779-786"
+    },
+    "analytics.markov.expl": {
+      "kind": "text",
+      "text": "<b>Plainly:</b> a statistical model sorted the last five years of months into \"calm weather\" (steady +2.4%/mo, tiny wobble) and \"stormy weather\" (flat drift, huge ±5.5% swings). Right now the model is 100% sure we're in the storm — the same weather the dot-com market had at its very top. Storms host both melt-ups and crashes; the model can't say which comes next, only that we're not in the calm state.",
+      "source": "src/dashboard.tsx:814-819"
+    },
+    "analytics.bsadf.expl": {
+      "kind": "text",
+      "text": "<b>Plainly:</b> a standard statistical \"bubble alarm\" (the PSY test). On raw prices it's exactly on the borderline — some runs flag it, some don't. The moment you allow for the fact that these companies' profits are genuinely growing ~17%/yr, the alarm goes silent in every variant. Translation: the academic jury is honestly split on whether this is a bubble at all — our own data reproduces both sides of the published dispute.",
+      "source": "src/dashboard.tsx:830-836"
+    },
+    "analytics.granger.headline_verdict": {
+      "kind": "text",
+      "text": "gold has moved FIRST this cycle",
+      "source": "src/dashboard.tsx:849"
+    },
+    "analytics.granger.expl": {
+      "kind": "text",
+      "text": "<b>Plainly:</b> statistically, gold's moves this cycle have come BEFORE the stock market's moves (about 4 months earlier), not after — a formal Granger test confirms it strongly one-way. Historically, gold's big surges came 0 to 36 months before market peaks. Today's surge peaked in January 2026 and was bigger than any historical reference (+94% in 12 months). Applying history's lead times brackets the implied market peak between \"now\" and about 19 months from now.",
+      "source": "src/dashboard.tsx:850-856"
+    },
+    "analytics.hedgeweight.expl": {
+      "kind": "text",
+      "text": "<b>How the score works.</b> Every hedge was graded 0–1 on five things and weighted: (1) <i>regime match, 30%</i> — does it follow the script that fits TODAY's regime? (2) <i>live tail evidence, 25%</i> — did it actually hold up in the market's worst months since 2021? (3) <i>institutional view, 25%</i> — what do central banks and stability reports say right now (≤ 6 weeks old)? (4) <i>lead property, 10%</i> — does it move BEFORE the market? (5) <i>entry valuation, 10%</i> — is it still cheap, or already expensive? Verdict: cash wins on CERTAINTY, gold on expected PAYOFF — statistically a tie at the top — while Treasuries fall to 5th. Doubling the \"already expensive\" penalty still keeps gold in 2nd (0.78), so the podium is robust. Important nuance: this elevation is CONDITIONAL on the 2026 regime — in the historical scorecard gold keeps its dot-com ✗ and stays \"near-universal, demoted\".",
+      "source": "src/dashboard.tsx:868-878"
+    },
+    "analytics.hedgeweight.formula": {
+      "kind": "text",
+      "text": "Score = 0.30·regime-match + 0.25·live tail + 0.25·institutional (≤6 wk) + 0.10·lead + 0.10·entry valuation.",
+      "source": "src/dashboard.tsx:900-901"
+    },
+    "analytics.limits.body": {
+      "kind": "text",
+      "text": "Historical templates are stylized anchor reconstructions; only the 2026 series are real market backfill. Monthly resolution (n = 60 returns) is thin for every method here — published versions use daily data. The LPPL fit failed its formal qualification; the raw bubble flag proved seed-sensitive; fan charts are conditional historical distributions under a constructed peak-at-today, not forecasts.",
+      "source": "src/dashboard.tsx:912-917"
+    },
+    "playbook.methods": {
+      "kind": "table",
+      "items": [
+        {
+          "id": "M0",
+          "name": "Crisis-type & likelihood",
+          "sig": "Rapid credit + asset-price growth → ~40% three-year crisis odds vs ~7% baseline; classify deflation / inflation / funding-stress.",
+          "cite": "Schularick & Taylor 2012 AER · Greenwood, Hanson, Shleifer & Sørensen 2022 JF",
+          "veto": null
+        },
+        {
+          "id": "M1",
+          "name": "Safe-haven econometrics",
+          "sig": "Rolling crisis-beta: is the asset flat/negative in the market's worst 5%/1% days? The haven effect decays ~15 trading days after a shock — never chase it.",
+          "cite": "Baur & Lucey 2010 · Baur & McDermott 2010 JBF · Engle 2002 (DCC)",
+          "veto": null
+        },
+        {
+          "id": "M2",
+          "name": "Bubble-perimeter & adjacency",
+          "sig": "Map what is INSIDE the bubble (run-up size, issuance, firm age, turnover) plus revenue/supply-chain adjacency — then stand outside it.",
+          "cite": "Greenwood, Shleifer & You 2019 JFE · Barrot & Sauvagnat 2016 QJE",
+          "veto": "Bubble-adjacency vetoes any 'defensive' label."
+        },
+        {
+          "id": "M3",
+          "name": "Balance-sheet resilience",
+          "sig": "Cash-rich, low-leverage, low-payout firms fell 26% (9.7 pp) less in COVID — all knowable from statements beforehand; quality/low-beta as ex-ante safety.",
+          "cite": "Fahlenbrach, Rageth & Stulz 2021 RFS · Duchin et al. 2010 JFE · Asness et al. 2019 QMJ",
+          "veto": null
+        },
+        {
+          "id": "M4",
+          "name": "Duration mapping",
+          "sig": "Long-duration growth assets mechanically fall hardest when growth/discount assumptions break; dividend futures measure the break in real time.",
+          "cite": "Gormsen & Koijen 2020 RAPS · Gormsen & Lazarus 2023 JF · Weber 2018 JFE",
+          "veto": null
+        },
+        {
+          "id": "M5",
+          "name": "Regime-matched class",
+          "sig": "Deflation → duration · Inflation → gold/real assets · Funding stress → USD cash. Watch breakevens and the dollar to classify in real time.",
+          "cite": "Baur & McDermott 2012 (WP) · Cheema, Ryan & Sarwar 2025 IREF",
+          "veto": null
+        },
+        {
+          "id": "M6",
+          "name": "Valuation-spread extremes",
+          "sig": "Buy the wide side of extreme spreads: the 2000 value spread, relative CAPE (US ~38–40 vs cheap EAFE/EM), gold/silver ratio.",
+          "cite": "Cohen, Polk & Vuolteenaho 2003 JF · Campbell & Shiller 1998 JPM",
+          "veto": null
+        },
+        {
+          "id": "M7",
+          "name": "Mandated vs contingent demand",
+          "sig": "Does the cash flow survive the bubble's death? Mandated (NATO budgets, grid/EV copper) vs bubble-contingent (merchant AI power, GPU capex).",
+          "cite": "Barsky & Summers 1988 JPE · Burdekin & Weidenmier 2004 · IEA 2025",
+          "veto": "An M7 pass qualifies Phase-3 only, unless demand is contractually mandated."
+        },
+        {
+          "id": "M8",
+          "name": "Carry & crowding",
+          "sig": "Is the hedge already pre-paid? A high real gold price predicts weak 10-yr returns; hedges bought after big hedge-demand run-ups underperform.",
+          "cite": "Erb & Harvey 2013 FAJ · Koijen, Moskowitz, Pedersen & Vrugt 2018 JFE",
+          "veto": "Extreme crowding halves the position size."
+        },
+        {
+          "id": "M9",
+          "name": "Survivability & marginal holder",
+          "sig": "Who owns it, with how much leverage? Levered arb holders → forced sales (convertibles −34% in 2008; portfolio insurance caused 1987).",
+          "cite": "Mitchell & Pulvino 2012 JFE · Gennotte & Leland 1990 AER · Brunnermeier & Pedersen 2009 RFS",
+          "veto": "M9 failure vetoes any Phase-0/1 hedge role."
+        },
+        {
+          "id": "M10",
+          "name": "Flow confirmation",
+          "sig": "Slow-moving confirmation: money-market inflows, central-bank reserve shifts (gold 27% > UST 22%, ECB Jun 2026). Confirms — it does not lead.",
+          "cite": "Baele et al. 2020 RFS · Coval & Stafford 2007 JFE",
+          "veto": null
+        }
+      ],
+      "source": "src/dashboard.tsx:926-938"
+    },
+    "playbook.verdicts": {
+      "kind": "table",
+      "items": [
+        {
+          "key": "defense",
+          "asset": "Defense / aerospace",
+          "verdict": "COND · P3 (halved)",
+          "note": "Mandated NATO budgets pass M7 — but the June-2026 Rheinmetall F126 cancellation (−18% in a day) shows program-level risk, and M8 crowding halves the size. A Phase-3 satellite, never a hedge."
+        },
+        {
+          "key": "utilities",
+          "asset": "Utilities / infrastructure",
+          "verdict": "DEMOTE (as haven)",
+          "note": "The decisive test is M2: utilities coupled to the AI-power trade in 2024–26 (tracked the S&P, at times outpaced the Nasdaq-100) — the defensive correlation is broken. Only regulated rate-base pure-plays keep a weak Phase-3 case."
+        },
+        {
+          "key": "copper",
+          "asset": "Copper / miners",
+          "verdict": "COND · Phase-3 riser",
+          "note": "Falls hard in every liquidity phase (2008 −69%, 2020) — M9 vetoes Phase 0/1. But the IEA ~30% supply deficit by 2035 is mostly grid/EV-mandated (AI datacenters only ~1–2% of demand), so the structural case survives the bubble's death: a high-conviction Phase-3 buy."
+        },
+        {
+          "key": "india",
+          "asset": "India equities",
+          "verdict": "COND · P3 (weak USD)",
+          "note": "High-beta EM, not a hedge (−60% USD in 2008). But post-correction valuations are near long-term averages and record domestic SIP flows floored the 2026 drawdown at ~13–14% against record FII outflows. Conditional on the weak-dollar regime and the SIP floor holding (stoppage ratio >100% is the warning light)."
+        },
+        {
+          "key": "convertibles",
+          "asset": "Convertible bonds",
+          "verdict": "COND (M9 flag)",
+          "note": "The 2008 crash was an ownership problem: ~80–85% arb-held with 3–5× leverage → forced sales (Mitchell-Pulvino). Today's holder base is long-only-dominated, so the flag softens — but hardens back to a veto if arb crowding returns toward 2008 levels."
+        },
+        {
+          "key": "em_intl_japan",
+          "asset": "EM / Intl / Japan",
+          "verdict": "COND · P3",
+          "note": "The validated 2002–07 precedent: after the US-centric dot-com bust, EAFE beat the S&P and EM won by ~10%/yr. Today the relative-CAPE gap is wide again and Japan/Europe carry the lowest AI/mega-cap adjacency (M2). Conditional on the weak-dollar regime (BIS dollar-cycle evidence)."
+        },
+        {
+          "key": "china",
+          "asset": "China",
+          "verdict": "DEMOTE (state risk)",
+          "note": "Cheapest headline CAPE, but the state is the 'marginal holder' — the M9-analog policy-intervention veto fires, and zero fresh expert confirmation in the final window agrees."
+        },
+        {
+          "key": "silver",
+          "asset": "Silver",
+          "verdict": "COND · P2/3 catch-up",
+          "note": "Classic pattern: falls harder than gold in the panic, outperforms in the recovery (~+400% 2009–11). But the gold/silver ratio extreme (~100 in Apr 2025) already compressed to ~60 — the easy catch-up trade is largely played out; a smaller Phase-2/3 role remains."
+        },
+        {
+          "key": "tips",
+          "asset": "TIPS",
+          "verdict": "COND (inflation branch)",
+          "note": "The inflation half of the unresolved regime fork (M5). Caveat: TIPS broke down in the 2008 and March-2020 liquidity crunches (−12% in 2008; Fleckenstein-Longstaff-Lustig puzzle) — hold through Phase 1, don't rely on it during the dash-for-cash."
+        }
+      ],
+      "source": "src/dashboard.tsx:941-960"
+    },
+    "playbook.phases.p0.rationale": {
+      "kind": "map",
+      "entries": {
+        "cash": "No leverage problem, positive carry — the dry powder.",
+        "gold": "Lead regime hedge — halved because the hedge is partly pre-paid.",
+        "quality": "Resilient balance sheets; AI-adjacent 'defensives' screened out.",
+        "short_ust": "Duration kept SHORT after April 2025.",
+        "tips": "The inflation branch; expect a Phase-1 wobble.",
+        "chf": "Secondary haven. On eToro only as FX CFD: long CHF = SELL USD/CHF."
+      },
+      "source": "src/dashboard.tsx:1024-1029"
+    },
+    "playbook.phases.p1.rule1..rule4": {
+      "kind": "list",
+      "items": [
+        "Hold cash — sitting still IS the strategy.",
+        "Do NOT add gold after the shock: the haven effect fades in ~15 trading days (M1) and the hedge is pre-paid (M8).",
+        "Copper, silver, EM, India, defense are Phase-1 FALLERS — set Phase-3 buy levels, don't catch knives.",
+        "Even gold and TIPS can dip in the dash-for-cash (2008 · Mar 2020). Cash is the only certainty."
+      ],
+      "source": "src/dashboard.tsx:1031-1036"
+    },
+    "playbook.phases.p2": {
+      "kind": "table",
+      "items": [
+        {
+          "branch": "inflation",
+          "title": "INFLATION branch confirms",
+          "signal": "breakevens rising",
+          "action": "Add gold miners + silver catch-up; hold TIPS; keep duration short."
+        },
+        {
+          "branch": "deflation",
+          "title": "DEFLATION branch confirms",
+          "signal": "growth shock, breakevens falling",
+          "action": "Extend duration into long Treasuries — accepting the post-April-2025 caveat; hold CHF."
+        }
+      ],
+      "source": "src/dashboard.tsx:1037-1040"
+    },
+    "playbook.phases.p3.rationale": {
+      "kind": "map",
+      "entries": {
+        "rsp": "The documented post-bubble rotation (+16.2%/yr 2000–07).",
+        "intl": "Widest relative-CAPE gap, lowest AI adjacency — the 2002–07 precedent.",
+        "em": "Weak-dollar conditional; China stripped out (M9 veto).",
+        "copper": "Grid/EV-mandated deficit demand; M9 veto lifts at the trough.",
+        "defense": "Mandated aggregate spend; avoid single programs (F126 lesson).",
+        "silver": "Late catch-up, sized down — the ratio extreme already compressed."
+      },
+      "source": "src/dashboard.tsx:1041-1048"
+    },
+    "playbook.experts.r1..24": {
+      "kind": "table",
+      "items": [
+        {
+          "r": 1,
+          "name": "Gold (physical / ETC)",
+          "verdict": "CORE · Phase 0 (20%)",
+          "note": "Experts' #1 = the protocol's lead regime hedge. M8 crowding is exactly why the weight is 20% and not 30%.",
+          "sources": "Dalio, UBS (Jun 12), JPMorgan, StanChart (Jun 19), Deutsche Bank (Jun 23), Morgan Stanley, GMO, XP, BofA/Hartnett, State Street (Jul), Gulf SWFs (Jun 30), Julius Baer (Jun 26), Amundi (Jul 1), BMO GAM (Jun 22), SocGen flows (Jul 1)"
+        },
+        {
+          "r": 2,
+          "name": "International / non-US developed",
+          "verdict": "P3 · 20%",
+          "note": "Protocol agrees on the asset, differs on timing: a post-trough Phase-3 buy (M6/M2 pass), not a hedge now (M1 fails).",
+          "sources": "Grantham/GMO (Jul 8), Hartnett, StanChart, State Street, Amundi, Dalio, UBS, JPMorgan, Morgan Stanley, Deutsche Bank, Macquarie"
+        },
+        {
+          "r": 3,
+          "name": "Emerging-market equities",
+          "verdict": "P3 · 15% ex-China",
+          "note": "Weak-dollar conditional (M5); the protocol strips China out of the sleeve.",
+          "sources": "Hartnett, GMO, Amundi, BlackRock/iShares, Dalio, JPMorgan, GSAM, StanChart, Morgan Stanley, Mobius"
+        },
+        {
+          "r": 4,
+          "name": "Healthcare (defensive)",
+          "verdict": "Relative mitigator",
+          "note": "Falls less, doesn't rise — no absolute-haven role in any phase (Baur–McDermott framework).",
+          "sources": "Schwab (Jun 26), GQG, JPMorgan, Amundi, RBC WM, Morgan Stanley, Cetera, Deutsche Bank"
+        },
+        {
+          "r": 5,
+          "name": "Quality bonds — govt & IG duration",
+          "verdict": "Challenged · short-dur only",
+          "note": "The sharpest divergence: experts rank duration #5; the protocol keeps it SMALL and SHORT after April 2025 (BIS: haven correlations ≈ 0). The CSV itself flags the contest.",
+          "sources": "Hartnett (Jul 6), Deutsche Bank (Jul 6), State Street (Jun 30), Julius Baer, Amundi, Morgan Stanley, UBS, JPMorgan, StanChart — haven status contested (BIS Jun 28)"
+        },
+        {
+          "r": 6,
+          "name": "Consumer staples",
+          "verdict": "Quality sleeve",
+          "note": "Lives inside the Phase-0 quality tilt, screened for AI adjacency (M2).",
+          "sources": "Schwab (Jun 26), GQG, Amundi, RBC WM, JPMorgan"
+        },
+        {
+          "r": 7,
+          "name": "Non-USD currencies",
+          "verdict": "CHF only (5%)",
+          "note": "The basket mixes a pass with a veto: protocol keeps CHF, drops JPY (falsified at ~¥162). eToro offers these only as FX-pair CFDs — CHF strength = SELL USD/CHF.",
+          "sources": "Amundi JPY/EUR (Jul 1), Hartnett bearish USD, UBS, Invesco, Deutsche Bank"
+        },
+        {
+          "r": 8,
+          "name": "Latin America / Brazil",
+          "verdict": "P3 satellite",
+          "note": "Weak-dollar conditional. Druckenmiller's ~4.5% EWZ book position is a Phase-3-style bet made early.",
+          "sources": "Druckenmiller (Jul 6), 24/7 Wall St, Amundi, JPMorgan PB, Morgan Stanley, GBM"
+        },
+        {
+          "r": 9,
+          "name": "Short-term T-bills / cash",
+          "verdict": "CORE · Phase 0 (30%)",
+          "note": "Perfect agreement — the CSV's own note ('lowest bias, highest conviction') matches the protocol's #1-certainty score; Buffett's $397B cash is M10 flow confirmation in the flesh.",
+          "sources": "Berkshire record $397.4B cash / ~$339.3B T-bills (Jul 5), SocGen money-market flows (Jul 1), NAI 500, JPMorgan"
+        },
+        {
+          "r": 10,
+          "name": "Dividend / quality equities",
+          "verdict": "P0 20% + P3 20%",
+          "note": "The quality/dividend sleeve in both phases (M3 resilience).",
+          "sources": "SocGen flows (Jul 1), RBC WM, NAI 500, Buffett-style income commentary"
+        },
+        {
+          "r": 11,
+          "name": "Global listed infrastructure",
+          "verdict": "Demoted (bias-flagged)",
+          "note": "Experts rank it #11 — but with the HIGHEST bias score (4 = product sellers). The protocol finds only a mild inflation hedge, utilities-adjacent (M2).",
+          "sources": "Julius Baer (Jun 26), Macquarie (Jun 30), Deutsche Bank, Gulf SWFs, JPMorgan — high bias, product sellers"
+        },
+        {
+          "r": 12,
+          "name": "Defense / aerospace",
+          "verdict": "P3 · 15% (halved)",
+          "note": "M7 mandated budgets pass; M8 crowding halves it; M2/M6 flag the run-up. A Phase-3 satellite, not a hedge — the F126 cancellation is the live warning.",
+          "sources": "Morgan Stanley/NOC (Jun 24), Nomura, Deutsche Bank, JPMorgan — conflict: VanEck Defense sold in Europe (Jul 1)"
+        },
+        {
+          "r": 13,
+          "name": "Utilities / power",
+          "verdict": "DEMOTE as haven",
+          "note": "Rare agreement on the negative: the CSV's Schwab flag = the protocol's M2 adjacency veto (AI-power coupling broke the defense).",
+          "sources": "Deutsche Bank (Jun 30), Gulf SWFs, JPMorgan — Schwab flags underperformance"
+        },
+        {
+          "r": 14,
+          "name": "Copper / miners",
+          "verdict": "P3 · 15%",
+          "note": "The CSV's own caveat ('cyclical diversifier, not classic haven') IS the protocol verdict: Phase-1 faller, Phase-3 riser (M7 pass, M9 veto until trough).",
+          "sources": "Goldman 2026 target $10,500/t, UBS, Hartnett, Deutsche Bank"
+        },
+        {
+          "r": 15,
+          "name": "India equities",
+          "verdict": "P3 small · conditional",
+          "note": "Only 1 fresh source in 3 weeks; protocol conditions it on the weak dollar and the domestic SIP floor holding (watch the >100% stoppage ratio).",
+          "sources": "Motilal Oswal (Jul 4, thesis Feb), JPMorgan, UBS, Nomura, StanChart, Mobius"
+        },
+        {
+          "r": 16,
+          "name": "Inflation-linked bonds (TIPS)",
+          "verdict": "P0 · 10%",
+          "note": "The inflation branch of the regime fork (M5); the protocol adds the Phase-1 liquidity caveat (2008/2020 breakdowns).",
+          "sources": "BMO GAM (Jun 22), Amundi (Jul 1), Dalio (pre-window)"
+        },
+        {
+          "r": 17,
+          "name": "Equal-weight S&P 500",
+          "verdict": "P0 toe-hold + P3 · 20%",
+          "note": "The documented post-bubble rotation (M6 — the 2000 value-spread precedent).",
+          "sources": "Amundi (Jul 1), Cetera, Druckenmiller (held), Morningstar"
+        },
+        {
+          "r": 18,
+          "name": "Broad world equity ETFs",
+          "verdict": "NO ROLE",
+          "note": "The starkest divergence: world ETFs are ~64%-weighted to the crashing asset (US mega-caps). The 'de-concentration' flow argues for ex-US — not world. (Links shown for reference; UCITS lines are the EU-ownable versions.)",
+          "sources": "SocGen — world ETFs = 40% of Frankfurt turnover (Jul 1), Amundi"
+        },
+        {
+          "r": 19,
+          "name": "Japan equities",
+          "verdict": "P3 tilt",
+          "note": "Lowest AI-adjacency developed market (M2) — but only one fresh confirmation.",
+          "sources": "Nomura constructive, UBS, JPMorgan, Dalio, Macquarie, HSBC (Q1 upgrade)"
+        },
+        {
+          "r": 20,
+          "name": "China equities / tech",
+          "verdict": "DEMOTE",
+          "note": "Zero fresh sources + the protocol's state-intervention M9-analog — both say stand aside despite the cheapest headline CAPE.",
+          "sources": "UBS, Hartnett (Apr/May), JPMorgan, Mobius — no fresh confirmation"
+        },
+        {
+          "r": 21,
+          "name": "EM bonds",
+          "verdict": "DEMOTE P0/1",
+          "note": "Dollar-funding sensitivity in the acute phase; thin sourcing agrees.",
+          "sources": "Julius Baer (Jun 26), HSBC (pre-window)"
+        },
+        {
+          "r": 22,
+          "name": "Silver / silver miners",
+          "verdict": "P2/3 · 15%",
+          "note": "No fresh expert confirmation AND the gold/silver-ratio extreme already played out (≈100 → ≈60) — the protocol keeps a smaller catch-up role.",
+          "sources": "UBS ('25, targets cut Jun), Dalio, XP — miner ETFs sold per Frankfurt flows (Jul 1)"
+        },
+        {
+          "r": 23,
+          "name": "US dollar (protection sleeve)",
+          "verdict": "Funding-stress only",
+          "note": "One source contradicting the majority; protocol: USD spikes only in the acute dash-for-cash, weakened by de-dollarization (worst H1 since 1973).",
+          "sources": "Banco Safra (Jul 3) — contradicts Hartnett/UBS/Amundi non-USD preference"
+        },
+        {
+          "r": 24,
+          "name": "Convertible bonds",
+          "verdict": "M9 flag",
+          "note": "Bottom rank + highest issuer bias (State Street sells the product) + the protocol's marginal-holder flag all align — the 2008 lesson stands. (No confirmed eToro listing for CWB.)",
+          "sources": "State Street (Jun 30) — record 2026 inflows; high issuer bias"
+        }
+      ],
+      "source": "src/dashboard.tsx:1051-1100"
+    },
+    "playbook.intro.expl": {
+      "kind": "text",
+      "text": "<b>This tab in one breath.</b> Instead of asking \"what went up in past crises\" (the other tabs), this asks \"HOW could you have KNOWN in advance?\" — and assembles, from the academic literature, the ten-screen checklist that would have found the winners and vetoed the traps (like convertibles in 2008 or portfolio insurance in 1987). Then it runs every candidate asset through the checklist, builds the phased buy plan, and finally holds it against what experts recommend RIGHT NOW (your research artifact) — showing exactly where academic method and current consensus agree, partly agree, or clash.",
+      "source": "src/dashboard.tsx:1121-1128"
+    },
+    "playbook.intro.summary": {
+      "kind": "text",
+      "text": "Ten ordered screens (M0–M10) with four veto rules → per-asset verdicts → a simple phased selection → mapped against the 24-asset expert-consensus table.",
+      "source": "src/dashboard.tsx:1130-1132"
+    },
+    "playbook.protocol.expl": {
+      "kind": "text",
+      "text": "<b>How to use it.</b> Run the screens in order, like airport security for assets: first classify the coming crisis (M0) and map what's inside the bubble (M2), then check the regime fit, the crash-day statistics, the balance sheet, the valuation gap, whether the demand survives the bubble's death, whether the hedge is already expensive — and finally the two killer questions: who OWNS this asset with how much leverage (M9), and do the big slow flows confirm (M10)? The four red veto rules are absolute — they exist because every famous \"safe\" asset that failed (convertibles '08, portfolio insurance '87, AAA-CDOs) failed on exactly one of them.",
+      "source": "src/dashboard.tsx:1139-1147"
+    },
+    "playbook.matrix.expl": {
+      "kind": "text",
+      "text": "<b>Reading the grid.</b> Green P = the asset passes that screen (P* = passes because the demand is contractually mandated). Red F = fails or is flagged. Amber C/S = conditional or split. The verdict on the right follows the veto rules mechanically — not opinion. Tap a row for the one-paragraph story.",
+      "source": "src/dashboard.tsx:1172-1176"
+    },
+    "playbook.phases.expl": {
+      "kind": "text",
+      "text": "<b>Why phases?</b> Because the same asset can be right and wrong depending on WHEN: copper is a Phase-1 casualty and a Phase-3 winner. Phase 0 = position now, while calm. Phase 1 = the crash itself: hold cash, buy nothing falling. Phase 2 = the regime reveals itself (inflation → gold/real assets; deflation → longer bonds). Phase 3 = the post-trough rotation, where the retrospective \"smart money\" of every past crisis did its buying. Weights are illustrative round numbers; every line names the screen that put it there.",
+      "source": "src/dashboard.tsx:1210-1216"
+    },
+    "playbook.phases.p1.headline": {
+      "kind": "text",
+      "text": "Hold. Buy nothing. (0–3 months)",
+      "source": "src/dashboard.tsx:1286"
+    },
+    "playbook.experts.expl": {
+      "kind": "text",
+      "text": "<b>Your research artifact, mapped.</b> The 24 rows are what experts currently recommend, scored by how many independent sources back each asset, how FRESH those calls are (≤3 weeks), and how BIASED the sources are (1 = neutral, 5 = product sellers talking their book). The protocol verdict from the checklist above is attached to every row: ✓ = method and consensus agree · ± = agree on the asset but not the phase or size · ✗ = genuine clash. The ✗ rows are where the checklist earns its keep: duration bonds ranked #5 by experts but \"challenged\" by the method; infrastructure ranked #11 but sold mostly by its own product issuers; and world ETFs — which ARE ~64% the crashing asset. Note the beautiful confirmation at #9: the lowest-bias, highest-conviction expert signal (cash) is exactly the protocol's #1-certainty position.",
+      "source": "src/dashboard.tsx:1330-1339"
+    },
+    "playbook.experts.scoring": {
+      "kind": "text",
+      "text": "Score = source-count × freshness × (inverse) bias composite from the source artifact, max 66. Bias 1–5 (5 = product-seller). The expert table is practitioner consensus — deliberately a LOOSER evidence standard than the academic protocol; the verdict column is the academic filter applied on top.",
+      "source": "src/dashboard.tsx:1352-1356"
+    },
+    "hero.intro": {
+      "kind": "text",
+      "text": "Stylized monthly reconstructions anchored to magnitudes documented in the peer-reviewed literature (Baur & McDermott 2010; Baele et al. 2020; Ranaldo & Söderlind 2010; Temin & Voth 2004; Gorton & Rouwenhorst 2006; Moskowitz, Ooi & Pedersen 2012; Conlon & McGee 2020; Reinhart & Rogoff 2009; Jordà et al. 2019) — not tick data, and not investment advice. Pre-1970 paths are schematic. The 2026 AI-bubble panel is a POTENTIAL crisis with its peak anchored at today by construction — real 2021–26 market backfill, lines end at t0, no forward projection (BIS, ECB, Fed & BoE 2026 stability reports). The Analytics tab adds the algorithmic battery (clock matching, bootstrap outcome fans, tail tests, regime & explosiveness diagnostics); the Playbook tab maps the ex-ante identification protocol (M0–M10) onto today's expert buy-list.",
+      "source": "src/dashboard.tsx:1420-1429"
+    },
+    "hero.howto.expl": {
+      "kind": "text",
+      "text": "<b>How to read this dashboard.</b> Every crisis is drawn on the same clock: month 0 is the moment the market hit its highest point (\"the peak\"). Everything left of the dashed line is the boom before; everything right is what happened after. All lines are re-scaled to start from the same value, so you compare <i>shapes</i>, not prices. Red always = the market that crashed; gold/green/blue = things that went UP or held value. Dashed lines = today's (2026) situation, which by design stops at the peak line — nobody knows the right half yet. Every section has one of these \"i\" buttons with a plain-language explanation.",
+      "source": "src/dashboard.tsx:1432-1439"
+    },
+    "footer.key_sources": {
+      "kind": "text",
+      "text": "Baur & McDermott (2010) <i>J. Banking & Finance</i> · Baele, Bekaert, Inghelbrecht & Wei (2020) <i>RFS</i> · Ranaldo & Söderlind (2010) <i>Rev. Finance</i> · Temin & Voth (2004) <i>AER</i> · Gorton & Rouwenhorst (2006) <i>FAJ</i> · Erb & Harvey (2013) · Moskowitz, Ooi & Pedersen (2012) <i>JFE</i> · Frazzini & Pedersen (2014) <i>JFE</i> · Asness, Frazzini & Pedersen (2019) · Hong & Kacperczyk (2009) <i>JFE</i> · Conlon & McGee (2020) <i>FRL</i> · Reinhart & Rogoff (2009) <i>AER</i> · Phillips, Shi & Yu (2015) <i>IER</i> · Jordà et al. (2019) <i>QJE</i> · Garber (1990; 2000) · Cheema, Ryan & Sarwar (2025) <i>IREF</i> · Baur & McDermott (2012) IIIS WP · Longstaff (2004) <i>J. Business</i> · Nagel (2016) <i>QJE</i> · Krishnamurthy & Vissing-Jorgensen (2012) <i>JPE</i> · Duffie (2020) Brookings · Szado (2009) <i>JAI</i> · Hood & Malik (2013) <i>RFE</i> · Carr & Wu (2009) <i>RFS</i> · Dew-Becker et al. (2017) <i>JFE</i> · Alpanda & Peralta-Alva (2010) <i>Rev. Econ. Dynamics</i> · Burdekin & Weidenmier (2004) CUP · Hamilton (2009) <i>BPEA</i> · BIS Annual Economic Report (Jun 2026) · ECB FSR (May 2026) & Int’l Role of the Euro (Jun 2026) · Fed FSR (May 2026) · BoE FSR (2026) · WGC (Jun 2026) · Greenwood, Shleifer & You (2019) <i>JFE</i> · Greenwood, Hanson, Shleifer & Sørensen (2022) <i>JF</i> · Schularick & Taylor (2012) <i>AER</i> · Fahlenbrach, Rageth & Stulz (2021) <i>RFS</i> · Mitchell & Pulvino (2012) <i>JFE</i> · Gennotte & Leland (1990) <i>AER</i> · Cohen, Polk & Vuolteenaho (2003) <i>JF</i> · Gormsen & Koijen (2020) <i>RAPS</i> · Coval, Jurek & Stafford (2009) <i>JEP</i> · Campbell & Shiller (1998) <i>JPM</i> · IEA (2025) · SIPRI (Apr 2026) · NATO (2025).",
+      "source": "src/dashboard.tsx:1464-1479"
+    },
+    "atlas.crises.ai2026.peak": {
+      "kind": "text",
+      "text": "Jul 2026 (= today, by construction)",
+      "source": "src/data/atlas.json:10"
+    },
+    "atlas.crises.ai2026.cause": {
+      "kind": "text",
+      "text": "Hyperscaler AI capex (~$1tn 2025–26) outpacing free cash flow, record concentration (Mag-7 ≈ 35% of the S&P 500) and CAPE ≈ 41 — the BIS (28 Jun 2026), ECB FSR (27 May 2026), Fed FSR (8 May 2026) and Bank of England all warn of a possible sharp correction; econometric bubble tests are split (Cowles/Yale GSADF finds explosiveness; a 2026 counter-paper finds none once tech fundamentals are modeled).",
+      "source": "src/data/atlas.json:11"
+    },
+    "atlas.crises.ai2026.highlight": {
+      "kind": "text",
+      "text": "Institutional + algorithmic verdict: GOLD is elevated to lead regime-matched hedge — 2026 hedge score 0.85, a statistical co-lead with phase-1 cash (0.88), decisively above 'challenged' Treasuries (0.42). Basis: 27% of global reserves vs 22% UST (ECB, 2 Jun 2026), regime-match r 0.96–0.98 with monetary-crisis scripts, worst-quintile beta ≈ 0, and gold Granger-LEADS the market this cycle. Caveat: a +130% run-up means part of the hedge is pre-paid. CHF secondary; the yen (~¥162) and Bitcoin (−51% from ATH) look falsified this cycle.",
+      "source": "src/data/atlas.json:12"
+    },
+    "atlas.crises.ai2026.sources": {
+      "kind": "text",
+      "text": "BIS Annual Economic Report 2026; ECB FSR May 2026 & Int'l Role of the Euro Jun 2026; Fed FSR May 2026; BoE FSR 2026; WGC Jun 2026; Duffie (2020)",
+      "source": "src/data/atlas.json:13"
+    },
+    "atlas.crises.depression.peak": {
+      "kind": "text",
+      "text": "Sep 1929",
+      "source": "src/data/atlas.json:387"
+    },
+    "atlas.crises.depression.cause": {
+      "kind": "text",
+      "text": "Equity bubble, banking collapse and deflation. Dow −89% peak-to-trough (Jul 1932).",
+      "source": "src/data/atlas.json:388"
+    },
+    "atlas.crises.depression.highlight": {
+      "kind": "text",
+      "text": "Homestake Mining +474–580% while the Dow lost 89% — the archetypal crisis-unique winner under the fixed gold price.",
+      "source": "src/data/atlas.json:389"
+    },
+    "atlas.crises.depression.sources": {
+      "kind": "text",
+      "text": "Brunnermeier & Oehmke (2013); Jordà et al. (2019) QJE; economic-history literature on gold-standard mining shares",
+      "source": "src/data/atlas.json:390"
+    },
+    "atlas.crises.stagflation.peak": {
+      "kind": "text",
+      "text": "Jan 1973",
+      "source": "src/data/atlas.json:604"
+    },
+    "atlas.crises.stagflation.cause": {
+      "kind": "text",
+      "text": "Growth-stock overvaluation meets oil shock and inflation. S&P 500 −48%; Nifty Fifty names fell 70–90%.",
+      "source": "src/data/atlas.json:605"
+    },
+    "atlas.crises.stagflation.highlight": {
+      "kind": "text",
+      "text": "Gold ≈ +385% within the window (post-Bretton-Woods repricing); crude roughly QUADRUPLED after the Oct 1973 embargo ($2.90 → $11.65/bbl — the highest-magnitude crisis-unique winner, Alpanda & Peralta-Alva 2010); collateralized commodity futures roughly doubled (Gorton & Rouwenhorst 2006).",
+      "source": "src/data/atlas.json:606"
+    },
+    "atlas.crises.stagflation.sources": {
+      "kind": "text",
+      "text": "Gorton & Rouwenhorst (2006) FAJ; Alpanda & Peralta-Alva (2010) Rev. Econ. Dynamics; Erb & Harvey (2013); Siegel (1998); Fesenmaier & Smith (2002)",
+      "source": "src/data/atlas.json:607"
+    },
+    "atlas.crises.japan.peak": {
+      "kind": "text",
+      "text": "Dec 1989",
+      "source": "src/data/atlas.json:921"
+    },
+    "atlas.crises.japan.cause": {
+      "kind": "text",
+      "text": "Monetary over-expansion, land + equity bubble. Nikkei −80% by 2003 (decline continues beyond this window).",
+      "source": "src/data/atlas.json:922"
+    },
+    "atlas.crises.japan.highlight": {
+      "kind": "text",
+      "text": "Deflation made JGBs and the yen the standout winners; rolling Nikkei puts are the stylized crisis-unique convexity trade.",
+      "source": "src/data/atlas.json:923"
+    },
+    "atlas.crises.japan.sources": {
+      "kind": "text",
+      "text": "Ranaldo & Söderlind (2010) Rev. Finance; Brunnermeier & Oehmke (2013)",
+      "source": "src/data/atlas.json:924"
+    },
+    "atlas.crises.blackmonday.peak": {
+      "kind": "text",
+      "text": "Aug 1987",
+      "source": "src/data/atlas.json:1202"
+    },
+    "atlas.crises.blackmonday.cause": {
+      "kind": "text",
+      "text": "Portfolio insurance and market microstructure. Dow −22.6% in a single day; ≈ −33% intra-quarter.",
+      "source": "src/data/atlas.json:1203"
+    },
+    "atlas.crises.blackmonday.highlight": {
+      "kind": "text",
+      "text": "Gold was a weak-to-strong safe haven for the US and Canada (Baur & McDermott 2010); Treasuries and the yen rallied.",
+      "source": "src/data/atlas.json:1204"
+    },
+    "atlas.crises.blackmonday.sources": {
+      "kind": "text",
+      "text": "Baur & McDermott (2010) J. Banking & Finance; Ranaldo & Söderlind (2010)",
+      "source": "src/data/atlas.json:1205"
+    },
+    "atlas.crises.asia.peak": {
+      "kind": "text",
+      "text": "Jun 1997",
+      "source": "src/data/atlas.json:1531"
+    },
+    "atlas.crises.asia.cause": {
+      "kind": "text",
+      "text": "USD-pegged EM currency and credit bust. Thai equities ≈ −80% in USD terms; Indonesian GNP −84% in USD.",
+      "source": "src/data/atlas.json:1532"
+    },
+    "atlas.crises.asia.highlight": {
+      "kind": "text",
+      "text": "The US dollar was the classic EM-crisis winner (+~115% vs THB at the extreme); gold rose in local-currency terms.",
+      "source": "src/data/atlas.json:1533"
+    },
+    "atlas.crises.asia.sources": {
+      "kind": "text",
+      "text": "Reinhart & Rogoff (2009); safe-haven currency literature (Ranaldo & Söderlind 2010)",
+      "source": "src/data/atlas.json:1534"
+    },
+    "atlas.crises.dotcom.peak": {
+      "kind": "text",
+      "text": "Mar 2000",
+      "source": "src/data/atlas.json:1752"
+    },
+    "atlas.crises.dotcom.cause": {
+      "kind": "text",
+      "text": "TMT equity bubble (GSADF-dated explosive episode). NASDAQ −78% peak-to-trough (Oct 2002).",
+      "source": "src/data/atlas.json:1753"
+    },
+    "atlas.crises.dotcom.highlight": {
+      "kind": "text",
+      "text": "Value's revenge: Fama-French small-value ≈ +16.2%/yr 2000–07 vs S&P +1.7%/yr. Gold FELL — the key exception that demotes it from universal status.",
+      "source": "src/data/atlas.json:1754"
+    },
+    "atlas.crises.dotcom.sources": {
+      "kind": "text",
+      "text": "Phillips, Wu & Yu (2011); Fama-French portfolio evidence; Baur & McDermott (2010)",
+      "source": "src/data/atlas.json:1755"
+    },
+    "atlas.crises.gfc.peak": {
+      "kind": "text",
+      "text": "Oct 2007",
+      "source": "src/data/atlas.json:2077"
+    },
+    "atlas.crises.gfc.cause": {
+      "kind": "text",
+      "text": "US housing / credit bubble and securitization. S&P 500 −57%; real house prices −35% over ~6 years.",
+      "source": "src/data/atlas.json:2078"
+    },
+    "atlas.crises.gfc.highlight": {
+      "kind": "text",
+      "text": "The full safe-haven set fired at once: gold strong safe haven at the peak (Baur & McDermott), Treasuries rallied hard, yen appreciated, trend-following delivered crisis alpha, long volatility paid out.",
+      "source": "src/data/atlas.json:2079"
+    },
+    "atlas.crises.gfc.sources": {
+      "kind": "text",
+      "text": "Baur & McDermott (2010); Baele et al. (2020) RFS; Moskowitz, Ooi & Pedersen (2012) JFE; St. Louis Fed",
+      "source": "src/data/atlas.json:2080"
+    },
+    "atlas.crises.euro.peak": {
+      "kind": "text",
+      "text": "Jul 2011 (intensification)",
+      "source": "src/data/atlas.json:2490"
+    },
+    "atlas.crises.euro.cause": {
+      "kind": "text",
+      "text": "Bank–sovereign doom loop; periphery yields spiked to unsustainable levels. Euro-area bank equity collapsed.",
+      "source": "src/data/atlas.json:2491"
+    },
+    "atlas.crises.euro.highlight": {
+      "kind": "text",
+      "text": "Core Bunds and US Treasuries rallied; the CHF surged +~50% vs EUR until the SNB floor (Sep 2011); gold in EUR peaked with the crisis.",
+      "source": "src/data/atlas.json:2492"
+    },
+    "atlas.crises.euro.sources": {
+      "kind": "text",
+      "text": "Ranaldo & Söderlind (2010); SNB-floor literature; Baele et al. (2020)",
+      "source": "src/data/atlas.json:2493"
+    },
+    "atlas.crises.covid.peak": {
+      "kind": "text",
+      "text": "Feb 2020",
+      "source": "src/data/atlas.json:2755"
+    },
+    "atlas.crises.covid.cause": {
+      "kind": "text",
+      "text": "Exogenous pandemic shock + dash-for-cash. S&P 500 −34% in one month — then the fastest recovery on record.",
+      "source": "src/data/atlas.json:2756"
+    },
+    "atlas.crises.covid.highlight": {
+      "kind": "text",
+      "text": "Phase 1 was a 'dash for cash': in mid-March even Treasuries sold off while T-bills/money-market funds absorbed record inflows (Duffie 2020) — then duration rallied. Treasuries later failed in the 2022 inflation regime; Bitcoin fell in lockstep with equities: falsified as a safe haven (Conlon & McGee 2020).",
+      "source": "src/data/atlas.json:2757"
+    },
+    "atlas.crises.covid.sources": {
+      "kind": "text",
+      "text": "Conlon & McGee (2020) Finance Research Letters; Duffie (2020) Brookings; Corbet et al. (2020); Baele et al. (2020)",
+      "source": "src/data/atlas.json:2758"
+    },
+    "atlas.crises.southsea.peak": {
+      "kind": "text",
+      "text": "Jun 1720",
+      "source": "src/data/atlas.json:3102"
+    },
+    "atlas.crises.southsea.cause": {
+      "kind": "text",
+      "text": "Debt-for-equity conversion scheme fuelled by credit; shares rose ~8× in six months, then collapsed ~85%.",
+      "source": "src/data/atlas.json:3104"
+    },
+    "atlas.crises.southsea.highlight": {
+      "kind": "text",
+      "text": "Hoare's Bank rode the bubble knowingly and exited near the top — IRR ≈ 51% p.a. (Temin & Voth 2004). The winning asset was the timed exit to cash and quality, not the bubble itself.",
+      "source": "src/data/atlas.json:3105"
+    },
+    "atlas.crises.southsea.sources": {
+      "kind": "text",
+      "text": "Temin & Voth (2004) AER; Garber (1990 JEP; 2000 MIT Press)",
+      "source": "src/data/atlas.json:3106"
+    },
+    "atlas.series.ai2026.mkt.suffix": {
+      "kind": "text",
+      "text": "(feared market)",
+      "source": "src/data/atlas.json:17"
+    },
+    "atlas.series.ai2026.au.suffix": {
+      "kind": "text",
+      "text": "— lead regime-matched hedge",
+      "source": "src/data/atlas.json:86"
+    },
+    "atlas.series.shared.phase1": {
+      "kind": "text",
+      "text": "— phase 1",
+      "source": "src/data/atlas.json:141,562,1104,1433,1943,2376,2886"
+    },
+    "atlas.series.ai2026.ust.suffix": {
+      "kind": "text",
+      "text": "— challenged",
+      "source": "src/data/atlas.json:183"
+    },
+    "atlas.series.ai2026.jpy.suffix": {
+      "kind": "text",
+      "text": "(failed this cycle)",
+      "source": "src/data/atlas.json:301"
+    },
+    "atlas.series.ai2026.btc.suffix": {
+      "kind": "text",
+      "text": "(risk asset)",
+      "source": "src/data/atlas.json:335"
+    },
+    "atlas.series.stagflation.oil.suffix": {
+      "kind": "text",
+      "text": "(unique)",
+      "source": "src/data/atlas.json:735"
+    },
+    "atlas.series.dotcom.au.suffix": {
+      "kind": "text",
+      "text": "(fell — the exception)",
+      "source": "src/data/atlas.json:2027"
+    },
+    "atlas.series.covid.btc.suffix": {
+      "kind": "text",
+      "text": "(falsified safe haven)",
+      "source": "src/data/atlas.json:3034"
+    },
+    "atlas.matrix.gold.depression": {
+      "kind": "text",
+      "text": "Rose via gold-mining shares (Homestake +474–580%) under the fixed gold price.",
+      "source": "src/data/atlas.json:3324"
+    },
+    "atlas.matrix.gold.blackmonday": {
+      "kind": "text",
+      "text": "Spiked intraday on Black Monday (+4.2%) then sold off as investors liquidated for cash — an 'ATM' in acute liquidity crunches; weak-to-strong per Baur & McDermott (2010).",
+      "source": "src/data/atlas.json:3325"
+    },
+    "atlas.matrix.gold.asia": {
+      "kind": "text",
+      "text": "Rose in local-currency terms as EM currencies collapsed.",
+      "source": "src/data/atlas.json:3326"
+    },
+    "atlas.matrix.gold.dotcom": {
+      "kind": "text",
+      "text": "Fell ≈ −27% into the peak and stayed weak — the key exception that demotes gold from universal status.",
+      "source": "src/data/atlas.json:3327"
+    },
+    "atlas.matrix.gold.gfc": {
+      "kind": "text",
+      "text": "Strong safe haven at the crisis peak (Baur & McDermott 2010).",
+      "source": "src/data/atlas.json:3328"
+    },
+    "atlas.matrix.gold.ai2026": {
+      "kind": "text",
+      "text": "ELEVATED to lead regime-matched hedge: 2026 hedge score 0.85 (co-lead with cash at 0.88) — regime-match r 0.96–0.98 vs monetary-crisis scripts, worst-quintile beta ≈ 0, Granger-leads the market; 27% of global reserves, overtaking US Treasuries at 22% (ECB, 2 Jun 2026); record central-bank demand (WGC, Jun 2026). Caveat: ~$4,100 after the $5,595 Jan-2026 record — part of the hedge is pre-paid.",
+      "source": "src/data/atlas.json:3329"
+    },
+    "atlas.matrix.bonds.stagflation": {
+      "kind": "text",
+      "text": "Collapsed in real terms — bonds fail in inflationary regimes.",
+      "source": "src/data/atlas.json:3348"
+    },
+    "atlas.matrix.bonds.euro": {
+      "kind": "text",
+      "text": "Core Bunds/Treasuries only; periphery sovereigns were the collapsing asset.",
+      "source": "src/data/atlas.json:3349"
+    },
+    "atlas.matrix.bonds.covid": {
+      "kind": "text",
+      "text": "Rallied in the crash, then fell ≈ −25% in the 2022 inflation regime.",
+      "source": "src/data/atlas.json:3350"
+    },
+    "atlas.matrix.bonds.ai2026": {
+      "kind": "text",
+      "text": "Challenged: in April 2025 Treasuries, USD and equities fell TOGETHER; BIS (Sep 2025) found Treasury safe-haven correlations near zero since. 2026 hedge score 0.42 — demoted to 5th, behind CHF, for this configuration (Cheema, Ryan & Sarwar 2025: bonds work best in macro/financial downturns, weaker in geopolitical/inflation shocks).",
+      "source": "src/data/atlas.json:3351"
+    },
+    "atlas.matrix.cash.depression": {
+      "kind": "text",
+      "text": "Deflation lifted the real value of cash ~25% peak-to-trough.",
+      "source": "src/data/atlas.json:3370"
+    },
+    "atlas.matrix.cash.stagflation": {
+      "kind": "text",
+      "text": "Positive nominal T-bill yields but negative real returns in the inflationary regime.",
+      "source": "src/data/atlas.json:3371"
+    },
+    "atlas.matrix.cash.covid": {
+      "kind": "text",
+      "text": "March 2020 'dash for cash': even Treasuries sold off while T-bills and money-market funds absorbed record inflows (Duffie 2020; BIS Bulletin No. 2).",
+      "source": "src/data/atlas.json:3372"
+    },
+    "atlas.matrix.cash.ai2026": {
+      "kind": "text",
+      "text": "The live phase-1 haven: money-market fund assets at a record $7.95tn (ICI, 1 Jul 2026). 2026 hedge score 0.88 — rank #1 on CERTAINTY (100% worst-month hit rate, no drawdown, par entry); gold is the payoff co-lead.",
+      "source": "src/data/atlas.json:3373"
+    },
+    "atlas.matrix.jpy.gfc": {
+      "kind": "text",
+      "text": "Appreciated ≈ +23% vs USD through the acute phase (Ranaldo & Söderlind 2010).",
+      "source": "src/data/atlas.json:3392"
+    },
+    "atlas.matrix.jpy.ai2026": {
+      "kind": "text",
+      "text": "~¥162 — a ~40-year low; carry dominates haven flows, so the yen has NOT behaved as a haven this cycle.",
+      "source": "src/data/atlas.json:3393"
+    },
+    "atlas.matrix.chf.euro": {
+      "kind": "text",
+      "text": "+~50% vs EUR until the SNB imposed the 1.20 floor in Sep 2011.",
+      "source": "src/data/atlas.json:3412"
+    },
+    "atlas.matrix.chf.ai2026": {
+      "kind": "text",
+      "text": "Credible secondary haven — the franc strengthened materially vs USD 2021–26 (USD/CHF ~0.76 in Jan 2026).",
+      "source": "src/data/atlas.json:3413"
+    },
+    "atlas.matrix.usd.asia": {
+      "kind": "text",
+      "text": "The classic EM-crisis winner: +~115% vs THB at the extreme.",
+      "source": "src/data/atlas.json:3432"
+    },
+    "atlas.matrix.usd.covid": {
+      "kind": "text",
+      "text": "Spiked in the Mar 2020 dash-for-cash funding stress.",
+      "source": "src/data/atlas.json:3433"
+    },
+    "atlas.matrix.usd.ai2026": {
+      "kind": "text",
+      "text": "Worst first half since 1973 in H1 2025 (DXY −10.8%); reserve diversification away from USD documented (ECB, WGC).",
+      "source": "src/data/atlas.json:3434"
+    },
+    "atlas.matrix.commodities.stagflation": {
+      "kind": "text",
+      "text": "Equity-like returns, negatively correlated with stocks, positively with inflation (Gorton & Rouwenhorst 2006).",
+      "source": "src/data/atlas.json:3453"
+    },
+    "atlas.matrix.oil.stagflation": {
+      "kind": "text",
+      "text": "Crude roughly quadrupled after the Oct 1973 embargo ($2.90 → $11.65/bbl by Jan 1974) — the highest-magnitude crisis-unique winner (Alpanda & Peralta-Alva 2010, Rev. Econ. Dynamics; Fed History).",
+      "source": "src/data/atlas.json:3472"
+    },
+    "atlas.matrix.oil.gfc": {
+      "kind": "text",
+      "text": "Fell from ~$147 to ~$34 in the demand-driven collapse (Hamilton 2009, BPEA) — high uniqueness, low recurrence.",
+      "source": "src/data/atlas.json:3473"
+    },
+    "atlas.matrix.value.dotcom": {
+      "kind": "text",
+      "text": "Small-value ≈ +16.2%/yr 2000–07 vs S&P +1.7%/yr — the post-bubble rotation.",
+      "source": "src/data/atlas.json:3492"
+    },
+    "atlas.matrix.value.gfc": {
+      "kind": "text",
+      "text": "Fell with the market during the crash itself; the premium is post-trough.",
+      "source": "src/data/atlas.json:3493"
+    },
+    "atlas.matrix.value.ai2026": {
+      "kind": "text",
+      "text": "The dot-com analogue: value / equal-weight rotation is the leading candidate post-bubble winner if an AI unwind mirrors 2000–02.",
+      "source": "src/data/atlas.json:3494"
+    },
+    "atlas.matrix.quality.gfc": {
+      "kind": "text",
+      "text": "QMJ shows mild positive convexity — benefits from flight to quality (Asness, Frazzini & Pedersen 2019).",
+      "source": "src/data/atlas.json:3513"
+    },
+    "atlas.matrix.trend.blackmonday": {
+      "kind": "text",
+      "text": "Crisis alpha is strongest in prolonged drawdowns, weaker in one-day crashes (Kaminski).",
+      "source": "src/data/atlas.json:3532"
+    },
+    "atlas.matrix.trend.gfc": {
+      "kind": "text",
+      "text": "+14–18% in 2008 while equities halved (time-series momentum, Moskowitz et al. 2012).",
+      "source": "src/data/atlas.json:3533"
+    },
+    "atlas.matrix.vol.blackmonday": {
+      "kind": "text",
+      "text": "Via index puts / portfolio hedges — VIX futures only tradable since 2004, VIX options since 2006.",
+      "source": "src/data/atlas.json:3552"
+    },
+    "atlas.matrix.vol.gfc": {
+      "kind": "text",
+      "text": "Long VIX futures/calls materially cut portfolio risk in 2008 (Szado 2009); VIX a stronger US hedge than gold (Hood & Malik 2013). Cost: persistently negative carry (Carr & Wu 2009).",
+      "source": "src/data/atlas.json:3553"
+    },
+    "atlas.matrix.vol.ai2026": {
+      "kind": "text",
+      "text": "Convex insurance is available and relatively cheap pre-spike; expected carry is negative between crises (Dew-Becker et al. 2017).",
+      "source": "src/data/atlas.json:3554"
+    },
+    "atlas.matrix.btc.covid": {
+      "kind": "text",
+      "text": "Fell in lockstep with the S&P 500; a 10% allocation raised 1% portfolio VaR by 13.6% (Conlon & McGee 2020) — falsified as a safe haven.",
+      "source": "src/data/atlas.json:3573"
+    },
+    "atlas.matrix.btc.ai2026": {
+      "kind": "text",
+      "text": "−51% from the Oct 2025 ATH (~$126k) to ~$62k by Jul 2026 while equity indices set records — again trading as a risk asset.",
+      "source": "src/data/atlas.json:3574"
+    },
+    "atlas.classification.universal.0": {
+      "kind": "text",
+      "text": "PHASE 1 · Cash / T-bills / USD liquidity — the first-response winner: flight to liquidity and record money-market inflows (Longstaff 2004; Nagel 2016; Krishnamurthy & Vissing-Jorgensen 2012; Baele et al. 2020; Duffie 2020 'dash for cash')",
+      "source": "src/data/atlas.json:3597"
+    },
+    "atlas.classification.universal.1": {
+      "kind": "text",
+      "text": "PHASE 2 · Long safe sovereign bonds — 9/10 crises once funding stress eases; best in macro/financial downturns, weaker in geopolitical/inflation shocks (Cheema, Ryan & Sarwar 2025) and challenged since April 2025",
+      "source": "src/data/atlas.json:3598"
+    },
+    "atlas.classification.universal.2": {
+      "kind": "text",
+      "text": "Long volatility / index puts — paid in every observed crisis; negative expected carry between crises (Szado 2009; Carr & Wu 2009)",
+      "source": "src/data/atlas.json:3599"
+    },
+    "atlas.classification.universal.3": {
+      "kind": "text",
+      "text": "Trend-following / CTA — 'crisis alpha' in prolonged drawdowns (weaker in one-day crashes)",
+      "source": "src/data/atlas.json:3600"
+    },
+    "atlas.classification.universal.4": {
+      "kind": "text",
+      "text": "Gold is near-universal but demoted historically (it fell in the dot-com bust) — yet for the 2026 configuration it is ELEVATED to lead regime-matched hedge, score 0.85 co-lead with cash (see Analytics ranking)",
+      "source": "src/data/atlas.json:3601"
+    },
+    "atlas.classification.category.0": {
+      "kind": "text",
+      "text": "Gold → monetary / inflation / currency crises — AND 'black-swan' ambiguity: investors buy gold on ambiguous signals, bonds on extreme-but-clear ones (Baur & McDermott 2012 working paper; Caballero & Krishnamurthy 2008)",
+      "source": "src/data/atlas.json:3609"
+    },
+    "atlas.classification.category.1": {
+      "kind": "text",
+      "text": "Value / small-value stocks → after equity-growth bubbles (dot-com)",
+      "source": "src/data/atlas.json:3610"
+    },
+    "atlas.classification.category.2": {
+      "kind": "text",
+      "text": "US dollar → EM and global funding-stress crises (Asia ’97, LTCM, 2008, 2020)",
+      "source": "src/data/atlas.json:3611"
+    },
+    "atlas.classification.category.3": {
+      "kind": "text",
+      "text": "Government bonds → deflationary crises specifically — they are the collapsing asset in sovereign/inflation crises",
+      "source": "src/data/atlas.json:3612"
+    },
+    "atlas.classification.category.4": {
+      "kind": "text",
+      "text": "Quality / low-beta → recessionary equity drawdowns generally",
+      "source": "src/data/atlas.json:3613"
+    },
+    "atlas.classification.unique.0": {
+      "kind": "text",
+      "text": "Oil / energy — 1973–74: crude ~4× post-embargo; the highest-MAGNITUDE unique winner, though the crisis TYPE recurs (1979, 1990, 2022) and oil FELL in the 2008/2020 demand collapses (Hamilton 2009)",
+      "source": "src/data/atlas.json:3621"
+    },
+    "atlas.classification.unique.1": {
+      "kind": "text",
+      "text": "Homestake Mining & gold miners — 1930s: >500% Oct 1929–Dec 1935 vs a ~⅔ Dow loss (Burdekin & Weidenmier 2004) — the most NON-REPLICABLE winner (fixed-gold-price regime)",
+      "source": "src/data/atlas.json:3622"
+    },
+    "atlas.classification.unique.2": {
+      "kind": "text",
+      "text": "Rolling Nikkei puts — Japan 1990",
+      "source": "src/data/atlas.json:3623"
+    },
+    "atlas.classification.unique.3": {
+      "kind": "text",
+      "text": "Mega-cap tech — the COVID recovery trade, not the crash hedge",
+      "source": "src/data/atlas.json:3624"
+    },
+    "atlas.classification.unique.4": {
+      "kind": "text",
+      "text": "Hoare's Bank timed exit — South Sea 1720 (IRR ≈ 51% p.a., Temin & Voth 2004)",
+      "source": "src/data/atlas.json:3625"
+    },
+    "atlas.classification.falsified.0": {
+      "kind": "text",
+      "text": "Bitcoin — fell in lockstep with equities in Mar 2020 (Conlon & McGee 2020); by Jul 2026 down ~51% from its ATH while indices set records",
+      "source": "src/data/atlas.json:3633"
+    },
+    "atlas.classification.falsified.1": {
+      "kind": "text",
+      "text": "Japanese yen (this cycle) — ~¥162, a ~40-year low despite repeated risk episodes; carry has dominated haven flows 2021–26",
+      "source": "src/data/atlas.json:3634"
+    },
+    "gauge.grounding": {
+      "kind": "map",
+      "entries": {
+        "literature_grounded": "Backed by peer-reviewed research.",
+        "literature_adjacent": "Motivated by the research, with a reasoned (not directly fitted) mapping.",
+        "judgmental": "Reasoned expert choice, not a fitted model.",
+        "contested": "Known to misfire — deliberately down-weighted.",
+        "lagging_confirmation": "Confirms stress already underway; does not predict."
+      },
+      "source": "src/bubblegauge.tsx:136-140"
+    },
+    "gauge.epistemic.chip_long": {
+      "kind": "text",
+      "text": "Heuristic · not a probability · calibrated on n≈4 · see limits",
+      "source": "src/bubblegauge.tsx:148"
+    },
+    "gauge.band.oneliner": {
+      "kind": "map",
+      "entries": {
+        "hold": "Hold — structural risk is present but not acute. No action indicated by the trend rule.",
+        "trim": "Trim — fragility is elevated. Consider easing risk if the trend rule confirms.",
+        "derisk": "De-risk — fragility is high or a hard override has fired. The trend rule is now the thing to watch.",
+        "suppressed": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed."
+      },
+      "source": "src/bubblegauge.tsx:149-154"
+    },
+    "gauge.ladder.ceiling": {
+      "kind": "text",
+      "text": "The score sets your ceiling on risk — how much caution is warranted. It does not tell you to sell today.",
+      "source": "src/bubblegauge.tsx:156"
+    },
+    "gauge.ladder.trigger": {
+      "kind": "text",
+      "text": "The 10-month trend rule (Faber) is the trigger — historically it reduces drawdowns, and honestly, does not boost returns.",
+      "source": "src/bubblegauge.tsx:157"
+    },
+    "gauge.ladder.speed": {
+      "kind": "text",
+      "text": "The fast alarm (VIX / variance premium) reacts faster than a monthly trend, for when things break quickly.",
+      "source": "src/bubblegauge.tsx:158"
+    },
+    "gauge.ladder.caveat": {
+      "kind": "text",
+      "text": "Acting early is expensive: missing the 10 best days over 1900–2006 — just 0.03% of trading days — cost ~65% of terminal wealth (Estrada). And any de-risking rule can lose money net of costs (Cederburg et al.). That is exactly why the score is a ceiling, not a button.",
+      "source": "src/bubblegauge.tsx:159"
+    },
+    "gauge.redflag.header": {
+      "kind": "text",
+      "text": "What would have to happen — each flag has a specific threshold (encoded in its name). If at least 3 of 4 fire, the score is floored at 70 regardless of everything else (a deliberate non-compensatory override).",
+      "source": "src/bubblegauge.tsx:161"
+    },
+    "gauge.falsify.header": {
+      "kind": "text",
+      "text": "This gauge is falsifiable, on purpose. It is WRONG if:",
+      "source": "src/bubblegauge.tsx:162"
+    },
+    "gauge.coverage.tip": {
+      "kind": "text",
+      "text": "Coverage = how much of each block's intended weight is actually live right now. When an input is unavailable, we drop it and re-weight the rest, rather than guessing.",
+      "source": "src/bubblegauge.tsx:163"
+    },
+    "gauge.changelog.tip": {
+      "kind": "text",
+      "text": "v2 → v3: this step was an aggregation fix — a change in how the sub-scores are combined — NOT the market getting worse. We show it here so you never mistake a methodology change for a market event.",
+      "source": "src/bubblegauge.tsx:164"
+    },
+    "gauge.fusion.header": {
+      "kind": "text",
+      "text": "Which past crisis does today most resemble? (This is an analogy, not a forecast.)",
+      "source": "src/bubblegauge.tsx:165"
+    },
+    "gauge.epistemic.not_probability": {
+      "kind": "text",
+      "text": "This is a 0–100 regime heuristic built from structured expert judgment. It is NOT a probability of a crash. There have been maybe four comparable US equity manias in a century — 1929, 2000, 2007, 2021 — far too few to calibrate a real probability. And today may not be a bubble at all: it could be rational repricing of a genuine general-purpose technology.",
+      "source": "src/bubblegauge.tsx:166"
+    },
+    "gauge.redflag.flag": {
+      "kind": "map",
+      "entries": {
+        "gsadf": "GSADF reads explosive (and not contested-suppressed)",
+        "semi_runup": "Semis' 2-yr net-of-market run-up ≥ 150 pp",
+        "hy_oas": "HY OAS widened > 100 bps",
+        "breadth": "< 50% of S&P 500 above the 200-DMA near an ATH"
+      },
+      "source": "src/bubblegauge.tsx:170-173"
+    },
+    "gauge.reg.s1": {
+      "kind": "map",
+      "entries": {
+        "plain": "How expensive are stocks versus their own history, once you account for interest rates?",
+        "fire": "CAPE sits at a historic extreme and the Excess CAPE Yield (stocks' edge over bonds) is thin.",
+        "why": "Weighted highest in the structural block because valuation is the most durable long-horizon fragility signal in the research."
+      },
+      "source": "src/bubblegauge.tsx:178-181"
+    },
+    "gauge.reg.s2": {
+      "kind": "map",
+      "entries": {
+        "plain": "How much does the whole index depend on a handful of AI names?",
+        "fire": "The top-10 share of the S&P 500 pushes further above its post-1990 range (~41% in 2025 vs ~27% at the 2000 peak).",
+        "why": "Literature-adjacent: a single-point-of-failure risk grounded in the concentration literature, not a fitted timing signal."
+      },
+      "source": "src/bubblegauge.tsx:182-185"
+    },
+    "gauge.reg.s3": {
+      "kind": "map",
+      "entries": {
+        "plain": "History says that when one industry doubles relative to the market in two years, it crashes about half the time.",
+        "fire": "Semiconductors' two-year gain over the market climbs the crash-frequency curve.",
+        "why": "Literature-grounded: Greenwood-Shleifer-You found a 100% two-year net-of-market run-up carries a 53% crash probability, rising to ~80% at 150%."
+      },
+      "source": "src/bubblegauge.tsx:186-189"
+    },
+    "gauge.reg.s4": {
+      "kind": "map",
+      "entries": {
+        "plain": "A statistical test for prices growing faster than exponentially — deliberately down-weighted because it can be fooled by a genuine technological revolution.",
+        "fire": "The recursive unit-root test flags explosive price dynamics.",
+        "why": "CONTESTED and low-weighted: a 2026 study shows it fires 93–100% of the time under real general-purpose-tech fundamentals."
+      },
+      "source": "src/bubblegauge.tsx:190-193"
+    },
+    "gauge.reg.s5": {
+      "kind": "map",
+      "entries": {
+        "plain": "When lenders are most relaxed, trouble tends to arrive about two years later. Today's spreads are near 25-year tights.",
+        "fire": "High-yield spreads are historically tight (measured with a two-year lead).",
+        "why": "Literature-grounded on López-Salido-Stein-Zakrajšek's finding that hot credit at t−2 precedes contraction at t."
+      },
+      "source": "src/bubblegauge.tsx:194-197"
+    },
+    "gauge.reg.d1": {
+      "kind": "map",
+      "entries": {
+        "plain": "How many stocks are still participating, versus a shrinking few holding the index up?",
+        "fire": "The share of S&P 500 members above their 200-day average drops sharply.",
+        "why": "Heaviest weight in the trigger block — breadth deterioration is a classic turn signal (judgmental)."
+      },
+      "source": "src/bubblegauge.tsx:198-201"
+    },
+    "gauge.reg.d2": {
+      "kind": "map",
+      "entries": {
+        "plain": "Leverage is at a record, but the signal only counts once it starts unwinding.",
+        "fire": "Margin debt turns down year-over-year and a rollover confirmation engages.",
+        "why": "Down-weighted, confirmation-only: CXO Advisory found a 0.00 correlation between margin-debt change and next-month returns — the market leads margin debt, not the reverse."
+      },
+      "source": "src/bubblegauge.tsx:202-205"
+    },
+    "gauge.reg.d3": {
+      "kind": "map",
+      "entries": {
+        "plain": "Spending a fortune on data centers is only alarming if the revenue stops showing up.",
+        "fire": "Cloud revenue growth falls below 15% YoY while trailing free cash flow is negative; otherwise capped low.",
+        "why": "Literature-grounded: railroads and fiber both had cash-flow troughs years before any peak — capex is only a bubble signal when it stops converting to revenue."
+      },
+      "source": "src/bubblegauge.tsx:206-209"
+    },
+    "gauge.reg.d4": {
+      "kind": "map",
+      "entries": {
+        "plain": "A physics-derived model of bubbles as 'critical points' — good at spotting them, prone to crying wolf early.",
+        "fire": "Prices show faster-than-exponential growth with accelerating oscillations.",
+        "why": "Literature-grounded but caveated: high recall (~90%), low precision (~29%)."
+      },
+      "source": "src/bubblegauge.tsx:210-213"
+    },
+    "gauge.epistemic.caveats": {
+      "kind": "list",
+      "items": [
+        "NOT-A-PROBABILITY: 0-100 regime heuristic = structured expert judgment; uncalibrated.",
+        "n≈4 CALIBRATION IMPOSSIBILITY: reference class {1929,2000,2007,2021}.",
+        "REFERENCE-CLASS CAVEAT: may be rational GPT repricing (Chen-Chen-Huang 2026).",
+        "NOMINAL≠EFFECTIVE WEIGHTS: see annual PSS sensitivity script.",
+        "Service never returns 500 on upstream failure: fallback or drop+renormalize."
+      ],
+      "source": "src/bubblegauge.tsx:219-225"
+    },
+    "gauge.falsify.criteria": {
+      "kind": "list",
+      "items": [
+        "Score < 30 through a > 30% S&P drawdown beginning within 3 months → construct falsified.",
+        "Score > 60 sustained through 24 months of > 10% annualized gains without a > 15% drawdown → falsified.",
+        "Override fires and no > 20% drawdown within 12 months → override falsified."
+      ],
+      "source": "src/bubblegauge.tsx:226-230"
+    },
+    "gauge.changelog": {
+      "kind": "table",
+      "items": [
+        {
+          "key": "v1",
+          "v": "v1",
+          "score": 33,
+          "note": "linear-additive, fully compensatory; stale concentration; HY-OAS sign inverted; LPPLS placeholder."
+        },
+        {
+          "key": "v2",
+          "v": "v2",
+          "score": 28,
+          "note": "data fixes; still fully compensatory."
+        },
+        {
+          "key": "v3",
+          "v": "v3",
+          "score": 40,
+          "note": "AGGREGATION FIX: two-block geometric mean + non-compensatory override + Monte Carlo median. NOT market deterioration."
+        },
+        {
+          "key": "v3_0_1",
+          "v": "v3.0.1",
+          "score": null,
+          "note": "first-live-run bugfixes (Stooq, FINRA parser, GSADF floor 0.25, LPPLS robustness). Methodology unchanged."
+        },
+        {
+          "key": "v3_1_0",
+          "v": "3.1.0",
+          "score": null,
+          "note": "price-layer restructure (provider chain + source hardening). Methodology unchanged."
+        }
+      ],
+      "source": "src/bubblegauge.tsx:231-237"
+    },
+    "gauge.fusion.note": {
+      "kind": "map",
+      "entries": {
+        "y1929": "Levered (margin) equity mania — deep macro damage.",
+        "y2000": "Unlevered tech/equity bubble — sharp equity drawdown, comparatively benign macro (Jordà-Schularick-Taylor).",
+        "y2007": "Credit/housing-leveraged — deepest recession & slowest recovery of the set.",
+        "y2021": "Everything-rally; mixed leverage; the most recent reference-class member."
+      },
+      "source": "src/bubblegauge.tsx:393-400"
+    },
+    "gauge.epistemic.chip": {
+      "kind": "text",
+      "text": "Heuristic · not a probability · n≈4",
+      "source": "src/bubblegauge.tsx:463"
+    },
+    "gauge.tooltip.faber": {
+      "kind": "text",
+      "text": "Faber 10-month trend rule (execution trigger)",
+      "source": "src/bubblegauge.tsx:674"
+    },
+    "gauge.headline.spread_note": {
+      "kind": "text",
+      "text": "The spread is the point — this is a distribution over assumptions, not a forecast.",
+      "source": "src/bubblegauge.tsx:721"
+    },
+    "gauge.anatomy.method_note": {
+      "kind": "text",
+      "text": "combined by <b>multiplication</b> (geometric mean) — one calm reading can't fully cancel an alarming one",
+      "source": "src/bubblegauge.tsx:780"
+    },
+    "gauge.anatomy.v_explainer": {
+      "kind": "text",
+      "text": "When near-term fear exceeds long-term fear, stress is already underway; this confirms, it doesn't predict.",
+      "source": "src/bubblegauge.tsx:788"
+    },
+    "gauge.anatomy.formula": {
+      "kind": "template",
+      "text": "Score = 100 × S<sup>α</sup> × D<sup>β</sup> (α=β=0.5) → point {point_score} → Monte Carlo median {headline_median}",
+      "source": "src/bubblegauge.tsx:792"
+    },
+    "gauge.redflag.fired_sub": {
+      "kind": "text",
+      "text": "OVERRIDE FIRED — score floored at 70",
+      "source": "src/bubblegauge.tsx:803"
+    },
+    "gauge.ladder.subtitle": {
+      "kind": "text",
+      "text": "the score is a ceiling, not a sell button",
+      "source": "src/bubblegauge.tsx:838"
+    },
+    "gauge.fusion.sub": {
+      "kind": "text",
+      "text": "from Block S composition · analogy, not forecast",
+      "source": "src/bubblegauge.tsx:949"
+    },
+    "gauge.fusion.caveat": {
+      "kind": "text",
+      "text": "This is a weak, stylized similarity across five hand-set dimensions — an analogy, not a forecast. Today may match NO past crisis (rational general-purpose-technology repricing; n≈4 reference class). The leverage dimension is approximate (no direct block-S leverage indicator). Jordà-Schularick-Taylor: <i>unlevered</i> equity bubbles historically produce shallower macro damage than credit-levered ones — use the nearest analogue to weight which havens in the atlas are most relevant, then judge for yourself.",
+      "source": "src/bubblegauge.tsx:979-984"
+    },
+    "gauge.series.suffix": {
+      "kind": "map",
+      "entries": {
+        "mkt": "— feared market",
+        "au": "— lead regime-matched hedge",
+        "cash": "— phase 1",
+        "ust": "— challenged"
+      },
+      "source": "src/bubblegauge.tsx:1122-1125"
+    },
+    "gauge.fg.context_tip": {
+      "kind": "text",
+      "text": "unofficial CNN endpoint — context only, does not feed the bubble score",
+      "source": "src/bubblegauge.tsx:1194"
+    },
+    "gauge.fg.gaps_note": {
+      "kind": "text",
+      "text": "t−60 · gaps = no observation (CNN history ≈ 13 months)",
+      "source": "src/bubblegauge.tsx:1229"
+    },
+    "gauge.live_backfill.proxies": {
+      "kind": "text",
+      "text": "Chart lines use labeled proxies (QQQ / GLD / IEF / BIL ETFs; Fed broad dollar index, not ICE DXY; FX lines inverted to show the currency vs USD).",
+      "source": "src/bubblegauge.tsx:1274"
+    },
+    "gauge.splash.band_blurb": {
+      "kind": "map",
+      "entries": {
+        "hold": "Structural risk present, not acute.",
+        "trim": "Fragility elevated — the trend rule is the trigger.",
+        "derisk": "Fragility high, or a hard override fired.",
+        "fallback": "Not scored — inputs degraded."
+      },
+      "source": "src/bubblegauge.tsx:1438"
+    },
+    "gauge.tiles.why": {
+      "kind": "map",
+      "entries": {
+        "cape": "valuation",
+        "top10": "concentration",
+        "hy_oas": "credit stress",
+        "gold": "haven bid",
+        "btc": "risk appetite"
+      },
+      "source": "src/bubblegauge.tsx:1809-1814"
+    },
+    "gauge.fg.not_scored_short": {
+      "kind": "text",
+      "text": "own axis · not scored",
+      "source": "src/bubblegauge.tsx:1926"
+    },
+    "gauge.live_backfill.banner": {
+      "kind": "map",
+      "entries": {
+        "template": "series re-anchored to {anchorMonth}{month_in_progress_clause} via the bubblegauge feed{service_version_suffix}{demo_suffix}",
+        "month_in_progress_clause": " (month in progress — t0 is month-to-date)",
+        "service_version_suffix": " {serviceVersion}",
+        "demo_suffix": " · demo fixture",
+        "placeholders": "{anchorMonth} = feed anchor month; month_in_progress_clause only when anchorPartial; service_version_suffix only when serviceVersion present; demo_suffix only in DEMO mode"
+      },
+      "source": "src/bubblegauge.tsx:1257-1258"
+    },
+    "gauge.live_backfill.static_note": {
+      "kind": "template",
+      "text": "Static Jul-2026 snapshot (feed unavailable): {static_series_list}.",
+      "source": "src/bubblegauge.tsx:1275"
+    },
+    "gauge.live_backfill.editorial_line": {
+      "kind": "text",
+      "text": "The panel's written analysis remains the Jul 2026 editorial snapshot. Refreshes twice daily.",
+      "source": "src/bubblegauge.tsx:1276"
+    },
+    "gauge.badge.static": {
+      "kind": "map",
+      "entries": {
+        "tip": "The bubblegauge feed is unavailable — these 2026 lines use the static Jul 2026 anchors.",
+        "pill": "static · Jul 2026 snapshot"
+      },
+      "source": "src/bubblegauge.tsx:1587"
+    },
+    "gauge.badge.live_tip": {
+      "kind": "map",
+      "entries": {
+        "base": "2026 lines re-anchored from the bubblegauge feed",
+        "partial_suffix": " — {anchorMonth} is month-to-date",
+        "placeholders": "partial_suffix appended only when anchorPartial; {anchorMonth} = feed anchor month"
+      },
+      "source": "src/bubblegauge.tsx:1591"
+    },
+    "gauge.badge.partial_tip": {
+      "kind": "template",
+      "text": "Feed partially available — static Jul 2026 snapshot for: {static_keys_list}",
+      "source": "src/bubblegauge.tsx:1593"
+    },
+    "gauge.verdict.lead": {
+      "kind": "table",
+      "items": [
+        {
+          "band": "suppressed (block degraded)",
+          "trend_broken": "any",
+          "template": "Not scored today."
+        },
+        {
+          "band": "de-risk",
+          "trend_broken": "yes",
+          "template": "De-risk now — {names} has broken trend."
+        },
+        {
+          "band": "de-risk",
+          "trend_broken": "no",
+          "template": "De-risk is warranted; the trigger has not fired."
+        },
+        {
+          "band": "trim",
+          "trend_broken": "yes",
+          "template": "Trim now — the trigger has fired on {names}."
+        },
+        {
+          "band": "trim",
+          "trend_broken": "no",
+          "template": "Trim is warranted — but nothing forces action today."
+        },
+        {
+          "band": "hold (and any unknown band)",
+          "trend_broken": "yes",
+          "template": "The score says hold — but the trend rule has broken."
+        },
+        {
+          "band": "hold (and any unknown band)",
+          "trend_broken": "no",
+          "template": "No action indicated."
+        },
+        {
+          "band": "_placeholder",
+          "trend_broken": "",
+          "template": "{names} = tickers among SPY, QQQ whose faber_10mo === \"OUT\", joined with \" and \""
+        }
+      ],
+      "source": "src/bubblegauge.tsx:1614-1629"
+    },
+    "gauge.verdict.detail": {
+      "kind": "table",
+      "items": [
+        {
+          "band": "suppressed (block degraded)",
+          "trend_broken": "any",
+          "template": "{gauge.band.oneliner.suppressed}"
+        },
+        {
+          "band": "de-risk",
+          "trend_broken": "yes",
+          "template": "Fragility is high{override_clause} and the 10-month rule has flipped on {names}."
+        },
+        {
+          "band": "de-risk",
+          "trend_broken": "no",
+          "template": "Fragility is high{override_clause}. Both 10-month trend rules are still intact, so the rule says watch, not sell."
+        },
+        {
+          "band": "trim",
+          "trend_broken": "yes",
+          "template": "Fragility is elevated{override_clause} and {names} has closed below its 10-month average. This is the combination the ladder treats as actionable."
+        },
+        {
+          "band": "trim",
+          "trend_broken": "no",
+          "template": "Fragility is elevated{override_clause}, so the ceiling on risk is lower. Both 10-month trend rules are intact, and that rule is what actually times a sale."
+        },
+        {
+          "band": "hold (and any unknown band)",
+          "trend_broken": "yes",
+          "template": "{names} has closed below its 10-month average. The score is a ceiling, the trend rule is the trigger, and the trigger has moved first."
+        },
+        {
+          "band": "hold (and any unknown band)",
+          "trend_broken": "no",
+          "template": "Structural risk is present but not acute{override_clause}, and both 10-month trend rules are intact."
+        },
+        {
+          "band": "_placeholder",
+          "trend_broken": "",
+          "template": "{override_clause} = \", and a hard override has fired\" when override_fired, else \"\"; {names} as in gauge.verdict.lead"
+        }
+      ],
+      "source": "src/bubblegauge.tsx:1614-1629"
+    },
+    "gauge.verdict.distance": {
+      "kind": "table",
+      "items": [
+        {
+          "case": "band suppressed (block degraded) or median not numeric",
+          "template": "(withheld — empty string)"
+        },
+        {
+          "case": "gap == 0",
+          "template": "It sits exactly on the {line} line at {nx}."
+        },
+        {
+          "case": "band == de-risk, gap > 0",
+          "template": "{gap}{unit} above the de-risk line at 60."
+        },
+        {
+          "case": "band == hold or trim, gap > 0",
+          "template": "{gap}{unit} below the {line} line at {nx}."
+        },
+        {
+          "case": "appended IQR clause: band != de-risk and iqr[1] >= nx",
+          "template": " The top of the model's 25–75% range already reaches {iqr_hi}."
+        },
+        {
+          "case": "appended IQR clause: band == de-risk and iqr[0] <= 60",
+          "template": " The bottom of that range is back at {iqr_lo}."
+        },
+        {
+          "case": "_placeholder",
+          "template": "{nx} = 45 for hold else 60; {line} = \"trim\" for hold else \"de-risk\"; {gap} = |{nx} - round(clamp(median,0,100))|; {unit} = \" point\" if gap == 1 else \" points\"; {iqr_hi}/{iqr_lo} = round(iqr[1])/round(iqr[0])"
+        }
+      ],
+      "source": "src/bubblegauge.tsx:1635-1650"
+    },
+    "gauge.hero.run_line": {
+      "kind": "table",
+      "items": [
+        {
+          "case": "run == null",
+          "template": "(empty string)"
+        },
+        {
+          "case": "run >= 3",
+          "template": "{BAND} for {run} readings"
+        },
+        {
+          "case": "run == 0",
+          "template": "changed to {BAND} this reading"
+        },
+        {
+          "case": "run == 1",
+          "template": "changed to {BAND} 1 reading ago"
+        },
+        {
+          "case": "run == 2",
+          "template": "changed to {BAND} {run} readings ago"
+        },
+        {
+          "case": "_placeholder",
+          "template": "{BAND} = current band label (HOLD/TRIM/DE-RISK/SUPPRESSED); {run} = consecutive readings the band has held"
+        }
+      ],
+      "source": "src/bubblegauge.tsx:2028-2030"
+    }
+  },
+  "missing": []
+}

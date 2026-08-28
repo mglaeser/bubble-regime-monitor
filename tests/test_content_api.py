@@ -40,9 +40,11 @@ class TestDashboardContent:
         assert set(blocks.keys()) == set(content_registry.static_blocks().keys())
         for slug, block in blocks.items():
             kind = block["kind"]
-            if kind == "text":
+            if kind in ("text", "template"):
+                # template = text carrying {placeholder} slots the client fills
+                # (Q9 interim design); both must be non-empty strings.
                 assert isinstance(block["text"], str) and block["text"].strip(), slug
-            elif kind in ("links", "endpoint_catalog"):
+            elif kind in ("links", "endpoint_catalog", "list", "table"):
                 assert isinstance(block["items"], list) and block["items"], slug
             elif kind == "map":
                 assert isinstance(block["entries"], dict) and block["entries"], slug
@@ -129,3 +131,42 @@ class TestCacheScope:
 
         monkeypatch.setattr(content_router, "get_settings", lambda: _Keyed())
         assert content_router._cache_control(300) == "private, max-age=300"
+
+
+class TestBlockArtifact:
+    """The versioned content-block artifact (config/content_blocks.v1.json)."""
+
+    def _with_artifact(self, monkeypatch, artifact):
+        import app.content_registry as reg
+
+        reg._file_artifact.cache_clear()
+        monkeypatch.setattr(reg, "_file_artifact", lambda: artifact)
+        return reg
+
+    def test_file_blocks_merge_without_overriding_builtins(self, monkeypatch):
+        reg = self._with_artifact(monkeypatch, {"content_version": 3, "blocks": {
+            "atlas.matrix.legend": {"kind": "text", "text": "example"},
+            "disclaimer_full": {"kind": "text", "text": "MUST NOT WIN"},
+        }})
+        blocks = reg.static_blocks()
+        assert blocks["atlas.matrix.legend"]["text"] == "example"
+        assert "MUST NOT WIN" not in blocks["disclaimer_full"]["text"]
+        assert reg.content_version() == 3
+
+    def test_gauge_display_prefix_extraction(self, monkeypatch):
+        reg = self._with_artifact(monkeypatch, {"content_version": 1, "blocks": {
+            "gauge.display.band.hold": {"kind": "text", "text": "example copy"},
+            "site.intro": {"kind": "text", "text": "not gauge"},
+        }})
+        display = reg.gauge_display()
+        assert display == {"band.hold": {"kind": "text", "text": "example copy"}}
+
+    def test_missing_file_serves_builtins_with_version_zero(self, monkeypatch):
+        import app.content_registry as reg
+
+        reg._file_artifact.cache_clear()
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", reg._BLOCKS_FILE.with_name("nope.json"))
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        assert "disclaimer_full" in reg.static_blocks()
+        reg._file_artifact.cache_clear()

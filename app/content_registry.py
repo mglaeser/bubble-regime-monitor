@@ -20,11 +20,33 @@ Two registries:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from app.engine.recompute_slots import schedule_display
 from app.references import DISCLAIMER
+
+# The versioned block artifact (save-haven prose migrated per the shallow-
+# frontend program). Absent file -> built-ins only; the artifact ships in the
+# same PR that first references its slugs.
+_BLOCKS_FILE = Path(__file__).resolve().parents[1] / "config" / "content_blocks.v1.json"
+
+
+@lru_cache(maxsize=1)
+def _file_artifact() -> dict[str, Any]:
+    if not _BLOCKS_FILE.exists():
+        return {"content_version": 0, "blocks": {}}
+    with _BLOCKS_FILE.open(encoding="utf-8") as fh:
+        loaded: dict[str, Any] = json.load(fh)
+    return loaded
+
+
+def content_version() -> int:
+    version = _file_artifact().get("content_version", 0)
+    return version if isinstance(version, int) else 0
 
 ADVICE_TAG = "Research, not advice."
 
@@ -34,7 +56,26 @@ def _text(text: str) -> dict[str, Any]:
 
 
 def static_blocks() -> dict[str, dict[str, Any]]:
-    """All static content blocks, keyed by slug. Pure; no I/O."""
+    """All static content blocks, keyed by slug: built-ins + the versioned
+    block artifact (file slugs never override built-ins)."""
+    blocks = dict(_builtin_blocks())
+    file_blocks = _file_artifact().get("blocks", {})
+    if isinstance(file_blocks, dict):
+        for slug, block in file_blocks.items():
+            if slug not in blocks and isinstance(block, dict):
+                blocks[slug] = block
+    return blocks
+
+
+def gauge_display() -> dict[str, Any]:
+    """The gauge display deck (Q8: copy rides the score payload) — every
+    file block under the gauge.display. prefix, keyed by its sub-slug."""
+    prefix = "gauge.display."
+    return {slug[len(prefix):]: block
+            for slug, block in static_blocks().items() if slug.startswith(prefix)}
+
+
+def _builtin_blocks() -> dict[str, dict[str, Any]]:
     return {
         # The canonical disclaimer (app.references.DISCLAIMER) with markdown
         # emphasis markers stripped for plain-text display surfaces.
@@ -134,8 +175,86 @@ class DynamicSlot:
     placeholder: str
 
 
-# Single-line printable ASCII; the length bound is repeated in the regex so a
-# consumer can validate with the regex alone.
+_PENDING = "Automated note pending - not yet generated."
+
+
+def _ascii_slot(slug: str, purpose: str, max_len: int) -> DynamicSlot:
+    """Single-line printable-ASCII slot; length bound repeated in the regex so
+    a consumer can validate with the regex alone."""
+    placeholder = _PENDING if len(_PENDING) <= max_len else "Pending."
+    return DynamicSlot(slug, purpose, max_len, rf"^[\x20-\x7E]{{1,{max_len}}}$", placeholder)
+
+
+def _save_haven_slots() -> list[DynamicSlot]:
+    """The companion-dashboard slot registry (A1 ledger contracts, ruling Q47).
+    Analytics slots serve today's frozen editorial values as placeholders until
+    the Phase-E battery produces them server-side."""
+    slots: list[DynamicSlot] = [
+        DynamicSlot("atlas.explorer.potential-banner.anchor-date",
+                    "Anchor month of the potential-crisis banner", 8,
+                    r"^[A-Z][a-z]{2} 20\d{2}$", "Jan 2026"),
+        _ascii_slot("atlas.explorer.potential-banner.backfill-window",
+                    "Backfill window of the potential-crisis banner", 24),
+        _ascii_slot("atlas.explorer.potential-banner.freshness",
+                    "Source-freshness line of the potential-crisis banner", 120),
+        _ascii_slot("atlas.crises.ai2026.peak", "AI-2026 crisis peak label", 48),
+        _ascii_slot("atlas.crises.ai2026.cause", "AI-2026 crisis cause prose", 600),
+        _ascii_slot("atlas.crises.ai2026.highlight", "AI-2026 crisis highlight prose", 700),
+        _ascii_slot("gauge.verdict.lead", "Gauge hero verdict lead sentence", 120),
+        _ascii_slot("gauge.verdict.detail", "Gauge hero verdict detail sentence", 360),
+        _ascii_slot("gauge.verdict.distance", "Gauge verdict distance clause", 200),
+        _ascii_slot("gauge.judgment_call", "Gauge judgment-call line", 300),
+        _ascii_slot("gauge.freshness", "Gauge freshness stamp", 24),
+        _ascii_slot("gauge.badge.static", "Gauge static-mode badge text", 120),
+        _ascii_slot("gauge.badge.live_tip", "Gauge live-mode badge tooltip", 120),
+        _ascii_slot("gauge.badge.partial_tip", "Gauge partial-mode badge tooltip", 140),
+        _ascii_slot("gauge.live_backfill.banner", "Gauge live-backfill banner", 160),
+        _ascii_slot("gauge.live_backfill.static_note", "Gauge live-backfill static note", 160),
+        _ascii_slot("gauge.live_backfill.editorial_line", "Gauge live-backfill editorial line", 120),
+        _ascii_slot("gauge.hero.run_line", "Gauge hero run line", 60),
+        _ascii_slot("gauge.metric.note", "Gauge metric provenance note", 120),
+        _ascii_slot("gauge.status.audit_flag.title", "Gauge audit-flag title", 80),
+        _ascii_slot("gauge.status.audit_flag.detail", "Gauge audit-flag detail", 280),
+        _ascii_slot("gauge.status.audit_flag.ref", "Gauge audit-flag reference", 40),
+        _ascii_slot("analytics.markov.p_turbulent", "Markov turbulent-state probability line", 32),
+        _ascii_slot("analytics.markov.states", "Markov state descriptions", 240),
+        _ascii_slot("analytics.granger.summary", "Granger lead-lag summary", 400),
+        _ascii_slot("analytics.hedgeweight.verdict", "Hedge-weighting verdict paragraph", 520),
+        _ascii_slot("playbook.etoro.verified", "eToro instrument verification date line", 48),
+        _ascii_slot("playbook.expert.as_of", "Expert buy-list as-of stamp", 24),
+    ]
+    for crisis_asset, n in (("gold", 520), ("bonds", 450), ("cash", 320),
+                            ("jpy", 160), ("btc", 200)):
+        slots.append(_ascii_slot(f"atlas.matrix.{crisis_asset}.ai2026",
+                                 f"AI-2026 matrix note for {crisis_asset}", n))
+    for asset in ("gold", "ust10y", "cash"):
+        for stat in ("bf", "bc", "hit", "lam"):
+            slots.append(DynamicSlot(
+                f"analytics.tail.{asset}.{stat}",
+                f"Tail-regression {stat} statistic for {asset}", 7,
+                r"^[+-]?\d{1,3}(\.\d{1,2})?%?$", "0.0"))
+    for i in range(1, 5):
+        slots.append(_ascii_slot(f"analytics.explos.{i}.label",
+                                 f"Explosiveness row {i} label", 48))
+        slots.append(DynamicSlot(f"analytics.explos.{i}.stat",
+                                 f"Explosiveness row {i} statistic", 6,
+                                 r"^[+-]\d\.\d{2}$", "+0.00"))
+        slots.append(_ascii_slot(f"analytics.explos.{i}.verdict",
+                                 f"Explosiveness row {i} verdict", 44))
+    for clock in ("weighted", "dotcom", "lppl", "gold-lead"):
+        slots.append(_ascii_slot(f"analytics.clock.{clock}.value",
+                                 f"Analytics clock {clock} value", 16))
+        slots.append(_ascii_slot(f"analytics.clock.{clock}.caption",
+                                 f"Analytics clock {clock} caption", 180))
+    for asset in ("cash", "gold", "chf", "usd", "ust10y", "jpy", "btc"):
+        slots.append(DynamicSlot(f"analytics.hedgeweight.{asset}.score",
+                                 f"Hedge weighting score for {asset}", 4,
+                                 r"^[01]\.\d{2}$", "0.00"))
+        slots.append(_ascii_slot(f"analytics.hedgeweight.{asset}.reason",
+                                 f"Hedge weighting reason for {asset}", 140))
+    return slots
+
+
 DYNAMIC_SLOTS: tuple[DynamicSlot, ...] = (
     DynamicSlot(
         slug="headline_note",
@@ -160,6 +279,7 @@ DYNAMIC_SLOTS: tuple[DynamicSlot, ...] = (
         regex=r"^[\x20-\x7E]{1,240}$",
         placeholder="Automated dashboard note pending - not yet generated.",
     ),
+    *_save_haven_slots(),
 )
 
 
