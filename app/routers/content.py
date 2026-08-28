@@ -17,20 +17,21 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from app.config import get_settings
 from app.content_registry import dynamic_slots_payload, static_blocks
-from app.references import EPISTEMIC_CAVEATS
+from app.schemas import Meta
 from app.security import READ_RATE_LIMIT, limiter, require_read_access
 
 router = APIRouter(prefix="/api/v1/content", tags=["content"])
 
 
 def _meta() -> dict[str, Any]:
-    # Snapshot-free endpoint: computed_at None + empty freshness, like meta.py.
-    return {
-        "computed_at": None,
-        "service_version": get_settings().service_version,
-        "data_freshness": {},
-        "epistemic_caveats": EPISTEMIC_CAVEATS,
-    }
+    # Snapshot-free endpoint (computed_at None, empty freshness). Serialized
+    # from the canonical schemas.Meta so this router can never drift from the
+    # mandated envelope — any future Meta field propagates automatically.
+    return Meta(
+        computed_at=None,
+        service_version=get_settings().service_version,
+        data_freshness={},
+    ).model_dump(mode="json")
 
 
 def _cache_control(max_age: int) -> str:
