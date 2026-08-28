@@ -918,21 +918,41 @@ def test_the_weekly_digest_is_judged_on_its_own_cadence():
         "a ten-day-dead weekly job passed the gate")
 
 
-def test_a_digest_that_never_ran_does_not_block_first_activation():
-    """Never-ran is not stale: the first proof-of-life lands next Monday.
+def test_a_digest_that_never_registered_blocks_cutover():
+    """Absence always blocks — for the digest exactly like everyone else.
 
-    Refusing cutover until the weekly job has run once would be a waiting
-    period in disguise — the thing the operator explicitly removed. A
-    dispatcher or watchdog with no heartbeat still blocks: their cadence is
-    minutes, so absence IS death.
+    The scheduler stamps a digest heartbeat at boot when the weekly job
+    registers, so a live deployment has a row from day one without waiting
+    for any Monday. No row therefore means the job is not scheduled at all —
+    the exact deployment that must not retire the legacy channel.
     """
     with session_scope() as session:
         report = preflight(session, now=NOW)
 
-    digest = [s_ for s_ in report.satisfied if s_.startswith("heartbeat_digest")]
-    assert digest and "not staleness" in digest[0]
+    digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert digest and "not scheduled" in digest[0]
     assert any(u.startswith("heartbeat_dispatcher") for u in report.unsatisfied)
     assert any(u.startswith("heartbeat_watchdog") for u in report.unsatisfied)
+
+
+def test_boot_registration_is_the_day_one_digest_proof(monkeypatch):
+    """record_scheduled() at boot satisfies the digest gate with zero waiting."""
+    from datetime import datetime as _dt
+
+    from app.config import get_settings
+    from app.jobs.alert_digest import record_scheduled
+
+    monkeypatch.setenv("ALERTS_MODE", "live")
+    get_settings.cache_clear()
+    try:
+        record_scheduled()
+        with session_scope() as session:
+            report = preflight(session, now=_dt.now(UTC))
+    finally:
+        get_settings.cache_clear()
+
+    assert any(s_.startswith("heartbeat_digest") for s_ in report.satisfied), (
+        "the boot registration stamp did not satisfy the digest gate")
 
 
 def test_a_digest_that_reported_failure_is_not_never_ran():
@@ -975,68 +995,3 @@ def test_the_schema_forbids_a_heartbeat_row_without_a_timestamp():
             component="digest", last_heartbeat_at=None, status="ok",
             detail_json={"mode": "live", "live_profile": "default"}))
         session.flush()
-
-
-def test_a_digest_absent_beyond_its_own_cadence_is_a_missing_job():
-    """The never-ran exemption is bounded by the deployment's own history.
-
-    Absence is "new" only while this deployment's live footprint is younger
-    than one digest cadence. A deployment whose earliest live delivery is
-    nine days old has lived through a full weekly cycle — no digest row by
-    then means the job was never deployed. Bounded by evidence age, not by
-    any waiting clock: a day-one cutover still passes immediately.
-    """
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW - timedelta(days=9),
-                   created_at=NOW - timedelta(days=9))
-        report = preflight(session, now=NOW)
-
-    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
-    assert faults, "nine live days with no digest row still read as never-ran"
-    assert "never deployed" in faults[0]
-
-
-def test_retention_cannot_renew_the_digest_grace_by_deleting_deliveries():
-    """The age bound reads MIN(created_at) over deliveries — pinned immutable.
-
-    Retention redacts message bodies and sweeps settled audit EVENTS; it never
-    deletes delivery rows ("keep the audit trail"). This test runs retention
-    with horizons far more aggressive than production and asserts the earliest
-    delivery survives and the digest absence still blocks — a future retention
-    change that starts deleting deliveries fails here and must reconsider the
-    exemption's bound before it lands.
-    """
-    from types import SimpleNamespace
-
-    from sqlalchemy import func, select
-
-    from app.alerts.models import AlertDelivery
-    from app.alerts.retention import run_retention
-
-    aggressive = SimpleNamespace(alerts_message_retention_days=1,
-                                 alerts_metadata_retention_days=2)
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW - timedelta(days=9),
-                   created_at=NOW - timedelta(days=9))
-        before = session.execute(
-            select(func.count()).select_from(AlertDelivery)).scalar_one()
-        run_retention(session, settings=aggressive, now=NOW)
-        after = session.execute(
-            select(func.count()).select_from(AlertDelivery)).scalar_one()
-        report = preflight(session, now=NOW)
-
-    assert after == before, "retention deleted delivery rows — the digest age bound just became mutable"
-    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
-    assert faults and "never deployed" in faults[0]
-
-
-def test_a_future_earliest_delivery_is_a_clock_fault_not_youth():
-    """A future minimum must not mint fresh grace for the never-ran exemption."""
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW + timedelta(days=2),
-                   created_at=NOW + timedelta(days=2))
-        report = preflight(session, now=NOW)
-
-    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
-    assert faults, "a future-dated delivery bought the digest exemption youth"
-    assert "clock fault" in faults[0]

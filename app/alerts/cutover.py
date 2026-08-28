@@ -330,52 +330,12 @@ def preflight(
         status_ok = row_status == "ok"
         if row is None:
             if component == "digest":
-                # Never run is not stale — but "never run" means NO ROW AT
-                # ALL. A row that exists is the job speaking, whatever its
-                # timestamp says, and it is judged below like any other
-                # report. The weekly job's first proof-of-life lands on the
-                # first Monday after activation, and refusing the cutover
-                # until then would be a clock in disguise — the thing the
-                # operator explicitly removed.
-                #
-                # The exemption is still BOUNDED, by the deployment's own
-                # evidence rather than by a waiting clock: once this
-                # deployment's earliest live delivery is older than one full
-                # digest cadence, a whole weekly cycle has elapsed without a
-                # single digest breath — that is a job that was never
-                # deployed, not a job that has not had its Monday yet. A
-                # day-one cutover passes untouched; nobody is asked to wait.
-                earliest = session.execute(
-                    select(func.min(AlertDelivery.created_at)).where(
-                        AlertDelivery.mode == "live",
-                        AlertDelivery.live_profile == live_profile,
-                    )
-                ).scalar_one()
-                earliest_at = _aware(earliest) if earliest is not None else None
-                if earliest_at is not None and earliest_at > now + timedelta(
-                        minutes=5):
-                    # The same future-skew rule the heartbeats live under: a
-                    # minimum that sits in the future is a clock fault, and a
-                    # clock fault must not mint fresh grace for the exemption.
-                    fresh, detail = False, (
-                        f"earliest live delivery is {earliest_at.isoformat()} "
-                        "— in the future, which is a clock fault; a faulted "
-                        "clock cannot vouch for a deployment being young")
-                    check(f"heartbeat_{component}", fresh, detail)
-                    continue
-                if (earliest_at is not None
-                        and earliest_at <= now - timedelta(hours=fresh_hours)):
-                    fresh, detail = False, (
-                        f"no digest heartbeat, yet this deployment's earliest "
-                        f"live delivery ({earliest_at.isoformat()}) predates "
-                        f"one full digest cadence ({fresh_hours}h) — a whole "
-                        "cycle without proof-of-life means the digest job "
-                        "was never deployed, not that it is new")
-                else:
-                    fresh, detail = True, (
-                        "no digest run yet — the weekly job's first "
-                        "proof-of-life lands next Monday 08:30; absence at "
-                        "first activation is not staleness")
+                fresh, detail = False, (
+                    "no digest heartbeat row — the scheduler stamps one at "
+                    "boot the moment the weekly job registers "
+                    "(alert_digest.record_scheduled), so day one already has "
+                    "a row and absence always means the job is not scheduled "
+                    "at all, never that it is new")
             else:
                 fresh, detail = False, (
                     f"no heartbeat in {fresh_hours}h — after cutover this "

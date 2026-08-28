@@ -153,6 +153,15 @@ def start() -> BackgroundScheduler:
                                        timezone="Europe/Berlin"),
                            id="alert_digest", replace_existing=True,
                            coalesce=True, misfire_grace_time=21600, max_instances=1)
+        # Registration IS the day-one liveness proof for the weekly job: the
+        # cutover gate treats a missing digest heartbeat as "not scheduled",
+        # and this stamp is why that is true from the first boot onward.
+        try:
+            from app.jobs.alert_digest import record_scheduled
+            record_scheduled()
+        except Exception as exc:
+            log.error("alert_digest_registration_heartbeat_failed",
+                      error=str(exc))
         # Wedged-recompute watchdog, on :05/:35 so it contends with nothing.
         # Its own job precisely BECAUSE the recompute job is max_instances=1: a
         # wedged run makes APScheduler skip that job's firings, so anything

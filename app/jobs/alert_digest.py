@@ -30,6 +30,19 @@ log = get_logger(__name__)
 COMPONENT = "digest"
 
 
+def record_scheduled() -> None:
+    """Boot-time proof that the weekly job is registered with the scheduler.
+
+    Written the moment `scheduler.start()` adds the digest job, in the same
+    namespace-stamped shape as a real run's heartbeat. This is what lets the
+    cutover gate refuse a deployment whose digest job is not scheduled AT ALL
+    without asking anyone to wait for the first Monday: day one already has a
+    row, and absence therefore always means "not scheduled", never "new".
+    """
+    heartbeat(COMPONENT, "ok",
+              {"note": "scheduled; runs Monday 08:30 Europe/Berlin"})
+
+
 
 
 def run_once(*, now: datetime | None = None,
