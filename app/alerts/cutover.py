@@ -400,7 +400,14 @@ def preflight(
             # manufactures WEEKLY false reds for healthy deployments,
             # which is the "clock in disguise" this gate exists to avoid.
             # Bounded corner, double-failure to reach, alternatives worse.
-            promised = next_digest_firing(beat)
+            # A run beat proves its firing happened, so its promise is
+            # the NEXT one; a registration stamp proves only scheduling,
+            # so it still owes the firing at its own instant. The two
+            # differ only at the exact instant, and each direction of that
+            # boundary was a separate panel finding (rounds 8 and 19).
+            is_registration = detail_json.get("kind") == "registration"
+            promised = next_digest_firing(
+                beat, strictly_after=not is_registration)
             due = promised + timedelta(hours=24)
             if now <= due:
                 fresh, detail = True, (

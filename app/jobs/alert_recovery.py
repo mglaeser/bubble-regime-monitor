@@ -78,12 +78,18 @@ def heartbeat(
     # Read-then-observe inverts that by construction: whatever the read
     # returns is already part of this observation's past. Retries reuse
     # this same value verbatim — a beat is evidence, never re-dated.
-    observed_at: datetime | None = None
+    # A HOLDER, not a return value (panel round 19): `x = f()` never
+    # assigns when f raises, and every retry path here is reached BY an
+    # exception — so the captured instant was lost exactly when it
+    # mattered, and the retry re-dated the beat. A beat that moves across
+    # Monday 08:30 manufactures phase evidence for a firing the
+    # observation never witnessed. The holder is filled inside the write,
+    # immediately after the read, so it survives however that attempt ends.
+    captured: list[datetime] = []
     for attempt in (1, 2, 3):
         try:
-            observed_at = _write_heartbeat(
-                             component, status, detail,
-                             now=observed_at,
+            _write_heartbeat(component, status, detail,
+                             captured=captured,
                              current_mode=current_mode,
                              current_profile=current_profile,
                              only_if_absent=only_if_absent,
@@ -104,7 +110,8 @@ def heartbeat(
                     # approximate for this one write, the failure is on
                     # the row, and the gate reads red.
                     _force_heartbeat(component, status, detail,
-                                     now=observed_at or datetime.now(UTC),
+                                     now=(captured[0] if captured
+                                          else datetime.now(UTC)),
                                      current_mode=current_mode,
                                      current_profile=current_profile)
                     return
@@ -170,22 +177,24 @@ def _write_heartbeat(
     status: str,
     detail: dict[str, Any] | None,
     *,
-    now: datetime | None,
+    captured: list[datetime],
     current_mode: str,
     current_profile: str,
     only_if_absent: bool,
     observation_is_current: bool = True,
-) -> datetime:
-    """Write one heartbeat; returns the observation instant actually used.
+) -> None:
+    """Write one heartbeat, recording the observation instant in ``captured``.
 
-    ``now=None`` means "capture the observation inside, after the read" —
-    the first attempt. A retry passes the value it got back, so the beat
-    it eventually lands is the instant that was observed, not the instant
-    the retry happened to run.
+    An empty ``captured`` means "observe inside, after the read" — the
+    first attempt. It is filled before anything can fail, so a retry
+    lands the instant that was OBSERVED rather than the instant the retry
+    happened to run.
     """
     with session_scope() as session:
         if only_if_absent:
-            now = now or datetime.now(UTC)
+            if not captured:
+                captured.append(datetime.now(UTC))
+            now = captured[0]
             # Atomic conditional INSERT — no check-then-write window at all.
             # A plain INSERT under a savepoint either creates the row or
             # hits the primary key, and the conflict is swallowed: an
@@ -213,10 +222,13 @@ def _write_heartbeat(
                     session.flush()
             except IntegrityError:
                 pass  # the row exists — exactly the desired end state
-            return now
+            return
         row = session.get(AlertComponentHeartbeat, component)
-        # Observation taken here, with the read already behind it.
-        now = now or datetime.now(UTC)
+        # Observation taken here, with the read already behind it, and
+        # recorded in the holder before any failure path can discard it.
+        if not captured:
+            captured.append(datetime.now(UTC))
+        now = captured[0]
         if row is None:
             payload = {
                 **(detail or {}),
@@ -275,15 +287,15 @@ def _write_heartbeat(
                     #    and the retry arrives without a current
                     #    observation, where clearing is forbidden.
                     if not observation_is_current:
-                        return now
+                        return
                     # The dominance margin is now redundant with the two
                     # constructions above; kept as defence in depth, and
                     # cheap because a genuine recovery is the component's
                     # next run, 30 minutes to 7 days later.
                     if now <= existing + _NON_OK_CLEAR_MARGIN:
-                        return now
+                        return
                 elif now <= existing:
-                    return now
+                    return
             previous = dict(row.detail_json or {})
             first_seen = previous.get("first_heartbeat_at") \
                 or row.last_heartbeat_at.isoformat()
@@ -324,7 +336,6 @@ def _write_heartbeat(
                         revision=AlertComponentHeartbeat.revision + 1))
             if getattr(result, "rowcount", 0) == 0:
                 raise _HeartbeatRaced(component)
-    return now
 
 
 #: Ordered by how much a mode is permitted to do. `live` is the only one that

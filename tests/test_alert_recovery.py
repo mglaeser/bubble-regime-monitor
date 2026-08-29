@@ -1736,3 +1736,66 @@ def test_a_crash_landing_between_read_and_write_survives_a_favoured_ok(
     with session_scope() as session:
         assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
             "an ok whose read predated the crash cleared it anyway")
+
+
+def test_the_observation_survives_an_exception_on_the_first_attempt(
+        isolated_db, monkeypatch):
+    """Panel round 19 defect 1, confirmed and fixed, pinned.
+
+    `x = f()` never assigns when f raises — and every retry path is
+    reached BY an exception, so the captured instant was lost exactly
+    when it mattered and the retry re-dated the beat. A beat that moves
+    across a firing instant manufactures phase evidence. The holder is
+    filled inside the write, before anything can fail, so the landed beat
+    is the observation from the FIRST attempt.
+    """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_recovery import heartbeat
+
+    # The pre-existing row must be OLDER than the observation under test,
+    # or the ordering guard correctly drops the write for being stale.
+    first_observation = datetime(2026, 8, 24, 6, 29, tzinfo=_utc)
+    _FrozenDatetime.frozen = first_observation - _td(hours=1)
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "ok", {"note": "existing row"})
+    _FrozenDatetime.frozen = first_observation
+
+    real_get = Session.get
+    state = {"n": 0}
+
+    def racing_get(self, entity, ident, **kw):
+        if entity is AlertComponentHeartbeat:
+            state["n"] += 1
+            if state["n"] == 1:
+                # Attempt 1 reads a row that has already moved on, so its
+                # compare-and-swap misses and it raises — losing the
+                # captured instant under the old code.
+                return AlertComponentHeartbeat(
+                    component="digest",
+                    last_heartbeat_at=(first_observation - _td(days=1)).replace(tzinfo=None),
+                    status="ok", revision=999,
+                    detail_json={"mode": "live", "live_profile": "default"})
+        return real_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(Session, "get", racing_get)
+    # The clock advances across the Monday 08:30 Berlin firing between
+    # attempts: a re-dated beat would claim that firing produced it.
+    _FrozenDatetime.frozen = first_observation
+    heartbeat("digest", "ok", {"note": "lands on retry"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        landed = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
+        landed = landed.replace(tzinfo=_utc) if landed.tzinfo is None else landed
+        assert landed == first_observation, (
+            "the retry re-dated the beat — the captured observation was "
+            "lost with the exception that triggered the retry")

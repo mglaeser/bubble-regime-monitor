@@ -1198,3 +1198,41 @@ def test_the_phase_math_is_identical_to_the_scheduler_that_fires_the_job():
         assert mine == theirs.astimezone(UTC) or mine == moment, (
             f"phase math diverged from the scheduler at {moment.isoformat()}: "
             f"gate={mine.isoformat()} scheduler={theirs.isoformat()}")
+
+
+def test_the_exact_instant_is_read_by_what_the_beat_proves():
+    """Panel rounds 8 and 19 flagged opposite sides of one boundary.
+
+    A RUN beat at 08:30:00.000000 was produced BY that firing, so calling
+    it dead 24h later is a false red for a healthy weekly job. A
+    REGISTRATION stamp at the same instant proves only that the job is
+    scheduled — it still owes that firing, and deferring a week is an
+    8-day blind spot. Both are now correct because the promise follows
+    what the beat proves, not the timestamp alone.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+
+    exact = datetime(2026, 8, 24, 8, 30, tzinfo=ZoneInfo("Europe/Berlin"))
+    exact_utc = exact.astimezone(UTC)
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest", last_heartbeat_at=exact_utc, status="ok",
+            detail_json={"mode": "live", "live_profile": "default"}))
+        session.flush()
+        # A run beat: healthy through the week, red only after the NEXT
+        # firing plus grace.
+        report = preflight(session, now=exact_utc + timedelta(days=5))
+        assert any(x.startswith("heartbeat_digest") for x in report.satisfied), (
+            "a healthy weekly run was called dead five days later")
+        report = preflight(session, now=exact_utc + timedelta(days=8, hours=2))
+        assert any(u.startswith("heartbeat_digest") for u in report.unsatisfied), (
+            "a run that missed the following firing stayed green")
+
+        # The same instant as a REGISTRATION stamp still owes that firing.
+        row = session.get(AlertComponentHeartbeat, "digest")
+        row.detail_json = {**row.detail_json, "kind": "registration"}
+        session.flush()
+        report = preflight(session, now=exact_utc + timedelta(hours=25))
+        assert any(u.startswith("heartbeat_digest") for u in report.unsatisfied), (
+            "a registration stamp deferred the firing it owed by a week")

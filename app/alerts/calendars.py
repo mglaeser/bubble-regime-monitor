@@ -231,7 +231,7 @@ DIGEST_FIRING_MINUTE = 30
 DIGEST_FIRING_TZ = "Europe/Berlin"
 
 
-def next_digest_firing(after: datetime) -> datetime:
+def next_digest_firing(after: datetime, *, strictly_after: bool = False) -> datetime:
     """First scheduled digest firing at or after ``after``, in UTC.
 
     Phase matters: a boot at Monday 08:29 Berlin is one minute from its first
@@ -253,14 +253,18 @@ def next_digest_firing(after: datetime) -> datetime:
     # (panel round 8, combo/SOTA-C, confirmed at the boundary). At the
     # measure-zero instant the earlier deadline is the fail-closed choice.
     #
-    # The instant is irreducibly ambiguous and BOTH readings were flagged
-    # across rounds (8: deferral is an 8-day blind spot; 15: the earlier
-    # deadline gives an exact-instant RUN beat only 24h of validity). A
-    # run cannot actually complete in zero time, so the false-red side is
-    # unreachable in practice, while the blind-spot side pairs with a
-    # silent job death — red-risk over blind-risk stays the choice, and
-    # it is pinned by test either way.
-    if candidate < local:
+    # The exact instant is ambiguous ONLY until you ask what the beat
+    # PROVES, which is what `strictly_after` selects (panel rounds 8, 16
+    # and 19 each flagged one side of it):
+    #
+    #   * a RUN beat at 08:30:00.000000 proves that firing produced it, so
+    #     the promise is the FOLLOWING week — otherwise a healthy weekly
+    #     job would be called dead 24h later;
+    #   * a REGISTRATION stamp at the same instant proves only that the
+    #     job is scheduled, and the firing at that instant is exactly what
+    #     it still owes — deferring a week would be an 8-day blind spot.
+    #
+    if candidate < local or (strictly_after and candidate == local):
         candidate += timedelta(days=7)
     return candidate.astimezone(UTC)
 QUIET_ALLOWED_FROM_HOUR = 7      # inclusive
