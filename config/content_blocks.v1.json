@@ -438,13 +438,13 @@
     },
     "playbook.intro.expl": {
       "kind": "text",
-      "text": "<b>This tab in one breath.</b> Instead of asking \"what went up in past crises\" (the other tabs), this asks \"HOW could you have KNOWN in advance?\" — and assembles, from the academic literature, the ten-screen checklist that would have found the winners and vetoed the traps (like convertibles in 2008 or portfolio insurance in 1987). Then it runs every candidate asset through the checklist, builds the phased buy plan, and finally holds it against what experts recommend RIGHT NOW (your research artifact) — showing exactly where academic method and current consensus agree, partly agree, or clash.",
+      "text": "<b>This tab in one breath.</b> Instead of asking \"what went up in past crises\" (the other tabs), this asks \"HOW could you have KNOWN in advance?\" — and assembles, from the academic literature, the eleven-screen checklist that would have found the winners and vetoed the traps (like convertibles in 2008 or portfolio insurance in 1987). Then it runs every candidate asset through the checklist, builds the phased buy plan, and finally holds it against what experts recommend RIGHT NOW (your research artifact) — showing exactly where academic method and current consensus agree, partly agree, or clash.",
       "source": "src/dashboard.tsx:1121-1128",
       "as_of": "2026-07"
     },
     "playbook.intro.summary": {
       "kind": "text",
-      "text": "Ten ordered screens (M0–M10) with four veto rules → per-asset verdicts → a simple phased selection → mapped against the 24-asset expert-consensus table.",
+      "text": "Eleven ordered screens (M0–M10) with four veto rules → per-asset verdicts → a simple phased selection → mapped against the 24-asset expert-consensus table.",
       "source": "src/dashboard.tsx:1130-1132"
     },
     "playbook.protocol.expl": {
@@ -964,7 +964,8 @@
     "atlas.classification.universal.1": {
       "kind": "text",
       "text": "PHASE 2 · Long safe sovereign bonds — 9/10 crises once funding stress eases; best in macro/financial downturns, weaker in geopolitical/inflation shocks (Cheema, Ryan & Sarwar 2025) and challenged since April 2025",
-      "source": "src/data/atlas.json:3598"
+      "source": "src/data/atlas.json:3598",
+      "as_of": "2026-07"
     },
     "atlas.classification.universal.2": {
       "kind": "text",
@@ -1195,7 +1196,8 @@
         "fire": "Margin debt turns down year-over-year and a rollover confirmation engages.",
         "why": "Down-weighted, confirmation-only: CXO Advisory found a 0.00 correlation between margin-debt change and next-month returns — the market leads margin debt, not the reverse."
       },
-      "source": "src/bubblegauge.tsx:202-205"
+      "source": "src/bubblegauge.tsx:202-205",
+      "as_of": "2026-07"
     },
     "gauge.reg.d3": {
       "kind": "map",
@@ -1339,7 +1341,8 @@
         "cash": "— phase 1",
         "ust": "— challenged"
       },
-      "source": "src/bubblegauge.tsx:1122-1125"
+      "source": "src/bubblegauge.tsx:1122-1125",
+      "as_of": "2026-07"
     },
     "gauge.fg.context_tip": {
       "kind": "text",

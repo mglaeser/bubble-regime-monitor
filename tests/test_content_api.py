@@ -577,6 +577,36 @@ class TestBlockArtifact:
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
+    def test_frozen_label_maps_carry_as_of(self):
+        # Round 23 (SOTA-A): gauge.series.suffix ("— feared market",
+        # "— challenged") is the gauge-page twin of the ai2026 suffixes —
+        # frozen hedge labels with no lexicon word must still be datable.
+        import json as _json
+
+        import app.content_registry as reg
+
+        raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
+        for slug in ("gauge.series.suffix",):
+            assert re.fullmatch(r"\d{4}-\d{2}",
+                                str(raw["blocks"][slug].get("as_of") or "")), slug
+
+    def test_methodology_count_matches_copy(self):
+        # Round 23 (SOTA-A): playbook.methods carries M0-M10 = ELEVEN rows,
+        # but the intro copy said "Ten ordered screens"/"ten-screen". The
+        # copy must agree with the table it summarizes. (The source site
+        # carries the same defect — flagged for the wiring PRs.)
+        import json as _json
+
+        import app.content_registry as reg
+
+        raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
+        rows = raw["blocks"]["playbook.methods"]["items"]
+        assert len(rows) == 11
+        assert [r["id"] for r in rows] == [f"M{i}" for i in range(11)]
+        assert "Eleven ordered screens (M0–M10)" in raw["blocks"]["playbook.intro.summary"]["text"]
+        assert "eleven-screen checklist" in raw["blocks"]["playbook.intro.expl"]["text"]
+        assert "ten-screen" not in raw["blocks"]["playbook.intro.expl"]["text"]
+
     def test_ai2026_family_carries_as_of(self):
         # Round 20 (SOTA-A): atlas.matrix.cash.ai2026 ("The live phase-1
         # haven... ICI, 1 Jul 2026") evaded the recency lexicon. The ai2026
@@ -698,8 +728,11 @@ class TestBlockArtifact:
             "gauge.fusion.header", "gauge.ladder.ceiling",
             "gauge.verdict.lead", "gauge.verdict.detail",
         }
+        # Round 23 (SOTA-A): frozen-STATE markers join the lexicon — "at a
+        # record", "since Apr 2025"-style claims are calendar-anchored too.
         recency = re.compile(
-            r"\b(today|today's|right now|current(ly)?|this cycle|latest)\b", re.I)
+            r"\b(today|today's|right now|current(ly)?|this cycle|latest"
+            r"|at a record|record high|all-time|since \w+ 20\d{2})\b", re.I)
         raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
         stamped = 0
         for slug, block in raw["blocks"].items():
