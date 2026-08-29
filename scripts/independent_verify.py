@@ -399,6 +399,28 @@ MIN_REASON_LEN = 8
 # ---------------------------------------------------------------- pure gates --
 
 
+_WITNESS_ANCHOR = re.compile(r"\S+:\d+\s*[—-]")
+
+
+def witnessed(v: Any) -> bool:
+    """Does a refutation carry at least one anchored witness?
+
+    The witness rule exists because a verdict without evidence is not a
+    finding: a veto must name path:line — defect — misbehavior — witness so
+    it can be falsified. This checks only the anchor (the machine-checkable
+    part); the trigger/mechanism quality lives in the prompt contract. A
+    refutation with no anchored defect entry still BLOCKS (fail-closed is
+    non-negotiable) but is labeled an INVALID veto, so a fabricated claim
+    can never be mistaken for a finding in the log or the step summary.
+    """
+    if not isinstance(v, dict):
+        return False
+    defects = v.get("defects")
+    if not isinstance(defects, list):
+        return False
+    return any(isinstance(d, str) and _WITNESS_ANCHOR.search(d) for d in defects)
+
+
 def decide(v: Any) -> dict[str, Any]:
     """Per-vote decision, fail-CLOSED: a reply without a boolean ``refuted``
     blocks; a refutation with confidence high OR medium blocks; only a
@@ -406,7 +428,13 @@ def decide(v: Any) -> dict[str, Any]:
     if not isinstance(v, dict) or not isinstance(v.get("refuted"), bool):
         return {"block": True, "reason": "unparsable/no refuted field -> fail-closed"}
     if v["refuted"] and v.get("confidence") != "low":
-        return {"block": True, "reason": v.get("reason") or "refutation (confidence >= medium)"}
+        reason = v.get("reason") or "refutation (confidence >= medium)"
+        if not witnessed(v):
+            reason = ("INVALID VETO (no witness anchor: every defect must be "
+                      "'path:line — defect — misbehavior — witness') — blocks "
+                      "fail-closed, but this is an unevidenced claim, not a "
+                      "finding: " + reason)
+        return {"block": True, "reason": reason}
     return {"block": False}
 
 
@@ -509,9 +537,12 @@ def require_approvals(votes: list[dict], models: list[str], required_approver: s
                     "reason": f'required approver "{required_approver}" without a valid vote '
                               "(error/unparsable) -> fail-closed"}
         if x["v"]["refuted"] is not False:
+            witness_tag = "" if witnessed(x["v"]) else \
+                " [INVALID VETO — no witness anchor; unevidenced claim, not a finding]"
             return {"block": True,
                     "reason": f'required approver "{required_approver}" does NOT approve '
-                              f'(refuted, confidence={x["v"].get("confidence", "?")}) -> veto, fail-closed'}
+                              f'(refuted, confidence={x["v"].get("confidence", "?")}) -> veto, '
+                              f'fail-closed{witness_tag}'}
         if not has_substantive_reason(x["v"]):
             return {"block": True,
                     "reason": f'required approver "{required_approver}" without a substantive own '
@@ -1065,6 +1096,24 @@ def build_system_prompt(challenge: str) -> str:
         "attack path). The changed-FILE LIST is COMPLETE; diffstat/body may be truncated, "
         "and any truncation is explicitly marked — if a marked truncation hides files you "
         "would need to see to approve, say so instead of approving blind. "
+        "WITNESS RULE — a refutation without evidence is not a refutation. Every "
+        "defects[] entry MUST be a checkable witness: "
+        "'path/file:line — defect — misbehavior — witness', where witness names the "
+        "CONCRETE trigger (the input, state, interleaving, or arithmetic) and the "
+        "step-by-step mechanism from trigger to the named misbehavior IN THIS CODE. "
+        "A bug-CLASS name (race, TOCTOU, TypeError, off-by-one, overflow, ...) without "
+        "its reproduced witness in THIS diff is NOT a finding -> refuted=false. The "
+        "anchor must be falsifiable: the path MUST appear in the FILE LIST and the "
+        "line must exist in the diff/tree. RECONCILE WITH EXECUTED EVIDENCE: if the "
+        "tree contains a test that EXECUTES the path you claim cannot run or crashes, "
+        "or that pins the exact boundary or arithmetic you claim is wrong, your "
+        "witness MUST name that test and state why it fails to disprove you; a claim "
+        "contradicted by green executing evidence and not reconciled -> refuted=false. "
+        "Before asserting any timing/window/cadence defect, COMPUTE the scenario: "
+        "instantiate concrete timestamps and walk them; if the arithmetic does not "
+        "reach the misbehavior, do not refute. An unwitnessed refutation is treated "
+        "as an INVALID VETO and publicly labeled unevidenced — it can never count "
+        "as a finding. "
         "No concrete failure path -> refuted=false. Do NOT refute over the "
         "inherent cross-vendor trust assumption itself (that a malicious endpoint could fool "
         "the verifier including the challenge echo) — that is the DOCUMENTED residual, "
@@ -1113,6 +1162,21 @@ def selftest() -> None:
     expect(decide(None)["block"] is True, "null/unparsable must fail-closed block")
     expect(decide({"refuted": False})["block"] is False, "no refutation must pass")
     expect(decide({"refuted": True, "confidence": "low"})["block"] is False, "low-confidence refutation passes")
+    # witness rule: unevidenced vetoes still block (fail-closed) but are labeled
+    unwitnessed = decide({"refuted": True, "confidence": "high",
+                          "reason": "synthetic liveness misaligned",
+                          "defects": ["vague vibes without an anchor"]})
+    expect(unwitnessed["block"] is True, "unwitnessed refutation must still block fail-closed")
+    expect("INVALID VETO" in unwitnessed["reason"], "unwitnessed refutation must be labeled INVALID")
+    anchored = decide({"refuted": True, "confidence": "high",
+                       "reason": "app/x.py:42 — race — beat overwritten",
+                       "defects": ["app/x.py:42 — race — beat overwritten — trace: t1 reads, t2 writes, t1 clobbers"]})
+    expect(anchored["block"] is True, "witnessed refutation must block")
+    expect("INVALID VETO" not in anchored["reason"], "witnessed refutation must NOT be labeled invalid")
+    expect(witnessed({"defects": ["a/b.py:7 - x - y - z"]}) is True, "hyphen anchor accepted")
+    expect(witnessed({"defects": []}) is False, "empty ledger has no witness")
+    expect(witnessed({}) is False, "missing ledger has no witness")
+    expect("WITNESS RULE" in build_system_prompt("chal"), "prompt must carry the witness rule")
     # model_matches()
     expect(model_matches("gpt-5.6-sol", "gpt-5.6-sol") is True, "exact ID matches")
     expect(model_matches("gpt-5.6-sol-2026-07-01", "gpt-5.6-sol") is True, "dated snapshot matches")
