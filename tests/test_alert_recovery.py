@@ -1272,3 +1272,129 @@ def test_the_beat_is_observation_time_never_redated_by_retries(
         assert row.status == "ok"
         assert landed == observed, (
             "the retry re-dated the beat past its observation time")
+
+
+def test_a_failure_report_survives_a_clock_rollback(isolated_db, monkeypatch):
+    """Panel round 13 defect 1, confirmed and fixed, pinned.
+
+    Wall clocks cannot order reports: after a backward step, a FRESH
+    critical compares older than a future-dated ok. Dropping it was the
+    fail-open direction — a failure report now ALWAYS lands; the ordering
+    guard applies to health claims only.
+    """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_recovery import heartbeat
+
+    heartbeat("digest", "ok", {"note": "healthy before the step-back"})
+    with session_scope() as session:
+        ok_beat = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
+        ok_beat = ok_beat.replace(tzinfo=_utc) if ok_beat.tzinfo is None else ok_beat
+
+    _FrozenDatetime.frozen = ok_beat - _td(minutes=3)  # clock stepped back
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "critical", {"note": "crash after rollback"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        assert row.status == "critical", (
+            "a clock rollback silenced a fresh failure report — fail-open")
+
+
+def test_the_registration_stamp_never_outranks_a_real_crash(
+        isolated_db, monkeypatch):
+    """Panel round 13 defect 2, confirmed and fixed, pinned.
+
+    A crash report whose observation predates the synthetic stamp's beat
+    still lands: non-ok reports are exempt from the ordering guard, so the
+    create-race loser's critical cannot be shadowed by registration-ok.
+    """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_digest import record_scheduled
+    from app.jobs.alert_recovery import heartbeat
+
+    record_scheduled()
+    with session_scope() as session:
+        stamp_beat = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
+        stamp_beat = stamp_beat.replace(tzinfo=_utc) if stamp_beat.tzinfo is None else stamp_beat
+
+    _FrozenDatetime.frozen = stamp_beat - _td(seconds=10)
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "critical", {"note": "raced the stamp and lost"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        assert row.status == "critical", (
+            "the synthetic registration stamp outranked a real crash report")
+
+
+def test_the_write_reverifies_against_a_row_that_moved(
+        isolated_db, monkeypatch):
+    """Panel round 13 defect 3, confirmed and fixed, pinned.
+
+    The ordering guard is only valid for the row state it READ. If another
+    writer lands between read and write, the compare-and-swap misses and
+    the attempt re-runs against a FRESH read — here a stale ok whose guard
+    passed against an old beat must NOT blind-overwrite the critical that
+    landed in between.
+    """
+    from datetime import UTC as _utc
+    from datetime import timedelta as _td
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs.alert_recovery import heartbeat
+
+    heartbeat("digest", "critical", {"note": "landed between read and write"})
+    with session_scope() as session:
+        crash_beat = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
+
+    aware = crash_beat.replace(tzinfo=_utc) if crash_beat.tzinfo is None else crash_beat
+    stale = AlertComponentHeartbeat(
+        component="digest",
+        last_heartbeat_at=(aware - _td(minutes=10)).replace(tzinfo=None),
+        status="ok",
+        detail_json={"mode": "live", "live_profile": "default"})
+
+    real_get = Session.get
+    state = {"fed": False}
+
+    def stale_get(self, entity, ident, **kw):
+        if not state["fed"] and entity is AlertComponentHeartbeat:
+            state["fed"] = True
+            return stale  # the read that the concurrent writer outran
+        return real_get(self, entity, ident, **kw)
+
+    # The ok's observation sits BETWEEN the stale beat and the crash: its
+    # guard passes against the stale read (the bug's window) but must fail
+    # against the truth once the compare-and-swap forces a fresh read.
+    from datetime import datetime as real_datetime
+
+    from app.jobs import alert_recovery
+    _FrozenDatetime.frozen = aware - _td(minutes=5)
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(Session, "get", stale_get)
+    heartbeat("digest", "ok", {"note": "guard passed against stale state"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        assert row.status == "critical", (
+            "a guard evaluated against a stale read blind-overwrote the "
+            "crash report that landed in between")

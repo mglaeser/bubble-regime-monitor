@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 
 from app.alerts.enums import EvaluationRunStatus
@@ -29,6 +30,10 @@ log = get_logger(__name__)
 
 COMPONENT = "recovery"
 SIDECAR_COMPONENT = "sidecar_reconciliation"
+
+
+class _HeartbeatRaced(Exception):
+    """The row moved between read and compare-and-swap write."""
 
 
 def heartbeat(
@@ -62,7 +67,7 @@ def heartbeat(
     # firing the observation never witnessed. Ordering between racing
     # reports is enforced at the write (monotonic guard), not by re-dating.
     observed_at = datetime.now(UTC)
-    for attempt in (1, 2):
+    for attempt in (1, 2, 3):
         try:
             _write_heartbeat(component, status, detail,
                              now=observed_at,
@@ -70,6 +75,13 @@ def heartbeat(
                              current_profile=current_profile,
                              only_if_absent=only_if_absent)
             return
+        except _HeartbeatRaced:
+            # The compare-and-swap found the row changed under us: loop
+            # back through a fresh read so guard and previous_* chain are
+            # rebuilt against what is actually there now.
+            if attempt == 3:
+                raise
+            continue
         except IntegrityError:
             # Lost a create race: this writer read "no row", another writer
             # (e.g. the boot registration's atomic insert, or a concurrent
@@ -79,7 +91,7 @@ def heartbeat(
             # was the non-atomic one (panel round 9). One retry suffices:
             # the row exists now, so the update path takes over and this
             # report lands on top, previous_* chain intact.
-            if attempt == 2:
+            if attempt >= 2:
                 raise
             continue
 
@@ -142,18 +154,24 @@ def _write_heartbeat(
                 component=component, last_heartbeat_at=now, status=status,
                 detail_json=payload))
         else:
-            existing = row.last_heartbeat_at
-            existing = existing.replace(tzinfo=UTC) \
-                if existing.tzinfo is None else existing
-            if now <= existing:
-                # MONOTONIC WRITES (panel rounds 10-12): a report whose
-                # observation is not strictly newer than the evidence on
-                # the row is stale by definition and is dropped — whatever
-                # its status. This is the ordering token the create-race
-                # needed: the loser's pre-race observation never lands on
-                # top of the winner's newer report, an older ok cannot
-                # erase a newer critical, and a genuinely later ok still
-                # clears a crash through this same comparison.
+            # ORDERING, fail-closed and asymmetric (panel rounds 10-13):
+            #
+            # - A NON-OK report ALWAYS lands. Dropping a failure report is
+            #   the fail-open direction — after a backward clock step a
+            #   fresh critical would compare "older" than a future-dated ok
+            #   and vanish. A stale red at worst makes an operator look;
+            #   the component's next healthy run clears it.
+            # - An OK report lands only if its observation is STRICTLY
+            #   newer than the evidence on the row. Wall clocks cannot
+            #   order concurrent reports, but for health claims the stale
+            #   side of the comparison is the safe side: a dropped ok is
+            #   at worst a briefly-red gate, never a hidden failure. This
+            #   is also what stops the create-race loser and the synthetic
+            #   registration stamp from shadowing a real crash report.
+            existing_raw = row.last_heartbeat_at
+            existing = existing_raw.replace(tzinfo=UTC) \
+                if existing_raw.tzinfo is None else existing_raw
+            if status == "ok" and now <= existing:
                 return
             previous = dict(row.detail_json or {})
             first_seen = previous.get("first_heartbeat_at") \
@@ -173,9 +191,22 @@ def _write_heartbeat(
                     else int(previous.get("consecutive_non_ok", 0)) + 1
                 ),
             }
-            row.last_heartbeat_at = now
-            row.status = status
-            row.detail_json = payload
+            # Compare-and-swap on the exact beat this payload was built
+            # from: the guard above and the previous_* chain are only valid
+            # for the row state that was READ, and a concurrent writer can
+            # land between that read and this write (panel round 13). If
+            # the row moved, rowcount is 0 and the raced sentinel sends the
+            # whole attempt back through a FRESH read — never a blind
+            # overwrite of state the guard never saw.
+            result = session.execute(  # CursorResult: UPDATE has rowcount
+                update(AlertComponentHeartbeat)
+                .where(AlertComponentHeartbeat.component == component,
+                       AlertComponentHeartbeat.last_heartbeat_at
+                       == existing_raw)
+                .values(last_heartbeat_at=now, status=status,
+                        detail_json=payload))
+            if getattr(result, "rowcount", 0) == 0:
+                raise _HeartbeatRaced(component)
 
 
 #: Ordered by how much a mode is permitted to do. `live` is the only one that
