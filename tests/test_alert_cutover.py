@@ -1132,3 +1132,28 @@ def test_a_beat_at_the_exact_firing_instant_promises_that_firing():
         green, faults = _digest_gate(session, exact + timedelta(hours=25))
         assert not green and "never produced" in faults[0], (
             "the exact-instant stamp deferred its obligation by a week")
+
+
+def test_the_promised_firing_is_wall_clock_across_dst_transitions():
+    """Panel round 11 (combo/SOTA-C), executed with its own example, refuted.
+
+    The claim: aware-datetime + timedelta adds absolute time, so the
+    promise lands at 09:30 CEST after spring-forward. False for zoneinfo:
+    the offset is derived per instant, so field arithmetic IS wall-clock
+    arithmetic — exactly APScheduler's cron semantics. Pinned on both
+    transitions of 2026 (spring-forward Mar 29, fall-back Oct 25).
+    """
+    from zoneinfo import ZoneInfo
+
+    from app.alerts.calendars import next_digest_firing
+
+    berlin = ZoneInfo("Europe/Berlin")
+    spring_beat = datetime(2026, 3, 23, 8, 31, tzinfo=berlin)
+    assert next_digest_firing(spring_beat) == datetime(
+        2026, 3, 30, 8, 30, tzinfo=berlin).astimezone(UTC), (
+        "spring-forward week promised the wrong wall-clock firing")
+
+    autumn_beat = datetime(2026, 10, 19, 8, 31, tzinfo=berlin)
+    assert next_digest_firing(autumn_beat) == datetime(
+        2026, 10, 26, 8, 30, tzinfo=berlin).astimezone(UTC), (
+        "fall-back week promised the wrong wall-clock firing")

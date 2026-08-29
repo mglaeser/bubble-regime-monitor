@@ -64,7 +64,8 @@ def heartbeat(
                              now=datetime.now(UTC),
                              current_mode=current_mode,
                              current_profile=current_profile,
-                             only_if_absent=only_if_absent)
+                             only_if_absent=only_if_absent,
+                             lost_create_race=attempt > 1)
             return
         except IntegrityError:
             # Lost a create race: this writer read "no row", another writer
@@ -89,6 +90,7 @@ def _write_heartbeat(
     current_mode: str,
     current_profile: str,
     only_if_absent: bool,
+    lost_create_race: bool = False,
 ) -> None:
     with session_scope() as session:
         if only_if_absent:
@@ -138,6 +140,16 @@ def _write_heartbeat(
                 component=component, last_heartbeat_at=now, status=status,
                 detail_json=payload))
         else:
+            if lost_create_race and status == "ok" and row.status != "ok":
+                # This writer read "no row", so its health observation was
+                # made BEFORE the colliding writer landed — and what landed
+                # is a failure report. Re-dating our stale ok on retry would
+                # erase a newer critical and read the component healthy at
+                # cutover (panel round 11). The crash report outranks a
+                # health claim that provably predates it; the component's
+                # next REAL healthy run clears it through the normal
+                # sequential path.
+                return
             previous = dict(row.detail_json or {})
             first_seen = previous.get("first_heartbeat_at") \
                 or row.last_heartbeat_at.isoformat()

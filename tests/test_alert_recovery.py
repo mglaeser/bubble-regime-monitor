@@ -1154,3 +1154,46 @@ def test_a_real_report_racing_the_boot_stamp_lands_instead_of_dying(
         prev_at = prev_at.replace(tzinfo=UTC) if prev_at.tzinfo is None else prev_at
         assert landed > prev_at, (
             "the conflict loser landed with its pre-race timestamp")
+
+
+def test_a_stale_ok_loser_defers_to_the_critical_it_collided_with(
+        isolated_db, monkeypatch):
+    """Panel round 11, confirmed and fixed, pinned.
+
+    Round 10 made the retry re-date its write; round 11 named the
+    consequence: an ok writer whose observation predates the collision
+    could then ERASE a newer critical with a fresher-looking timestamp.
+    Now a create-race loser carrying ok defers to a non-ok winner — the
+    crash report survives; recovery still clears it sequentially.
+    """
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs.alert_recovery import heartbeat
+
+    heartbeat("digest", "critical", {"note": "job crashed"})  # the winner
+
+    real_get = Session.get
+    state = {"raced": False}
+
+    def racing_get(self, entity, ident, **kw):
+        if not state["raced"] and entity is AlertComponentHeartbeat:
+            state["raced"] = True  # loser reads before the winner landed
+            return None
+        return real_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(Session, "get", racing_get)
+    heartbeat("digest", "ok", {"note": "stale health claim"})  # must defer
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        assert row.status == "critical", (
+            "a stale ok erased the crash report it collided with")
+
+    heartbeat("digest", "ok", {"note": "real recovery"})  # sequential clear
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        assert row.status == "ok", (
+            "a genuine sequential recovery must still clear critical")
