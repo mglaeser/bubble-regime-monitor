@@ -564,6 +564,35 @@ class TestBlockArtifact:
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
+    def test_verdict_band_missing_fired_trend_degrades(self, monkeypatch, tmp_path):
+        # Round 20 (SOTA-A): band presence alone let an artifact carry only
+        # trend_broken="no" rows for an action band — a FIRED trend state had
+        # no truthful template. Coverage requires "any", or yes AND no.
+        art = self._baseline()
+        for row in art["blocks"]["gauge.verdict.lead"]["items"]:
+            if row["band"] == "hold":
+                row["trend_broken"] = "no"
+        reg = self._install(monkeypatch, tmp_path, art)
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()
+
+    def test_ai2026_family_carries_as_of(self):
+        # Round 20 (SOTA-A): atlas.matrix.cash.ai2026 ("The live phase-1
+        # haven... ICI, 1 Jul 2026") evaded the recency lexicon. The ai2026
+        # column IS the frozen present-cycle assessment — every member of the
+        # family must be machine-datable, lexicon or not.
+        import json as _json
+
+        import app.content_registry as reg
+
+        raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
+        family = [s for s in raw["blocks"] if "ai2026" in s]
+        assert len(family) >= 18, "ai2026 family unexpectedly small"
+        for slug in family:
+            assert re.fullmatch(r"\d{4}-\d{2}",
+                                str(raw["blocks"][slug].get("as_of") or "")), (
+                f"{slug} is a frozen 2026-cycle assessment without as_of")
+
     def test_distance_row_missing_case_degrades(self, monkeypatch, tmp_path):
         # The distance table is case-keyed; its rows have a schema too.
         art = self._baseline()

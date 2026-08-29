@@ -507,7 +507,8 @@
     "atlas.crises.ai2026.cause": {
       "kind": "text",
       "text": "Hyperscaler AI capex (~$1tn 2025–26) outpacing free cash flow, record concentration (Mag-7 ≈ 35% of the S&P 500) and CAPE ≈ 41 — the BIS (28 Jun 2026), ECB FSR (27 May 2026), Fed FSR (8 May 2026) and Bank of England all warn of a possible sharp correction; econometric bubble tests are split (Cowles/Yale GSADF finds explosiveness; a 2026 counter-paper finds none once tech fundamentals are modeled).",
-      "source": "src/data/atlas.json:11"
+      "source": "src/data/atlas.json:11",
+      "as_of": "2026-07"
     },
     "atlas.crises.ai2026.highlight": {
       "kind": "text",
@@ -518,7 +519,8 @@
     "atlas.crises.ai2026.sources": {
       "kind": "text",
       "text": "BIS Annual Economic Report 2026; ECB FSR May 2026 & Int'l Role of the Euro Jun 2026; Fed FSR May 2026; BoE FSR 2026; WGC Jun 2026; Duffie (2020)",
-      "source": "src/data/atlas.json:13"
+      "source": "src/data/atlas.json:13",
+      "as_of": "2026-07"
     },
     "atlas.crises.depression.peak": {
       "kind": "text",
@@ -723,12 +725,14 @@
     "atlas.series.ai2026.mkt.suffix": {
       "kind": "text",
       "text": "(feared market)",
-      "source": "src/data/atlas.json:17"
+      "source": "src/data/atlas.json:17",
+      "as_of": "2026-07"
     },
     "atlas.series.ai2026.au.suffix": {
       "kind": "text",
       "text": "— lead regime-matched hedge",
-      "source": "src/data/atlas.json:86"
+      "source": "src/data/atlas.json:86",
+      "as_of": "2026-07"
     },
     "atlas.series.shared.phase1": {
       "kind": "text",
@@ -738,7 +742,8 @@
     "atlas.series.ai2026.ust.suffix": {
       "kind": "text",
       "text": "— challenged",
-      "source": "src/data/atlas.json:183"
+      "source": "src/data/atlas.json:183",
+      "as_of": "2026-07"
     },
     "atlas.series.ai2026.jpy.suffix": {
       "kind": "text",
@@ -749,7 +754,8 @@
     "atlas.series.ai2026.btc.suffix": {
       "kind": "text",
       "text": "(risk asset)",
-      "source": "src/data/atlas.json:335"
+      "source": "src/data/atlas.json:335",
+      "as_of": "2026-07"
     },
     "atlas.series.stagflation.oil.suffix": {
       "kind": "text",
@@ -794,7 +800,8 @@
     "atlas.matrix.gold.ai2026": {
       "kind": "text",
       "text": "ELEVATED to lead regime-matched hedge: 2026 hedge score 0.85 (co-lead with cash at 0.88) — regime-match r 0.96–0.98 vs monetary-crisis scripts, worst-quintile beta ≈ 0, Granger-leads the market; 27% of global reserves, overtaking US Treasuries at 22% (ECB, 2 Jun 2026); record central-bank demand (WGC, Jun 2026). Caveat: ~$4,100 after the $5,595 Jan-2026 record — part of the hedge is pre-paid.",
-      "source": "src/data/atlas.json:3329"
+      "source": "src/data/atlas.json:3329",
+      "as_of": "2026-07"
     },
     "atlas.matrix.bonds.stagflation": {
       "kind": "text",
@@ -814,7 +821,8 @@
     "atlas.matrix.bonds.ai2026": {
       "kind": "text",
       "text": "Challenged: in April 2025 Treasuries, USD and equities fell TOGETHER; BIS (Sep 2025) found Treasury safe-haven correlations near zero since. 2026 hedge score 0.42 — demoted to 5th, behind CHF, for this configuration (Cheema, Ryan & Sarwar 2025: bonds work best in macro/financial downturns, weaker in geopolitical/inflation shocks).",
-      "source": "src/data/atlas.json:3351"
+      "source": "src/data/atlas.json:3351",
+      "as_of": "2026-07"
     },
     "atlas.matrix.cash.depression": {
       "kind": "text",
@@ -834,7 +842,8 @@
     "atlas.matrix.cash.ai2026": {
       "kind": "text",
       "text": "The live phase-1 haven: money-market fund assets at a record $7.95tn (ICI, 1 Jul 2026). 2026 hedge score 0.88 — rank #1 on CERTAINTY (100% worst-month hit rate, no drawdown, par entry); gold is the payoff co-lead.",
-      "source": "src/data/atlas.json:3373"
+      "source": "src/data/atlas.json:3373",
+      "as_of": "2026-07"
     },
     "atlas.matrix.jpy.gfc": {
       "kind": "text",
@@ -855,7 +864,8 @@
     "atlas.matrix.chf.ai2026": {
       "kind": "text",
       "text": "Credible secondary haven — the franc strengthened materially vs USD 2021–26 (USD/CHF ~0.76 in Jan 2026).",
-      "source": "src/data/atlas.json:3413"
+      "source": "src/data/atlas.json:3413",
+      "as_of": "2026-07"
     },
     "atlas.matrix.usd.asia": {
       "kind": "text",
@@ -870,7 +880,8 @@
     "atlas.matrix.usd.ai2026": {
       "kind": "text",
       "text": "Worst first half since 1973 in H1 2025 (DXY −10.8%); reserve diversification away from USD documented (ECB, WGC).",
-      "source": "src/data/atlas.json:3434"
+      "source": "src/data/atlas.json:3434",
+      "as_of": "2026-07"
     },
     "atlas.matrix.commodities.stagflation": {
       "kind": "text",
@@ -900,7 +911,8 @@
     "atlas.matrix.value.ai2026": {
       "kind": "text",
       "text": "The dot-com analogue: value / equal-weight rotation is the leading candidate post-bubble winner if an AI unwind mirrors 2000–02.",
-      "source": "src/data/atlas.json:3494"
+      "source": "src/data/atlas.json:3494",
+      "as_of": "2026-07"
     },
     "atlas.matrix.quality.gfc": {
       "kind": "text",
@@ -930,7 +942,8 @@
     "atlas.matrix.vol.ai2026": {
       "kind": "text",
       "text": "Convex insurance is available and relatively cheap pre-spike; expected carry is negative between crises (Dew-Becker et al. 2017).",
-      "source": "src/data/atlas.json:3554"
+      "source": "src/data/atlas.json:3554",
+      "as_of": "2026-07"
     },
     "atlas.matrix.btc.covid": {
       "kind": "text",
@@ -940,7 +953,8 @@
     "atlas.matrix.btc.ai2026": {
       "kind": "text",
       "text": "−51% from the Oct 2025 ATH (~$126k) to ~$62k by Jul 2026 while equity indices set records — again trading as a risk asset.",
-      "source": "src/data/atlas.json:3574"
+      "source": "src/data/atlas.json:3574",
+      "as_of": "2026-07"
     },
     "atlas.classification.universal.0": {
       "kind": "text",
@@ -965,7 +979,8 @@
     "atlas.classification.universal.4": {
       "kind": "text",
       "text": "Gold is near-universal but demoted historically (it fell in the dot-com bust) — yet for the 2026 configuration it is ELEVATED to lead regime-matched hedge, score 0.85 co-lead with cash (see Analytics ranking)",
-      "source": "src/data/atlas.json:3601"
+      "source": "src/data/atlas.json:3601",
+      "as_of": "2026-07"
     },
     "atlas.classification.category.0": {
       "kind": "text",
@@ -1020,7 +1035,8 @@
     "atlas.classification.falsified.0": {
       "kind": "text",
       "text": "Bitcoin — fell in lockstep with equities in Mar 2020 (Conlon & McGee 2020); by Jul 2026 down ~51% from its ATH while indices set records",
-      "source": "src/data/atlas.json:3633"
+      "source": "src/data/atlas.json:3633",
+      "as_of": "2026-07"
     },
     "atlas.classification.falsified.1": {
       "kind": "text",
@@ -1383,12 +1399,14 @@
     "gauge.live_backfill.static_note": {
       "kind": "template",
       "text": "Static Jul-2026 snapshot (feed unavailable): {static_series_list}.",
-      "source": "src/bubblegauge.tsx:1275"
+      "source": "src/bubblegauge.tsx:1275",
+      "as_of": "2026-07"
     },
     "gauge.live_backfill.editorial_line": {
       "kind": "text",
       "text": "The panel's written analysis remains the Jul 2026 editorial snapshot. Refreshes twice daily.",
-      "source": "src/bubblegauge.tsx:1276"
+      "source": "src/bubblegauge.tsx:1276",
+      "as_of": "2026-07"
     },
     "gauge.badge.static": {
       "kind": "map",
@@ -1396,7 +1414,8 @@
         "tip": "The bubblegauge feed is unavailable — these 2026 lines use the static Jul 2026 anchors.",
         "pill": "static · Jul 2026 snapshot"
       },
-      "source": "src/bubblegauge.tsx:1587"
+      "source": "src/bubblegauge.tsx:1587",
+      "as_of": "2026-07"
     },
     "gauge.badge.live_tip": {
       "kind": "map",
@@ -1410,7 +1429,8 @@
     "gauge.badge.partial_tip": {
       "kind": "template",
       "text": "Feed partially available — static Jul 2026 snapshot for: {static_keys_list}",
-      "source": "src/bubblegauge.tsx:1593"
+      "source": "src/bubblegauge.tsx:1593",
+      "as_of": "2026-07"
     },
     "gauge.verdict.lead": {
       "kind": "table",

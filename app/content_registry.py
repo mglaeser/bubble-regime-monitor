@@ -204,6 +204,7 @@ def _bands_closed(blocks: dict[str, Any]) -> bool:
         # (round 17, SOTA-A). A band-table row whose band is not a string
         # is corruption — the artifact degrades whole, it never crashes.
         rows: set[str] = set()
+        coverage: dict[str, set[str]] = {}
         for row in items:
             band = row.get("band") if isinstance(row, dict) else None
             if not isinstance(band, str):
@@ -221,8 +222,16 @@ def _bands_closed(blocks: dict[str, Any]) -> bool:
             if not isinstance(trend, str) or trend not in _TREND_SELECTORS:
                 return False
             rows.add(band)
+            coverage.setdefault(band, set()).add(trend)
         if not vocab.issubset(rows):
             return False
+        # Trend coverage (round 20, SOTA-A): band presence alone let an
+        # artifact drop every "yes" row and still serve v1 — a fired
+        # hold/trim/de-risk state had no truthful template. Every band must
+        # resolve for BOTH trend states: an "any" row, or yes AND no rows.
+        for selectors in coverage.values():
+            if "any" not in selectors and not {"yes", "no"} <= selectors:
+                return False
     # The distance table is case-keyed, not band-keyed — but its rows have a
     # schema too: a non-empty case selector and template copy (round 18).
     distance = blocks.get(_DISTANCE_TABLE_SLUG, {})
