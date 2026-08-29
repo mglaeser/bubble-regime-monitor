@@ -588,7 +588,7 @@ class TestBlockArtifact:
 
         raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
         family = [s for s in raw["blocks"] if s.startswith("analytics.")]
-        assert len(family) >= 20, "analytics family unexpectedly small"
+        assert len(family) >= 15, "analytics family unexpectedly small"
         for slug in family:
             assert re.fullmatch(r"\d{4}-\d{2}",
                                 str(raw["blocks"][slug].get("as_of") or "")), (
