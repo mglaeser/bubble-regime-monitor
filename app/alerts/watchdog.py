@@ -106,7 +106,8 @@ def heartbeat_status(firing: bool, evaluation_status: str | None) -> str:
     return "ok"
 
 
-def run_once(*, now: datetime | None = None) -> dict[str, object]:
+def run_once(*, now: datetime | None = None,
+             since: int | None = None) -> dict[str, object]:
     """Check for an outage and, when firing, capture a watchdog input.
 
     Capturing the sidecar is the whole job here: evaluation of
@@ -211,7 +212,8 @@ def run_once(*, now: datetime | None = None) -> dict[str, object]:
     result = {**verdict.as_dict(), "input_identity": captured,
               "recovery_observation": recovery_observation,
               "evaluation_status": evaluated}
-    heartbeat(COMPONENT, heartbeat_status(verdict.firing, evaluated), result)
+    heartbeat(COMPONENT, heartbeat_status(verdict.firing, evaluated), result,
+              since=since)
     log.info("alert_watchdog", **result)
     return result
 

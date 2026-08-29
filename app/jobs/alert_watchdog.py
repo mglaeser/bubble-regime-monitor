@@ -18,13 +18,13 @@ log = get_logger(__name__)
 COMPONENT = "watchdog"
 
 
-def run_once() -> dict[str, Any]:
+def run_once(*, since: int | None = None) -> dict[str, Any]:
     settings = get_settings()
     if not settings.alert_input_capture and settings.alerts_mode == "disabled":
         return {"status": "skipped", "reason": "capture and alerting both disabled"}
     from app.alerts.watchdog import run_once as check
 
-    return check()
+    return check(since=since)
 
 
 def job() -> None:
@@ -38,7 +38,7 @@ def job() -> None:
         from app.jobs.alert_recovery import liveness_token
 
         token = liveness_token(COMPONENT)
-        result = run_once()
+        result = run_once(since=token)
         if result.get("status") == "skipped":
             from app.jobs.alert_recovery import heartbeat
 

@@ -540,6 +540,7 @@ def dispatch_once(
     live_profile: str,
     sender: Sender | None = None,
     now: datetime | None = None,
+    since: int | None = None,
     settings: Any = None,
     limit: int = 5,
     clock: Callable[[], datetime] | None = None,
@@ -578,7 +579,8 @@ def dispatch_once(
                 "live delivery withheld: the ruleset's active stage is not "
                 "backed by its gate evidence")
             log.error("alert_live_admission_refused", blockers=blockers)
-            _heartbeat(report, mode=mode, live_profile=live_profile)
+            _heartbeat(report, mode=mode, live_profile=live_profile,
+                       since=since)
             return report
 
     if sender is None:
@@ -631,7 +633,7 @@ def dispatch_once(
                  live_profile=live_profile, sender=sender, now=now, settings=settings,
                  report=report, clock=wire_clock)
 
-    _heartbeat(report, mode=mode, live_profile=live_profile)
+    _heartbeat(report, mode=mode, live_profile=live_profile, since=since)
     return report
 
 
@@ -1023,7 +1025,7 @@ def _process(session_factory: Any, delivery_id: str, *, phrase_set: ValidatedPhr
 
 
 def _heartbeat(report: DispatchReport, *, mode: str,
-               live_profile: str) -> None:
+               live_profile: str, since: int | None = None) -> None:
     try:
         from app.jobs.alert_recovery import heartbeat
 
@@ -1033,6 +1035,10 @@ def _heartbeat(report: DispatchReport, *, mode: str,
             report.as_dict(),
             mode=mode,
             live_profile=live_profile,
+            # The caller's pre-work snapshot. Without it a success report
+            # cannot clear an earlier failure at all, and the component
+            # would stay red forever (panel round 27).
+            since=since,
         )
     except Exception as exc:
         log.warning("alert_dispatcher_heartbeat_failed", error=sanitize(exc))

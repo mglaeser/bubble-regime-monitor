@@ -2050,3 +2050,52 @@ def test_every_scheduled_component_snapshots_before_its_work():
             f"{module.__name__}.job() does not snapshot a liveness token")
         assert source.index("try:") < source.index("liveness_token("), (
             f"{module.__name__}.job() reads its token outside the never-raises guard")
+
+
+def test_a_normal_success_run_can_clear_its_component_after_a_failure(
+        isolated_db, monkeypatch):
+    """Panel round 27, confirmed and fixed, pinned.
+
+    Round 26 wired tokens into the SKIPPED branches only, while the real
+    success heartbeats live in the service layer (dispatcher, watchdog,
+    recovery). Tokenless there meant a normal successful run could never
+    clear an earlier failure, so a component that recovered would stay
+    red forever and the cutover gate would never pass — fail-closed, but
+    permanently stuck. Every normal path now carries its pre-work token.
+    """
+    import inspect
+
+    from app.alerts import dispatcher, watchdog
+    from app.jobs import alert_dispatch, alert_recovery, alert_watchdog
+
+    # The token reaches the service call that writes the heartbeat.
+    assert "since=since" in inspect.getsource(dispatcher._heartbeat)
+    assert "since=since" in inspect.getsource(watchdog.run_once)
+    assert "since=token" in inspect.getsource(alert_dispatch.job)
+    assert "since=token" in inspect.getsource(alert_watchdog.job)
+    assert "since=since" in inspect.getsource(alert_dispatch.run_once)
+    assert "since=since" in inspect.getsource(alert_watchdog.run_once)
+
+    # And recovery reports both of its components with their own tokens.
+    recovery_job = inspect.getsource(alert_recovery.job)
+    assert "liveness_token(COMPONENT)" in recovery_job
+    assert "liveness_token(SIDECAR_COMPONENT)" in recovery_job
+
+
+def test_a_component_that_recovers_does_not_stay_red_forever(isolated_db):
+    """The end-to-end property round 27 protects: report a failure, then a
+    success carrying a pre-work token, and the component is healthy again
+    — otherwise the cutover gate could never be satisfied after any
+    transient fault."""
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs.alert_recovery import heartbeat, liveness_token
+
+    for component in ("dispatcher", "watchdog", "digest"):
+        heartbeat(component, "critical", {"note": "transient fault"})
+        heartbeat(component, "ok", {"note": "next successful run"},
+                  since=liveness_token(component))
+        with session_scope() as session:
+            assert session.get(AlertComponentHeartbeat, component).status == "ok", (
+                f"{component} stayed red after a successful run — the gate "
+                "would never pass again")

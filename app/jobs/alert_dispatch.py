@@ -23,7 +23,7 @@ log = get_logger(__name__)
 COMPONENT = "dispatcher"
 
 
-def run_once() -> dict[str, Any]:
+def run_once(*, since: int | None = None) -> dict[str, Any]:
     settings = get_settings()
     if settings.alerts_mode == "disabled":
         return {"status": "skipped", "reason": "ALERTS_MODE=disabled"}
@@ -39,6 +39,7 @@ def run_once() -> dict[str, Any]:
         phrase_set=artifacts.phrase_set,
         mode=settings.alerts_mode,
         live_profile=settings.alerts_live_profile,
+        since=since,
         settings=settings,
     )
     return {"status": "ok", "mode": settings.alerts_mode, **report.as_dict()}
@@ -55,7 +56,7 @@ def job() -> None:
         from app.jobs.alert_recovery import liveness_token
 
         token = liveness_token(COMPONENT)
-        result = run_once()
+        result = run_once(since=token)
         if result.get("status") == "skipped":
             from app.jobs.alert_recovery import heartbeat
 

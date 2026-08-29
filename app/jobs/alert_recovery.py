@@ -491,14 +491,16 @@ def _retryable_inputs(session: Any, abandoned: list[str], *, limit: int,
     return out
 
 
-def run_once(*, since: int | None = None) -> dict[str, Any]:
+def run_once(*, since: int | None = None,
+             sidecar_since: int | None = None) -> dict[str, Any]:
     settings = get_settings()
     if not settings.alert_input_capture and settings.alerts_mode == "disabled":
         detail = {"status": "skipped",
                   "reason": "capture and alerting both disabled",
                   "skipped": True}
         heartbeat(COMPONENT, "ok", detail, since=since)
-        heartbeat(SIDECAR_COMPONENT, "ok", {**detail, "sidecar_gaps": 0})
+        heartbeat(SIDECAR_COMPONENT, "ok", {**detail, "sidecar_gaps": 0},
+                  since=sidecar_since)
         return detail
 
     with session_scope() as session:
@@ -585,11 +587,12 @@ def run_once(*, since: int | None = None) -> dict[str, Any]:
         "retries_failed": len(failed),
         "retries_budget_exhausted": len(exhausted),
     }
-    heartbeat(COMPONENT, status, detail)
+    heartbeat(COMPONENT, status, detail, since=since)
     heartbeat(
         SIDECAR_COMPONENT,
         "degraded" if gaps else "ok",
         {"sidecar_gaps": len(gaps)},
+        since=sidecar_since,
     )
     return {"status": status, **detail}
 
@@ -598,7 +601,8 @@ def job() -> None:
     """Scheduler entry point. Never raises."""
     try:
         # Landing order before the work; see the dispatcher for why.
-        result = run_once(since=liveness_token(COMPONENT))
+        result = run_once(since=liveness_token(COMPONENT),
+                          sidecar_since=liveness_token(SIDECAR_COMPONENT))
         log.info("alert_recovery_job", **result)
     except Exception as exc:
         log.error("alert_recovery_job_failed", error_class=type(exc).__name__,
