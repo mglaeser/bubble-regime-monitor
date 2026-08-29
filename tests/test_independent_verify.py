@@ -2440,3 +2440,30 @@ class TestWireFailover:
             assert iv.should_fallback_chat(status) is True, status
         for status in (200, 400, 401, 403, 408, 409, 429):
             assert iv.should_fallback_chat(status) is False, status
+
+
+def test_the_ledger_sink_cannot_carry_a_workflow_command():
+    """PR #99 panel veto, executed: 'GHA workflow-command parsing survives
+    JSON quoting in new ledger stdout sink.'
+
+    The runner interprets '::name::' only at the start of a physical stdout
+    line. The sink is safe on two INDEPENDENT grounds, both pinned here with
+    the adversary's own payload (a real embedded newline plus workflow
+    commands, arriving the way model replies actually arrive — via
+    json.loads): json.dumps with ensure_ascii escapes every control
+    character, so no entry can mint a second physical line; and the constant
+    '    defect N: ' prefix keeps '::' off line-start even if the runner
+    ever trimmed leading whitespace.
+    """
+    hostile = json.loads(
+        '{"defects": ["x\\n::error::pwned\\n::add-mask::s",'
+        ' {"nested": "::stop-commands::x"}, "\\u2028::error::ls"]}')
+    printed = [f"    defect {j}: {json.dumps(entry)}"
+               for j, entry in enumerate(hostile["defects"], start=1)]
+
+    physical = "\n".join(printed).split("\n")
+    assert len(physical) == len(hostile["defects"]), (
+        "an entry minted an extra physical line — workflow-command surface")
+    for line in physical:
+        assert not line.startswith("::")
+        assert not line.lstrip().startswith("::")
