@@ -10,7 +10,7 @@
     },
     "atlas.explorer.potential-banner.method": {
       "kind": "text",
-      "text": "POTENTIAL crisis — the peak is anchored at today (Jul 2026) <b>by construction, not as a forecast</b>. All lines end at t0 and the right half of the axis is intentionally empty: no forward projection. Backfill uses real market anchors (Jul 2021 → Jul 2026); current-state sources are ≤ 6 weeks old (BIS 28 Jun · ECB 2 Jun & 27 May · Fed 8 May 2026). Safe-haven candidates are shown dashed.",
+      "text": "POTENTIAL crisis — the peak is anchored at today (Jul 2026) <b>by construction, not as a forecast</b>. All lines end at t0 and the right half of the axis is intentionally empty: no forward projection. Backfill uses real market anchors (Jul 2021 → Jul 2026); current-state sources as of (BIS 28 Jun · ECB 2 Jun & 27 May · Fed 8 May 2026). Safe-haven candidates are shown dashed.",
       "source": "src/dashboard.tsx:173"
     },
     "atlas.explorer.expl.chart-controls": {

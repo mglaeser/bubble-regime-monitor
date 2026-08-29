@@ -59,6 +59,8 @@ fixed with priority.
 
 | 10 | SOTA-A | v1 completeness unchecked (truncated valid subset serves under v1); stale freshness copy ("≤ 6 weeks old" with July dates self-invalidates); band-map scan detects by `hold`+`trim` presence so a map missing those keys self-excludes | **UPHELD ×3 → fixed**: artifact self-attests `block_count` (mismatch degrades whole, shipped file pinned ≥211); the freshness placeholder states dates and asserts no recency claim (the verbatim BLOCK text mirrors the live site and is replaced by this very slot — noted); the known band maps are pinned by SLUG and must be band-shaped, with the generic scan kept on top. All pinned |
 
+| 11 | SOTA-A + SOTA-C | `lru_cache` froze artifact health at first load (runtime change never re-examined); count-without-manifest lets count-consistent junk serve v1; generic tail regex admits domain-impossible values (999%); the served BLOCK still carried the self-invalidating "≤ 6 weeks old" claim | **UPHELD ×4 → fixed**: mtime/size-keyed cache (health re-examined on any file change at ~stat cost, handlers otherwise I/O-free); `REQUIRED_FILE_SLUGS` anchored in code (junk artifacts fail the manifest); per-stat domain regexes (hit 0–100%, betas signed d.dd, lambda [0,1]); the block's recency claim replaced by a dated statement (the wiring PRs propagate this to the site, which renders from this API). All pinned incl. a runtime-corruption re-examination test |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit

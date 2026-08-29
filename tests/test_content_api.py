@@ -139,7 +139,7 @@ class TestBlockArtifact:
     def _with_artifact(self, monkeypatch, artifact):
         import app.content_registry as reg
 
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         monkeypatch.setattr(reg, "_file_artifact", lambda: artifact)
         return reg
 
@@ -167,21 +167,21 @@ class TestBlockArtifact:
         # on arrival while the artifact ships in the same PR.
         import app.content_registry as reg
 
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         display = reg.gauge_display()
         assert display, "score data.display is empty with the shipped artifact"
         assert "band.oneliner" in display
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_missing_file_serves_builtins_with_version_zero(self, monkeypatch):
         import app.content_registry as reg
 
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         monkeypatch.setattr(reg, "_BLOCKS_FILE", reg._BLOCKS_FILE.with_name("nope.json"))
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
         assert "disclaimer_full" in reg.static_blocks()
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_malformed_artifact_never_couples_to_requests(self, monkeypatch, tmp_path):
         # Panel finding (PR #97): a corrupt artifact file must degrade to
@@ -191,10 +191,10 @@ class TestBlockArtifact:
         bad = tmp_path / "content_blocks.v1.json"
         bad.write_text("{not json", encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
         assert "disclaimer_full" in reg.static_blocks()
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_every_band_shaped_map_keys_real_band_values(self):
         # Panel findings (PR #97 rounds 2 + 7): EVERY band-keyed map in the
@@ -204,7 +204,7 @@ class TestBlockArtifact:
         # this test previously masked by pinning only band.oneliner.
         import app.content_registry as reg
 
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         blocks = reg.static_blocks()
         # Round 10: detection-by-key self-excludes a map MISSING those keys —
         # the known band maps are pinned by SLUG and must be band-shaped.
@@ -223,7 +223,7 @@ class TestBlockArtifact:
             for band in ("hold", "trim", "de-risk", "suppressed (block degraded)", "fallback"):
                 assert band in entries, f"{slug} missing band key {band!r}"
             assert "derisk" not in entries, f"{slug} carries the broken 'derisk' key"
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_structurally_invalid_blocks_degrades_wholly_to_v0(self, monkeypatch, tmp_path):
         # Round 3: blocks-as-list must not serve built-ins while STILL
@@ -233,9 +233,9 @@ class TestBlockArtifact:
         bad = tmp_path / "content_blocks.v1.json"
         bad.write_text('{"content_version": 1, "blocks": []}', encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_hostile_deep_nesting_never_escapes(self, monkeypatch, tmp_path):
         # Round 3: a deeply nested JSON file raises RecursionError inside
@@ -245,20 +245,20 @@ class TestBlockArtifact:
         bad = tmp_path / "content_blocks.v1.json"
         bad.write_text("[" * 200000 + "]" * 200000, encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
         assert "disclaimer_full" in reg.static_blocks()
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_site_disclaimer_alias_for_companion_contract(self):
         # The companion dashboard's frozen contract gates on this exact slug
         # and phrase; its deploy-time fallback generator exits 1 without it.
         import app.content_registry as reg
 
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         block = reg.static_blocks()["site.disclaimer"]
         assert "not investment advice" in block["text"]
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_member_corruption_degrades_whole_artifact(self, monkeypatch, tmp_path):
         # Round 4: partial content must never be served under the artifact's
@@ -271,10 +271,10 @@ class TestBlockArtifact:
                        '"bad.block": {"kind": "text", "text": ""}}}',
                        encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
         assert "good.block" not in reg.static_blocks()
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_lone_surrogate_rejected_at_load_not_at_response(self, monkeypatch, tmp_path):
         # Round 4: a lone UTF-16 surrogate passes json.load but raises
@@ -286,9 +286,9 @@ class TestBlockArtifact:
                        '"x.y": {"kind": "text", "text": "bad \\ud800 char"}}}',
                        encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_boolean_version_rejected(self, monkeypatch, tmp_path):
         # Round 4: bool is an int subclass — `true` must not pass as version.
@@ -298,9 +298,9 @@ class TestBlockArtifact:
         bad.write_text('{"content_version": true, "blocks": {'
                        '"x.y": {"kind": "text", "text": "fine"}}}', encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_non_finite_numbers_rejected_at_load(self, monkeypatch, tmp_path):
         # Round 5: python json accepts Infinity/NaN; the response encoder
@@ -312,9 +312,9 @@ class TestBlockArtifact:
                        '"x.y": {"kind": "table", "items": [{"v": Infinity}]}}}',
                        encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_nested_item_corruption_degrades_whole_artifact(self, monkeypatch, tmp_path):
         # Round 5: a table holding a string item is corrupt — the all-or-
@@ -326,9 +326,9 @@ class TestBlockArtifact:
                        '"x.y": {"kind": "table", "items": [{"a": 1}, "corrupt"]}}}',
                        encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_exponent_overflow_infinity_rejected(self, monkeypatch, tmp_path):
         # Round 6: 1e400 parses to float('inf') via parse_float (bypassing
@@ -340,9 +340,9 @@ class TestBlockArtifact:
                        '"x.y": {"kind": "table", "items": [{"v": 1e400}]}}}',
                        encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_depth_bound_covers_wrapped_response_margin(self, monkeypatch, tmp_path):
         # Round 8: preflight dumped the RAW artifact while responses serialize
@@ -361,9 +361,9 @@ class TestBlockArtifact:
         bad.write_text(_json.dumps({"content_version": 1, "blocks": {
             "ok.map": deep, "deep.block": deep_block}}), encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_verdict_tables_never_map_unknown_to_hold(self):
         # Round 9: the source generator conflated 'hold (and any unknown
@@ -372,7 +372,7 @@ class TestBlockArtifact:
         # with non-action copy, and no row may bundle unknown with a band.
         import app.content_registry as reg
 
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         blocks = reg.static_blocks()
         for table in ("gauge.verdict.lead", "gauge.verdict.detail"):
             bands = [row.get("band") for row in blocks[table]["items"]]
@@ -386,7 +386,7 @@ class TestBlockArtifact:
                 text = row.get("template", "").lower()
                 for verb in ("de-risk now", "trim now", "hold —", "hold -"):
                     assert verb not in text, f"{table} unknown row carries action copy"
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_truncated_artifact_fails_completeness_attestation(self, monkeypatch, tmp_path):
         # Round 10: a valid-member subset must not serve under the artifact's
@@ -397,9 +397,9 @@ class TestBlockArtifact:
         bad.write_text('{"content_version": 1, "block_count": 5, "blocks": {'
                        '"x.y": {"kind": "text", "text": "only one"}}}', encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
         assert reg.content_version() == 0
-        reg._file_artifact.cache_clear()
+        reg._clear_artifact_cache()
 
     def test_shipped_artifact_attests_its_own_completeness(self):
         import json as _json
@@ -408,3 +408,39 @@ class TestBlockArtifact:
 
         raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
         assert raw["block_count"] == len(raw["blocks"]) >= 211
+
+    def test_runtime_artifact_change_is_reexamined(self, monkeypatch, tmp_path):
+        # Round 11 (SOTA-C): lru_cache froze artifact health at first load —
+        # the mtime/size-keyed cache must re-examine a changed/vanished file.
+        import os
+
+        import app.content_registry as reg
+
+        f = tmp_path / "content_blocks.v1.json"
+        good = ('{"content_version": 2, "block_count": 5, "blocks": {'
+                '"gauge.band.oneliner": {"kind": "map", "entries": {"hold": "h"}},'
+                '"gauge.splash.band_blurb": {"kind": "map", "entries": {"hold": "h"}},'
+                '"gauge.verdict.lead": {"kind": "table", "items": [{"a": "b"}]},'
+                '"gauge.verdict.detail": {"kind": "table", "items": [{"a": "b"}]},'
+                '"gauge.verdict.distance": {"kind": "table", "items": [{"a": "b"}]}}}')
+        f.write_text(good, encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", f)
+        reg._clear_artifact_cache()
+        assert reg.content_version() == 2
+        f.write_text("{corrupt", encoding="utf-8")
+        os.utime(f, (1, 1))  # force a different mtime signature
+        assert reg.content_version() == 0, "runtime corruption must be re-examined"
+        reg._clear_artifact_cache()
+
+    def test_junk_artifact_with_matching_count_fails_required_slugs(self, monkeypatch, tmp_path):
+        # Round 11 (SOTA-A): count-consistent junk must fail the code-anchored
+        # required-slug manifest.
+        import app.content_registry as reg
+
+        f = tmp_path / "content_blocks.v1.json"
+        f.write_text('{"content_version": 1, "block_count": 1, "blocks": {'
+                     '"junk.slug": {"kind": "text", "text": "junk"}}}', encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", f)
+        reg._clear_artifact_cache()
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()

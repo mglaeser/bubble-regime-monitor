@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -37,9 +36,41 @@ _BLOCKS_FILE = Path(__file__).resolve().parents[1] / "config" / "content_blocks.
 
 _EMPTY_ARTIFACT: dict[str, Any] = {"content_version": 0, "blocks": {}}
 
+# Slugs the service itself consumes from the file artifact — presence is
+# anchored HERE, in code, so a self-consistent junk artifact (valid members,
+# matching count, wrong slugs) cannot satisfy completeness (round 11).
+REQUIRED_FILE_SLUGS: frozenset[str] = frozenset({
+    "gauge.band.oneliner", "gauge.splash.band_blurb",
+    "gauge.verdict.lead", "gauge.verdict.detail", "gauge.verdict.distance",
+})
 
-@lru_cache(maxsize=1)
+_cache_key: tuple[float, int] | None = None
+_cache_value: dict[str, Any] | None = None
+
+
 def _file_artifact() -> dict[str, Any]:
+    # mtime/size-keyed cache: request handlers stay ~I/O-free (one stat), but
+    # artifact health is re-examined whenever the file changes or vanishes —
+    # lru_cache froze health at first load (panel finding, round 11).
+    global _cache_key, _cache_value
+    try:
+        st = _BLOCKS_FILE.stat()
+        key: tuple[float, int] | None = (st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if key == _cache_key and _cache_value is not None:
+        return _cache_value
+    _cache_value = _load_artifact() if key is not None else dict(_EMPTY_ARTIFACT)
+    _cache_key = key
+    return _cache_value
+
+
+def _clear_artifact_cache() -> None:
+    global _cache_key, _cache_value
+    _cache_key, _cache_value = None, None
+
+
+def _load_artifact() -> dict[str, Any]:
     # NEVER couple request handling to artifact health: a missing, unreadable
     # or malformed artifact degrades WHOLLY to built-ins at version 0 (the
     # never-500-on-data-failure invariant). Validation is deep, not root-only:
@@ -74,6 +105,7 @@ def _file_artifact() -> dict[str, Any]:
         return dict(_EMPTY_ARTIFACT)
     # bool is an int subclass in Python: `true` must not pass as a version.
     if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
+            or not REQUIRED_FILE_SLUGS.issubset(blocks.keys())
             or _max_depth(blocks) > 32
             or not all(_valid_member(b) for b in blocks.values())):
         # All-or-nothing: an artifact with ANY corrupt member degrades whole —
@@ -331,13 +363,21 @@ def _save_haven_slots() -> list[DynamicSlot]:
         "ust10y": {"bf": "+0.08", "bc": "-0.02", "hit": "33%", "lam": "0.31"},
         "cash": {"bf": "+0.01", "bc": "+0.01", "hit": "100%", "lam": "0.37"},
     }
+    # Per-stat domain regexes (round 11): hit is a 0-100 percentage, bf/bc are
+    # signed betas, lam lives in [0,1] — a generic numeric regex admitted
+    # domain-impossible values like 999%.
+    tail_regex = {
+        "bf": r"^[+-]\d\.\d{2}$",
+        "bc": r"^[+-]\d\.\d{2}$",
+        "hit": r"^(100|[1-9]?\d)(\.\d{1,2})?%$",
+        "lam": r"^[01]\.\d{2}$",
+    }
     for asset, stats in tail_editorial.items():
         for stat, value in stats.items():
-            # max_len dominates the regex's worst case ('+123.45%' = 8).
             slots.append(DynamicSlot(
                 f"analytics.tail.{asset}.{stat}",
                 f"Tail-regression {stat} statistic for {asset}", 8,
-                r"^[+-]?\d{1,3}(\.\d{1,2})?%?$", value))
+                tail_regex[stat], value))
     explos_editorial = [
         ("Raw log price", "+0.75", "borderline (crit 0.62-0.78, seed-sensitive)"),
         ("Linear-trend residual", "-0.76", "not explosive"),
