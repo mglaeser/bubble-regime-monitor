@@ -1603,12 +1603,12 @@
           "template": "Trim is warranted — but nothing forces action today."
         },
         {
-          "band": "hold (and any unknown band)",
+          "band": "hold",
           "trend_broken": "yes",
           "template": "The score says hold — but the trend rule has broken."
         },
         {
-          "band": "hold (and any unknown band)",
+          "band": "hold",
           "trend_broken": "no",
           "template": "No action indicated."
         },
@@ -1616,6 +1616,11 @@
           "band": "_placeholder",
           "trend_broken": "",
           "template": "{names} = tickers among SPY, QQQ whose faber_10mo === \"OUT\", joined with \" and \""
+        },
+        {
+          "band": "unknown",
+          "trend_broken": "any",
+          "template": "Not scored — the current reading could not be classified."
         }
       ],
       "source": "src/bubblegauge.tsx:1614-1629"
@@ -1649,12 +1654,12 @@
           "template": "Fragility is elevated{override_clause}, so the ceiling on risk is lower. Both 10-month trend rules are intact, and that rule is what actually times a sale."
         },
         {
-          "band": "hold (and any unknown band)",
+          "band": "hold",
           "trend_broken": "yes",
           "template": "{names} has closed below its 10-month average. The score is a ceiling, the trend rule is the trigger, and the trigger has moved first."
         },
         {
-          "band": "hold (and any unknown band)",
+          "band": "hold",
           "trend_broken": "no",
           "template": "Structural risk is present but not acute{override_clause}, and both 10-month trend rules are intact."
         },
@@ -1662,6 +1667,11 @@
           "band": "_placeholder",
           "trend_broken": "",
           "template": "{override_clause} = \", and a hard override has fired\" when override_fired, else \"\"; {names} as in gauge.verdict.lead"
+        },
+        {
+          "band": "unknown",
+          "trend_broken": "any",
+          "template": "Not scored — the current reading could not be classified."
         }
       ],
       "source": "src/bubblegauge.tsx:1614-1629"

@@ -357,3 +357,26 @@ class TestBlockArtifact:
         reg._file_artifact.cache_clear()
         assert reg.content_version() == 0
         reg._file_artifact.cache_clear()
+
+    def test_verdict_tables_never_map_unknown_to_hold(self):
+        # Round 9: the source generator conflated 'hold (and any unknown
+        # band)' — an unrecognized band rendered HOLD copy with action
+        # framing. Every verdict table must carry an explicit 'unknown' row
+        # with non-action copy, and no row may bundle unknown with a band.
+        import app.content_registry as reg
+
+        reg._file_artifact.cache_clear()
+        blocks = reg.static_blocks()
+        for table in ("gauge.verdict.lead", "gauge.verdict.detail"):
+            bands = [row.get("band") for row in blocks[table]["items"]]
+            assert "unknown" in bands, f"{table} lacks an explicit unknown row"
+            for band in bands:
+                assert band is None or "unknown" not in band or band == "unknown", (
+                    f"{table} bundles unknown into row {band!r}"
+                )
+            unknown_rows = [r for r in blocks[table]["items"] if r.get("band") == "unknown"]
+            for row in unknown_rows:
+                text = row.get("template", "").lower()
+                for verb in ("de-risk now", "trim now", "hold —", "hold -"):
+                    assert verb not in text, f"{table} unknown row carries action copy"
+        reg._file_artifact.cache_clear()

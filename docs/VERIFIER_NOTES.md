@@ -55,6 +55,8 @@ fixed with priority.
 
 | 8 | SOTA-A | Raw-depth preflight ≠ wrapped response (near-limit artifact passes raw dump, 500s inside `{data:{...},meta}`); unknown/degraded band still defaults to HOLD in `\|\|hold` clients when a band map carries no correct fallback | **UPHELD ×2 → fixed**: explicit iterative depth bound (≤32, no recursion — decoupled from interpreter limits entirely); every band-shaped map now ships a `fallback` entry carrying the suppressed-state text, and the class-wide pin test requires it — an unrecognized band renders "Not scored" copy, never HOLD |
 
+| 9 | SOTA-A | Suppressed/unknown VERDICT fallback maps to HOLD — the extracted verdict tables faithfully preserved the source generator's own conflated row `"hold (and any unknown band)"` | **UPHELD → fixed at the semantics level**: the conflated rows split into pure `hold` rows plus an explicit `unknown` row ("Not scored — the current reading could not be classified.") in both verdict tables; pinned so no verdict table may bundle unknown with a band or give an unknown row action copy. (The same fix must reach the save-haven source generator in the wiring PRs — noted for PR-1b.) |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit
