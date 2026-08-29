@@ -71,10 +71,18 @@ def heartbeat(
     # beat crossing a firing instant manufactures phase evidence for a
     # firing the observation never witnessed. Ordering between racing
     # reports is enforced at the write (monotonic guard), not by re-dating.
-    observed_at = datetime.now(UTC)
+    # Captured INSIDE the first write, immediately AFTER the row read —
+    # never before it (panel round 18). Taking it beforehand left a window
+    # in which a failure could land between observation and read, so an
+    # observation that had never witnessed the crash could still clear it.
+    # Read-then-observe inverts that by construction: whatever the read
+    # returns is already part of this observation's past. Retries reuse
+    # this same value verbatim — a beat is evidence, never re-dated.
+    observed_at: datetime | None = None
     for attempt in (1, 2, 3):
         try:
-            _write_heartbeat(component, status, detail,
+            observed_at = _write_heartbeat(
+                             component, status, detail,
                              now=observed_at,
                              current_mode=current_mode,
                              current_profile=current_profile,
@@ -96,7 +104,7 @@ def heartbeat(
                     # approximate for this one write, the failure is on
                     # the row, and the gate reads red.
                     _force_heartbeat(component, status, detail,
-                                     now=observed_at,
+                                     now=observed_at or datetime.now(UTC),
                                      current_mode=current_mode,
                                      current_profile=current_profile)
                     return
@@ -162,14 +170,22 @@ def _write_heartbeat(
     status: str,
     detail: dict[str, Any] | None,
     *,
-    now: datetime,
+    now: datetime | None,
     current_mode: str,
     current_profile: str,
     only_if_absent: bool,
     observation_is_current: bool = True,
-) -> None:
+) -> datetime:
+    """Write one heartbeat; returns the observation instant actually used.
+
+    ``now=None`` means "capture the observation inside, after the read" —
+    the first attempt. A retry passes the value it got back, so the beat
+    it eventually lands is the instant that was observed, not the instant
+    the retry happened to run.
+    """
     with session_scope() as session:
         if only_if_absent:
+            now = now or datetime.now(UTC)
             # Atomic conditional INSERT — no check-then-write window at all.
             # A plain INSERT under a savepoint either creates the row or
             # hits the primary key, and the conflict is swallowed: an
@@ -197,8 +213,10 @@ def _write_heartbeat(
                     session.flush()
             except IntegrityError:
                 pass  # the row exists — exactly the desired end state
-            return
+            return now
         row = session.get(AlertComponentHeartbeat, component)
+        # Observation taken here, with the read already behind it.
+        now = now or datetime.now(UTC)
         if row is None:
             payload = {
                 **(detail or {}),
@@ -244,23 +262,28 @@ def _write_heartbeat(
                     # fixed margin (panel round 17; the round-14 margin
                     # proof only covered steps within the tolerance).
                     #
-                    # What actually licenses a clear is causality: this
-                    # writer's observation must not predate state it had
-                    # not yet seen. On a first attempt the observation is
-                    # taken microseconds before the read, so a read that
-                    # returns a FAILURE places the observation after that
-                    # failure landed — whatever either clock says. A retry
-                    # is the opposite: it carries an observation formed
-                    # before the race it lost, so it may never clear.
+                    # What licenses a clear is causality: the observation
+                    # must not predate state it had not yet seen. Two
+                    # constructions make that airtight, no clock trusted:
+                    #
+                    #  * the observation is taken AFTER this read, so a
+                    #    read returning a FAILURE puts that failure in the
+                    #    observation's past (panel round 18 — taking it
+                    #    beforehand left exactly this window open);
+                    #  * a failure landing between our read and our write
+                    #    bumps the revision, so the compare-and-swap misses
+                    #    and the retry arrives without a current
+                    #    observation, where clearing is forbidden.
                     if not observation_is_current:
-                        return
-                    # Belt and braces for the microsecond window on a
-                    # first attempt: still require dominance beyond the
-                    # skew the gate tolerates.
+                        return now
+                    # The dominance margin is now redundant with the two
+                    # constructions above; kept as defence in depth, and
+                    # cheap because a genuine recovery is the component's
+                    # next run, 30 minutes to 7 days later.
                     if now <= existing + _NON_OK_CLEAR_MARGIN:
-                        return
+                        return now
                 elif now <= existing:
-                    return
+                    return now
             previous = dict(row.detail_json or {})
             first_seen = previous.get("first_heartbeat_at") \
                 or row.last_heartbeat_at.isoformat()
@@ -301,6 +324,7 @@ def _write_heartbeat(
                         revision=AlertComponentHeartbeat.revision + 1))
             if getattr(result, "rowcount", 0) == 0:
                 raise _HeartbeatRaced(component)
+    return now
 
 
 #: Ordered by how much a mode is permitted to do. `live` is the only one that

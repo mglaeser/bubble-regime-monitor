@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.alerts.enums import EvaluationRunStatus
 from app.alerts.models import AlertEvaluation, AlertRulesetRegistry
@@ -1676,3 +1676,63 @@ def test_a_retrying_ok_can_never_clear_a_failure_however_the_clocks_read(
     with session_scope() as session:
         assert session.get(AlertComponentHeartbeat, "digest").status == "ok", (
             "a genuine recovery must still clear the failure")
+
+
+def test_a_crash_landing_between_read_and_write_survives_a_favoured_ok(
+        isolated_db, monkeypatch):
+    """Panel round 18, confirmed and fixed, pinned.
+
+    The last window: a failure landing between a writer's observation and
+    its read meant the observation had never witnessed the crash, yet
+    could still clear it. Two constructions close it — the observation is
+    now taken AFTER the read, and a failure landing after that read bumps
+    the revision so the compare-and-swap misses and the retry may not
+    clear. Here the timestamps favour the ok as much as possible (the
+    crash beat is rewound 20 minutes), so only causality can save the
+    crash report.
+    """
+    from datetime import UTC as _utc
+    from datetime import timedelta as _td
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs.alert_recovery import heartbeat
+
+    heartbeat("digest", "ok", {"note": "healthy at 10:00"})
+    with session_scope() as session:
+        healthy = session.get(AlertComponentHeartbeat, "digest")
+        pre_crash = AlertComponentHeartbeat(
+            component="digest", last_heartbeat_at=healthy.last_heartbeat_at,
+            status=healthy.status, detail_json=dict(healthy.detail_json),
+            revision=healthy.revision)
+        beat = healthy.last_heartbeat_at
+        beat = beat.replace(tzinfo=_utc) if beat.tzinfo is None else beat
+
+    # The crash lands with a beat rewound 20 minutes — every margin favours
+    # the ok — and bumps the revision the ok writer's read never saw.
+    with session_scope() as session:
+        session.execute(
+            update(AlertComponentHeartbeat)
+            .where(AlertComponentHeartbeat.component == "digest")
+            .values(last_heartbeat_at=(beat - _td(minutes=20)).replace(tzinfo=None),
+                    status="critical",
+                    revision=AlertComponentHeartbeat.revision + 1))
+
+    real_get = Session.get
+    state = {"fed": False}
+
+    def pre_crash_get(self, entity, ident, **kw):
+        if not state["fed"] and entity is AlertComponentHeartbeat:
+            state["fed"] = True
+            return pre_crash  # the read that the crash outran
+        return real_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(Session, "get", pre_crash_get)
+    heartbeat("digest", "ok", {"note": "health claim from before the crash"})
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
+            "an ok whose read predated the crash cleared it anyway")
