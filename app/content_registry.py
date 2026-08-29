@@ -21,6 +21,8 @@ Two registries:
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +38,10 @@ _BLOCKS_FILE = Path(__file__).resolve().parents[1] / "config" / "content_blocks.
 
 
 _EMPTY_ARTIFACT: dict[str, Any] = {"content_version": 0, "blocks": {}}
+
+# Slug shape: dot-namespaced, lowercase; an empty or malformed slug is schema
+# corruption (round 13) - it would merge silently or produce empty sub-slugs.
+_SLUG_RE = re.compile(r"^[a-z0-9_.\-]{1,120}$")
 
 # Slugs the service itself consumes from the file artifact, WITH their
 # required kinds — presence alone is porous (a required slug of the wrong
@@ -55,27 +61,34 @@ _cache: tuple[tuple[int, int, int] | None, dict[str, Any]] | None = None
 
 
 def _file_artifact() -> dict[str, Any]:
-    # Cache keyed on (mtime_ns, size, inode): atomic-rename deployment always
-    # changes the inode, so a replaced artifact is re-examined even when a
-    # copy tool preserves mtime and size (round 12). An in-place rewrite that
-    # preserves all three is a deliberate filesystem-level act outside this
-    # control's threat model (an actor with that access can edit code).
+    # Cache keyed on (mtime_ns, size, inode) of the OPEN file descriptor:
+    # key and content are provably bound to the same file state — a separate
+    # stat()-then-open() lets a rename land between the two, caching one
+    # file's content under another's key (TOCTOU; round 13). Atomic-rename
+    # deployment always changes the inode, so a replaced artifact is
+    # re-examined even when a copy tool preserves mtime and size; an in-place
+    # rewrite preserving all three is a filesystem-level act outside this
+    # control's threat model.
     global _cache
     try:
-        st = _BLOCKS_FILE.stat()
-        key: tuple[int, int, int] | None = (st.st_mtime_ns, st.st_size, st.st_ino)
+        fh = _BLOCKS_FILE.open(encoding="utf-8")
     except OSError:
-        key = None
-    cached = _cache
-    if cached is not None and cached[0] == key:
-        return cached[1]
-    with _cache_lock:
+        with _cache_lock:
+            _cache = (None, dict(_EMPTY_ARTIFACT))
+            return _cache[1]
+    with fh:
+        st = os.fstat(fh.fileno())
+        key = (st.st_mtime_ns, st.st_size, st.st_ino)
         cached = _cache
         if cached is not None and cached[0] == key:
             return cached[1]
-        value = _load_artifact() if key is not None else dict(_EMPTY_ARTIFACT)
-        _cache = (key, value)
-        return value
+        with _cache_lock:
+            cached = _cache
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            value = _load_artifact(fh)
+            _cache = (key, value)
+            return value
 
 
 def _clear_artifact_cache() -> None:
@@ -94,7 +107,7 @@ def artifact_view() -> tuple[dict[str, Any], int]:
             version if type(version) is int else 0)
 
 
-def _load_artifact() -> dict[str, Any]:
+def _load_artifact(fh: Any) -> dict[str, Any]:
     # NEVER couple request handling to artifact health: a missing, unreadable
     # or malformed artifact degrades WHOLLY to built-ins at version 0 (the
     # never-500-on-data-failure invariant). Validation is deep, not root-only:
@@ -108,8 +121,7 @@ def _load_artifact() -> dict[str, Any]:
         raise ValueError(f"non-finite JSON constant: {name}")
 
     try:
-        with _BLOCKS_FILE.open(encoding="utf-8") as fh:
-            loaded = json.load(fh, parse_constant=_reject_constant)
+        loaded = json.load(fh, parse_constant=_reject_constant)
         # A payload that json.load accepts can still be unserializable at
         # RESPONSE time (lone UTF-16 surrogates raise UnicodeEncodeError; a
         # 1e400 exponent overflows to float('inf') via parse_float, bypassing
@@ -129,6 +141,8 @@ def _load_artifact() -> dict[str, Any]:
         return dict(_EMPTY_ARTIFACT)
     # bool is an int subclass in Python: `true` must not pass as a version.
     if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
+            or not all(isinstance(slug, str) and _SLUG_RE.fullmatch(slug)
+                       for slug in blocks)
             or not all(isinstance(blocks.get(slug), dict)
                        and blocks[slug].get("kind") == kind
                        for slug, kind in REQUIRED_FILE_SLUG_KINDS.items())

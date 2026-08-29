@@ -108,22 +108,6 @@
       ],
       "source": "src/dashboard.tsx:378-391"
     },
-    "atlas.aggregate.stat (each with .value and .caption)": {
-      "kind": "table",
-      "items": [
-        {
-          "key": "cape",
-          "value": "CAPE ≈ 41",
-          "caption": "Shiller CAPE, Jul 2026 — near the ~44 dot-com record; flagged by BIS, ECB, Fed & BoE 2026 stability reports"
-        },
-        {
-          "key": "reserve-shares",
-          "value": "27% vs 22%",
-          "caption": "gold vs US Treasuries share of global reserves at end-2025 — gold overtook Treasuries (ECB, 2 Jun 2026)"
-        }
-      ],
-      "source": "src/dashboard.tsx:463-464"
-    },
     "atlas.aggregate.expl.tab": {
       "kind": "text",
       "text": "<b>This tab in one breath.</b> We averaged all ten historical crises into one \"typical crisis\" per asset family, then laid today's 2026 situation (dashed) on top. Both are forced to equal 100 at the peak, so the only fair comparison is the <i>shape of the climb</i> before the peak — and what history did afterwards. \"History ↔ 2026 pairs\" shows one small chart per family (easiest to read). \"All composites\" puts everything in one big chart. The dashed lines stop at the peak because the 2026 future is unknown — that empty right half is the whole point.",
@@ -1739,6 +1723,22 @@
         }
       ],
       "source": "src/bubblegauge.tsx:2028-2030"
+    },
+    "atlas.aggregate.stats": {
+      "kind": "table",
+      "items": [
+        {
+          "key": "cape",
+          "value": "CAPE ≈ 41",
+          "caption": "Shiller CAPE, Jul 2026 — near the ~44 dot-com record; flagged by BIS, ECB, Fed & BoE 2026 stability reports"
+        },
+        {
+          "key": "reserve-shares",
+          "value": "27% vs 22%",
+          "caption": "gold vs US Treasuries share of global reserves at end-2025 — gold overtook Treasuries (ECB, 2 Jun 2026)"
+        }
+      ],
+      "source": "src/dashboard.tsx:463-464"
     }
   },
   "missing": [],

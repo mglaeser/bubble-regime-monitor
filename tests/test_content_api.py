@@ -491,3 +491,23 @@ class TestBlockArtifact:
         reg._clear_artifact_cache()
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
+
+    def test_malformed_slug_degrades_whole_artifact(self, monkeypatch, tmp_path):
+        # Round 13: slug shape is schema — a slug with spaces/notes must
+        # degrade the artifact (this check caught a real defect in the
+        # shipped artifact on first contact).
+        import app.content_registry as reg
+
+        f = tmp_path / "content_blocks.v1.json"
+        f.write_text('{"content_version": 1, "block_count": 6, "blocks": {'
+                     '"bad slug (with note)": {"kind": "text", "text": "x"},'
+                     '"gauge.band.oneliner": {"kind": "map", "entries": {"hold": "h"}},'
+                     '"gauge.splash.band_blurb": {"kind": "map", "entries": {"hold": "h"}},'
+                     '"gauge.verdict.lead": {"kind": "table", "items": [{"a": "b"}]},'
+                     '"gauge.verdict.detail": {"kind": "table", "items": [{"a": "b"}]},'
+                     '"gauge.verdict.distance": {"kind": "table", "items": [{"a": "b"}]}}}',
+                     encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", f)
+        reg._clear_artifact_cache()
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()

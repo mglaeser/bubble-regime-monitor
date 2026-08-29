@@ -63,6 +63,8 @@ fixed with priority.
 
 | 12 | SOTA-A + SOTA-C | Cache key (mtime,size) spoofable by timestamp-preserving copies; required slugs unchecked for KIND; cache publication non-atomic under threads; blocks/version read twice per response (torn pairing); `100.99%`/`1.50` regex-legal; CI pins can short-circuit the loader | **UPHELD ×6 → fixed**: cache keyed (mtime_ns, size, inode) — atomic-rename replacement always changes inode; in-place all-three-preserved rewrite is a filesystem-level act outside this control's threat model, on the record; `REQUIRED_FILE_SLUG_KINDS` validates kind, not just presence; cache published as one tuple under a lock (double-checked); `dashboard_payload()` builds each response from ONE artifact snapshot (call-counted pin); hit bounded to 0–100%, lambda to [0,1]; a pin now runs the REAL loader end-to-end on the shipped file. All pinned |
 
+| 13 | SOTA-A | Cache key-to-file binding (stat-then-open TOCTOU: a rename between the two caches one file's content under another's key, and a quick revert makes the mismatch stick); artifact schema still slug-porous | **UPHELD ×2 → fixed**: key and content now bind to the SAME open file descriptor (`fstat` on the handle the loader reads from); slug-shape validation added (`^[a-z0-9_.\-]{1,120}$`) — which immediately caught a real defect in the shipped artifact itself (a slug carrying a leaked extractor note, now renamed `atlas.aggregate.stats`). The control proved itself on first contact. Both pinned |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit
