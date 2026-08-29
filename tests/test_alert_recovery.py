@@ -1457,3 +1457,107 @@ def test_a_rollback_stale_ok_cannot_clear_a_later_crash(
     with session_scope() as session:
         assert session.get(AlertComponentHeartbeat, "digest").status == "ok", (
             "a genuine recovery beyond the margin failed to clear")
+
+
+def test_the_cas_token_is_state_not_a_repeatable_timestamp(
+        isolated_db, monkeypatch):
+    """Panel round 15 defect 1 (ABA), confirmed and fixed, pinned.
+
+    A critical is exempt from strict ordering, so it can land with a beat
+    EQUAL to the ok it replaces. A stale ok writer that read the old state
+    then finds its timestamp-only CAS still matching — and erases the
+    crash. The token is now (beat, status): the flip the gate cares about
+    always changes it.
+    """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_recovery import heartbeat
+
+    base = datetime(2026, 8, 24, 6, 0, tzinfo=_utc)
+    _FrozenDatetime.frozen = base
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "ok", {"note": "healthy"})
+    # The crash lands with the SAME beat value — allowed: non-ok bypasses
+    # strict ordering.
+    heartbeat("digest", "critical", {"note": "crash, equal timestamp"})
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical"
+
+    # The stale ok writer: read the OLD ok state, CAS must miss on status.
+    stale = AlertComponentHeartbeat(
+        component="digest", last_heartbeat_at=base.replace(tzinfo=None),
+        status="ok", detail_json={"mode": "live", "live_profile": "default"})
+    real_get = Session.get
+    state = {"fed": False}
+
+    def stale_get(self, entity, ident, **kw):
+        if not state["fed"] and entity is AlertComponentHeartbeat:
+            state["fed"] = True
+            return stale
+        return real_get(self, entity, ident, **kw)
+
+    _FrozenDatetime.frozen = base + _td(minutes=4)  # inside clear margin too
+    monkeypatch.setattr(Session, "get", stale_get)
+    heartbeat("digest", "ok", {"note": "stale, saw the old ok"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
+            "a timestamp-collision ABA let a stale ok erase the crash")
+
+
+def test_a_failure_report_lands_even_under_sustained_contention(
+        isolated_db, monkeypatch):
+    """Panel round 15 defect 2, confirmed and fixed, pinned.
+
+    Exhausting CAS retries must never drop crash evidence: after the third
+    miss a non-ok report lands unconditionally (chain approximate, failure
+    on the row, gate red).
+    """
+    from datetime import UTC as _utc
+    from datetime import timedelta as _td
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs.alert_recovery import heartbeat
+
+    heartbeat("digest", "ok", {"note": "healthy"})
+    with session_scope() as session:
+        true_beat = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
+
+    # Every read this writer makes sees a row that has already moved on
+    # (different beat), so the CAS misses on every attempt.
+    aware = true_beat.replace(tzinfo=_utc) if true_beat.tzinfo is None else true_beat
+    real_get = Session.get
+    state = {"n": 0}
+
+    def moving_get(self, entity, ident, **kw):
+        if entity is AlertComponentHeartbeat:
+            state["n"] += 1
+            return AlertComponentHeartbeat(
+                component="digest",
+                last_heartbeat_at=(aware - _td(seconds=state["n"])).replace(tzinfo=None),
+                status="ok",
+                detail_json={"mode": "live", "live_profile": "default"})
+        return real_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(Session, "get", moving_get)
+    heartbeat("digest", "critical", {"note": "crash under contention"})
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        assert row.status == "critical", (
+            "retry exhaustion dropped the crash report — fail-open")
+        assert row.detail_json.get("forced_landing") is True, (
+            "the landing should be marked as forced for the audit trail")

@@ -85,6 +85,20 @@ def heartbeat(
             # back through a fresh read so guard and previous_* chain are
             # rebuilt against what is actually there now.
             if attempt == 3:
+                if status != "ok":
+                    # A failure report is never dropped by retry
+                    # exhaustion (panel round 15): sustained contention
+                    # from health writers must not suppress crash
+                    # evidence. The CAS exists to keep the previous_*
+                    # chain exact, not to gate safety — so the last
+                    # resort is an unconditional landing; the chain is
+                    # approximate for this one write, the failure is on
+                    # the row, and the gate reads red.
+                    _force_heartbeat(component, status, detail,
+                                     now=observed_at,
+                                     current_mode=current_mode,
+                                     current_profile=current_profile)
+                    return
                 raise
             continue
         except IntegrityError:
@@ -99,6 +113,46 @@ def heartbeat(
             if attempt >= 2:
                 raise
             continue
+
+
+def _force_heartbeat(
+    component: str,
+    status: str,
+    detail: dict[str, Any] | None,
+    *,
+    now: datetime,
+    current_mode: str,
+    current_profile: str,
+) -> None:
+    """Last-resort unconditional landing for a NON-OK report (round 15)."""
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, component)
+        previous = dict(row.detail_json or {}) if row is not None else {}
+        payload = {
+            **(detail or {}),
+            "mode": current_mode,
+            "live_profile": current_profile,
+            "run_count": int(previous.get("run_count", 0)) + 1,
+            "first_heartbeat_at": previous.get("first_heartbeat_at")
+            or now.isoformat(),
+            "previous_heartbeat_at": (
+                row.last_heartbeat_at.isoformat() if row is not None else None),
+            "previous_status": row.status if row is not None else None,
+            "previous_mode": previous.get("mode"),
+            "previous_live_profile": previous.get("live_profile"),
+            "consecutive_non_ok": int(previous.get("consecutive_non_ok", 0)) + 1,
+            "forced_landing": True,
+        }
+        if row is None:
+            session.add(AlertComponentHeartbeat(
+                component=component, last_heartbeat_at=now, status=status,
+                detail_json=payload))
+        else:
+            session.execute(
+                update(AlertComponentHeartbeat)
+                .where(AlertComponentHeartbeat.component == component)
+                .values(last_heartbeat_at=now, status=status,
+                        detail_json=payload))
 
 
 def _write_heartbeat(
@@ -219,11 +273,19 @@ def _write_heartbeat(
             # the row moved, rowcount is 0 and the raced sentinel sends the
             # whole attempt back through a FRESH read — never a blind
             # overwrite of state the guard never saw.
+            # The token is the read STATE (beat AND status), not the beat
+            # alone (panel round 15): timestamps can repeat — a critical is
+            # exempt from strict ordering and may land with an observation
+            # equal to the prior ok's beat — and a value that can repeat is
+            # not a CAS token (ABA). Every gate-relevant transition changes
+            # status, so (beat, status) equality pins the exact state the
+            # guard and previous_* chain were built from.
             result = session.execute(  # CursorResult: UPDATE has rowcount
                 update(AlertComponentHeartbeat)
                 .where(AlertComponentHeartbeat.component == component,
                        AlertComponentHeartbeat.last_heartbeat_at
-                       == existing_raw)
+                       == existing_raw,
+                       AlertComponentHeartbeat.status == row.status)
                 .values(last_heartbeat_at=now, status=status,
                         detail_json=payload))
             if getattr(result, "rowcount", 0) == 0:

@@ -252,6 +252,14 @@ def next_digest_firing(after: datetime) -> datetime:
     # 08:30:00.000000 sharp deferred its whole obligation by seven days
     # (panel round 8, combo/SOTA-C, confirmed at the boundary). At the
     # measure-zero instant the earlier deadline is the fail-closed choice.
+    #
+    # The instant is irreducibly ambiguous and BOTH readings were flagged
+    # across rounds (8: deferral is an 8-day blind spot; 15: the earlier
+    # deadline gives an exact-instant RUN beat only 24h of validity). A
+    # run cannot actually complete in zero time, so the false-red side is
+    # unreachable in practice, while the blind-spot side pairs with a
+    # silent job death — red-risk over blind-risk stays the choice, and
+    # it is pinned by test either way.
     if candidate < local:
         candidate += timedelta(days=7)
     return candidate.astimezone(UTC)
