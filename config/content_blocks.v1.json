@@ -106,7 +106,8 @@
           "note": "2026 gold has risen far above the historical pre-crisis norm into the assumed peak — elevated to lead regime-matched hedge (score 0.85, Analytics ranking), but hedge demand may be pre-paid."
         }
       ],
-      "source": "src/dashboard.tsx:378-391"
+      "source": "src/dashboard.tsx:378-391",
+      "as_of": "2026-07"
     },
     "atlas.aggregate.expl.tab": {
       "kind": "text",
@@ -309,7 +310,8 @@
           "veto": null
         }
       ],
-      "source": "src/dashboard.tsx:926-938"
+      "source": "src/dashboard.tsx:926-938",
+      "as_of": "2026-07"
     },
     "playbook.verdicts": {
       "kind": "table",
@@ -369,7 +371,8 @@
           "note": "The inflation half of the unresolved regime fork (M5). Caveat: TIPS broke down in the 2008 and March-2020 liquidity crunches (−12% in 2008; Fleckenstein-Longstaff-Lustig puzzle) — hold through Phase 1, don't rely on it during the dash-for-cash."
         }
       ],
-      "source": "src/dashboard.tsx:941-960"
+      "source": "src/dashboard.tsx:941-960",
+      "as_of": "2026-07"
     },
     "playbook.phases.p0.rationale": {
       "kind": "map",
@@ -381,7 +384,8 @@
         "tips": "The inflation branch; expect a Phase-1 wobble.",
         "chf": "Secondary haven. On eToro only as FX CFD: long CHF = SELL USD/CHF."
       },
-      "source": "src/dashboard.tsx:1024-1029"
+      "source": "src/dashboard.tsx:1024-1029",
+      "as_of": "2026-07"
     },
     "playbook.phases.p1.rule1..rule4": {
       "kind": "list",
@@ -391,7 +395,8 @@
         "Copper, silver, EM, India, defense are Phase-1 FALLERS — set Phase-3 buy levels, don't catch knives.",
         "Even gold and TIPS can dip in the dash-for-cash (2008 · Mar 2020). Cash is the only certainty."
       ],
-      "source": "src/dashboard.tsx:1031-1036"
+      "source": "src/dashboard.tsx:1031-1036",
+      "as_of": "2026-07"
     },
     "playbook.phases.p2": {
       "kind": "table",
@@ -409,7 +414,8 @@
           "action": "Extend duration into long Treasuries — accepting the post-April-2025 caveat; hold CHF."
         }
       ],
-      "source": "src/dashboard.tsx:1037-1040"
+      "source": "src/dashboard.tsx:1037-1040",
+      "as_of": "2026-07"
     },
     "playbook.phases.p3.rationale": {
       "kind": "map",
@@ -421,7 +427,8 @@
         "defense": "Mandated aggregate spend; avoid single programs (F126 lesson).",
         "silver": "Late catch-up, sized down — the ratio extreme already compressed."
       },
-      "source": "src/dashboard.tsx:1041-1048"
+      "source": "src/dashboard.tsx:1041-1048",
+      "as_of": "2026-07"
     },
     "playbook.experts.r1..24": {
       "kind": "table",
@@ -595,7 +602,8 @@
           "sources": "State Street (Jun 30) — record 2026 inflows; high issuer bias"
         }
       ],
-      "source": "src/dashboard.tsx:1051-1100"
+      "source": "src/dashboard.tsx:1051-1100",
+      "as_of": "2026-07"
     },
     "playbook.intro.expl": {
       "kind": "text",
@@ -620,22 +628,26 @@
     "playbook.phases.expl": {
       "kind": "text",
       "text": "<b>Why phases?</b> Because the same asset can be right and wrong depending on WHEN: copper is a Phase-1 casualty and a Phase-3 winner. Phase 0 = position now, while calm. Phase 1 = the crash itself: hold cash, buy nothing falling. Phase 2 = the regime reveals itself (inflation → gold/real assets; deflation → longer bonds). Phase 3 = the post-trough rotation, where the retrospective \"smart money\" of every past crisis did its buying. Weights are illustrative round numbers; every line names the screen that put it there.",
-      "source": "src/dashboard.tsx:1210-1216"
+      "source": "src/dashboard.tsx:1210-1216",
+      "as_of": "2026-07"
     },
     "playbook.phases.p1.headline": {
       "kind": "text",
       "text": "Hold. Buy nothing. (0–3 months)",
-      "source": "src/dashboard.tsx:1286"
+      "source": "src/dashboard.tsx:1286",
+      "as_of": "2026-07"
     },
     "playbook.experts.expl": {
       "kind": "text",
       "text": "<b>Your research artifact, mapped.</b> The 24 rows are what experts currently recommend, scored by how many independent sources back each asset, how FRESH those calls are (≤3 weeks), and how BIASED the sources are (1 = neutral, 5 = product sellers talking their book). The protocol verdict from the checklist above is attached to every row: ✓ = method and consensus agree · ± = agree on the asset but not the phase or size · ✗ = genuine clash. The ✗ rows are where the checklist earns its keep: duration bonds ranked #5 by experts but \"challenged\" by the method; infrastructure ranked #11 but sold mostly by its own product issuers; and world ETFs — which ARE ~64% the crashing asset. Note the beautiful confirmation at #9: the lowest-bias, highest-conviction expert signal (cash) is exactly the protocol's #1-certainty position.",
-      "source": "src/dashboard.tsx:1330-1339"
+      "source": "src/dashboard.tsx:1330-1339",
+      "as_of": "2026-07"
     },
     "playbook.experts.scoring": {
       "kind": "text",
       "text": "Score = source-count × freshness × (inverse) bias composite from the source artifact, max 66. Bias 1–5 (5 = product-seller). The expert table is practitioner consensus — deliberately a LOOSER evidence standard than the academic protocol; the verdict column is the academic filter applied on top.",
-      "source": "src/dashboard.tsx:1352-1356"
+      "source": "src/dashboard.tsx:1352-1356",
+      "as_of": "2026-07"
     },
     "hero.intro": {
       "kind": "text",
