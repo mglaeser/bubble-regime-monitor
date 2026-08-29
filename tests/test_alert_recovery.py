@@ -1101,3 +1101,44 @@ def test_work_written_off_by_the_retry_budget_reaches_the_status(
     out = _retryable_inputs(session, ["SPENT"], limit=2, exhausted=exhausted)
     assert out == []
     assert exhausted == ["SPENT"], "the write-off was invisible to the caller"
+
+
+def test_a_real_report_racing_the_boot_stamp_lands_instead_of_dying(
+        isolated_db, monkeypatch):
+    """Panel round 9 (also round 7 defect 1), confirmed and fixed, pinned.
+
+    The boot registration writes with an atomic conditional INSERT — but the
+    NORMAL heartbeat path was get-then-add: a real report racing the stamp
+    read "no row", inserted, and died on the primary key while the synthetic
+    row survived. The conflict-tolerant writer structurally beat the honest
+    one. The retry makes the loser land on the update path instead: the real
+    report must overwrite the registration stamp, not raise.
+    """
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs.alert_digest import record_scheduled
+    from app.jobs.alert_recovery import heartbeat
+
+    record_scheduled()  # the winner: registration row exists
+
+    real_get = Session.get
+    state = {"raced": False}
+
+    def racing_get(self, entity, ident, **kw):
+        if not state["raced"] and entity is AlertComponentHeartbeat:
+            state["raced"] = True  # this writer read before the winner landed
+            return None
+        return real_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(Session, "get", racing_get)
+    heartbeat("digest", "critical", {"note": "job failed"})  # must not raise
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        assert row.status == "critical", (
+            "the real failure report lost the race and vanished")
+        assert row.detail_json.get("previous_status") == "ok", (
+            "the retry must land on the update path, previous_* chain intact")

@@ -377,6 +377,15 @@ def preflight(
             # permits — stretched first-miss detection to 30h, and a stamp
             # at the exact firing instant deferred its obligation a week.
             # Calendar math also absorbs DST weeks, which are not 168h.
+            #
+            # Skew (panel round 9): the beat, APScheduler's own next-fire
+            # computation, and this preflight all read the SAME process
+            # clock. Forward skew therefore shifts the stamp, the
+            # scheduler's actual plan, and `now` together — a beat recorded
+            # minutes past the firing instant means the scheduler ALSO
+            # plans nothing until next week, so the promise tracks what the
+            # scheduler will really do. There is no second clock for the
+            # phase lease to amplify against.
             from app.alerts.calendars import next_digest_firing
             promised = next_digest_firing(beat)
             due = promised + timedelta(hours=24)

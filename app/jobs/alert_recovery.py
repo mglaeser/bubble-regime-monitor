@@ -15,6 +15,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
+
 from app.alerts.enums import EvaluationRunStatus
 from app.alerts.errors import sanitize
 from app.alerts.models import AlertComponentHeartbeat
@@ -54,6 +56,37 @@ def heartbeat(
     settings = get_settings()
     current_mode = mode or settings.alerts_mode
     current_profile = live_profile or settings.alerts_live_profile
+    for attempt in (1, 2):
+        try:
+            _write_heartbeat(component, status, detail, now=now,
+                             current_mode=current_mode,
+                             current_profile=current_profile,
+                             only_if_absent=only_if_absent)
+            return
+        except IntegrityError:
+            # Lost a create race: this writer read "no row", another writer
+            # (e.g. the boot registration's atomic insert, or a concurrent
+            # CLI run) inserted first, and our own insert hit the primary
+            # key. Without the retry the REAL report died with the
+            # exception while the other row survived — the opposite writer
+            # was the non-atomic one (panel round 9). One retry suffices:
+            # the row exists now, so the update path takes over and this
+            # report lands on top, previous_* chain intact.
+            if attempt == 2:
+                raise
+            continue
+
+
+def _write_heartbeat(
+    component: str,
+    status: str,
+    detail: dict[str, Any] | None,
+    *,
+    now: datetime,
+    current_mode: str,
+    current_profile: str,
+    only_if_absent: bool,
+) -> None:
     with session_scope() as session:
         if only_if_absent:
             # Atomic conditional INSERT — no check-then-write window at all.
