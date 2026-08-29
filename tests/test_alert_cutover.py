@@ -1073,3 +1073,60 @@ def test_the_digest_grace_detects_the_first_missed_firing_within_a_day():
         report = preflight(session, now=NOW)
     assert any(u.startswith("heartbeat_digest") for u in report.unsatisfied), (
         "the first missed weekly firing went undetected past the 24h grace")
+
+
+def test_a_registration_stamp_is_bounded_by_schedule_phase_not_a_flat_window():
+    """The reproduced panel finding (PR #96 rounds 5/7), pinned forever.
+
+    A boot stamp at Monday 08:29 Berlin sits one minute before its first
+    firing. Under the flat 192h window the gate stayed green after BOTH that
+    Monday's and the next Monday's executions were missed. Phase-aware, the
+    stamp is valid only until first-firing + 24h: the first missed execution
+    blocks within a day, whatever the stamp's phase.
+    """
+    from zoneinfo import ZoneInfo
+
+    from app.alerts.models import AlertComponentHeartbeat
+
+    berlin = ZoneInfo("Europe/Berlin")
+    boot = datetime(2026, 8, 24, 8, 29, tzinfo=berlin).astimezone(UTC)
+    first_firing = datetime(2026, 8, 24, 8, 30, tzinfo=berlin).astimezone(UTC)
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest", last_heartbeat_at=boot, status="ok",
+            detail_json={"mode": "live", "live_profile": "default",
+                         "kind": "registration",
+                         "note": "scheduled; runs Monday 08:30 Europe/Berlin"}))
+        session.flush()
+
+        # Before the firing (and within grace): day-one cutover unaffected.
+        report = preflight(session, now=first_firing + timedelta(hours=23))
+        assert any(x.startswith("heartbeat_digest") for x in report.satisfied), (
+            "a registration stamp inside first-firing grace must not block")
+
+        # 25h after the missed firing: the flat window said green for days.
+        report = preflight(session, now=first_firing + timedelta(hours=25))
+        faults = [u for u in report.unsatisfied
+                  if u.startswith("heartbeat_digest")]
+        assert faults and "never happened" in faults[0], (
+            "the first missed scheduled execution went undetected — the "
+            "phase bug is back")
+
+
+def test_a_real_run_heartbeat_still_gets_the_full_cadence_window():
+    """Run heartbeats (no registration kind) keep 192h — runs are aligned to
+    firings by construction, so the flat window means one missed firing."""
+    from app.alerts.models import AlertComponentHeartbeat
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest",
+            last_heartbeat_at=NOW - timedelta(days=5),
+            status="ok",
+            detail_json={"mode": "live", "live_profile": "default"}))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    assert any(x.startswith("heartbeat_digest") for x in report.satisfied), (
+        "a five-day-old run heartbeat is healthy for a weekly job")

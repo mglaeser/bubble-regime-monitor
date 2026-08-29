@@ -360,6 +360,31 @@ def preflight(
             fresh, detail = False, (
                 f"heartbeat is {beat.isoformat()} — in the future, which is a "
                 "clock fault, not health")
+        elif (component == "digest"
+              and detail_json.get("kind") == "registration"):
+            # A registration stamp proves the job is SCHEDULED, not that it
+            # runs — so it is judged by the schedule's PHASE, not by the flat
+            # cadence window. The flat window let a stamp landing minutes
+            # before a Monday firing stay green through TWO missed
+            # executions (panel finding, PR #96 rounds 5/7, reproduced
+            # 2026-08-29: stamp Mon 08:29 Berlin -> green after both missed
+            # Mondays). A stamp is valid until the first firing it promises
+            # plus the same 24h grace the cadence window carries; after
+            # that, the first scheduled execution never happened.
+            from app.alerts.calendars import next_digest_firing
+            first_due = next_digest_firing(beat) + timedelta(hours=24)
+            if now <= first_due:
+                fresh, detail = True, (
+                    "registration stamp valid until the first scheduled "
+                    f"firing plus 24h grace ({first_due.isoformat()}); the "
+                    "job's own run heartbeat takes over from there")
+            else:
+                fresh, detail = False, (
+                    f"registration stamp from {beat.isoformat()} but the "
+                    "first scheduled execution "
+                    f"(due {next_digest_firing(beat).isoformat()}) never "
+                    "happened — a job that is scheduled and does not run is "
+                    "dead, whatever the stamp's age")
         elif beat >= now - timedelta(hours=fresh_hours):
             fresh, detail = True, "fresh, healthy, and live-namespace matched"
         else:

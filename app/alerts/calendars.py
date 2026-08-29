@@ -220,6 +220,36 @@ def ttl_basis(*, calendar: str, intervals: int, start: datetime) -> str:
 # ---------------------------------------------------------------------------
 
 QUIET_TZ = "Europe/Berlin"
+
+# The weekly digest firing, owned HERE and imported by the scheduler (to build
+# the trigger) and by the cutover gate (to judge a registration stamp by the
+# schedule's phase, not by a flat window). Restating these numbers anywhere
+# else recreates the phase bug the gate exists to catch.
+DIGEST_FIRING_WEEKDAY = 0        # Monday
+DIGEST_FIRING_HOUR = 8
+DIGEST_FIRING_MINUTE = 30
+DIGEST_FIRING_TZ = "Europe/Berlin"
+
+
+def next_digest_firing(after: datetime) -> datetime:
+    """First scheduled digest firing strictly after ``after``, in UTC.
+
+    Phase matters: a boot at Monday 08:29 Berlin is one minute from its first
+    firing, a boot at 08:31 is a week away. The cutover gate uses this to
+    bound a registration stamp by "first firing + grace" instead of a flat
+    window that can silently span two missed firings.
+    """
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(DIGEST_FIRING_TZ)
+    local = _as_utc(after).astimezone(tz)
+    candidate = local.replace(hour=DIGEST_FIRING_HOUR,
+                              minute=DIGEST_FIRING_MINUTE,
+                              second=0, microsecond=0)
+    candidate += timedelta(days=(DIGEST_FIRING_WEEKDAY - candidate.weekday()) % 7)
+    if candidate <= local:
+        candidate += timedelta(days=7)
+    return candidate.astimezone(UTC)
 QUIET_ALLOWED_FROM_HOUR = 7      # inclusive
 QUIET_ALLOWED_UNTIL_HOUR = 22    # EXCLUSIVE — exactly 22:00 is held
 

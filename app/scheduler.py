@@ -148,9 +148,17 @@ def start() -> BackgroundScheduler:
         # scheduler was free. Its own heartbeat is the proof of a quiet run:
         # a digest job that stopped running must read as a dead component, not
         # as permission to create a memberless provider intent.
+        from app.alerts.calendars import (
+            DIGEST_FIRING_HOUR,
+            DIGEST_FIRING_MINUTE,
+            DIGEST_FIRING_TZ,
+            DIGEST_FIRING_WEEKDAY,
+        )
         _scheduler.add_job(_alert_digest_job,
-                           CronTrigger(day_of_week="mon", hour=8, minute=30,
-                                       timezone="Europe/Berlin"),
+                           CronTrigger(day_of_week=DIGEST_FIRING_WEEKDAY,
+                                       hour=DIGEST_FIRING_HOUR,
+                                       minute=DIGEST_FIRING_MINUTE,
+                                       timezone=DIGEST_FIRING_TZ),
                            id="alert_digest", replace_existing=True,
                            coalesce=True, misfire_grace_time=21600, max_instances=1)
         # Registration IS the day-one liveness proof for the weekly job: the

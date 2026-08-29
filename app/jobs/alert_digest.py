@@ -44,7 +44,8 @@ def record_scheduled() -> None:
     scheduled", never "new".
     """
     heartbeat(COMPONENT, "ok",
-              {"note": "scheduled; runs Monday 08:30 Europe/Berlin"},
+              {"kind": "registration",
+               "note": "scheduled; runs Monday 08:30 Europe/Berlin"},
               only_if_absent=True)
 
 
