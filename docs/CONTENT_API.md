@@ -61,7 +61,21 @@ Already-dynamic, already-API-served (no change): `snapshot.judgment_call`,
 
 ```
 GET /api/v1/content/dashboard   static blocks {slug: {kind, text|items|entries}}
-GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, updated_at, purpose, constraints}}
+GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, updated_at, purpose, as_of, constraints}}
+```
+
+v1 completeness is the full code-anchored manifest (`app/content_manifest.py`):
+the served block set must EQUAL the manifest — every listed slug present with
+its declared kind, and no undeclared block — or the artifact degrades whole to
+built-ins at version 0. Extend the manifest in the same PR that adds content;
+an artifact block with no manifest entry is treated as injected content.
+
+Static blocks may carry `as_of: "YYYY-MM"` — mandatory for editorial whose
+copy asserts calendar recency ("today", "right now", "this cycle"): the claim
+is frozen at authoring time and clients must be able to date it. Blocks whose
+"now" is live-referential (copy riding the live payload it explains) carry no
+stamp; the reviewed allowlist lives in `test_dated_editorial_carries_as_of`.
+```
 ```
 
 - Standard `{data, meta}` envelope, `require_read_access` + 60/min rate limit —

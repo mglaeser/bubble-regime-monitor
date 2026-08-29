@@ -20,11 +20,321 @@ Two registries:
 
 from __future__ import annotations
 
+import json
+import os
+import re
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from app.content_manifest import REQUIRED_FILE_SLUG_KINDS
 from app.engine.recompute_slots import schedule_display
 from app.references import DISCLAIMER
+
+# The versioned block artifact (save-haven prose migrated per the shallow-
+# frontend program). Absent file -> built-ins only; the artifact ships in the
+# same PR that first references its slugs.
+_BLOCKS_FILE = Path(__file__).resolve().parents[1] / "config" / "content_blocks.v1.json"
+
+
+_EMPTY_ARTIFACT: dict[str, Any] = {"content_version": 0, "blocks": {}}
+
+# Slug shape: dot-SEPARATED non-empty lowercase segments — the round-13 charset
+# regex still passed degenerate slugs ("..", leading/trailing dots, bare
+# "gauge." producing an empty display sub-slug); round 16 structures it. Two
+# shipped slugs were caught and renamed on first contact (again).
+# Round 22 (SOTA-A): the round-16 structural rewrite silently DROPPED the
+# round-13 {1,120} length cap — arbitrary-length keys loaded as v1. The
+# lookahead restores the frozen cap; structure stays round-16.
+_SLUG_RE = re.compile(r"^(?=.{1,120}$)[a-z0-9_-]+(\.[a-z0-9_-]+)*$")
+
+# Completeness = the FULL code-anchored manifest (app/content_manifest.py):
+# every v1 slug present with its declared kind, or the artifact degrades
+# whole. Round 18 (SOTA-A): the previous gate — five required slugs plus a
+# 200-block count floor — accepted an artifact of band slugs + junk fillers
+# with all 206 remaining editorial blocks missing. The round-16 _MIN_BLOCKS
+# floor is strictly subsumed: manifest coverage implies len(blocks) >= 211.
+# (REQUIRED_FILE_SLUG_KINDS is imported at the top of this module.)
+
+# The band vocabulary is CANONICAL, not artifact-self-declared (round 17).
+# app/models.py:61-65 pins the authoritative action states (hold | trim |
+# de-risk | suppressed); display adds the degraded-suppression and fallback
+# sentinels, and "unknown" is the explicit not-scored state (round 9: an
+# unrecognized band must never fall through to HOLD action copy).
+_CANONICAL_BANDS: frozenset[str] = frozenset({
+    "hold", "trim", "de-risk", "suppressed",
+    "suppressed (block degraded)", "fallback", "unknown",
+})
+_BAND_MAP_SLUGS = ("gauge.band.oneliner", "gauge.splash.band_blurb")
+# gauge.verdict.distance is deliberately NOT here: its rows are case-keyed
+# (case/template), not band-keyed — see the shipped artifact.
+_BAND_TABLE_SLUGS = ("gauge.verdict.lead", "gauge.verdict.detail")
+# Verdict-row schema (round 18, SOTA-A): a band-only row ({"band": "hold"})
+# passed _valid_member (non-empty dict) and closure (band str) yet serves a
+# verdict with no template and no trend selector — clients render nothing.
+_TREND_SELECTORS: frozenset[str] = frozenset({"yes", "no", "any"})
+_DISTANCE_TABLE_SLUG = "gauge.verdict.distance"
+
+_cache_lock = threading.Lock()
+# Published as ONE tuple so a reader can never see a key from one load paired
+# with a value from another (round 12: non-atomic publication under threads).
+_cache: tuple[tuple[int, int, int] | None, dict[str, Any]] | None = None
+
+
+def _file_artifact() -> dict[str, Any]:
+    # Cache keyed on (mtime_ns, size, inode) of the OPEN file descriptor:
+    # key and content are provably bound to the same file state — a separate
+    # stat()-then-open() lets a rename land between the two, caching one
+    # file's content under another's key (TOCTOU; round 13). Atomic-rename
+    # deployment always changes the inode, so a replaced artifact is
+    # re-examined even when a copy tool preserves mtime and size; an in-place
+    # rewrite preserving all three is a filesystem-level act outside this
+    # control's threat model.
+    global _cache
+    try:
+        fh = _BLOCKS_FILE.open(encoding="utf-8")
+        with fh:
+            # EVERY filesystem-level fault degrades to built-ins, never a
+            # handler 500 (round 25, SOTA-A): the original guard covered
+            # open() alone, so an fstat failure on the descriptor (EIO on a
+            # failing mount, a revoked fd) escaped into score/dashboard/
+            # dynamic. The scope now spans the whole descriptor lifetime —
+            # including the implicit close(), which can also raise EIO.
+            st = os.fstat(fh.fileno())
+            key = (st.st_mtime_ns, st.st_size, st.st_ino)
+            cached = _cache
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            with _cache_lock:
+                cached = _cache
+                if cached is not None and cached[0] == key:
+                    return cached[1]
+                value = _load_artifact(fh)
+                _cache = (key, value)
+                return value
+    except OSError:
+        # Explicit invalidation under the None key. A fault always short-
+        # circuits before the key comparison, so simply returning empty
+        # would behave identically — this assignment is defensive clarity,
+        # NOT an independently test-pinned control (round 26 audit, on the
+        # record, same honesty rule as parse_constant above).
+        with _cache_lock:
+            _cache = (None, dict(_EMPTY_ARTIFACT))
+            return _cache[1]
+
+
+def _clear_artifact_cache() -> None:
+    global _cache
+    with _cache_lock:
+        _cache = None
+
+
+def artifact_view() -> tuple[dict[str, Any], int]:
+    """One coherent snapshot of (blocks, version) from a SINGLE artifact read —
+    a response must never mix one load's blocks with another's version."""
+    artifact = _file_artifact()
+    version = artifact.get("content_version", 0)
+    blocks = artifact.get("blocks", {})
+    return (blocks if isinstance(blocks, dict) else {},
+            version if type(version) is int else 0)
+
+
+def _load_artifact(fh: Any) -> dict[str, Any]:
+    # NEVER couple request handling to artifact health: a missing, unreadable
+    # or malformed artifact degrades WHOLLY to built-ins at version 0 (the
+    # never-500-on-data-failure invariant). Validation is deep, not root-only:
+    # an artifact with a structurally invalid blocks/version must not keep
+    # advertising its version while serving built-ins; and a hostile
+    # deeply-nested file raises RecursionError, which must not escape into a
+    # request handler (panel findings, PR #97 rounds 2-3).
+    def _reject_constant(name: str) -> Any:
+        # Python's json accepts Infinity/NaN by default; Starlette's response
+        # encoder (allow_nan=False) then 500s — reject at load instead.
+        raise ValueError(f"non-finite JSON constant: {name}")
+
+    try:
+        # parse_constant is EARLY rejection only — everything it refuses
+        # (Infinity/NaN) is also refused by the strict round-trip below, so
+        # it is deliberately redundant and NOT independently test-pinned
+        # (round 22 deletion audit, on the record).
+        loaded = json.load(fh, parse_constant=_reject_constant)
+        # A payload that json.load accepts can still be unserializable at
+        # RESPONSE time (lone UTF-16 surrogates raise UnicodeEncodeError; a
+        # 1e400 exponent overflows to float('inf') via parse_float, bypassing
+        # parse_constant, and the allow_nan=False response encoder raises).
+        # Prove the whole artifact round-trips under the RESPONSE encoder's
+        # own strictness here, or reject it whole.
+        json.dumps(loaded, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (ValueError, RecursionError, UnicodeEncodeError):
+        # CONTENT faults only. OSError is deliberately NOT caught here: an
+        # I/O failure mid-read is TRANSIENT, and a degraded result returned
+        # from this function is cached under the file's (mtime,size,inode)
+        # key — which does not change when the disk recovers, so one EIO
+        # would pin v0 until the artifact is rewritten or the process
+        # restarts (round 26, SOTA-A). Letting OSError propagate to
+        # _file_artifact's guard caches it under the None key instead, so
+        # the very next request re-reads. Content faults keep caching under
+        # the real key: corrupt bytes stay corrupt until the file changes,
+        # and re-parsing them every request would be pure waste.
+        return dict(_EMPTY_ARTIFACT)
+    version = loaded.get("content_version") if isinstance(loaded, dict) else None
+    blocks = loaded.get("blocks") if isinstance(loaded, dict) else None
+    declared = loaded.get("block_count") if isinstance(loaded, dict) else None
+    # Completeness self-attestation: the artifact declares its own block
+    # count; a truncated-but-valid subset must not serve under the artifact's
+    # version (panel finding, round 10).
+    if type(declared) is not int or not isinstance(blocks, dict) or declared != len(blocks):
+        return dict(_EMPTY_ARTIFACT)
+    # bool is an int subclass in Python: `true` must not pass as a version.
+    if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
+            # EQUALITY, not subset (round 27, SOTA-A): the manifest was
+            # enforced only as "every declared slug is present", so an
+            # artifact could carry EXTRA undeclared blocks and publish them
+            # at v1 through /content/dashboard (and, under a gauge. prefix,
+            # score's display deck) — injected content bypassing every
+            # review pin. The served block set must be exactly the manifest.
+            or blocks.keys() != REQUIRED_FILE_SLUG_KINDS.keys()
+            or not all(isinstance(blocks.get(slug), dict)
+                       and blocks[slug].get("kind") == kind
+                       for slug, kind in REQUIRED_FILE_SLUG_KINDS.items())
+            # Slug shape is now SUBSUMED at the artifact boundary by the
+            # equality check above (a non-manifest slug can never appear).
+            # Retained as defense in depth and applied where it still bites:
+            # the manifest itself, pinned by test_manifest_slugs_are_valid.
+            or not all(isinstance(slug, str) and _SLUG_RE.fullmatch(slug)
+                       for slug in blocks)
+            or _max_depth(blocks) > 32
+            or not all(_valid_member(b) for b in blocks.values())
+            or not _bands_closed(blocks)):
+        # All-or-nothing: an artifact with ANY corrupt member degrades whole —
+        # partial content must never be served under the artifact's version.
+        return dict(_EMPTY_ARTIFACT)
+    return {"content_version": version, "blocks": blocks}
+
+
+def _bands_closed(blocks: dict[str, Any]) -> bool:
+    """Band-vocabulary closure at RUNTIME against a CANONICAL vocabulary.
+
+    Round 17 (SOTA-A + SOTA-C): closure relative to whatever the oneliner
+    happened to declare let a v1 artifact omit the de-risk copy from every
+    band block at once, and left gauge.splash.band_blurb entirely
+    unvalidated — a swapped artifact missing its fallback/de-risk blurbs
+    passed the loader, and ||hold client patterns rendered HOLD copy for
+    the highest-severity band. Every band-keyed map must cover ALL of
+    _CANONICAL_BANDS, and every band-keyed verdict table must cover the
+    canonical set PLUS any extra band a map declares, or the artifact
+    degrades whole."""
+    vocab: set[str] = set(_CANONICAL_BANDS)
+    for map_slug in _BAND_MAP_SLUGS:
+        block = blocks.get(map_slug, {})
+        entries = block.get("entries") if isinstance(block, dict) else None
+        if not isinstance(entries, dict) or not _CANONICAL_BANDS.issubset(entries):
+            return False
+        vocab.update(entries)
+    for table_slug in _BAND_TABLE_SLUGS:
+        table = blocks.get(table_slug, {})
+        items = table.get("items") if isinstance(table, dict) else None
+        if not isinstance(items, list):
+            return False
+        # str-check BEFORE any hashing: an unhashable "band" value (list/
+        # dict) raised TypeError out of a set comprehension here, past the
+        # load-time try/except, and 500'd every artifact-backed route
+        # (round 17, SOTA-A). A band-table row whose band is not a string
+        # is corruption — the artifact degrades whole, it never crashes.
+        rows: set[str] = set()
+        coverage: dict[str, set[str]] = {}
+        for row in items:
+            band = row.get("band") if isinstance(row, dict) else None
+            if not isinstance(band, str):
+                return False
+            # Full row schema, not band-presence alone (round 18): every
+            # verdict row needs its template copy and a trend selector.
+            template = row.get("template")
+            if not isinstance(template, str) or not template.strip():
+                return False
+            # isinstance BEFORE membership: `x in frozenset` hashes x, so a
+            # valid-JSON [] here raised TypeError into three routes — the
+            # same crash class as round 17's band fix, reintroduced by the
+            # round-18 schema check and caught by SOTA-A (round 19).
+            trend = row.get("trend_broken")
+            if not isinstance(trend, str) or trend not in _TREND_SELECTORS:
+                return False
+            rows.add(band)
+            coverage.setdefault(band, set()).add(trend)
+        if not vocab.issubset(rows):
+            return False
+        # Trend coverage (round 20, SOTA-A): band presence alone let an
+        # artifact drop every "yes" row and still serve v1 — a fired
+        # hold/trim/de-risk state had no truthful template. Every band must
+        # resolve for BOTH trend states: an "any" row, or yes AND no rows.
+        for selectors in coverage.values():
+            if "any" not in selectors and not {"yes", "no"} <= selectors:
+                return False
+    # The distance table is case-keyed, not band-keyed — but its rows have a
+    # schema too: a non-empty case selector and template copy (round 18).
+    distance = blocks.get(_DISTANCE_TABLE_SLUG, {})
+    d_items = distance.get("items") if isinstance(distance, dict) else None
+    if not isinstance(d_items, list):
+        return False
+    for row in d_items:
+        if not isinstance(row, dict):
+            return False
+        case = row.get("case")
+        template = row.get("template")
+        if not (isinstance(case, str) and case.strip()
+                and isinstance(template, str) and template.strip()):
+            return False
+    return True
+
+
+def _max_depth(obj: Any) -> int:
+    """Iterative nesting depth (no recursion): the preflight round-trip dumps
+    the RAW artifact, but responses serialize it WRAPPED in {data:{...},meta}
+    — an artifact near the interpreter recursion limit passes a raw dump yet
+    raises inside the response encoder. An explicit bound (32) decouples
+    artifact health from interpreter limits entirely."""
+    depth, stack = 0, [(obj, 1)]
+    while stack:
+        node, d = stack.pop()
+        depth = max(depth, d)
+        if d > 64:  # hard stop: deeper than any legitimate artifact
+            return d
+        if isinstance(node, dict):
+            stack.extend((v, d + 1) for v in node.values())
+        elif isinstance(node, list):
+            stack.extend((v, d + 1) for v in node)
+    return depth
+
+
+def _valid_member(block: Any) -> bool:
+    # Deep, not container-shallow: the all-or-nothing invariant means every
+    # ITEM must satisfy its kind's shape, not just the container's presence.
+    if not isinstance(block, dict):
+        return False
+    kind = block.get("kind")
+    if kind in ("text", "template"):
+        text = block.get("text")
+        return isinstance(text, str) and bool(text.strip())
+    if kind in ("links", "endpoint_catalog", "table"):
+        items = block.get("items")
+        return (isinstance(items, list) and bool(items)
+                and all(isinstance(i, dict) and i for i in items))
+    if kind == "list":
+        items = block.get("items")
+        return (isinstance(items, list) and bool(items)
+                and all((isinstance(i, str) and i.strip())
+                        or (isinstance(i, dict) and i) for i in items))
+    if kind == "map":
+        entries = block.get("entries")
+        return (isinstance(entries, dict) and bool(entries)
+                and all(isinstance(v, str) and v.strip() for v in entries.values()))
+    return False
+
+
+def content_version() -> int:
+    version = _file_artifact().get("content_version", 0)
+    return version if isinstance(version, int) else 0
 
 ADVICE_TAG = "Research, not advice."
 
@@ -33,12 +343,42 @@ def _text(text: str) -> dict[str, Any]:
     return {"kind": "text", "text": text}
 
 
+def dashboard_payload() -> dict[str, Any]:
+    """Blocks + version from ONE artifact snapshot — a response must never
+    pair one load's blocks with another load's version (round 12)."""
+    file_blocks, version = artifact_view()
+    blocks = dict(_builtin_blocks())
+    for slug, block in file_blocks.items():
+        if slug not in blocks and isinstance(block, dict):
+            blocks[slug] = block
+    return {"blocks": blocks, "content_version": version}
+
+
 def static_blocks() -> dict[str, dict[str, Any]]:
-    """All static content blocks, keyed by slug. Pure; no I/O."""
+    """All static content blocks, keyed by slug: built-ins + the versioned
+    block artifact (file slugs never override built-ins)."""
+    blocks: dict[str, dict[str, Any]] = dashboard_payload()["blocks"]
+    return blocks
+
+
+def gauge_display() -> dict[str, Any]:
+    """The gauge display deck (Q8: copy rides the score payload) — every
+    file block under the gauge. prefix (the A1 ledger's namespace for the
+    deck), keyed by its sub-slug (e.g. band.oneliner, badge.static)."""
+    prefix = "gauge."
+    return {slug[len(prefix):]: block
+            for slug, block in static_blocks().items() if slug.startswith(prefix)}
+
+
+def _builtin_blocks() -> dict[str, dict[str, Any]]:
     return {
         # The canonical disclaimer (app.references.DISCLAIMER) with markdown
         # emphasis markers stripped for plain-text display surfaces.
         "disclaimer_full": _text(DISCLAIMER.replace("**", "")),
+        # Canonical alias for the companion dashboard's frozen content
+        # contract: its client, fallback generator and acceptance suite all
+        # gate on blocks['site.disclaimer'] carrying 'not investment advice'.
+        "site.disclaimer": _text(DISCLAIMER.replace("**", "")),
         "advice_tag": _text(ADVICE_TAG),
         "intro.science_audit": _text(
             "Everything currently unclear, incomplete, contested, proxied, judgmental, "
@@ -132,10 +472,140 @@ class DynamicSlot:
     max_len: int
     regex: str
     placeholder: str
+    # Authoring date of a FROZEN editorial placeholder (round 21, SOTA-A):
+    # frozen values served without a date let relative readings drift with
+    # request time. None only for non-editorial "pending" placeholders.
+    as_of: str | None = None
 
 
-# Single-line printable ASCII; the length bound is repeated in the regex so a
-# consumer can validate with the regex alone.
+_PENDING = "Automated note pending - not yet generated."
+
+
+def _ascii_slot(slug: str, purpose: str, max_len: int) -> DynamicSlot:
+    """Single-line printable-ASCII slot; length bound repeated in the regex so
+    a consumer can validate with the regex alone."""
+    placeholder = _PENDING if len(_PENDING) <= max_len else "Pending."
+    return DynamicSlot(slug, purpose, max_len, rf"^[\x20-\x7E]{{1,{max_len}}}$", placeholder)
+
+
+def _save_haven_slots() -> list[DynamicSlot]:
+    """The companion-dashboard slot registry (A1 ledger contracts, ruling Q47).
+    Analytics slots serve today's frozen editorial values as placeholders until
+    the Phase-E battery produces them server-side."""
+    slots: list[DynamicSlot] = [
+        # Banner placeholders carry the CURRENT editorial values (A2: analytics/
+        # banner slots serve today's frozen editorial state until generation
+        # lands) — a placeholder shaped like a date must never fabricate one.
+        DynamicSlot("atlas.explorer.potential-banner.anchor-date",
+                    "Anchor month of the potential-crisis banner", 8,
+                    r"^[A-Z][a-z]{2} 20\d{2}$", "Jul 2026", as_of="2026-07"),
+        DynamicSlot("atlas.explorer.potential-banner.backfill-window",
+                    "Backfill window of the potential-crisis banner", 24,
+                    r"^[\x20-\x7E]{1,24}$", "Jul 2021 - Jul 2026", as_of="2026-07"),
+        # The placeholder states DATES and asserts no recency claim — a
+        # "<= N weeks old" phrasing self-invalidates as time passes (panel
+        # finding, round 10); the dynamic slot exists to keep this current.
+        DynamicSlot("atlas.explorer.potential-banner.freshness",
+                    "Source-freshness line of the potential-crisis banner", 120,
+                    r"^[\x20-\x7E]{1,120}$",
+                    "sources as of BIS 28 Jun / ECB 2 Jun & 27 May / Fed 8 May 2026", as_of="2026-07"),
+        _ascii_slot("atlas.crises.ai2026.peak", "AI-2026 crisis peak label", 48),
+        _ascii_slot("atlas.crises.ai2026.cause", "AI-2026 crisis cause prose", 600),
+        _ascii_slot("atlas.crises.ai2026.highlight", "AI-2026 crisis highlight prose", 700),
+        _ascii_slot("gauge.verdict.lead", "Gauge hero verdict lead sentence", 120),
+        _ascii_slot("gauge.verdict.detail", "Gauge hero verdict detail sentence", 360),
+        _ascii_slot("gauge.verdict.distance", "Gauge verdict distance clause", 200),
+        _ascii_slot("gauge.judgment_call", "Gauge judgment-call line", 300),
+        _ascii_slot("gauge.freshness", "Gauge freshness stamp", 24),
+        _ascii_slot("gauge.badge.static", "Gauge static-mode badge text", 120),
+        _ascii_slot("gauge.badge.live_tip", "Gauge live-mode badge tooltip", 120),
+        _ascii_slot("gauge.badge.partial_tip", "Gauge partial-mode badge tooltip", 140),
+        _ascii_slot("gauge.live_backfill.banner", "Gauge live-backfill banner", 160),
+        _ascii_slot("gauge.live_backfill.static_note", "Gauge live-backfill static note", 160),
+        _ascii_slot("gauge.live_backfill.editorial_line", "Gauge live-backfill editorial line", 120),
+        _ascii_slot("gauge.hero.run_line", "Gauge hero run line", 60),
+        _ascii_slot("gauge.metric.note", "Gauge metric provenance note", 120),
+        _ascii_slot("gauge.status.audit_flag.title", "Gauge audit-flag title", 80),
+        _ascii_slot("gauge.status.audit_flag.detail", "Gauge audit-flag detail", 280),
+        _ascii_slot("gauge.status.audit_flag.ref", "Gauge audit-flag reference", 40),
+        _ascii_slot("analytics.markov.p_turbulent", "Markov turbulent-state probability line", 32),
+        _ascii_slot("analytics.markov.states", "Markov state descriptions", 240),
+        _ascii_slot("analytics.granger.summary", "Granger lead-lag summary", 400),
+        _ascii_slot("analytics.hedgeweight.verdict", "Hedge-weighting verdict paragraph", 520),
+        _ascii_slot("playbook.etoro.verified", "eToro instrument verification date line", 48),
+        _ascii_slot("playbook.expert.as_of", "Expert buy-list as-of stamp", 24),
+    ]
+    for crisis_asset, n in (("gold", 520), ("bonds", 450), ("cash", 320),
+                            ("jpy", 160), ("btc", 200)):
+        slots.append(_ascii_slot(f"atlas.matrix.{crisis_asset}.ai2026",
+                                 f"AI-2026 matrix note for {crisis_asset}", n))
+    # Numeric analytics placeholders carry the TRUE frozen editorial values
+    # from the dashboard's battery (A2; ASCII-normalized) — a zero-shaped
+    # placeholder would fabricate a measurement (panel finding, PR #97).
+    tail_editorial = {
+        "gold": {"bf": "-0.08", "bc": "-0.02", "hit": "42%", "lam": "0.26"},
+        "ust10y": {"bf": "+0.08", "bc": "-0.02", "hit": "33%", "lam": "0.31"},
+        "cash": {"bf": "+0.01", "bc": "+0.01", "hit": "100%", "lam": "0.37"},
+    }
+    # Per-stat domain regexes (round 11): hit is a 0-100 percentage, bf/bc are
+    # signed betas, lam lives in [0,1] — a generic numeric regex admitted
+    # domain-impossible values like 999%.
+    tail_regex = {
+        "bf": r"^[+-]\d\.\d{2}$",
+        "bc": r"^[+-]\d\.\d{2}$",
+        "hit": r"^(100|[1-9]?\d(\.\d{1,2})?)%$",
+        "lam": r"^(0\.\d{2}|1\.00)$",
+    }
+    for asset, stats in tail_editorial.items():
+        for stat, value in stats.items():
+            slots.append(DynamicSlot(
+                f"analytics.tail.{asset}.{stat}",
+                f"Tail-regression {stat} statistic for {asset}", 8,
+                tail_regex[stat], value, as_of="2026-07"))
+    explos_editorial = [
+        ("Raw log price", "+0.75", "borderline (crit 0.62-0.78, seed-sensitive)"),
+        ("Linear-trend residual", "-0.76", "not explosive"),
+        ("Broken-trend residual (break Dec '22)", "-1.20", "not explosive"),
+        ("Earnings-proxy residual (17%/yr)", "-0.83", "not explosive"),
+    ]
+    for i, (label, stat, verdict) in enumerate(explos_editorial, start=1):
+        slots.append(DynamicSlot(f"analytics.explos.{i}.label",
+                                 f"Explosiveness row {i} label", 48,
+                                 r"^[\x20-\x7E]{1,48}$", label, as_of="2026-07"))
+        slots.append(DynamicSlot(f"analytics.explos.{i}.stat",
+                                 f"Explosiveness row {i} statistic", 6,
+                                 r"^[+-]\d\.\d{2}$", stat, as_of="2026-07"))
+        slots.append(DynamicSlot(f"analytics.explos.{i}.verdict",
+                                 f"Explosiveness row {i} verdict", 44,
+                                 r"^[\x20-\x7E]{1,44}$", verdict, as_of="2026-07"))
+    clock_editorial = {
+        "weighted": "~ -12 mo", "dotcom": "p ~ 0 / +1",
+        # gold-lead was "now -> +19 mo" — a frozen Jul-2026 window phrased
+        # deictically shifted the implied market peak forward with request
+        # time (round 21, SOTA-A). Absolute calendar bounds instead.
+        "lppl": "+2.5 mo", "gold-lead": "Jul'26 - Feb'28",
+    }
+    for clock, value in clock_editorial.items():
+        slots.append(DynamicSlot(f"analytics.clock.{clock}.value",
+                                 f"Analytics clock {clock} value", 16,
+                                 r"^[\x20-\x7E]{1,16}$", value, as_of="2026-07"))
+        slots.append(_ascii_slot(f"analytics.clock.{clock}.caption",
+                                 f"Analytics clock {clock} caption", 180))
+    hedge_editorial = {
+        "cash": "0.88", "gold": "0.85", "chf": "0.59", "usd": "0.44",
+        "ust10y": "0.42", "jpy": "0.21", "btc": "0.11",
+    }
+    for asset, score in hedge_editorial.items():
+        # Domain-tight: a hedge score lives in [0, 1] — the regex must not
+        # admit 1.50 (panel finding, PR #97).
+        slots.append(DynamicSlot(f"analytics.hedgeweight.{asset}.score",
+                                 f"Hedge weighting score for {asset}", 4,
+                                 r"^(0\.\d{2}|1\.00)$", score, as_of="2026-07"))
+        slots.append(_ascii_slot(f"analytics.hedgeweight.{asset}.reason",
+                                 f"Hedge weighting reason for {asset}", 140))
+    return slots
+
+
 DYNAMIC_SLOTS: tuple[DynamicSlot, ...] = (
     DynamicSlot(
         slug="headline_note",
@@ -160,6 +630,7 @@ DYNAMIC_SLOTS: tuple[DynamicSlot, ...] = (
         regex=r"^[\x20-\x7E]{1,240}$",
         placeholder="Automated dashboard note pending - not yet generated.",
     ),
+    *_save_haven_slots(),
 )
 
 
@@ -171,6 +642,7 @@ def dynamic_slots_payload() -> dict[str, dict[str, Any]]:
             "source": "placeholder",
             "updated_at": None,
             "purpose": s.purpose,
+            "as_of": s.as_of,
             "constraints": {"max_len": s.max_len, "regex": s.regex},
         }
         for s in DYNAMIC_SLOTS
