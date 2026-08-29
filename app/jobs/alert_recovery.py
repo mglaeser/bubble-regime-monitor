@@ -37,6 +37,20 @@ SIDECAR_COMPONENT = "sidecar_reconciliation"
 _NON_OK_CLEAR_MARGIN = timedelta(minutes=5)
 
 
+def liveness_token(component: str) -> int | None:
+    """Snapshot a component's landing order BEFORE doing the work you will
+    report on.
+
+    heartbeat() cannot know when its caller formed a verdict, so its own
+    entry snapshot may already include a failure that landed after the
+    work finished — and "nothing moved since entry" would then license a
+    stale clear (panel round 24). A caller that takes this token first and
+    passes it back as ``since`` closes that window exactly: anything that
+    landed while the work was running shows up as a moved revision.
+    """
+    return _current_revision(component)
+
+
 def _current_revision(component: str) -> int | None:
     """The row's landing-order counter right now, or None if it has none.
 
@@ -63,6 +77,7 @@ def heartbeat(
     mode: str | None = None,
     live_profile: str | None = None,
     only_if_absent: bool = False,
+    since: int | None = None,
 ) -> None:
     """Record liveness with the namespace whose work was actually checked.
 
@@ -91,7 +106,10 @@ def heartbeat(
     # lands late. The revision counter IS landing order, so reading it
     # here, next to the verdict, gives an exact answer: anything with a
     # higher revision at write time arrived after this writer entered.
-    entry_revision = _current_revision(component)
+    # `since` is the caller's own pre-work snapshot and is strictly better
+    # evidence than anything measurable here: it predates the work, while
+    # this fallback only predates the write.
+    entry_revision = since if since is not None else _current_revision(component)
     settings = get_settings()
     current_mode = mode or settings.alerts_mode
     current_profile = live_profile or settings.alerts_live_profile
@@ -102,6 +120,7 @@ def heartbeat(
                              captured=captured,
                              claimed_at=claimed_at,
                              entry_revision=entry_revision,
+                             since=since,
                              current_mode=current_mode,
                              current_profile=current_profile,
                              only_if_absent=only_if_absent,
@@ -192,6 +211,7 @@ def _write_heartbeat(
     captured: list[datetime],
     claimed_at: datetime,
     entry_revision: int | None,
+    since: int | None,
     current_mode: str,
     current_profile: str,
     only_if_absent: bool,
@@ -319,7 +339,24 @@ def _write_heartbeat(
                         return
                     if entry_revision is None or row.revision != entry_revision:
                         return
-                    if now <= existing + _NON_OK_CLEAR_MARGIN:
+                    # Second, independent refusal: a failure whose beat is
+                    # newer than the moment this writer entered cannot have
+                    # been seen by the verdict it would clear. Weaker than
+                    # the revision check (beats are observation instants,
+                    # not landing order) but it costs nothing and fails in
+                    # a different direction, so both must pass.
+                    if existing > claimed_at:
+                        return
+                    # The dominance margin is a HEURISTIC for callers
+                    # that supply no pre-work token: it assumes a
+                    # genuine recovery is the component's next run,
+                    # minutes to days later. A caller that DID supply
+                    # one has already proven the stronger thing —
+                    # nothing landed while its work ran — so proof
+                    # supersedes the heuristic, which would otherwise
+                    # veto a legitimate immediate re-run.
+                    if (since is None
+                            and now <= existing + _NON_OK_CLEAR_MARGIN):
                         return
                 elif now <= existing:
                     return

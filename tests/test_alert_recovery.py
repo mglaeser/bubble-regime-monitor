@@ -1912,3 +1912,53 @@ def test_a_late_landing_failure_with_an_old_beat_still_blocks_a_clear(
         assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
             "a failure that landed after the verdict was cleared by it "
             "because its beat looked older")
+
+
+def test_a_failure_landing_during_the_work_is_not_cleared_by_that_run(
+        isolated_db, monkeypatch):
+    """Panel round 24, confirmed and fixed, pinned.
+
+    heartbeat()'s own entry snapshot is taken after the caller's verdict,
+    so a failure landing between the work finishing and the report being
+    written was already IN that snapshot — and "nothing moved since
+    entry" then licensed the stale clear. A caller that snapshots before
+    its work and passes the token closes the window exactly.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs.alert_recovery import heartbeat, liveness_token
+
+    heartbeat("digest", "ok", {"note": "healthy before the run"})
+
+    token = liveness_token("digest")        # taken BEFORE the work
+    heartbeat("digest", "critical", {"note": "crash during the work"})
+
+    # The run finishes and reports success, carrying its pre-work token.
+    heartbeat("digest", "ok", {"note": "success verdict from that run"},
+              since=token)
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
+            "a run cleared a failure that landed while it was working")
+
+    # A later run, snapshotting after that failure, clears it normally.
+    later = liveness_token("digest")
+    heartbeat("digest", "ok", {"note": "next run"}, since=later)
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "ok", (
+            "a genuine later run could not clear the failure")
+
+
+def test_the_digest_job_snapshots_its_liveness_token_before_working():
+    """The gate leans on the digest, so its verdict window is closed by
+    construction rather than assumed small — pinned structurally."""
+    import inspect
+
+    from app.jobs.alert_digest import job
+
+    source = inspect.getsource(job)
+    token_line = source.index("liveness_token(COMPONENT)")
+    work_line = source.index("run_once(")
+    assert token_line < work_line, (
+        "the digest job must snapshot its token BEFORE running the work")
+    assert "since=token" in source, (
+        "the token must be passed back with the success report")

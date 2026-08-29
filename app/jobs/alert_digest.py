@@ -22,7 +22,7 @@ from app.alerts.errors import sanitize
 from app.alerts.models import AlertDigestItem, AlertEpisode
 from app.config import get_settings
 from app.db import session_scope
-from app.jobs.alert_recovery import heartbeat
+from app.jobs.alert_recovery import heartbeat, liveness_token
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -52,13 +52,14 @@ def record_scheduled() -> None:
 
 
 def run_once(*, now: datetime | None = None,
-             window_key: str | None = None) -> dict[str, Any]:
+             window_key: str | None = None,
+             since: int | None = None) -> dict[str, Any]:
     now = now or datetime.now(UTC)
     settings = get_settings()
     if settings.alerts_mode == "disabled":
         detail = {"status": "skipped", "reason": "alerting disabled",
                   "skipped": True}
-        heartbeat(COMPONENT, "ok", detail)
+        heartbeat(COMPONENT, "ok", detail, since=since)
         return detail
 
     # The window that just CLOSED, not the one we are in. Running on Monday for
@@ -160,14 +161,19 @@ def run_once(*, now: datetime | None = None,
               "recovered_windows": recovered}
     if recovered:
         log.warning("alert_digest_recovered_missed_windows", windows=recovered)
-    heartbeat(COMPONENT, "ok", detail)
+    heartbeat(COMPONENT, "ok", detail, since=since)
     return {"status": "ok", **detail}
 
 
 def job() -> None:
     """Scheduler entry point. Never raises."""
+    # Snapshotted BEFORE the work, so a failure landing while the digest
+    # runs cannot be cleared by the success verdict this run may report
+    # (panel round 24). The cutover gate leans on this component, so its
+    # verdict window is closed explicitly rather than assumed small.
+    token = liveness_token(COMPONENT)
     try:
-        result = run_once()
+        result = run_once(since=token)
         log.info("alert_digest_job", **result)
     except Exception as exc:
         log.error("alert_digest_job_failed", error_class=type(exc).__name__,
