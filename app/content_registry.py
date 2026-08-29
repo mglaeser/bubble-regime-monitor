@@ -66,6 +66,12 @@ def _file_artifact() -> dict[str, Any]:
         return dict(_EMPTY_ARTIFACT)
     version = loaded.get("content_version") if isinstance(loaded, dict) else None
     blocks = loaded.get("blocks") if isinstance(loaded, dict) else None
+    declared = loaded.get("block_count") if isinstance(loaded, dict) else None
+    # Completeness self-attestation: the artifact declares its own block
+    # count; a truncated-but-valid subset must not serve under the artifact's
+    # version (panel finding, round 10).
+    if type(declared) is not int or not isinstance(blocks, dict) or declared != len(blocks):
+        return dict(_EMPTY_ARTIFACT)
     # bool is an int subclass in Python: `true` must not pass as a version.
     if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
             or _max_depth(blocks) > 32
@@ -280,10 +286,13 @@ def _save_haven_slots() -> list[DynamicSlot]:
         DynamicSlot("atlas.explorer.potential-banner.backfill-window",
                     "Backfill window of the potential-crisis banner", 24,
                     r"^[\x20-\x7E]{1,24}$", "Jul 2021 - Jul 2026"),
+        # The placeholder states DATES and asserts no recency claim — a
+        # "<= N weeks old" phrasing self-invalidates as time passes (panel
+        # finding, round 10); the dynamic slot exists to keep this current.
         DynamicSlot("atlas.explorer.potential-banner.freshness",
                     "Source-freshness line of the potential-crisis banner", 120,
                     r"^[\x20-\x7E]{1,120}$",
-                    "<= 6 weeks old (BIS 28 Jun / ECB 2 Jun & 27 May / Fed 8 May 2026)"),
+                    "sources as of BIS 28 Jun / ECB 2 Jun & 27 May / Fed 8 May 2026"),
         _ascii_slot("atlas.crises.ai2026.peak", "AI-2026 crisis peak label", 48),
         _ascii_slot("atlas.crises.ai2026.cause", "AI-2026 crisis cause prose", 600),
         _ascii_slot("atlas.crises.ai2026.highlight", "AI-2026 crisis highlight prose", 700),

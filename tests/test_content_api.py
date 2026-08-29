@@ -205,11 +205,18 @@ class TestBlockArtifact:
         import app.content_registry as reg
 
         reg._file_artifact.cache_clear()
+        blocks = reg.static_blocks()
+        # Round 10: detection-by-key self-excludes a map MISSING those keys —
+        # the known band maps are pinned by SLUG and must be band-shaped.
+        KNOWN_BAND_MAPS = ("gauge.band.oneliner", "gauge.splash.band_blurb")
+        for slug in KNOWN_BAND_MAPS:
+            assert blocks.get(slug, {}).get("kind") == "map", f"{slug} missing or not a map"
         band_maps = [
             (slug, block["entries"])
-            for slug, block in reg.static_blocks().items()
+            for slug, block in blocks.items()
             if block.get("kind") == "map"
-            and "hold" in block.get("entries", {}) and "trim" in block["entries"]
+            and (slug in KNOWN_BAND_MAPS
+                 or ("hold" in block.get("entries", {}) and "trim" in block["entries"]))
         ]
         assert band_maps, "no band-shaped maps found - artifact regression?"
         for slug, entries in band_maps:
@@ -380,3 +387,24 @@ class TestBlockArtifact:
                 for verb in ("de-risk now", "trim now", "hold —", "hold -"):
                     assert verb not in text, f"{table} unknown row carries action copy"
         reg._file_artifact.cache_clear()
+
+    def test_truncated_artifact_fails_completeness_attestation(self, monkeypatch, tmp_path):
+        # Round 10: a valid-member subset must not serve under the artifact's
+        # version — block_count self-attestation catches truncation.
+        import app.content_registry as reg
+
+        bad = tmp_path / "content_blocks.v1.json"
+        bad.write_text('{"content_version": 1, "block_count": 5, "blocks": {'
+                       '"x.y": {"kind": "text", "text": "only one"}}}', encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", bad)
+        reg._file_artifact.cache_clear()
+        assert reg.content_version() == 0
+        reg._file_artifact.cache_clear()
+
+    def test_shipped_artifact_attests_its_own_completeness(self):
+        import json as _json
+
+        import app.content_registry as reg
+
+        raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
+        assert raw["block_count"] == len(raw["blocks"]) >= 211
