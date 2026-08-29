@@ -1259,12 +1259,15 @@ def test_the_beat_is_observation_time_never_redated_by_retries(
     from app.jobs import alert_recovery
     from app.jobs.alert_recovery import heartbeat
 
-    heartbeat("digest", "critical", {"note": "old crash"})
+    # ok-over-ok through a retry: a retry may not CLEAR a failure (that is
+    # causally forbidden), so the re-dating property is pinned on the
+    # transition a retry is still allowed to make.
+    heartbeat("digest", "ok", {"note": "earlier healthy run"})
     with session_scope() as session:
         crash_beat = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
         crash_beat = crash_beat.replace(tzinfo=_utc) if crash_beat.tzinfo is None else crash_beat
 
-    observed = crash_beat + _td(minutes=6)    # next run, beyond the margin
+    observed = crash_beat + _td(minutes=6)    # next run, strictly newer
     _FrozenDatetime.frozen = observed
     monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
 
@@ -1616,3 +1619,60 @@ def test_two_failure_reports_sharing_a_beat_cannot_be_aba_overwritten(
         assert row.detail_json.get("previous_status") == "critical", (
             "the stale writer's CAS matched a repeated (beat, status) pair "
             "and overwrote the intervening failure report's audit trail")
+
+
+def test_a_retrying_ok_can_never_clear_a_failure_however_the_clocks_read(
+        isolated_db, monkeypatch):
+    """Panel round 17, confirmed and fixed, pinned.
+
+    A non-ok report is exempt from ordering, so it can land with a beat
+    REWOUND far behind the previous ok's — and then a health claim formed
+    before the crash still dominates any fixed margin. The round-14 margin
+    proof only covered steps inside the tolerance; this closes it causally
+    instead: a retry carries an observation formed before the race it
+    lost, so it may never clear a failure, whatever the timestamps say.
+    """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_recovery import heartbeat
+
+    # Pre-crash health claim at 10:00, then a 20-minute backward step: the
+    # crash lands stamped 09:40 — far more rewind than any fixed margin.
+    _FrozenDatetime.frozen = datetime(2026, 8, 24, 9, 40, tzinfo=_utc)
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "critical", {"note": "crash after a 20min rewind"})
+
+    # The stale ok: observed at 10:00 (pre-step), 20 minutes "newer" than
+    # the crash beat, and it lost the race — so it arrives on a retry.
+    _FrozenDatetime.frozen = datetime(2026, 8, 24, 10, 0, tzinfo=_utc)
+    real_get = Session.get
+    state = {"n": 0}
+
+    def racing_get(self, entity, ident, **kw):
+        if entity is AlertComponentHeartbeat:
+            state["n"] += 1
+            if state["n"] == 1:
+                return None  # the create race this writer loses
+        return real_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(Session, "get", racing_get)
+    heartbeat("digest", "ok", {"note": "health claim formed before the crash"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
+            "a carried observation cleared a failure it never witnessed")
+
+    # And a genuine later run — observation contemporaneous with a read that
+    # sees the failure — still clears it.
+    heartbeat("digest", "ok", {"note": "genuine recovery run"})
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "ok", (
+            "a genuine recovery must still clear the failure")

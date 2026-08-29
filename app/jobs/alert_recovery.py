@@ -78,7 +78,8 @@ def heartbeat(
                              now=observed_at,
                              current_mode=current_mode,
                              current_profile=current_profile,
-                             only_if_absent=only_if_absent)
+                             only_if_absent=only_if_absent,
+                             observation_is_current=attempt == 1)
             return
         except _HeartbeatRaced:
             # The compare-and-swap found the row changed under us: loop
@@ -165,6 +166,7 @@ def _write_heartbeat(
     current_mode: str,
     current_profile: str,
     only_if_absent: bool,
+    observation_is_current: bool = True,
 ) -> None:
     with session_scope() as session:
         if only_if_absent:
@@ -233,18 +235,28 @@ def _write_heartbeat(
                 if existing_raw.tzinfo is None else existing_raw
             if status == "ok":
                 if row.status != "ok":
-                    # Clearing a FAILURE needs dominance beyond the clock
-                    # model, not bare ordering (panel round 14): an ok whose
-                    # observation was captured before a backward clock step
-                    # carries a wall-future timestamp and would erase a
-                    # later crash. Bound: with any single step <= the 5min
-                    # the gate already tolerates, two writers' clock errors
-                    # differ by <= 5min, so a stale ok (observed before the
-                    # crash in real time) can exceed the crash beat by at
-                    # most 5min on the wall — requiring MORE than that
-                    # margin excludes every such write by construction.
-                    # Genuine recoveries are the component's next run:
-                    # 30min to 7 days later, clearing the margin trivially.
+                    # CLEARING A FAILURE IS CAUSAL, NOT CHRONOMETRIC.
+                    #
+                    # Timestamps cannot arbitrate this: a non-ok report is
+                    # exempt from ordering, so it may carry a beat REWOUND
+                    # far behind the previous ok's — and then a health
+                    # claim captured before the crash still dominates any
+                    # fixed margin (panel round 17; the round-14 margin
+                    # proof only covered steps within the tolerance).
+                    #
+                    # What actually licenses a clear is causality: this
+                    # writer's observation must not predate state it had
+                    # not yet seen. On a first attempt the observation is
+                    # taken microseconds before the read, so a read that
+                    # returns a FAILURE places the observation after that
+                    # failure landed — whatever either clock says. A retry
+                    # is the opposite: it carries an observation formed
+                    # before the race it lost, so it may never clear.
+                    if not observation_is_current:
+                        return
+                    # Belt and braces for the microsecond window on a
+                    # first attempt: still require dominance beyond the
+                    # skew the gate tolerates.
                     if now <= existing + _NON_OK_CLEAR_MARGIN:
                         return
                 elif now <= existing:
