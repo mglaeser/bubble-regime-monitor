@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 
 from app.config import get_settings
+from app.content_registry import gauge_display
 from app.db import session_scope
 from app.models import Snapshot
 from app.references import EPISTEMIC_CAVEATS
@@ -108,6 +109,10 @@ def get_score(request: Request, _: None = Depends(require_read_access)) -> dict[
         "fast_alarm": snap.fast_alarm,
         "judgment_call": {"text": snap.judgment_call, "stale": snap.judgment_stale,
                           "error_class": snap.judgment_error},
+        # Q8 (shallow-frontend program): the gauge display copy rides the data
+        # it explains — band one-liners, indicator glosses, badge/banner texts.
+        # Sourced from the versioned content-block artifact; {} until it ships.
+        "display": gauge_display(),
     }
     meta = _meta(snap)
     meta["coverage"] = (snap.data_freshness or {}).get("_coverage", {})
