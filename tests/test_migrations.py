@@ -440,7 +440,7 @@ def test_admin_atomicity_migration_upgrade_downgrade_upgrade(tmp_path):
     _run_with_db(db, _cycle)
     connection = sqlite3.connect(db)
     assert connection.execute(
-        "select version_num from alembic_version").fetchone() == ("0017",)
+        "select version_num from alembic_version").fetchone() == ("0018",)
     connection.close()
 
 

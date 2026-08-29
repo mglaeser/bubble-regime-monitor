@@ -520,7 +520,7 @@ _EVALUATOR_MAX_SILENCE_S = 10 * 60 * 60
 #: is called a fault rather than noise.
 _CLOCK_SKEW_TOLERANCE_S = 60
 
-_ALERT_SCHEMA_REVISION = "0017"
+_ALERT_SCHEMA_REVISION = "0018"
 _REQUIRED_PARTIAL_INDEXES = frozenset({
     "uq_alert_input_snapshot_id",
     "uq_alert_episode_open",

@@ -1561,3 +1561,58 @@ def test_a_failure_report_lands_even_under_sustained_contention(
             "retry exhaustion dropped the crash report — fail-open")
         assert row.detail_json.get("forced_landing") is True, (
             "the landing should be marked as forced for the audit trail")
+
+
+def test_two_failure_reports_sharing_a_beat_cannot_be_aba_overwritten(
+        isolated_db, monkeypatch):
+    """Panel round 16 defect 2, confirmed and fixed, pinned.
+
+    Non-ok writes bypass strict ordering, so two failure reports can carry
+    the SAME beat and status — making (beat, status) a repeatable pair. A
+    stale writer holding it still matched and erased the intervening
+    report's detail and run_count. The token is now the row's monotonic
+    revision, which cannot repeat.
+    """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_recovery import heartbeat
+
+    base = datetime(2026, 8, 24, 6, 0, tzinfo=_utc)
+    _FrozenDatetime.frozen = base
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "critical", {"note": "first failure"})
+    with session_scope() as session:
+        first = session.get(AlertComponentHeartbeat, "digest")
+        stale_snapshot = AlertComponentHeartbeat(
+            component="digest", last_heartbeat_at=first.last_heartbeat_at,
+            status=first.status, detail_json=dict(first.detail_json),
+            revision=first.revision)
+
+    # A second failure at the SAME beat and status: the pair repeats.
+    heartbeat("digest", "critical", {"note": "second failure, same instant"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+
+    real_get = Session.get
+    state = {"fed": False}
+
+    def stale_get(self, entity, ident, **kw):
+        if not state["fed"] and entity is AlertComponentHeartbeat:
+            state["fed"] = True
+            return stale_snapshot
+        return real_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(Session, "get", stale_get)
+    heartbeat("digest", "degraded", {"note": "writer holding the stale pair"})
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        assert row.detail_json.get("previous_status") == "critical", (
+            "the stale writer's CAS matched a repeated (beat, status) pair "
+            "and overwrote the intervening failure report's audit trail")

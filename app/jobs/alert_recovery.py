@@ -152,7 +152,8 @@ def _force_heartbeat(
                 update(AlertComponentHeartbeat)
                 .where(AlertComponentHeartbeat.component == component)
                 .values(last_heartbeat_at=now, status=status,
-                        detail_json=payload))
+                        detail_json=payload,
+                        revision=AlertComponentHeartbeat.revision + 1))
 
 
 def _write_heartbeat(
@@ -273,21 +274,19 @@ def _write_heartbeat(
             # the row moved, rowcount is 0 and the raced sentinel sends the
             # whole attempt back through a FRESH read — never a blind
             # overwrite of state the guard never saw.
-            # The token is the read STATE (beat AND status), not the beat
-            # alone (panel round 15): timestamps can repeat — a critical is
-            # exempt from strict ordering and may land with an observation
-            # equal to the prior ok's beat — and a value that can repeat is
-            # not a CAS token (ABA). Every gate-relevant transition changes
-            # status, so (beat, status) equality pins the exact state the
-            # guard and previous_* chain were built from.
+            # The token is the row's REVISION: monotonic, therefore
+            # unrepeatable. (beat, status) was the closest available pair
+            # and it can repeat — two failure reports may share a beat
+            # because non-ok bypasses strict ordering — so a stale writer
+            # holding that pair still matched and erased the intervening
+            # report's detail and run_count (ABA, panel round 16).
             result = session.execute(  # CursorResult: UPDATE has rowcount
                 update(AlertComponentHeartbeat)
                 .where(AlertComponentHeartbeat.component == component,
-                       AlertComponentHeartbeat.last_heartbeat_at
-                       == existing_raw,
-                       AlertComponentHeartbeat.status == row.status)
+                       AlertComponentHeartbeat.revision == row.revision)
                 .values(last_heartbeat_at=now, status=status,
-                        detail_json=payload))
+                        detail_json=payload,
+                        revision=AlertComponentHeartbeat.revision + 1))
             if getattr(result, "rowcount", 0) == 0:
                 raise _HeartbeatRaced(component)
 

@@ -798,6 +798,11 @@ class AlertComponentHeartbeat(Base):
     last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     detail_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    #: Compare-and-swap token for the write path. Monotonic per row and
+    #: therefore unrepeatable — unlike (beat, status), which two failure
+    #: reports can share because non-ok writes bypass strict ordering.
+    revision: Mapped[int] = mapped_column(Integer, nullable=False,
+                                          default=0, server_default="0")
 
 
 # ===========================================================================

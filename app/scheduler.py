@@ -167,6 +167,21 @@ def start() -> BackgroundScheduler:
         # writes only when no digest row exists — later boots preserve
         # whatever the job last reported, so failures survive restarts and a
         # never-running job goes stale on schedule.
+        #
+        # OPERATOR-OWNED TRADE-OFF (panel round 16, combo/SOTA-C): before
+        # this stamp existed, an absent digest row blocked the cutover gate
+        # immediately, so a registered-but-never-running job could not pass
+        # at all. The stamp trades that for a bounded window — until the
+        # first firing this deployment can actually reach, plus 24h grace,
+        # which is up to ~8 days when a boot lands just after a Monday
+        # 08:30. That window is not an artifact to be tuned away: NO
+        # evidence distinguishing "scheduled and will run" from "scheduled
+        # and will silently fail" can exist before the first firing, so
+        # demanding it IS the week-long waiting clock the operator removed
+        # by name on 2026-08-27. Narrower alternatives (shorter stamp
+        # validity) re-impose exactly that wait for anyone activating on a
+        # Monday afternoon. A real run heartbeat supersedes the stamp the
+        # moment it lands, and the window closes to one cadence + grace.
         try:
             from app.jobs.alert_digest import record_scheduled
             record_scheduled()
