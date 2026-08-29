@@ -2446,18 +2446,28 @@ def test_the_ledger_sink_cannot_carry_a_workflow_command():
     """PR #99 panel veto, executed: 'GHA workflow-command parsing survives
     JSON quoting in new ledger stdout sink.'
 
-    The runner interprets '::name::' only at the start of a physical stdout
-    line. The sink is safe on two INDEPENDENT grounds, both pinned here with
-    the adversary's own payload (a real embedded newline plus workflow
-    commands, arriving the way model replies actually arrive — via
-    json.loads): json.dumps with ensure_ascii escapes every control
-    character, so no entry can mint a second physical line; and the constant
-    '    defect N: ' prefix keeps '::' off line-start even if the runner
-    ever trimmed leading whitespace.
+    Verified against the runner's OWN parser (actions/runner,
+    src/Runner.Common/ActionCommand.cs, TryParseV2):
+
+        message = message.TrimStart();
+        if (!message.StartsWith(_commandKey))   // _commandKey == "::"
+            return false;
+
+    A command parses ONLY when '::' opens the line after leading whitespace
+    is trimmed — mid-line '::' is inert ('embedded commands remain active'
+    cannot occur), and this oracle checks exactly those two semantics: raw
+    line start AND lstrip() line start ('startswith-only oracle' checks
+    precisely what the parser checks). TrimStart is also why the guards
+    matter: a whitespace-only prefix WOULD be parsed, so safety rests on
+    two independent non-whitespace grounds — the 'defect N: ' label, and
+    json.dumps quoting (every entry opens with a quote or brace, and
+    ensure_ascii escapes every control character, so no entry can mint a
+    second physical line).
     """
     hostile = json.loads(
         '{"defects": ["x\\n::error::pwned\\n::add-mask::s",'
-        ' {"nested": "::stop-commands::x"}, "\\u2028::error::ls"]}')
+        ' {"nested": "::stop-commands::x"}, "\\u2028::error::ls",'
+        ' " ::error::leading-space-inside-string"]}')
     printed = [f"    defect {j}: {json.dumps(entry)}"
                for j, entry in enumerate(hostile["defects"], start=1)]
 
@@ -2465,5 +2475,7 @@ def test_the_ledger_sink_cannot_carry_a_workflow_command():
     assert len(physical) == len(hostile["defects"]), (
         "an entry minted an extra physical line — workflow-command surface")
     for line in physical:
-        assert not line.startswith("::")
-        assert not line.lstrip().startswith("::")
+        assert not line.startswith("::")           # raw line start
+        assert not line.lstrip().startswith("::")  # the runner's TrimStart
+        assert line.lstrip().startswith("defect "), (
+            "the non-whitespace label is the guard TrimStart cannot remove")
