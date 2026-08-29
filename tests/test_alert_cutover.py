@@ -932,3 +932,78 @@ def test_a_digest_that_never_ran_does_not_block_first_activation():
     assert digest and "not staleness" in digest[0]
     assert any(u.startswith("heartbeat_dispatcher") for u in report.unsatisfied)
     assert any(u.startswith("heartbeat_watchdog") for u in report.unsatisfied)
+
+
+def test_a_digest_that_reported_failure_is_not_never_ran():
+    """The never-ran exemption keys on the ROW, not on the timestamp.
+
+    A digest row that exists carries the job's own word about itself. Keying
+    the exemption on a missing timestamp would let a recorded FAILURE read as
+    "has not had its first Monday yet" and skip the status check entirely. The
+    schema makes that unreachable today, and the assertion below pins it, so a
+    future relaxation fails here rather than silently in the gate.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+
+    assert AlertComponentHeartbeat.__table__.c.last_heartbeat_at.nullable is False, (
+        "last_heartbeat_at became nullable — the digest never-ran exemption "
+        "must be re-examined before that lands")
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest",
+            last_heartbeat_at=NOW - timedelta(hours=1),
+            status="critical",
+            detail_json={"mode": "live", "live_profile": "default"}))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert digest, "a digest that reported FAILURE was treated as never-ran"
+    assert "not accepted health" in digest[0]
+
+
+def test_a_digest_never_deployed_stops_being_exempt_after_one_cadence():
+    """"No digest yet" is true on day one and a lie a fortnight later.
+
+    Unbounded, the exemption lets a deployment whose digest job was never
+    deployed AT ALL pass this gate forever. It is bounded by the deployment's
+    own evidence, not by a waiting clock: once live deliveries reach back past
+    one full digest cadence, a Monday has come and gone with no proof-of-life.
+    """
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(days=9),
+                   created_at=NOW - timedelta(days=9))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert digest, "a digest absent for a full weekly cadence stayed exempt"
+    assert "never deployed" in digest[0]
+
+
+def test_a_day_one_cutover_is_untouched_by_the_absence_bound():
+    """The bound must not reintroduce the waiting period it replaced."""
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(hours=2),
+                   created_at=NOW - timedelta(hours=2))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    digest = [s_ for s_ in report.satisfied if s_.startswith("heartbeat_digest")]
+    assert digest, "a day-one cutover was blocked on a digest with no Monday yet"
+    assert "not staleness" in digest[0]
+
+
+def test_a_future_dated_delivery_cannot_mint_digest_grace():
+    """A future-dated minimum would renew the exemption for as long as the
+    clock is wrong. Same rule the heartbeats live under: fail closed."""
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW + timedelta(days=2),
+                   created_at=NOW + timedelta(days=2))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert digest, "a future-dated delivery minted fresh digest grace"
+    assert "clock fault" in digest[0]
