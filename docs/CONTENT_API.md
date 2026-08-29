@@ -64,6 +64,14 @@ GET /api/v1/content/dashboard   static blocks {slug: {kind, text|items|entries}}
 GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, updated_at, purpose, constraints}}
 ```
 
+Static blocks may carry `as_of: "YYYY-MM"` — mandatory for editorial whose
+copy asserts calendar recency ("today", "right now", "this cycle"): the claim
+is frozen at authoring time and clients must be able to date it. Blocks whose
+"now" is live-referential (copy riding the live payload it explains) carry no
+stamp; the reviewed allowlist lives in `test_dated_editorial_carries_as_of`.
+```
+```
+
 - Standard `{data, meta}` envelope, `require_read_access` + 60/min rate limit —
   the `/api/v1/status` pattern. `Cache-Control: public, max-age=300` / `max-age=60`.
 - Registry: `app/content_registry.py`. Scientific text is **imported** from

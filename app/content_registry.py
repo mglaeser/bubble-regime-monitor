@@ -62,6 +62,20 @@ REQUIRED_FILE_SLUG_KINDS: dict[str, str] = {
     "gauge.verdict.distance": "table",
 }
 
+# The band vocabulary is CANONICAL, not artifact-self-declared (round 17).
+# app/models.py:61-65 pins the authoritative action states (hold | trim |
+# de-risk | suppressed); display adds the degraded-suppression and fallback
+# sentinels, and "unknown" is the explicit not-scored state (round 9: an
+# unrecognized band must never fall through to HOLD action copy).
+_CANONICAL_BANDS: frozenset[str] = frozenset({
+    "hold", "trim", "de-risk", "suppressed",
+    "suppressed (block degraded)", "fallback", "unknown",
+})
+_BAND_MAP_SLUGS = ("gauge.band.oneliner", "gauge.splash.band_blurb")
+# gauge.verdict.distance is deliberately NOT here: its rows are case-keyed
+# (case/template), not band-keyed — see the shipped artifact.
+_BAND_TABLE_SLUGS = ("gauge.verdict.lead", "gauge.verdict.detail")
+
 _cache_lock = threading.Lock()
 # Published as ONE tuple so a reader can never see a key from one load paired
 # with a value from another (round 12: non-atomic publication under threads).
@@ -165,21 +179,41 @@ def _load_artifact(fh: Any) -> dict[str, Any]:
 
 
 def _bands_closed(blocks: dict[str, Any]) -> bool:
-    """Band-vocabulary closure at RUNTIME, not only in CI pins (round 16):
-    every band key the oneliner map declares must resolve to a row in each
-    band-keyed verdict table, or the whole artifact degrades."""
-    oneliner = blocks.get("gauge.band.oneliner", {})
-    entries = oneliner.get("entries") if isinstance(oneliner, dict) else None
-    if not isinstance(entries, dict):
-        return False
-    declared = set(entries.keys())
-    for table_slug in ("gauge.verdict.lead", "gauge.verdict.detail"):
+    """Band-vocabulary closure at RUNTIME against a CANONICAL vocabulary.
+
+    Round 17 (SOTA-A + SOTA-C): closure relative to whatever the oneliner
+    happened to declare let a v1 artifact omit the de-risk copy from every
+    band block at once, and left gauge.splash.band_blurb entirely
+    unvalidated — a swapped artifact missing its fallback/de-risk blurbs
+    passed the loader, and ||hold client patterns rendered HOLD copy for
+    the highest-severity band. Every band-keyed map must cover ALL of
+    _CANONICAL_BANDS, and every band-keyed verdict table must cover the
+    canonical set PLUS any extra band a map declares, or the artifact
+    degrades whole."""
+    vocab: set[str] = set(_CANONICAL_BANDS)
+    for map_slug in _BAND_MAP_SLUGS:
+        block = blocks.get(map_slug, {})
+        entries = block.get("entries") if isinstance(block, dict) else None
+        if not isinstance(entries, dict) or not _CANONICAL_BANDS.issubset(entries):
+            return False
+        vocab.update(entries)
+    for table_slug in _BAND_TABLE_SLUGS:
         table = blocks.get(table_slug, {})
         items = table.get("items") if isinstance(table, dict) else None
         if not isinstance(items, list):
             return False
-        rows = {row.get("band") for row in items if isinstance(row, dict)}
-        if not declared.issubset(rows):
+        # str-check BEFORE any hashing: an unhashable "band" value (list/
+        # dict) raised TypeError out of a set comprehension here, past the
+        # load-time try/except, and 500'd every artifact-backed route
+        # (round 17, SOTA-A). A band-table row whose band is not a string
+        # is corruption — the artifact degrades whole, it never crashes.
+        rows: set[str] = set()
+        for row in items:
+            band = row.get("band") if isinstance(row, dict) else None
+            if not isinstance(band, str):
+                return False
+            rows.add(band)
+        if not vocab.issubset(rows):
             return False
     return True
 

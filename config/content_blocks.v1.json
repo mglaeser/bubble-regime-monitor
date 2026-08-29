@@ -1,6 +1,6 @@
 {
   "content_version": 1,
-  "generated": "2026-08-28",
+  "generated": "2026-08-29",
   "origin": "save-haven-monitor prose migration (shallow-frontend program, A1 ledger; verbatim extraction)",
   "blocks": {
     "atlas.explorer.expl.crisis-card": {
@@ -11,7 +11,8 @@
     "atlas.explorer.potential-banner.method": {
       "kind": "text",
       "text": "POTENTIAL crisis — the peak is anchored at today (Jul 2026) <b>by construction, not as a forecast</b>. All lines end at t0 and the right half of the axis is intentionally empty: no forward projection. Backfill uses real market anchors (Jul 2021 → Jul 2026); current-state sources as of (BIS 28 Jun · ECB 2 Jun & 27 May · Fed 8 May 2026). Safe-haven candidates are shown dashed.",
-      "source": "src/dashboard.tsx:173"
+      "source": "src/dashboard.tsx:173",
+      "as_of": "2026-07"
     },
     "atlas.explorer.expl.chart-controls": {
       "kind": "text",
@@ -35,7 +36,8 @@
     "atlas.matrix.expl.scorecard": {
       "kind": "text",
       "text": "<b>The scorecard, in plain words.</b> Each cell answers one simple question: did this asset go UP during that crisis? Green ✓ = yes, clearly. Amber ~ = sort of / only in some places. Red ✗ = no, it fell. Gray ? = the 2026 AI crisis hasn't actually happened, so those cells show only what experts <i>currently expect</i>. Blank = the academic literature has no evidence either way. Tap any cell to read the one-sentence story behind it, with the research paper it comes from.",
-      "source": "src/dashboard.tsx:256-260"
+      "source": "src/dashboard.tsx:256-260",
+      "as_of": "2026-07"
     },
     "atlas.matrix.intro-citation": {
       "kind": "text",
@@ -50,7 +52,8 @@
     "atlas.matrix.expl.buckets": {
       "kind": "text",
       "text": "<b>Why four buckets?</b> Decades of research boil down to this: some things protect you in almost <i>every</i> crisis (U — like cash first, then safe government bonds), some only in the <i>matching type</i> of crisis (C — gold shines in money/inflation crises, cheap \"value\" stocks shine after tech bubbles), some were one-off jackpots you couldn't have planned (★ — like a gold miner in the 1930s), and some famous ideas simply failed the real-world test (! — Bitcoin in 2020, the yen this cycle). The two-phase rule inside U: in the first weeks everyone runs to CASH; only later does the money flow into long bonds.",
-      "source": "src/dashboard.tsx:314-319"
+      "source": "src/dashboard.tsx:314-319",
+      "as_of": "2026-07"
     },
     "atlas.matrix.verification.heading": {
       "kind": "text",
@@ -112,12 +115,14 @@
     "atlas.aggregate.expl.tab": {
       "kind": "text",
       "text": "<b>This tab in one breath.</b> We averaged all ten historical crises into one \"typical crisis\" per asset family, then laid today's 2026 situation (dashed) on top. Both are forced to equal 100 at the peak, so the only fair comparison is the <i>shape of the climb</i> before the peak — and what history did afterwards. \"History ↔ 2026 pairs\" shows one small chart per family (easiest to read). \"All composites\" puts everything in one big chart. The dashed lines stop at the peak because the 2026 future is unknown — that empty right half is the whole point.",
-      "source": "src/dashboard.tsx:487-492"
+      "source": "src/dashboard.tsx:487-492",
+      "as_of": "2026-07"
     },
     "atlas.aggregate.method-intro": {
       "kind": "text",
       "text": "Ten historical crises rebased to <b>100 at the peak (t0)</b>, crisis-weight-averaged into unified families (bubbles 1.0 · currency/sovereign 0.8 · Black Monday 0.7 · COVID 0.5). The default view pairs each historical family (solid) with its 2026 counterpart (dashed, real Jul 2021 → today backfill, ending at t0 — no projection). Both lines equal 100 at the peak by construction, so the comparison lives in the <b>run-up shape</b> into the peak and the <b>historical aftermath</b> that follows it. Bitcoin (falsified) is excluded.",
-      "source": "src/dashboard.tsx:496-500"
+      "source": "src/dashboard.tsx:496-500",
+      "as_of": "2026-07"
     },
     "atlas.aggregate.history-only-note": {
       "kind": "text",
@@ -132,12 +137,14 @@
     "atlas.analytics.expl.tab": {
       "kind": "text",
       "text": "<b>What this tab is.</b> Six statistical methods were run in Python on the real 2021–26 data and the historical templates; the heavy results (LPPL, Markov, tail regressions) are reported as fixed numbers, while the correlation curves and outcome fans below are recomputed live in your browser from the same anchors. None of it is a prediction — it answers \"what does today most RESEMBLE, and what usually followed that resemblance?\"",
-      "source": "src/dashboard.tsx:698-704"
+      "source": "src/dashboard.tsx:698-704",
+      "as_of": "2026-07"
     },
     "analytics.intro.expl": {
       "kind": "text",
       "text": "<b>What this tab is.</b> Six statistical methods were run in Python on the real 2021–26 data and the historical templates; the heavy results (LPPL, Markov, tail regressions) are reported as fixed numbers, while the correlation curves and outcome fans below are recomputed live in your browser from the same anchors. None of it is a prediction — it answers \"what does today most RESEMBLE, and what usually followed that resemblance?\"",
-      "source": "src/dashboard.tsx:698-704"
+      "source": "src/dashboard.tsx:698-704",
+      "as_of": "2026-07"
     },
     "analytics.intro.methods": {
       "kind": "text",
@@ -147,12 +154,14 @@
     "analytics.clock.expl": {
       "kind": "text",
       "text": "<b>How to read this.</b> We took today's last 24 months of NASDAQ-100 and slid it along each historical bubble's path, asking at every position: how similar are the shapes? The horizontal axis is the position — \"0\" means \"today looks like the historical peak day\", \"−12\" means \"today looks like 12 months BEFORE that peak\". Where a line is highest is where today fits best. Dot-com peaks at ≈ 0 (we look like its top); 1929 and Japan peak further left (we look like their run-up phase, 1–2 years early).",
-      "source": "src/dashboard.tsx:727-733"
+      "source": "src/dashboard.tsx:727-733",
+      "as_of": "2026-07"
     },
     "analytics.clock.caption": {
       "kind": "text",
       "text": "Correlation of today's last 24 months vs the analog window ending at position p (computed live; K=36 confirms the pattern).",
-      "source": "src/dashboard.tsx:749-751"
+      "source": "src/dashboard.tsx:749-751",
+      "as_of": "2026-07"
     },
     "analytics.fans.expl": {
       "kind": "text",
@@ -187,17 +196,20 @@
           "note": "The most regime-fragile fan: today's Treasuries enter the peak below their 2021 level — if inflation persists, this deflationary-analog band does not apply."
         }
       ],
-      "source": "src/dashboard.tsx:766-773"
+      "source": "src/dashboard.tsx:766-773",
+      "as_of": "2026-07"
     },
     "analytics.tail.expl": {
       "kind": "text",
       "text": "<b>Beta, in plain words.</b> Beta answers: when the market falls 1%, what does the hedge do on average? A beta near zero or negative <i>in the market's WORST months</i> (second column) is the definition of a real safe haven (Baur & McDermott's method). \"Hit rate\" = how often the hedge was actually UP in those worst months. λ_L (tail dependence) measures how glued the hedge is to the market in disasters — 0 would be perfectly decoupled, 1 perfectly glued. Verdict this cycle: cash perfect, gold and Treasuries weak-but-real havens, nothing fully decoupled.",
-      "source": "src/dashboard.tsx:779-786"
+      "source": "src/dashboard.tsx:779-786",
+      "as_of": "2026-07"
     },
     "analytics.markov.expl": {
       "kind": "text",
       "text": "<b>Plainly:</b> a statistical model sorted the last five years of months into \"calm weather\" (steady +2.4%/mo, tiny wobble) and \"stormy weather\" (flat drift, huge ±5.5% swings). Right now the model is 100% sure we're in the storm — the same weather the dot-com market had at its very top. Storms host both melt-ups and crashes; the model can't say which comes next, only that we're not in the calm state.",
-      "source": "src/dashboard.tsx:814-819"
+      "source": "src/dashboard.tsx:814-819",
+      "as_of": "2026-07"
     },
     "analytics.bsadf.expl": {
       "kind": "text",
@@ -207,17 +219,20 @@
     "analytics.granger.headline_verdict": {
       "kind": "text",
       "text": "gold has moved FIRST this cycle",
-      "source": "src/dashboard.tsx:849"
+      "source": "src/dashboard.tsx:849",
+      "as_of": "2026-07"
     },
     "analytics.granger.expl": {
       "kind": "text",
       "text": "<b>Plainly:</b> statistically, gold's moves this cycle have come BEFORE the stock market's moves (about 4 months earlier), not after — a formal Granger test confirms it strongly one-way. Historically, gold's big surges came 0 to 36 months before market peaks. Today's surge peaked in January 2026 and was bigger than any historical reference (+94% in 12 months). Applying history's lead times brackets the implied market peak between \"now\" and about 19 months from now.",
-      "source": "src/dashboard.tsx:850-856"
+      "source": "src/dashboard.tsx:850-856",
+      "as_of": "2026-07"
     },
     "analytics.hedgeweight.expl": {
       "kind": "text",
       "text": "<b>How the score works.</b> Every hedge was graded 0–1 on five things and weighted: (1) <i>regime match, 30%</i> — does it follow the script that fits TODAY's regime? (2) <i>live tail evidence, 25%</i> — did it actually hold up in the market's worst months since 2021? (3) <i>institutional view, 25%</i> — what do central banks and stability reports say right now (≤ 6 weeks old)? (4) <i>lead property, 10%</i> — does it move BEFORE the market? (5) <i>entry valuation, 10%</i> — is it still cheap, or already expensive? Verdict: cash wins on CERTAINTY, gold on expected PAYOFF — statistically a tie at the top — while Treasuries fall to 5th. Doubling the \"already expensive\" penalty still keeps gold in 2nd (0.78), so the podium is robust. Important nuance: this elevation is CONDITIONAL on the 2026 regime — in the historical scorecard gold keeps its dot-com ✗ and stays \"near-universal, demoted\".",
-      "source": "src/dashboard.tsx:868-878"
+      "source": "src/dashboard.tsx:868-878",
+      "as_of": "2026-07"
     },
     "analytics.hedgeweight.formula": {
       "kind": "text",
@@ -227,7 +242,8 @@
     "analytics.limits.body": {
       "kind": "text",
       "text": "Historical templates are stylized anchor reconstructions; only the 2026 series are real market backfill. Monthly resolution (n = 60 returns) is thin for every method here — published versions use daily data. The LPPL fit failed its formal qualification; the raw bubble flag proved seed-sensitive; fan charts are conditional historical distributions under a constructed peak-at-today, not forecasts.",
-      "source": "src/dashboard.tsx:912-917"
+      "source": "src/dashboard.tsx:912-917",
+      "as_of": "2026-07"
     },
     "playbook.methods": {
       "kind": "table",
@@ -422,7 +438,8 @@
     "playbook.intro.expl": {
       "kind": "text",
       "text": "<b>This tab in one breath.</b> Instead of asking \"what went up in past crises\" (the other tabs), this asks \"HOW could you have KNOWN in advance?\" — and assembles, from the academic literature, the ten-screen checklist that would have found the winners and vetoed the traps (like convertibles in 2008 or portfolio insurance in 1987). Then it runs every candidate asset through the checklist, builds the phased buy plan, and finally holds it against what experts recommend RIGHT NOW (your research artifact) — showing exactly where academic method and current consensus agree, partly agree, or clash.",
-      "source": "src/dashboard.tsx:1121-1128"
+      "source": "src/dashboard.tsx:1121-1128",
+      "as_of": "2026-07"
     },
     "playbook.intro.summary": {
       "kind": "text",
@@ -466,12 +483,14 @@
     "hero.intro": {
       "kind": "text",
       "text": "Stylized monthly reconstructions anchored to magnitudes documented in the peer-reviewed literature (Baur & McDermott 2010; Baele et al. 2020; Ranaldo & Söderlind 2010; Temin & Voth 2004; Gorton & Rouwenhorst 2006; Moskowitz, Ooi & Pedersen 2012; Conlon & McGee 2020; Reinhart & Rogoff 2009; Jordà et al. 2019) — not tick data, and not investment advice. Pre-1970 paths are schematic. The 2026 AI-bubble panel is a POTENTIAL crisis with its peak anchored at today by construction — real 2021–26 market backfill, lines end at t0, no forward projection (BIS, ECB, Fed & BoE 2026 stability reports). The Analytics tab adds the algorithmic battery (clock matching, bootstrap outcome fans, tail tests, regime & explosiveness diagnostics); the Playbook tab maps the ex-ante identification protocol (M0–M10) onto today's expert buy-list.",
-      "source": "src/dashboard.tsx:1420-1429"
+      "source": "src/dashboard.tsx:1420-1429",
+      "as_of": "2026-07"
     },
     "hero.howto.expl": {
       "kind": "text",
       "text": "<b>How to read this dashboard.</b> Every crisis is drawn on the same clock: month 0 is the moment the market hit its highest point (\"the peak\"). Everything left of the dashed line is the boom before; everything right is what happened after. All lines are re-scaled to start from the same value, so you compare <i>shapes</i>, not prices. Red always = the market that crashed; gold/green/blue = things that went UP or held value. Dashed lines = today's (2026) situation, which by design stops at the peak line — nobody knows the right half yet. Every section has one of these \"i\" buttons with a plain-language explanation.",
-      "source": "src/dashboard.tsx:1432-1439"
+      "source": "src/dashboard.tsx:1432-1439",
+      "as_of": "2026-07"
     },
     "footer.key_sources": {
       "kind": "text",
@@ -481,7 +500,8 @@
     "atlas.crises.ai2026.peak": {
       "kind": "text",
       "text": "Jul 2026 (= today, by construction)",
-      "source": "src/data/atlas.json:10"
+      "source": "src/data/atlas.json:10",
+      "as_of": "2026-07"
     },
     "atlas.crises.ai2026.cause": {
       "kind": "text",
@@ -491,7 +511,8 @@
     "atlas.crises.ai2026.highlight": {
       "kind": "text",
       "text": "Institutional + algorithmic verdict: GOLD is elevated to lead regime-matched hedge — 2026 hedge score 0.85, a statistical co-lead with phase-1 cash (0.88), decisively above 'challenged' Treasuries (0.42). Basis: 27% of global reserves vs 22% UST (ECB, 2 Jun 2026), regime-match r 0.96–0.98 with monetary-crisis scripts, worst-quintile beta ≈ 0, and gold Granger-LEADS the market this cycle. Caveat: a +130% run-up means part of the hedge is pre-paid. CHF secondary; the yen (~¥162) and Bitcoin (−51% from ATH) look falsified this cycle.",
-      "source": "src/data/atlas.json:12"
+      "source": "src/data/atlas.json:12",
+      "as_of": "2026-07"
     },
     "atlas.crises.ai2026.sources": {
       "kind": "text",
@@ -721,7 +742,8 @@
     "atlas.series.ai2026.jpy.suffix": {
       "kind": "text",
       "text": "(failed this cycle)",
-      "source": "src/data/atlas.json:301"
+      "source": "src/data/atlas.json:301",
+      "as_of": "2026-07"
     },
     "atlas.series.ai2026.btc.suffix": {
       "kind": "text",
@@ -821,7 +843,8 @@
     "atlas.matrix.jpy.ai2026": {
       "kind": "text",
       "text": "~¥162 — a ~40-year low; carry dominates haven flows, so the yen has NOT behaved as a haven this cycle.",
-      "source": "src/data/atlas.json:3393"
+      "source": "src/data/atlas.json:3393",
+      "as_of": "2026-07"
     },
     "atlas.matrix.chf.euro": {
       "kind": "text",
@@ -1001,7 +1024,8 @@
     "atlas.classification.falsified.1": {
       "kind": "text",
       "text": "Japanese yen (this cycle) — ~¥162, a ~40-year low despite repeated risk episodes; carry has dominated haven flows 2021–26",
-      "source": "src/data/atlas.json:3634"
+      "source": "src/data/atlas.json:3634",
+      "as_of": "2026-07"
     },
     "gauge.grounding": {
       "kind": "map",
@@ -1027,7 +1051,8 @@
         "de-risk": "De-risk — fragility is high or a hard override has fired. The trend rule is now the thing to watch.",
         "suppressed": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
         "suppressed (block degraded)": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
-        "fallback": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed."
+        "fallback": "Not scored right now — too many inputs for one block are unavailable, so the action band is withheld rather than guessed.",
+        "unknown": "Not scored — the current reading could not be classified, so the action band is withheld."
       },
       "source": "src/bubblegauge.tsx:149-154"
     },
@@ -1321,7 +1346,8 @@
         "de-risk": "Fragility high, or a hard override fired.",
         "suppressed": "Not scored — inputs degraded.",
         "suppressed (block degraded)": "Not scored — inputs degraded.",
-        "fallback": "Not scored — inputs degraded."
+        "fallback": "Not scored — inputs degraded.",
+        "unknown": "Not scored — reading unclassified."
       },
       "source": "src/bubblegauge.tsx:1438"
     },
