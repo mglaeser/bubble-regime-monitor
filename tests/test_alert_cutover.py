@@ -973,14 +973,3 @@ def test_a_digest_that_reported_failure_blocks_the_cutover():
     digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
     assert digest, "a digest that reported FAILURE passed the liveness gate"
     assert "not accepted health" in digest[0]
-
-
-def test_probe_timing():
-    import time
-    main = _load_main_module()
-    t = time.time()
-    _case(main, "digest", -timedelta(hours=1), "ok", NS_OK, -timedelta(hours=2))
-    print(f"\nONE CASE WITH DELIVERY: {time.time()-t:.2f}s")
-    t = time.time()
-    _case(main, "digest", -timedelta(hours=1), "ok", NS_OK, None)
-    print(f"ONE CASE NO DELIVERY: {time.time()-t:.2f}s")
