@@ -63,10 +63,6 @@ STABLE_DAYS = 14
 #: half days out of seven. Eight days covers one full cadence plus grace.
 HEARTBEAT_FRESH_HOURS = 2
 _HEARTBEAT_FRESH = {"dispatcher": 2, "watchdog": 2, "digest": 8 * 24}
-#: Tolerated forward clock skew. A heartbeat — or the delivery history that
-#: bounds the digest exemption below — dated beyond this is a broken clock,
-#: not evidence. One rule, one constant, so the two cannot drift apart.
-_CLOCK_SKEW = timedelta(minutes=5)
 UNKNOWN_STALE_HOURS = 24
 
 
@@ -315,56 +311,6 @@ def preflight(
           "whatever its age)")
 
     # 6: the components that replace the daily message are alive
-    #
-    # A digest that has NEVER spoken is exempt from staleness: its first
-    # proof-of-life lands on the first Monday AFTER activation, and refusing
-    # the cutover until then would be a clock in disguise — the thing the
-    # operator explicitly removed. But the exemption has to EXPIRE, or a
-    # deployment whose digest job was never deployed at all passes this gate
-    # forever. It is bounded by the deployment's own evidence rather than by a
-    # waiting clock: once live deliveries reach back further than one full
-    # digest cadence, a whole weekly cycle has elapsed with nothing from the
-    # digest, so absence means never-deployed. A day-one cutover is untouched.
-    digest_absence_ok, digest_absence_detail = True, (
-        "no digest run yet — the weekly job's first proof-of-life lands next "
-        "Monday 08:30; absence at first activation is not staleness")
-    earliest_live = session.execute(
-        select(func.min(AlertDelivery.created_at)).where(
-            AlertDelivery.mode == "live",
-            AlertDelivery.live_profile == live_profile,
-        )
-    ).scalar_one()
-    if earliest_live is None:
-        # No live delivery has ever been recorded, so there is no evidence the
-        # deployment is young — only an ABSENCE of evidence, which is not the
-        # same thing and must not read as grace. Without this branch the
-        # exemption never expires in a profile that has sent nothing, and the
-        # check would keep reporting "its first Monday has not come yet" for a
-        # digest that has been dead for a year.
-        #
-        # `ready` is unchanged in every reachable state: `wire_proven` above
-        # needs one live delivery CONFIRMED SENT, and those rows are a strict
-        # subset of the ones counted here, so it is already refusing whenever
-        # this branch is taken. What changes is that this check no longer
-        # claims a component is fine on evidence it does not have.
-        digest_absence_ok, digest_absence_detail = False, (
-            "no digest heartbeat and no live delivery history at all — "
-            "nothing here can tell a first activation from a digest that was "
-            "never deployed, so this is not evidence of health")
-    else:
-        earliest = _aware(earliest_live)
-        if earliest > now + _CLOCK_SKEW:
-            # The same rule the heartbeats live under: a future-dated minimum
-            # would otherwise mint fresh grace for as long as the clock is wrong.
-            digest_absence_ok, digest_absence_detail = False, (
-                f"earliest live delivery is {earliest.isoformat()} — in the "
-                "future, which is a clock fault, not a young deployment")
-        elif earliest <= now - timedelta(hours=_HEARTBEAT_FRESH["digest"]):
-            digest_absence_ok, digest_absence_detail = False, (
-                "no digest heartbeat at all, and live deliveries reach back to "
-                f"{earliest.isoformat()} — a full weekly cadence has elapsed "
-                "with no proof-of-life, so the job was never deployed")
-
     for component, fresh_hours in _HEARTBEAT_FRESH.items():
         row = session.get(AlertComponentHeartbeat, component)
         detail_json = row.detail_json if row is not None else {}
@@ -376,20 +322,21 @@ def preflight(
         row_status = row.status if row is not None else None
         status_ok = row_status == "ok"
         if row is None:
-            # "Never ran" is the ABSENCE OF THE ROW — the only state that
-            # actually means the component has not spoken. Keying this on the
-            # timestamp instead would let a row carrying a recorded FAILURE
-            # read as never-ran and skip the status check below.
-            if component == "digest":
-                fresh, detail = digest_absence_ok, digest_absence_detail
-            else:
-                fresh, detail = False, (
-                    f"no heartbeat in {fresh_hours}h — after cutover this "
-                    "component is load-bearing")
+            # Absence blocks for EVERY component, digest included. The operator
+            # removed the soak and the two-successful-digests gate and kept this
+            # heartbeat as "the liveness signal that remains" — so a digest that
+            # has never spoken is precisely what this check exists to refuse.
+            # Nothing readable here separates "scheduled, first Monday not yet
+            # come" from "never deployed", and delivery history is not digest
+            # evidence: it is the same row wire_proven already counts, so it
+            # would grant the grace and satisfy its own corroboration at once.
+            fresh, detail = False, (
+                f"no {component} heartbeat at all — after cutover this "
+                "component is load-bearing")
         elif row.last_heartbeat_at is None:
-            # Schema-impossible today (last_heartbeat_at is NOT NULL), and
+            # Schema-impossible today (last_heartbeat_at is NOT NULL) and
             # fail-closed on purpose: a component that HAS a row has spoken, so
-            # an unreadable beat is a defect, never a never-ran exemption.
+            # an unreadable beat is a defect, never a pass.
             fresh, detail = False, (
                 f"{component} heartbeat row carries no timestamp — fail closed")
         else:
@@ -399,7 +346,7 @@ def preflight(
             # exists to distrust. Small forward skew is tolerated; beyond it the
             # heartbeat is evidence of a broken clock, not of health.
             beat = _aware(row.last_heartbeat_at)
-            if beat > now + _CLOCK_SKEW:
+            if beat > now + timedelta(minutes=5):
                 fresh, detail = False, (
                     f"heartbeat is {beat.isoformat()} — in the future, which "
                     "is a clock fault, not health")

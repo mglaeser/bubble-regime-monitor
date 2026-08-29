@@ -918,47 +918,48 @@ def test_the_weekly_digest_is_judged_on_its_own_cadence():
         "a ten-day-dead weekly job passed the gate")
 
 
-def test_a_digest_absence_needs_evidence_the_deployment_is_young():
-    """Absence of evidence is not evidence the first Monday has not come.
+def test_an_absent_digest_heartbeat_blocks_the_cutover():
+    """Absence blocks for every component, digest included.
 
-    With no delivery history at all, nothing distinguishes a first activation
-    from a digest that was never deployed, so the exemption does not apply and
-    the check says so instead of asserting health. `ready` does not move:
-    wire_proven is already refusing here, since it needs a live delivery
-    CONFIRMED SENT and those rows are a subset of the ones the bound reads. A
-    dispatcher or watchdog with no heartbeat still blocks: their cadence is
-    minutes, so absence IS death.
-
-    The exemption itself is pinned by
-    test_a_day_one_cutover_is_untouched_by_the_absence_bound, which supplies
-    the live delivery a real first activation has.
+    The operator removed the soak and the two-successful-digests gate and kept
+    this heartbeat as "the liveness signal that remains", so a digest that has
+    never spoken is exactly what the gate exists to refuse. Critically, a young
+    deployment WITH live delivery history does not earn the digest a pass: that
+    delivery is the same row wire_proven counts, so treating it as digest
+    evidence would let one row grant the grace and satisfy its own
+    corroboration — an undeployed weekly job could then ride through cutover.
     """
     with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(days=3),
+                   created_at=NOW - timedelta(days=3))
+        session.flush()
         report = preflight(session, now=NOW)
 
+    assert any(s_.startswith("wire_proven") for s_ in report.satisfied), (
+        "precondition: the recent delivery must satisfy wire_proven, so this "
+        "test proves the digest check stands on its own evidence")
     digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
-    assert digest and "not evidence of health" in digest[0]
-    assert any(u.startswith("wire_proven") for u in report.unsatisfied), (
-        "wire_proven must be the gate that actually refuses this deployment")
+    assert digest, "a digest that was never deployed passed the liveness gate"
+    assert "load-bearing" in digest[0]
     assert report.ready is False
     assert any(u.startswith("heartbeat_dispatcher") for u in report.unsatisfied)
     assert any(u.startswith("heartbeat_watchdog") for u in report.unsatisfied)
 
 
-def test_a_digest_that_reported_failure_is_not_never_ran():
-    """The never-ran exemption keys on the ROW, not on the timestamp.
+def test_a_digest_that_reported_failure_blocks_the_cutover():
+    """A row that exists carries the job's own word, and it is read.
 
-    A digest row that exists carries the job's own word about itself. Keying
-    the exemption on a missing timestamp would let a recorded FAILURE read as
-    "has not had its first Monday yet" and skip the status check entirely. The
-    schema makes that unreachable today, and the assertion below pins it, so a
-    future relaxation fails here rather than silently in the gate.
+    The status check must not be reachable only through a timestamp: keying the
+    absent case on a missing timestamp rather than a missing ROW would let a row
+    carrying a recorded FAILURE skip it. The schema makes that unreachable
+    today, and the assertion below pins the nullability so a future relaxation
+    fails here rather than silently in the gate.
     """
     from app.alerts.models import AlertComponentHeartbeat
 
     assert AlertComponentHeartbeat.__table__.c.last_heartbeat_at.nullable is False, (
-        "last_heartbeat_at became nullable — the digest never-ran exemption "
-        "must be re-examined before that lands")
+        "last_heartbeat_at became nullable — the absent-row branch in the "
+        "heartbeat gate must be re-examined before that lands")
 
     with session_scope() as session:
         session.add(AlertComponentHeartbeat(
@@ -970,51 +971,16 @@ def test_a_digest_that_reported_failure_is_not_never_ran():
         report = preflight(session, now=NOW)
 
     digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
-    assert digest, "a digest that reported FAILURE was treated as never-ran"
+    assert digest, "a digest that reported FAILURE passed the liveness gate"
     assert "not accepted health" in digest[0]
 
 
-def test_a_digest_never_deployed_stops_being_exempt_after_one_cadence():
-    """"No digest yet" is true on day one and a lie a fortnight later.
-
-    Unbounded, the exemption lets a deployment whose digest job was never
-    deployed AT ALL pass this gate forever. It is bounded by the deployment's
-    own evidence, not by a waiting clock: once live deliveries reach back past
-    one full digest cadence, a Monday has come and gone with no proof-of-life.
-    """
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW - timedelta(days=9),
-                   created_at=NOW - timedelta(days=9))
-        session.flush()
-        report = preflight(session, now=NOW)
-
-    digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
-    assert digest, "a digest absent for a full weekly cadence stayed exempt"
-    assert "never deployed" in digest[0]
-
-
-def test_a_day_one_cutover_is_untouched_by_the_absence_bound():
-    """The bound must not reintroduce the waiting period it replaced."""
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW - timedelta(hours=2),
-                   created_at=NOW - timedelta(hours=2))
-        session.flush()
-        report = preflight(session, now=NOW)
-
-    digest = [s_ for s_ in report.satisfied if s_.startswith("heartbeat_digest")]
-    assert digest, "a day-one cutover was blocked on a digest with no Monday yet"
-    assert "not staleness" in digest[0]
-
-
-def test_a_future_dated_delivery_cannot_mint_digest_grace():
-    """A future-dated minimum would renew the exemption for as long as the
-    clock is wrong. Same rule the heartbeats live under: fail closed."""
-    with session_scope() as session:
-        _live_sent(session, sent_at=NOW + timedelta(days=2),
-                   created_at=NOW + timedelta(days=2))
-        session.flush()
-        report = preflight(session, now=NOW)
-
-    digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
-    assert digest, "a future-dated delivery minted fresh digest grace"
-    assert "clock fault" in digest[0]
+def test_probe_timing():
+    import time
+    main = _load_main_module()
+    t = time.time()
+    _case(main, "digest", -timedelta(hours=1), "ok", NS_OK, -timedelta(hours=2))
+    print(f"\nONE CASE WITH DELIVERY: {time.time()-t:.2f}s")
+    t = time.time()
+    _case(main, "digest", -timedelta(hours=1), "ok", NS_OK, None)
+    print(f"ONE CASE NO DELIVERY: {time.time()-t:.2f}s")
