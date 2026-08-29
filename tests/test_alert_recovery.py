@@ -1156,44 +1156,119 @@ def test_a_real_report_racing_the_boot_stamp_lands_instead_of_dying(
             "the conflict loser landed with its pre-race timestamp")
 
 
-def test_a_stale_ok_loser_defers_to_the_critical_it_collided_with(
-        isolated_db, monkeypatch):
-    """Panel round 11, confirmed and fixed, pinned.
+class _FrozenDatetime:
+    """datetime stand-in whose now() returns a fixed instant."""
 
-    Round 10 made the retry re-date its write; round 11 named the
-    consequence: an ok writer whose observation predates the collision
-    could then ERASE a newer critical with a fresher-looking timestamp.
-    Now a create-race loser carrying ok defers to a non-ok winner — the
-    crash report survives; recovery still clears it sequentially.
+    frozen = None
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.frozen
+
+    def __class_getitem__(cls, item):
+        return cls
+
+
+def test_a_stale_observation_never_lands_on_newer_evidence(
+        isolated_db, monkeypatch):
+    """Panel rounds 10-12, the whole family, pinned via monotonic writes.
+
+    A writer whose OBSERVATION predates the evidence already on the row is
+    stale by definition — its write is dropped whatever its status. Here an
+    ok observed BEFORE a crash report races it, loses the create-race, and
+    must not land; a genuinely later ok still clears the crash.
     """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
     from sqlalchemy.orm import Session
 
     from app.alerts.models import AlertComponentHeartbeat
     from app.db import session_scope
+    from app.jobs import alert_recovery
     from app.jobs.alert_recovery import heartbeat
 
     heartbeat("digest", "critical", {"note": "job crashed"})  # the winner
+
+    with session_scope() as session:
+        crash_beat = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
+        crash_beat = crash_beat.replace(tzinfo=_utc) if crash_beat.tzinfo is None else crash_beat
+
+    # The stale writer: observed health 30s BEFORE the crash landed, and
+    # reads "no row" (the create race), so it inserts, collides, retries.
+    _FrozenDatetime.frozen = crash_beat - _td(seconds=30)
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
 
     real_get = Session.get
     state = {"raced": False}
 
     def racing_get(self, entity, ident, **kw):
         if not state["raced"] and entity is AlertComponentHeartbeat:
-            state["raced"] = True  # loser reads before the winner landed
+            state["raced"] = True
             return None
         return real_get(self, entity, ident, **kw)
 
     monkeypatch.setattr(Session, "get", racing_get)
-    heartbeat("digest", "ok", {"note": "stale health claim"})  # must defer
+    heartbeat("digest", "ok", {"note": "stale health claim"})  # must drop
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
     monkeypatch.undo()
 
     with session_scope() as session:
         row = session.get(AlertComponentHeartbeat, "digest")
         assert row.status == "critical", (
-            "a stale ok erased the crash report it collided with")
+            "an observation older than the crash report erased it")
 
-    heartbeat("digest", "ok", {"note": "real recovery"})  # sequential clear
+    heartbeat("digest", "ok", {"note": "real recovery"})  # genuinely later
     with session_scope() as session:
         row = session.get(AlertComponentHeartbeat, "digest")
         assert row.status == "ok", (
-            "a genuine sequential recovery must still clear critical")
+            "a genuinely later recovery must still clear the crash")
+
+
+def test_the_beat_is_observation_time_never_redated_by_retries(
+        isolated_db, monkeypatch):
+    """Panel round 12: a retry crossing a firing instant must not manufacture
+    phase evidence. The landed beat equals the once-captured observation
+    time exactly, even when the write went through the conflict retry."""
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
+    from sqlalchemy.orm import Session
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_recovery import heartbeat
+
+    heartbeat("digest", "critical", {"note": "old crash"})
+    with session_scope() as session:
+        crash_beat = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
+        crash_beat = crash_beat.replace(tzinfo=_utc) if crash_beat.tzinfo is None else crash_beat
+
+    observed = crash_beat + _td(seconds=45)   # a genuinely later recovery
+    _FrozenDatetime.frozen = observed
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+
+    real_get = Session.get
+    state = {"raced": False}
+
+    def racing_get(self, entity, ident, **kw):
+        if not state["raced"] and entity is AlertComponentHeartbeat:
+            state["raced"] = True
+            return None
+        return real_get(self, entity, ident, **kw)
+
+    monkeypatch.setattr(Session, "get", racing_get)
+    heartbeat("digest", "ok", {"note": "recovery through retry"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+    monkeypatch.undo()
+
+    with session_scope() as session:
+        row = session.get(AlertComponentHeartbeat, "digest")
+        landed = row.last_heartbeat_at
+        landed = landed.replace(tzinfo=_utc) if landed.tzinfo is None else landed
+        assert row.status == "ok"
+        assert landed == observed, (
+            "the retry re-dated the beat past its observation time")

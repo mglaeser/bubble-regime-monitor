@@ -55,17 +55,20 @@ def heartbeat(
     settings = get_settings()
     current_mode = mode or settings.alerts_mode
     current_profile = live_profile or settings.alerts_live_profile
+    # OBSERVATION TIME, captured exactly once (panel rounds 10-12, the same
+    # disease three ways): the beat is evidence of WHEN the component's
+    # state was observed, so a retry must never re-date it — a re-dated
+    # beat crossing a firing instant manufactures phase evidence for a
+    # firing the observation never witnessed. Ordering between racing
+    # reports is enforced at the write (monotonic guard), not by re-dating.
+    observed_at = datetime.now(UTC)
     for attempt in (1, 2):
         try:
-            # Captured PER ATTEMPT (panel round 10): a conflict loser that
-            # retried with its pre-race timestamp overwrote a newer report
-            # with an older one — the retry is a new write and must say so.
             _write_heartbeat(component, status, detail,
-                             now=datetime.now(UTC),
+                             now=observed_at,
                              current_mode=current_mode,
                              current_profile=current_profile,
-                             only_if_absent=only_if_absent,
-                             lost_create_race=attempt > 1)
+                             only_if_absent=only_if_absent)
             return
         except IntegrityError:
             # Lost a create race: this writer read "no row", another writer
@@ -90,7 +93,6 @@ def _write_heartbeat(
     current_mode: str,
     current_profile: str,
     only_if_absent: bool,
-    lost_create_race: bool = False,
 ) -> None:
     with session_scope() as session:
         if only_if_absent:
@@ -140,15 +142,18 @@ def _write_heartbeat(
                 component=component, last_heartbeat_at=now, status=status,
                 detail_json=payload))
         else:
-            if lost_create_race and status == "ok" and row.status != "ok":
-                # This writer read "no row", so its health observation was
-                # made BEFORE the colliding writer landed — and what landed
-                # is a failure report. Re-dating our stale ok on retry would
-                # erase a newer critical and read the component healthy at
-                # cutover (panel round 11). The crash report outranks a
-                # health claim that provably predates it; the component's
-                # next REAL healthy run clears it through the normal
-                # sequential path.
+            existing = row.last_heartbeat_at
+            existing = existing.replace(tzinfo=UTC) \
+                if existing.tzinfo is None else existing
+            if now <= existing:
+                # MONOTONIC WRITES (panel rounds 10-12): a report whose
+                # observation is not strictly newer than the evidence on
+                # the row is stale by definition and is dropped — whatever
+                # its status. This is the ordering token the create-race
+                # needed: the loser's pre-race observation never lands on
+                # top of the winner's newer report, an older ok cannot
+                # erase a newer critical, and a genuinely later ok still
+                # clears a crash through this same comparison.
                 return
             previous = dict(row.detail_json or {})
             first_seen = previous.get("first_heartbeat_at") \
