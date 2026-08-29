@@ -114,6 +114,11 @@ def _file_artifact() -> dict[str, Any]:
                 _cache = (key, value)
                 return value
     except OSError:
+        # Explicit invalidation under the None key. A fault always short-
+        # circuits before the key comparison, so simply returning empty
+        # would behave identically — this assignment is defensive clarity,
+        # NOT an independently test-pinned control (round 26 audit, on the
+        # record, same honesty rule as parse_constant above).
         with _cache_lock:
             _cache = (None, dict(_EMPTY_ARTIFACT))
             return _cache[1]
@@ -161,7 +166,17 @@ def _load_artifact(fh: Any) -> dict[str, Any]:
         # Prove the whole artifact round-trips under the RESPONSE encoder's
         # own strictness here, or reject it whole.
         json.dumps(loaded, ensure_ascii=False, allow_nan=False).encode("utf-8")
-    except (OSError, ValueError, RecursionError, UnicodeEncodeError):
+    except (ValueError, RecursionError, UnicodeEncodeError):
+        # CONTENT faults only. OSError is deliberately NOT caught here: an
+        # I/O failure mid-read is TRANSIENT, and a degraded result returned
+        # from this function is cached under the file's (mtime,size,inode)
+        # key — which does not change when the disk recovers, so one EIO
+        # would pin v0 until the artifact is rewritten or the process
+        # restarts (round 26, SOTA-A). Letting OSError propagate to
+        # _file_artifact's guard caches it under the None key instead, so
+        # the very next request re-reads. Content faults keep caching under
+        # the real key: corrupt bytes stay corrupt until the file changes,
+        # and re-parsing them every request would be pure waste.
         return dict(_EMPTY_ARTIFACT)
     version = loaded.get("content_version") if isinstance(loaded, dict) else None
     blocks = loaded.get("blocks") if isinstance(loaded, dict) else None

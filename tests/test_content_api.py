@@ -236,6 +236,78 @@ class TestBlockArtifact:
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
+    def test_transient_read_error_is_not_cached_under_a_valid_key(
+            self, monkeypatch, tmp_path):
+        # Round 26 (SOTA-A): a read EIO was caught INSIDE _load_artifact and
+        # returned as a degraded artifact, which _file_artifact then cached
+        # under the file's (mtime,size,inode) key. Recovery does not change
+        # that key, so one transient fault pinned v0/empty gauge until the
+        # artifact was rewritten or the process restarted.
+        #
+        # The fault is injected at the REAL read (fh.read, where json.load
+        # pulls bytes) — NOT by monkeypatching _load_artifact, which would
+        # bypass the inner except clause this test exists to pin. The
+        # full-control audit caught exactly that vacuity in the first draft.
+        import app.content_registry as reg
+
+        art = self._baseline()
+        reg_mod = self._install(monkeypatch, tmp_path, art)
+        path_type = type(reg._BLOCKS_FILE)
+        real_open = path_type.open
+        state = {"fail": True}
+
+        class FlakyRead:
+            def __init__(self, fh):
+                self._fh = fh
+
+            def __getattr__(self, name):
+                return getattr(self._fh, name)
+
+            def __enter__(self):
+                self._fh.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._fh.__exit__(*exc)
+
+            def read(self, *a, **kw):
+                if state["fail"]:
+                    state["fail"] = False
+                    raise OSError(5, "Input/output error")
+                return self._fh.read(*a, **kw)
+
+        def flaky_open(self, *a, **kw):
+            return FlakyRead(real_open(self, *a, **kw))
+
+        monkeypatch.setattr(path_type, "open", flaky_open)
+        assert reg_mod.content_version() == 0, "transient fault must degrade"
+        # The file has NOT changed — same mtime, size, inode. Recovery alone
+        # must be enough; nothing else may be required of an operator.
+        assert reg_mod.content_version() == 1, "recovery must not need a rewrite"
+        reg._clear_artifact_cache()
+
+    def test_content_fault_stays_cached_under_its_key(self, monkeypatch, tmp_path):
+        # The other half of the same contract: a CONTENT fault is
+        # deterministic, so it must keep caching under the real key — no
+        # re-parsing corrupt bytes on every request.
+        import app.content_registry as reg
+
+        art = self._baseline()
+        art["blocks"]["hero.intro"]["text"] = ""
+        reg_mod = self._install(monkeypatch, tmp_path, art)
+        real_load = reg._load_artifact
+        calls = {"n": 0}
+
+        def counting(fh):
+            calls["n"] += 1
+            return real_load(fh)
+
+        monkeypatch.setattr(reg, "_load_artifact", counting)
+        assert reg_mod.content_version() == 0
+        assert reg_mod.content_version() == 0
+        assert calls["n"] == 1, "a deterministic content fault must stay cached"
+        reg._clear_artifact_cache()
+
     def test_missing_file_serves_builtins_with_version_zero(self, monkeypatch):
         import app.content_registry as reg
 
