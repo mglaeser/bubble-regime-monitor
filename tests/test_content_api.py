@@ -173,6 +173,40 @@ class TestBlockArtifact:
         assert "band.oneliner" in display
         reg._clear_artifact_cache()
 
+    def test_fstat_failure_degrades_never_500s(self, monkeypatch):
+        # Round 25 (SOTA-A): the try/except covered open() but NOT the
+        # os.fstat on the descriptor — an EIO/revoked-fd stat escaped into
+        # score/dashboard/dynamic as a 500. Every filesystem-level fault
+        # must degrade to built-ins at v0.
+        import os as _os
+
+        import app.content_registry as reg
+
+        def boom(_fd):
+            raise OSError(5, "Input/output error")
+
+        reg._clear_artifact_cache()
+        monkeypatch.setattr(_os, "fstat", boom)
+        assert reg.content_version() == 0
+        assert "disclaimer_full" in reg.static_blocks()
+        assert reg.dashboard_payload()["content_version"] == 0
+        reg._clear_artifact_cache()
+
+    def test_fstat_failure_keeps_routes_serving(self, client, monkeypatch):
+        # The route-level half of the same guarantee.
+        import os as _os
+
+        import app.content_registry as reg
+
+        def boom(_fd):
+            raise OSError(5, "Input/output error")
+
+        reg._clear_artifact_cache()
+        monkeypatch.setattr(_os, "fstat", boom)
+        for path in ("/api/v1/content/dashboard", "/api/v1/content/dynamic"):
+            assert client.get(path).status_code == 200, path
+        reg._clear_artifact_cache()
+
     def test_missing_file_serves_builtins_with_version_zero(self, monkeypatch):
         import app.content_registry as reg
 

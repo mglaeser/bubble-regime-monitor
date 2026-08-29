@@ -99,7 +99,17 @@ def _file_artifact() -> dict[str, Any]:
             _cache = (None, dict(_EMPTY_ARTIFACT))
             return _cache[1]
     with fh:
-        st = os.fstat(fh.fileno())
+        try:
+            st = os.fstat(fh.fileno())
+        except OSError:
+            # The open() guard did not cover the STAT (round 25, SOTA-A): an
+            # fstat failure on the descriptor (EIO on a failing mount, a
+            # revoked fd) escaped into every artifact-backed route as a 500.
+            # Any filesystem-level failure degrades to built-ins, like every
+            # other artifact fault — never a handler crash.
+            with _cache_lock:
+                _cache = (None, dict(_EMPTY_ARTIFACT))
+                return _cache[1]
         key = (st.st_mtime_ns, st.st_size, st.st_ino)
         cached = _cache
         if cached is not None and cached[0] == key:
