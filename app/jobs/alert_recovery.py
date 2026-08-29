@@ -12,7 +12,7 @@ something nobody verified.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import update
@@ -30,6 +30,11 @@ log = get_logger(__name__)
 
 COMPONENT = "recovery"
 SIDECAR_COMPONENT = "sidecar_reconciliation"
+
+
+#: Matches the cutover gate's future-skew tolerance: the proof that a
+#: rollback-stale ok cannot clear a failure holds exactly up to this step.
+_NON_OK_CLEAR_MARGIN = timedelta(minutes=5)
 
 
 class _HeartbeatRaced(Exception):
@@ -171,8 +176,24 @@ def _write_heartbeat(
             existing_raw = row.last_heartbeat_at
             existing = existing_raw.replace(tzinfo=UTC) \
                 if existing_raw.tzinfo is None else existing_raw
-            if status == "ok" and now <= existing:
-                return
+            if status == "ok":
+                if row.status != "ok":
+                    # Clearing a FAILURE needs dominance beyond the clock
+                    # model, not bare ordering (panel round 14): an ok whose
+                    # observation was captured before a backward clock step
+                    # carries a wall-future timestamp and would erase a
+                    # later crash. Bound: with any single step <= the 5min
+                    # the gate already tolerates, two writers' clock errors
+                    # differ by <= 5min, so a stale ok (observed before the
+                    # crash in real time) can exceed the crash beat by at
+                    # most 5min on the wall — requiring MORE than that
+                    # margin excludes every such write by construction.
+                    # Genuine recoveries are the component's next run:
+                    # 30min to 7 days later, clearing the margin trivially.
+                    if now <= existing + _NON_OK_CLEAR_MARGIN:
+                        return
+                elif now <= existing:
+                    return
             previous = dict(row.detail_json or {})
             first_seen = previous.get("first_heartbeat_at") \
                 or row.last_heartbeat_at.isoformat()

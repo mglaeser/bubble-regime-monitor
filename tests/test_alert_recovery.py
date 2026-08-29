@@ -648,8 +648,13 @@ def test_retention_job_heartbeats_success_and_failure(isolated_db, monkeypatch):
         assert failed.detail_json["error"] == "RuntimeError"
 
 
-def test_heartbeat_preserves_bounded_run_history(isolated_db):
+def test_heartbeat_preserves_bounded_run_history(isolated_db, monkeypatch):
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
     from app.alerts.models import AlertComponentHeartbeat
+    from app.jobs import alert_recovery
     from app.jobs.alert_recovery import heartbeat
 
     heartbeat(
@@ -659,9 +664,16 @@ def test_heartbeat_preserves_bounded_run_history(isolated_db):
         first = session.get(AlertComponentHeartbeat, "history-test")
         first_seen = first.last_heartbeat_at
 
+    # The recovery is the component's next run — beyond the 5min dominance
+    # margin an ok needs to clear a non-ok (rollback-stale exclusion).
+    seen_aware = first_seen.replace(tzinfo=_utc) \
+        if first_seen.tzinfo is None else first_seen
+    _FrozenDatetime.frozen = seen_aware + _td(minutes=6)
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
     heartbeat(
         "history-test", "ok", {"second": True},
         mode="shadow", live_profile="default")
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
     with session_scope() as session:
         row = session.get(AlertComponentHeartbeat, "history-test")
         detail = row.detail_json
@@ -1219,7 +1231,12 @@ def test_a_stale_observation_never_lands_on_newer_evidence(
         assert row.status == "critical", (
             "an observation older than the crash report erased it")
 
-    heartbeat("digest", "ok", {"note": "real recovery"})  # genuinely later
+    # A genuine recovery is the component's NEXT run — beyond the 5min
+    # dominance margin that excludes rollback-stale health claims.
+    _FrozenDatetime.frozen = crash_beat + _td(minutes=6)
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "ok", {"note": "real recovery"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
     with session_scope() as session:
         row = session.get(AlertComponentHeartbeat, "digest")
         assert row.status == "ok", (
@@ -1247,7 +1264,7 @@ def test_the_beat_is_observation_time_never_redated_by_retries(
         crash_beat = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
         crash_beat = crash_beat.replace(tzinfo=_utc) if crash_beat.tzinfo is None else crash_beat
 
-    observed = crash_beat + _td(seconds=45)   # a genuinely later recovery
+    observed = crash_beat + _td(minutes=6)    # next run, beyond the margin
     _FrozenDatetime.frozen = observed
     monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
 
@@ -1398,3 +1415,45 @@ def test_the_write_reverifies_against_a_row_that_moved(
         assert row.status == "critical", (
             "a guard evaluated against a stale read blind-overwrote the "
             "crash report that landed in between")
+
+
+def test_a_rollback_stale_ok_cannot_clear_a_later_crash(
+        isolated_db, monkeypatch):
+    """Panel round 14, confirmed and fixed, pinned.
+
+    The mirror of the rollback-critical case: an ok whose observation was
+    captured before a backward clock step carries a wall-future timestamp
+    and would erase a crash that landed after it in real time. Clearing a
+    failure therefore needs dominance BEYOND the 5min step tolerance —
+    under any single step within it, two writers' clock errors differ by
+    at most the tolerance, so every rollback-stale ok is excluded by
+    construction. An ok 4min past the crash beat must drop; the same ok
+    6min past it (a genuine next run) must clear.
+    """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_recovery import heartbeat
+
+    heartbeat("digest", "critical", {"note": "crash after the step-back"})
+    with session_scope() as session:
+        crash_beat = session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at
+        crash_beat = crash_beat.replace(tzinfo=_utc) if crash_beat.tzinfo is None else crash_beat
+
+    _FrozenDatetime.frozen = crash_beat + _td(minutes=4)  # inside the margin
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "ok", {"note": "pre-rollback health claim"})
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
+            "a rollback-stale ok cleared a crash that happened after it")
+
+    _FrozenDatetime.frozen = crash_beat + _td(minutes=6)  # beyond the margin
+    heartbeat("digest", "ok", {"note": "genuine next run"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "ok", (
+            "a genuine recovery beyond the margin failed to clear")
