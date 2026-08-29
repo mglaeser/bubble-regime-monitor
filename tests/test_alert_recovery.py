@@ -655,7 +655,7 @@ def test_heartbeat_preserves_bounded_run_history(isolated_db, monkeypatch):
 
     from app.alerts.models import AlertComponentHeartbeat
     from app.jobs import alert_recovery
-    from app.jobs.alert_recovery import heartbeat
+    from app.jobs.alert_recovery import heartbeat, liveness_token
 
     heartbeat(
         "history-test", "degraded", {"first": True},
@@ -672,7 +672,8 @@ def test_heartbeat_preserves_bounded_run_history(isolated_db, monkeypatch):
     monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
     heartbeat(
         "history-test", "ok", {"second": True},
-        mode="shadow", live_profile="default")
+        mode="shadow", live_profile="default",
+        since=liveness_token("history-test"))
     monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
     with session_scope() as session:
         row = session.get(AlertComponentHeartbeat, "history-test")
@@ -1235,7 +1236,8 @@ def test_a_stale_observation_never_lands_on_newer_evidence(
     # dominance margin that excludes rollback-stale health claims.
     _FrozenDatetime.frozen = crash_beat + _td(minutes=6)
     monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
-    heartbeat("digest", "ok", {"note": "real recovery"})
+    heartbeat("digest", "ok", {"note": "real recovery"},
+              since=alert_recovery.liveness_token("digest"))
     monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
     with session_scope() as session:
         row = session.get(AlertComponentHeartbeat, "digest")
@@ -1455,7 +1457,8 @@ def test_a_rollback_stale_ok_cannot_clear_a_later_crash(
             "a rollback-stale ok cleared a crash that happened after it")
 
     _FrozenDatetime.frozen = crash_beat + _td(minutes=6)  # beyond the margin
-    heartbeat("digest", "ok", {"note": "genuine next run"})
+    heartbeat("digest", "ok", {"note": "genuine next run"},
+              since=alert_recovery.liveness_token("digest"))
     monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
     with session_scope() as session:
         assert session.get(AlertComponentHeartbeat, "digest").status == "ok", (
@@ -1672,7 +1675,8 @@ def test_a_retrying_ok_can_never_clear_a_failure_however_the_clocks_read(
 
     # And a genuine later run — observation contemporaneous with a read that
     # sees the failure — still clears it.
-    heartbeat("digest", "ok", {"note": "genuine recovery run"})
+    heartbeat("digest", "ok", {"note": "genuine recovery run"},
+              since=alert_recovery.liveness_token("digest"))
     with session_scope() as session:
         assert session.get(AlertComponentHeartbeat, "digest").status == "ok", (
             "a genuine recovery must still clear the failure")
@@ -1840,7 +1844,8 @@ def test_a_verdict_cannot_clear_a_failure_that_landed_after_it(
             "a verdict cleared a failure that landed after it was formed")
 
     # A writer entering after the crash still clears normally.
-    heartbeat("digest", "ok", {"note": "genuine later run"})
+    heartbeat("digest", "ok", {"note": "genuine later run"},
+              since=alert_recovery.liveness_token("digest"))
     with session_scope() as session:
         assert session.get(AlertComponentHeartbeat, "digest").status == "ok"
 
@@ -2002,3 +2007,46 @@ def test_the_digest_job_reads_its_token_inside_the_never_raises_guard():
     source = inspect.getsource(job)
     assert source.index("try:") < source.index("liveness_token(COMPONENT)"), (
         "the token read sits outside the try that makes job() never raise")
+
+
+def test_only_a_caller_with_a_pre_work_token_may_clear_a_failure(
+        isolated_db, monkeypatch):
+    """Panel round 26, confirmed and closed, pinned.
+
+    Without a pre-work token the only snapshot available is taken after
+    the caller formed its verdict, so a failure landing in between is
+    already inside it and looks like it was always there. No ordering
+    trick fixes that from inside heartbeat() — the missing evidence
+    belongs to the caller. So a tokenless ok may not clear a failure at
+    all; every scheduled component supplies one.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs.alert_recovery import heartbeat, liveness_token
+
+    heartbeat("digest", "critical", {"note": "component is down"})
+
+    heartbeat("digest", "ok", {"note": "tokenless health claim"})
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
+            "a tokenless verdict cleared a failure it cannot prove it saw")
+
+    heartbeat("digest", "ok", {"note": "scheduled run"},
+              since=liveness_token("digest"))
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "ok", (
+            "a token-carrying run could not clear the failure")
+
+
+def test_every_scheduled_component_snapshots_before_its_work():
+    """The load-bearing components must not use the tokenless path."""
+    import inspect
+
+    from app.jobs import alert_digest, alert_dispatch, alert_recovery, alert_watchdog
+
+    for module in (alert_digest, alert_dispatch, alert_watchdog, alert_recovery):
+        source = inspect.getsource(module.job)
+        assert "liveness_token(" in source, (
+            f"{module.__name__}.job() does not snapshot a liveness token")
+        assert source.index("try:") < source.index("liveness_token("), (
+            f"{module.__name__}.job() reads its token outside the never-raises guard")

@@ -348,6 +348,22 @@ def _write_heartbeat(
                     # this bound rests on, named here rather than implied.
                     if not observation_is_current:
                         return
+                    if since is None:
+                        # TOKENLESS CALLERS MAY NOT CLEAR A FAILURE.
+                        #
+                        # Without a pre-work token the only snapshot
+                        # available is taken after the caller formed its
+                        # verdict, so a failure landing in between is
+                        # already inside it and looks like it was always
+                        # there (panel round 26). No ordering trick fixes
+                        # that from in here — the missing evidence is the
+                        # caller's, not ours. Every scheduled component
+                        # supplies one (digest, dispatcher, watchdog,
+                        # recovery), so this path is manual and ad-hoc
+                        # work, where refusing to clear costs a red gate
+                        # until the component's next real run and buys a
+                        # gate that cannot be greened by a stale verdict.
+                        return
                     if row.revision != entry_revision:
                         return
                     # Second, independent refusal: a failure whose beat is
@@ -475,13 +491,13 @@ def _retryable_inputs(session: Any, abandoned: list[str], *, limit: int,
     return out
 
 
-def run_once() -> dict[str, Any]:
+def run_once(*, since: int | None = None) -> dict[str, Any]:
     settings = get_settings()
     if not settings.alert_input_capture and settings.alerts_mode == "disabled":
         detail = {"status": "skipped",
                   "reason": "capture and alerting both disabled",
                   "skipped": True}
-        heartbeat(COMPONENT, "ok", detail)
+        heartbeat(COMPONENT, "ok", detail, since=since)
         heartbeat(SIDECAR_COMPONENT, "ok", {**detail, "sidecar_gaps": 0})
         return detail
 
@@ -581,7 +597,8 @@ def run_once() -> dict[str, Any]:
 def job() -> None:
     """Scheduler entry point. Never raises."""
     try:
-        result = run_once()
+        # Landing order before the work; see the dispatcher for why.
+        result = run_once(since=liveness_token(COMPONENT))
         log.info("alert_recovery_job", **result)
     except Exception as exc:
         log.error("alert_recovery_job_failed", error_class=type(exc).__name__,

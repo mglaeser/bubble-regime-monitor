@@ -30,11 +30,20 @@ def run_once() -> dict[str, Any]:
 def job() -> None:
     """Scheduler entry point. Never raises."""
     try:
+        # Landing order BEFORE the work (panel round 26): this component is
+        # load-bearing for the cutover gate, so its success reports must be
+        # able to prove that no failure landed while they were being earned.
+        # Inside the try because it reads the database and this function
+        # never raises.
+        from app.jobs.alert_recovery import liveness_token
+
+        token = liveness_token(COMPONENT)
         result = run_once()
         if result.get("status") == "skipped":
             from app.jobs.alert_recovery import heartbeat
 
-            heartbeat(COMPONENT, "ok", {**result, "skipped": True})
+            heartbeat(COMPONENT, "ok", {**result, "skipped": True},
+                      since=token)
         log.info("alert_watchdog_job", **result)
     except Exception as exc:
         log.error("alert_watchdog_job_failed", error_class=type(exc).__name__,
