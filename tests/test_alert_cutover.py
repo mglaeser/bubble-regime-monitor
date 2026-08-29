@@ -43,7 +43,8 @@ def test_a_fresh_deployment_fails_every_observational_gate():
     assert report.ready is False
     joined = " ".join(report.unsatisfied)
     for gate in ("live_mode",
-                 "heartbeat_dispatcher", "heartbeat_watchdog"):
+                 "heartbeat_dispatcher", "heartbeat_watchdog",
+                 "heartbeat_digest"):
         assert gate in joined, f"{gate} was not evaluated or not reported"
 
     # and the checks that CAN pass on a fresh db are reported as satisfied,
@@ -917,19 +918,29 @@ def test_the_weekly_digest_is_judged_on_its_own_cadence():
         "a ten-day-dead weekly job passed the gate")
 
 
-def test_a_digest_that_never_ran_does_not_block_first_activation():
-    """Never-ran is not stale: the first proof-of-life lands next Monday.
+def test_a_digest_absence_needs_evidence_the_deployment_is_young():
+    """Absence of evidence is not evidence the first Monday has not come.
 
-    Refusing cutover until the weekly job has run once would be a waiting
-    period in disguise — the thing the operator explicitly removed. A
+    With no delivery history at all, nothing distinguishes a first activation
+    from a digest that was never deployed, so the exemption does not apply and
+    the check says so instead of asserting health. `ready` does not move:
+    wire_proven is already refusing here, since it needs a live delivery
+    CONFIRMED SENT and those rows are a subset of the ones the bound reads. A
     dispatcher or watchdog with no heartbeat still blocks: their cadence is
     minutes, so absence IS death.
+
+    The exemption itself is pinned by
+    test_a_day_one_cutover_is_untouched_by_the_absence_bound, which supplies
+    the live delivery a real first activation has.
     """
     with session_scope() as session:
         report = preflight(session, now=NOW)
 
-    digest = [s_ for s_ in report.satisfied if s_.startswith("heartbeat_digest")]
-    assert digest and "not staleness" in digest[0]
+    digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert digest and "not evidence of health" in digest[0]
+    assert any(u.startswith("wire_proven") for u in report.unsatisfied), (
+        "wire_proven must be the gate that actually refuses this deployment")
+    assert report.ready is False
     assert any(u.startswith("heartbeat_dispatcher") for u in report.unsatisfied)
     assert any(u.startswith("heartbeat_watchdog") for u in report.unsatisfied)
 

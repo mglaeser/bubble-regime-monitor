@@ -334,7 +334,24 @@ def preflight(
             AlertDelivery.live_profile == live_profile,
         )
     ).scalar_one()
-    if earliest_live is not None:
+    if earliest_live is None:
+        # No live delivery has ever been recorded, so there is no evidence the
+        # deployment is young — only an ABSENCE of evidence, which is not the
+        # same thing and must not read as grace. Without this branch the
+        # exemption never expires in a profile that has sent nothing, and the
+        # check would keep reporting "its first Monday has not come yet" for a
+        # digest that has been dead for a year.
+        #
+        # `ready` is unchanged in every reachable state: `wire_proven` above
+        # needs one live delivery CONFIRMED SENT, and those rows are a strict
+        # subset of the ones counted here, so it is already refusing whenever
+        # this branch is taken. What changes is that this check no longer
+        # claims a component is fine on evidence it does not have.
+        digest_absence_ok, digest_absence_detail = False, (
+            "no digest heartbeat and no live delivery history at all — "
+            "nothing here can tell a first activation from a digest that was "
+            "never deployed, so this is not evidence of health")
+    else:
         earliest = _aware(earliest_live)
         if earliest > now + _CLOCK_SKEW:
             # The same rule the heartbeats live under: a future-dated minimum
