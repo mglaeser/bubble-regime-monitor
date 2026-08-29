@@ -511,3 +511,24 @@ class TestBlockArtifact:
         reg._clear_artifact_cache()
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
+
+    def test_band_vocabulary_closed_across_structures(self):
+        # Round 14: every band key the band maps declare must resolve to a
+        # row in the band-keyed verdict tables — vocabulary closure, so no
+        # state silently falls to generic copy. And no extractor scaffolding
+        # (_placeholder) may ship in any served table.
+        import app.content_registry as reg
+
+        reg._clear_artifact_cache()
+        blocks = reg.static_blocks()
+        declared = set(blocks["gauge.band.oneliner"]["entries"].keys())
+        for table in ("gauge.verdict.lead", "gauge.verdict.detail"):
+            rows = {r.get("band") for r in blocks[table]["items"]}
+            missing = declared - rows
+            assert not missing, f"{table} lacks rows for declared bands: {missing}"
+        for slug, block in blocks.items():
+            for item in block.get("items", []) if isinstance(block.get("items"), list) else []:
+                assert "_placeholder" not in str(item), (
+                    f"extractor scaffolding shipped in {slug}"
+                )
+        reg._clear_artifact_cache()

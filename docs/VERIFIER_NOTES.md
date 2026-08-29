@@ -65,6 +65,8 @@ fixed with priority.
 
 | 13 | SOTA-A | Cache key-to-file binding (stat-then-open TOCTOU: a rename between the two caches one file's content under another's key, and a quick revert makes the mismatch stick); artifact schema still slug-porous | **UPHELD ×2 → fixed**: key and content now bind to the SAME open file descriptor (`fstat` on the handle the loader reads from); slug-shape validation added (`^[a-z0-9_.\-]{1,120}$`) — which immediately caught a real defect in the shipped artifact itself (a slug carrying a leaked extractor note, now renamed `atlas.aggregate.stats`). The control proved itself on first contact. Both pinned |
 
+| 14 | SOTA-A + SOTA-C | Band maps declare `suppressed`/`fallback` keys the verdict tables have no rows for (those states resolved to generic copy); `_placeholder` extractor scaffolding shipped in served tables; stat-tile editorial undated in machine-readable form | **UPHELD ×3 → fixed**: verdict tables gain `suppressed` rows (block-degraded copy) and `fallback` rows (unknown copy) — band vocabulary is CLOSED across all band-keyed structures, pinned by a closure test (map keys ⊆ table rows); all `_placeholder` scaffolding stripped from every served table, pinned; `atlas.aggregate.stats` carries machine-readable `as_of: 2026-07` + a note pointing live values to the metrics feed |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit

@@ -1597,12 +1597,17 @@
           "template": "No action indicated."
         },
         {
-          "band": "_placeholder",
-          "trend_broken": "",
-          "template": "{names} = tickers among SPY, QQQ whose faber_10mo === \"OUT\", joined with \" and \""
+          "band": "unknown",
+          "trend_broken": "any",
+          "template": "Not scored — the current reading could not be classified."
         },
         {
-          "band": "unknown",
+          "band": "suppressed",
+          "trend_broken": "any",
+          "template": "Not scored today."
+        },
+        {
+          "band": "fallback",
           "trend_broken": "any",
           "template": "Not scored — the current reading could not be classified."
         }
@@ -1648,12 +1653,17 @@
           "template": "Structural risk is present but not acute{override_clause}, and both 10-month trend rules are intact."
         },
         {
-          "band": "_placeholder",
-          "trend_broken": "",
-          "template": "{override_clause} = \", and a hard override has fired\" when override_fired, else \"\"; {names} as in gauge.verdict.lead"
+          "band": "unknown",
+          "trend_broken": "any",
+          "template": "Not scored — the current reading could not be classified."
         },
         {
-          "band": "unknown",
+          "band": "suppressed",
+          "trend_broken": "any",
+          "template": "{gauge.band.oneliner.suppressed}"
+        },
+        {
+          "band": "fallback",
           "trend_broken": "any",
           "template": "Not scored — the current reading could not be classified."
         }
@@ -1686,10 +1696,6 @@
         {
           "case": "appended IQR clause: band == de-risk and iqr[0] <= 60",
           "template": " The bottom of that range is back at {iqr_lo}."
-        },
-        {
-          "case": "_placeholder",
-          "template": "{nx} = 45 for hold else 60; {line} = \"trim\" for hold else \"de-risk\"; {gap} = |{nx} - round(clamp(median,0,100))|; {unit} = \" point\" if gap == 1 else \" points\"; {iqr_hi}/{iqr_lo} = round(iqr[1])/round(iqr[0])"
         }
       ],
       "source": "src/bubblegauge.tsx:1635-1650"
@@ -1716,10 +1722,6 @@
         {
           "case": "run == 2",
           "template": "changed to {BAND} {run} readings ago"
-        },
-        {
-          "case": "_placeholder",
-          "template": "{BAND} = current band label (HOLD/TRIM/DE-RISK/SUPPRESSED); {run} = consecutive readings the band has held"
         }
       ],
       "source": "src/bubblegauge.tsx:2028-2030"
@@ -1738,7 +1740,9 @@
           "caption": "gold vs US Treasuries share of global reserves at end-2025 — gold overtook Treasuries (ECB, 2 Jun 2026)"
         }
       ],
-      "source": "src/dashboard.tsx:463-464"
+      "source": "src/dashboard.tsx:463-464",
+      "as_of": "2026-07",
+      "note": "frozen editorial snapshot (Jul 2026); live values come from /api/v1/dashboard/feed"
     }
   },
   "missing": [],
