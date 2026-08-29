@@ -433,6 +433,10 @@ class DynamicSlot:
     max_len: int
     regex: str
     placeholder: str
+    # Authoring date of a FROZEN editorial placeholder (round 21, SOTA-A):
+    # frozen values served without a date let relative readings drift with
+    # request time. None only for non-editorial "pending" placeholders.
+    as_of: str | None = None
 
 
 _PENDING = "Automated note pending - not yet generated."
@@ -455,17 +459,17 @@ def _save_haven_slots() -> list[DynamicSlot]:
         # lands) — a placeholder shaped like a date must never fabricate one.
         DynamicSlot("atlas.explorer.potential-banner.anchor-date",
                     "Anchor month of the potential-crisis banner", 8,
-                    r"^[A-Z][a-z]{2} 20\d{2}$", "Jul 2026"),
+                    r"^[A-Z][a-z]{2} 20\d{2}$", "Jul 2026", as_of="2026-07"),
         DynamicSlot("atlas.explorer.potential-banner.backfill-window",
                     "Backfill window of the potential-crisis banner", 24,
-                    r"^[\x20-\x7E]{1,24}$", "Jul 2021 - Jul 2026"),
+                    r"^[\x20-\x7E]{1,24}$", "Jul 2021 - Jul 2026", as_of="2026-07"),
         # The placeholder states DATES and asserts no recency claim — a
         # "<= N weeks old" phrasing self-invalidates as time passes (panel
         # finding, round 10); the dynamic slot exists to keep this current.
         DynamicSlot("atlas.explorer.potential-banner.freshness",
                     "Source-freshness line of the potential-crisis banner", 120,
                     r"^[\x20-\x7E]{1,120}$",
-                    "sources as of BIS 28 Jun / ECB 2 Jun & 27 May / Fed 8 May 2026"),
+                    "sources as of BIS 28 Jun / ECB 2 Jun & 27 May / Fed 8 May 2026", as_of="2026-07"),
         _ascii_slot("atlas.crises.ai2026.peak", "AI-2026 crisis peak label", 48),
         _ascii_slot("atlas.crises.ai2026.cause", "AI-2026 crisis cause prose", 600),
         _ascii_slot("atlas.crises.ai2026.highlight", "AI-2026 crisis highlight prose", 700),
@@ -518,7 +522,7 @@ def _save_haven_slots() -> list[DynamicSlot]:
             slots.append(DynamicSlot(
                 f"analytics.tail.{asset}.{stat}",
                 f"Tail-regression {stat} statistic for {asset}", 8,
-                tail_regex[stat], value))
+                tail_regex[stat], value, as_of="2026-07"))
     explos_editorial = [
         ("Raw log price", "+0.75", "borderline (crit 0.62-0.78, seed-sensitive)"),
         ("Linear-trend residual", "-0.76", "not explosive"),
@@ -528,21 +532,24 @@ def _save_haven_slots() -> list[DynamicSlot]:
     for i, (label, stat, verdict) in enumerate(explos_editorial, start=1):
         slots.append(DynamicSlot(f"analytics.explos.{i}.label",
                                  f"Explosiveness row {i} label", 48,
-                                 r"^[\x20-\x7E]{1,48}$", label))
+                                 r"^[\x20-\x7E]{1,48}$", label, as_of="2026-07"))
         slots.append(DynamicSlot(f"analytics.explos.{i}.stat",
                                  f"Explosiveness row {i} statistic", 6,
-                                 r"^[+-]\d\.\d{2}$", stat))
+                                 r"^[+-]\d\.\d{2}$", stat, as_of="2026-07"))
         slots.append(DynamicSlot(f"analytics.explos.{i}.verdict",
                                  f"Explosiveness row {i} verdict", 44,
-                                 r"^[\x20-\x7E]{1,44}$", verdict))
+                                 r"^[\x20-\x7E]{1,44}$", verdict, as_of="2026-07"))
     clock_editorial = {
         "weighted": "~ -12 mo", "dotcom": "p ~ 0 / +1",
-        "lppl": "+2.5 mo", "gold-lead": "now -> +19 mo",
+        # gold-lead was "now -> +19 mo" — a frozen Jul-2026 window phrased
+        # deictically shifted the implied market peak forward with request
+        # time (round 21, SOTA-A). Absolute calendar bounds instead.
+        "lppl": "+2.5 mo", "gold-lead": "Jul'26 - Feb'28",
     }
     for clock, value in clock_editorial.items():
         slots.append(DynamicSlot(f"analytics.clock.{clock}.value",
                                  f"Analytics clock {clock} value", 16,
-                                 r"^[\x20-\x7E]{1,16}$", value))
+                                 r"^[\x20-\x7E]{1,16}$", value, as_of="2026-07"))
         slots.append(_ascii_slot(f"analytics.clock.{clock}.caption",
                                  f"Analytics clock {clock} caption", 180))
     hedge_editorial = {
@@ -554,7 +561,7 @@ def _save_haven_slots() -> list[DynamicSlot]:
         # admit 1.50 (panel finding, PR #97).
         slots.append(DynamicSlot(f"analytics.hedgeweight.{asset}.score",
                                  f"Hedge weighting score for {asset}", 4,
-                                 r"^(0\.\d{2}|1\.00)$", score))
+                                 r"^(0\.\d{2}|1\.00)$", score, as_of="2026-07"))
         slots.append(_ascii_slot(f"analytics.hedgeweight.{asset}.reason",
                                  f"Hedge weighting reason for {asset}", 140))
     return slots
@@ -596,6 +603,7 @@ def dynamic_slots_payload() -> dict[str, dict[str, Any]]:
             "source": "placeholder",
             "updated_at": None,
             "purpose": s.purpose,
+            "as_of": s.as_of,
             "constraints": {"max_len": s.max_len, "regex": s.regex},
         }
         for s in DYNAMIC_SLOTS

@@ -61,7 +61,7 @@ Already-dynamic, already-API-served (no change): `snapshot.judgment_call`,
 
 ```
 GET /api/v1/content/dashboard   static blocks {slug: {kind, text|items|entries}}
-GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, updated_at, purpose, constraints}}
+GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, updated_at, purpose, as_of, constraints}}
 ```
 
 v1 completeness is the full code-anchored manifest (`app/content_manifest.py`):

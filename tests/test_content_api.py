@@ -593,6 +593,33 @@ class TestBlockArtifact:
                                 str(raw["blocks"][slug].get("as_of") or "")), (
                 f"{slug} is a frozen 2026-cycle assessment without as_of")
 
+    def test_editorial_placeholders_dated_and_never_deictic(self):
+        # Round 21 (SOTA-A): the gold-lead clock placeholder said
+        # "now -> +19 mo" — a frozen Jul-2026 analytical window phrased
+        # relative to REQUEST time, silently moving the implied market-peak
+        # window forward after Jul 2026. Two standing rules: (1) no dynamic
+        # placeholder may use deictic relative time; (2) every slot whose
+        # placeholder carries a frozen editorial value must be machine-dated.
+        import app.content_registry as reg
+
+        deictic = re.compile(r"\b(now|today|tomorrow|ago|from now)\b", re.I)
+        pending = (reg._PENDING, "Pending.")
+        dated = 0
+        for slot in reg.DYNAMIC_SLOTS:
+            assert not deictic.search(slot.placeholder), (
+                f"{slot.slug} placeholder is deictic: {slot.placeholder!r}")
+            if slot.placeholder in pending or slot.placeholder.startswith("Automated"):
+                continue
+            assert re.fullmatch(r"\d{4}-\d{2}", str(slot.as_of or "")), (
+                f"{slot.slug} serves a frozen editorial value without as_of")
+            dated += 1
+        assert dated >= 38, "editorial placeholder census unexpectedly small"
+
+    def test_dynamic_payload_carries_as_of(self, client):
+        payload = client.get("/api/v1/content/dynamic").json()["data"]["slots"]
+        assert payload["analytics.clock.gold-lead.value"]["as_of"] == "2026-07"
+        assert payload["headline_note"]["as_of"] is None
+
     def test_distance_row_missing_case_degrades(self, monkeypatch, tmp_path):
         # The distance table is case-keyed; its rows have a schema too.
         art = self._baseline()
