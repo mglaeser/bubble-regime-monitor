@@ -52,13 +52,16 @@ def heartbeat(
     refreshed the timestamp would launder a recorded failure into health and
     keep a registered-but-never-running job green forever.
     """
-    now = datetime.now(UTC)
     settings = get_settings()
     current_mode = mode or settings.alerts_mode
     current_profile = live_profile or settings.alerts_live_profile
     for attempt in (1, 2):
         try:
-            _write_heartbeat(component, status, detail, now=now,
+            # Captured PER ATTEMPT (panel round 10): a conflict loser that
+            # retried with its pre-race timestamp overwrote a newer report
+            # with an older one — the retry is a new write and must say so.
+            _write_heartbeat(component, status, detail,
+                             now=datetime.now(UTC),
                              current_mode=current_mode,
                              current_profile=current_profile,
                              only_if_absent=only_if_absent)
@@ -90,11 +93,12 @@ def _write_heartbeat(
     with session_scope() as session:
         if only_if_absent:
             # Atomic conditional INSERT — no check-then-write window at all.
-            # ON CONFLICT DO NOTHING can only create the row or leave an
-            # existing one byte-for-byte alone, so a concurrent job writing
-            # its own real heartbeat can never be overwritten, raced, or
-            # crashed into; the losing insert simply evaporates.
-            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+            # A plain INSERT under a savepoint either creates the row or
+            # hits the primary key, and the conflict is swallowed: an
+            # existing row stays byte-for-byte untouched, and a concurrent
+            # real heartbeat can never be overwritten, raced, or crashed
+            # into. Plain SQL, no dialect-specific statement (panel round
+            # 10) — the stamp works wherever the schema does.
             payload = {
                 **(detail or {}),
                 "mode": current_mode,
@@ -107,11 +111,14 @@ def _write_heartbeat(
                 "previous_live_profile": None,
                 "consecutive_non_ok": 0 if status == "ok" else 1,
             }
-            session.execute(
-                sqlite_insert(AlertComponentHeartbeat)
-                .values(component=component, last_heartbeat_at=now,
-                        status=status, detail_json=payload)
-                .on_conflict_do_nothing(index_elements=["component"]))
+            try:
+                with session.begin_nested():
+                    session.add(AlertComponentHeartbeat(
+                        component=component, last_heartbeat_at=now,
+                        status=status, detail_json=payload))
+                    session.flush()
+            except IntegrityError:
+                pass  # the row exists — exactly the desired end state
             return
         row = session.get(AlertComponentHeartbeat, component)
         if row is None:

@@ -387,6 +387,19 @@ def preflight(
             # scheduler will really do. There is no second clock for the
             # phase lease to amplify against.
             from app.alerts.calendars import next_digest_firing
+            # ACCEPTED RESIDUAL (panel round 10, examined and kept): a
+            # BACKWARD clock step inside the 5-minute tolerance, landing a
+            # persisted beat in the small window just after a firing
+            # instant, makes this promise say "next week" while the
+            # stepped-back clock still delivers this week's firing — whose
+            # death would then go unseen for 7 extra days. Reaching that
+            # state needs the step-back AND the job dying WITHOUT its own
+            # failure heartbeat (the failure path writes critical, which
+            # blocks above on status). Every closure constructed against it
+            # — skew-shifted promises, registration-vs-run asymmetry —
+            # manufactures WEEKLY false reds for healthy deployments,
+            # which is the "clock in disguise" this gate exists to avoid.
+            # Bounded corner, double-failure to reach, alternatives worse.
             promised = next_digest_firing(beat)
             due = promised + timedelta(hours=24)
             if now <= due:

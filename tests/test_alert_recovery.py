@@ -1142,3 +1142,15 @@ def test_a_real_report_racing_the_boot_stamp_lands_instead_of_dying(
             "the real failure report lost the race and vanished")
         assert row.detail_json.get("previous_status") == "ok", (
             "the retry must land on the update path, previous_* chain intact")
+        # Panel round 10: the loser must not retry with its pre-race clock.
+        # The landed beat has to be NEWER than the winner's, because the
+        # retry is a new write — an older ok silently shadowing a newer
+        # critical is exactly what the per-attempt timestamp forbids.
+        prev = row.detail_json.get("previous_heartbeat_at")
+        assert prev is not None
+        landed = row.last_heartbeat_at
+        landed = landed.replace(tzinfo=UTC) if landed.tzinfo is None else landed
+        prev_at = datetime.fromisoformat(prev)
+        prev_at = prev_at.replace(tzinfo=UTC) if prev_at.tzinfo is None else prev_at
+        assert landed > prev_at, (
+            "the conflict loser landed with its pre-race timestamp")
