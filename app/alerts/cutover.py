@@ -62,7 +62,13 @@ STABLE_DAYS = 14
 #: holding it to the same two hours made `cutover apply` refusable six and a
 #: half days out of seven. Eight days covers one full cadence plus grace.
 HEARTBEAT_FRESH_HOURS = 2
-_HEARTBEAT_FRESH = {"dispatcher": 2, "watchdog": 2, "digest": 8 * 24}
+# Flat freshness hours for the fast components. The digest is deliberately
+# NOT here: its freshness is computed against the weekly schedule's phase
+# (next promised firing + 24h) in the loop below — a flat window cannot
+# honor "first miss detected within a day" once permitted misfire lateness
+# and DST weeks exist.
+_HEARTBEAT_FLAT_FRESH = {"dispatcher": 2, "watchdog": 2}
+_HEARTBEAT_COMPONENTS = ("dispatcher", "watchdog", "digest")
 UNKNOWN_STALE_HOURS = 24
 
 
@@ -311,7 +317,8 @@ def preflight(
           "whatever its age)")
 
     # 6: the components that replace the daily message are alive
-    for component, fresh_hours in _HEARTBEAT_FRESH.items():
+    for component in _HEARTBEAT_COMPONENTS:
+        fresh_hours = _HEARTBEAT_FLAT_FRESH.get(component)
         row = session.get(AlertComponentHeartbeat, component)
         beat = _aware(row.last_heartbeat_at) if (
             row is not None and row.last_heartbeat_at is not None) else None
@@ -360,32 +367,31 @@ def preflight(
             fresh, detail = False, (
                 f"heartbeat is {beat.isoformat()} — in the future, which is a "
                 "clock fault, not health")
-        elif (component == "digest"
-              and detail_json.get("kind") == "registration"):
-            # A registration stamp proves the job is SCHEDULED, not that it
-            # runs — so it is judged by the schedule's PHASE, not by the flat
-            # cadence window. The flat window let a stamp landing minutes
-            # before a Monday firing stay green through TWO missed
-            # executions (panel finding, PR #96 rounds 5/7, reproduced
-            # 2026-08-29: stamp Mon 08:29 Berlin -> green after both missed
-            # Mondays). A stamp is valid until the first firing it promises
-            # plus the same 24h grace the cadence window carries; after
-            # that, the first scheduled execution never happened.
+        elif component == "digest":
+            # Every digest beat — registration stamp or real run alike —
+            # promises exactly one thing: the NEXT scheduled firing will
+            # produce a fresh heartbeat. So the deadline is that firing plus
+            # 24h grace, computed on the calendar. A flat 192h window broke
+            # this contract twice (panel round 8, both executed and
+            # confirmed): a run 6h late — lateness APScheduler explicitly
+            # permits — stretched first-miss detection to 30h, and a stamp
+            # at the exact firing instant deferred its obligation a week.
+            # Calendar math also absorbs DST weeks, which are not 168h.
             from app.alerts.calendars import next_digest_firing
-            first_due = next_digest_firing(beat) + timedelta(hours=24)
-            if now <= first_due:
+            promised = next_digest_firing(beat)
+            due = promised + timedelta(hours=24)
+            if now <= due:
                 fresh, detail = True, (
-                    "registration stamp valid until the first scheduled "
-                    f"firing plus 24h grace ({first_due.isoformat()}); the "
-                    "job's own run heartbeat takes over from there")
+                    f"digest heartbeat {beat.isoformat()} is valid until its "
+                    f"next promised firing plus 24h ({due.isoformat()})")
             else:
                 fresh, detail = False, (
-                    f"registration stamp from {beat.isoformat()} but the "
-                    "first scheduled execution "
-                    f"(due {next_digest_firing(beat).isoformat()}) never "
-                    "happened — a job that is scheduled and does not run is "
-                    "dead, whatever the stamp's age")
-        elif beat >= now - timedelta(hours=fresh_hours):
+                    f"digest heartbeat {beat.isoformat()} — the firing "
+                    f"promised at {promised.isoformat()} never produced a "
+                    "heartbeat; the weekly job is dead or its schedule is "
+                    "not running")
+        elif fresh_hours is not None and beat >= now - timedelta(
+                hours=fresh_hours):
             fresh, detail = True, "fresh, healthy, and live-namespace matched"
         else:
             fresh, detail = False, (

@@ -886,38 +886,6 @@ def test_an_unreconciled_digest_unknown_blocks_cutover():
         "an unreconciled DIGEST ambiguity did not block cutover")
 
 
-def test_the_weekly_digest_is_judged_on_its_own_cadence():
-    """Two hours of silence from a WEEKLY job is Tuesday, not death.
-
-    The single 2h freshness limit made `cutover apply` refusable six and a
-    half days out of seven — a clock in disguise. A digest heartbeat from last
-    Monday is healthy all week; one older than a full cadence plus grace means
-    the job died and blocks.
-    """
-    from app.alerts.models import AlertComponentHeartbeat
-
-    with session_scope() as session:
-        session.add(AlertComponentHeartbeat(
-            component="digest",
-            last_heartbeat_at=NOW - timedelta(days=3),   # last Monday-ish
-            status="ok",
-            detail_json={"mode": "live", "live_profile": "default"}))
-        session.flush()
-        report = preflight(session, now=NOW)
-
-    assert any(s_.startswith("heartbeat_digest") for s_ in report.satisfied), (
-        "a three-day-old weekly heartbeat was read as a dead component")
-
-    with session_scope() as session:
-        session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at = \
-            NOW - timedelta(days=10)
-        session.flush()
-        report = preflight(session, now=NOW)
-
-    assert any(u.startswith("heartbeat_digest") for u in report.unsatisfied), (
-        "a ten-day-dead weekly job passed the gate")
-
-
 def test_a_digest_that_never_registered_blocks_cutover():
     """Absence always blocks — for the digest exactly like everyone else.
 
@@ -1044,37 +1012,6 @@ def test_restarts_never_refresh_the_registration_stamp():
         "digest green past a full cadence")
 
 
-def test_the_digest_grace_detects_the_first_missed_firing_within_a_day():
-    """192h is one weekly cadence plus 24h of grace — not two firings' worth.
-
-    A beat stamped at a Monday firing goes red 192 hours later: the Tuesday
-    after the FIRST missed Monday, six days before a second missed firing
-    could even exist (that would need 336h). Pinned at the boundary from
-    both sides so the window can neither quietly widen past a second firing
-    nor shrink back into the 2h clock-in-disguise this PR removes.
-    """
-    from app.alerts.models import AlertComponentHeartbeat
-
-    with session_scope() as session:
-        session.add(AlertComponentHeartbeat(
-            component="digest",
-            last_heartbeat_at=NOW - timedelta(hours=191),  # inside the grace
-            status="ok",
-            detail_json={"mode": "live", "live_profile": "default"}))
-        session.flush()
-        report = preflight(session, now=NOW)
-    assert any(s_.startswith("heartbeat_digest") for s_ in report.satisfied), (
-        "still inside one-cadence-plus-grace, yet the gate went red")
-
-    with session_scope() as session:
-        session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at = \
-            NOW - timedelta(hours=193)  # first missed firing, +25h
-        session.flush()
-        report = preflight(session, now=NOW)
-    assert any(u.startswith("heartbeat_digest") for u in report.unsatisfied), (
-        "the first missed weekly firing went undetected past the 24h grace")
-
-
 def test_a_registration_stamp_is_bounded_by_schedule_phase_not_a_flat_window():
     """The reproduced panel finding (PR #96 rounds 5/7), pinned forever.
 
@@ -1109,24 +1046,89 @@ def test_a_registration_stamp_is_bounded_by_schedule_phase_not_a_flat_window():
         report = preflight(session, now=first_firing + timedelta(hours=25))
         faults = [u for u in report.unsatisfied
                   if u.startswith("heartbeat_digest")]
-        assert faults and "never happened" in faults[0], (
+        assert faults and "never produced" in faults[0], (
             "the first missed scheduled execution went undetected — the "
             "phase bug is back")
 
 
-def test_a_real_run_heartbeat_still_gets_the_full_cadence_window():
-    """Run heartbeats (no registration kind) keep 192h — runs are aligned to
-    firings by construction, so the flat window means one missed firing."""
+def _berlin(*args):
+    from zoneinfo import ZoneInfo
+    return datetime(*args, tzinfo=ZoneInfo("Europe/Berlin")).astimezone(UTC)
+
+
+def _digest_row(session, beat, **detail_extra):
     from app.alerts.models import AlertComponentHeartbeat
+    session.add(AlertComponentHeartbeat(
+        component="digest", last_heartbeat_at=beat, status="ok",
+        detail_json={"mode": "live", "live_profile": "default", **detail_extra}))
+    session.flush()
+
+
+def _digest_gate(session, now):
+    report = preflight(session, now=now)
+    green = any(x.startswith("heartbeat_digest") for x in report.satisfied)
+    faults = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    return green, faults
+
+
+def test_a_run_heartbeat_is_valid_until_its_next_promised_firing_plus_grace():
+    """One rule for every digest beat: next promised firing + 24h.
+
+    A run from Monday 08:31 is healthy all week and through 23h after the
+    next Monday's firing; 25h after that firing produced no heartbeat, the
+    job is dead — phase-computed, not a flat window.
+    """
+    beat = _berlin(2026, 8, 24, 8, 31)          # ran right after the firing
 
     with session_scope() as session:
-        session.add(AlertComponentHeartbeat(
-            component="digest",
-            last_heartbeat_at=NOW - timedelta(days=5),
-            status="ok",
-            detail_json={"mode": "live", "live_profile": "default"}))
-        session.flush()
-        report = preflight(session, now=NOW)
+        _digest_row(session, beat)
+        green, _ = _digest_gate(session, _berlin(2026, 8, 30, 12, 0))
+        assert green, "a mid-week run heartbeat must be healthy"
+        green, _ = _digest_gate(session, _berlin(2026, 9, 1, 7, 30))
+        assert green, "23h after the next firing is inside the grace"
+        green, faults = _digest_gate(session, _berlin(2026, 9, 1, 9, 30))
+        assert not green and "never produced" in faults[0], (
+            "the firing promised on Aug 31 went undetected past 24h")
 
-    assert any(x.startswith("heartbeat_digest") for x in report.satisfied), (
-        "a five-day-old run heartbeat is healthy for a weekly job")
+
+def test_a_permitted_late_run_does_not_stretch_first_miss_detection():
+    """Panel round 8 (combo/SOTA-A), executed and confirmed, pinned.
+
+    APScheduler permits the digest to run up to 6h late
+    (misfire_grace_time=21600). Under the flat 192h window a run at Monday
+    14:30 kept the gate green until 30h after the NEXT Monday's missed
+    firing — lateness leaked into detection lag. Phase-computed, detection
+    stays at promised-firing + 24h no matter how late the last run was.
+    """
+    beat = _berlin(2026, 8, 24, 14, 30)         # permitted 6h-late run
+
+    with session_scope() as session:
+        _digest_row(session, beat)
+        green, _ = _digest_gate(session, _berlin(2026, 9, 1, 7, 30))
+        assert green, "23h after the missed firing is still grace"
+        green, faults = _digest_gate(session, _berlin(2026, 9, 1, 9, 30))
+        assert not green and "never produced" in faults[0], (
+            "a permitted late run stretched first-miss detection past 24h")
+
+
+def test_a_beat_at_the_exact_firing_instant_promises_that_firing():
+    """Panel round 8 (combo/SOTA-C), confirmed at the boundary, pinned.
+
+    With `<=` in next_digest_firing, a registration stamp at exactly
+    Monday 08:30:00.000000 deferred its whole obligation to NEXT week. The
+    strict `<` makes the beat promise THAT instant's firing — at the
+    measure-zero boundary the earlier deadline is the fail-closed choice.
+    """
+    from app.alerts.calendars import next_digest_firing
+
+    exact = _berlin(2026, 8, 24, 8, 30)
+    assert next_digest_firing(exact) == exact, (
+        "a beat at the firing instant must promise that firing, not next week")
+
+    with session_scope() as session:
+        _digest_row(session, exact, kind="registration")
+        green, _ = _digest_gate(session, exact + timedelta(hours=23))
+        assert green
+        green, faults = _digest_gate(session, exact + timedelta(hours=25))
+        assert not green and "never produced" in faults[0], (
+            "the exact-instant stamp deferred its obligation by a week")

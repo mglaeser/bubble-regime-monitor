@@ -232,7 +232,7 @@ DIGEST_FIRING_TZ = "Europe/Berlin"
 
 
 def next_digest_firing(after: datetime) -> datetime:
-    """First scheduled digest firing strictly after ``after``, in UTC.
+    """First scheduled digest firing at or after ``after``, in UTC.
 
     Phase matters: a boot at Monday 08:29 Berlin is one minute from its first
     firing, a boot at 08:31 is a week away. The cutover gate uses this to
@@ -247,7 +247,12 @@ def next_digest_firing(after: datetime) -> datetime:
                               minute=DIGEST_FIRING_MINUTE,
                               second=0, microsecond=0)
     candidate += timedelta(days=(DIGEST_FIRING_WEEKDAY - candidate.weekday()) % 7)
-    if candidate <= local:
+    # STRICT <, deliberately: a beat at exactly the firing instant promises
+    # THAT firing, not next week's. With <= a registration stamp landing on
+    # 08:30:00.000000 sharp deferred its whole obligation by seven days
+    # (panel round 8, combo/SOTA-C, confirmed at the boundary). At the
+    # measure-zero instant the earlier deadline is the fail-closed choice.
+    if candidate < local:
         candidate += timedelta(days=7)
     return candidate.astimezone(UTC)
 QUIET_ALLOWED_FROM_HOUR = 7      # inclusive
