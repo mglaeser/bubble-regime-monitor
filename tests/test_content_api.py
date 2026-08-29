@@ -577,6 +577,23 @@ class TestBlockArtifact:
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
+    def test_analytics_family_carries_as_of(self):
+        # Round 24 (SOTA-A): analytics.bsadf.expl carried a measured Jul-2026
+        # BSADF verdict with no as_of and no lexicon word. The ENTIRE
+        # analytics namespace describes the frozen Jul-2026 battery run —
+        # family rule, like ai2026: every analytics.* block is machine-dated.
+        import json as _json
+
+        import app.content_registry as reg
+
+        raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
+        family = [s for s in raw["blocks"] if s.startswith("analytics.")]
+        assert len(family) >= 20, "analytics family unexpectedly small"
+        for slug in family:
+            assert re.fullmatch(r"\d{4}-\d{2}",
+                                str(raw["blocks"][slug].get("as_of") or "")), (
+                f"{slug} describes the frozen battery run without as_of")
+
     def test_frozen_label_maps_carry_as_of(self):
         # Round 23 (SOTA-A): gauge.series.suffix ("— feared market",
         # "— challenged") is the gauge-page twin of the ai2026 suffixes —

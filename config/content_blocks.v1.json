@@ -150,7 +150,8 @@
     "analytics.intro.methods": {
       "kind": "text",
       "text": "Template matching (cross-correlation + DTW), LPPL critical-time estimation, PSY/SADF explosiveness, Baur–McDermott tail regressions, Hamilton regime switching, and Granger lead–lag — individually per asset, then weighted into one clock reading.",
-      "source": "src/dashboard.tsx:706-709"
+      "source": "src/dashboard.tsx:706-709",
+      "as_of": "2026-07"
     },
     "analytics.clock.expl": {
       "kind": "text",
@@ -167,7 +168,8 @@
     "analytics.fans.expl": {
       "kind": "text",
       "text": "<b>What is a \"fan\"?</b> We took the months AFTER past peaks, shuffled them thousands of times in 6-month blocks, and rebuilt 1,500 possible \"afterwards\" paths per family. The dark band is where the middle half of those historical outcomes landed; the light band covers 80%. It shows what USUALLY happened after such peaks — it is explicitly NOT a forecast; if the optimists (BIS's \"capex boom, not solvency bubble\") are right, reality can land above the whole fan.",
-      "source": "src/dashboard.tsx:756-762"
+      "source": "src/dashboard.tsx:756-762",
+      "as_of": "2026-07"
     },
     "analytics.fans.analogs": {
       "kind": "map",
@@ -176,7 +178,8 @@
         "gold": "monetary-crisis refs: 1973 · GFC · Euro",
         "bonds": "deflationary analogs: dot-com · 1929 · Japan"
       },
-      "source": "src/dashboard.tsx:765,768,771"
+      "source": "src/dashboard.tsx:765,768,771",
+      "as_of": "2026-07"
     },
     "analytics.fans": {
       "kind": "table",
@@ -215,7 +218,8 @@
     "analytics.bsadf.expl": {
       "kind": "text",
       "text": "<b>Plainly:</b> a standard statistical \"bubble alarm\" (the PSY test). On raw prices it's exactly on the borderline — some runs flag it, some don't. The moment you allow for the fact that these companies' profits are genuinely growing ~17%/yr, the alarm goes silent in every variant. Translation: the academic jury is honestly split on whether this is a bubble at all — our own data reproduces both sides of the published dispute.",
-      "source": "src/dashboard.tsx:830-836"
+      "source": "src/dashboard.tsx:830-836",
+      "as_of": "2026-07"
     },
     "analytics.granger.headline_verdict": {
       "kind": "text",
@@ -238,7 +242,8 @@
     "analytics.hedgeweight.formula": {
       "kind": "text",
       "text": "Score = 0.30·regime-match + 0.25·live tail + 0.25·institutional (≤6 wk) + 0.10·lead + 0.10·entry valuation.",
-      "source": "src/dashboard.tsx:900-901"
+      "source": "src/dashboard.tsx:900-901",
+      "as_of": "2026-07"
     },
     "analytics.limits.body": {
       "kind": "text",
