@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.alerts.enums import EvaluationRunStatus
@@ -35,6 +35,20 @@ SIDECAR_COMPONENT = "sidecar_reconciliation"
 #: Matches the cutover gate's future-skew tolerance: the proof that a
 #: rollback-stale ok cannot clear a failure holds exactly up to this step.
 _NON_OK_CLEAR_MARGIN = timedelta(minutes=5)
+
+
+def _current_revision(component: str) -> int | None:
+    """The row's landing-order counter right now, or None if it has none.
+
+    A scalar SELECT rather than an identity-map get: this is a probe for
+    one integer, it must not populate a session with a row the write path
+    would then reuse instead of reading afresh.
+    """
+    with session_scope() as session:
+        return session.execute(
+            select(AlertComponentHeartbeat.revision)
+            .where(AlertComponentHeartbeat.component == component)
+        ).scalar_one_or_none()
 
 
 class _HeartbeatRaced(Exception):
@@ -71,6 +85,13 @@ def heartbeat(
     # Distinct from the observation captured further down: that one dates
     # the evidence, this one bounds when the claim was formed.
     claimed_at = datetime.now(UTC)
+    # THE LANDING ORDER AT ENTRY (panel round 22). Beats are observation
+    # instants and cannot answer "did this failure land before my verdict
+    # was formed?" — a rewound or slow writer produces an old beat that
+    # lands late. The revision counter IS landing order, so reading it
+    # here, next to the verdict, gives an exact answer: anything with a
+    # higher revision at write time arrived after this writer entered.
+    entry_revision = _current_revision(component)
     settings = get_settings()
     current_mode = mode or settings.alerts_mode
     current_profile = live_profile or settings.alerts_live_profile
@@ -80,6 +101,7 @@ def heartbeat(
             _write_heartbeat(component, status, detail,
                              captured=captured,
                              claimed_at=claimed_at,
+                             entry_revision=entry_revision,
                              current_mode=current_mode,
                              current_profile=current_profile,
                              only_if_absent=only_if_absent,
@@ -169,6 +191,7 @@ def _write_heartbeat(
     *,
     captured: list[datetime],
     claimed_at: datetime,
+    entry_revision: int | None,
     current_mode: str,
     current_profile: str,
     only_if_absent: bool,
@@ -273,11 +296,13 @@ def _write_heartbeat(
                     #
                     #  1. A retry carries an observation formed before the
                     #     race it lost, so it may never clear.
-                    #  2. If the failure's beat is NEWER than the instant
-                    #     this writer entered with its verdict already
-                    #     decided, then that failure demonstrably landed
-                    #     after the verdict was formed, and a verdict
-                    #     cannot clear a failure it could not have seen.
+                    #  2. If the row's REVISION moved since this writer
+                    #     entered, the failure now on the row landed after
+                    #     the verdict was formed, and a verdict cannot
+                    #     clear a failure it could not have seen. Landing
+                    #     order, not beat order — beats are observation
+                    #     instants and a rewound or slow writer lands an
+                    #     old beat late (panel round 22).
                     #  3. Otherwise the clear must still dominate the
                     #     failure by more than the tolerated skew.
                     #
@@ -292,7 +317,7 @@ def _write_heartbeat(
                     # this bound rests on, named here rather than implied.
                     if not observation_is_current:
                         return
-                    if existing > claimed_at:
+                    if entry_revision is None or row.revision != entry_revision:
                         return
                     if now <= existing + _NON_OK_CLEAR_MARGIN:
                         return

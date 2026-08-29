@@ -1860,3 +1860,55 @@ def test_the_claim_instant_is_sampled_before_any_other_work():
             if line.strip() and not line.strip().startswith("#")]
     assert body[0].startswith("claimed_at = datetime.now("), (
         f"the claim instant is no longer the first statement: {body[0]!r}")
+
+
+def test_a_late_landing_failure_with_an_old_beat_still_blocks_a_clear(
+        isolated_db, monkeypatch):
+    """Panel round 22, confirmed and fixed, pinned.
+
+    Beats are observation instants, so they cannot answer a LANDING-order
+    question: a crash carrying an old beat (rewound clock, slow writer)
+    can land after a health verdict was formed, and the beat comparison
+    waved it through. The guard now reads the revision counter — the real
+    landing order — at entry: a row that moved since means the failure
+    arrived after the verdict, whatever the beats say.
+    """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_recovery import heartbeat
+
+    entry = datetime(2026, 8, 24, 10, 0, tzinfo=_utc)
+    _FrozenDatetime.frozen = entry - _td(hours=2)
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "ok", {"note": "seed"})
+
+    fired = {"once": False}
+
+    def crash_lands_after_entry(*_a, **_k):
+        # Lands DURING the clearing writer's call, carrying a beat 20
+        # minutes OLDER than that writer's entry — so every beat
+        # comparison favours the clear. One-shot: the nested heartbeat
+        # re-enters this same hook.
+        if not fired["once"]:
+            fired["once"] = True
+            _FrozenDatetime.frozen = entry - _td(minutes=20)
+            heartbeat("digest", "critical", {"note": "late landing, old beat"})
+            _FrozenDatetime.frozen = entry
+        return real_settings()
+
+    real_settings = alert_recovery.get_settings
+    _FrozenDatetime.frozen = entry
+    monkeypatch.setattr(alert_recovery, "get_settings", crash_lands_after_entry)
+    heartbeat("digest", "ok", {"note": "verdict formed before the crash"})
+    monkeypatch.setattr(alert_recovery, "get_settings", real_settings)
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
+            "a failure that landed after the verdict was cleared by it "
+            "because its beat looked older")
