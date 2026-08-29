@@ -884,3 +884,92 @@ def test_an_unreconciled_digest_unknown_blocks_cutover():
 
     assert any(u.startswith("unknowns_reconciled") for u in report.unsatisfied), (
         "an unreconciled DIGEST ambiguity did not block cutover")
+
+
+def test_the_weekly_digest_is_judged_on_its_own_cadence():
+    """Two hours of silence from a WEEKLY job is Tuesday, not death.
+
+    The single 2h freshness limit made `cutover apply` refusable six and a
+    half days out of seven — a clock in disguise. A digest heartbeat from last
+    Monday is healthy all week; one older than a full cadence plus grace means
+    the job died and blocks.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest",
+            last_heartbeat_at=NOW - timedelta(days=3),   # last Monday-ish
+            status="ok",
+            detail_json={"mode": "live", "live_profile": "default"}))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    assert any(s_.startswith("heartbeat_digest") for s_ in report.satisfied), (
+        "a three-day-old weekly heartbeat was read as a dead component")
+
+    with session_scope() as session:
+        session.get(AlertComponentHeartbeat, "digest").last_heartbeat_at = \
+            NOW - timedelta(days=10)
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    assert any(u.startswith("heartbeat_digest") for u in report.unsatisfied), (
+        "a ten-day-dead weekly job passed the gate")
+
+
+def test_an_absent_digest_heartbeat_blocks_the_cutover():
+    """Absence blocks for every component, digest included.
+
+    The operator removed the soak and the two-successful-digests gate and kept
+    this heartbeat as "the liveness signal that remains", so a digest that has
+    never spoken is exactly what the gate exists to refuse. Critically, a young
+    deployment WITH live delivery history does not earn the digest a pass: that
+    delivery is the same row wire_proven counts, so treating it as digest
+    evidence would let one row grant the grace and satisfy its own
+    corroboration — an undeployed weekly job could then ride through cutover.
+    """
+    with session_scope() as session:
+        _live_sent(session, sent_at=NOW - timedelta(days=3),
+                   created_at=NOW - timedelta(days=3))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    assert any(s_.startswith("wire_proven") for s_ in report.satisfied), (
+        "precondition: the recent delivery must satisfy wire_proven, so this "
+        "test proves the digest check stands on its own evidence")
+    digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert digest, "a digest that was never deployed passed the liveness gate"
+    assert "load-bearing" in digest[0]
+    assert report.ready is False
+    assert any(u.startswith("heartbeat_dispatcher") for u in report.unsatisfied)
+    assert any(u.startswith("heartbeat_watchdog") for u in report.unsatisfied)
+
+
+def test_a_digest_that_reported_failure_blocks_the_cutover():
+    """A row that exists carries the job's own word, and it is read.
+
+    The status check must not be reachable only through a timestamp: keying the
+    absent case on a missing timestamp rather than a missing ROW would let a row
+    carrying a recorded FAILURE skip it. The schema makes that unreachable
+    today, and the assertion below pins the nullability so a future relaxation
+    fails here rather than silently in the gate.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+
+    assert AlertComponentHeartbeat.__table__.c.last_heartbeat_at.nullable is False, (
+        "last_heartbeat_at became nullable — the absent-row branch in the "
+        "heartbeat gate must be re-examined before that lands")
+
+    with session_scope() as session:
+        session.add(AlertComponentHeartbeat(
+            component="digest",
+            last_heartbeat_at=NOW - timedelta(hours=1),
+            status="critical",
+            detail_json={"mode": "live", "live_profile": "default"}))
+        session.flush()
+        report = preflight(session, now=NOW)
+
+    digest = [u for u in report.unsatisfied if u.startswith("heartbeat_digest")]
+    assert digest, "a digest that reported FAILURE passed the liveness gate"
+    assert "not accepted health" in digest[0]

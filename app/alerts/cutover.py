@@ -56,7 +56,13 @@ log = get_logger(__name__)
 #: digest's own liveness — which is the trade the operator chose at the start
 #: of this project: full stage now, safeguards instead of a soak.
 STABLE_DAYS = 14
+#: Freshness is CADENCE-APPROPRIATE, not one number: the dispatcher polls in
+#: seconds and the watchdog in minutes, so two hours of silence from either is
+#: a dead component — but the digest runs WEEKLY (Monday 08:30 Berlin), and
+#: holding it to the same two hours made `cutover apply` refusable six and a
+#: half days out of seven. Eight days covers one full cadence plus grace.
 HEARTBEAT_FRESH_HOURS = 2
+_HEARTBEAT_FRESH = {"dispatcher": 2, "watchdog": 2, "digest": 8 * 24}
 UNKNOWN_STALE_HOURS = 24
 
 
@@ -305,15 +311,8 @@ def preflight(
           "whatever its age)")
 
     # 6: the components that replace the daily message are alive
-    for component in ("dispatcher", "watchdog", "digest"):
+    for component, fresh_hours in _HEARTBEAT_FRESH.items():
         row = session.get(AlertComponentHeartbeat, component)
-        beat = _aware(row.last_heartbeat_at) if (
-            row is not None and row.last_heartbeat_at is not None) else None
-        # Bounded on BOTH sides. A timestamp from the future satisfies any
-        # `>= now - 2h` check forever, so a clock fault would read as a
-        # component that never goes stale — the exact component this gate
-        # exists to distrust. Small forward skew is tolerated; beyond it the
-        # heartbeat is evidence of a broken clock, not of health.
         detail_json = row.detail_json if row is not None else {}
         namespace_ok = bool(
             isinstance(detail_json, dict)
@@ -322,28 +321,49 @@ def preflight(
         )
         row_status = row.status if row is not None else None
         status_ok = row_status == "ok"
-        if beat is None:
+        if row is None:
+            # Absence blocks for EVERY component, digest included. The operator
+            # removed the soak and the two-successful-digests gate and kept this
+            # heartbeat as "the liveness signal that remains" — so a digest that
+            # has never spoken is precisely what this check exists to refuse.
+            # Nothing readable here separates "scheduled, first Monday not yet
+            # come" from "never deployed", and delivery history is not digest
+            # evidence: it is the same row wire_proven already counts, so it
+            # would grant the grace and satisfy its own corroboration at once.
             fresh, detail = False, (
-                f"no heartbeat in {HEARTBEAT_FRESH_HOURS}h — after cutover "
-                "this component is load-bearing")
-        elif beat > now + timedelta(minutes=5):
+                f"no {component} heartbeat at all — after cutover this "
+                "component is load-bearing")
+        elif row.last_heartbeat_at is None:
+            # Schema-impossible today (last_heartbeat_at is NOT NULL) and
+            # fail-closed on purpose: a component that HAS a row has spoken, so
+            # an unreadable beat is a defect, never a pass.
             fresh, detail = False, (
-                f"heartbeat is {beat.isoformat()} — in the future, which is a "
-                "clock fault, not health")
-        elif not namespace_ok:
-            fresh, detail = False, (
-                f"fresh heartbeat belongs to another namespace; expected "
-                f"mode='live', live_profile={live_profile!r}, observed="
-                f"{detail_json!r}")
-        elif not status_ok:
-            fresh, detail = False, (
-                f"heartbeat status is {row_status!r}, not accepted health")
-        elif beat >= now - timedelta(hours=HEARTBEAT_FRESH_HOURS):
-            fresh, detail = True, "fresh, healthy, and live-namespace matched"
+                f"{component} heartbeat row carries no timestamp — fail closed")
         else:
-            fresh, detail = False, (
-                f"last heartbeat {beat.isoformat()}, older than "
-                f"{HEARTBEAT_FRESH_HOURS}h")
+            # Bounded on BOTH sides. A timestamp from the future satisfies any
+            # `>= now - N` check forever, so a clock fault would read as a
+            # component that never goes stale — the exact component this gate
+            # exists to distrust. Small forward skew is tolerated; beyond it the
+            # heartbeat is evidence of a broken clock, not of health.
+            beat = _aware(row.last_heartbeat_at)
+            if beat > now + timedelta(minutes=5):
+                fresh, detail = False, (
+                    f"heartbeat is {beat.isoformat()} — in the future, which "
+                    "is a clock fault, not health")
+            elif not namespace_ok:
+                fresh, detail = False, (
+                    f"fresh heartbeat belongs to another namespace; expected "
+                    f"mode='live', live_profile={live_profile!r}, observed="
+                    f"{detail_json!r}")
+            elif not status_ok:
+                fresh, detail = False, (
+                    f"heartbeat status is {row_status!r}, not accepted health")
+            elif beat >= now - timedelta(hours=fresh_hours):
+                fresh, detail = True, "fresh, healthy, and live-namespace matched"
+            else:
+                fresh, detail = False, (
+                    f"last heartbeat {beat.isoformat()}, older than "
+                    f"{fresh_hours}h (cadence-appropriate limit for {component})")
         check(f"heartbeat_{component}", fresh, detail)
 
     # 7: there is still something to cut over
