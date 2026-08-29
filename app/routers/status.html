@@ -72,6 +72,7 @@
   button:hover{border-color:var(--accent)}
   .overflow{overflow-x:auto}
   code{font-family:var(--mono);background:var(--panel2);padding:1px 5px;border-radius:5px;font-size:12px}
+  .slot{font-size:12.5px;color:var(--muted);font-style:italic;margin-top:6px;flex-basis:100%}
 </style>
 </head>
 <body>
@@ -79,41 +80,31 @@
   <h1>bubblegauge</h1>
   <span class="ver" id="ver"></span>
   <span class="refresh"><span class="muted" id="ts"></span> <button id="refresh">Refresh</button></span>
-  <!-- The disclaimer lives STATICALLY on this human-facing page (and /docs);
-       since v3.6.0 the machine JSON payloads no longer repeat it. -->
-  <div class="disclaimer" id="disclaimer">bubblegauge is a research instrument, not investment
-    advice. The headline is a 0&ndash;100 regime heuristic produced by structured expert judgment;
-    it is uncalibrated and is not a probability. The reference class of comparable US equity manias
-    is roughly four events {1929, 2000, 2007, 2021}, so no honest probability calibration is
-    possible. The current episode may be rational general-purpose-technology repricing rather than
-    a bubble. Nothing here is a recommendation to buy, sell, or hold any security. Any de-risking
-    rule may destroy value net of costs. Use at your own risk.</div>
+  <!-- Shallow page: ALL grounded text (the disclaimer included) hydrates from
+       GET /api/v1/content/dashboard. On fetch failure no scientific claims
+       render at all, so nothing is ever shown un-disclaimed. -->
+  <div class="disclaimer" id="disclaimer"></div>
+  <div class="disclaimer" id="content-stale"></div>
 </header>
 <main>
   <section id="sec-headline"><h2>Headline</h2><div id="headline" class="headline"></div></section>
 
   <section id="sec-audit">
     <h2>Science audit <span class="counts" id="audit-counts"></span></h2>
-    <p class="muted" style="margin-top:0">Everything currently unclear, incomplete, contested,
-      proxied, judgmental, or deviating from the written spec — flagged and made visible.
-      Scientific correctness is the leading design aspect.</p>
+    <p class="muted" style="margin-top:0" id="intro-audit"></p>
     <div class="tabs" id="audit-tabs"></div>
     <div id="audit"></div>
   </section>
 
   <section id="sec-sources">
     <h2>Data source pulls</h2>
-    <p class="muted" style="margin-top:0">Live success/failure of each external fetch from the
-      most recent recompute, with the scientific/official basis of each source.</p>
+    <p class="muted" style="margin-top:0" id="intro-sources"></p>
     <div id="sources"></div>
   </section>
 
   <section id="sec-feedsrc">
     <h2>Dashboard-feed sources (non-scoring)</h2>
-    <p class="muted" style="margin-top:0">Per-item health of the companion-dashboard feed
-      (<span class="mono">GET /api/v1/dashboard/feed</span>) — incl. the CNN Fear &amp; Greed
-      pull. These sources feed display only; each degrades independently and never touches
-      the score.</p>
+    <p class="muted" style="margin-top:0" id="intro-feed"></p>
     <div id="feedsrc"></div>
   </section>
 
@@ -126,22 +117,14 @@
 
   <section id="sec-legs">
     <h2>Legs 2–3 &amp; action bands — scientific sources</h2>
-    <p class="muted" style="margin-top:0">The trend trigger, fast alarm, and action-band
-      thresholds that gate the headline, with their literature basis and caveats.</p>
+    <p class="muted" style="margin-top:0" id="intro-legs"></p>
     <div id="legs"></div>
   </section>
 
   <section id="sec-api">
     <h2>API reference</h2>
-    <p class="muted" style="margin-top:0">Interactive, machine-readable spec with schemas and
-      try-it-out:</p>
-    <div class="row" style="margin-bottom:12px">
-      <a href="/docs">Swagger UI →</a>
-      <a href="/redoc">ReDoc →</a>
-      <a href="/openapi.json">openapi.json →</a>
-      <a href="/api/v1/status">this status as JSON →</a>
-      <a href="/api/v1/meta/methodology">methodology JSON →</a>
-    </div>
+    <p class="muted" style="margin-top:0" id="intro-api"></p>
+    <div class="row" style="margin-bottom:12px" id="doclinks"></div>
     <div id="endpoints"></div>
     <h2 style="margin-top:18px">Example — <code>GET /api/v1/score</code></h2>
     <pre id="example"></pre>
@@ -157,7 +140,7 @@
 </main>
 
 <script>
-// -- safe DOM helpers: all dynamic/external text via textContent, never innerHTML --
+// -- safe DOM helpers: all dynamic/external text via textContent, never markup injection --
 function h(tag, cls, text){ const e=document.createElement(tag); if(cls) e.className=cls;
   if(text!=null) e.textContent=String(text); return e; }
 function badge(status){ const b=h('span','badge b-'+status, status); return b; }
@@ -166,27 +149,74 @@ function clear(el){ while(el.firstChild) el.removeChild(el.firstChild); }
 function kv(pairs){ const d=h('div','kv'); pairs.forEach(([k,v])=>{ d.appendChild(h('b',null,k));
   d.appendChild(h('span',null, v==null?'—':v)); }); return d; }
 
-// The worked example is served from the status document (single source of
-// truth shared with the OpenAPI /score example) — set at load time.
+// Content-as-a-resource: every grounded string on this page comes from the
+// content API. CONTENT holds static blocks by slug; SLOTS holds dynamic slots.
+// On content-fetch failure the accessors return neutral fallbacks so the page
+// stays usable without stating any scientific fact.
+let CONTENT = {};
+let SLOTS = {};
 let EXAMPLE = {};
+let LAST_OK = null; // service.now of the last successful status load
+let LOAD_SEQ = 0;   // commit ordering: only the newest load() may render
+let BLOCKS_STALE = false; // retained explanatory blocks are from an earlier load
+let SLOTS_STALE = false;  // retained automated notes are from an earlier load
+let LOADING = false;      // single-flight: slow replies commit; ticks never overlap
 
-const ENDPOINTS = [
-  ["GET","/api/v1/score","Headline median, IQR, band, both blocks, red flags, legs, judgment"],
-  ["GET","/api/v1/score/history","Historical snapshots (raw/daily/monthly)"],
-  ["GET","/api/v1/indicators/{id}","Full WHAT/HOW/WHY methodology + references"],
-  ["GET","/api/v1/legs/trend","Faber trend states (SPY, QQQ)"],
-  ["GET","/api/v1/legs/fast-alarm","VIX term structure, VRP, SKEW"],
-  ["GET","/api/v1/meta/methodology","Framework, references, falsification, changelog"],
-  ["GET","/api/v1/dashboard/feed","Dashboard feed: 12 monthly series + 34 scalars (DASHBOARD_FEED_SPEC.md)"],
-  ["GET","/api/v1/status","This status document"],
-  ["GET","/readyz","Per-source health matrix + GSADF R self-check"],
-  ["POST","/api/v1/admin/refresh","Trigger a recompute (X-API-Key)"],
-];
+// If the disclaimer ever becomes unavailable, no grounded value may outlive
+// it: purge every previously-rendered grounded section before gating.
+function purgeGrounded(){
+  ['headline','audit-counts','audit-tabs','audit','sources','feedsrc','providers',
+   'indicators','legs','falsification','caveats','changelog','foot','example']
+    .forEach(id=>{ const el=document.getElementById(id); if(el) el.textContent=''; });
+}
+function ctext(slug, fb){ const b=CONTENT[slug]; return (b && typeof b.text==='string') ? b.text : (fb||''); }
+function citems(slug){ const b=CONTENT[slug]; return (b && Array.isArray(b.items)) ? b.items : []; }
+function cmap(slug){ const b=CONTENT[slug]; return (b && b.entries && typeof b.entries==='object') ? b.entries : {}; }
+function slotText(name){ const s=SLOTS[name]; return (s && typeof s.text==='string') ? s.text : null; }
+
+function renderContentText(){
+  const stale=document.getElementById('content-stale');
+  const parts=[];
+  if(BLOCKS_STALE) parts.push('CONTENT REFRESH FAILED - explanatory blocks shown from an earlier load.');
+  if(SLOTS_STALE) parts.push('NOTE REFRESH FAILED - automated notes shown from an earlier load.');
+  stale.textContent = parts.join(' ');
+  stale.style.color = parts.length ? 'var(--err)' : '';
+  document.getElementById('disclaimer').textContent = ctext('disclaimer_full','');
+  document.getElementById('intro-audit').textContent = ctext('intro.science_audit','');
+  document.getElementById('intro-sources').textContent = ctext('intro.sources','');
+  document.getElementById('intro-feed').textContent = ctext('intro.feed_sources','');
+  document.getElementById('intro-legs').textContent = ctext('intro.legs','');
+  document.getElementById('intro-api').textContent = ctext('intro.api','');
+}
+
+function renderDoclinks(){
+  const el=document.getElementById('doclinks'); clear(el);
+  citems('api.doc_links').forEach(l=>{
+    if(!sameOrigin(l.href)) return;
+    const a=h('a',null,l.label||l.href); a.href=l.href; el.appendChild(a);
+  });
+}
+
+function renderEndpoints(){
+  const el=document.getElementById('endpoints'); clear(el);
+  const items=citems('api.endpoints');
+  if(!items.length){ el.appendChild(h('div','muted','—')); return; }
+  const wrap=h('div','overflow'); const tb=h('table');
+  const thead=h('thead'); const htr=h('tr'); ['method','path','purpose'].forEach(x=>htr.appendChild(h('th',null,x)));
+  thead.appendChild(htr); tb.appendChild(thead); const tbody=h('tbody');
+  items.forEach(it=>{ const tr=h('tr'); tr.appendChild(h('td','mono',it.method));
+    const pc=h('td'); const a=h('a',null,it.path);
+    a.href=(sameOrigin(it.path) && it.path.indexOf('{')<0)?it.path:'#';
+    pc.appendChild(a); tr.appendChild(pc);
+    tr.appendChild(h('td','muted',it.purpose)); tbody.appendChild(tr); });
+  tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
+  document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
+}
 
 function renderHeadline(s){
   const el=document.getElementById('headline'); clear(el);
   const snap=s.snapshot;
-  if(!snap){ el.appendChild(h('div','muted','No snapshot computed yet — trigger a recompute or wait for the 4-hourly (02/06/10/14/18/22 UTC) schedule.')); return; }
+  if(!snap){ el.appendChild(h('div','muted', ctext('empty.snapshot','No data yet.'))); return; }
   el.appendChild(h('div','score', snap.headline_median));
   const right=h('div');
   right.appendChild(badge(snap.action_band||'—'));
@@ -199,6 +229,8 @@ function renderHeadline(s){
   el.appendChild(right);
   if(snap.judgment_call){ const j=h('div','ind-meta'); j.style.flexBasis='100%';
     j.textContent='Judgment: '+snap.judgment_call+(snap.judgment_stale?' (stale)':''); el.appendChild(j); }
+  const note=slotText('headline_note');
+  if(note){ el.appendChild(h('div','slot', note)); }
 }
 
 let AUDIT=[], AUDIT_FILTER='all';
@@ -218,6 +250,8 @@ function drawAudit(){
   const el=document.getElementById('audit'); clear(el);
   const list=AUDIT.filter(f=>AUDIT_FILTER==='all'||f.severity===AUDIT_FILTER);
   if(!list.length){ el.appendChild(h('div','muted','Nothing flagged at this level.')); return; }
+  const note=slotText('audit_note');
+  if(note){ el.appendChild(h('div','slot', note)); }
   list.forEach(f=>{
     const d=h('div','flag '+f.severity);
     const t=h('div','t'); t.appendChild(badge(f.severity==='error'?'error':(f.severity==='warn'?'warn':'info')));
@@ -265,7 +299,7 @@ function renderSources(s){
 function renderFeedSources(s){
   const el=document.getElementById('feedsrc'); clear(el);
   const fs=s.feed_sources;
-  if(!fs){ el.appendChild(h('div','muted','No feed payload persisted yet — builds with the next recompute.')); return; }
+  if(!fs){ el.appendChild(h('div','muted', ctext('empty.feed','No data yet.'))); return; }
   el.appendChild(h('div','ind-meta','Feed built: '+(fs.computed_at||'—')+
     (fs.unavailable&&fs.unavailable.length?(' · unavailable: '+fs.unavailable.join(', ')):' · all items available')));
   const wrap=h('div','overflow'); const tb=h('table');
@@ -288,7 +322,7 @@ function renderFeedSources(s){
 function renderProviders(s){
   const el=document.getElementById('providers'); clear(el);
   const list=s.providers||[];
-  if(!list.length){ el.appendChild(h('div','muted','No price-provider health recorded yet (first recompute pending).')); return; }
+  if(!list.length){ el.appendChild(h('div','muted', ctext('empty.providers','No data yet.'))); return; }
   const wrap=h('div','overflow'); const tb=h('table');
   const thead=h('thead'); const htr=h('tr'); ['provider','status','consecutive failures','cooldown until','updated'].forEach(x=>htr.appendChild(h('th',null,x)));
   thead.appendChild(htr); tb.appendChild(thead); const tbody=h('tbody');
@@ -300,12 +334,12 @@ function renderProviders(s){
   tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
 }
 
-const GROUND_BADGE={'literature-grounded':'ok','literature-adjacent':'info','judgmental':'warn','contested':'error','lagging-confirmation':'info'};
 function renderIndicators(s){
+  const groundBadge=cmap('taxonomy.grounding');
   const el=document.getElementById('indicators'); clear(el);
   (s.indicators||[]).forEach(ind=>{
     const det=h('details'); const sum=h('summary');
-    const gb=badge(GROUND_BADGE[ind.grounding]||'unknown'); gb.textContent=ind.grounding; sum.appendChild(gb);
+    const gb=badge(groundBadge[ind.grounding]||'unknown'); gb.textContent=ind.grounding; sum.appendChild(gb);
     sum.appendChild(h('span',null,ind.id.toUpperCase()+' · '+ind.name));
     sum.appendChild(h('span','weight','w='+ind.weight+' · block '+ind.block));
     const lv=ind.live;
@@ -351,34 +385,114 @@ function renderMeta(s){
   (s.changelog||[]).forEach(e=>{ const d=h('div','ind-meta'); d.appendChild(h('b',null,(e.version||'')+' ')); d.appendChild(document.createTextNode((e.score?'('+e.score+') ':'')+(e.notes||''))); cl.appendChild(d); });
 }
 
-function renderEndpoints(){
-  const el=document.getElementById('endpoints'); clear(el);
-  const wrap=h('div','overflow'); const tb=h('table');
-  const thead=h('thead'); const htr=h('tr'); ['method','path','purpose'].forEach(x=>htr.appendChild(h('th',null,x)));
-  thead.appendChild(htr); tb.appendChild(thead); const tbody=h('tbody');
-  ENDPOINTS.forEach(([m,p,d])=>{ const tr=h('tr'); tr.appendChild(h('td','mono',m));
-    const pc=h('td'); const a=h('a',null,p); a.href=p.indexOf('{')<0?p:'#'; pc.appendChild(a); tr.appendChild(pc);
-    tr.appendChild(h('td','muted',d)); tbody.appendChild(tr); });
-  tb.appendChild(tbody); wrap.appendChild(tb); el.appendChild(wrap);
-  document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
+async function fetchJson(url){
+  // Bounded: a hung request must not wedge the single-flight loader (30s cap,
+  // well under the 60s refresh interval).
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), 30000);
+  try{
+    const r = await fetch(url, {headers:{'Accept':'application/json'}, signal: ctrl.signal});
+    if(!r.ok) throw new Error('HTTP '+r.status+' for '+url);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+function sameOrigin(href){ // relative path only; rejects protocol-relative //host
+  return typeof href==='string' && href.charAt(0)==='/' && href.charAt(1)!=='/';
 }
 
 async function load(){
-  renderEndpoints();
+  // Single-flight: an in-flight load owns the page; ticks and Refresh clicks
+  // do not stack, so a slow (>60s-interval) reply still commits instead of
+  // being invalidated by the next tick (panel round 8). Fetches are bounded
+  // at 30s, so the flight always terminates.
+  if(LOADING) return;
+  LOADING = true;
+  try{ await doLoad(); } finally { LOADING = false; }
+}
+async function doLoad(){
+  // Commit ordering: kept as belt-and-braces beneath the single-flight guard;
+  // a slow older request must never overwrite a newer render (round 5).
+  const seq = ++LOAD_SEQ;
+  // Content first (blocks + slots), then the live status; each degrades
+  // independently — a failed content fetch leaves neutral text, a failed
+  // status fetch shows the generic failure line and no grounded values.
+  // last-known-good: CONTENT/SLOTS only ever advance on a successful fetch.
+  // A failed refresh keeps the previous (disclaimed) content on screen, so
+  // the disclaimer gate cannot be blanked while stale grounded values remain
+  // rendered (reentrancy hole flagged by the cross-vendor panel).
+  // Fetch into locals first: NO global (state) commit may happen from a load
+  // that is no longer the newest — the seq guard protects state commits, not
+  // just renders (panel round 7: an older response must not win in state).
+  let newBlocks=null, newSlots=null, blocksFailed=false, slotsFailed=false;
   try{
-    const r = await fetch('/api/v1/status', {headers:{'Accept':'application/json'}});
-    const s = await r.json();
+    const c = await fetchJson('/api/v1/content/dashboard');
+    const b = c.data&&c.data.blocks;
+    // Response-shape validator: a content payload is acceptable ONLY if it
+    // carries a non-empty disclaimer — a payload without one may never commit
+    // (it would blank the gate over rendered values, panel round 8).
+    if(b && typeof b==='object' && b.disclaimer_full &&
+       typeof b.disclaimer_full.text==='string' && b.disclaimer_full.text) newBlocks = b;
+  }catch(e){ /* classified below */ }
+  // A 2xx whose shape failed validation is a FAILURE, not freshness: without
+  // this, prior content silently pairs with fresh status (panel round 8).
+  if(!newBlocks) blocksFailed = true;
+  if(seq!==LOAD_SEQ) return; // a newer load owns state from here on
+  try{
+    const dyn = await fetchJson('/api/v1/content/dynamic');
+    const sl = dyn.data&&dyn.data.slots;
+    if(sl && typeof sl==='object') newSlots = sl;
+  }catch(e){ /* classified below */ }
+  if(!newSlots) slotsFailed = true;
+  if(seq!==LOAD_SEQ) return;
+  // Commit + precise staleness: a part is 'stale' only when ITS refresh
+  // failed AND a previous value is actually retained on screen; a first-load
+  // failure is absence, not staleness (panel round 7: partial-failure
+  // labeling must not conflate blocks with slots or invent an earlier load).
+  if(newBlocks){ CONTENT = newBlocks; BLOCKS_STALE = false; }
+  else if(blocksFailed && ctext('disclaimer_full','')) BLOCKS_STALE = true;
+  if(newSlots){ SLOTS = newSlots; SLOTS_STALE = false; }
+  else if(slotsFailed && Object.keys(SLOTS).length) SLOTS_STALE = true;
+  renderContentText(); renderDoclinks();
+  // DISCLAIMER GATE (fail-closed): grounded values render ONLY when the
+  // disclaimer is actually on screen. Without it, no score, no indicators,
+  // no audit — the page must never show a scientific claim un-disclaimed.
+  if(!ctext('disclaimer_full','')){
+    // No disclaimer -> no grounded value may remain on screen, including ones
+    // rendered by an earlier successful load (panel round 8: DOM purge).
+    purgeGrounded();
+    renderEndpoints();
+    document.getElementById('headline').textContent =
+      'Failed to load page content: data display disabled.';
+    return;
+  }
+  try{
+    const s = await fetchJson('/api/v1/status');
+    if(seq!==LOAD_SEQ) return; // a newer load started; discard this response
+    LAST_OK = (s.service&&s.service.now)||null;
     document.getElementById('ver').textContent = 'v'+((s.service&&s.service.version)||'?');
-    document.getElementById('ts').textContent = 'as of '+((s.service&&s.service.now)||'');
+    const ts=document.getElementById('ts');
+    ts.textContent = 'as of '+(LAST_OK||''); ts.style.color='';
     EXAMPLE = s.example || {};
-    document.getElementById('example').textContent = JSON.stringify(EXAMPLE, null, 2);
+    renderEndpoints();
     renderHeadline(s); renderAudit(s); renderSources(s); renderFeedSources(s); renderProviders(s);
     renderIndicators(s); renderLegs(s); renderMeta(s);
-    document.getElementById('foot').textContent =
-      'bubblegauge '+((s.service&&s.service.version)||'')+' · recompute '+((s.service&&s.service.recompute_schedule)||'')+
-      ' · Research, not advice.';
+    const foot=document.getElementById('foot');
+    foot.textContent = 'bubblegauge '+((s.service&&s.service.version)||'')+' · recompute '+
+      ((s.service&&s.service.recompute_schedule)||'')+
+      (ctext('advice_tag','')?(' · '+ctext('advice_tag','')):'');
   }catch(e){
-    document.getElementById('headline').textContent = 'Failed to load status: '+e;
+    if(seq!==LOAD_SEQ) return; // stale failure must not clobber a newer render
+    renderEndpoints();
+    if(LAST_OK){
+      // A refresh failed AFTER a successful load: the grounded sections still
+      // show the last successful data — say so loudly instead of presenting
+      // stale values as current (cross-vendor panel finding, round 3).
+      const ts=document.getElementById('ts');
+      ts.textContent = 'REFRESH FAILED - showing data as of '+LAST_OK;
+      ts.style.color = 'var(--err)';
+    } else {
+      document.getElementById('headline').textContent = 'Failed to load status: '+e;
+    }
   }
 }
 document.getElementById('refresh').onclick=load;

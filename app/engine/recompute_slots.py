@@ -30,6 +30,15 @@ def cron_hour_expression() -> str:
     return _CRON_HOURS
 
 
+def schedule_display() -> str:
+    """Human display of the recompute cadence, derived from the slot table.
+
+    The '02/06/10/14/18/22 UTC' fact must never be restated as a literal —
+    this is the one place display strings come from."""
+    hours = "/".join(f"{h:02d}" for h in RECOMPUTE_SLOT_HOURS)
+    return f"every {SLOT_INTERVAL_HOURS}h ({hours} UTC)"
+
+
 def _as_utc(moment: datetime) -> datetime:
     """Normalize to aware UTC. SQLite hands back naive datetimes."""
     return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)

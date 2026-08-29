@@ -1065,6 +1065,10 @@ def build_system_prompt(challenge: str) -> str:
         "attack path). The changed-FILE LIST is COMPLETE; diffstat/body may be truncated, "
         "and any truncation is explicitly marked — if a marked truncation hides files you "
         "would need to see to approve, say so instead of approving blind. "
+        "STEELMAN BEFORE YOU REFUTE: every refutation MUST state the strongest "
+        "reading of the code under which your defect disappears, and show from the "
+        "quoted code alone why that reading fails. A defect that does not survive "
+        "its own steelman is not a finding -> refuted=false. "
         "No concrete failure path -> refuted=false. Do NOT refute over the "
         "inherent cross-vendor trust assumption itself (that a malicious endpoint could fool "
         "the verifier including the challenge echo) — that is the DOCUMENTED residual, "
@@ -2012,6 +2016,18 @@ def main() -> int:
         reason = json.dumps(v.get("reason"))[:1000] if v.get("reason") else '"(no reason given)"'
         print(f"  Verifier {i + 1}/{panel} ({models[i]}): refuted={v.get('refuted')} "
               f"confidence={v.get('confidence')} — reason: {reason}")
+        # The FULL defect ledger, untruncated, in the job log. PR #96's
+        # post-mortem: the ledger rendered only in the step summary while this
+        # log carried a clipped reason line, and a witnessed TRUE finding was
+        # judged fabricated from the clipped line alone. Verdicts get argued
+        # from what this log shows, so this log must show all of it.
+        # json.dumps per entry stays single-line and injection-safe, exactly
+        # like the reason above.
+        defects = v.get("defects")
+        if isinstance(defects, list) and defects:
+            print(f"  Verifier {i + 1}/{panel} ({models[i]}): full defect ledger:")
+            for j, entry in enumerate(defects, start=1):
+                print(f"    defect {j}: {json.dumps(entry)}")
 
     # Gates in order, short-circuiting on the FIRST block — the order is the
     # semantics and does not change. What is new is that the gates evaluated so
