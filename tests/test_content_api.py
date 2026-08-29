@@ -358,11 +358,13 @@ class TestBlockArtifact:
     def test_non_finite_numbers_rejected_at_load(self, monkeypatch, tmp_path):
         # Round 5: python json accepts Infinity/NaN; the response encoder
         # (allow_nan=False) then 500s — reject at load (parse_constant).
+        # Round 22: fixture moved to an ORDINARY table — the distance table
+        # gained its own row schema (round 18), which was rejecting this
+        # fixture for an unrelated reason and masking the control.
         import json as _json
 
         art = self._baseline()
-        art["blocks"]["gauge.verdict.distance"]["items"].append(
-            {"case": "x", "v": 123456789})
+        art["blocks"]["analytics.fans"]["items"].append({"v": 123456789})
         raw = _json.dumps(art).replace("123456789", "Infinity")
         reg = self._install(monkeypatch, tmp_path, raw=raw)
         assert reg.content_version() == 0
@@ -372,7 +374,7 @@ class TestBlockArtifact:
         # Round 5: a table holding a string item is corrupt — the all-or-
         # nothing invariant applies to ITEMS, not just containers.
         art = self._baseline()
-        art["blocks"]["gauge.verdict.distance"]["items"].append("corrupt")
+        art["blocks"]["analytics.fans"]["items"].append("corrupt")
         reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
@@ -380,11 +382,11 @@ class TestBlockArtifact:
     def test_exponent_overflow_infinity_rejected(self, monkeypatch, tmp_path):
         # Round 6: 1e400 parses to float('inf') via parse_float (bypassing
         # parse_constant); the strict round-trip must reject it at load.
+        # Round 22: moved to an ordinary table (see non_finite above).
         import json as _json
 
         art = self._baseline()
-        art["blocks"]["gauge.verdict.distance"]["items"].append(
-            {"case": "x", "v": 123456789})
+        art["blocks"]["analytics.fans"]["items"].append({"v": 123456789})
         raw = _json.dumps(art).replace("123456789", "1e400")
         reg = self._install(monkeypatch, tmp_path, raw=raw)
         assert reg.content_version() == 0
@@ -398,8 +400,7 @@ class TestBlockArtifact:
         nested: object = "leaf"
         for _ in range(40):
             nested = [nested]
-        art["blocks"]["gauge.verdict.distance"]["items"].append(
-            {"case": "deep", "v": nested})
+        art["blocks"]["analytics.fans"]["items"].append({"v": nested})
         reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
@@ -462,21 +463,21 @@ class TestBlockArtifact:
 
     def test_missing_required_slug_fails_manifest(self, monkeypatch, tmp_path):
         # Round 11 (SOTA-A): count-consistent junk must fail the code-anchored
-        # required-slug manifest. gauge.verdict.distance is used because it is
-        # NOT band-closure-checked — the manifest is the only control that
-        # fires here.
+        # required-slug manifest. Round 22: an ordinary slug — a deleted
+        # distance table also trips the closure, which was masking this.
         art = self._baseline()
-        del art["blocks"]["gauge.verdict.distance"]
+        del art["blocks"]["analytics.fans"]
         art["blocks"]["junk.extra"] = {"kind": "text", "text": "junk"}
         reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
     def test_wrong_kind_for_required_slug_rejected(self, monkeypatch, tmp_path):
-        # The manifest pins KIND, not just presence — distance again, so the
-        # kind check is the single control under test.
+        # The manifest pins KIND, not just presence. Round 22: an ORDINARY
+        # slug — the band-closure checks also reject a broken distance table,
+        # which was masking this control.
         art = self._baseline()
-        art["blocks"]["gauge.verdict.distance"] = {"kind": "text", "text": "not a table"}
+        art["blocks"]["analytics.fans"] = {"kind": "text", "text": "not a table"}
         reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
@@ -671,7 +672,7 @@ class TestBlockArtifact:
         # the artifact whole — this call raising ANY exception is the bug.
         art = self._baseline()
         art["blocks"]["gauge.verdict.lead"]["items"].append(
-            {"band": ["de-risk"], "template": "t"})
+            {"band": ["de-risk"], "trend_broken": "any", "template": "t"})
         reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
@@ -741,39 +742,23 @@ class TestBlockArtifact:
 
     def test_required_slug_with_wrong_kind_degrades(self, monkeypatch, tmp_path):
         # Round 12: presence alone is porous — a required slug of the wrong
-        # KIND must degrade the artifact.
-        import app.content_registry as reg
-
-        f = tmp_path / "content_blocks.v1.json"
-        f.write_text('{"content_version": 1, "block_count": 5, "blocks": {'
-                     '"gauge.band.oneliner": {"kind": "text", "text": "wrong kind"},'
-                     '"gauge.splash.band_blurb": {"kind": "map", "entries": {"hold": "h"}},'
-                     '"gauge.verdict.lead": {"kind": "table", "items": [{"a": "b"}]},'
-                     '"gauge.verdict.detail": {"kind": "table", "items": [{"a": "b"}]},'
-                     '"gauge.verdict.distance": {"kind": "table", "items": [{"a": "b"}]}}}',
-                     encoding="utf-8")
-        monkeypatch.setattr(reg, "_BLOCKS_FILE", f)
-        reg._clear_artifact_cache()
+        # KIND must degrade the artifact. Round 22: rebuilt on the baseline
+        # (the old 5-block fixture was multiply-invalid and pinned nothing);
+        # hero.intro flips text->map, a kind-only violation.
+        art = self._baseline()
+        art["blocks"]["hero.intro"] = {"kind": "map", "entries": {"k": "v"}}
+        reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
     def test_malformed_slug_degrades_whole_artifact(self, monkeypatch, tmp_path):
         # Round 13: slug shape is schema — a slug with spaces/notes must
         # degrade the artifact (this check caught a real defect in the
-        # shipped artifact on first contact).
-        import app.content_registry as reg
-
-        f = tmp_path / "content_blocks.v1.json"
-        f.write_text('{"content_version": 1, "block_count": 6, "blocks": {'
-                     '"bad slug (with note)": {"kind": "text", "text": "x"},'
-                     '"gauge.band.oneliner": {"kind": "map", "entries": {"hold": "h"}},'
-                     '"gauge.splash.band_blurb": {"kind": "map", "entries": {"hold": "h"}},'
-                     '"gauge.verdict.lead": {"kind": "table", "items": [{"a": "b"}]},'
-                     '"gauge.verdict.detail": {"kind": "table", "items": [{"a": "b"}]},'
-                     '"gauge.verdict.distance": {"kind": "table", "items": [{"a": "b"}]}}}',
-                     encoding="utf-8")
-        monkeypatch.setattr(reg, "_BLOCKS_FILE", f)
-        reg._clear_artifact_cache()
+        # shipped artifact on first contact). Round 22: rebuilt on the
+        # baseline as a single-violation fixture.
+        art = self._baseline()
+        art["blocks"]["bad slug (with note)"] = {"kind": "text", "text": "x"}
+        reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
@@ -827,3 +812,8 @@ class TestBlockArtifact:
         assert reg._SLUG_RE.fullmatch("gauge.band.oneliner")
         for bad in ("gauge.", ".gauge", "a..b", ".", "playbook.experts.r1..24"):
             assert not reg._SLUG_RE.fullmatch(bad), bad
+        # Round 22 (SOTA-A): the round-16 rewrite dropped round 13's frozen
+        # {1,120} cap — restored; 120 loads, 121 degrades.
+        assert reg._SLUG_RE.fullmatch("a" * 120)
+        assert not reg._SLUG_RE.fullmatch("a" * 121)
+        assert not reg._SLUG_RE.fullmatch("x." + "a" * 119)

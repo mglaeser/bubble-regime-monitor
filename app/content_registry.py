@@ -44,7 +44,10 @@ _EMPTY_ARTIFACT: dict[str, Any] = {"content_version": 0, "blocks": {}}
 # regex still passed degenerate slugs ("..", leading/trailing dots, bare
 # "gauge." producing an empty display sub-slug); round 16 structures it. Two
 # shipped slugs were caught and renamed on first contact (again).
-_SLUG_RE = re.compile(r"^[a-z0-9_-]+(\.[a-z0-9_-]+)*$")
+# Round 22 (SOTA-A): the round-16 structural rewrite silently DROPPED the
+# round-13 {1,120} length cap — arbitrary-length keys loaded as v1. The
+# lookahead restores the frozen cap; structure stays round-16.
+_SLUG_RE = re.compile(r"^(?=.{1,120}$)[a-z0-9_-]+(\.[a-z0-9_-]+)*$")
 
 # Completeness = the FULL code-anchored manifest (app/content_manifest.py):
 # every v1 slug present with its declared kind, or the artifact degrades
@@ -140,6 +143,10 @@ def _load_artifact(fh: Any) -> dict[str, Any]:
         raise ValueError(f"non-finite JSON constant: {name}")
 
     try:
+        # parse_constant is EARLY rejection only — everything it refuses
+        # (Infinity/NaN) is also refused by the strict round-trip below, so
+        # it is deliberately redundant and NOT independently test-pinned
+        # (round 22 deletion audit, on the record).
         loaded = json.load(fh, parse_constant=_reject_constant)
         # A payload that json.load accepts can still be unserializable at
         # RESPONSE time (lone UTF-16 surrogates raise UnicodeEncodeError; a
