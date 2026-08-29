@@ -387,17 +387,6 @@
       "source": "src/dashboard.tsx:1024-1029",
       "as_of": "2026-07"
     },
-    "playbook.phases.p1.rule1..rule4": {
-      "kind": "list",
-      "items": [
-        "Hold cash — sitting still IS the strategy.",
-        "Do NOT add gold after the shock: the haven effect fades in ~15 trading days (M1) and the hedge is pre-paid (M8).",
-        "Copper, silver, EM, India, defense are Phase-1 FALLERS — set Phase-3 buy levels, don't catch knives.",
-        "Even gold and TIPS can dip in the dash-for-cash (2008 · Mar 2020). Cash is the only certainty."
-      ],
-      "source": "src/dashboard.tsx:1031-1036",
-      "as_of": "2026-07"
-    },
     "playbook.phases.p2": {
       "kind": "table",
       "items": [
@@ -428,181 +417,6 @@
         "silver": "Late catch-up, sized down — the ratio extreme already compressed."
       },
       "source": "src/dashboard.tsx:1041-1048",
-      "as_of": "2026-07"
-    },
-    "playbook.experts.r1..24": {
-      "kind": "table",
-      "items": [
-        {
-          "r": 1,
-          "name": "Gold (physical / ETC)",
-          "verdict": "CORE · Phase 0 (20%)",
-          "note": "Experts' #1 = the protocol's lead regime hedge. M8 crowding is exactly why the weight is 20% and not 30%.",
-          "sources": "Dalio, UBS (Jun 12), JPMorgan, StanChart (Jun 19), Deutsche Bank (Jun 23), Morgan Stanley, GMO, XP, BofA/Hartnett, State Street (Jul), Gulf SWFs (Jun 30), Julius Baer (Jun 26), Amundi (Jul 1), BMO GAM (Jun 22), SocGen flows (Jul 1)"
-        },
-        {
-          "r": 2,
-          "name": "International / non-US developed",
-          "verdict": "P3 · 20%",
-          "note": "Protocol agrees on the asset, differs on timing: a post-trough Phase-3 buy (M6/M2 pass), not a hedge now (M1 fails).",
-          "sources": "Grantham/GMO (Jul 8), Hartnett, StanChart, State Street, Amundi, Dalio, UBS, JPMorgan, Morgan Stanley, Deutsche Bank, Macquarie"
-        },
-        {
-          "r": 3,
-          "name": "Emerging-market equities",
-          "verdict": "P3 · 15% ex-China",
-          "note": "Weak-dollar conditional (M5); the protocol strips China out of the sleeve.",
-          "sources": "Hartnett, GMO, Amundi, BlackRock/iShares, Dalio, JPMorgan, GSAM, StanChart, Morgan Stanley, Mobius"
-        },
-        {
-          "r": 4,
-          "name": "Healthcare (defensive)",
-          "verdict": "Relative mitigator",
-          "note": "Falls less, doesn't rise — no absolute-haven role in any phase (Baur–McDermott framework).",
-          "sources": "Schwab (Jun 26), GQG, JPMorgan, Amundi, RBC WM, Morgan Stanley, Cetera, Deutsche Bank"
-        },
-        {
-          "r": 5,
-          "name": "Quality bonds — govt & IG duration",
-          "verdict": "Challenged · short-dur only",
-          "note": "The sharpest divergence: experts rank duration #5; the protocol keeps it SMALL and SHORT after April 2025 (BIS: haven correlations ≈ 0). The CSV itself flags the contest.",
-          "sources": "Hartnett (Jul 6), Deutsche Bank (Jul 6), State Street (Jun 30), Julius Baer, Amundi, Morgan Stanley, UBS, JPMorgan, StanChart — haven status contested (BIS Jun 28)"
-        },
-        {
-          "r": 6,
-          "name": "Consumer staples",
-          "verdict": "Quality sleeve",
-          "note": "Lives inside the Phase-0 quality tilt, screened for AI adjacency (M2).",
-          "sources": "Schwab (Jun 26), GQG, Amundi, RBC WM, JPMorgan"
-        },
-        {
-          "r": 7,
-          "name": "Non-USD currencies",
-          "verdict": "CHF only (5%)",
-          "note": "The basket mixes a pass with a veto: protocol keeps CHF, drops JPY (falsified at ~¥162). eToro offers these only as FX-pair CFDs — CHF strength = SELL USD/CHF.",
-          "sources": "Amundi JPY/EUR (Jul 1), Hartnett bearish USD, UBS, Invesco, Deutsche Bank"
-        },
-        {
-          "r": 8,
-          "name": "Latin America / Brazil",
-          "verdict": "P3 satellite",
-          "note": "Weak-dollar conditional. Druckenmiller's ~4.5% EWZ book position is a Phase-3-style bet made early.",
-          "sources": "Druckenmiller (Jul 6), 24/7 Wall St, Amundi, JPMorgan PB, Morgan Stanley, GBM"
-        },
-        {
-          "r": 9,
-          "name": "Short-term T-bills / cash",
-          "verdict": "CORE · Phase 0 (30%)",
-          "note": "Perfect agreement — the CSV's own note ('lowest bias, highest conviction') matches the protocol's #1-certainty score; Buffett's $397B cash is M10 flow confirmation in the flesh.",
-          "sources": "Berkshire record $397.4B cash / ~$339.3B T-bills (Jul 5), SocGen money-market flows (Jul 1), NAI 500, JPMorgan"
-        },
-        {
-          "r": 10,
-          "name": "Dividend / quality equities",
-          "verdict": "P0 20% + P3 20%",
-          "note": "The quality/dividend sleeve in both phases (M3 resilience).",
-          "sources": "SocGen flows (Jul 1), RBC WM, NAI 500, Buffett-style income commentary"
-        },
-        {
-          "r": 11,
-          "name": "Global listed infrastructure",
-          "verdict": "Demoted (bias-flagged)",
-          "note": "Experts rank it #11 — but with the HIGHEST bias score (4 = product sellers). The protocol finds only a mild inflation hedge, utilities-adjacent (M2).",
-          "sources": "Julius Baer (Jun 26), Macquarie (Jun 30), Deutsche Bank, Gulf SWFs, JPMorgan — high bias, product sellers"
-        },
-        {
-          "r": 12,
-          "name": "Defense / aerospace",
-          "verdict": "P3 · 15% (halved)",
-          "note": "M7 mandated budgets pass; M8 crowding halves it; M2/M6 flag the run-up. A Phase-3 satellite, not a hedge — the F126 cancellation is the live warning.",
-          "sources": "Morgan Stanley/NOC (Jun 24), Nomura, Deutsche Bank, JPMorgan — conflict: VanEck Defense sold in Europe (Jul 1)"
-        },
-        {
-          "r": 13,
-          "name": "Utilities / power",
-          "verdict": "DEMOTE as haven",
-          "note": "Rare agreement on the negative: the CSV's Schwab flag = the protocol's M2 adjacency veto (AI-power coupling broke the defense).",
-          "sources": "Deutsche Bank (Jun 30), Gulf SWFs, JPMorgan — Schwab flags underperformance"
-        },
-        {
-          "r": 14,
-          "name": "Copper / miners",
-          "verdict": "P3 · 15%",
-          "note": "The CSV's own caveat ('cyclical diversifier, not classic haven') IS the protocol verdict: Phase-1 faller, Phase-3 riser (M7 pass, M9 veto until trough).",
-          "sources": "Goldman 2026 target $10,500/t, UBS, Hartnett, Deutsche Bank"
-        },
-        {
-          "r": 15,
-          "name": "India equities",
-          "verdict": "P3 small · conditional",
-          "note": "Only 1 fresh source in 3 weeks; protocol conditions it on the weak dollar and the domestic SIP floor holding (watch the >100% stoppage ratio).",
-          "sources": "Motilal Oswal (Jul 4, thesis Feb), JPMorgan, UBS, Nomura, StanChart, Mobius"
-        },
-        {
-          "r": 16,
-          "name": "Inflation-linked bonds (TIPS)",
-          "verdict": "P0 · 10%",
-          "note": "The inflation branch of the regime fork (M5); the protocol adds the Phase-1 liquidity caveat (2008/2020 breakdowns).",
-          "sources": "BMO GAM (Jun 22), Amundi (Jul 1), Dalio (pre-window)"
-        },
-        {
-          "r": 17,
-          "name": "Equal-weight S&P 500",
-          "verdict": "P0 toe-hold + P3 · 20%",
-          "note": "The documented post-bubble rotation (M6 — the 2000 value-spread precedent).",
-          "sources": "Amundi (Jul 1), Cetera, Druckenmiller (held), Morningstar"
-        },
-        {
-          "r": 18,
-          "name": "Broad world equity ETFs",
-          "verdict": "NO ROLE",
-          "note": "The starkest divergence: world ETFs are ~64%-weighted to the crashing asset (US mega-caps). The 'de-concentration' flow argues for ex-US — not world. (Links shown for reference; UCITS lines are the EU-ownable versions.)",
-          "sources": "SocGen — world ETFs = 40% of Frankfurt turnover (Jul 1), Amundi"
-        },
-        {
-          "r": 19,
-          "name": "Japan equities",
-          "verdict": "P3 tilt",
-          "note": "Lowest AI-adjacency developed market (M2) — but only one fresh confirmation.",
-          "sources": "Nomura constructive, UBS, JPMorgan, Dalio, Macquarie, HSBC (Q1 upgrade)"
-        },
-        {
-          "r": 20,
-          "name": "China equities / tech",
-          "verdict": "DEMOTE",
-          "note": "Zero fresh sources + the protocol's state-intervention M9-analog — both say stand aside despite the cheapest headline CAPE.",
-          "sources": "UBS, Hartnett (Apr/May), JPMorgan, Mobius — no fresh confirmation"
-        },
-        {
-          "r": 21,
-          "name": "EM bonds",
-          "verdict": "DEMOTE P0/1",
-          "note": "Dollar-funding sensitivity in the acute phase; thin sourcing agrees.",
-          "sources": "Julius Baer (Jun 26), HSBC (pre-window)"
-        },
-        {
-          "r": 22,
-          "name": "Silver / silver miners",
-          "verdict": "P2/3 · 15%",
-          "note": "No fresh expert confirmation AND the gold/silver-ratio extreme already played out (≈100 → ≈60) — the protocol keeps a smaller catch-up role.",
-          "sources": "UBS ('25, targets cut Jun), Dalio, XP — miner ETFs sold per Frankfurt flows (Jul 1)"
-        },
-        {
-          "r": 23,
-          "name": "US dollar (protection sleeve)",
-          "verdict": "Funding-stress only",
-          "note": "One source contradicting the majority; protocol: USD spikes only in the acute dash-for-cash, weakened by de-dollarization (worst H1 since 1973).",
-          "sources": "Banco Safra (Jul 3) — contradicts Hartnett/UBS/Amundi non-USD preference"
-        },
-        {
-          "r": 24,
-          "name": "Convertible bonds",
-          "verdict": "M9 flag",
-          "note": "Bottom rank + highest issuer bias (State Street sells the product) + the protocol's marginal-holder flag all align — the 2008 lesson stands. (No confirmed eToro listing for CWB.)",
-          "sources": "State Street (Jun 30) — record 2026 inflows; high issuer bias"
-        }
-      ],
-      "source": "src/dashboard.tsx:1051-1100",
       "as_of": "2026-07"
     },
     "playbook.intro.expl": {
@@ -1755,6 +1569,192 @@
       "source": "src/dashboard.tsx:463-464",
       "as_of": "2026-07",
       "note": "frozen editorial snapshot (Jul 2026); live values come from /api/v1/dashboard/feed"
+    },
+    "playbook.experts.rows": {
+      "kind": "table",
+      "items": [
+        {
+          "r": 1,
+          "name": "Gold (physical / ETC)",
+          "verdict": "CORE · Phase 0 (20%)",
+          "note": "Experts' #1 = the protocol's lead regime hedge. M8 crowding is exactly why the weight is 20% and not 30%.",
+          "sources": "Dalio, UBS (Jun 12), JPMorgan, StanChart (Jun 19), Deutsche Bank (Jun 23), Morgan Stanley, GMO, XP, BofA/Hartnett, State Street (Jul), Gulf SWFs (Jun 30), Julius Baer (Jun 26), Amundi (Jul 1), BMO GAM (Jun 22), SocGen flows (Jul 1)"
+        },
+        {
+          "r": 2,
+          "name": "International / non-US developed",
+          "verdict": "P3 · 20%",
+          "note": "Protocol agrees on the asset, differs on timing: a post-trough Phase-3 buy (M6/M2 pass), not a hedge now (M1 fails).",
+          "sources": "Grantham/GMO (Jul 8), Hartnett, StanChart, State Street, Amundi, Dalio, UBS, JPMorgan, Morgan Stanley, Deutsche Bank, Macquarie"
+        },
+        {
+          "r": 3,
+          "name": "Emerging-market equities",
+          "verdict": "P3 · 15% ex-China",
+          "note": "Weak-dollar conditional (M5); the protocol strips China out of the sleeve.",
+          "sources": "Hartnett, GMO, Amundi, BlackRock/iShares, Dalio, JPMorgan, GSAM, StanChart, Morgan Stanley, Mobius"
+        },
+        {
+          "r": 4,
+          "name": "Healthcare (defensive)",
+          "verdict": "Relative mitigator",
+          "note": "Falls less, doesn't rise — no absolute-haven role in any phase (Baur–McDermott framework).",
+          "sources": "Schwab (Jun 26), GQG, JPMorgan, Amundi, RBC WM, Morgan Stanley, Cetera, Deutsche Bank"
+        },
+        {
+          "r": 5,
+          "name": "Quality bonds — govt & IG duration",
+          "verdict": "Challenged · short-dur only",
+          "note": "The sharpest divergence: experts rank duration #5; the protocol keeps it SMALL and SHORT after April 2025 (BIS: haven correlations ≈ 0). The CSV itself flags the contest.",
+          "sources": "Hartnett (Jul 6), Deutsche Bank (Jul 6), State Street (Jun 30), Julius Baer, Amundi, Morgan Stanley, UBS, JPMorgan, StanChart — haven status contested (BIS Jun 28)"
+        },
+        {
+          "r": 6,
+          "name": "Consumer staples",
+          "verdict": "Quality sleeve",
+          "note": "Lives inside the Phase-0 quality tilt, screened for AI adjacency (M2).",
+          "sources": "Schwab (Jun 26), GQG, Amundi, RBC WM, JPMorgan"
+        },
+        {
+          "r": 7,
+          "name": "Non-USD currencies",
+          "verdict": "CHF only (5%)",
+          "note": "The basket mixes a pass with a veto: protocol keeps CHF, drops JPY (falsified at ~¥162). eToro offers these only as FX-pair CFDs — CHF strength = SELL USD/CHF.",
+          "sources": "Amundi JPY/EUR (Jul 1), Hartnett bearish USD, UBS, Invesco, Deutsche Bank"
+        },
+        {
+          "r": 8,
+          "name": "Latin America / Brazil",
+          "verdict": "P3 satellite",
+          "note": "Weak-dollar conditional. Druckenmiller's ~4.5% EWZ book position is a Phase-3-style bet made early.",
+          "sources": "Druckenmiller (Jul 6), 24/7 Wall St, Amundi, JPMorgan PB, Morgan Stanley, GBM"
+        },
+        {
+          "r": 9,
+          "name": "Short-term T-bills / cash",
+          "verdict": "CORE · Phase 0 (30%)",
+          "note": "Perfect agreement — the CSV's own note ('lowest bias, highest conviction') matches the protocol's #1-certainty score; Buffett's $397B cash is M10 flow confirmation in the flesh.",
+          "sources": "Berkshire record $397.4B cash / ~$339.3B T-bills (Jul 5), SocGen money-market flows (Jul 1), NAI 500, JPMorgan"
+        },
+        {
+          "r": 10,
+          "name": "Dividend / quality equities",
+          "verdict": "P0 20% + P3 20%",
+          "note": "The quality/dividend sleeve in both phases (M3 resilience).",
+          "sources": "SocGen flows (Jul 1), RBC WM, NAI 500, Buffett-style income commentary"
+        },
+        {
+          "r": 11,
+          "name": "Global listed infrastructure",
+          "verdict": "Demoted (bias-flagged)",
+          "note": "Experts rank it #11 — but with the HIGHEST bias score (4 = product sellers). The protocol finds only a mild inflation hedge, utilities-adjacent (M2).",
+          "sources": "Julius Baer (Jun 26), Macquarie (Jun 30), Deutsche Bank, Gulf SWFs, JPMorgan — high bias, product sellers"
+        },
+        {
+          "r": 12,
+          "name": "Defense / aerospace",
+          "verdict": "P3 · 15% (halved)",
+          "note": "M7 mandated budgets pass; M8 crowding halves it; M2/M6 flag the run-up. A Phase-3 satellite, not a hedge — the F126 cancellation is the live warning.",
+          "sources": "Morgan Stanley/NOC (Jun 24), Nomura, Deutsche Bank, JPMorgan — conflict: VanEck Defense sold in Europe (Jul 1)"
+        },
+        {
+          "r": 13,
+          "name": "Utilities / power",
+          "verdict": "DEMOTE as haven",
+          "note": "Rare agreement on the negative: the CSV's Schwab flag = the protocol's M2 adjacency veto (AI-power coupling broke the defense).",
+          "sources": "Deutsche Bank (Jun 30), Gulf SWFs, JPMorgan — Schwab flags underperformance"
+        },
+        {
+          "r": 14,
+          "name": "Copper / miners",
+          "verdict": "P3 · 15%",
+          "note": "The CSV's own caveat ('cyclical diversifier, not classic haven') IS the protocol verdict: Phase-1 faller, Phase-3 riser (M7 pass, M9 veto until trough).",
+          "sources": "Goldman 2026 target $10,500/t, UBS, Hartnett, Deutsche Bank"
+        },
+        {
+          "r": 15,
+          "name": "India equities",
+          "verdict": "P3 small · conditional",
+          "note": "Only 1 fresh source in 3 weeks; protocol conditions it on the weak dollar and the domestic SIP floor holding (watch the >100% stoppage ratio).",
+          "sources": "Motilal Oswal (Jul 4, thesis Feb), JPMorgan, UBS, Nomura, StanChart, Mobius"
+        },
+        {
+          "r": 16,
+          "name": "Inflation-linked bonds (TIPS)",
+          "verdict": "P0 · 10%",
+          "note": "The inflation branch of the regime fork (M5); the protocol adds the Phase-1 liquidity caveat (2008/2020 breakdowns).",
+          "sources": "BMO GAM (Jun 22), Amundi (Jul 1), Dalio (pre-window)"
+        },
+        {
+          "r": 17,
+          "name": "Equal-weight S&P 500",
+          "verdict": "P0 toe-hold + P3 · 20%",
+          "note": "The documented post-bubble rotation (M6 — the 2000 value-spread precedent).",
+          "sources": "Amundi (Jul 1), Cetera, Druckenmiller (held), Morningstar"
+        },
+        {
+          "r": 18,
+          "name": "Broad world equity ETFs",
+          "verdict": "NO ROLE",
+          "note": "The starkest divergence: world ETFs are ~64%-weighted to the crashing asset (US mega-caps). The 'de-concentration' flow argues for ex-US — not world. (Links shown for reference; UCITS lines are the EU-ownable versions.)",
+          "sources": "SocGen — world ETFs = 40% of Frankfurt turnover (Jul 1), Amundi"
+        },
+        {
+          "r": 19,
+          "name": "Japan equities",
+          "verdict": "P3 tilt",
+          "note": "Lowest AI-adjacency developed market (M2) — but only one fresh confirmation.",
+          "sources": "Nomura constructive, UBS, JPMorgan, Dalio, Macquarie, HSBC (Q1 upgrade)"
+        },
+        {
+          "r": 20,
+          "name": "China equities / tech",
+          "verdict": "DEMOTE",
+          "note": "Zero fresh sources + the protocol's state-intervention M9-analog — both say stand aside despite the cheapest headline CAPE.",
+          "sources": "UBS, Hartnett (Apr/May), JPMorgan, Mobius — no fresh confirmation"
+        },
+        {
+          "r": 21,
+          "name": "EM bonds",
+          "verdict": "DEMOTE P0/1",
+          "note": "Dollar-funding sensitivity in the acute phase; thin sourcing agrees.",
+          "sources": "Julius Baer (Jun 26), HSBC (pre-window)"
+        },
+        {
+          "r": 22,
+          "name": "Silver / silver miners",
+          "verdict": "P2/3 · 15%",
+          "note": "No fresh expert confirmation AND the gold/silver-ratio extreme already played out (≈100 → ≈60) — the protocol keeps a smaller catch-up role.",
+          "sources": "UBS ('25, targets cut Jun), Dalio, XP — miner ETFs sold per Frankfurt flows (Jul 1)"
+        },
+        {
+          "r": 23,
+          "name": "US dollar (protection sleeve)",
+          "verdict": "Funding-stress only",
+          "note": "One source contradicting the majority; protocol: USD spikes only in the acute dash-for-cash, weakened by de-dollarization (worst H1 since 1973).",
+          "sources": "Banco Safra (Jul 3) — contradicts Hartnett/UBS/Amundi non-USD preference"
+        },
+        {
+          "r": 24,
+          "name": "Convertible bonds",
+          "verdict": "M9 flag",
+          "note": "Bottom rank + highest issuer bias (State Street sells the product) + the protocol's marginal-holder flag all align — the 2008 lesson stands. (No confirmed eToro listing for CWB.)",
+          "sources": "State Street (Jun 30) — record 2026 inflows; high issuer bias"
+        }
+      ],
+      "source": "src/dashboard.tsx:1051-1100",
+      "as_of": "2026-07"
+    },
+    "playbook.phases.p1.rules": {
+      "kind": "list",
+      "items": [
+        "Hold cash — sitting still IS the strategy.",
+        "Do NOT add gold after the shock: the haven effect fades in ~15 trading days (M1) and the hedge is pre-paid (M8).",
+        "Copper, silver, EM, India, defense are Phase-1 FALLERS — set Phase-3 buy levels, don't catch knives.",
+        "Even gold and TIPS can dip in the dash-for-cash (2008 · Mar 2020). Cash is the only certainty."
+      ],
+      "source": "src/dashboard.tsx:1031-1036",
+      "as_of": "2026-07"
     }
   },
   "missing": [],

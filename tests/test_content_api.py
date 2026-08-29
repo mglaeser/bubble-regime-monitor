@@ -420,11 +420,12 @@ class TestBlockArtifact:
         good = ('{"content_version": 2, "block_count": 5, "blocks": {'
                 '"gauge.band.oneliner": {"kind": "map", "entries": {"hold": "h"}},'
                 '"gauge.splash.band_blurb": {"kind": "map", "entries": {"hold": "h"}},'
-                '"gauge.verdict.lead": {"kind": "table", "items": [{"a": "b"}]},'
-                '"gauge.verdict.detail": {"kind": "table", "items": [{"a": "b"}]},'
-                '"gauge.verdict.distance": {"kind": "table", "items": [{"a": "b"}]}}}')
+                '"gauge.verdict.lead": {"kind": "table", "items": [{"band": "hold", "template": "x"}]},'
+                '"gauge.verdict.detail": {"kind": "table", "items": [{"band": "hold", "template": "x"}]},'
+                '"gauge.verdict.distance": {"kind": "table", "items": [{"case": "c", "template": "x"}]}}}')
         f.write_text(good, encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", f)
+        monkeypatch.setattr(reg, "_MIN_BLOCKS", 1)  # mechanism under test: cache re-exam
         reg._clear_artifact_cache()
         assert reg.content_version() == 2
         f.write_text("{corrupt", encoding="utf-8")
@@ -532,3 +533,38 @@ class TestBlockArtifact:
                     f"extractor scaffolding shipped in {slug}"
                 )
         reg._clear_artifact_cache()
+
+    def test_runtime_floor_and_closure_enforced_in_loader(self, monkeypatch, tmp_path):
+        # Round 16 (SOTA-C): completeness and band closure must fire in the
+        # RUNTIME loader, not only in CI pins — a small valid artifact and an
+        # unclosed band vocabulary must both degrade at load.
+        import app.content_registry as reg
+
+        f = tmp_path / "content_blocks.v1.json"
+        small = ('{"content_version": 1, "block_count": 5, "blocks": {'
+                 '"gauge.band.oneliner": {"kind": "map", "entries": {"hold": "h"}},'
+                 '"gauge.splash.band_blurb": {"kind": "map", "entries": {"hold": "h"}},'
+                 '"gauge.verdict.lead": {"kind": "table", "items": [{"band": "hold", "template": "x"}]},'
+                 '"gauge.verdict.detail": {"kind": "table", "items": [{"band": "hold", "template": "x"}]},'
+                 '"gauge.verdict.distance": {"kind": "table", "items": [{"case": "c", "template": "x"}]}}}')
+        f.write_text(small, encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", f)
+        reg._clear_artifact_cache()
+        assert reg.content_version() == 0, "5-block artifact must fail the runtime floor"
+        # Unclosed vocabulary: oneliner declares a band the tables lack.
+        monkeypatch.setattr(reg, "_MIN_BLOCKS", 1)
+        unclosed = small.replace('{"hold": "h"}',
+                                 '{"hold": "h", "trim": "t"}', 1)
+        f.write_text(unclosed, encoding="utf-8")
+        reg._clear_artifact_cache()
+        assert reg.content_version() == 0, "unclosed band vocabulary must degrade at load"
+        reg._clear_artifact_cache()
+
+    def test_degenerate_slugs_rejected_by_structured_regex(self, monkeypatch, tmp_path):
+        # Round 16 (SOTA-A): the charset regex passed '..' and trailing dots —
+        # the shipped artifact itself carried two such slugs (renamed).
+        import app.content_registry as reg
+
+        assert reg._SLUG_RE.fullmatch("gauge.band.oneliner")
+        for bad in ("gauge.", ".gauge", "a..b", ".", "playbook.experts.r1..24"):
+            assert not reg._SLUG_RE.fullmatch(bad), bad

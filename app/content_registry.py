@@ -39,9 +39,17 @@ _BLOCKS_FILE = Path(__file__).resolve().parents[1] / "config" / "content_blocks.
 
 _EMPTY_ARTIFACT: dict[str, Any] = {"content_version": 0, "blocks": {}}
 
-# Slug shape: dot-namespaced, lowercase; an empty or malformed slug is schema
-# corruption (round 13) - it would merge silently or produce empty sub-slugs.
-_SLUG_RE = re.compile(r"^[a-z0-9_.\-]{1,120}$")
+# Slug shape: dot-SEPARATED non-empty lowercase segments — the round-13 charset
+# regex still passed degenerate slugs ("..", leading/trailing dots, bare
+# "gauge." producing an empty display sub-slug); round 16 structures it. Two
+# shipped slugs were caught and renamed on first contact (again).
+_SLUG_RE = re.compile(r"^[a-z0-9_-]+(\.[a-z0-9_-]+)*$")
+
+# Runtime completeness floor: the closure/completeness guarantees must live in
+# the LOADER, not only in CI pins — a runtime artifact swap with a handful of
+# valid blocks must not serve at v1 (round 16). Deliberate slack under the
+# shipped 211 so small edits never brick content.
+_MIN_BLOCKS = 200
 
 # Slugs the service itself consumes from the file artifact, WITH their
 # required kinds — presence alone is porous (a required slug of the wrong
@@ -141,17 +149,39 @@ def _load_artifact(fh: Any) -> dict[str, Any]:
         return dict(_EMPTY_ARTIFACT)
     # bool is an int subclass in Python: `true` must not pass as a version.
     if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
+            or len(blocks) < _MIN_BLOCKS
             or not all(isinstance(slug, str) and _SLUG_RE.fullmatch(slug)
                        for slug in blocks)
             or not all(isinstance(blocks.get(slug), dict)
                        and blocks[slug].get("kind") == kind
                        for slug, kind in REQUIRED_FILE_SLUG_KINDS.items())
             or _max_depth(blocks) > 32
-            or not all(_valid_member(b) for b in blocks.values())):
+            or not all(_valid_member(b) for b in blocks.values())
+            or not _bands_closed(blocks)):
         # All-or-nothing: an artifact with ANY corrupt member degrades whole —
         # partial content must never be served under the artifact's version.
         return dict(_EMPTY_ARTIFACT)
     return {"content_version": version, "blocks": blocks}
+
+
+def _bands_closed(blocks: dict[str, Any]) -> bool:
+    """Band-vocabulary closure at RUNTIME, not only in CI pins (round 16):
+    every band key the oneliner map declares must resolve to a row in each
+    band-keyed verdict table, or the whole artifact degrades."""
+    oneliner = blocks.get("gauge.band.oneliner", {})
+    entries = oneliner.get("entries") if isinstance(oneliner, dict) else None
+    if not isinstance(entries, dict):
+        return False
+    declared = set(entries.keys())
+    for table_slug in ("gauge.verdict.lead", "gauge.verdict.detail"):
+        table = blocks.get(table_slug, {})
+        items = table.get("items") if isinstance(table, dict) else None
+        if not isinstance(items, list):
+            return False
+        rows = {row.get("band") for row in items if isinstance(row, dict)}
+        if not declared.issubset(rows):
+            return False
+    return True
 
 
 def _max_depth(obj: Any) -> int:
