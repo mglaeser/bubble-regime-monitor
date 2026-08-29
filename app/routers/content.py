@@ -16,7 +16,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request, Response
 
 from app.config import get_settings
-from app.content_registry import content_version, dynamic_slots_payload, static_blocks
+from app.content_registry import (
+    artifact_view,
+    dashboard_payload,
+    dynamic_slots_payload,
+)
 from app.schemas import Meta
 from app.security import READ_RATE_LIMIT, limiter, require_read_access
 
@@ -46,8 +50,8 @@ def _cache_control(max_age: int) -> str:
 def get_dashboard_content(request: Request, response: Response,
                           _: None = Depends(require_read_access)) -> dict[str, Any]:
     response.headers["Cache-Control"] = _cache_control(300)
-    return {"data": {"blocks": static_blocks(), "content_version": content_version()},
-            "meta": _meta()}
+    # ONE artifact snapshot per response: blocks and version stay coherent.
+    return {"data": dashboard_payload(), "meta": _meta()}
 
 
 @router.get("/dynamic", summary="Dynamic content slots with hard length/regex contracts")
@@ -55,5 +59,6 @@ def get_dashboard_content(request: Request, response: Response,
 def get_dynamic_content(request: Request, response: Response,
                         _: None = Depends(require_read_access)) -> dict[str, Any]:
     response.headers["Cache-Control"] = _cache_control(60)
-    return {"data": {"slots": dynamic_slots_payload(), "content_version": content_version()},
+    return {"data": {"slots": dynamic_slots_payload(),
+                     "content_version": artifact_view()[1]},
             "meta": _meta()}

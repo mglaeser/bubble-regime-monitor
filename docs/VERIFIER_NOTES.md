@@ -61,6 +61,8 @@ fixed with priority.
 
 | 11 | SOTA-A + SOTA-C | `lru_cache` froze artifact health at first load (runtime change never re-examined); count-without-manifest lets count-consistent junk serve v1; generic tail regex admits domain-impossible values (999%); the served BLOCK still carried the self-invalidating "≤ 6 weeks old" claim | **UPHELD ×4 → fixed**: mtime/size-keyed cache (health re-examined on any file change at ~stat cost, handlers otherwise I/O-free); `REQUIRED_FILE_SLUGS` anchored in code (junk artifacts fail the manifest); per-stat domain regexes (hit 0–100%, betas signed d.dd, lambda [0,1]); the block's recency claim replaced by a dated statement (the wiring PRs propagate this to the site, which renders from this API). All pinned incl. a runtime-corruption re-examination test |
 
+| 12 | SOTA-A + SOTA-C | Cache key (mtime,size) spoofable by timestamp-preserving copies; required slugs unchecked for KIND; cache publication non-atomic under threads; blocks/version read twice per response (torn pairing); `100.99%`/`1.50` regex-legal; CI pins can short-circuit the loader | **UPHELD ×6 → fixed**: cache keyed (mtime_ns, size, inode) — atomic-rename replacement always changes inode; in-place all-three-preserved rewrite is a filesystem-level act outside this control's threat model, on the record; `REQUIRED_FILE_SLUG_KINDS` validates kind, not just presence; cache published as one tuple under a lock (double-checked); `dashboard_payload()` builds each response from ONE artifact snapshot (call-counted pin); hit bounded to 0–100%, lambda to [0,1]; a pin now runs the REAL loader end-to-end on the shipped file. All pinned |
+
 ## Reviewer guidance for subsequent rounds
 
 - The **disclaimer gate**, **last-known-good + stale labeling**, **commit

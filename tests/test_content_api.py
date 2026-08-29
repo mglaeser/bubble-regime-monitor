@@ -444,3 +444,50 @@ class TestBlockArtifact:
         reg._clear_artifact_cache()
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
+
+    def test_shipped_artifact_passes_the_full_loader(self):
+        # Round 12: the CI pin must exercise the REAL loader end-to-end on the
+        # shipped file — raw-JSON reads can short-circuit loader regressions.
+        import app.content_registry as reg
+
+        reg._clear_artifact_cache()
+        assert reg.content_version() == 1
+        payload = reg.dashboard_payload()
+        assert payload["content_version"] == 1
+        assert len(payload["blocks"]) >= 211
+        reg._clear_artifact_cache()
+
+    def test_dashboard_payload_is_one_snapshot(self, monkeypatch):
+        # Round 12: blocks and version must come from a SINGLE artifact read.
+        import app.content_registry as reg
+
+        calls = {"n": 0}
+        real = reg.artifact_view
+
+        def counting():
+            calls["n"] += 1
+            return real()
+
+        monkeypatch.setattr(reg, "artifact_view", counting)
+        reg._clear_artifact_cache()
+        reg.dashboard_payload()
+        assert calls["n"] == 1
+        reg._clear_artifact_cache()
+
+    def test_required_slug_with_wrong_kind_degrades(self, monkeypatch, tmp_path):
+        # Round 12: presence alone is porous — a required slug of the wrong
+        # KIND must degrade the artifact.
+        import app.content_registry as reg
+
+        f = tmp_path / "content_blocks.v1.json"
+        f.write_text('{"content_version": 1, "block_count": 5, "blocks": {'
+                     '"gauge.band.oneliner": {"kind": "text", "text": "wrong kind"},'
+                     '"gauge.splash.band_blurb": {"kind": "map", "entries": {"hold": "h"}},'
+                     '"gauge.verdict.lead": {"kind": "table", "items": [{"a": "b"}]},'
+                     '"gauge.verdict.detail": {"kind": "table", "items": [{"a": "b"}]},'
+                     '"gauge.verdict.distance": {"kind": "table", "items": [{"a": "b"}]}}}',
+                     encoding="utf-8")
+        monkeypatch.setattr(reg, "_BLOCKS_FILE", f)
+        reg._clear_artifact_cache()
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()

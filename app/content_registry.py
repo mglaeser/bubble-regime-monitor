@@ -21,6 +21,7 @@ Two registries:
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,38 +37,61 @@ _BLOCKS_FILE = Path(__file__).resolve().parents[1] / "config" / "content_blocks.
 
 _EMPTY_ARTIFACT: dict[str, Any] = {"content_version": 0, "blocks": {}}
 
-# Slugs the service itself consumes from the file artifact — presence is
-# anchored HERE, in code, so a self-consistent junk artifact (valid members,
-# matching count, wrong slugs) cannot satisfy completeness (round 11).
-REQUIRED_FILE_SLUGS: frozenset[str] = frozenset({
-    "gauge.band.oneliner", "gauge.splash.band_blurb",
-    "gauge.verdict.lead", "gauge.verdict.detail", "gauge.verdict.distance",
-})
+# Slugs the service itself consumes from the file artifact, WITH their
+# required kinds — presence alone is porous (a required slug of the wrong
+# kind breaks its consumers just as hard; rounds 11-12).
+REQUIRED_FILE_SLUG_KINDS: dict[str, str] = {
+    "gauge.band.oneliner": "map",
+    "gauge.splash.band_blurb": "map",
+    "gauge.verdict.lead": "table",
+    "gauge.verdict.detail": "table",
+    "gauge.verdict.distance": "table",
+}
 
-_cache_key: tuple[float, int] | None = None
-_cache_value: dict[str, Any] | None = None
+_cache_lock = threading.Lock()
+# Published as ONE tuple so a reader can never see a key from one load paired
+# with a value from another (round 12: non-atomic publication under threads).
+_cache: tuple[tuple[int, int, int] | None, dict[str, Any]] | None = None
 
 
 def _file_artifact() -> dict[str, Any]:
-    # mtime/size-keyed cache: request handlers stay ~I/O-free (one stat), but
-    # artifact health is re-examined whenever the file changes or vanishes —
-    # lru_cache froze health at first load (panel finding, round 11).
-    global _cache_key, _cache_value
+    # Cache keyed on (mtime_ns, size, inode): atomic-rename deployment always
+    # changes the inode, so a replaced artifact is re-examined even when a
+    # copy tool preserves mtime and size (round 12). An in-place rewrite that
+    # preserves all three is a deliberate filesystem-level act outside this
+    # control's threat model (an actor with that access can edit code).
+    global _cache
     try:
         st = _BLOCKS_FILE.stat()
-        key: tuple[float, int] | None = (st.st_mtime, st.st_size)
+        key: tuple[int, int, int] | None = (st.st_mtime_ns, st.st_size, st.st_ino)
     except OSError:
         key = None
-    if key == _cache_key and _cache_value is not None:
-        return _cache_value
-    _cache_value = _load_artifact() if key is not None else dict(_EMPTY_ARTIFACT)
-    _cache_key = key
-    return _cache_value
+    cached = _cache
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    with _cache_lock:
+        cached = _cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        value = _load_artifact() if key is not None else dict(_EMPTY_ARTIFACT)
+        _cache = (key, value)
+        return value
 
 
 def _clear_artifact_cache() -> None:
-    global _cache_key, _cache_value
-    _cache_key, _cache_value = None, None
+    global _cache
+    with _cache_lock:
+        _cache = None
+
+
+def artifact_view() -> tuple[dict[str, Any], int]:
+    """One coherent snapshot of (blocks, version) from a SINGLE artifact read —
+    a response must never mix one load's blocks with another's version."""
+    artifact = _file_artifact()
+    version = artifact.get("content_version", 0)
+    blocks = artifact.get("blocks", {})
+    return (blocks if isinstance(blocks, dict) else {},
+            version if type(version) is int else 0)
 
 
 def _load_artifact() -> dict[str, Any]:
@@ -105,7 +129,9 @@ def _load_artifact() -> dict[str, Any]:
         return dict(_EMPTY_ARTIFACT)
     # bool is an int subclass in Python: `true` must not pass as a version.
     if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
-            or not REQUIRED_FILE_SLUGS.issubset(blocks.keys())
+            or not all(isinstance(blocks.get(slug), dict)
+                       and blocks[slug].get("kind") == kind
+                       for slug, kind in REQUIRED_FILE_SLUG_KINDS.items())
             or _max_depth(blocks) > 32
             or not all(_valid_member(b) for b in blocks.values())):
         # All-or-nothing: an artifact with ANY corrupt member degrades whole —
@@ -169,15 +195,21 @@ def _text(text: str) -> dict[str, Any]:
     return {"kind": "text", "text": text}
 
 
+def dashboard_payload() -> dict[str, Any]:
+    """Blocks + version from ONE artifact snapshot — a response must never
+    pair one load's blocks with another load's version (round 12)."""
+    file_blocks, version = artifact_view()
+    blocks = dict(_builtin_blocks())
+    for slug, block in file_blocks.items():
+        if slug not in blocks and isinstance(block, dict):
+            blocks[slug] = block
+    return {"blocks": blocks, "content_version": version}
+
+
 def static_blocks() -> dict[str, dict[str, Any]]:
     """All static content blocks, keyed by slug: built-ins + the versioned
     block artifact (file slugs never override built-ins)."""
-    blocks = dict(_builtin_blocks())
-    file_blocks = _file_artifact().get("blocks", {})
-    if isinstance(file_blocks, dict):
-        for slug, block in file_blocks.items():
-            if slug not in blocks and isinstance(block, dict):
-                blocks[slug] = block
+    blocks: dict[str, dict[str, Any]] = dashboard_payload()["blocks"]
     return blocks
 
 
@@ -369,8 +401,8 @@ def _save_haven_slots() -> list[DynamicSlot]:
     tail_regex = {
         "bf": r"^[+-]\d\.\d{2}$",
         "bc": r"^[+-]\d\.\d{2}$",
-        "hit": r"^(100|[1-9]?\d)(\.\d{1,2})?%$",
-        "lam": r"^[01]\.\d{2}$",
+        "hit": r"^(100|[1-9]?\d(\.\d{1,2})?)%$",
+        "lam": r"^(0\.\d{2}|1\.00)$",
     }
     for asset, stats in tail_editorial.items():
         for stat, value in stats.items():
