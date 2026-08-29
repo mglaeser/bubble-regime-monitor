@@ -228,32 +228,42 @@ class TestBlockArtifact:
 
     # ---- Round 17 (SOTA-A): every hostile test below builds on a baseline
     # that passes EVERY loader control, then applies exactly ONE violation.
-    # The original tiny fixtures ({"blocks": {"x.y": ...}}) predated
-    # _MIN_BLOCKS and REQUIRED_FILE_SLUG_KINDS and had become vacuous: they
+    # The original tiny fixtures ({"blocks": {"x.y": ...}}) predated the
+    # completeness controls and had become vacuous: they
     # degraded for several reasons at once, so deleting the specific control
     # a test claimed to pin kept CI green. The positive control
     # (test_baseline_fixture_passes_the_full_loader) keeps the battery honest.
 
     def _baseline(self, version: int = 1) -> dict:
+        # Round 18: the baseline covers the FULL code-anchored manifest —
+        # completeness now means every v1 slug with its declared kind, so the
+        # builder derives from app/content_manifest.py, then overwrites the
+        # five band-structured slugs with schema-complete band structures.
         import app.content_registry as reg
 
-        bands = sorted(reg._CANONICAL_BANDS)
-        blocks: dict = {
-            "gauge.band.oneliner": {
-                "kind": "map", "entries": {b: f"one {b}" for b in bands}},
-            "gauge.splash.band_blurb": {
-                "kind": "map", "entries": {b: f"blurb {b}" for b in bands}},
-            "gauge.verdict.lead": {
-                "kind": "table",
-                "items": [{"band": b, "template": "t"} for b in bands]},
-            "gauge.verdict.detail": {
-                "kind": "table",
-                "items": [{"band": b, "template": "t"} for b in bands]},
-            "gauge.verdict.distance": {
-                "kind": "table", "items": [{"case": "c", "template": "t"}]},
+        shapes = {
+            "text": {"kind": "text", "text": "x"},
+            "template": {"kind": "template", "text": "x"},
+            "map": {"kind": "map", "entries": {"k": "v"}},
+            "list": {"kind": "list", "items": ["x"]},
+            "links": {"kind": "links", "items": [{"a": "b"}]},
+            "endpoint_catalog": {"kind": "endpoint_catalog", "items": [{"a": "b"}]},
+            "table": {"kind": "table", "items": [{"a": "b"}]},
         }
-        for i in range(reg._MIN_BLOCKS):
-            blocks[f"filler.block{i:03d}"] = {"kind": "text", "text": f"filler {i}"}
+        import copy
+
+        blocks: dict = {slug: copy.deepcopy(shapes[kind])
+                        for slug, kind in reg.REQUIRED_FILE_SLUG_KINDS.items()}
+        bands = sorted(reg._CANONICAL_BANDS)
+        blocks["gauge.band.oneliner"] = {
+            "kind": "map", "entries": {b: f"one {b}" for b in bands}}
+        blocks["gauge.splash.band_blurb"] = {
+            "kind": "map", "entries": {b: f"blurb {b}" for b in bands}}
+        for t in ("gauge.verdict.lead", "gauge.verdict.detail"):
+            blocks[t] = {"kind": "table", "items": [
+                {"band": b, "trend_broken": "any", "template": "t"} for b in bands]}
+        blocks["gauge.verdict.distance"] = {
+            "kind": "table", "items": [{"case": "c", "template": "t"}]}
         return {"content_version": version, "block_count": len(blocks),
                 "blocks": blocks}
 
@@ -280,7 +290,7 @@ class TestBlockArtifact:
         # removed from the loader — no fixture short-circuits (round 17).
         reg = self._install(monkeypatch, tmp_path, self._baseline())
         assert reg.content_version() == 1
-        assert reg.static_blocks()["filler.block000"]["text"] == "filler 0"
+        assert reg.static_blocks()["hero.intro"]["text"] == "x"
         reg._clear_artifact_cache()
 
     def test_structurally_invalid_blocks_degrades_wholly_to_v0(self, monkeypatch, tmp_path):
@@ -322,17 +332,17 @@ class TestBlockArtifact:
         # version — ONE corrupt member (empty text) degrades the whole
         # artifact to v0.
         art = self._baseline()
-        art["blocks"]["filler.block000"]["text"] = ""
+        art["blocks"]["hero.intro"]["text"] = ""
         reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
-        assert "filler.block001" not in reg.static_blocks()
+        assert "hero.howto.expl" not in reg.static_blocks()
         reg._clear_artifact_cache()
 
     def test_lone_surrogate_rejected_at_load_not_at_response(self, monkeypatch, tmp_path):
         # Round 4: a lone UTF-16 surrogate passes json.load but raises
         # UnicodeEncodeError in the RESPONSE encoder — reject at load.
         art = self._baseline()
-        art["blocks"]["filler.block000"]["text"] = "bad \ud800 char"
+        art["blocks"]["hero.intro"]["text"] = "bad \ud800 char"
         reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
@@ -479,15 +489,73 @@ class TestBlockArtifact:
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
-    def test_below_min_blocks_rejected_at_runtime(self, monkeypatch, tmp_path):
-        # Round 16: the completeness floor is a RUNTIME control, not a CI pin.
+    def test_count_only_artifact_with_fillers_degrades(self, monkeypatch, tmp_path):
+        # Round 18 (SOTA-A): the completeness gate was count-plus-five-slugs —
+        # THIS artifact (five valid band slugs + 206 junk fillers, count
+        # consistent) served at v1 with every remaining editorial block
+        # missing. It must degrade under the full manifest.
         art = self._baseline()
-        import app.content_registry as reg_mod
+        keep = ("gauge.band.oneliner", "gauge.splash.band_blurb",
+                "gauge.verdict.lead", "gauge.verdict.detail",
+                "gauge.verdict.distance")
+        n_dropped = len(art["blocks"]) - len(keep)
+        art["blocks"] = {s: b for s, b in art["blocks"].items() if s in keep}
+        for i in range(n_dropped):
+            art["blocks"][f"filler.block{i:03d}"] = {"kind": "text", "text": f"f {i}"}
+        reg = self._install(monkeypatch, tmp_path, art)
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()
 
-        for i in range(reg_mod._MIN_BLOCKS):
-            if len(art["blocks"]) <= reg_mod._MIN_BLOCKS - 1:
-                break
-            art["blocks"].pop(f"filler.block{i:03d}", None)
+    def test_missing_single_editorial_slug_degrades(self, monkeypatch, tmp_path):
+        # Round 18: completeness is per-slug, not statistical — ONE missing
+        # editorial block (count kept consistent) degrades the artifact.
+        art = self._baseline()
+        del art["blocks"]["hero.intro"]
+        reg = self._install(monkeypatch, tmp_path, art)
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()
+
+    def test_manifest_matches_shipped_artifact_exactly(self):
+        # The manifest IS the meaning of v1 completeness: it must name
+        # exactly the shipped slug set with the shipped kinds.
+        import json as _json
+
+        import app.content_registry as reg
+
+        raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
+        shipped = {slug: blk["kind"] for slug, blk in raw["blocks"].items()}
+        assert reg.REQUIRED_FILE_SLUG_KINDS == shipped
+
+    def test_verdict_row_missing_template_degrades(self, monkeypatch, tmp_path):
+        # Round 18 (SOTA-A): a band-only row passed _valid_member and closure
+        # yet serves a verdict with no copy at all.
+        art = self._baseline()
+        art["blocks"]["gauge.verdict.lead"]["items"].append(
+            {"band": "hold", "trend_broken": "any"})
+        reg = self._install(monkeypatch, tmp_path, art)
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()
+
+    def test_verdict_row_missing_trend_selector_degrades(self, monkeypatch, tmp_path):
+        art = self._baseline()
+        art["blocks"]["gauge.verdict.detail"]["items"].append(
+            {"band": "hold", "template": "t"})
+        reg = self._install(monkeypatch, tmp_path, art)
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()
+
+    def test_verdict_row_invalid_trend_selector_degrades(self, monkeypatch, tmp_path):
+        art = self._baseline()
+        art["blocks"]["gauge.verdict.lead"]["items"].append(
+            {"band": "hold", "trend_broken": "sometimes", "template": "t"})
+        reg = self._install(monkeypatch, tmp_path, art)
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()
+
+    def test_distance_row_missing_case_degrades(self, monkeypatch, tmp_path):
+        # The distance table is case-keyed; its rows have a schema too.
+        art = self._baseline()
+        art["blocks"]["gauge.verdict.distance"]["items"].append({"template": "t"})
         reg = self._install(monkeypatch, tmp_path, art)
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
@@ -550,11 +618,16 @@ class TestBlockArtifact:
 
         import app.content_registry as reg
 
+        # Round 18 (SOTA-A): gauge.reg.s5 was wrongly on this list — its
+        # "Today's spreads are near 25-year tights" is a frozen market fact,
+        # not live-referential copy; it is now dated + stamped. The rest were
+        # re-reviewed after that miss: each block's "today/now" refers to the
+        # live payload it rides (band state, coverage, fusion output).
         LIVE_REFERENTIAL = {
             "gauge.band.oneliner", "gauge.coverage.tip",
             "gauge.epistemic.not_probability", "gauge.fusion.caveat",
             "gauge.fusion.header", "gauge.ladder.ceiling",
-            "gauge.reg.s5", "gauge.verdict.lead",
+            "gauge.verdict.lead",
         }
         recency = re.compile(
             r"\b(today|today's|right now|currently|this cycle|latest)\b", re.I)
@@ -567,7 +640,7 @@ class TestBlockArtifact:
                 assert re.fullmatch(r"\d{4}-\d{2}", str(block.get("as_of") or "")), (
                     f"{slug} asserts calendar recency but carries no as_of stamp")
                 stamped += 1
-        assert stamped >= 24, "recency sweep found suspiciously few dated blocks"
+        assert stamped >= 25, "recency sweep found suspiciously few dated blocks"
 
     def test_shipped_artifact_passes_the_full_loader(self):
         # Round 12: the CI pin must exercise the REAL loader end-to-end on the
@@ -659,8 +732,10 @@ class TestBlockArtifact:
 
     def test_runtime_floor_and_closure_enforced_in_loader(self, monkeypatch, tmp_path):
         # Round 16 (SOTA-C): completeness and band closure must fire in the
-        # RUNTIME loader, not only in CI pins — a small valid artifact and an
-        # unclosed band vocabulary must both degrade at load.
+        # RUNTIME loader, not only in CI pins. Round 18 superseded the count
+        # floor with the full manifest — the small artifact still degrades,
+        # now for the stronger reason; closure has its own single-violation
+        # tests above.
         import app.content_registry as reg
 
         f = tmp_path / "content_blocks.v1.json"
@@ -673,14 +748,7 @@ class TestBlockArtifact:
         f.write_text(small, encoding="utf-8")
         monkeypatch.setattr(reg, "_BLOCKS_FILE", f)
         reg._clear_artifact_cache()
-        assert reg.content_version() == 0, "5-block artifact must fail the runtime floor"
-        # Unclosed vocabulary: oneliner declares a band the tables lack.
-        monkeypatch.setattr(reg, "_MIN_BLOCKS", 1)
-        unclosed = small.replace('{"hold": "h"}',
-                                 '{"hold": "h", "trim": "t"}', 1)
-        f.write_text(unclosed, encoding="utf-8")
-        reg._clear_artifact_cache()
-        assert reg.content_version() == 0, "unclosed band vocabulary must degrade at load"
+        assert reg.content_version() == 0, "5-block artifact must fail completeness"
         reg._clear_artifact_cache()
 
     def test_degenerate_slugs_rejected_by_structured_regex(self, monkeypatch, tmp_path):

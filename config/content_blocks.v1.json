@@ -1155,11 +1155,12 @@
     "gauge.reg.s5": {
       "kind": "map",
       "entries": {
-        "plain": "When lenders are most relaxed, trouble tends to arrive about two years later. Today's spreads are near 25-year tights.",
+        "plain": "When lenders are most relaxed, trouble tends to arrive about two years later. As of Jul 2026, spreads were near 25-year tights.",
         "fire": "High-yield spreads are historically tight (measured with a two-year lead).",
         "why": "Literature-grounded on López-Salido-Stein-Zakrajšek's finding that hot credit at t−2 precedes contraction at t."
       },
-      "source": "src/bubblegauge.tsx:194-197"
+      "source": "src/bubblegauge.tsx:194-197",
+      "as_of": "2026-07"
     },
     "gauge.reg.d1": {
       "kind": "map",

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.content_manifest import REQUIRED_FILE_SLUG_KINDS
 from app.engine.recompute_slots import schedule_display
 from app.references import DISCLAIMER
 
@@ -45,22 +46,13 @@ _EMPTY_ARTIFACT: dict[str, Any] = {"content_version": 0, "blocks": {}}
 # shipped slugs were caught and renamed on first contact (again).
 _SLUG_RE = re.compile(r"^[a-z0-9_-]+(\.[a-z0-9_-]+)*$")
 
-# Runtime completeness floor: the closure/completeness guarantees must live in
-# the LOADER, not only in CI pins — a runtime artifact swap with a handful of
-# valid blocks must not serve at v1 (round 16). Deliberate slack under the
-# shipped 211 so small edits never brick content.
-_MIN_BLOCKS = 200
-
-# Slugs the service itself consumes from the file artifact, WITH their
-# required kinds — presence alone is porous (a required slug of the wrong
-# kind breaks its consumers just as hard; rounds 11-12).
-REQUIRED_FILE_SLUG_KINDS: dict[str, str] = {
-    "gauge.band.oneliner": "map",
-    "gauge.splash.band_blurb": "map",
-    "gauge.verdict.lead": "table",
-    "gauge.verdict.detail": "table",
-    "gauge.verdict.distance": "table",
-}
+# Completeness = the FULL code-anchored manifest (app/content_manifest.py):
+# every v1 slug present with its declared kind, or the artifact degrades
+# whole. Round 18 (SOTA-A): the previous gate — five required slugs plus a
+# 200-block count floor — accepted an artifact of band slugs + junk fillers
+# with all 206 remaining editorial blocks missing. The round-16 _MIN_BLOCKS
+# floor is strictly subsumed: manifest coverage implies len(blocks) >= 211.
+# (REQUIRED_FILE_SLUG_KINDS is imported at the top of this module.)
 
 # The band vocabulary is CANONICAL, not artifact-self-declared (round 17).
 # app/models.py:61-65 pins the authoritative action states (hold | trim |
@@ -75,6 +67,11 @@ _BAND_MAP_SLUGS = ("gauge.band.oneliner", "gauge.splash.band_blurb")
 # gauge.verdict.distance is deliberately NOT here: its rows are case-keyed
 # (case/template), not band-keyed — see the shipped artifact.
 _BAND_TABLE_SLUGS = ("gauge.verdict.lead", "gauge.verdict.detail")
+# Verdict-row schema (round 18, SOTA-A): a band-only row ({"band": "hold"})
+# passed _valid_member (non-empty dict) and closure (band str) yet serves a
+# verdict with no template and no trend selector — clients render nothing.
+_TREND_SELECTORS: frozenset[str] = frozenset({"yes", "no", "any"})
+_DISTANCE_TABLE_SLUG = "gauge.verdict.distance"
 
 _cache_lock = threading.Lock()
 # Published as ONE tuple so a reader can never see a key from one load paired
@@ -163,7 +160,6 @@ def _load_artifact(fh: Any) -> dict[str, Any]:
         return dict(_EMPTY_ARTIFACT)
     # bool is an int subclass in Python: `true` must not pass as a version.
     if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
-            or len(blocks) < _MIN_BLOCKS
             or not all(isinstance(slug, str) and _SLUG_RE.fullmatch(slug)
                        for slug in blocks)
             or not all(isinstance(blocks.get(slug), dict)
@@ -212,8 +208,29 @@ def _bands_closed(blocks: dict[str, Any]) -> bool:
             band = row.get("band") if isinstance(row, dict) else None
             if not isinstance(band, str):
                 return False
+            # Full row schema, not band-presence alone (round 18): every
+            # verdict row needs its template copy and a trend selector.
+            template = row.get("template")
+            if not isinstance(template, str) or not template.strip():
+                return False
+            if row.get("trend_broken") not in _TREND_SELECTORS:
+                return False
             rows.add(band)
         if not vocab.issubset(rows):
+            return False
+    # The distance table is case-keyed, not band-keyed — but its rows have a
+    # schema too: a non-empty case selector and template copy (round 18).
+    distance = blocks.get(_DISTANCE_TABLE_SLUG, {})
+    d_items = distance.get("items") if isinstance(distance, dict) else None
+    if not isinstance(d_items, list):
+        return False
+    for row in d_items:
+        if not isinstance(row, dict):
+            return False
+        case = row.get("case")
+        template = row.get("template")
+        if not (isinstance(case, str) and case.strip()
+                and isinstance(template, str) and template.strip()):
             return False
     return True
 

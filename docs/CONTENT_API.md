@@ -64,6 +64,11 @@ GET /api/v1/content/dashboard   static blocks {slug: {kind, text|items|entries}}
 GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, updated_at, purpose, constraints}}
 ```
 
+v1 completeness is the full code-anchored manifest (`app/content_manifest.py`):
+every listed slug present with its declared kind, or the artifact degrades
+whole to built-ins at version 0. Extend the manifest in the same PR that adds
+content.
+
 Static blocks may carry `as_of: "YYYY-MM"` — mandatory for editorial whose
 copy asserts calendar recency ("today", "right now", "this cycle"): the claim
 is frozen at authoring time and clients must be able to date it. Blocks whose
