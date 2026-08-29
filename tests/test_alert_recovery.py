@@ -1843,3 +1843,20 @@ def test_a_verdict_cannot_clear_a_failure_that_landed_after_it(
     heartbeat("digest", "ok", {"note": "genuine later run"})
     with session_scope() as session:
         assert session.get(AlertComponentHeartbeat, "digest").status == "ok"
+
+
+def test_the_claim_instant_is_sampled_before_any_other_work():
+    """Panel round 21: every statement before the sample makes it later,
+    and a later claim instant classifies fewer failures as post-verdict —
+    a strictly weaker guard. Pinned structurally because the cost of
+    getting it wrong is invisible in behaviour until a slow prelude
+    coincides with a crash."""
+    import inspect
+
+    from app.jobs.alert_recovery import heartbeat
+
+    body = [line.strip() for line in
+            inspect.getsource(heartbeat).split('"""')[2].strip().split("\n")
+            if line.strip() and not line.strip().startswith("#")]
+    assert body[0].startswith("claimed_at = datetime.now("), (
+        f"the claim instant is no longer the first statement: {body[0]!r}")

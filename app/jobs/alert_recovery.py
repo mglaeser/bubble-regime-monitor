@@ -62,34 +62,18 @@ def heartbeat(
     refreshed the timestamp would launder a recorded failure into health and
     keep a registered-but-never-running job green forever.
     """
+    # FIRST STATEMENT, deliberately (panel round 21): this is the instant
+    # the writer entered with its verdict already decided, and every line
+    # that runs before it only makes it later — which loosens the guard
+    # below, since a later claim instant classifies fewer failures as
+    # having landed after the verdict. Settings resolution is cached and
+    # quick, but "quick" is not a safety argument; entry means entry.
+    # Distinct from the observation captured further down: that one dates
+    # the evidence, this one bounds when the claim was formed.
+    claimed_at = datetime.now(UTC)
     settings = get_settings()
     current_mode = mode or settings.alerts_mode
     current_profile = live_profile or settings.alerts_live_profile
-    # OBSERVATION TIME, captured exactly once (panel rounds 10-12, the same
-    # disease three ways): the beat is evidence of WHEN the component's
-    # state was observed, so a retry must never re-date it — a re-dated
-    # beat crossing a firing instant manufactures phase evidence for a
-    # firing the observation never witnessed. Ordering between racing
-    # reports is enforced at the write (monotonic guard), not by re-dating.
-    # Captured INSIDE the first write, immediately AFTER the row read —
-    # never before it (panel round 18). Taking it beforehand left a window
-    # in which a failure could land between observation and read, so an
-    # observation that had never witnessed the crash could still clear it.
-    # Read-then-observe inverts that by construction: whatever the read
-    # returns is already part of this observation's past. Retries reuse
-    # this same value verbatim — a beat is evidence, never re-dated.
-    # A HOLDER, not a return value (panel round 19): `x = f()` never
-    # assigns when f raises, and every retry path here is reached BY an
-    # exception — so the captured instant was lost exactly when it
-    # mattered, and the retry re-dated the beat. A beat that moves across
-    # Monday 08:30 manufactures phase evidence for a firing the
-    # observation never witnessed. The holder is filled inside the write,
-    # immediately after the read, so it survives however that attempt ends.
-    # The instant this writer ENTERED with its verdict already decided.
-    # Distinct from the observation below and used for a different
-    # question: the observation dates the evidence, this bounds when the
-    # claim was formed (panel round 20).
-    claimed_at = datetime.now(UTC)
     captured: list[datetime] = []
     for attempt in (1, 2, 3):
         try:
