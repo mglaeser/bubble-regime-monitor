@@ -651,6 +651,40 @@ class TestBlockArtifact:
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
+    def test_undeclared_block_degrades_whole_artifact(self, monkeypatch, tmp_path):
+        # Round 27 (SOTA-A): the manifest was a SUBSET check, so an artifact
+        # could inject extra blocks that served at v1 and were published by
+        # /content/dashboard — content that never passed any review pin.
+        art = self._baseline()
+        art["blocks"]["hero.injected"] = {"kind": "text", "text": "not reviewed"}
+        reg = self._install(monkeypatch, tmp_path, art)
+        assert reg.content_version() == 0
+        assert "hero.injected" not in reg.static_blocks()
+        reg._clear_artifact_cache()
+
+    def test_injected_gauge_block_never_reaches_the_display_deck(
+            self, monkeypatch, tmp_path):
+        # The score route's consequence of the same defect: a gauge.-prefixed
+        # injection would have ridden the display deck onto every score
+        # response.
+        import app.content_registry as reg
+
+        art = self._baseline()
+        art["blocks"]["gauge.injected"] = {"kind": "text", "text": "not reviewed"}
+        self._install(monkeypatch, tmp_path, art)
+        assert "injected" not in reg.gauge_display()
+        reg._clear_artifact_cache()
+
+    def test_manifest_slugs_are_structurally_valid(self):
+        # The slug schema is subsumed at the artifact boundary by manifest
+        # equality, so it is pinned where it still bites: the manifest is
+        # code, and a malformed entry there would define a malformed
+        # artifact as canonical.
+        import app.content_registry as reg
+
+        for slug in reg.REQUIRED_FILE_SLUG_KINDS:
+            assert reg._SLUG_RE.fullmatch(slug), slug
+
     def test_manifest_matches_shipped_artifact_exactly(self):
         # The manifest IS the meaning of v1 completeness: it must name
         # exactly the shipped slug set with the shipped kinds.

@@ -188,11 +188,22 @@ def _load_artifact(fh: Any) -> dict[str, Any]:
         return dict(_EMPTY_ARTIFACT)
     # bool is an int subclass in Python: `true` must not pass as a version.
     if (type(version) is not int or version < 1 or not isinstance(blocks, dict)
-            or not all(isinstance(slug, str) and _SLUG_RE.fullmatch(slug)
-                       for slug in blocks)
+            # EQUALITY, not subset (round 27, SOTA-A): the manifest was
+            # enforced only as "every declared slug is present", so an
+            # artifact could carry EXTRA undeclared blocks and publish them
+            # at v1 through /content/dashboard (and, under a gauge. prefix,
+            # score's display deck) — injected content bypassing every
+            # review pin. The served block set must be exactly the manifest.
+            or blocks.keys() != REQUIRED_FILE_SLUG_KINDS.keys()
             or not all(isinstance(blocks.get(slug), dict)
                        and blocks[slug].get("kind") == kind
                        for slug, kind in REQUIRED_FILE_SLUG_KINDS.items())
+            # Slug shape is now SUBSUMED at the artifact boundary by the
+            # equality check above (a non-manifest slug can never appear).
+            # Retained as defense in depth and applied where it still bites:
+            # the manifest itself, pinned by test_manifest_slugs_are_valid.
+            or not all(isinstance(slug, str) and _SLUG_RE.fullmatch(slug)
+                       for slug in blocks)
             or _max_depth(blocks) > 32
             or not all(_valid_member(b) for b in blocks.values())
             or not _bands_closed(blocks)):

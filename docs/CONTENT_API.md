@@ -65,9 +65,10 @@ GET /api/v1/content/dynamic     dynamic slots {slug: {text, source, updated_at, 
 ```
 
 v1 completeness is the full code-anchored manifest (`app/content_manifest.py`):
-every listed slug present with its declared kind, or the artifact degrades
-whole to built-ins at version 0. Extend the manifest in the same PR that adds
-content.
+the served block set must EQUAL the manifest — every listed slug present with
+its declared kind, and no undeclared block — or the artifact degrades whole to
+built-ins at version 0. Extend the manifest in the same PR that adds content;
+an artifact block with no manifest entry is treated as injected content.
 
 Static blocks may carry `as_of: "YYYY-MM"` — mandatory for editorial whose
 copy asserts calendar recency ("today", "right now", "this cycle"): the claim
