@@ -171,8 +171,13 @@ def job() -> None:
     # runs cannot be cleared by the success verdict this run may report
     # (panel round 24). The cutover gate leans on this component, so its
     # verdict window is closed explicitly rather than assumed small.
-    token = liveness_token(COMPONENT)
+    #
+    # INSIDE the try (panel round 25): this reads the database, and a read
+    # that fails outside would escape a function whose whole contract is
+    # "never raises" — leaving the scheduler with an exception and the
+    # component with no failure heartbeat at all.
     try:
+        token = liveness_token(COMPONENT)
         result = run_once(since=token)
         log.info("alert_digest_job", **result)
     except Exception as exc:

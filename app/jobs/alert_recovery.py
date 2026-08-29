@@ -37,7 +37,7 @@ SIDECAR_COMPONENT = "sidecar_reconciliation"
 _NON_OK_CLEAR_MARGIN = timedelta(minutes=5)
 
 
-def liveness_token(component: str) -> int | None:
+def liveness_token(component: str) -> int:
     """Snapshot a component's landing order BEFORE doing the work you will
     report on.
 
@@ -51,7 +51,13 @@ def liveness_token(component: str) -> int | None:
     return _current_revision(component)
 
 
-def _current_revision(component: str) -> int | None:
+#: A row that does not exist yet. A real snapshot value, distinct from
+#: "no token supplied" (panel round 25): a first run that saw no row must
+#: still detect a failure that CREATED one while it worked.
+_NO_ROW = -1
+
+
+def _current_revision(component: str) -> int:
     """The row's landing-order counter right now, or None if it has none.
 
     A scalar SELECT rather than an identity-map get: this is a probe for
@@ -59,10 +65,11 @@ def _current_revision(component: str) -> int | None:
     would then reuse instead of reading afresh.
     """
     with session_scope() as session:
-        return session.execute(
+        found = session.execute(
             select(AlertComponentHeartbeat.revision)
             .where(AlertComponentHeartbeat.component == component)
         ).scalar_one_or_none()
+        return _NO_ROW if found is None else int(found)
 
 
 class _HeartbeatRaced(Exception):
@@ -91,15 +98,10 @@ def heartbeat(
     refreshed the timestamp would launder a recorded failure into health and
     keep a registered-but-never-running job green forever.
     """
-    # FIRST STATEMENT, deliberately (panel round 21): this is the instant
-    # the writer entered with its verdict already decided, and every line
-    # that runs before it only makes it later — which loosens the guard
-    # below, since a later claim instant classifies fewer failures as
-    # having landed after the verdict. Settings resolution is cached and
-    # quick, but "quick" is not a safety argument; entry means entry.
-    # Distinct from the observation captured further down: that one dates
-    # the evidence, this one bounds when the claim was formed.
-    claimed_at = datetime.now(UTC)
+    # ORDER MATTERS (panel round 25): the landing-order snapshot is taken
+    # FIRST, so anything arriving after it — including in the gap before
+    # the clock read below — shows up as a moved revision at write time
+    # and refuses the clear. Taking it second left that gap invisible.
     # THE LANDING ORDER AT ENTRY (panel round 22). Beats are observation
     # instants and cannot answer "did this failure land before my verdict
     # was formed?" — a rewound or slow writer produces an old beat that
@@ -110,6 +112,15 @@ def heartbeat(
     # evidence than anything measurable here: it predates the work, while
     # this fallback only predates the write.
     entry_revision = since if since is not None else _current_revision(component)
+    # FIRST STATEMENT, deliberately (panel round 21): this is the instant
+    # the writer entered with its verdict already decided, and every line
+    # that runs before it only makes it later — which loosens the guard
+    # below, since a later claim instant classifies fewer failures as
+    # having landed after the verdict. Settings resolution is cached and
+    # quick, but "quick" is not a safety argument; entry means entry.
+    # Distinct from the observation captured further down: that one dates
+    # the evidence, this one bounds when the claim was formed.
+    claimed_at = datetime.now(UTC)
     settings = get_settings()
     current_mode = mode or settings.alerts_mode
     current_profile = live_profile or settings.alerts_live_profile
@@ -210,7 +221,7 @@ def _write_heartbeat(
     *,
     captured: list[datetime],
     claimed_at: datetime,
-    entry_revision: int | None,
+    entry_revision: int,
     since: int | None,
     current_mode: str,
     current_profile: str,
@@ -337,7 +348,7 @@ def _write_heartbeat(
                     # this bound rests on, named here rather than implied.
                     if not observation_is_current:
                         return
-                    if entry_revision is None or row.revision != entry_revision:
+                    if row.revision != entry_revision:
                         return
                     # Second, independent refusal: a failure whose beat is
                     # newer than the moment this writer entered cannot have

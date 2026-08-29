@@ -1845,12 +1845,16 @@ def test_a_verdict_cannot_clear_a_failure_that_landed_after_it(
         assert session.get(AlertComponentHeartbeat, "digest").status == "ok"
 
 
-def test_the_claim_instant_is_sampled_before_any_other_work():
-    """Panel round 21: every statement before the sample makes it later,
-    and a later claim instant classifies fewer failures as post-verdict —
-    a strictly weaker guard. Pinned structurally because the cost of
-    getting it wrong is invisible in behaviour until a slow prelude
-    coincides with a crash."""
+def test_both_entry_snapshots_precede_any_other_work():
+    """Rounds 21 and 25 together: nothing may run before the two entry
+    snapshots, and the LANDING-ORDER one must come first.
+
+    Ordering is the guard here. A revision snapshot taken second leaves
+    the gap before it invisible — anything landing in that gap looks like
+    it was already there — while taking it first turns the same gap into
+    a detectable moved revision. The clock read follows immediately, and
+    everything else follows both.
+    """
     import inspect
 
     from app.jobs.alert_recovery import heartbeat
@@ -1858,8 +1862,10 @@ def test_the_claim_instant_is_sampled_before_any_other_work():
     body = [line.strip() for line in
             inspect.getsource(heartbeat).split('"""')[2].strip().split("\n")
             if line.strip() and not line.strip().startswith("#")]
-    assert body[0].startswith("claimed_at = datetime.now("), (
-        f"the claim instant is no longer the first statement: {body[0]!r}")
+    assert body[0].startswith("entry_revision = "), (
+        f"the landing-order snapshot is not first: {body[0]!r}")
+    assert body[1].startswith("claimed_at = datetime.now("), (
+        f"the claim instant does not follow it immediately: {body[1]!r}")
 
 
 def test_a_late_landing_failure_with_an_old_beat_still_blocks_a_clear(
@@ -1962,3 +1968,37 @@ def test_the_digest_job_snapshots_its_liveness_token_before_working():
         "the digest job must snapshot its token BEFORE running the work")
     assert "since=token" in source, (
         "the token must be passed back with the success report")
+
+
+def test_a_first_run_detects_a_failure_that_created_the_row(
+        isolated_db, monkeypatch):
+    """Panel round 25 defect 2, confirmed and fixed, pinned.
+
+    A pre-work snapshot of an ABSENT row is a real observation, not a
+    missing token. Conflating the two sent a first run down the tokenless
+    path, where a long enough job could clear a failure that landed —
+    and created the row — while it worked.
+    """
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs.alert_recovery import heartbeat, liveness_token
+
+    token = liveness_token("digest")        # no row yet
+    heartbeat("digest", "critical", {"note": "crash created the row"})
+    heartbeat("digest", "ok", {"note": "first run's success"}, since=token)
+
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
+            "a first run cleared a failure that landed while it worked")
+
+
+def test_the_digest_job_reads_its_token_inside_the_never_raises_guard():
+    """Panel round 25 defect 3: job() promises never to raise, and the
+    token read touches the database. Pinned structurally."""
+    import inspect
+
+    from app.jobs.alert_digest import job
+
+    source = inspect.getsource(job)
+    assert source.index("try:") < source.index("liveness_token(COMPONENT)"), (
+        "the token read sits outside the try that makes job() never raise")
