@@ -207,6 +207,35 @@ class TestBlockArtifact:
             assert client.get(path).status_code == 200, path
         reg._clear_artifact_cache()
 
+    def test_close_failure_degrades_never_500s(self, monkeypatch, tmp_path):
+        # Sibling of the round-25 finding, found by sweeping the class: the
+        # implicit close() at the end of `with fh:` can raise EIO too. The
+        # guard spans the whole descriptor lifetime, so it degrades as well.
+        import app.content_registry as reg
+
+        real_open = type(reg._BLOCKS_FILE).open
+
+        class BadClose:
+            def __init__(self, fh):
+                self._fh = fh
+
+            def __getattr__(self, name):
+                return getattr(self._fh, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                raise OSError(5, "Input/output error")
+
+        def open_badclose(self, *a, **kw):
+            return BadClose(real_open(self, *a, **kw))
+
+        reg._clear_artifact_cache()
+        monkeypatch.setattr(type(reg._BLOCKS_FILE), "open", open_badclose)
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()
+
     def test_missing_file_serves_builtins_with_version_zero(self, monkeypatch):
         import app.content_registry as reg
 

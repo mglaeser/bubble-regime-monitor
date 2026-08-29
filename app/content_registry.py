@@ -94,33 +94,29 @@ def _file_artifact() -> dict[str, Any]:
     global _cache
     try:
         fh = _BLOCKS_FILE.open(encoding="utf-8")
+        with fh:
+            # EVERY filesystem-level fault degrades to built-ins, never a
+            # handler 500 (round 25, SOTA-A): the original guard covered
+            # open() alone, so an fstat failure on the descriptor (EIO on a
+            # failing mount, a revoked fd) escaped into score/dashboard/
+            # dynamic. The scope now spans the whole descriptor lifetime —
+            # including the implicit close(), which can also raise EIO.
+            st = os.fstat(fh.fileno())
+            key = (st.st_mtime_ns, st.st_size, st.st_ino)
+            cached = _cache
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            with _cache_lock:
+                cached = _cache
+                if cached is not None and cached[0] == key:
+                    return cached[1]
+                value = _load_artifact(fh)
+                _cache = (key, value)
+                return value
     except OSError:
         with _cache_lock:
             _cache = (None, dict(_EMPTY_ARTIFACT))
             return _cache[1]
-    with fh:
-        try:
-            st = os.fstat(fh.fileno())
-        except OSError:
-            # The open() guard did not cover the STAT (round 25, SOTA-A): an
-            # fstat failure on the descriptor (EIO on a failing mount, a
-            # revoked fd) escaped into every artifact-backed route as a 500.
-            # Any filesystem-level failure degrades to built-ins, like every
-            # other artifact fault — never a handler crash.
-            with _cache_lock:
-                _cache = (None, dict(_EMPTY_ARTIFACT))
-                return _cache[1]
-        key = (st.st_mtime_ns, st.st_size, st.st_ino)
-        cached = _cache
-        if cached is not None and cached[0] == key:
-            return cached[1]
-        with _cache_lock:
-            cached = _cache
-            if cached is not None and cached[0] == key:
-                return cached[1]
-            value = _load_artifact(fh)
-            _cache = (key, value)
-            return value
 
 
 def _clear_artifact_cache() -> None:
