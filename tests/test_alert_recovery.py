@@ -1799,3 +1799,47 @@ def test_the_observation_survives_an_exception_on_the_first_attempt(
         assert landed == first_observation, (
             "the retry re-dated the beat — the captured observation was "
             "lost with the exception that triggered the retry")
+
+
+def test_a_verdict_cannot_clear_a_failure_that_landed_after_it(
+        isolated_db, monkeypatch):
+    """Panel round 20, confirmed and bounded, pinned.
+
+    A writer arrives with its status already decided, so a post-read
+    observation dates the EVIDENCE, not the verdict. When the failure's
+    beat is newer than the instant this writer entered, that failure
+    demonstrably landed after the verdict was formed — and a verdict
+    cannot clear a failure it could not have seen.
+    """
+    from datetime import UTC as _utc
+    from datetime import datetime as real_datetime
+    from datetime import timedelta as _td
+
+    from app.alerts.models import AlertComponentHeartbeat
+    from app.db import session_scope
+    from app.jobs import alert_recovery
+    from app.jobs.alert_recovery import heartbeat
+
+    entry = datetime(2026, 8, 24, 6, 0, tzinfo=_utc)
+    _FrozenDatetime.frozen = entry
+    monkeypatch.setattr(alert_recovery, "datetime", _FrozenDatetime)
+    heartbeat("digest", "ok", {"note": "seed"})
+
+    # The crash is stamped AFTER the moment the clearing writer enters.
+    _FrozenDatetime.frozen = entry + _td(minutes=30)
+    heartbeat("digest", "critical", {"note": "crash after the verdict"})
+
+    # This writer enters at `entry + 10min`, i.e. before the crash landed,
+    # yet its beat would dominate the margin. It must not clear.
+    _FrozenDatetime.frozen = entry + _td(minutes=10)
+    heartbeat("digest", "ok", {"note": "verdict formed before the crash"})
+    monkeypatch.setattr(alert_recovery, "datetime", real_datetime)
+
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "critical", (
+            "a verdict cleared a failure that landed after it was formed")
+
+    # A writer entering after the crash still clears normally.
+    heartbeat("digest", "ok", {"note": "genuine later run"})
+    with session_scope() as session:
+        assert session.get(AlertComponentHeartbeat, "digest").status == "ok"

@@ -85,11 +85,17 @@ def heartbeat(
     # Monday 08:30 manufactures phase evidence for a firing the
     # observation never witnessed. The holder is filled inside the write,
     # immediately after the read, so it survives however that attempt ends.
+    # The instant this writer ENTERED with its verdict already decided.
+    # Distinct from the observation below and used for a different
+    # question: the observation dates the evidence, this bounds when the
+    # claim was formed (panel round 20).
+    claimed_at = datetime.now(UTC)
     captured: list[datetime] = []
     for attempt in (1, 2, 3):
         try:
             _write_heartbeat(component, status, detail,
                              captured=captured,
+                             claimed_at=claimed_at,
                              current_mode=current_mode,
                              current_profile=current_profile,
                              only_if_absent=only_if_absent,
@@ -178,6 +184,7 @@ def _write_heartbeat(
     detail: dict[str, Any] | None,
     *,
     captured: list[datetime],
+    claimed_at: datetime,
     current_mode: str,
     current_profile: str,
     only_if_absent: bool,
@@ -274,24 +281,35 @@ def _write_heartbeat(
                     # fixed margin (panel round 17; the round-14 margin
                     # proof only covered steps within the tolerance).
                     #
-                    # What licenses a clear is causality: the observation
-                    # must not predate state it had not yet seen. Two
-                    # constructions make that airtight, no clock trusted:
+                    # WHAT IS AND IS NOT GUARANTEED HERE.
                     #
-                    #  * the observation is taken AFTER this read, so a
-                    #    read returning a FAILURE puts that failure in the
-                    #    observation's past (panel round 18 — taking it
-                    #    beforehand left exactly this window open);
-                    #  * a failure landing between our read and our write
-                    #    bumps the revision, so the compare-and-swap misses
-                    #    and the retry arrives without a current
-                    #    observation, where clearing is forbidden.
+                    # Three checks, each sound on its own terms; stated
+                    # precisely because an earlier version of this comment
+                    # overclaimed (panel round 20 was right to say so).
+                    #
+                    #  1. A retry carries an observation formed before the
+                    #     race it lost, so it may never clear.
+                    #  2. If the failure's beat is NEWER than the instant
+                    #     this writer entered with its verdict already
+                    #     decided, then that failure demonstrably landed
+                    #     after the verdict was formed, and a verdict
+                    #     cannot clear a failure it could not have seen.
+                    #  3. Otherwise the clear must still dominate the
+                    #     failure by more than the tolerated skew.
+                    #
+                    # What is NOT proven: that the caller's health verdict
+                    # postdates the failure in every case. heartbeat()
+                    # cannot know when its caller decided — only when it
+                    # was told. The residual is therefore exactly a caller
+                    # that sat on a verdict for longer than the margin
+                    # before writing; every in-tree caller writes on the
+                    # next line after judging (alert_digest, alert_dispatch,
+                    # alert_watchdog, alert_recovery), which is the premise
+                    # this bound rests on, named here rather than implied.
                     if not observation_is_current:
                         return
-                    # The dominance margin is now redundant with the two
-                    # constructions above; kept as defence in depth, and
-                    # cheap because a genuine recovery is the component's
-                    # next run, 30 minutes to 7 days later.
+                    if existing > claimed_at:
+                        return
                     if now <= existing + _NON_OK_CLEAR_MARGIN:
                         return
                 elif now <= existing:
