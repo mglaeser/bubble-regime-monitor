@@ -213,7 +213,12 @@ def _bands_closed(blocks: dict[str, Any]) -> bool:
             template = row.get("template")
             if not isinstance(template, str) or not template.strip():
                 return False
-            if row.get("trend_broken") not in _TREND_SELECTORS:
+            # isinstance BEFORE membership: `x in frozenset` hashes x, so a
+            # valid-JSON [] here raised TypeError into three routes — the
+            # same crash class as round 17's band fix, reintroduced by the
+            # round-18 schema check and caught by SOTA-A (round 19).
+            trend = row.get("trend_broken")
+            if not isinstance(trend, str) or trend not in _TREND_SELECTORS:
                 return False
             rows.add(band)
         if not vocab.issubset(rows):

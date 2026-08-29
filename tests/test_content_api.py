@@ -552,6 +552,18 @@ class TestBlockArtifact:
         assert reg.content_version() == 0
         reg._clear_artifact_cache()
 
+    def test_unhashable_trend_selector_degrades_never_500s(self, monkeypatch, tmp_path):
+        # Round 19 (SOTA-A): `x in frozenset` HASHES x — a valid-JSON [] as
+        # trend_broken raised TypeError out of the round-18 schema check into
+        # score/dashboard/dynamic. Same crash class as round 17's band fix;
+        # any exception from this call is the bug.
+        art = self._baseline()
+        art["blocks"]["gauge.verdict.lead"]["items"].append(
+            {"band": "hold", "trend_broken": [], "template": "t"})
+        reg = self._install(monkeypatch, tmp_path, art)
+        assert reg.content_version() == 0
+        reg._clear_artifact_cache()
+
     def test_distance_row_missing_case_degrades(self, monkeypatch, tmp_path):
         # The distance table is case-keyed; its rows have a schema too.
         art = self._baseline()
@@ -627,10 +639,10 @@ class TestBlockArtifact:
             "gauge.band.oneliner", "gauge.coverage.tip",
             "gauge.epistemic.not_probability", "gauge.fusion.caveat",
             "gauge.fusion.header", "gauge.ladder.ceiling",
-            "gauge.verdict.lead",
+            "gauge.verdict.lead", "gauge.verdict.detail",
         }
         recency = re.compile(
-            r"\b(today|today's|right now|currently|this cycle|latest)\b", re.I)
+            r"\b(today|today's|right now|current(ly)?|this cycle|latest)\b", re.I)
         raw = _json.loads(reg._BLOCKS_FILE.read_text(encoding="utf-8"))
         stamped = 0
         for slug, block in raw["blocks"].items():

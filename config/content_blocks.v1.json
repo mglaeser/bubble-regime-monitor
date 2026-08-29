@@ -47,7 +47,8 @@
     "atlas.matrix.legend": {
       "kind": "text",
       "text": "✓ rose / strong safe haven · ~ weak or mixed · ✗ fell · ? potential (AI ’26 — no outcome yet, current institutional view only) · blank = no academic evidence. Tap any cell for the note.",
-      "source": "src/dashboard.tsx:265"
+      "source": "src/dashboard.tsx:265",
+      "as_of": "2026-07"
     },
     "atlas.matrix.expl.buckets": {
       "kind": "text",
