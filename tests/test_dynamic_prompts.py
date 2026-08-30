@@ -95,3 +95,42 @@ def test_no_prompt_smuggles_an_example_number():
         body = body.replace(entry["purpose"], " ")
         stray = re.findall(r"(?<![A-Za-z_])\d+(?![A-Za-z_])", body)
         assert not stray, f"{slug} contains literal numeral(s) {stray}"
+
+
+def test_no_prompt_asks_the_model_to_DERIVE_a_number():
+    """A direction that asks for a difference asks for arithmetic.
+
+    The engine admits numerals that appear VERBATIM in the grounded facts, so a
+    slot asking "how far X is from Y" while grounding only X and Y leaves the
+    generator two choices: omit the figure, or compute one the validator will
+    refuse. Round 36 (SOTA-A) found exactly that in gauge.verdict.distance.
+    The fix is to supply the derived value as its own fact, not to relax the
+    rule.
+    """
+    # INSTRUCTIONS to derive, not the vocabulary of derivation. "when the
+    # figures were last computed" describes provenance and is fine; "compute
+    # the distance" is not. The first version matched the bare word and flagged
+    # gauge.badge.live_tip for saying "last computed".
+    derive = re.compile(
+        r"how far|how much (?:more|less|higher|lower)|the difference between|"
+        r"\bsubtract\b|\b(?:compute|calculate|derive|work out)\s+(?:the|a|its)\b|"
+        r"\bpercent(?:age)? change\b",
+        re.IGNORECASE)
+    # A PROHIBITION against deriving is not an instruction to derive. Without
+    # this, "do not subtract one supplied number from another" — the very
+    # sentence that fixes the defect — trips the control that checks for it.
+    negated = re.compile(r"(?:do not|don't|never|must not|rather than)[^.;]*",
+                         re.IGNORECASE)
+    for slug, entry in PROMPTS.items():
+        direction = entry["prompt"].split("DIRECTION:", 1)[-1]
+        direction = negated.sub(" ", direction)
+        hit = derive.search(direction)
+        assert not hit, (
+            f"{slug} asks the model to derive a value ({hit.group(0)!r}); "
+            "supply it as a grounded fact instead")
+
+
+def test_a_slot_naming_a_distance_grounds_the_distance_itself():
+    entry = PROMPTS["gauge.verdict.distance"]
+    assert "F_DISTANCE_POINTS" in entry["grounding_fields"]
+    assert "do not compute it" in entry["prompt"]
