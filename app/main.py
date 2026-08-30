@@ -121,7 +121,12 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=[
             "https://ai-bubble.fyi",
-            "https://crash.klee.me",
+            # crash.klee.me was REMOVED per DR-014 (ruling Q21). The dashboard
+            # is served from ai-bubble.fyi (its CNAME), and crash.klee.me no
+            # longer resolves at all. A dead host in an allowlist is not
+            # harmless: the name can be re-registered by someone else, and the
+            # entry would then hand that someone a browser-trusted origin
+            # against this API.
             # add local dev origins only if a dashboard dev server calls the API, e.g.:
             # "http://localhost:8000",
         ],
