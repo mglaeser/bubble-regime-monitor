@@ -261,3 +261,45 @@ def _register_alert_tables() -> None:
 
 
 _register_alert_tables()
+
+
+class MessageEngineAttempt(Base):
+    """One LLM attempt by the message engine — including the ones that failed.
+
+    Every attempt is persisted, timeouts and rejections included, because the
+    governor's whole state is DERIVED from these rows rather than kept in a
+    second place that can disagree with them: the pacing floor reads the last
+    attempt's timestamp, the breaker counts the trailing run of technical
+    errors, and the daily budget counts today's rows. A dropped row would
+    silently hand a failing model more attempts (the same reasoning as
+    app/alerts/llm_selector.py, which counts rejections against its budget).
+
+    Deliberately NOT app/alerts/models.py:AlertRender: that table's
+    `gsm7_septets` is NOT NULL under CHECK (0..160) and septets() raises on
+    emoji, so an iMessage body of 200 code points carrying emoji cannot even
+    compute the column. See docs/MESSAGE_ENGINE.md, decision 3.
+    """
+
+    __tablename__ = "message_engine_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: Trigger key from config/message_prompts.v1.json (e.g. BAND_TO_DERISK).
+    trigger: Mapped[str] = mapped_column(String(64), index=True)
+    channel: Mapped[str] = mapped_column(String(16))
+    #: 1..4; a P1 never waits for this engine (docs/MESSAGE_ENGINE.md).
+    priority: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: ok | format_rejected | content_rejected | technical_error | budget_skipped
+    outcome: Mapped[str] = mapped_column(String(32), index=True)
+    #: Which iteration within one compose (1-based), so a re-ask is visible.
+    iteration: Mapped[int] = mapped_column(Integer, default=1)
+    #: Never the model's raw error body — only a class name or short reason;
+    #: the gateway's own error boundary is preserved (app/llm_gateway.py).
+    failure_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    #: The text that was ultimately used, whatever its source.
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: generated | fallback | deterministic
+    source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    code_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    emoji_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
